@@ -11,6 +11,7 @@ pub mod scaled;
 pub mod select_option;
 pub mod shortcut_capture;
 pub mod spinner;
+pub mod split_pane;
 pub mod star_rating;
 pub mod tag_chip;
 pub mod tooltip;

@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use iced::widget::pane_grid;
+
 #[cfg(feature = "asset-studio")]
 use super::model::DoorAudioEvent;
 use super::model::{PreviewData, PreviewLoadStage, PreviewRequest};
@@ -96,6 +98,15 @@ pub enum Message {
         index: usize,
         position: [f32; 3],
     },
+    #[cfg(feature = "asset-studio")]
+    InspectorResized {
+        split: pane_grid::Split,
+        ratio: f32,
+    },
+    #[cfg(feature = "asset-studio")]
+    InspectorLayoutChanged(f32),
+    #[cfg(feature = "asset-studio")]
+    InspectorReset(f32),
     BackRequested,
     ExpandToggled,
     CloseFinished,

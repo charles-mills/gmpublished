@@ -85,6 +85,25 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.toggle_description_spoiler(id);
             Vec::new()
         }
+        Message::PanesResized { split, ratio } => {
+            state.resize_panes(split, ratio);
+            Vec::new()
+        }
+        Message::PanesLayoutChanged(width) => {
+            state.set_pane_ratio(super::view::effective_sidebar_ratio(
+                state.sidebar_ratio(),
+                width,
+            ));
+            Vec::new()
+        }
+        Message::PanesReset(width) => {
+            state.reset_panes();
+            state.set_pane_ratio(super::view::effective_sidebar_ratio(
+                state.sidebar_ratio(),
+                width,
+            ));
+            Vec::new()
+        }
         Message::CopyCurrentPathRequested => state
             .copy_current_path_text()
             .map_or_else(Vec::new, |text| vec![Effect::CopyTextRequested(text)]),
@@ -339,5 +358,20 @@ mod tests {
         assert!(state.revealed_description_spoilers().contains(id));
         assert!(update(&mut state, Message::DescriptionSpoilerToggled(*id)).is_empty());
         assert!(!state.revealed_description_spoilers().contains(id));
+    }
+
+    #[test]
+    fn pane_ratio_clamps_to_layout_and_survives_modal_close() {
+        let mut state = State::default();
+        state.set_pane_ratio(0.8);
+
+        assert!(update(&mut state, Message::PanesLayoutChanged(1000.0)).is_empty());
+        assert_eq!(state.sidebar_ratio(), 0.45);
+
+        assert_eq!(
+            update(&mut state, Message::CloseFinished),
+            vec![Effect::ThumbnailDemandsChanged]
+        );
+        assert_eq!(state.sidebar_ratio(), 0.45);
     }
 }

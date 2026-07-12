@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use gmpublished_backend::bbcode::SpoilerId;
+use iced::widget::pane_grid;
 
 use crate::backend::domain::PublishedFileId;
 use crate::backend::ui_error::UiError;
@@ -32,6 +33,12 @@ pub enum Message {
     WorkshopLinkRequested,
     DescriptionLinkRequested(String),
     DescriptionSpoilerToggled(SpoilerId),
+    PanesResized {
+        split: pane_grid::Split,
+        ratio: f32,
+    },
+    PanesLayoutChanged(f32),
+    PanesReset(f32),
     CopyCurrentPathRequested,
     OpenLocationRequested,
     AnimationTick(Instant),

@@ -1,5 +1,6 @@
 use iced::widget::{
-    Space, button, checkbox, column, container, image, progress_bar, row, scrollable, svg, text,
+    Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
+    sensor, stack, svg, text,
 };
 use iced::{Border, Center, Color, ContentFit, Element, Font, Length, Shadow, border};
 
@@ -10,7 +11,7 @@ use crate::{
     widgets::{
         file_types::{SilkIcon, file_type_info},
         spinner::spinner,
-        tooltip as tooltip_widget,
+        split_pane, tooltip as tooltip_widget,
     },
 };
 
@@ -35,6 +36,12 @@ const SPINNER_SIZE: f32 = 32.0;
 const INFO_LABEL_WIDTH: f32 = 76.0;
 const CODE_LINE_NUMBER_WIDTH: f32 = 44.0;
 #[cfg(feature = "asset-studio")]
+const VIEWER_MIN_WIDTH: f32 = 240.0;
+#[cfg(feature = "asset-studio")]
+const INSPECTOR_MIN_WIDTH: f32 = 200.0;
+#[cfg(feature = "asset-studio")]
+const INSPECTOR_MAX_WIDTH: f32 = 420.0;
+#[cfg(feature = "asset-studio")]
 const MODE_PILL_MARGIN: f32 = 12.0;
 #[cfg(feature = "asset-studio")]
 const MODE_PILL_PADDING: f32 = 3.0;
@@ -48,11 +55,16 @@ const MODE_PILL_SLOT_HEIGHT: f32 = 28.0;
 const MODE_PILL_ICON_SIZE: f32 = 18.0;
 
 /// Renders the in-archive File Preview pane embedded in Preview GMA.
-pub fn pane<'a>(state: &'a State, ctx: ViewCtx<'a>, show_inspector: bool) -> Element<'a, Message> {
+pub fn pane<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+    show_inspector: bool,
+    content_width: f32,
+) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     column![
         header(state, ctx),
-        container(body(state, ctx, show_inspector))
+        container(body(state, ctx, show_inspector, content_width))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(tokens.spacing.pad)
@@ -182,7 +194,12 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .into()
 }
 
-fn body<'a>(state: &'a State, ctx: ViewCtx<'a>, show_inspector: bool) -> Element<'a, Message> {
+fn body<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+    show_inspector: bool,
+    content_width: f32,
+) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     if state.loading() {
@@ -228,7 +245,7 @@ fn body<'a>(state: &'a State, ctx: ViewCtx<'a>, show_inspector: bool) -> Element
 
     state.current().map_or_else(
         || container(Space::new()).center(Length::Fill).into(),
-        |data| preview_content(state, data, ctx, show_inspector),
+        |data| preview_content(state, data, ctx, show_inspector, content_width),
     )
 }
 
@@ -238,6 +255,7 @@ fn preview_content<'a>(
     data: &'a PreviewData,
     ctx: ViewCtx<'a>,
     show_inspector: bool,
+    content_width: f32,
 ) -> Element<'a, Message> {
     match &data.content {
         PreviewContent::Code { lines, truncated } => code_preview(lines, *truncated, ctx),
@@ -249,10 +267,12 @@ fn preview_content<'a>(
         #[cfg(feature = "asset-studio")]
         PreviewContent::Audio { duration_secs, .. } => audio_preview(state, *duration_secs, ctx),
         #[cfg(feature = "asset-studio")]
-        PreviewContent::Model(model) => model_preview(state, data, model, ctx, show_inspector),
+        PreviewContent::Model(model) => {
+            model_preview(state, data, model, ctx, show_inspector, content_width)
+        }
         #[cfg(feature = "asset-studio")]
         PreviewContent::Particle(preview) => {
-            particle_preview(state, data, preview, ctx, show_inspector)
+            particle_preview(state, data, preview, ctx, show_inspector, content_width)
         }
         #[cfg(feature = "asset-studio")]
         PreviewContent::Map {
@@ -273,6 +293,7 @@ fn preview_content<'a>(
             },
             ctx,
             show_inspector,
+            content_width,
         ),
         PreviewContent::Info { reason } => info_preview(data, *reason, ctx),
     }
@@ -555,56 +576,58 @@ fn model_preview<'a>(
     model: &'a std::sync::Arc<ModelPreview>,
     ctx: ViewCtx<'a>,
     show_inspector: bool,
+    content_width: f32,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
-    // Content-addressed: reopening the same entry reuses the GPU upload.
-    let content_id = data.content_id();
-    let skin_remap = model
-        .skin_tables
-        .get(state.selected_skin())
-        .cloned()
-        .unwrap_or_default();
-    let viewer = container(
-        iced::widget::shader(super::viewer3d::Viewer3d {
-            model: std::sync::Arc::clone(model),
-            content_id,
-            skin_remap,
-            bodygroup_choices: state.bodygroup_choices().to_vec(),
-            phy_debug_visible: state.phy_debug_enabled(),
-            pose: state.orbit_pose(),
-        })
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .clip(true)
-    .style(move |_| theme::styles::file_preview_body_well(&tokens));
-
-    if !show_inspector {
-        return viewer.into();
-    }
-
-    let inspector = container(
-        scrollable(
-            column![
-                model_selectors(state, model, ctx),
-                model_inspector_rows(data, model, ctx)
-            ]
-            .spacing(tokens.spacing.gap_sm),
+    let viewer = || {
+        // Content-addressed: reopening the same entry reuses the GPU upload.
+        let skin_remap = model
+            .skin_tables
+            .get(state.selected_skin())
+            .cloned()
+            .unwrap_or_default();
+        container(
+            iced::widget::shader(super::viewer3d::Viewer3d {
+                model: std::sync::Arc::clone(model),
+                content_id: data.content_id(),
+                skin_remap,
+                bodygroup_choices: state.bodygroup_choices().to_vec(),
+                phy_debug_visible: state.phy_debug_enabled(),
+                pose: state.orbit_pose(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
-        .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
-    )
-    .width(Length::Fixed(tokens.dims.file_preview_inspector_width))
-    .height(Length::Fill)
-    .padding(tokens.spacing.pad)
-    .style(move |_| theme::styles::file_preview_body_well(&tokens));
-
-    row![viewer, inspector]
-        .spacing(tokens.spacing.gap_sm)
         .width(Length::Fill)
         .height(Length::Fill)
+        .clip(true)
+        .style(move |_| theme::styles::file_preview_body_well(&tokens))
         .into()
+    };
+
+    if !show_inspector {
+        return viewer();
+    }
+
+    let inspector = || {
+        container(
+            scrollable(
+                column![
+                    model_selectors(state, model, ctx),
+                    model_inspector_rows(data, model, ctx)
+                ]
+                .spacing(tokens.spacing.gap_sm),
+            )
+            .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(tokens.spacing.pad)
+        .style(move |_| theme::styles::file_preview_body_well(&tokens))
+        .into()
+    };
+
+    resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
 #[cfg(feature = "asset-studio")]
@@ -807,53 +830,54 @@ fn particle_preview<'a>(
     preview: &'a std::sync::Arc<ParticlePreview>,
     ctx: ViewCtx<'a>,
     show_inspector: bool,
+    content_width: f32,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
-    // Content-addressed: reopening the same entry reuses the GPU upload.
-    let content_id = data.content_id();
-    let viewer = container(
-        iced::widget::shader(super::particles3d::ParticleViewer {
-            preview: std::sync::Arc::clone(preview),
-            content_id,
-            system_index: state.particle_system(),
-            playing: state.particle_playing(),
-            speed: state.particle_speed(),
-            restart_epoch: state.particle_restart_epoch(),
-            pose: state.orbit_pose(),
-            control_points: state.particle_control_points(),
-        })
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .clip(true)
-    .style(move |_| theme::styles::file_preview_body_well(&tokens));
-
-    if !show_inspector {
-        return viewer.into();
-    }
-
-    let inspector = container(
-        scrollable(
-            column![
-                particle_selectors(state, preview, ctx),
-                particle_inspector_rows(state, data, preview, ctx)
-            ]
-            .spacing(tokens.spacing.gap_sm),
+    let viewer = || {
+        container(
+            iced::widget::shader(super::particles3d::ParticleViewer {
+                preview: std::sync::Arc::clone(preview),
+                content_id: data.content_id(),
+                system_index: state.particle_system(),
+                playing: state.particle_playing(),
+                speed: state.particle_speed(),
+                restart_epoch: state.particle_restart_epoch(),
+                pose: state.orbit_pose(),
+                control_points: state.particle_control_points(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
-        .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
-    )
-    .width(Length::Fixed(tokens.dims.file_preview_inspector_width))
-    .height(Length::Fill)
-    .padding(tokens.spacing.pad)
-    .style(move |_| theme::styles::file_preview_body_well(&tokens));
-
-    row![viewer, inspector]
-        .spacing(tokens.spacing.gap_sm)
         .width(Length::Fill)
         .height(Length::Fill)
+        .clip(true)
+        .style(move |_| theme::styles::file_preview_body_well(&tokens))
         .into()
+    };
+
+    if !show_inspector {
+        return viewer();
+    }
+
+    let inspector = || {
+        container(
+            scrollable(
+                column![
+                    particle_selectors(state, preview, ctx),
+                    particle_inspector_rows(state, data, preview, ctx)
+                ]
+                .spacing(tokens.spacing.gap_sm),
+            )
+            .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(tokens.spacing.pad)
+        .style(move |_| theme::styles::file_preview_body_well(&tokens))
+        .into()
+    };
+
+    resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
 #[cfg(feature = "asset-studio")]
@@ -1081,66 +1105,119 @@ fn map_preview<'a>(
     map: MapPreviewParts<'a>,
     ctx: ViewCtx<'a>,
     show_inspector: bool,
+    content_width: f32,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    // Content-addressed: reopening the same map reuses the GPU upload.
-    let content_id = data.content_id();
-    let viewer = container(
-        iced::widget::shader(super::viewer3d::FlyViewer {
-            scene: std::sync::Arc::clone(map.scene),
-            content_id,
-            fog: map.fog,
-            fog_enabled: state.map_fog_enabled(),
-            sky_camera: map.sky_camera,
-            map_skybox_visible: state.map_skybox_enabled(),
-            visibility_culling: state.map_visibility_enabled(),
-            phy_debug_visible: state.phy_debug_enabled(),
-            spawn: map.spawn,
-            pose: state.fly_pose(),
-            movement_mode: state.fly_movement_mode(),
-            requested_movement_mode: state.requested_movement_mode(),
-        })
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .clip(true)
-    .style(move |_| theme::styles::file_preview_body_well(&tokens));
-
-    let viewer = map_viewer_with_overlays(viewer.into(), state, map, ctx);
-
-    if !show_inspector {
-        return viewer;
-    }
-
-    let inspector = container(
-        scrollable(
-            column![
-                container(
-                    text(i18n.tr("file-preview-map-controls"))
-                        .size(tokens.typography.caption)
-                        .color(Color::from(tokens.colors.text_dim))
-                        .wrapping(text::Wrapping::WordOrGlyph),
-                )
-                .width(Length::Fill),
-                map_inspector_rows(state, data, map.stats, ctx)
-            ]
-            .spacing(tokens.spacing.gap_sm),
+    let viewer = || {
+        let viewer = container(
+            iced::widget::shader(super::viewer3d::FlyViewer {
+                scene: std::sync::Arc::clone(map.scene),
+                content_id: data.content_id(),
+                fog: map.fog,
+                fog_enabled: state.map_fog_enabled(),
+                sky_camera: map.sky_camera,
+                map_skybox_visible: state.map_skybox_enabled(),
+                visibility_culling: state.map_visibility_enabled(),
+                phy_debug_visible: state.phy_debug_enabled(),
+                spawn: map.spawn,
+                pose: state.fly_pose(),
+                movement_mode: state.fly_movement_mode(),
+                requested_movement_mode: state.requested_movement_mode(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
-        .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
-    )
-    .width(Length::Fixed(tokens.dims.file_preview_inspector_width))
-    .height(Length::Fill)
-    .padding(tokens.spacing.pad)
-    .style(move |_| theme::styles::file_preview_body_well(&tokens));
-
-    row![viewer, inspector]
-        .spacing(tokens.spacing.gap_sm)
         .width(Length::Fill)
         .height(Length::Fill)
+        .clip(true)
+        .style(move |_| theme::styles::file_preview_body_well(&tokens));
+
+        map_viewer_with_overlays(viewer.into(), state, map, ctx)
+    };
+
+    if !show_inspector {
+        return viewer();
+    }
+
+    let inspector = || {
+        container(
+            scrollable(
+                column![
+                    container(
+                        text(i18n.tr("file-preview-map-controls"))
+                            .size(tokens.typography.caption)
+                            .color(Color::from(tokens.colors.text_dim))
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                    )
+                    .width(Length::Fill),
+                    map_inspector_rows(state, data, map.stats, ctx)
+                ]
+                .spacing(tokens.spacing.gap_sm),
+            )
+            .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(tokens.spacing.pad)
+        .style(move |_| theme::styles::file_preview_body_well(&tokens))
         .into()
+    };
+
+    resizable_inspector(state, &tokens, content_width, viewer, inspector)
+}
+
+#[cfg(feature = "asset-studio")]
+fn resizable_inspector<'a>(
+    state: &'a State,
+    tokens: &Tokens,
+    width: f32,
+    viewer: impl Fn() -> Element<'a, Message>,
+    inspector: impl Fn() -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    let tokens = *tokens;
+    let ratio = effective_inspector_ratio(state.inspector_ratio(), width);
+    let viewer_width = (width * ratio - split_pane::DIVIDER_WIDTH / 2.0)
+        .round()
+        .max(VIEWER_MIN_WIDTH);
+    let grid = pane_grid(state.inspector_panes(), |_, pane_kind, _| {
+        pane_grid::Content::new(match pane_kind {
+            super::state::Pane::Viewer => viewer(),
+            super::state::Pane::Inspector => inspector(),
+        })
+    })
+    .spacing(split_pane::DIVIDER_WIDTH)
+    .min_size(INSPECTOR_MIN_WIDTH)
+    .on_resize(split_pane::GRAB_LEEWAY, move |event| {
+        Message::InspectorResized {
+            split: event.split,
+            ratio: effective_inspector_ratio(event.ratio, width),
+        }
+    })
+    .style(move |_| split_pane::style(&tokens));
+
+    let split = stack![
+        grid,
+        split_pane::reset_overlay(viewer_width, Message::InspectorReset(width))
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill);
+    sensor(split)
+        .on_show(|size| Message::InspectorLayoutChanged(size.width))
+        .on_resize(|size| Message::InspectorLayoutChanged(size.width))
+        .into()
+}
+
+#[cfg(feature = "asset-studio")]
+pub(super) fn effective_inspector_ratio(ratio: f32, width: f32) -> f32 {
+    split_pane::clamp_ratio(
+        ratio,
+        width,
+        VIEWER_MIN_WIDTH,
+        f32::INFINITY,
+        INSPECTOR_MIN_WIDTH,
+        INSPECTOR_MAX_WIDTH,
+    )
 }
 
 #[cfg(feature = "asset-studio")]
