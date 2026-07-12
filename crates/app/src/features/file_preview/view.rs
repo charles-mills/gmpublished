@@ -264,6 +264,7 @@ fn preview_content<'a>(
             width,
             height,
         } => image_preview(handle, *width, *height, ctx),
+        PreviewContent::Font { handle, family, .. } => raster_preview(handle, family.clone(), ctx),
         #[cfg(feature = "asset-studio")]
         PreviewContent::Audio { duration_secs, .. } => audio_preview(state, *duration_secs, ctx),
         #[cfg(feature = "asset-studio")]
@@ -392,7 +393,6 @@ fn image_preview<'a>(
     height: u32,
     ctx: ViewCtx<'a>,
 ) -> Element<'a, Message> {
-    let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let width_text = count_text(width);
     let height_text = count_text(height);
@@ -404,6 +404,15 @@ fn image_preview<'a>(
         ],
     );
 
+    raster_preview(handle, caption, ctx)
+}
+
+fn raster_preview<'a>(
+    handle: &'a iced::widget::image::Handle,
+    caption: String,
+    ctx: ViewCtx<'a>,
+) -> Element<'a, Message> {
+    let tokens = *ctx.tokens;
     column![
         container(
             image(handle.clone())

@@ -107,6 +107,10 @@ fn classification_table_matches_expected_extensions() {
     assert_eq!(classify_entry_path("sound/music.MP3"), EntryClass::Audio);
     assert_eq!(classify_entry_path("sound/music.ogg"), EntryClass::Audio);
     assert_eq!(
+        classify_entry_path("resource/fonts/menu.TTF"),
+        EntryClass::Font
+    );
+    assert_eq!(
         classify_entry_path("models/test/thing.dx90.ctx"),
         EntryClass::Info
     );
@@ -550,6 +554,52 @@ fn text_preview_over_hard_cap_becomes_too_large_info() {
         PreviewContent::Code {
             truncated: true,
             ..
+        }
+    ));
+}
+
+#[test]
+fn ttf_preview_renders_the_font_family() {
+    let bytes = crate::assets::fonts::inter_regular_bytes();
+    let request = request("resource/fonts/inter.ttf", bytes);
+
+    let data = preview_data_from_bytes(&request, bytes, &test_tokens(), None);
+
+    assert!(matches!(
+        data.content,
+        PreviewContent::Font {
+            ref family,
+            ..
+        } if family == "Inter"
+    ));
+}
+
+#[test]
+fn invalid_ttf_becomes_decode_failed_info() {
+    let bytes = b"not a font";
+    let request = request("resource/fonts/broken.ttf", bytes);
+
+    let data = preview_data_from_bytes(&request, bytes, &test_tokens(), None);
+
+    assert!(matches!(
+        data.content,
+        PreviewContent::Info {
+            reason: InfoReason::DecodeFailed
+        }
+    ));
+}
+
+#[test]
+fn oversized_ttf_requires_load_anyway() {
+    let bytes = vec![0; FONT_TOO_LARGE_BYTES + 1];
+    let request = request("resource/fonts/huge.ttf", &bytes);
+
+    let data = preview_data_from_bytes(&request, &bytes, &test_tokens(), None);
+
+    assert!(matches!(
+        data.content,
+        PreviewContent::Info {
+            reason: InfoReason::TooLarge
         }
     ));
 }

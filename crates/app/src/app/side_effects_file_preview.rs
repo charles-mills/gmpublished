@@ -8,6 +8,10 @@ use std::{
 use super::{App, RootMessage, file_preview, iced_mpsc, send_root_message, stream};
 
 use crate::features::file_preview::model::{MeshData, ModelData, ModelVertex};
+use cosmic_text::{
+    Align, Attrs, Buffer, Color as TextColor, FontSystem, Metrics, PlatformFallback, Shaping,
+    SwashCache, fontdb,
+};
 #[cfg(test)]
 use gmpublished_backend::scene::map::MapVisibilityBucket;
 use gmpublished_backend::scene::map::{
@@ -18,6 +22,7 @@ use gmpublished_backend::scene::map::{
 };
 use iced::Task;
 use iced::widget::image as iced_image;
+use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
 use vformats::phy::{ConvexLedge, ReadStats, SkipReason};
 
@@ -71,6 +76,7 @@ use syntax::{glua_highlighted_lines, json_highlighted_lines, plain_lines, vmt_hi
 const TEXT_TRUNCATE_BYTES: usize = 512 * 1024;
 const TEXT_TOO_LARGE_BYTES: usize = 4 * 1024 * 1024;
 const IMAGE_TOO_LARGE_BYTES: usize = 32 * 1024 * 1024;
+const FONT_TOO_LARGE_BYTES: usize = 8 * 1024 * 1024;
 const AUDIO_TOO_LARGE_BYTES: usize = 64 * 1024 * 1024;
 const MAP_TOO_LARGE_BYTES: usize = gmpublished_backend::scene::map::MAX_BSP_BYTES;
 const PARTICLE_TOO_LARGE_BYTES: usize = 16 * 1024 * 1024;
@@ -222,6 +228,7 @@ const fn initial_load_stage(entry_class: EntryClass) -> PreviewLoadStage {
         EntryClass::Map => PreviewLoadStage::ReadingBsp,
         EntryClass::Code { .. }
         | EntryClass::Image(_)
+        | EntryClass::Font
         | EntryClass::Audio
         | EntryClass::Model
         | EntryClass::ModelCompanion
@@ -308,6 +315,7 @@ fn preview_data_from_bytes_inner(
         EntryClass::Code { syntax } => code_preview_data(request, bytes, syntax, tokens),
         EntryClass::Image(ImageClass::Encoded) => encoded_image_preview_data(request, bytes),
         EntryClass::Image(ImageClass::Vtf) => vtf_preview_data(request, bytes),
+        EntryClass::Font => font_preview_data(request, bytes, tokens),
         EntryClass::Audio => audio_preview_data(request, bytes),
         EntryClass::Model => model_preview_data(request, bytes, gmod_dir),
         EntryClass::ModelCompanion => info_preview_data(request, InfoReason::DecodeFailed),
@@ -409,6 +417,83 @@ fn vtf_preview_data(request: &PreviewRequest, bytes: &[u8]) -> PreviewData {
         }
         None => info_preview_data(request, InfoReason::DecodeFailed),
     }
+}
+
+fn font_preview_data(request: &PreviewRequest, bytes: &[u8], tokens: &Tokens) -> PreviewData {
+    const WIDTH: u32 = 960;
+    const HEIGHT: u32 = 360;
+    const LEFT: f32 = 28.0;
+    const SPECIMENS: [(&str, f32, f32); 4] = [
+        ("Aa Bb Cc 123", 68.0, 18.0),
+        ("The quick brown fox jumps over the lazy dog.", 32.0, 112.0),
+        ("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 24.0, 180.0),
+        (
+            "abcdefghijklmnopqrstuvwxyz  0123456789  !?@#$%&",
+            24.0,
+            230.0,
+        ),
+    ];
+
+    if !request.bypass_size_limits && bytes.len() > FONT_TOO_LARGE_BYTES {
+        return info_preview_data(request, InfoReason::TooLarge);
+    }
+
+    let mut db = fontdb::Database::new();
+    let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(bytes.to_vec())));
+    let Some(face) = ids.first().and_then(|id| db.face(*id)) else {
+        return info_preview_data(request, InfoReason::DecodeFailed);
+    };
+    let Some((family, _)) = face.families.first().cloned() else {
+        return info_preview_data(request, InfoReason::DecodeFailed);
+    };
+    db.set_sans_serif_family(family.clone());
+
+    let mut font_system =
+        FontSystem::new_with_locale_and_db_and_fallback("en-US".to_owned(), db, PlatformFallback);
+    let mut cache = SwashCache::new();
+    let mut rgba = RgbaImage::new(WIDTH, HEIGHT);
+    let color = tokens.colors.text;
+    let text_color = TextColor::rgba(color.r, color.g, color.b, color.a);
+
+    for (sample, size, top) in SPECIMENS {
+        let line_height = size * crate::media::text::LINE_HEIGHT_RATIO;
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(size, line_height));
+        buffer.set_size(
+            &mut font_system,
+            Some(WIDTH as f32 - LEFT * 2.0),
+            Some(line_height),
+        );
+        buffer.set_text(
+            &mut font_system,
+            sample,
+            &Attrs::new(),
+            Shaping::Advanced,
+            Some(Align::Left),
+        );
+        buffer.shape_until_scroll(&mut font_system, false);
+        buffer.draw(
+            &mut font_system,
+            &mut cache,
+            text_color,
+            |x, y, _, _, color| {
+                if let (Ok(x), Ok(y)) = (
+                    u32::try_from(x + LEFT as i32),
+                    u32::try_from(y + top as i32),
+                ) && let Some(pixel) = rgba.get_pixel_mut_checked(x, y)
+                {
+                    pixel.blend(&Rgba(color.as_rgba()));
+                }
+            },
+        );
+    }
+
+    PreviewData::from_request(
+        request,
+        PreviewContent::Font {
+            handle: iced_image::Handle::from_rgba(WIDTH, HEIGHT, rgba.into_raw()),
+            family,
+        },
+    )
 }
 
 fn audio_preview_data(request: &PreviewRequest, bytes: &[u8]) -> PreviewData {
