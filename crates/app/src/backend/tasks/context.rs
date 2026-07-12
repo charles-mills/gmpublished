@@ -237,14 +237,25 @@ impl BackendContext {
         event: &BackendRuntimeEvent,
     ) -> BackendRuntimeEventEffects {
         match event {
-            BackendRuntimeEvent::DownloadStarted { transaction_id } => {
-                let task = self.create_task(TaskKind::Download, DOWNLOAD_STATUS_DOWNLOADING);
+            BackendRuntimeEvent::DownloadStarted {
+                transaction_id,
+                request_id,
+            } => {
+                let task = self.create_task(
+                    if request_id.is_some() {
+                        TaskKind::WorkshopSnapshot
+                    } else {
+                        TaskKind::Download
+                    },
+                    DOWNLOAD_STATUS_DOWNLOADING,
+                );
                 self.transaction_tasks.correlate(
                     *transaction_id,
                     task,
                     BackendTaskSource::WorkshopDownload {
                         item_id: None,
                         start_emitted: false,
+                        request_id: *request_id,
                     },
                 );
                 BackendRuntimeEventEffects::handled()
@@ -253,9 +264,17 @@ impl BackendContext {
                 transaction_id,
                 workshop_id,
                 source_path,
+                request_id,
                 ..
             } => {
-                let task = self.create_task(TaskKind::Extract, EXTRACT_STATUS);
+                let task = self.create_task(
+                    if request_id.is_some() {
+                        TaskKind::WorkshopSnapshot
+                    } else {
+                        TaskKind::Extract
+                    },
+                    EXTRACT_STATUS,
+                );
                 let effects = self.transaction_tasks.correlate(
                     *transaction_id,
                     task,
@@ -263,6 +282,7 @@ impl BackendContext {
                         item_id: *workshop_id,
                         start_emitted: false,
                         source_gma: source_path.clone(),
+                        request_id: *request_id,
                     },
                 );
                 BackendRuntimeEventEffects::handled_with(effects)

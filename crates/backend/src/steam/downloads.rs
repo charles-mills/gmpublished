@@ -45,6 +45,7 @@ pub struct DownloadInner {
     transaction: crate::transactions::Transaction,
     sent_total: AtomicBool,
     extract_destination: ExtractDestination,
+    request_id: Option<u64>,
 }
 impl std::hash::Hash for DownloadInner {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -450,8 +451,9 @@ impl Downloads {
         folder: PathBuf,
         item: PublishedFileId,
         extract_destination: ExtractDestination,
+        request_id: Option<u64>,
     ) {
-        self.extract_with_cleanup(folder, item, extract_destination, None);
+        self.extract_with_cleanup(folder, item, extract_destination, request_id, None);
     }
 
     fn extract_with_cleanup(
@@ -459,6 +461,7 @@ impl Downloads {
         folder: PathBuf,
         item: PublishedFileId,
         extract_destination: ExtractDestination,
+        request_id: Option<u64>,
         temp_guard: Option<tempfile::TempPath>,
     ) {
         let downloads = Arc::clone(self);
@@ -486,6 +489,7 @@ impl Downloads {
                     source_path: source_gma.clone(),
                     file_name: None,
                     workshop_id: Some(item),
+                    request_id,
                 }));
 
             let open_on_disk = |path: PathBuf| -> Result<(GMAFile, GmaView), GMAError> {
@@ -557,8 +561,9 @@ impl Downloads {
         extract_destination: &Arc<ExtractDestination>,
         item: PublishedFileId,
         epoch: u64,
+        request_id: Option<u64>,
     ) {
-        if self.cancelled_since(epoch) {
+        if request_id.is_none() && self.cancelled_since(epoch) {
             return;
         }
 
@@ -569,12 +574,14 @@ impl Downloads {
                     PathBuf::from(info.folder),
                     item,
                     (**extract_destination).clone(),
+                    request_id,
                 );
             } else {
                 let transaction = self.transactions.begin();
                 self.transactions
                     .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
                         transaction_id: transaction.id,
+                        request_id,
                     }));
                 transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
                 transaction.error(crate::error_key::keys::DOWNLOAD_MISSING);
@@ -585,11 +592,13 @@ impl Downloads {
                 sent_total: AtomicBool::new(false),
                 transaction: self.transactions.begin(),
                 extract_destination: (**extract_destination).clone(),
+                request_id,
             });
 
             self.transactions
                 .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
                     transaction_id: download.transaction.id,
+                    request_id,
                 }));
             download
                 .transaction
@@ -600,8 +609,8 @@ impl Downloads {
     }
 
     /// Emits the failed-download row shown when Steam does not know an item.
-    fn missing_item(&self, item: PublishedFileId, epoch: u64) {
-        if self.cancelled_since(epoch) {
+    fn missing_item(&self, item: PublishedFileId, epoch: u64, request_id: Option<u64>) {
+        if request_id.is_none() && self.cancelled_since(epoch) {
             return;
         }
 
@@ -609,18 +618,37 @@ impl Downloads {
         self.transactions
             .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
                 transaction_id: transaction.id,
+                request_id,
             }));
         transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
         transaction.error(crate::error_key::keys::ITEM_NOT_FOUND);
     }
 
     pub fn download(self: &Arc<Self>, ids: impl IntoIterator<Item = PublishedFileId>) {
+        self.download_many(ids, self.app_data.extract_destination_snapshot(), None);
+    }
+
+    pub fn download_one_to(
+        self: &Arc<Self>,
+        item: PublishedFileId,
+        extract_destination: ExtractDestination,
+        request_id: u64,
+    ) {
+        self.download_many([item], extract_destination, Some(request_id));
+    }
+
+    fn download_many(
+        self: &Arc<Self>,
+        ids: impl IntoIterator<Item = PublishedFileId>,
+        extract_destination: ExtractDestination,
+        request_id: Option<u64>,
+    ) {
         let ids: Vec<PublishedFileId> = ids.into_iter().collect();
         if ids.is_empty() {
             return;
         }
         let epoch = self.cancel_epoch.load(Ordering::SeqCst);
-        let extract_destination = Arc::new(self.app_data.extract_destination_snapshot());
+        let extract_destination = Arc::new(extract_destination);
 
         // Web API preflight: resolves collections and legacy CDN URLs in a
         // few batched keyless calls, with no side effects on failure —
@@ -638,7 +666,7 @@ impl Downloads {
         };
         match webapi::resolve_downloads(known_items, possible_collections) {
             Ok(details) => {
-                self.dispatch_preflighted(details, &extract_destination, epoch);
+                self.dispatch_preflighted(details, &extract_destination, epoch, request_id);
                 return;
             }
             Err(error) => log::warn!(
@@ -646,7 +674,7 @@ impl Downloads {
             ),
         }
 
-        self.download_via_steamworks(ids, &extract_destination, epoch);
+        self.download_via_steamworks(ids, &extract_destination, epoch, request_id);
     }
 
     /// Routes preflighted items to the cheapest lane: already-installed
@@ -657,6 +685,7 @@ impl Downloads {
         details: Vec<webapi::PublishedFileDetail>,
         extract_destination: &Arc<ExtractDestination>,
         epoch: u64,
+        request_id: Option<u64>,
     ) {
         self.steam.fetch_workshop_items(
             details
@@ -695,11 +724,19 @@ impl Downloads {
                         detail.file_size,
                         extract_destination,
                         epoch,
+                        request_id,
                     );
                 }
                 _ => {
                     let mut pending = self.pending.lock();
-                    self.push_download(&ugc, &mut pending, extract_destination, detail.id, epoch);
+                    self.push_download(
+                        &ugc,
+                        &mut pending,
+                        extract_destination,
+                        detail.id,
+                        epoch,
+                        request_id,
+                    );
                     queued_steam_downloads |= !pending.is_empty();
                 }
             }
@@ -710,7 +747,7 @@ impl Downloads {
         }
 
         if !unresolved.is_empty() {
-            self.download_via_steamworks(unresolved, extract_destination, epoch);
+            self.download_via_steamworks(unresolved, extract_destination, epoch, request_id);
         }
     }
 
@@ -721,8 +758,9 @@ impl Downloads {
         file_size: u64,
         extract_destination: &Arc<ExtractDestination>,
         epoch: u64,
+        request_id: Option<u64>,
     ) {
-        if self.cancelled_since(epoch) {
+        if request_id.is_none() && self.cancelled_since(epoch) {
             return;
         }
 
@@ -730,6 +768,7 @@ impl Downloads {
         self.transactions
             .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
                 transaction_id: transaction.id,
+                request_id,
             }));
         transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
 
@@ -744,6 +783,7 @@ impl Downloads {
                         temp_path.to_path_buf(),
                         item,
                         extract_destination,
+                        request_id,
                         Some(temp_path),
                     );
                 }
@@ -841,6 +881,7 @@ impl Downloads {
         mut ids: Vec<PublishedFileId>,
         extract_destination: &Arc<ExtractDestination>,
         epoch: u64,
+        request_id: Option<u64>,
     ) {
         let possible_collections: Arc<Mutex<PossibleCollectionsState>> = Arc::new(Mutex::new({
             let workshop = self
@@ -880,6 +921,7 @@ impl Downloads {
                     self.transactions
                         .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
                             transaction_id: transaction.id,
+                            request_id,
                         }));
                     transaction.error(crate::transactions::TransactionError::detailed(
                         crate::error_key::keys::STEAM_ERROR,
@@ -895,6 +937,21 @@ impl Downloads {
                 .include_children(true)
                 .fetch(
                     move |results: Result<QueryResults<'_>, steamworks::SteamError>| {
+                        if let Err(error) = &results
+                            && let Some(request_id) = request_id
+                        {
+                            let transaction = downloads.transactions.begin();
+                            downloads.transactions.emit(BackendEvent::DownloadStarted(
+                                DownloadStartedEvent {
+                                    transaction_id: transaction.id,
+                                    request_id: Some(request_id),
+                                },
+                            ));
+                            transaction.error(crate::transactions::TransactionError::detailed(
+                                crate::error_key::keys::STEAM_ERROR,
+                                crate::transactions::detail_from_serialize(error.to_string()),
+                            ));
+                        }
                         if let Ok(results) = results {
                             let mut pending = downloads.pending.lock();
                             pending.reserve(results.returned_results() as usize);
@@ -944,10 +1001,11 @@ impl Downloads {
                                             &extract_destination,
                                             item,
                                             epoch,
+                                            request_id,
                                         );
                                     }
                                     WorkshopDownloadAction::MissingItem(item) => {
-                                        downloads.missing_item(item, epoch);
+                                        downloads.missing_item(item, epoch, request_id);
                                     }
                                 }
                             }
@@ -969,7 +1027,14 @@ impl Downloads {
             .expect("download_via_steamworks is only reached once Steam has connected")
             .ugc();
         for item in ids {
-            self.push_download(&ugc, &mut pending, extract_destination, item, epoch);
+            self.push_download(
+                &ugc,
+                &mut pending,
+                extract_destination,
+                item,
+                epoch,
+                request_id,
+            );
         }
 
         if !pending.is_empty() {
@@ -1020,6 +1085,7 @@ impl Downloads {
                             PathBuf::from(info.folder),
                             download.item,
                             extract_destination,
+                            download.request_id,
                         );
                     } else {
                         log::error!("ISteamUGC Download MISSING: {:?}", download.item);
@@ -1124,6 +1190,15 @@ pub fn queue_workshop_downloads(
     ids: impl IntoIterator<Item = PublishedFileId>,
 ) {
     downloads.download(ids);
+}
+
+pub fn queue_workshop_download_to(
+    downloads: &Arc<Downloads>,
+    item: PublishedFileId,
+    destination: ExtractDestination,
+    request_id: u64,
+) {
+    downloads.download_one_to(item, destination, request_id);
 }
 
 /// The folder's single `.gma` payload; `None` when absent or ambiguous

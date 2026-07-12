@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::backend::{
-    domain::{PublishedFileId, workshop_url},
+    domain::{PublishedFileId, WorkshopDownloadSuccess, workshop_url},
     publish::{
         DEFAULT_WORKSHOP_ICON_FILE_NAME, IconFormat, PublishSubmitMode, PublishSubmitPreview,
     },
@@ -14,12 +14,13 @@ use super::{AddonTag, AddonType, Mode, OpenTarget, State, UpdateTarget};
 use crate::features::prepare_publish::model::{
     ContentPathVerificationRequest, IgnorePatternMutationResult, IgnoredPattern,
     PublishSubmitContext, PublishSubmitResult, VerifiedContentPathState, VerifiedIcon,
-    VerifiedIconPreview,
+    VerifiedIconPreview, WorkshopContentRequest, inspect_workshop_snapshot,
 };
 use crate::media::{
     thumbnail_demand,
     thumbnail_worker::{ThumbnailError, ThumbnailInput},
 };
+use crate::test_support::TestDir;
 
 #[test]
 fn open_new_resets_to_blank_new_mode() {
@@ -31,7 +32,8 @@ fn open_new_resets_to_blank_new_mode() {
             title: "Old".to_owned(),
             tags: vec!["map".to_owned()],
             preview_url: None,
-            saved_path: None,
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-42".into(),
         },
     );
 
@@ -54,7 +56,8 @@ fn open_update_prefills_workshop_metadata() {
             title: "Workshop Addon".to_owned(),
             tags: vec!["Addon".to_owned(), "map".to_owned(), "scenic".to_owned()],
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
-            saved_path: Some("/tmp/addon".into()),
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
 
@@ -62,7 +65,7 @@ fn open_update_prefills_workshop_metadata() {
     assert!(state.update_mode());
     assert_eq!(state.workshop_id_text(), "99");
     assert_eq!(state.title(), "Workshop Addon");
-    assert_eq!(state.addon_path(), "/tmp/addon");
+    assert_eq!(state.addon_path(), "");
     assert_eq!(state.addon_type, Some(AddonType::Map));
     assert_eq!(state.tags[0], Some(AddonTag::Scenic));
     assert_eq!(
@@ -77,8 +80,137 @@ fn open_update_prefills_workshop_metadata() {
     );
     assert!(state.path_pending());
     assert_eq!(
-        request.expect("saved path should verify").display_path,
-        "/tmp/addon"
+        request.expect("Workshop content should load").destination,
+        PathBuf::from("/tmp/workshop-99")
+    );
+}
+
+#[test]
+fn workshop_download_hydrates_the_current_update_path() {
+    let mut state = State::default();
+    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let destination = PathBuf::from("/tmp/workshop-99");
+    let _request = open_update(
+        &mut state,
+        UpdateTarget {
+            workshop_id,
+            title: "Workshop Addon".to_owned(),
+            tags: Vec::new(),
+            preview_url: None,
+            snapshot_request_id: 1,
+            snapshot_destination: destination.clone(),
+        },
+    );
+
+    let verification = state
+        .apply_workshop_download(
+            1,
+            WorkshopDownloadSuccess {
+                item_id: workshop_id,
+                installed_path: None,
+                extracted_path: destination.clone(),
+            },
+        )
+        .expect("current Workshop snapshot should verify");
+
+    assert_eq!(verification.path, destination);
+    assert!(state.path_pending());
+}
+
+#[test]
+fn inspected_workshop_baseline_is_visible_but_not_a_publish_source() {
+    let root = TestDir::new("prepare-publish-baseline");
+    root.file("lua/autorun/init.lua", b"print('ready')");
+    let destination = root.path().to_path_buf();
+    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let mut state = State::default();
+    let _request = open_update(
+        &mut state,
+        UpdateTarget {
+            workshop_id,
+            title: "Workshop Addon".to_owned(),
+            tags: Vec::new(),
+            preview_url: None,
+            snapshot_request_id: 1,
+            snapshot_destination: destination.clone(),
+        },
+    );
+    let inspection = state
+        .apply_workshop_download(
+            1,
+            WorkshopDownloadSuccess {
+                item_id: workshop_id,
+                installed_path: None,
+                extracted_path: destination,
+            },
+        )
+        .expect("current snapshot should be inspected");
+    let snapshot = inspect_workshop_snapshot(inspection.clone()).expect("snapshot inventory");
+
+    assert!(state.apply_snapshot_inspection_result(inspection.generation, Ok(snapshot)));
+    assert!(state.browser_snapshot().visible());
+    assert_eq!(state.addon_path(), "");
+    assert!(!state.can_submit());
+}
+
+#[test]
+fn late_workshop_download_is_cleaned_after_close() {
+    let mut state = State::default();
+    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let destination = PathBuf::from("/tmp/workshop-99");
+    let _request = open_update(
+        &mut state,
+        UpdateTarget {
+            workshop_id,
+            title: "Workshop Addon".to_owned(),
+            tags: Vec::new(),
+            preview_url: None,
+            snapshot_request_id: 1,
+            snapshot_destination: destination.clone(),
+        },
+    );
+
+    assert!(state.close().is_empty());
+    assert!(
+        state
+            .apply_workshop_download(
+                1,
+                WorkshopDownloadSuccess {
+                    item_id: workshop_id,
+                    installed_path: None,
+                    extracted_path: destination.clone(),
+                }
+            )
+            .is_none()
+    );
+    assert_eq!(state.take_pending_cleanup(), vec![destination]);
+}
+
+#[test]
+fn workshop_snapshot_error_leaves_manual_selection_available() {
+    let mut state = State::default();
+    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let destination = PathBuf::from("/tmp/workshop-99");
+    let _request = open_update(
+        &mut state,
+        UpdateTarget {
+            workshop_id,
+            title: "Workshop Addon".to_owned(),
+            tags: Vec::new(),
+            preview_url: None,
+            snapshot_request_id: 1,
+            snapshot_destination: destination.clone(),
+        },
+    );
+    state.apply_workshop_submission_result(1, Err(UiError::new(ErrorKey("DOWNLOAD_FAILED"))));
+
+    assert!(!state.path_pending());
+    assert!(state.path_error().is_some());
+    assert_eq!(state.take_pending_cleanup(), vec![destination]);
+    assert!(
+        state
+            .begin_content_path_verification("/tmp/manual-addon")
+            .is_some()
     );
 }
 
@@ -92,7 +224,8 @@ fn update_mode_title_is_read_only() {
             title: "Original".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            saved_path: None,
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
 
@@ -213,7 +346,8 @@ fn begin_update_submit_uses_workshop_id_changelog_and_no_default_preview() {
             title: "Existing Addon".to_owned(),
             tags: vec!["Addon".to_owned(), "map".to_owned(), "scenic".to_owned()],
             preview_url: None,
-            saved_path: None,
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
     set_verified_path(&mut state);
@@ -381,7 +515,8 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            saved_path: None,
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
     assert!(state.begin_publish_icon().is_none());
@@ -482,7 +617,8 @@ fn changelog_content_round_trips_through_editor_actions() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            saved_path: None,
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-7".into(),
         },
     );
 
@@ -507,7 +643,8 @@ fn open_update_seeds_workshop_preview_display_only() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
-            saved_path: None,
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
 
@@ -554,7 +691,8 @@ fn browsed_icon_replaces_the_seeded_preview() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
-            saved_path: None,
+            snapshot_request_id: 1,
+            snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
     let set = state.thumbnail_demands();
@@ -633,10 +771,15 @@ fn verified_icon_preview(display_path: &str, can_upscale: bool) -> VerifiedIconP
 }
 
 fn open_new(state: &mut State) -> Option<ContentPathVerificationRequest> {
-    state.open_target(OpenTarget::New, Vec::new(), false)
+    assert!(
+        state
+            .open_target(OpenTarget::New, Vec::new(), false)
+            .is_none()
+    );
+    None
 }
 
-fn open_update(state: &mut State, target: UpdateTarget) -> Option<ContentPathVerificationRequest> {
+fn open_update(state: &mut State, target: UpdateTarget) -> Option<WorkshopContentRequest> {
     state.open_target(OpenTarget::Update(target), Vec::new(), false)
 }
 
@@ -651,6 +794,9 @@ fn ready_new_submit_state() -> State {
 }
 
 fn set_verified_path(state: &mut State) {
+    state.path_pending = false;
+    state.active_workshop_request = None;
+    state.workshop_loads.clear();
     state.addon_path = "/tmp/addon".to_owned();
     state.verified_addon_path = Some(VerifiedContentPathState {
         display_path: "/tmp/addon".to_owned(),

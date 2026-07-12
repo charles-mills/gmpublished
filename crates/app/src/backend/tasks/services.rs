@@ -529,6 +529,25 @@ impl BackendServices {
         Ok(())
     }
 
+    pub(crate) fn submit_workshop_snapshot(
+        &self,
+        item_id: PublishedFileId,
+        destination: crate::backend::gma::ExtractDestination,
+        request_id: u64,
+    ) -> Result<(), UiError> {
+        if !self.steam_connected() {
+            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+        }
+
+        downloads::queue_workshop_download_to(
+            &self.backend.downloads,
+            gmpublished_backend::appdata::SettingsPublishedFileId(item_id.get()),
+            destination,
+            request_id,
+        );
+        Ok(())
+    }
+
     pub(crate) fn submit_publish_request(
         &self,
         request: PublishSubmitRequest,

@@ -6,6 +6,9 @@ use super::{
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
 use gmpublished_backend::error_key::keys;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static WORKSHOP_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl App {
     pub(super) fn apply_prepare_publish_message(
@@ -51,6 +54,27 @@ impl App {
             }
             prepare_publish::Effect::IconPickerRequested => self.prepare_publish_icon_picker_task(),
             prepare_publish::Effect::OpenUrlRequested(url) => self.open_url_task(url),
+            prepare_publish::Effect::WorkshopContentRequested(request) => {
+                self.prepare_publish_workshop_content_task(request)
+            }
+            prepare_publish::Effect::WorkshopSnapshotInspectionRequested(request) => {
+                let generation = request.generation;
+                self.ctx
+                    .run_blocking("prepare-publish-workshop-inspect", move |_app| {
+                        prepare_publish::inspect_workshop_snapshot(request)
+                    })
+                    .map(move |result| {
+                        RootMessage::PreparePublish(
+                            prepare_publish::Message::WorkshopSnapshotInspected(
+                                generation,
+                                flatten_blocking_ui_result(result),
+                            ),
+                        )
+                    })
+            }
+            prepare_publish::Effect::CleanupPathRequested(path) => {
+                self.prepare_publish_cleanup_path_task(path)
+            }
             prepare_publish::Effect::PathVerificationRequested(request) => {
                 self.prepare_publish_content_verification_task(request)
             }
@@ -87,6 +111,65 @@ impl App {
     pub(super) fn prepare_publish_upscale_default(&self) -> bool {
         let (settings, _paths) = self.ctx.settings_and_paths_snapshot();
         settings.upscale_addon_icon
+    }
+
+    pub(super) fn prepare_publish_workshop_snapshot(
+        &self,
+        workshop_id: PublishedFileId,
+    ) -> (u64, PathBuf) {
+        let (_settings, paths) = self.ctx.settings_and_paths_snapshot();
+        let sequence = WORKSHOP_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = paths
+            .temp_dir
+            .join("prepare-publish-workshop")
+            .join(format!("{}-{sequence}", workshop_id.get()));
+        (sequence, path)
+    }
+
+    pub(super) fn prepare_publish_workshop_content_task(
+        &self,
+        request: prepare_publish::WorkshopContentRequest,
+    ) -> Task<RootMessage> {
+        let request_id = request.request_id;
+        self.ctx
+            .run_blocking("prepare-publish-workshop-content", move |app| {
+                if request.destination.exists() {
+                    std::fs::remove_dir_all(&request.destination).map_err(|error| {
+                        UiError::detailed(keys::IO_ERROR, Some(error.to_string()))
+                    })?;
+                }
+                prepare_publish_connect_steam(app)?;
+                app.submit_workshop_snapshot(
+                    request.workshop_id,
+                    crate::backend::gma::ExtractDestination::Directory(request.destination),
+                    request_id,
+                )
+            })
+            .map(move |result| {
+                RootMessage::PreparePublish(
+                    prepare_publish::Message::WorkshopContentSubmissionCompleted(
+                        request_id,
+                        flatten_blocking_ui_result(result),
+                    ),
+                )
+            })
+    }
+
+    pub(super) fn prepare_publish_cleanup_path_task(&self, path: PathBuf) -> Task<RootMessage> {
+        self.ctx
+            .run_blocking("prepare-publish-workshop-cleanup", move |_app| {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        log::warn!(
+                            "failed to clean Prepare Publish Workshop snapshot {}: {error}",
+                            path.display()
+                        );
+                    }
+                }
+            })
+            .discard()
     }
 
     /// Plays the modal's UI sounds in response to a `prepare_publish::Message`.
@@ -341,14 +424,6 @@ impl App {
         }
         tasks.push(self.open_url_task(workshop_url));
         Task::batch(tasks)
-    }
-
-    pub(super) fn prepare_publish_saved_path(
-        &self,
-        workshop_id: PublishedFileId,
-    ) -> Option<PathBuf> {
-        let (settings, _paths) = self.ctx.settings_and_paths_snapshot();
-        settings.my_workshop_local_paths.get(&workshop_id).cloned()
     }
 }
 

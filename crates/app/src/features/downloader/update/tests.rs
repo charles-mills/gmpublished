@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::backend::domain::{PublishedFileId, WorkshopMetadata};
 use crate::backend::tasks::{
-    SharedTaskUpdate, StatusKey, TaskId, TaskUpdate, WorkshopDownloadTaskKind,
+    SharedTaskUpdate, StatusKey, TaskId, TaskKind, TaskUpdate, WorkshopDownloadTaskKind,
 };
 use crate::backend::ui_error::UiError;
 use gmpublished_backend::error_key::keys;
@@ -117,6 +117,30 @@ fn task_started_creates_download_row_and_metadata_updates_title() {
     );
 
     assert_eq!(state.downloading()[0].title(), "Resolved Addon");
+}
+
+#[test]
+fn workshop_snapshot_tasks_never_create_downloader_rows() {
+    let mut state = State::default();
+    let task_id = TaskId::from_raw(70);
+
+    for update_message in [
+        TaskUpdate::Started {
+            kind: TaskKind::WorkshopSnapshot,
+            status: StatusKey::new("downloading"),
+        },
+        TaskUpdate::Progress(0.5),
+        TaskUpdate::Finished,
+    ] {
+        let effects = update(
+            &mut state,
+            Message::TaskEventsReceived(vec![(task_id, update_message.into())]),
+        );
+        assert!(effects.is_empty());
+    }
+
+    assert!(state.downloading().is_empty());
+    assert!(state.extracting().is_empty());
 }
 
 #[test]

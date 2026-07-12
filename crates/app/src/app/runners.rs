@@ -4,8 +4,8 @@ use super::{
     Arc, BackendContext, BackendRuntimeAction, BackendRuntimeEvent, BackendServices, Duration,
     HashMap, NativeOpenTarget, Path, PathBuf, PublishedFileId, RootMessage, RunBlockingError,
     SearchFullRequest, TaskHandle, TaskKind, UiError, WorkshopDownloadResult,
-    WorkshopDownloadSuccess, downloader, gma, iced_mpsc, installed_addons, preview_gma, search,
-    size_analyzer, steam_session, tasks,
+    WorkshopDownloadSuccess, downloader, gma, iced_mpsc, installed_addons, prepare_publish,
+    preview_gma, search, size_analyzer, steam_session, tasks,
 };
 
 pub(super) fn flatten_blocking_ui_result<T>(
@@ -437,7 +437,7 @@ pub(super) fn log_preview_gma_extraction_result(
 
 pub(super) fn backend_runtime_action_message(action: BackendRuntimeAction) -> RootMessage {
     match action {
-        BackendRuntimeAction::WorkshopDownloadTaskStarted {
+        BackendRuntimeAction::DownloadTaskStarted {
             kind,
             item_id,
             task_id,
@@ -448,7 +448,21 @@ pub(super) fn backend_runtime_action_message(action: BackendRuntimeAction) -> Ro
                 task_id,
             },
         )),
-        BackendRuntimeAction::WorkshopDownloadFinished {
+        BackendRuntimeAction::DownloadFinished {
+            request_id: Some(request_id),
+            item_id,
+            installed_path,
+            extracted_path,
+        } => RootMessage::PreparePublish(prepare_publish::Message::WorkshopContentDownloaded(
+            request_id,
+            WorkshopDownloadSuccess {
+                item_id,
+                installed_path,
+                extracted_path,
+            },
+        )),
+        BackendRuntimeAction::DownloadFinished {
+            request_id: None,
             item_id,
             installed_path,
             extracted_path,
@@ -462,6 +476,9 @@ pub(super) fn backend_runtime_action_message(action: BackendRuntimeAction) -> Ro
                 }),
             }),
         )),
+        BackendRuntimeAction::SnapshotFailed { request_id, error } => RootMessage::PreparePublish(
+            prepare_publish::Message::WorkshopSnapshotFailed(request_id, error),
+        ),
     }
 }
 

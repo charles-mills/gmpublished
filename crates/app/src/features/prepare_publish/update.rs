@@ -14,34 +14,69 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             let request = state.open_target(target, ignored_patterns, upscale_icon_default);
             let mut effects = vec![Effect::ModalOpenRequested];
             if let Some(request) = request {
-                effects.push(Effect::PathVerificationRequested(request));
+                effects.push(Effect::WorkshopContentRequested(request));
             }
+            append_cleanup_effects(state, &mut effects);
             effects.push(Effect::ThumbnailDemandsChanged);
             effects
         }
         Message::CloseRequested => {
-            state.close();
-            vec![Effect::ThumbnailDemandsChanged]
+            let mut effects = state
+                .close()
+                .into_iter()
+                .map(Effect::CleanupPathRequested)
+                .collect::<Vec<_>>();
+            effects.push(Effect::ThumbnailDemandsChanged);
+            effects
+        }
+        Message::WorkshopContentSubmissionCompleted(generation, result) => {
+            state.apply_workshop_submission_result(generation, result);
+            cleanup_effects(state)
+        }
+        Message::WorkshopSnapshotFailed(request_id, error) => {
+            state.apply_workshop_submission_result(request_id, Err(error));
+            cleanup_effects(state)
+        }
+        Message::WorkshopContentDownloaded(request_id, success) => {
+            let mut effects = state
+                .apply_workshop_download(request_id, success)
+                .map_or_else(Vec::new, |request| {
+                    vec![Effect::WorkshopSnapshotInspectionRequested(request)]
+                });
+            append_cleanup_effects(state, &mut effects);
+            effects
+        }
+        Message::WorkshopSnapshotInspected(generation, result) => {
+            let _applied = state.apply_snapshot_inspection_result(generation, result);
+            cleanup_effects(state)
         }
         Message::AddonPathEdited(value) => {
             state.edit_addon_path(value);
-            Vec::new()
+            cleanup_effects(state)
         }
-        Message::AddonPathAccepted => state
-            .begin_accepted_path_verification()
-            .map_or_else(Vec::new, |request| {
-                vec![Effect::PathVerificationRequested(request)]
-            }),
+        Message::AddonPathAccepted => {
+            let mut effects = state
+                .begin_accepted_path_verification()
+                .map_or_else(Vec::new, |request| {
+                    vec![Effect::PathVerificationRequested(request)]
+                });
+            append_cleanup_effects(state, &mut effects);
+            effects
+        }
         Message::WorkshopLinkRequested => state
             .workshop_url()
             .map_or_else(Vec::new, |url| vec![Effect::OpenUrlRequested(url)]),
         Message::AddonPathBrowseRequested => vec![Effect::ContentPickerRequested],
-        Message::AddonPathBrowseCompleted(path) => path
-            .map(|path| path.to_string_lossy().into_owned())
-            .and_then(|path| state.begin_content_path_verification(&path))
-            .map_or_else(Vec::new, |request| {
-                vec![Effect::PathVerificationRequested(request)]
-            }),
+        Message::AddonPathBrowseCompleted(path) => {
+            let mut effects = path
+                .map(|path| path.to_string_lossy().into_owned())
+                .and_then(|path| state.begin_content_path_verification(&path))
+                .map_or_else(Vec::new, |request| {
+                    vec![Effect::PathVerificationRequested(request)]
+                });
+            append_cleanup_effects(state, &mut effects);
+            effects
+        }
         Message::IconBrowseRequested => vec![Effect::IconPickerRequested],
         Message::IconBrowseCompleted {
             path,
@@ -164,6 +199,18 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             effects
         }
     }
+}
+
+fn cleanup_effects(state: &mut State) -> Vec<Effect> {
+    state
+        .take_pending_cleanup()
+        .into_iter()
+        .map(Effect::CleanupPathRequested)
+        .collect()
+}
+
+fn append_cleanup_effects(state: &mut State, effects: &mut Vec<Effect>) {
+    effects.extend(cleanup_effects(state));
 }
 
 #[cfg(test)]

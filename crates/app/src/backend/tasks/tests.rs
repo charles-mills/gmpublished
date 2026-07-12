@@ -362,7 +362,10 @@ fn backend_context_forwards_installed_backend_events() {
     ctx.backend()
         .transactions
         .emit(gmpublished_backend::events::BackendEvent::DownloadStarted(
-            gmpublished_backend::events::DownloadStartedEvent { transaction_id: 40 },
+            gmpublished_backend::events::DownloadStartedEvent {
+                transaction_id: 40,
+                request_id: None,
+            },
         ));
     ctx.backend().transactions.emit(
         gmpublished_backend::events::BackendEvent::ExtractionStarted(
@@ -371,6 +374,7 @@ fn backend_context_forwards_installed_backend_events() {
                 source_path: Some(PathBuf::from("/tmp/addon.gma")),
                 file_name: Some("addon.gma".to_owned()),
                 workshop_id: Some(gmpublished_backend::appdata::SettingsPublishedFileId(123)),
+                request_id: None,
             },
         ),
     );
@@ -401,7 +405,10 @@ fn backend_context_forwards_installed_backend_events() {
     );
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-        BackendRuntimeEvent::DownloadStarted { transaction_id: 40 }
+        BackendRuntimeEvent::DownloadStarted {
+            transaction_id: 40,
+            request_id: None,
+        }
     );
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -412,6 +419,7 @@ fn backend_context_forwards_installed_backend_events() {
             workshop_id: Some(
                 PublishedFileId::new(123).expect("test fixture ids are always nonzero")
             ),
+            request_id: None,
         }
     );
     assert_eq!(
@@ -526,6 +534,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
             workshop_id: Some(
                 PublishedFileId::new(765).expect("test fixture ids are always nonzero")
             ),
+            request_id: None,
         })
         .handled_event()
     );
@@ -627,6 +636,7 @@ fn correlated_backend_transaction_error_finishes_task_with_error() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
             transaction_id: 501,
+            request_id: None,
         })
         .handled_event()
     );
@@ -715,6 +725,7 @@ fn download_start_waits_for_item_payload_before_downloader_action() {
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
         transaction_id: 610,
+        request_id: None,
     });
     assert!(effects.handled_event());
     assert!(effects.into_actions().is_empty());
@@ -732,7 +743,7 @@ fn download_start_waits_for_item_payload_before_downloader_action() {
     assert_eq!(actions.len(), 1);
     assert!(matches!(
         &actions[0],
-        BackendRuntimeAction::WorkshopDownloadTaskStarted {
+        BackendRuntimeAction::DownloadTaskStarted {
             kind: WorkshopDownloadTaskKind::Download,
             item_id,
             ..
@@ -749,13 +760,14 @@ fn extraction_start_and_finish_emit_downloader_actions() {
         source_path: None,
         file_name: None,
         workshop_id: Some(PublishedFileId::new(456).expect("test fixture ids are always nonzero")),
+        request_id: None,
     });
     assert!(effects.handled_event());
     let actions = effects.into_actions();
     assert_eq!(actions.len(), 1);
     assert!(matches!(
         &actions[0],
-        BackendRuntimeAction::WorkshopDownloadTaskStarted {
+        BackendRuntimeAction::DownloadTaskStarted {
             kind: WorkshopDownloadTaskKind::Extract,
             item_id,
             ..
@@ -771,7 +783,8 @@ fn extraction_start_and_finish_emit_downloader_actions() {
     assert!(effects.handled_event());
     assert_eq!(
         effects.into_actions(),
-        vec![BackendRuntimeAction::WorkshopDownloadFinished {
+        vec![BackendRuntimeAction::DownloadFinished {
+            request_id: None,
             item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
             installed_path: None,
             extracted_path: PathBuf::from("/tmp/extracted/456"),
@@ -789,6 +802,7 @@ fn extraction_finish_carries_the_source_gma_from_the_started_event() {
         source_path: Some(source_gma.clone()),
         file_name: None,
         workshop_id: Some(PublishedFileId::new(457).expect("test fixture ids are always nonzero")),
+        request_id: None,
     });
     assert!(effects.handled_event());
 
@@ -801,12 +815,69 @@ fn extraction_finish_carries_the_source_gma_from_the_started_event() {
     assert!(effects.handled_event());
     assert_eq!(
         effects.into_actions(),
-        vec![BackendRuntimeAction::WorkshopDownloadFinished {
+        vec![BackendRuntimeAction::DownloadFinished {
+            request_id: None,
             item_id: PublishedFileId::new(457).expect("test fixture ids are always nonzero"),
             installed_path: Some(source_gma),
             extracted_path: PathBuf::from("/tmp/extracted/457"),
         }]
     );
+}
+
+#[test]
+fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
+    let ctx = BackendContext::new().expect("test backend context");
+    let workshop_id = PublishedFileId::new(458).expect("test fixture ids are always nonzero");
+
+    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
+        transaction_id: 622,
+        source_path: None,
+        file_name: None,
+        workshop_id: Some(workshop_id),
+        request_id: Some(77),
+    });
+    assert!(effects.handled_event());
+    assert!(effects.into_actions().is_empty());
+
+    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+        TransactionRuntimeEvent::Finished {
+            id: 622,
+            payload: TransactionPayload::ExtractedPath(PathBuf::from("/tmp/extracted/458")),
+        },
+    ));
+    assert_eq!(
+        effects.into_actions(),
+        vec![BackendRuntimeAction::DownloadFinished {
+            request_id: Some(77),
+            item_id: workshop_id,
+            installed_path: None,
+            extracted_path: PathBuf::from("/tmp/extracted/458"),
+        }]
+    );
+}
+
+#[test]
+fn workshop_snapshot_error_is_request_scoped() {
+    let ctx = BackendContext::new().expect("test backend context");
+    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
+        transaction_id: 623,
+        request_id: Some(78),
+    });
+    assert!(effects.handled_event());
+
+    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+        TransactionRuntimeEvent::Error {
+            id: 623,
+            error: TransactionError::detailed(
+                gmpublished_backend::error_key::ErrorKey("ERR_TEST"),
+                Some("detail".to_owned()),
+            ),
+        },
+    ));
+    assert!(matches!(
+        effects.into_actions().as_slice(),
+        [BackendRuntimeAction::SnapshotFailed { request_id: 78, .. }]
+    ));
 }
 
 #[test]
@@ -821,6 +892,7 @@ fn cancelling_correlated_backend_task_aborts_registered_transaction() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
             transaction_id: transaction.id,
+            request_id: None,
         })
         .handled_event()
     );
@@ -833,8 +905,7 @@ fn cancelling_correlated_backend_task_aborts_registered_transaction() {
         },
     ));
     let actions = effects.into_actions();
-    let [BackendRuntimeAction::WorkshopDownloadTaskStarted { task_id, .. }] = actions.as_slice()
-    else {
+    let [BackendRuntimeAction::DownloadTaskStarted { task_id, .. }] = actions.as_slice() else {
         panic!("expected correlated downloader start action");
     };
 
@@ -889,11 +960,12 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
         source_path: None,
         file_name: None,
         workshop_id: Some(PublishedFileId::new(789).expect("test fixture ids are always nonzero")),
+        request_id: None,
     });
     assert!(effects.handled_event());
     assert!(matches!(
         effects.into_actions().as_slice(),
-        [BackendRuntimeAction::WorkshopDownloadTaskStarted {
+        [BackendRuntimeAction::DownloadTaskStarted {
             kind: WorkshopDownloadTaskKind::Extract,
             item_id,
             ..

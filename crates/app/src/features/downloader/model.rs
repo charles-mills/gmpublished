@@ -308,6 +308,7 @@ pub struct DownloaderUiState {
     task_row_index: HashMap<TaskId, RowLocation>,
     workshop_row_index: HashMap<PublishedFileId, Vec<RowLocation>>,
     pending_task_updates: HashMap<TaskId, CoalescedTaskUpdate>,
+    ignored_task_ids: HashSet<TaskId>,
     workshop_title_requests: HashSet<PublishedFileId>,
     /// Tasks that started for already-cancelled (hidden) items; drained by
     /// the update layer into a cancellation effect so they abort at birth.
@@ -326,6 +327,7 @@ impl Default for DownloaderUiState {
             task_row_index: HashMap::new(),
             workshop_row_index: HashMap::new(),
             pending_task_updates: HashMap::new(),
+            ignored_task_ids: HashSet::new(),
             workshop_title_requests: HashSet::new(),
             pending_cancellations: Vec::new(),
             next_synthetic_row_id: SYNTHETIC_ROW_START,
@@ -433,6 +435,25 @@ impl DownloaderUiState {
     }
 
     fn apply_task_update(&mut self, task_id: TaskId, update: TaskUpdate, now: Instant) -> bool {
+        if matches!(
+            &update,
+            TaskUpdate::Started {
+                kind: TaskKind::WorkshopSnapshot,
+                ..
+            }
+        ) {
+            self.ignored_task_ids.insert(task_id);
+            return false;
+        }
+        if self.ignored_task_ids.contains(&task_id) {
+            if matches!(
+                update,
+                TaskUpdate::Finished | TaskUpdate::Error(_) | TaskUpdate::Abandoned
+            ) {
+                self.ignored_task_ids.remove(&task_id);
+            }
+            return false;
+        }
         let Some((section, index)) = self.running_row_index_for_task(task_id) else {
             self.remember_pending_task_update(task_id, update);
             return false;

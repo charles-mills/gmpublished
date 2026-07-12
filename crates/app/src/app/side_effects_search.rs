@@ -150,13 +150,18 @@ impl App {
                 preview_url,
             } => Task::done(RootMessage::PreparePublish(
                 prepare_publish::Message::OpenRequested {
-                    target: prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
-                        workshop_id,
-                        title,
-                        tags,
-                        preview_url,
-                        saved_path: self.prepare_publish_saved_path(workshop_id),
-                    }),
+                    target: {
+                        let (snapshot_request_id, snapshot_destination) =
+                            self.prepare_publish_workshop_snapshot(workshop_id);
+                        prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
+                            workshop_id,
+                            title,
+                            tags,
+                            preview_url,
+                            snapshot_request_id,
+                            snapshot_destination,
+                        })
+                    },
                     ignored_patterns: self.prepare_publish_ignored_patterns(),
                     upscale_icon_default: self.prepare_publish_upscale_default(),
                 },

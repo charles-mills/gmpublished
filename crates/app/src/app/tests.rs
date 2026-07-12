@@ -6,7 +6,8 @@ use std::{
 
 use crate::backend::domain::{
     AvatarRgba, InstalledAddon, PublishedFileId, SearchHit, SearchItem, SearchItemSource,
-    SearchQuickBatch, SearchQuickCarry, SearchQuickRequest, SteamUser, workshop_url,
+    SearchQuickBatch, SearchQuickCarry, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess,
+    workshop_url,
 };
 use gmpublished_backend::appdata::{
     AppDataPathsSnapshot as BackendAppDataPathsSnapshot, AppDataSnapshot as BackendAppDataSnapshot,
@@ -301,6 +302,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     let _task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::DownloadStarted {
             transaction_id: transaction.id,
+            request_id: None,
         },
     ));
 
@@ -2132,7 +2134,7 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
 
 #[test]
 fn backend_runtime_actions_translate_to_downloader_events() {
-    let start = backend_runtime_action_message(BackendRuntimeAction::WorkshopDownloadTaskStarted {
+    let start = backend_runtime_action_message(BackendRuntimeAction::DownloadTaskStarted {
         kind: WorkshopDownloadTaskKind::Download,
         item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
         task_id: TaskId::from_raw(7),
@@ -2148,7 +2150,8 @@ fn backend_runtime_actions_translate_to_downloader_events() {
         )) if item_id == PublishedFileId::new(123).expect("test fixture ids are always nonzero") && task_id == TaskId::from_raw(7)
     ));
 
-    let finished = backend_runtime_action_message(BackendRuntimeAction::WorkshopDownloadFinished {
+    let finished = backend_runtime_action_message(BackendRuntimeAction::DownloadFinished {
+        request_id: None,
         item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
         installed_path: None,
         extracted_path: PathBuf::from("/tmp/extracted/456"),
@@ -2163,6 +2166,55 @@ fn backend_runtime_actions_translate_to_downloader_events() {
                     && success.installed_path.is_none()
             })
     ));
+
+    let snapshot = backend_runtime_action_message(BackendRuntimeAction::DownloadFinished {
+        request_id: Some(77),
+        item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+        installed_path: None,
+        extracted_path: PathBuf::from("/tmp/snapshot/456"),
+    });
+    assert!(matches!(
+        snapshot,
+        RootMessage::PreparePublish(prepare_publish::Message::WorkshopContentDownloaded(
+            77,
+            WorkshopDownloadSuccess { item_id, .. }
+        )) if item_id == PublishedFileId::new(456).expect("test fixture ids are always nonzero")
+    ));
+}
+
+#[test]
+fn workshop_download_completion_starts_baseline_inspection() {
+    let mut app = App::new_for_test();
+    let workshop_id = PublishedFileId::new(456).expect("test fixture ids are always nonzero");
+    let extracted_path = PathBuf::from("/tmp/prepare-publish-workshop/456-0");
+    let _task = app.update(RootMessage::PreparePublish(
+        prepare_publish::Message::OpenRequested {
+            target: prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
+                workshop_id,
+                title: "Workshop Addon".to_owned(),
+                tags: Vec::new(),
+                preview_url: None,
+                snapshot_request_id: 1,
+                snapshot_destination: extracted_path.clone(),
+            }),
+            ignored_patterns: Vec::new(),
+            upscale_icon_default: false,
+        },
+    ));
+
+    let _task = app.update(RootMessage::PreparePublish(
+        prepare_publish::Message::WorkshopContentDownloaded(
+            1,
+            WorkshopDownloadSuccess {
+                item_id: workshop_id,
+                installed_path: None,
+                extracted_path,
+            },
+        ),
+    ));
+
+    assert_eq!(app.state.prepare_publish.addon_path(), "");
+    assert!(app.state.prepare_publish.path_pending());
 }
 
 #[test]

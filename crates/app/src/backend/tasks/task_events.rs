@@ -86,6 +86,7 @@ pub enum TaskKind {
     #[cfg_attr(not(any(feature = "debug", test)), expect(dead_code))]
     Notice,
     Download,
+    WorkshopSnapshot,
     Search,
 }
 
