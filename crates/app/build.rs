@@ -13,8 +13,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     compress_bundled_fonts()?;
-    compress_locale_catalogs()?;
-
     Ok(())
 }
 
@@ -57,62 +55,6 @@ fn compress_bundled_fonts() -> Result<(), Box<dyn Error>> {
         format!(
             "const FONT_SEGMENTS: &[(usize, usize)] = &[\n{segments}];\n\
              const FONTS_UNCOMPRESSED_LEN: usize = {};\n",
-            concatenated.len()
-        ),
-    )?;
-
-    Ok(())
-}
-
-/// Concatenates every bundled .ftl catalog and stores one LZMA blob plus a
-/// segment table in OUT_DIR; the twelve catalogs are ~90% redundant with each
-/// other (same keys), so one shared dictionary compresses far better than
-/// twelve separate streams. `i18n/mod.rs` decompresses lazily at runtime.
-fn compress_locale_catalogs() -> Result<(), Box<dyn Error>> {
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("no manifest dir")?);
-    let i18n_dir = manifest_dir.join("i18n");
-    println!("cargo:rerun-if-changed={}", i18n_dir.display());
-
-    let mut catalogs: Vec<(String, String)> = Vec::new();
-    for entry in fs::read_dir(&i18n_dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("ftl") {
-            continue;
-        }
-        println!("cargo:rerun-if-changed={}", path.display());
-        let id = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or("non-utf8 .ftl file name")?
-            .to_owned();
-        catalogs.push((id, fs::read_to_string(&path)?));
-    }
-    catalogs.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut concatenated = String::new();
-    let mut segments = String::new();
-    for (id, source) in &catalogs {
-        let _ = writeln!(segments, "    (\"{id}\", {}),", source.len());
-        concatenated.push_str(source);
-    }
-
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("no OUT_DIR")?);
-
-    let options = lzma_rust2::LzmaOptions::with_preset(9);
-    let mut encoder = lzma_rust2::LzmaWriter::new_use_header(
-        Vec::new(),
-        &options,
-        Some(concatenated.len() as u64),
-    )?;
-    encoder.write_all(concatenated.as_bytes())?;
-    fs::write(out_dir.join("i18n_catalogs.lzma"), encoder.finish()?)?;
-
-    fs::write(
-        out_dir.join("i18n_segments.rs"),
-        format!(
-            "/// (locale file stem, uncompressed byte length) in blob order.\n\
-             const CATALOG_SEGMENTS: &[(&str, usize)] = &[\n{segments}];\n\
-             const CATALOGS_UNCOMPRESSED_LEN: usize = {};\n",
             concatenated.len()
         ),
     )?;

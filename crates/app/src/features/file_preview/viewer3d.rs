@@ -1794,27 +1794,6 @@ mod tests {
     /// way.)
     #[test]
     fn constant_white_vertex_color_shades_uniformly() {
-        use std::sync::Arc;
-
-        fn block_on<F: std::future::Future>(future: F) -> F::Output {
-            use std::task::{Context, Poll, Wake, Waker};
-            struct ThreadWaker(std::thread::Thread);
-            impl Wake for ThreadWaker {
-                fn wake(self: Arc<Self>) {
-                    self.0.unpark();
-                }
-            }
-            let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-            let mut context = Context::from_waker(&waker);
-            let mut future = std::pin::pin!(future);
-            loop {
-                match future.as_mut().poll(&mut context) {
-                    Poll::Ready(output) => return output,
-                    Poll::Pending => std::thread::park(),
-                }
-            }
-        }
-
         const WIDTH: u32 = 512;
         const HEIGHT: u32 = 384;
 
@@ -1826,17 +1805,18 @@ mod tests {
             backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::default()
         });
-        let Ok(adapter) =
-            block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        else {
+        let Ok(adapter) = futures::executor::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        ) else {
             eprintln!("skipping: no wgpu adapter available");
             return;
         };
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("test.uniform_shading"),
-            ..wgpu::DeviceDescriptor::default()
-        }))
-        .expect("device");
+        let (device, queue) =
+            futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("test.uniform_shading"),
+                ..wgpu::DeviceDescriptor::default()
+            }))
+            .expect("device");
 
         // Desk-top-like angled quad: constant white color, constant UV, so
         // every fragment must shade identically.

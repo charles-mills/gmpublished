@@ -24,7 +24,6 @@ vformats.workspace = true
 # Read-only maps of GMA archives (never fully loaded; addons reach GBs).
 memmap2 = "0.9"
 arc-swap.workspace = true
-bytemuck.workspace = true
 clap = "4.6"
 crc32fast.workspace = true
 dirs.workspace = true
@@ -35,9 +34,7 @@ lzma-rust2.workspace = true
 nucleo-matcher.workspace = true
 opener.workspace = true
 parking_lot.workspace = true
-path-slash = "0.2"
 rayon.workspace = true
-regex-lite = "0.1"
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["std"] }
 steamlocate.workspace = true

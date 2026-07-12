@@ -41,7 +41,6 @@ log.workspace = true
 # Decoder for the build-time-compressed .ftl catalogs (already linked via the
 # backend crate, so this adds no code to the binary).
 lzma-rust2.workspace = true
-mimalloc.workspace = true
 notify.workspace = true
 quick_cache.workspace = true
 rayon.workspace = true

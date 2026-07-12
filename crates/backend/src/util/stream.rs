@@ -1,7 +1,4 @@
-use std::{
-    io::{BufRead, BufWriter, ErrorKind, Write},
-    sync::Arc,
-};
+use std::io::{BufRead, BufWriter, ErrorKind, Write};
 
 use crate::Transaction;
 
@@ -50,29 +47,7 @@ pub fn stream_bytes<R: BufRead + ?Sized, W: Write>(
     Ok(())
 }
 
-pub trait NTStringWriter: Write {
-    fn write_nt_string<S: AsRef<str>>(&mut self, str: S) -> Result<(), std::io::Error> {
-        self.write_all(str.as_ref().as_bytes())?;
-        self.write_all(&[0])?;
-        Ok(())
-    }
-}
-impl NTStringWriter for Vec<u8> {}
-
-#[derive(Clone, Debug)]
-pub struct ArcBytes(Arc<[u8]>);
-impl ArcBytes {
-    pub(crate) fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-}
-impl AsRef<[u8]> for ArcBytes {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-impl From<Vec<u8>> for ArcBytes {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(Arc::from(bytes))
-    }
+pub fn write_nt_string(writer: &mut impl Write, value: &str) -> Result<(), std::io::Error> {
+    writer.write_all(value.as_bytes())?;
+    writer.write_all(&[0])
 }

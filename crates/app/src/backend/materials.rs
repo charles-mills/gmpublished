@@ -8,8 +8,6 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll, Wake, Waker},
-    thread,
 };
 
 use parking_lot::Mutex;
@@ -1292,22 +1290,7 @@ fn bc_supported() -> bool {
 }
 
 fn block_on_worker<F: std::future::Future>(future: F) -> F::Output {
-    struct ThreadWaker(thread::Thread);
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
-    let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut future = std::pin::pin!(future);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => thread::park(),
-        }
-    }
+    futures::executor::block_on(future)
 }
 
 fn rgba_len(width: u32, height: u32) -> Option<usize> {

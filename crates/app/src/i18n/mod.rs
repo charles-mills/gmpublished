@@ -12,93 +12,77 @@ const FALLBACK_LOCALE: &str = "en";
 struct LocaleCatalog {
     id: &'static str,
     tag: &'static str,
+    source: &'static str,
 }
 
-// Written by build.rs: `CATALOG_SEGMENTS` (locale id, uncompressed length)
-// and `CATALOGS_UNCOMPRESSED_LEN`, describing the LZMA blob below.
-include!(concat!(env!("OUT_DIR"), "/i18n_segments.rs"));
-
-/// All bundled .ftl catalogs, concatenated and LZMA-compressed at build time
-/// (the twelve catalogs share their message keys, so one stream compresses
-/// far better than twelve). Decompressed lazily, once, on first use.
-const COMPRESSED_CATALOGS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/i18n_catalogs.lzma"));
-
 fn catalog_source(id: &str) -> &'static str {
-    static SOURCES: OnceLock<Vec<(&'static str, String)>> = OnceLock::new();
-    let sources = SOURCES.get_or_init(|| {
-        use std::io::Read;
-
-        let mut decompressed = String::with_capacity(CATALOGS_UNCOMPRESSED_LEN);
-        lzma_rust2::LzmaReader::new_mem_limit(COMPRESSED_CATALOGS, u32::MAX, None)
-            .and_then(|mut reader| reader.read_to_string(&mut decompressed))
-            .expect("bundled locale catalogs must decompress");
-
-        let mut rest = decompressed.as_str();
-        CATALOG_SEGMENTS
-            .iter()
-            .map(|(id, len)| {
-                let (source, tail) = rest.split_at(*len);
-                rest = tail;
-                (*id, source.to_owned())
-            })
-            .collect()
-    });
-
-    sources
+    CATALOGS
         .iter()
-        .find(|(catalog_id, _)| *catalog_id == id)
-        .map(|(_, source)| source.as_str())
-        .expect("every bundled locale id must have a packed catalog")
+        .find(|catalog| catalog.id == id)
+        .map(|catalog| catalog.source)
+        .expect("every bundled locale id must have a catalog")
 }
 
 const CATALOGS: &[LocaleCatalog] = &[
     LocaleCatalog {
         id: "en",
         tag: "en",
+        source: include_str!("../../i18n/en.ftl"),
     },
     LocaleCatalog {
         id: "de",
         tag: "de",
+        source: include_str!("../../i18n/de.ftl"),
     },
     LocaleCatalog {
         id: "es",
         tag: "es",
+        source: include_str!("../../i18n/es.ftl"),
     },
     LocaleCatalog {
         id: "fr",
         tag: "fr",
+        source: include_str!("../../i18n/fr.ftl"),
     },
     LocaleCatalog {
         id: "kr",
         tag: "ko",
+        source: include_str!("../../i18n/kr.ftl"),
     },
     LocaleCatalog {
         id: "nl",
         tag: "nl",
+        source: include_str!("../../i18n/nl.ftl"),
     },
     LocaleCatalog {
         id: "pl",
         tag: "pl",
+        source: include_str!("../../i18n/pl.ftl"),
     },
     LocaleCatalog {
         id: "pt-BR",
         tag: "pt-BR",
+        source: include_str!("../../i18n/pt-BR.ftl"),
     },
     LocaleCatalog {
         id: "ru",
         tag: "ru",
+        source: include_str!("../../i18n/ru.ftl"),
     },
     LocaleCatalog {
         id: "tr",
         tag: "tr",
+        source: include_str!("../../i18n/tr.ftl"),
     },
     LocaleCatalog {
         id: "uk",
         tag: "uk",
+        source: include_str!("../../i18n/uk.ftl"),
     },
     LocaleCatalog {
         id: "zh-cn",
         tag: "zh-CN",
+        source: include_str!("../../i18n/zh-cn.ftl"),
     },
 ];
 

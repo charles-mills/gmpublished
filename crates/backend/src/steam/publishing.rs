@@ -5,7 +5,6 @@ use crate::{
     transactions::Transactions,
 };
 use image::{DynamicImage, ImageError, ImageFormat};
-use path_slash::PathExt;
 use std::{
     fs::File,
     io::BufReader,
@@ -835,7 +834,7 @@ pub fn verify_whitelist(
             }
 
             let relative_path = match path.strip_prefix(&content_root) {
-                Ok(rel_path) => rel_path.to_slash_lossy().to_string(),
+                Ok(rel_path) => rel_path.to_string_lossy().replace('\\', "/"),
                 Err(_) => return None,
             };
 

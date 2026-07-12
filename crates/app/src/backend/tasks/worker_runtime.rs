@@ -32,27 +32,8 @@ pub(super) fn show_native_open_error_dialog(description: String) {
     );
 }
 
-/// Minimal thread-parking executor for driving a single future to completion
-/// on a detached worker thread (no async runtime is available there).
 pub(super) fn block_on_worker<F: std::future::Future>(future: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct ThreadWaker(thread::Thread);
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
-    let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut future = std::pin::pin!(future);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => thread::park(),
-        }
-    }
+    futures::executor::block_on(future)
 }
 
 pub(super) type WorkerPoolSpawner =
