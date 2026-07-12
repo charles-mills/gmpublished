@@ -4,7 +4,7 @@ use std::{
     panic::PanicHookInfo,
     path::PathBuf,
     sync::{
-        LazyLock, OnceLock,
+        LazyLock, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -95,6 +95,14 @@ pub fn enable_file_sink(logs_dir: PathBuf) {
 /// hypothetical re-init) reuses the first one's install rather than erroring.
 pub fn install() -> Result<(), log::SetLoggerError> {
     static INSTALLED: OnceLock<()> = OnceLock::new();
+    static INSTALL_LOCK: Mutex<()> = Mutex::new(());
+    if INSTALLED.get().is_some() {
+        return Ok(());
+    }
+
+    let _install_guard = INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if INSTALLED.get().is_some() {
         return Ok(());
     }
@@ -223,6 +231,29 @@ fn panic(panic: &PanicHookInfo<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_installation_is_idempotent() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    install()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            assert!(
+                thread
+                    .join()
+                    .expect("install thread should not panic")
+                    .is_ok()
+            );
+        }
+    }
 
     #[test]
     fn log_level_parser_accepts_known_values_and_defaults_invalid_input() {

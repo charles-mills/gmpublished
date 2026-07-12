@@ -11,7 +11,6 @@ use crate::features::file_preview;
 use super::model::{AuthorInfo, LoadedArchive, OpenTarget, WorkshopMetadata};
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(feature = "asset-studio"), derive(Eq))]
 pub enum Message {
     OpenRequested(OpenTarget),
     ArchiveOpened(u64, Result<LoadedArchive, UiError>),

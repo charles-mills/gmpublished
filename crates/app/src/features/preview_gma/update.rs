@@ -22,13 +22,13 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             if !state.apply_archive_opened(request_id, result) {
                 return Vec::new();
             }
-            let mut effects = Vec::new();
+            let effects = vec![Effect::BrowserPathChanged, Effect::ThumbnailDemandsChanged];
+            #[cfg(feature = "asset-studio")]
+            let mut effects = effects;
             #[cfg(feature = "asset-studio")]
             if let Some(request) = state.take_initial_entry_preview_request() {
-                effects.push(Effect::EntryPreviewRequested(request));
+                effects.insert(0, Effect::EntryPreviewRequested(request));
             }
-            effects.push(Effect::BrowserPathChanged);
-            effects.push(Effect::ThumbnailDemandsChanged);
             effects
         }
         Message::WorkshopMetadataCompleted(request_id, workshop_id, result) => {

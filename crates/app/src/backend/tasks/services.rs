@@ -31,6 +31,8 @@ pub struct BackendServices {
     workshop_metadata: Mutex<HashMap<PublishedFileId, CachedWorkshopMetadata>>,
     metadata_snapshot_file: Option<PathBuf>,
     _backend_event_sink: Option<BackendEventSinkRegistration>,
+    #[cfg(test)]
+    _test_data_root: Option<tempfile::TempDir>,
 }
 
 impl BackendServices {
@@ -46,17 +48,27 @@ impl BackendServices {
             || Arc::new(gmpublished_backend::events::NullEventSink) as _,
             BackendEventSinkRegistration::sink,
         );
+        #[cfg(not(test))]
         let backend = build_default_backend(event_sink)?;
+        #[cfg(test)]
+        let (backend, test_data_root) = build_default_backend(event_sink)?;
         let (settings, paths) =
             appdata_snapshot_from_backend(backend.app_data.snapshot(), &UiSettings::default());
         let steam_runtime = SteamRuntime::new(Arc::clone(&backend.steam));
-        Ok(Self::new_with_steam_runtime(
+        let services = Self::new_with_steam_runtime(
             backend,
             settings,
             paths,
             steam_runtime,
             backend_event_sink,
-        ))
+        );
+        #[cfg(test)]
+        let services = {
+            let mut services = services;
+            services._test_data_root = Some(test_data_root);
+            services
+        };
+        Ok(services)
     }
 
     fn new_with_steam_runtime(
@@ -106,6 +118,8 @@ impl BackendServices {
             workshop_metadata: Mutex::new(HashMap::new()),
             metadata_snapshot_file: None,
             _backend_event_sink: backend_event_sink,
+            #[cfg(test)]
+            _test_data_root: None,
         }
     }
 
@@ -142,7 +156,8 @@ impl BackendServices {
     pub(crate) fn for_test_with_event_sink(
         event_sink: Arc<dyn gmpublished_backend::events::BackendEventSink>,
     ) -> Self {
-        let backend = build_default_backend(event_sink).expect("test backend init");
+        let (backend, test_data_root) =
+            build_default_backend(event_sink).expect("test backend init");
         let settings = Settings::default();
         let paths = default_paths(&settings);
         let mut services = Self::with_steam_runtime(
@@ -153,13 +168,15 @@ impl BackendServices {
             None,
         );
         services.persist_appdata_settings = false;
+        services._test_data_root = Some(test_data_root);
         services
     }
 
     #[cfg(test)]
     pub(super) fn for_test_with_ui_settings_file(ui_settings_file: PathBuf) -> Self {
-        let backend = build_default_backend(Arc::new(gmpublished_backend::events::NullEventSink))
-            .expect("test backend init");
+        let (backend, test_data_root) =
+            build_default_backend(Arc::new(gmpublished_backend::events::NullEventSink))
+                .expect("test backend init");
         let ui = UiSettings::load_from_file_or_default(&ui_settings_file);
         let mut settings = Settings::default();
         settings.apply_ui_settings(&ui);
@@ -174,6 +191,7 @@ impl BackendServices {
         services.persist_appdata_settings = false;
         services.persist_ui_settings = true;
         services.ui_settings_file = ui_settings_file;
+        services._test_data_root = Some(test_data_root);
         services
     }
 
@@ -817,13 +835,11 @@ fn build_default_backend(
 #[cfg(test)]
 fn build_default_backend(
     event_sink: Arc<dyn gmpublished_backend::events::BackendEventSink>,
-) -> Result<Arc<Backend>, gmpublished_backend::BackendInitError> {
-    // Persisted deliberately: nextest runs one test per process, so a stray
-    // tempdir per test process is a non-issue, and keeping a `TempDir` guard
-    // alive would tie it to `Arc<Backend>`'s lifetime for no benefit.
-    let path = tempfile::tempdir().expect("test backend tempdir").keep();
-    gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
+) -> Result<(Arc<Backend>, tempfile::TempDir), gmpublished_backend::BackendInitError> {
+    let root = tempfile::tempdir().expect("test backend tempdir");
+    let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
         event_sink,
-        ..gmpublished_backend::BackendConfig::for_test(&path)
-    })
+        ..gmpublished_backend::BackendConfig::for_test(root.path())
+    })?;
+    Ok((backend, root))
 }

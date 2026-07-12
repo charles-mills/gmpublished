@@ -12,7 +12,7 @@ use gmpublished_backend::appdata::{
     AppDataPathsSnapshot as BackendAppDataPathsSnapshot, AppDataSnapshot as BackendAppDataSnapshot,
     Settings as BackendSettings,
 };
-use iced::{Point, Size, keyboard, theme::Mode, widget::image, window};
+use iced::{Point, Size, Task, keyboard, theme::Mode, widget::image, window};
 
 #[cfg(feature = "asset-studio")]
 use crate::{backend::archive::PreviewArchiveSource, features::file_preview};
@@ -40,14 +40,22 @@ use super::{
 };
 use crate::backend::ui_error::UiError;
 
+fn assert_task_scheduled(task: &Task<RootMessage>) {
+    assert!(task.units() > 0, "expected a scheduled task");
+}
+
+fn assert_no_task(task: &Task<RootMessage>) {
+    assert_eq!(task.units(), 0, "expected no scheduled task");
+}
+
 #[test]
-fn new_uses_default_root_state_and_dark_theme() {
-    let (app, _startup_task) = App::new_for_test();
+fn test_constructor_uses_default_root_state_without_running_startup() {
+    let app = App::new_for_test();
 
     assert_eq!(app.state.title, State::default().title);
     assert_eq!(app.state.shell.route(), shell::Route::MyWorkshop);
     assert_eq!(app.state.shell.account_name(), None);
-    assert!(app.state.my_workshop.is_route_visible());
+    assert!(!app.state.my_workshop.is_route_visible());
     assert_eq!(
         app.state.tokens.iced_theme().palette().background,
         app.state.tokens.colors.bg.into()
@@ -58,7 +66,7 @@ fn new_uses_default_root_state_and_dark_theme() {
 
 #[test]
 fn update_delegates_modal_stack_messages_to_modal_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::OpenDestinationSelect,
@@ -70,7 +78,7 @@ fn update_delegates_modal_stack_messages_to_modal_state() {
 
 #[test]
 fn modal_stack_close_clears_preview_gma_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::PreviewGma(
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
@@ -106,7 +114,7 @@ fn modal_stack_close_clears_preview_gma_state() {
 
 #[test]
 fn destination_overlay_layers_over_preview_and_closes_first() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::PreviewGma(
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
@@ -144,7 +152,7 @@ fn destination_overlay_layers_over_preview_and_closes_first() {
 
 #[test]
 fn prepare_publish_open_claims_modal_stack_slot() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::PreparePublish(
         prepare_publish::Message::OpenRequested {
@@ -163,7 +171,7 @@ fn prepare_publish_open_claims_modal_stack_slot() {
 
 #[test]
 fn modal_stack_close_clears_prepare_publish_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::PreparePublish(
         prepare_publish::Message::OpenRequested {
@@ -192,7 +200,7 @@ fn modal_stack_close_clears_prepare_publish_state() {
 
 #[test]
 fn settings_activation_claims_modal_stack_slot() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::Shell(shell::Message::SettingsActivated));
     let snapshot = app.settings_snapshot();
@@ -209,16 +217,16 @@ fn settings_activation_claims_modal_stack_slot() {
 
 #[test]
 fn shell_executor_open_settings_schedules_settings_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(vec![shell::Effect::OpenSettings], App::run_shell_effect);
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn shell_executor_open_url_schedules_native_open_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![shell::Effect::OpenUrl(
@@ -227,32 +235,32 @@ fn shell_executor_open_url_schedules_native_open_task() {
         App::run_shell_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn shell_executor_begin_window_drag_schedules_window_drag_when_window_known() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.window_id = Some(window::Id::unique());
 
     let task = app.batch_effects(vec![shell::Effect::BeginWindowDrag], App::run_shell_effect);
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn shell_executor_toggle_maximize_schedules_window_toggle_when_window_known() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.window_id = Some(window::Id::unique());
 
     let task = app.batch_effects(vec![shell::Effect::ToggleMaximize], App::run_shell_effect);
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn downloader_executor_submission_schedules_worker_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::WorkshopSubmissionAccepted(vec![
@@ -261,12 +269,12 @@ fn downloader_executor_submission_schedules_worker_task() {
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn downloader_executor_cancels_requested_tasks() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let handle = app.ctx.create_task(TaskKind::Download, "working");
     let task_id = handle.id();
     let transaction = app.ctx.begin_transaction();
@@ -278,13 +286,13 @@ fn downloader_executor_cancels_requested_tasks() {
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(transaction.aborted());
 }
 
 #[test]
 fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     // The backend queues a Steam download: DownloadStarted correlates a
     // fresh task with the transaction (the same path backend_event_task
@@ -332,7 +340,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
 
 #[test]
 fn downloader_row_cancel_button_is_clickable_through_the_full_app_view() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
         shell::Route::Downloader,
     )));
@@ -375,7 +383,7 @@ fn downloader_row_cancel_button_is_clickable_through_the_full_app_view() {
 
 #[test]
 fn downloader_executor_open_paths_schedules_native_open_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::PathsOpenRequested(vec![PathBuf::from(
@@ -384,12 +392,12 @@ fn downloader_executor_open_paths_schedules_native_open_task() {
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn downloader_executor_open_workshop_schedules_url_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::WorkshopPageOpenRequested(Some(
@@ -398,24 +406,24 @@ fn downloader_executor_open_workshop_schedules_url_task() {
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn downloader_executor_bulk_extract_picker_schedules_dialog_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::BulkExtractPickerRequested],
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
-    let (app, _startup_task) = App::new_for_test();
+    let app = App::new_for_test();
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Cancel Test")
             .entry("lua/autorun/cancel.lua", b"print('hi')\n".to_vec())
@@ -451,7 +459,7 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
 
 #[test]
 fn downloader_executor_local_extraction_schedules_worker_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::LocalExtractionRequested(vec![
@@ -460,24 +468,24 @@ fn downloader_executor_local_extraction_schedules_worker_task() {
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn gma_file_drop_reuses_bulk_local_extraction_path() {
-    let (app, _startup_task) = App::new_for_test();
+    let app = App::new_for_test();
     let root = tempfile::tempdir().expect("tempdir");
     let path = root.path().join("selected.gma");
     std::fs::write(&path, b"GMAD").expect("gma fixture");
 
     let task = app.handle_file_drop(path);
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn downloader_executor_destination_selection_opens_overlay() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::DestinationSelectionRequested],
@@ -485,49 +493,49 @@ fn downloader_executor_destination_selection_opens_overlay() {
     );
 
     assert!(app.state.modal_stack.overlay_active());
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
 }
 
 #[test]
 fn destination_select_executor_modal_open_opens_overlay() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![destination_select::Effect::ModalOpenRequested],
         App::run_destination_select_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(app.state.modal_stack.overlay_active());
 }
 
 #[test]
 fn destination_select_executor_folder_picker_schedules_dialog() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![destination_select::Effect::FolderPickerRequested],
         App::run_destination_select_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn destination_select_executor_create_folder_schedules_persistence() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![destination_select::Effect::CreateFolderChanged(true)],
         App::run_destination_select_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn destination_select_executor_persist_request_schedules_save() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![destination_select::Effect::DestinationPersistRequested(
@@ -540,12 +548,12 @@ fn destination_select_executor_persist_request_schedules_save() {
         App::run_destination_select_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn destination_select_executor_persisted_closes_overlay_and_runs_handoffs() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.batch_effects(
         vec![destination_select::Effect::ModalOpenRequested],
         App::run_destination_select_effect,
@@ -556,14 +564,14 @@ fn destination_select_executor_persisted_closes_overlay_and_runs_handoffs() {
         App::run_destination_select_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(app.state.modal_stack.overlay_active());
     assert!(!app.state.modal_stack.overlay_interactive());
 }
 
 #[test]
 fn destination_select_executor_dismissed_clears_context_menu_extract_paths() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.state.context_menu_extract_paths = Some(vec![PathBuf::from("/tmp/context.gma")]);
 
     let task = app.batch_effects(
@@ -571,13 +579,13 @@ fn destination_select_executor_dismissed_clears_context_menu_extract_paths() {
         App::run_destination_select_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert_eq!(app.state.context_menu_extract_paths, None);
 }
 
 #[test]
 fn downloader_executor_title_query_schedules_metadata_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::WorkshopTitleQueryRequested(vec![
@@ -586,19 +594,19 @@ fn downloader_executor_title_query_schedules_metadata_task() {
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn downloader_executor_active_job_count_updates_shell_badge() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![downloader::Effect::ActiveJobCountChanged(3)],
         App::run_downloader_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert_eq!(app.state.shell.downloader_jobs(), 3);
     assert_eq!(
         app.state
@@ -612,17 +620,17 @@ fn downloader_executor_active_job_count_updates_shell_badge() {
 
 #[test]
 fn search_executor_palette_opened_refreshes_thumbnail_demands() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     seed_search_result(&mut app, false);
 
     let task = app.batch_effects(vec![search::Effect::PaletteOpened], App::run_search_effect);
 
-    assert!(task.units() > 0);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn search_executor_palette_dismissed_refreshes_thumbnail_demands() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     seed_search_result(&mut app, false);
 
     let task = app.batch_effects(
@@ -630,24 +638,24 @@ fn search_executor_palette_dismissed_refreshes_thumbnail_demands() {
         App::run_search_effect,
     );
 
-    assert!(task.units() > 0);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn search_executor_focus_input_schedules_focus_operation() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![search::Effect::FocusInputRequested],
         App::run_search_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn search_executor_quick_debounce_schedules_debounce_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let request = seed_search_request(&mut app);
 
     let task = app.batch_effects(
@@ -655,12 +663,12 @@ fn search_executor_quick_debounce_schedules_debounce_task() {
         App::run_search_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn search_executor_quick_search_schedules_worker_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let request = seed_search_request(&mut app);
 
     let task = app.batch_effects(
@@ -668,12 +676,12 @@ fn search_executor_quick_search_schedules_worker_task() {
         App::run_search_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn search_executor_full_search_starts_stream_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     seed_search_result(&mut app, true);
 
     let task = app.batch_effects(
@@ -681,14 +689,14 @@ fn search_executor_full_search_starts_stream_task() {
         App::run_search_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(app.state.search.loading());
     assert!(!app.state.search.should_begin_full_search());
 }
 
 #[test]
 fn search_executor_cancels_requested_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let handle = app.ctx.create_task(TaskKind::Search, "search");
     let task_id = handle.id();
     let transaction = app.ctx.begin_transaction();
@@ -700,13 +708,13 @@ fn search_executor_cancels_requested_task() {
         App::run_search_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(transaction.aborted());
 }
 
 #[test]
 fn search_executor_result_activation_schedules_selection_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     seed_search_result(&mut app, false);
 
     let task = app.batch_effects(
@@ -714,12 +722,12 @@ fn search_executor_result_activation_schedules_selection_task() {
         App::run_search_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn search_executor_thumbnail_demands_changed_refreshes_thumbnail_demands() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     seed_search_result(&mut app, false);
 
     let task = app.batch_effects(
@@ -727,12 +735,12 @@ fn search_executor_thumbnail_demands_changed_refreshes_thumbnail_demands() {
         App::run_search_effect,
     );
 
-    assert!(task.units() > 0);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn search_executor_metadata_refresh_defers_until_steam_connects() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![search::Effect::MetadataRefreshRequested {
@@ -753,7 +761,7 @@ fn search_executor_metadata_refresh_defers_until_steam_connects() {
 
 #[test]
 fn my_workshop_executor_page_request_defers_until_steam_connects() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
@@ -774,7 +782,7 @@ fn my_workshop_executor_page_request_defers_until_steam_connects() {
 
 #[test]
 fn my_workshop_executor_stats_refresh_defers_until_steam_connects() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::StatsRefreshRequested {
@@ -795,7 +803,7 @@ fn my_workshop_executor_stats_refresh_defers_until_steam_connects() {
 
 #[test]
 fn my_workshop_executor_prepare_publish_schedules_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![my_workshop::Effect::PreparePublishRequested(
@@ -804,12 +812,12 @@ fn my_workshop_executor_prepare_publish_schedules_open() {
         App::run_my_workshop_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn my_workshop_executor_context_menu_sets_target_and_schedules_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![my_workshop::Effect::ContextMenuRequested(
@@ -818,7 +826,7 @@ fn my_workshop_executor_context_menu_sets_target_and_schedules_open() {
         App::run_my_workshop_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(matches!(
         app.state.context_menu_target,
         Some(ContextMenuTarget::MyWorkshop { workshop_id, .. })
@@ -828,19 +836,19 @@ fn my_workshop_executor_context_menu_sets_target_and_schedules_open() {
 
 #[test]
 fn my_workshop_executor_thumbnail_demands_runs_owner_sync() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![my_workshop::Effect::ThumbnailDemandsChanged],
         App::run_my_workshop_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
 }
 
 #[test]
 fn my_workshop_executor_drag_press_updates_drag_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![my_workshop::Effect::AddonDragPressed {
@@ -852,13 +860,13 @@ fn my_workshop_executor_drag_press_updates_drag_state() {
         App::run_my_workshop_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(app.state.addon_drag.is_active());
 }
 
 #[test]
 fn my_workshop_executor_drag_release_finishes_drag() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::MyWorkshop,
         "123".to_owned(),
@@ -871,13 +879,13 @@ fn my_workshop_executor_drag_release_finishes_drag() {
         App::run_my_workshop_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(!app.state.addon_drag.is_active());
 }
 
 #[test]
 fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![installed_addons::Effect::MetadataRequested {
@@ -898,7 +906,7 @@ fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
 
 #[test]
 fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![installed_addons::Effect::MetadataRefreshRequested {
@@ -919,7 +927,7 @@ fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
 
 #[test]
 fn installed_addons_executor_preview_schedules_preview_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![installed_addons::Effect::PreviewRequested(
@@ -929,7 +937,7 @@ fn installed_addons_executor_preview_schedules_preview_open() {
     );
 
     // Modal + local archive + Workshop details now start together.
-    assert_eq!(task.units(), 3);
+    assert_task_scheduled(&task);
     assert_eq!(
         app.state.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
@@ -938,7 +946,7 @@ fn installed_addons_executor_preview_schedules_preview_open() {
 
 #[test]
 fn installed_addons_executor_context_menu_sets_target_and_schedules_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let request = installed_context_menu_request();
 
     let task = app.batch_effects(
@@ -946,7 +954,7 @@ fn installed_addons_executor_context_menu_sets_target_and_schedules_open() {
         App::run_installed_addons_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(matches!(
         app.state.context_menu_target,
         Some(ContextMenuTarget::Local(LocalMenuTarget { workshop_id, .. }))
@@ -956,19 +964,19 @@ fn installed_addons_executor_context_menu_sets_target_and_schedules_open() {
 
 #[test]
 fn installed_addons_executor_thumbnail_demands_runs_owner_sync() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![installed_addons::Effect::ThumbnailDemandsChanged],
         App::run_installed_addons_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
 }
 
 #[test]
 fn installed_addons_executor_drag_press_updates_drag_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![installed_addons::Effect::AddonDragPressed {
@@ -980,13 +988,13 @@ fn installed_addons_executor_drag_press_updates_drag_state() {
         App::run_installed_addons_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(app.state.addon_drag.is_active());
 }
 
 #[test]
 fn installed_addons_executor_drag_release_finishes_drag() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::InstalledAddons,
         "/tmp/drag.gma".to_owned(),
@@ -999,13 +1007,13 @@ fn installed_addons_executor_drag_release_finishes_drag() {
         App::run_installed_addons_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(!app.state.addon_drag.is_active());
 }
 
 #[test]
 fn size_analyzer_executor_preview_url_resolve_schedules_worker() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![size_analyzer::Effect::PreviewUrlsResolveRequested(vec![
@@ -1014,12 +1022,12 @@ fn size_analyzer_executor_preview_url_resolve_schedules_worker() {
         App::run_size_analyzer_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn size_analyzer_executor_preview_schedules_preview_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![size_analyzer::Effect::PreviewRequested(
@@ -1035,19 +1043,19 @@ fn size_analyzer_executor_preview_schedules_preview_open() {
     );
 
     // Local archive and Workshop details start together from this route.
-    assert_eq!(task.units(), 2);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn size_analyzer_executor_context_menu_sets_target_and_schedules_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![size_analyzer_context_menu_effect()],
         App::run_size_analyzer_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(matches!(
         app.state.context_menu_target,
         Some(ContextMenuTarget::Local(LocalMenuTarget { workshop_id, .. }))
@@ -1057,19 +1065,19 @@ fn size_analyzer_executor_context_menu_sets_target_and_schedules_open() {
 
 #[test]
 fn size_analyzer_executor_thumbnail_demands_runs_owner_sync() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![size_analyzer::Effect::ThumbnailDemandsChanged],
         App::run_size_analyzer_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
 }
 
 #[test]
 fn size_analyzer_executor_drag_press_updates_drag_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![size_analyzer::Effect::AddonDragPressed {
@@ -1081,13 +1089,13 @@ fn size_analyzer_executor_drag_press_updates_drag_state() {
         App::run_size_analyzer_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(app.state.addon_drag.is_active());
 }
 
 #[test]
 fn size_analyzer_executor_drag_release_finishes_drag() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::SizeAnalyzer,
         "/tmp/size-drag.gma".to_owned(),
@@ -1100,20 +1108,20 @@ fn size_analyzer_executor_drag_release_finishes_drag() {
         App::run_size_analyzer_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(!app.state.addon_drag.is_active());
 }
 
 #[test]
 fn preview_gma_executor_modal_open_claims_modal_slot() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::ModalOpenRequested],
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert_eq!(
         app.state.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
@@ -1122,7 +1130,7 @@ fn preview_gma_executor_modal_open_claims_modal_slot() {
 
 #[test]
 fn preview_gma_executor_archive_open_schedules_worker() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::ArchiveOpenRequested(
@@ -1131,12 +1139,12 @@ fn preview_gma_executor_archive_open_schedules_worker() {
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn preview_gma_executor_metadata_request_schedules_worker() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::WorkshopMetadataRequested(
@@ -1145,12 +1153,12 @@ fn preview_gma_executor_metadata_request_schedules_worker() {
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn preview_gma_executor_author_request_schedules_worker() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::AuthorFetchRequested(
@@ -1159,26 +1167,26 @@ fn preview_gma_executor_author_request_schedules_worker() {
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn preview_gma_executor_destination_select_opens_overlay() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::DestinationSelectRequested],
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert!(app.state.modal_stack.overlay_active());
 }
 
 #[cfg(not(feature = "asset-studio"))]
 #[test]
 fn preview_gma_executor_entry_extraction_schedules_worker() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::EntryExtractionRequested(
@@ -1187,13 +1195,13 @@ fn preview_gma_executor_entry_extraction_schedules_worker() {
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[cfg(feature = "asset-studio")]
 #[test]
 fn preview_gma_executor_entry_preview_opens_embedded_file_preview() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::EntryPreviewRequested(
@@ -1202,7 +1210,7 @@ fn preview_gma_executor_entry_preview_opens_embedded_file_preview() {
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert_eq!(app.state.modal_stack.overlay_modal(), None);
     assert!(app.state.file_preview.loading());
 }
@@ -1210,7 +1218,7 @@ fn preview_gma_executor_entry_preview_opens_embedded_file_preview() {
 #[cfg(feature = "asset-studio")]
 #[test]
 fn prepare_publish_executor_entry_preview_opens_embedded_file_preview() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![prepare_publish::Effect::EntryPreviewRequested(
@@ -1219,14 +1227,14 @@ fn prepare_publish_executor_entry_preview_opens_embedded_file_preview() {
         App::run_prepare_publish_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     assert!(app.state.file_preview.loading());
 }
 
 #[cfg(feature = "asset-studio")]
 #[test]
 fn preview_gma_close_request_chains_expanded_preview_back_then_modal() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::PreviewGma(
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
@@ -1292,7 +1300,7 @@ fn preview_gma_close_request_chains_expanded_preview_back_then_modal() {
 #[cfg(feature = "asset-studio")]
 #[test]
 fn preview_gma_close_request_back_stops_embedded_audio_preview() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::PreviewGma(
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
@@ -1343,7 +1351,7 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
 
 #[test]
 fn preview_gma_executor_open_url_schedules_native_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::OpenUrlRequested(
@@ -1352,24 +1360,24 @@ fn preview_gma_executor_open_url_schedules_native_open() {
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn preview_gma_executor_copy_text_schedules_clipboard_write() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::CopyTextRequested("path".to_owned())],
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn preview_gma_executor_reveal_path_schedules_native_open() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::RevealPathRequested(PathBuf::from(
@@ -1378,43 +1386,43 @@ fn preview_gma_executor_reveal_path_schedules_native_open() {
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn preview_gma_executor_browser_path_changed_schedules_autoscroll() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::BrowserPathChanged],
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn preview_gma_executor_thumbnail_demands_runs_owner_sync() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![preview_gma::Effect::ThumbnailDemandsChanged],
         App::run_preview_gma_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
 }
 
 #[test]
 fn settings_executor_modal_open_claims_modal_slot() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![settings::Effect::ModalOpenRequested],
         App::run_settings_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert_eq!(
         app.state.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
@@ -1423,7 +1431,7 @@ fn settings_executor_modal_open_claims_modal_slot() {
 
 #[test]
 fn settings_executor_modal_close_starts_close_animation() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.batch_effects(
         vec![settings::Effect::ModalOpenRequested],
         App::run_settings_effect,
@@ -1434,7 +1442,7 @@ fn settings_executor_modal_close_starts_close_animation() {
         App::run_settings_effect,
     );
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert_eq!(
         app.state.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
@@ -1444,7 +1452,7 @@ fn settings_executor_modal_close_starts_close_animation() {
 
 #[test]
 fn settings_executor_path_browse_schedules_dialog() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![settings::Effect::PathBrowseRequested(
@@ -1453,12 +1461,12 @@ fn settings_executor_path_browse_schedules_dialog() {
         App::run_settings_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn settings_executor_path_validation_schedules_worker() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let request = app
         .state
         .settings
@@ -1469,12 +1477,12 @@ fn settings_executor_path_validation_schedules_worker() {
         App::run_settings_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn settings_executor_mutation_applies_runtime_and_schedules_save() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![settings::Effect::MutationApplied(
@@ -1483,12 +1491,12 @@ fn settings_executor_mutation_applies_runtime_and_schedules_save() {
         App::run_settings_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[test]
 fn settings_executor_reset_run_schedules_worker() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let task = app.batch_effects(
         vec![settings::Effect::ResetRunRequested(
@@ -1497,7 +1505,7 @@ fn settings_executor_reset_run_schedules_worker() {
         App::run_settings_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
 }
 
 #[cfg(feature = "asset-studio")]
@@ -1594,7 +1602,7 @@ fn global_shortcut_mapper_matches_command_f_comma_and_route_numbers_only() {
 
 #[test]
 fn shell_executor_open_search_palette_focuses_search_and_dismisses_account_menu() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::Shell(shell::Message::AccountMenuToggled));
     assert!(app.state.shell.account_menu_open());
@@ -1610,7 +1618,7 @@ fn shell_executor_open_search_palette_focuses_search_and_dismisses_account_menu(
 
 #[test]
 fn command_f_toggles_palette_when_global_shortcuts_are_enabled() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch));
     assert!(app.state.search.palette_open());
@@ -1621,7 +1629,7 @@ fn command_f_toggles_palette_when_global_shortcuts_are_enabled() {
 
 #[test]
 fn global_shortcuts_are_guarded_while_context_or_modal_ui_is_active() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.update(RootMessage::ContextMenu(
         context_menu::Message::OpenRequested(context_menu::OpenRequest::new(
             context_menu::Owner::InstalledAddons,
@@ -1634,7 +1642,7 @@ fn global_shortcuts_are_guarded_while_context_or_modal_ui_is_active() {
 
     assert!(!app.state.search.palette_open());
 
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::OpenDestinationSelect,
     ));
@@ -1646,7 +1654,7 @@ fn global_shortcuts_are_guarded_while_context_or_modal_ui_is_active() {
 
 #[test]
 fn command_comma_dismisses_account_menu_and_defers_to_settings_open_task() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::Shell(shell::Message::AccountMenuToggled));
     assert!(app.state.shell.account_menu_open());
@@ -1659,7 +1667,7 @@ fn command_comma_dismisses_account_menu_and_defers_to_settings_open_task() {
 
 #[test]
 fn command_comma_closes_settings_when_it_is_the_active_modal() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let snapshot = app.settings_snapshot();
     let _task = app.update(RootMessage::Settings(settings::Message::OpenRequested(
         snapshot,
@@ -1672,7 +1680,7 @@ fn command_comma_closes_settings_when_it_is_the_active_modal() {
     // The toggle dispatches the same CloseRequested that Escape and the
     // scrim click dismissal paths emit.
     let task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSettings));
-    assert_eq!(task.units(), 1);
+    assert_task_scheduled(&task);
     let _task = app.update(RootMessage::Settings(settings::Message::CloseRequested));
 
     // Close-then-clear: the layer settles on the next animation tick.
@@ -1706,7 +1714,7 @@ fn settings_toggle_mapper_maps_only_command_comma() {
 
 #[test]
 fn command_comma_stays_inert_over_other_modals() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::OpenPreviewGma,
     ));
@@ -1717,7 +1725,7 @@ fn command_comma_stays_inert_over_other_modals() {
 
     let task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSettings));
 
-    assert_eq!(task.units(), 0);
+    assert_no_task(&task);
     assert_eq!(
         app.state.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
@@ -1726,7 +1734,7 @@ fn command_comma_stays_inert_over_other_modals() {
 
 #[test]
 fn search_result_activation_closes_palette() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch));
     assert!(app.state.search.palette_open());
@@ -1738,7 +1746,7 @@ fn search_result_activation_closes_palette() {
 
 #[test]
 fn modal_stack_close_clears_settings_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let snapshot = app.settings_snapshot();
     let _task = app.update(RootMessage::Settings(settings::Message::OpenRequested(
         snapshot,
@@ -1764,7 +1772,7 @@ fn modal_stack_close_clears_settings_state() {
 
 #[test]
 fn context_menu_extract_opens_destination_select_with_pending_path() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let path = PathBuf::from("/tmp/context-menu.gma");
     app.state.context_menu_target = Some(ContextMenuTarget::Local(LocalMenuTarget {
         path: path.clone(),
@@ -1786,7 +1794,7 @@ fn context_menu_extract_opens_destination_select_with_pending_path() {
 
 #[test]
 fn context_menu_dismiss_clears_active_target() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.state.context_menu_target = Some(ContextMenuTarget::MyWorkshop {
         workshop_id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
         workshop_url: workshop_url::workshop_item_url(
@@ -1805,7 +1813,7 @@ fn context_menu_dismiss_clears_active_target() {
 #[cfg(feature = "debug")]
 #[test]
 fn hide_addon_context_action_is_session_scoped_and_removes_my_workshop_row() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let workshop_id = PublishedFileId::new(123).expect("test fixture ids are always nonzero");
     app.state
         .my_workshop
@@ -1824,7 +1832,7 @@ fn hide_addon_context_action_is_session_scoped_and_removes_my_workshop_row() {
 
 #[test]
 fn update_delegates_search_messages_to_search_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::Search(search::Message::QueryEdited(
         "addons".to_owned(),
@@ -1941,7 +1949,7 @@ fn addon_drag_state_preserves_size_analyzer_local_cell_click() {
 
 #[test]
 fn addon_drag_update_events_promote_and_finish_drag() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::MyWorkshop,
         "42".to_owned(),
@@ -1965,7 +1973,7 @@ fn addon_drag_update_events_promote_and_finish_drag() {
 
 #[test]
 fn update_delegates_steam_session_messages_to_session_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connecting),
@@ -1979,7 +1987,7 @@ fn update_delegates_steam_session_messages_to_session_state() {
 
 #[test]
 fn backend_steam_events_update_session_and_shell_state() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::SteamConnected,
@@ -2032,7 +2040,7 @@ fn backend_appdata_snapshot_for_test(
 
 #[test]
 fn backend_appdata_event_refreshes_settings_and_paths() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let initial_steam_status = app.state.steam_session.status();
     let root = tempfile::tempdir().expect("tempdir");
     app.ctx
@@ -2065,7 +2073,7 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
 
 #[test]
 fn download_count_format_mutation_updates_runtime_formatter() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.apply_settings_mutation_runtime(
         &settings::SettingsMutation::DownloadCountFormat(DownloadCountFormat::Period),
@@ -2079,7 +2087,7 @@ fn download_count_format_mutation_updates_runtime_formatter() {
 
 #[test]
 fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     app.ctx.backend().search.clear();
     let snapshot = LibrarySnapshot {
         addons: Arc::from(
@@ -2159,7 +2167,7 @@ fn backend_runtime_actions_translate_to_downloader_events() {
 
 #[test]
 fn uncorrelated_backend_transaction_events_are_data_only() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let initial_steam_status = app.state.steam_session.status();
 
     let _task = app.update(RootMessage::BackendEvent(BackendRuntimeEvent::Transaction(
@@ -2174,7 +2182,7 @@ fn uncorrelated_backend_transaction_events_are_data_only() {
 
 #[test]
 fn steam_backed_page_request_defers_until_connection() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
@@ -2199,7 +2207,7 @@ fn steam_backed_page_request_defers_until_connection() {
 
 #[test]
 fn steam_backed_stats_refresh_defers_until_connection() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::StatsRefreshRequested {
@@ -2224,7 +2232,7 @@ fn steam_backed_stats_refresh_defers_until_connection() {
 
 #[test]
 fn failed_steam_connection_clears_pending_retry() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
             generation: 7,
@@ -2251,7 +2259,7 @@ fn failed_steam_connection_clears_pending_retry() {
 
 #[test]
 fn successful_steam_connection_retries_pending_operation_once() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
             generation: 7,
@@ -2284,7 +2292,7 @@ fn successful_steam_connection_retries_pending_operation_once() {
 
 #[test]
 fn connected_steam_attempt_retries_pending_operation_without_edge() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let retry = steam_session::PendingRetry::MyWorkshopPage {
         generation: 7,
         page: 2,
@@ -2320,7 +2328,7 @@ fn connected_steam_attempt_retries_pending_operation_without_edge() {
 
 #[test]
 fn steam_identity_fetch_completion_updates_shell_identity() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
     ));
@@ -2335,7 +2343,7 @@ fn steam_identity_fetch_completion_updates_shell_identity() {
 
 #[test]
 fn steam_identity_fetch_failure_restores_anonymous_shell_identity() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
     ));
@@ -2359,7 +2367,7 @@ fn steam_identity_fetch_failure_restores_anonymous_shell_identity() {
 
 #[test]
 fn shell_executor_navigated_enters_destination_and_exits_previous_route() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.batch_effects(
         vec![shell::Effect::Navigated {
@@ -2375,7 +2383,7 @@ fn shell_executor_navigated_enters_destination_and_exits_previous_route() {
 
 #[test]
 fn shell_executor_navigated_runs_size_analyzer_enter_and_exit_effects() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let snapshot = LibrarySnapshot {
         addons: Arc::from(
             vec![installed_addon_for_library(
@@ -2413,7 +2421,7 @@ fn shell_executor_navigated_runs_size_analyzer_enter_and_exit_effects() {
 
     assert!(app.state.size_analyzer.is_route_visible());
     assert!(app.state.size_analyzer.projection_key_for_test().is_some());
-    assert!(enter_task.units() > 0);
+    assert_task_scheduled(&enter_task);
 
     let _exit_task = app.batch_effects(
         vec![shell::Effect::Navigated {
@@ -2428,7 +2436,7 @@ fn shell_executor_navigated_runs_size_analyzer_enter_and_exit_effects() {
 
 #[test]
 fn shell_navigation_to_current_route_does_not_reenter_route() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
     let snapshot = LibrarySnapshot {
         addons: Arc::from(
             vec![installed_addon_for_library(
@@ -2475,7 +2483,7 @@ fn shell_navigation_to_current_route_does_not_reenter_route() {
 
 #[test]
 fn update_check_completion_marks_update_nag_available() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::UpdateCheckCompleted(Ok(Ok(Some(
         shell::UpdateRelease::new(
@@ -2494,7 +2502,7 @@ fn update_check_completion_marks_update_nag_available() {
 
 #[test]
 fn downloader_start_events_sync_shell_job_badge() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::Downloader(downloader::Message::EventReceived(
         downloader::DownloaderEvent::TaskStarted {
@@ -2514,7 +2522,7 @@ fn downloader_start_events_sync_shell_job_badge() {
 
 #[test]
 fn language_switch_rebuilds_the_runtime_bundle() {
-    let (mut app, _startup_task) = App::new_for_test();
+    let mut app = App::new_for_test();
 
     app.state.apply_runtime_language(Some("fr-CA"));
 

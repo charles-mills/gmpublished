@@ -36,6 +36,10 @@ pub struct BackendConfig {
     /// tests that just need service handles (not a live Steam attempt or an
     /// outbound HTTPS call per test process) set this `false`.
     pub background_threads: bool,
+    /// Whether process-global logging should write to this backend's app-data
+    /// directory. Test backends disable it because many isolated roots coexist
+    /// in one process and only the first can own the global sink.
+    pub file_logging: bool,
 }
 
 impl Default for BackendConfig {
@@ -45,6 +49,7 @@ impl Default for BackendConfig {
             event_sink: Arc::new(NullEventSink),
             data_root: None,
             background_threads: true,
+            file_logging: true,
         }
     }
 }
@@ -60,6 +65,7 @@ impl BackendConfig {
             event_sink: Arc::new(NullEventSink),
             data_root: Some(data_root.to_path_buf()),
             background_threads: false,
+            file_logging: false,
         }
     }
 }
@@ -129,6 +135,7 @@ impl Backend {
             event_sink,
             data_root,
             background_threads,
+            file_logging,
         } = config;
 
         initialize_stage("logging", || {
@@ -148,7 +155,9 @@ impl Backend {
         let app_data = initialize_stage("appdata", || {
             Arc::new(AppData::load(paths, transactions.clone()))
         })?;
-        crate::logging::enable_file_sink(app_data.logging_logs_dir());
+        if file_logging {
+            crate::logging::enable_file_sink(app_data.logging_logs_dir());
+        }
 
         log::info!("initializing steamworks");
         let steam = initialize_stage("steamworks", || Arc::new(Steam::new(transactions.clone())))?;
