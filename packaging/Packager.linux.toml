@@ -1,0 +1,60 @@
+name = "gmpublished"
+product-name = "gmpublished"
+identifier = "dev.charlesmills.gmpublished"
+version = "1.0.0"
+description = "Native desktop app for gmpublished."
+category = "DeveloperTool"
+out-dir = "../target/packager"
+binaries-dir = "../target/release"
+before-packaging-command = "sh scripts/prepare_packager_inputs.sh"
+formats = ["deb", "appimage"]
+
+binaries = [{ path = "gmpublished", main = true }]
+external-binaries = ["steam/generated/libsteam_api.so"]
+
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.png",
+]
+
+[deb]
+package-name = "gmpublished"
+section = "utils"
+priority = "optional"
+desktop-template = "linux/gmpublished.desktop.hbs"
+depends = [
+    "libc6",
+    "libgcc-s1",
+    "libx11-6",
+    "libxcb1",
+    "libxkbcommon0",
+    "libfontconfig1",
+    "libgl1",
+    "libwayland-client0",
+]
+
+[deb.files]
+"linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
+
+[appimage]
+libs = []
+bins = []
+
+[appimage.files]
+"linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
+
+[pacman]
+depends = [
+    "hicolor-icon-theme",
+    "mesa",
+    "fontconfig",
+    "libxkbcommon",
+    "libx11",
+    "libxcb",
+    "wayland",
+]
+
+[pacman.files]
+"linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"

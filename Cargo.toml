@@ -1,0 +1,145 @@
+[workspace]
+members = [
+    "crates/app",
+    "crates/backend",
+    "crates/vformats",
+]
+# Vendored crates that are consumed as external inputs rather than maintained
+# as workspace crates.
+exclude = [
+    "crates/vendor/iced_wgpu",
+    "crates/vendor/iced_winit",
+]
+resolver = "3"
+
+# iced_wgpu: request TEXTURE_COMPRESSION_BC when the adapter supports it
+# (iced 0.14 hardcodes Features::empty() with no knob).
+# iced_winit: unbounded free-slot ack channel in the event-loop Proxy; the
+# upstream bounded channel silently drops acks under load, which permanently
+# wedges all subscription/task message delivery (frozen library, dead
+# watchers) while the UI stays responsive.
+[patch.crates-io]
+iced_wgpu = { path = "crates/vendor/iced_wgpu" }
+iced_winit = { path = "crates/vendor/iced_winit" }
+
+# Applied by crates/app and crates/backend via `[lints] workspace = true`;
+# vendored crates deliberately do not opt in.
+[workspace.lints.clippy]
+# ownership / clones
+redundant_clone = "warn"
+implicit_clone = "warn"
+assigning_clones = "warn"
+# control flow / combinators
+map_unwrap_or = "warn"
+manual_let_else = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+needless_continue = "warn"
+# formatting / string building
+uninlined_format_args = "warn"
+semicolon_if_nothing_returned = "warn"
+format_push_string = "warn"
+needless_raw_string_hashes = "warn"
+# imports
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+# correctness-adjacent
+case_sensitive_file_extension_comparisons = "warn"
+significant_drop_tightening = "warn"
+or_fun_call = "warn"
+iter_with_drain = "warn"
+large_stack_arrays = "warn"
+# style floor
+use_self = "warn"
+elidable_lifetime_names = "warn"
+match_wildcard_for_single_variants = "warn"
+unnested_or_patterns = "warn"
+derive_partial_eq_without_eq = "warn"
+return_self_not_must_use = "warn"
+# phase B: ownership / signature discipline
+large_types_passed_by_value = "warn"
+needless_pass_by_value = "warn"
+struct_excessive_bools = "warn"
+option_if_let_else = "warn"
+single_match_else = "warn"
+redundant_pub_crate = "warn"
+ref_option = "warn"
+unnecessary_wraps = "warn"
+needless_pass_by_ref_mut = "warn"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.96"
+authors = [
+    "Charles Mills <charles@charlesmills.dev>",
+    "William Venner <william@venner.io>",
+]
+license = "GPL-3.0-only"
+repository = "https://github.com/charles-mills/gmpublished"
+publish = false
+
+[workspace.dependencies]
+arc-swap = "1"
+vformats = { path = "crates/vformats" }
+crc32fast = { version = "1.5", default-features = false }
+dirs = "6"
+fast_image_resize = { version = "6.0.0", default-features = false, features = ["std", "only_u8x4"] }
+fluent-bundle = { version = "0.16.0", default-features = false }
+fluent-langneg = { version = "0.13.1", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+gif = { version = "0.14.2", default-features = false, features = ["std"] }
+# "advanced" only exposes the iced::advanced API modules (no codegen change);
+# needed by the bespoke context_area widget.
+iced = { version = "0.14.0", default-features = false, features = ["advanced", "canvas", "wgpu", "tiny-skia", "svg", "image-without-codecs", "tokio", "x11", "wayland", "linux-theme-detection"] }
+jiff = { version = "0.2.31", default-features = false, features = ["tz-system"] }
+log = "0.4"
+lzma-rust2 = { version = "0.16.4", default-features = false, features = ["std", "optimization"] }
+mimalloc = "0.1"
+# unicode-casefold is required by `CaseMatching::Ignore`, unicode-normalization
+# by `Normalization::Smart`; the omitted default (unicode-segmentation) only
+# collapses grapheme clusters to their first codepoint during matching.
+notify = "8"
+nucleo-matcher = { version = "0.3.1", default-features = false, features = ["unicode-casefold", "unicode-normalization"] }
+opener = { version = "0.8.5", features = ["reveal"] }
+parking_lot = "0.12.5"
+quick_cache = { version = "0.7.0", default-features = false }
+rayon = "1.12.0"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+# Playback + only the decoders needed for UI blips and archive audio preview.
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "vorbis", "wav", "symphonia-adpcm"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+steamlocate = "2"
+sys-locale = "0.3.2"
+tempfile = { version = "3.23.0", default-features = false }
+thiserror = { version = "2", default-features = false }
+trash = { version = "5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
+unic-langid = { version = "0.9.6", default-features = false }
+bytemuck = { version = "1", default-features = false, features = ["derive"] }
+vtf = "0.4.1"
+vmdl = "0.2.0"
+# `rustls-no-provider` + `_ring` gives rustls with the ring crypto provider but
+# WITHOUT the bundled Mozilla webpki roots; `platform-verifier` enables
+# certificate verification against the OS trust store (rustls-platform-verifier).
+# Every agent must set `RootCerts::PlatformVerifier` — the WebPki default panics.
+ureq = { version = "3.3.0", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
+walkdir = "2.5.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = "s"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+
+[profile.dev-bundle]
+inherits = "dev"
+debug = 1
+incremental = true
+opt-level = 0

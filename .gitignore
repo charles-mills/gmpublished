@@ -1,0 +1,6 @@
+/target/
+/crates/*/target/
+/.direnv/
+/.idea/
+/.cargo/*
+!/.cargo/config.toml

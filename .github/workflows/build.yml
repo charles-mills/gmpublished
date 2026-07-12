@@ -1,0 +1,364 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PACKAGER_VERSION: 0.11.8
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Require successful main-branch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$((SECONDS + 2400))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            run="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow check.yml \
+              --commit "$GITHUB_SHA" \
+              --event push \
+              --limit 1 \
+              --json databaseId,status,conclusion \
+              --jq '.[0] // empty | [.databaseId, .status, (.conclusion // "")] | @tsv')"
+
+            if [ -z "$run" ]; then
+              sleep 15
+              continue
+            fi
+
+            IFS="$(printf '\t')" read -r run_id status conclusion <<< "$run"
+            if [ "$status" != "completed" ]; then
+              sleep 15
+              continue
+            fi
+
+            if [ "$conclusion" = "success" ]; then
+              printf 'verified by check run %s\n' "$run_id"
+              exit 0
+            fi
+
+            printf 'check run %s completed with %s\n' "$run_id" "$conclusion" >&2
+            exit 1
+          done
+
+          printf 'timed out waiting for CI on %s\n' "$GITHUB_SHA" >&2
+          exit 1
+
+  build_linux:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            curl \
+            file \
+            pkg-config \
+            zip
+
+      - name: Restore Cargo sources
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-sources-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-sources-${{ runner.os }}-
+
+      - name: Configure compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+
+      - name: Restore cargo-packager
+        id: cargo-packager
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-packager*
+          key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Install cargo-packager
+        if: steps.cargo-packager.outputs.cache-hit != 'true'
+        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+
+      - name: Verify cargo-packager
+        run: cargo packager --version
+
+      - name: Verify Steam runtime input
+        run: test -f packaging/steam/redistributable/linux/libsteam_api.so
+
+      - name: Verify lockfile matches manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Package
+        run: cargo packager --release --config packaging/Packager.linux.toml
+
+      - name: Collect artifacts
+        run: |
+          artifact_version="${GITHUB_REF_NAME##*/}"
+          artifact_version="${artifact_version#v}"
+          mkdir -p artifacts/linux/zip-root
+          cp target/release/gmpublished artifacts/linux/zip-root/
+          cp target/release/libsteam_api.so artifacts/linux/zip-root/
+          (cd artifacts/linux/zip-root && zip -r "../gmpublished-${artifact_version}-x86_64-linux.zip" gmpublished libsteam_api.so)
+          appimage="$(find target/packager -type f -iname '*.AppImage' -print -quit)"
+          deb="$(find target/packager -type f -iname '*.deb' -print -quit)"
+          test -n "$appimage"
+          test -n "$deb"
+          cp "$appimage" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.AppImage"
+          cp "$deb" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.deb"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          path: artifacts/linux/gmpublished-*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  build_windows:
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore Cargo sources
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-sources-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-sources-${{ runner.os }}-
+
+      - name: Configure compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+
+      - name: Restore cargo-packager
+        id: cargo-packager
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-packager*
+          key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Install cargo-packager
+        if: steps.cargo-packager.outputs.cache-hit != 'true'
+        shell: bash
+        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+
+      - name: Verify cargo-packager
+        shell: bash
+        run: cargo packager --version
+
+      - name: Verify Steam runtime input
+        shell: bash
+        run: test -f packaging/steam/redistributable/windows/steam_api64.dll
+
+      - name: Verify lockfile matches manifests
+        shell: bash
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Package
+        shell: bash
+        run: cargo packager --release --config packaging/Packager.windows.toml
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          artifact_version="${GITHUB_REF_NAME##*/}"
+          artifact_version="${artifact_version#v}"
+          mkdir -p artifacts/windows
+          msi="$(find target/packager -type f -iname '*.msi' -print -quit)"
+          test -n "$msi"
+          cp "$msi" "artifacts/windows/gmpublished-${artifact_version}-x86_64-windows.msi"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: artifacts/windows/gmpublished-*.msi
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  build_macos:
+    needs: verify
+    runs-on: macos-latest
+    env:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore Cargo sources
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-sources-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-sources-${{ runner.os }}-
+
+      - name: Configure compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+
+      - name: Restore cargo-packager
+        id: cargo-packager
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-packager*
+          key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Install cargo-packager
+        if: steps.cargo-packager.outputs.cache-hit != 'true'
+        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+
+      - name: Verify cargo-packager
+        run: cargo packager --version
+
+      - name: Install Apple Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Verify Steam runtime input
+        run: test -f packaging/steam/redistributable/macos/libsteam_api.dylib
+
+      - name: Verify lockfile matches manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Build universal macOS executable
+        run: packaging/scripts/stage_macos_universal_binary.sh
+
+      - name: Package
+        env:
+          GMPUBLISHED_SKIP_PREPARE_BUILD: "1"
+        run: cargo packager --release --config packaging/Packager.macos.toml --formats app
+
+      - name: Fix app bundle metadata
+        run: packaging/scripts/fix_macos_app_bundle.sh target/packager/gmpublished.app
+
+      - name: Verify macOS universal app executable
+        run: |
+          app_executable="target/packager/gmpublished.app/Contents/MacOS/gmpublished"
+          test -f "$app_executable"
+          lipo -info "$app_executable"
+          lipo "$app_executable" -verify_arch arm64
+          lipo "$app_executable" -verify_arch x86_64
+
+      - name: Import signing certificate
+        if: env.MACOS_CERTIFICATE_P12 != '' && env.MACOS_CERTIFICATE_PASSWORD != '' && env.MACOS_SIGNING_IDENTITY != ''
+        run: |
+          security create-keychain -p "$RUNNER_TEMP" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$RUNNER_TEMP" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$RUNNER_TEMP" build.keychain
+
+      - name: Sign app bundle
+        if: env.MACOS_CERTIFICATE_P12 != '' && env.MACOS_CERTIFICATE_PASSWORD != '' && env.MACOS_SIGNING_IDENTITY != ''
+        run: |
+          codesign --force --deep --options runtime --sign "$MACOS_SIGNING_IDENTITY" target/packager/gmpublished.app
+          codesign --verify --deep --strict --verbose=2 target/packager/gmpublished.app
+
+      - name: Create disk image
+        run: |
+          artifact_version="${GITHUB_REF_NAME##*/}"
+          artifact_version="${artifact_version#v}"
+          packaging/scripts/create_macos_dmg.sh \
+            target/packager/gmpublished.app \
+            "artifacts/macos/gmpublished-${artifact_version}-universal-apple-darwin.dmg" \
+            gmpublished
+
+      - name: Notarize and staple
+        if: env.MACOS_CERTIFICATE_P12 != '' && env.MACOS_CERTIFICATE_PASSWORD != '' && env.MACOS_SIGNING_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          artifact_version="${GITHUB_REF_NAME##*/}"
+          artifact_version="${artifact_version#v}"
+          dmg="artifacts/macos/gmpublished-${artifact_version}-universal-apple-darwin.dmg"
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler staple target/packager/gmpublished.app || true
+
+      - name: Collect artifacts
+        run: |
+          artifact_version="${GITHUB_REF_NAME##*/}"
+          artifact_version="${artifact_version#v}"
+          ditto -c -k --keepParent \
+            target/packager/gmpublished.app \
+            "artifacts/macos/gmpublished-${artifact_version}-universal-apple-darwin.app.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: artifacts/macos/gmpublished-*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  publish:
+    needs:
+      - build_linux
+      - build_windows
+      - build_macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: artifacts/gmpublished-*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

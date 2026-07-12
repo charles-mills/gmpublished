@@ -1,0 +1,51 @@
+name: tools
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build.yml
+      - .github/workflows/tools.yml
+      - rust-toolchain.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tools-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PACKAGER_VERSION: 0.11.8
+
+jobs:
+  cargo_packager:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore cargo-packager
+        id: cargo-packager
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-packager*
+          key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Install cargo-packager
+        if: steps.cargo-packager.outputs.cache-hit != 'true'
+        shell: bash
+        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+
+      - name: Verify cargo-packager
+        shell: bash
+        run: cargo packager --version

@@ -1,0 +1,55 @@
+[package]
+name = "vformats"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Hardened parsers for the Source 1 engine format suite: KeyValues/VDF, VMT, soundscripts, VTF, MDL/VTX/VVD, PHY, VPK, BSP, and GMA (read + write). Zero-dependency core."
+repository = "https://github.com/charles-mills/gmpublished"
+keywords = ["source-engine", "valve", "keyvalues", "vdf", "parser"]
+categories = ["parser-implementations", "game-development"]
+# The v1 format set has landed and the pre-publish review is done;
+# flipping this (and confirming `repository`) is the owner's release call.
+publish = false
+
+[features]
+default = ["keyvalues", "vmt", "soundscript", "vtf", "phy", "vpk", "gma", "lzma", "mdl", "bsp"]
+keyvalues = []
+vmt = ["keyvalues"]
+soundscript = ["keyvalues"]
+vtf = []
+phy = ["keyvalues"]
+vpk = []
+gma = []
+mdl = []
+bsp = ["keyvalues"]
+# LZMA decompression wherever the formats embed it: whole-file
+# compressed GMAs (gma::decompress), repacked BSP lumps and game lumps,
+# and LZMA pakfile entries. Without it those paths return typed
+# "compressed but undecodable" errors.
+lzma = ["dep:lzma-rust2"]
+
+[dependencies]
+# The dependency policy admits only: lzma-rust2 (below) and serde
+# (reserved, no feature yet).
+lzma-rust2 = { version = "0.16.4", default-features = false, features = ["std", "optimization"], optional = true }
+
+[dev-dependencies]
+# Test-only reference implementations: crc32fast cross-checks our CRC,
+# the vtf crate (the pipeline being replaced) cross-checks VTF decoding.
+crc32fast.workspace = true
+image.workspace = true
+vtf.workspace = true
+# Encoder for gma::decompress round-trip tests only.
+lzma-rust2 = { workspace = true, features = ["encoder"] }
+# The crates.io implementation being replaced; differential oracle.
+vmdl.workspace = true
+bytemuck = "1"
+# DEFLATE encoder: differential oracle for the in-crate inflate.
+flate2 = "1"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true

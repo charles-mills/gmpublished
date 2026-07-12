@@ -1,0 +1,30 @@
+name = "gmpublished"
+product-name = "gmpublished"
+identifier = "dev.charlesmills.gmpublished"
+version = "1.0.0"
+description = "Native desktop app for gmpublished."
+category = "DeveloperTool"
+out-dir = "../target/packager-dev"
+binaries-dir = "../target/dev-bundle"
+before-packaging-command = "GMPUBLISHED_PACKAGER_PROFILE=dev-bundle sh scripts/prepare_packager_inputs.sh"
+formats = ["app"]
+
+binaries = [{ path = "gmpublished", main = true }]
+
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.icns",
+    "icons/icon.ico",
+]
+
+resources = [
+    { src = "macos/Credits.rtf", target = "Credits.rtf" },
+]
+
+external-binaries = ["steam/generated/libsteam_api.dylib"]
+
+[macos]
+minimum-system-version = "10.13"
+info-plist-path = "macos/Info.extra.plist"

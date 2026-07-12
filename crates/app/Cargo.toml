@@ -1,0 +1,90 @@
+[package]
+name = "gmpublished"
+description = "Native Iced desktop app for gmpublished."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "gmpublished"
+path = "src/main.rs"
+
+[features]
+default = ["asset-studio"]
+# Developer-only context-menu actions for simulating subscriber changes and
+# hiding addons from the current in-memory session.
+debug = []
+asset-studio = [
+    "dep:bytemuck",
+    "gmpublished-backend/scene",
+]
+
+[dependencies]
+bytemuck = { workspace = true, optional = true }
+vformats.workspace = true
+# pinned to match iced 0.14's internal version — do not bump independently
+cosmic-text = { version = "0.15.0", default-features = false, features = ["std", "swash"] }
+fast_image_resize.workspace = true
+fluent-bundle.workspace = true
+fluent-langneg.workspace = true
+gif.workspace = true
+gmpublished-backend = { path = "../backend" }
+iced.workspace = true
+image.workspace = true
+jiff.workspace = true
+log.workspace = true
+# Decoder for the build-time-compressed .ftl catalogs (already linked via the
+# backend crate, so this adds no code to the binary).
+lzma-rust2.workspace = true
+mimalloc.workspace = true
+notify.workspace = true
+quick_cache.workspace = true
+rayon.workspace = true
+rfd.workspace = true
+rodio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sys-locale.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+# pinned to match iced 0.14's internal version — do not bump independently
+tokio = { version = "1.52.3", default-features = false, features = ["sync", "time"] }
+parking_lot.workspace = true
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+bytes = "1.10"
+unic-langid.workspace = true
+ureq.workspace = true
+thumbhash = "0.1.0"
+crc32fast.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS .gma document-open bridge (src/platform_open): Apple Event fallback,
+# NSApplicationDelegate patch, and main-queue scheduling for the patch.
+block2 = { version = "0.6.2", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
+muda = { version = "0.19.3", default-features = false }
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDistributedNotificationCenter", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL", "block2"] }
+raw-window-handle = "0.6.2"
+
+[build-dependencies]
+# Encoder only runs at build time to pack the .ftl catalogs; never ships.
+lzma-rust2 = { workspace = true, features = ["encoder"] }
+
+[dev-dependencies]
+crc32fast.workspace = true
+# Headless widget-tree simulator for click-through view tests.
+iced_test = "0.14.0"
+lzma-rust2 = { workspace = true, features = ["encoder"] }
+vtf.workspace = true
+
+[lints]
+workspace = true

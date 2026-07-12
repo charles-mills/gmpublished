@@ -1,0 +1,47 @@
+name = "gmpublished"
+product-name = "gmpublished"
+identifier = "dev.charlesmills.gmpublished"
+version = "1.0.0"
+description = "Native desktop app for gmpublished."
+category = "DeveloperTool"
+out-dir = "../target/packager"
+binaries-dir = "../target/release"
+before-packaging-command = "sh scripts/prepare_packager_inputs.sh"
+formats = ["app"]
+
+binaries = [{ path = "gmpublished", main = true }]
+
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.icns",
+    "icons/icon.ico",
+]
+
+resources = [
+    { src = "macos/Credits.rtf", target = "Credits.rtf" },
+]
+
+# cargo-packager copies external binaries to Contents/MacOS for macOS .app
+# bundles. The prepare script creates the target-triple-suffixed input from the
+# selected Steam SDK redistributable.
+external-binaries = ["steam/generated/libsteam_api.dylib"]
+
+[macos]
+minimum-system-version = "10.13"
+info-plist-path = "macos/Info.extra.plist"
+
+[dmg]
+
+[dmg.window-size]
+width = 660
+height = 400
+
+[dmg.app-position]
+x = 180
+y = 170
+
+[dmg.application-folder-position]
+x = 480
+y = 170

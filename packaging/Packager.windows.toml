@@ -1,0 +1,70 @@
+name = "gmpublished"
+product-name = "gmpublished"
+identifier = "dev.charlesmills.gmpublished"
+version = "1.0.0"
+description = "Native desktop app for gmpublished."
+category = "DeveloperTool"
+out-dir = "../target/packager"
+binaries-dir = "../target/release"
+before-packaging-command = "sh scripts/prepare_packager_inputs.sh"
+formats = ["wix"]
+
+binaries = [{ path = "gmpublished", main = true }]
+
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.ico",
+]
+
+resources = [
+    { src = "steam/generated/steam_api64.dll", target = "steam_api64.dll" },
+]
+
+[wix]
+languages = ["en-US"]
+component-refs = ["FileTypeAssociationsReg"]
+# cargo-packager 0.11.8 passes fragment-paths to WiX with a verbatim \\?\ path
+# on Windows. WiX 3 candle.exe is not reliable with that path form, so keep the
+# custom file association fragment inline; cargo-packager writes inline fragments
+# beside generated main.wxs before compiling them.
+fragments = ['''
+<?xml version="1.0" encoding="utf-8"?>
+<?if $(sys.BUILDARCH)="x86"?>
+  <?define Win64 = "no" ?>
+<?elseif $(sys.BUILDARCH)="x64"?>
+  <?define Win64 = "yes" ?>
+<?else?>
+  <?error Unsupported value of sys.BUILDARCH=$(sys.BUILDARCH)?>
+<?endif?>
+
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="FileTypeAssociationsReg" Guid="968B7FDB-58B9-46D7-86DA-76D031ACEFCE" Win64="$(var.Win64)">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities" Name="ApplicationDescription" Value="gmpublished" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities" Name="ApplicationIcon" Value="&quot;[INSTALLDIR]gmpublished.exe&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities" Name="ApplicationName" Value="gmpublished" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\FileAssociations" Name=".gma" Value="gmpublished.gma.Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\MIMEAssociations" Name="application/gma" Value="gmpublished.gma.Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\shell\Open\command" Value="&quot;[INSTALLDIR]gmpublished.exe&quot; -e &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\RegisteredApplications" Name="gmpublished" Value="SOFTWARE\gmpublished\Capabilities" Type="string" KeyPath="yes" />
+
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\gmpublished.gma.Document" Value="Packed Garry's Mod Addon" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\gmpublished.gma.Document\DefaultIcon" Value="&quot;[INSTALLDIR]gmpublished.exe&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\gmpublished.gma.Document\shell\open\command" Value="&quot;[INSTALLDIR]gmpublished.exe&quot; -e &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Value="gmpublished.gma.Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Name="Content Type" Value="application/gma" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma\OpenWithList\gmpublished.exe" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma\OpenWithProgids" Name="gmpublished.gma.Document" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Applications\gmpublished.exe\SupportedTypes" Name=".gma" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Applications\gmpublished.exe\shell\open" Name="FriendlyAppName" Value="gmpublished" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Applications\gmpublished.exe\shell\open\command" Value="&quot;[INSTALLDIR]gmpublished.exe&quot; -e &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\gmpublished.exe" Value="[INSTALLDIR]gmpublished.exe" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\gmpublished.exe" Name="Path" Value="[INSTALLDIR]" Type="string" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>
+''']
