@@ -34,7 +34,7 @@ const TOOLTIP_MAX_WIDTH: f32 = 280.0;
 const SILKICON_SIZE: f32 = 16.0;
 const SPINNER_SIZE: f32 = 32.0;
 const INFO_LABEL_WIDTH: f32 = 76.0;
-const CODE_LINE_NUMBER_WIDTH: f32 = 44.0;
+const CODE_LINE_NUMBER_WIDTH: f32 = 32.0;
 #[cfg(feature = "asset-studio")]
 const VIEWER_MIN_WIDTH: f32 = 240.0;
 #[cfg(feature = "asset-studio")]
@@ -313,6 +313,8 @@ fn code_preview<'a>(
     for (index, line) in lines.iter().enumerate() {
         rows = rows.push(code_line(index + 1, line, &tokens));
     }
+    rows =
+        rows.push(Space::new().height(theme::styles::vertical_scrollbar_reserved_width(&tokens)));
 
     container(
         scrollable(rows)
@@ -361,7 +363,7 @@ fn code_line<'a>(line_number: usize, line: &'a CodeLine, tokens: &Tokens) -> Ele
     ]
     .align_y(Center)
     .spacing(tokens.spacing.gap_sm)
-    .padding([2.0, tokens.spacing.pad_sm])
+    .padding([2.0, tokens.spacing.pad_xs])
     .into()
 }
 
