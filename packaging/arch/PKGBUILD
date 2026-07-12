@@ -3,14 +3,15 @@
 pkgname=gmpublished-bin
 _pkgname=gmpublished
 _github_repo='charles-mills/gmpublished'
-pkgver=1.0.0
-_release_tag='1.0.0'
+pkgver=0.1.0
+_release_tag='v0.1.0'
 pkgrel=1
 pkgdesc="Native Workshop Publishing Utility for Garry's Mod"
 arch=('x86_64')
 url="https://github.com/${_github_repo}"
 license=('GPL-3.0-only')
 depends=(
+  'alsa-lib'
   'desktop-file-utils'
   'fontconfig'
   'gtk-update-icon-cache'
@@ -25,17 +26,18 @@ depends=(
 )
 provides=("${_pkgname}=${pkgver}")
 conflicts=("${_pkgname}")
+options=('strip' '!debug')
 source=(
-  "${_pkgname}-${pkgver}-x86_64-linux.zip::\
-${url}/releases/download/${_release_tag}/${_pkgname}-${pkgver}-x86_64-linux.zip"
+  "${_pkgname}-${pkgver}-${CARCH}-linux.zip::\
+${url}/releases/download/${_release_tag}/${_pkgname}-${pkgver}-${CARCH}-linux.zip"
   "${pkgname}-${pkgver}-LICENSE::\
 https://raw.githubusercontent.com/${_github_repo}/${_release_tag}/LICENSE"
   "${pkgname}-${pkgver}.png::\
 https://raw.githubusercontent.com/${_github_repo}/${_release_tag}/packaging/icons/128x128.png"
 )
-sha256sums=('SKIP'
-            'SKIP'
-            'SKIP')
+sha256sums=('3d2707af971c1245c46a48a684ce7259d712daebfd780221578abf944860880f'
+            '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986'
+            'f2051aabe232caaf972db91dddafe4c3307a9cbdaf930b093bd107dbf74a18c8')
 
 package() {
   install -Dm755 "${srcdir}/${_pkgname}" \
