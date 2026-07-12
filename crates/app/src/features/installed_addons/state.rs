@@ -213,17 +213,15 @@ impl State {
         changed
     }
 
-    /// Drops Ready thumbnails outside the visible+prefetch window (all of
-    /// them while the route is hidden); the demand/cache path re-delivers.
+    /// Drops Ready thumbnails outside the visible+prefetch window; the
+    /// demand/cache path re-delivers. The window is kept even while the
+    /// route is hidden so returning to it paints real pixels on the first
+    /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
-        let changed = if self.route_visible {
-            model::release_offscreen_thumbnails(
-                &mut self.loaded_rows,
-                self.grid.visible_item_range(),
-            )
-        } else {
-            model::invalidate_ready_thumbnails(&mut self.loaded_rows)
-        };
+        let changed = model::release_offscreen_thumbnails(
+            &mut self.loaded_rows,
+            self.grid.visible_item_range(),
+        );
         if changed {
             self.refresh_item_thumbnails();
         }

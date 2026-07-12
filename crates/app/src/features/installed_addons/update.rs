@@ -7,8 +7,8 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::RouteEntered => {
             state.enter_route();
-            // Demands are visibility-gated: exit released every thumbnail,
-            // so entry must re-sync them even when the visible range is
+            // Demands are visibility-gated: exit dropped them to an empty
+            // set, so entry must re-sync them even when the visible range is
             // unchanged (an unchanged range emits no VisibleRangeChanged).
             let mut effects = metadata_request_effects(state);
             effects.push(Effect::ThumbnailDemandsChanged);
