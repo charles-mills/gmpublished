@@ -253,8 +253,7 @@ fn draw_thumbnail_layer(
             });
         } else if !state.thumbnail_pending(workshop_id) {
             // Failed or never-deliverable (local addon, no preview URL):
-            // draw the dead-file glyph. Cells still awaiting delivery
-            // stay plain so the thumbnail pops in without a glyph flash.
+            // draw the dead-file glyph.
             draw_dead_placeholder(frame, cell);
         }
     }

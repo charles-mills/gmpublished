@@ -16,11 +16,12 @@ pub use decode::ThumbnailDecoder;
 #[cfg(test)]
 pub use disk_cache::disk_cache_path;
 pub use disk_cache::{WorkerDiskCache, read_disk_cache, write_disk_cache};
-pub use thumbnail_key::{ThumbnailKey, normalize_url};
+pub use thumbnail_key::{ThumbnailKey, ThumbnailMode, normalize_url};
 pub use types::{PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail};
 pub use types::{Thumbnail, ThumbnailError, ThumbnailInput, ThumbnailMetadata, ThumbnailResult};
 
 static THUMBNAIL_AGENT: LazyLock<ureq::Agent> = LazyLock::new(decode::http_agent);
+const THUMBNAIL_SOURCE_EDGES: [u32; 3] = [512, 384, 256];
 
 #[derive(Clone, Debug, Default)]
 pub struct ThumbnailCancellation {
@@ -83,6 +84,20 @@ pub fn run_thumbnail_request(
         return Ok(ThumbnailWorkerOutcome::Completed(thumbnail));
     }
 
+    if key.mode() == ThumbnailMode::Static
+        && let Some(cache) = disk_cache
+    {
+        for source_edge in THUMBNAIL_SOURCE_EDGES {
+            let source_key = key.with_max_edge_and_mode(source_edge, ThumbnailMode::Animated);
+            let Some(source) = read_disk_cache(cache, &source_key, source_edge) else {
+                continue;
+            };
+            let thumbnail = decoder.resize_static_thumbnail(source, max_edge)?;
+            write_disk_cache(cache, key, &thumbnail);
+            return Ok(ThumbnailWorkerOutcome::Completed(thumbnail));
+        }
+    }
+
     let ThumbnailInput::Url { url } = input;
     let mut result = decoder.fetch_decode_and_resize_url_with_agent(
         &THUMBNAIL_AGENT,
@@ -96,6 +111,9 @@ pub fn run_thumbnail_request(
     // pixels and travels back to the placeholder cache. Disk-cache hits already
     // carry it.
     if let Ok(ThumbnailWorkerOutcome::Completed(thumbnail)) = &mut result {
+        if key.mode() == ThumbnailMode::Static {
+            thumbnail.make_static();
+        }
         let metadata = thumbnail.metadata();
         let thumbhash = crate::media::thumbhash::encode(
             metadata.width,
@@ -138,4 +156,50 @@ pub fn validate_max_edge(max_edge: u32) -> ThumbnailResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_request_derives_and_persists_from_the_existing_animated_source() {
+        let root = crate::test_support::TestDir::new("static-thumbnail-source-cache");
+        let cache = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
+        let input = ThumbnailInput::from_url("not-a-network-url");
+        let source_key = input.cache_key_with_mode(256, ThumbnailMode::Animated);
+        let static_key = input.cache_key_with_mode(64, ThumbnailMode::Static);
+        let source = Thumbnail::new(
+            vec![80; 128 * 64 * 4],
+            ThumbnailMetadata {
+                width: 128,
+                height: 64,
+                source_width: 128,
+                source_height: 64,
+                max_edge: 256,
+            },
+        )
+        .expect("source thumbnail is valid");
+        write_disk_cache(&cache, &source_key, &source);
+
+        let outcome = run_thumbnail_request(
+            Some(&cache),
+            &static_key,
+            input,
+            64,
+            FetchProfile::Interactive,
+            &ThumbnailCancellation::default(),
+        )
+        .expect("static request should use disk, not the invalid URL");
+        let ThumbnailWorkerOutcome::Completed(thumbnail) = outcome else {
+            panic!("disk-backed request should complete");
+        };
+
+        assert_eq!(
+            (thumbnail.metadata().width, thumbnail.metadata().height),
+            (64, 32)
+        );
+        assert!(thumbnail.animation().is_none());
+        assert!(read_disk_cache(&cache, &static_key, 64).is_some());
+    }
 }

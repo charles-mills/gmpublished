@@ -241,6 +241,67 @@ fn thumbnail_demands_include_current_layout_workshop_leaves() {
 }
 
 #[test]
+fn thumbnail_demands_include_every_addon_without_a_cutoff() {
+    let addons = (1..=129)
+        .map(|workshop_id| {
+            installed_addon(
+                &format!("{workshop_id}.gma"),
+                Some(workshop_id),
+                &format!("Addon {workshop_id}"),
+                "tool",
+                workshop_id,
+            )
+        })
+        .collect();
+    let mut state = ready_state_from_snapshot(snapshot_from_addons(1, addons));
+    let urls = (1..=129)
+        .map(|workshop_id| {
+            (
+                id(workshop_id),
+                format!("https://example.invalid/{workshop_id}.jpg"),
+            )
+        })
+        .collect();
+    let _invalidation = state.apply_preview_urls(urls);
+
+    let demands = state.thumbnail_demands();
+    assert_eq!(demands.demands.len(), 129);
+    assert!(demands.demands.iter().all(|demand| {
+        demand.logical_max_edge.is_power_of_two()
+            && (ADDON_THUMBNAIL_MIN_EDGE..=ADDON_THUMBNAIL_MAX_EDGE)
+                .contains(&demand.logical_max_edge)
+    }));
+}
+
+#[test]
+fn thumbnail_plan_deduplicates_workshop_ids_at_the_largest_required_edge() {
+    let duplicate = id(7);
+    let addons = vec![
+        installed_addon("small.gma", Some(7), "Small", "tool", 1),
+        installed_addon("large.gma", Some(7), "Large", "tool", 10_000),
+    ];
+    let mut state = ready_state_from_snapshot(snapshot_from_addons(1, addons));
+    let expected_edge = state
+        .layout
+        .as_ref()
+        .expect("layout is ready")
+        .leaf_rects()
+        .into_iter()
+        .filter(|leaf| leaf.addon.workshop_id == Some(duplicate))
+        .map(|leaf| analyzer_thumbnail_edge(leaf.rect))
+        .max()
+        .expect("duplicate leaves exist");
+    let _invalidation = state.apply_preview_urls(HashMap::from([(
+        duplicate,
+        "https://example.invalid/7.jpg".to_owned(),
+    )]));
+
+    let demands = state.thumbnail_demands();
+    assert_eq!(demands.demands.len(), 1);
+    assert_eq!(demands.demands[0].logical_max_edge, expected_edge);
+}
+
+#[test]
 fn preview_url_refresh_merges_for_current_layout_only() {
     let mut state = ready_state_with_workshop();
     assert_eq!(

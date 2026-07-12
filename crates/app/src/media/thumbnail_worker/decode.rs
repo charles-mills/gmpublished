@@ -36,6 +36,16 @@ impl ThumbnailDecoder {
             .map_err(Into::into)
     }
 
+    pub(crate) fn resize_static_thumbnail(
+        &mut self,
+        thumbnail: Thumbnail,
+        max_edge: u32,
+    ) -> ThumbnailResult<Thumbnail> {
+        self.inner
+            .resize_static_thumbnail(thumbnail, max_edge)
+            .map_err(Into::into)
+    }
+
     #[cfg(test)]
     pub(crate) fn decode_and_resize_file(
         &mut self,

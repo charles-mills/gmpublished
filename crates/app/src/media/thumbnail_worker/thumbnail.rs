@@ -115,6 +115,10 @@ impl Thumbnail {
         self.thumbhash = thumbhash;
     }
 
+    pub(crate) fn make_static(&mut self) {
+        self.animation = None;
+    }
+
     /// Returns the in-memory byte weight of this payload.
     #[must_use]
     pub fn byte_len(&self) -> usize {
@@ -226,6 +230,36 @@ impl ThumbnailDecoder {
         }
 
         self.decode_and_resize_reader(Cursor::new(bytes), max_edge)
+    }
+
+    pub fn resize_static_thumbnail(
+        &mut self,
+        thumbnail: Thumbnail,
+        max_edge: u32,
+    ) -> ThumbnailDecodeResult<Thumbnail> {
+        validate_max_edge(max_edge)?;
+        let metadata = thumbnail.metadata().clone();
+        if metadata.width.max(metadata.height) <= max_edge {
+            let mut thumbnail = thumbnail;
+            thumbnail.make_static();
+            thumbnail.metadata.max_edge = max_edge;
+            return Ok(thumbnail);
+        }
+
+        let thumbhash = thumbnail.thumbhash_arc();
+        let (width, height) = fit_inside(metadata.width, metadata.height, max_edge)?;
+        let mut resized = self.resize_rgba(
+            metadata.width,
+            metadata.height,
+            width,
+            height,
+            max_edge,
+            thumbnail.rgba_bytes().to_vec(),
+        )?;
+        resized.metadata.source_width = metadata.source_width;
+        resized.metadata.source_height = metadata.source_height;
+        resized.set_thumbhash(thumbhash);
+        Ok(resized)
     }
 
     /// Decodes a local image file into a bounded straight-RGBA thumbnail.
@@ -484,6 +518,27 @@ mod tests {
         assert!(
             (120..=136).contains(&pixel[3]),
             "half coverage should preserve semi-transparent alpha: {pixel:?}"
+        );
+    }
+
+    #[test]
+    fn static_resize_keeps_only_the_first_gif_frame() {
+        let dir = crate::test_support::TestDir::new("gmpublished-static-thumbnail-gif");
+        let gif = dir.gif("animated.gif", 8, 8);
+        let mut decoder = ThumbnailDecoder::new();
+        let thumbnail = decoder
+            .decode_and_resize_file(gif, 64)
+            .expect("animated GIF thumbnail should decode");
+        assert!(thumbnail.animation().is_some());
+
+        let resized = decoder
+            .resize_static_thumbnail(thumbnail, 4)
+            .expect("first frame should resize");
+
+        assert!(resized.animation().is_none());
+        assert_eq!(
+            (resized.metadata().width, resized.metadata().height),
+            (4, 4)
         );
     }
 
