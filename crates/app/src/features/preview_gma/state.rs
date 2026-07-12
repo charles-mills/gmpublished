@@ -454,12 +454,7 @@ impl State {
     }
 
     pub(super) fn take_workshop_metadata_request(&mut self) -> Option<MetadataRequest> {
-        if !self.open
-            || self.loading
-            || self.error.is_some()
-            || self.archive.is_none()
-            || self.workshop_metadata_requested
-        {
+        if !self.open || self.workshop_metadata_requested {
             return None;
         }
 
@@ -477,12 +472,34 @@ impl State {
         workshop_id: PublishedFileId,
         result: Result<Option<WorkshopMetadata>, UiError>,
     ) -> bool {
-        if !self.open || self.request_id != request_id || self.workshop_id != Some(workshop_id) {
+        if !self.open
+            || self.request_id != request_id
+            || self.workshop_id != Some(workshop_id)
+            || self.error.is_some()
+        {
             return false;
         }
 
         match result {
-            Ok(Some(metadata)) if metadata.id == workshop_id => {
+            Ok(Some(mut metadata)) if metadata.id == workshop_id => {
+                let owner_changed = self
+                    .workshop_metadata
+                    .as_ref()
+                    .is_some_and(|existing| existing.steamid64 != metadata.steamid64);
+                if let Some(existing) = self.workshop_metadata.as_ref()
+                    && existing.steamid64 == metadata.steamid64
+                {
+                    if metadata.author.is_none() {
+                        metadata.author.clone_from(&existing.author);
+                    }
+                    if metadata.avatar.is_none() {
+                        metadata.avatar.clone_from(&existing.avatar);
+                    }
+                }
+                if owner_changed {
+                    self.author_requested = false;
+                    self.author_fetch_failed = false;
+                }
                 metadata.title.trim().clone_into(&mut self.title);
                 if metadata.preview_url != self.thumbnail_url {
                     self.thumbnail_url.clone_from(&metadata.preview_url);
@@ -504,8 +521,9 @@ impl State {
             }
             Err(error) => {
                 log::debug!("Preview GMA workshop metadata lookup failed: {error}");
-                self.workshop_metadata = None;
-                self.settle_thumbnail_without_metadata();
+                if self.workshop_metadata.is_none() {
+                    self.settle_thumbnail_without_metadata();
+                }
                 self.refresh_details();
             }
         }

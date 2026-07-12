@@ -36,15 +36,47 @@ impl Steam {
     }
 
     pub fn fetch_user(&self, steamid: SteamId) -> SteamUser {
+        let mut latest = None;
+        self.fetch_user_streaming(steamid, |user| latest = Some(user));
+        latest.unwrap_or_else(|| {
+            SteamUser::from(
+                self.client()
+                    .expect("Steam interface should remain available while fetching a user")
+                    .friends()
+                    .get_friend(steamid),
+            )
+        })
+    }
+
+    /// Emits the cached/persona result as soon as it is useful, then emits a
+    /// second result if waiting briefly produces the real avatar bytes.
+    pub fn fetch_user_streaming(&self, steamid: SteamId, mut on_user: impl FnMut(SteamUser)) {
         main_thread_forbidden!();
 
         let client = self.client().expect(
             "reached only through app-layer entry points that already checked steam_connected()",
         );
 
+        if let Some(cached) = self.users.read().get(&steamid).cloned() {
+            let complete = cached.avatar.is_some();
+            on_user(cached);
+            if complete {
+                return;
+            }
+        }
+
         // See the field doc: overlapping persona waits clobber each other's
         // callback registration and turn into full timeouts.
         let _fetch_guard = self.persona_fetch.lock();
+        // Another serialized fetch may have completed while this caller was
+        // waiting for the callback slot. Reuse it instead of starting the
+        // same persona/avatar wait again.
+        if let Some(cached) = self.users.read().get(&steamid).cloned()
+            && cached.avatar.is_some()
+        {
+            on_user(cached);
+            return;
+        }
 
         // Registered before the request so an event delivered in between
         // cannot be missed.
@@ -64,6 +96,10 @@ impl Steam {
             // using further events as wakeups. A user genuinely on the
             // default avatar never changes and rides out the deadline.
             let _ = event_rx.recv_timeout(std::time::Duration::from_secs(10));
+            let persona = SteamUser::from(client.friends().get_friend(steamid));
+            self.users.write().insert(steamid, persona.clone());
+            on_user(persona);
+
             let avatar_baseline = client.friends().get_friend(steamid).medium_avatar();
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
             while std::time::Instant::now() < deadline
@@ -79,8 +115,7 @@ impl Steam {
             let user = user.clone();
             self.users.write().insert(user.steamid, user);
         }
-
-        user
+        on_user(user);
     }
 
     pub fn fetch_users(&self, steamids: Vec<SteamId>) -> Vec<SteamUser> {
@@ -95,4 +130,8 @@ impl Steam {
 
 pub fn fetch_steam_user(steam: &Steam, steamid64: u64) -> SteamUser {
     steam.fetch_user(SteamId::from_raw(steamid64))
+}
+
+pub fn fetch_steam_user_streaming(steam: &Steam, steamid64: u64, on_user: impl FnMut(SteamUser)) {
+    steam.fetch_user_streaming(SteamId::from_raw(steamid64), on_user);
 }

@@ -71,6 +71,10 @@ struct SnapshotEntry {
     tags: Vec<String>,
     preview_url: Option<String>,
     subscriptions: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_steamid: Option<u64>,
     fetched_at: u64,
     // Added after v1 shipped; `default` keeps pre-ThumbHash snapshots loadable
     // without a version bump.
@@ -133,6 +137,8 @@ fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, Cache
                     tags: entry.tags,
                     preview_url: entry.preview_url,
                     subscriptions: entry.subscriptions,
+                    full_description: entry.full_description,
+                    owner_steamid: entry.owner_steamid,
                     thumbhash: entry.thumbhash.map(Arc::from),
                 },
                 // Clock-skew guard: never trust timestamps from the future.
@@ -170,6 +176,8 @@ pub fn write(
             tags: cached.metadata.tags.clone(),
             preview_url: cached.metadata.preview_url.clone(),
             subscriptions: cached.metadata.subscriptions,
+            full_description: cached.metadata.full_description.clone(),
+            owner_steamid: cached.metadata.owner_steamid,
             fetched_at: cached.fetched_at,
             thumbhash: cached.metadata.thumbhash.as_deref().map(<[u8]>::to_vec),
         })
@@ -208,6 +216,8 @@ mod tests {
                 tags: vec!["addon".to_owned(), "fun".to_owned()],
                 preview_url: Some(format!("https://example.test/{id}.jpg")),
                 subscriptions: 42,
+                full_description: Some(format!("Full description {id}")),
+                owner_steamid: Some(76_561_197_960_265_728 + id),
                 thumbhash: Some(Arc::from(vec![id as u8, 7, 9].as_slice())),
             },
             fetched_at,

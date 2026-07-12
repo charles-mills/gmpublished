@@ -12,7 +12,8 @@ pub use message::Message;
 
 pub use model::{
     AuthorRequest, ExtractionIntent, ExtractionRequest, LoadedArchive, MetadataRequest,
-    OpenRequest, OpenSeed, OpenTarget, query_steam_user, query_workshop_metadata,
+    OpenRequest, OpenSeed, OpenTarget, cached_workshop_metadata, query_steam_user_streaming,
+    query_workshop_metadata,
 };
 pub use state::State;
 pub use update::{nav_path_scrollable_id, update};

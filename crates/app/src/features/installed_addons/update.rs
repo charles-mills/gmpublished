@@ -240,6 +240,31 @@ mod tests {
     }
 
     #[test]
+    fn first_scroll_recovers_paging_when_viewport_was_not_observed() {
+        let mut state = State::default();
+        state.enter_route();
+        let rows = (1..=105)
+            .map(|index| {
+                Row::for_test(
+                    &format!("/tmp/{index}.gma"),
+                    &format!("Addon {index}"),
+                    Some(
+                        PublishedFileId::new(index as u64)
+                            .expect("test fixture ids are always nonzero"),
+                    ),
+                )
+            })
+            .collect();
+        state.apply_snapshot(LibraryRefreshReason::Startup, Ok(rows));
+        assert_eq!(state.loaded_count(), 50);
+
+        let effects = update(&mut state, Message::Grid(addon_grid::Message::Scrolled(1)));
+
+        assert_eq!(state.loaded_count(), 100);
+        assert_eq!(effects, vec![Effect::ThumbnailDemandsChanged]);
+    }
+
+    #[test]
     fn visible_snapshot_requests_metadata_and_thumbnail_sync() {
         let mut state = State::default();
         let _effects = update(&mut state, Message::RouteEntered);

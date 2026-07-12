@@ -915,6 +915,8 @@ fn workshop_item(id: u64, title: &str) -> WorkshopMetadata {
         tags: Vec::new(),
         preview_url: None,
         subscriptions: 0,
+        full_description: None,
+        owner_steamid: None,
         thumbhash: None,
     }
 }

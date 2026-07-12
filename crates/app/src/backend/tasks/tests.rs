@@ -1298,6 +1298,8 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
             tags: vec!["addon".to_owned(), "fun".to_owned()],
             preview_url: Some("https://example.test/preview.jpg".to_owned()),
             subscriptions: 42,
+            full_description: None,
+            owner_steamid: Some(76561198000000000),
             thumbhash: None,
         }]
     );
@@ -1314,6 +1316,34 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
             PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
             PublishedFileId::new(789).expect("test fixture ids are always nonzero")
         ]
+    );
+}
+
+#[test]
+fn workshop_detail_cache_persists_full_description_across_summary_refreshes() {
+    let services = BackendServices::for_test();
+    let mut item = live_workshop_item_for_metadata_tests(123);
+    item.description = Some("  Full Workshop description  ".to_owned());
+
+    services.cache_workshop_item_details(&item);
+    let id = item.id;
+    let cached = services
+        .cached_workshop_item_details(id)
+        .expect("detail query should populate the detail cache");
+    assert_eq!(
+        cached.full_description.as_deref(),
+        Some("Full Workshop description")
+    );
+    assert_eq!(cached.owner_steamid, item.steamid);
+
+    item.description = Some("short summary".to_owned());
+    services.cache_workshop_items(&[item]);
+    let cached = services
+        .cached_workshop_item_details(id)
+        .expect("summary refresh should retain full details");
+    assert_eq!(
+        cached.full_description.as_deref(),
+        Some("Full Workshop description")
     );
 }
 

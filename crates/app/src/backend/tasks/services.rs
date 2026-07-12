@@ -433,11 +433,25 @@ impl BackendServices {
             return Err(UiError::from(&SteamRuntimeError::NotConnected));
         }
 
-        steam_workshop::query_workshop_item_details(&self.backend.steam, id.get())
+        let item = steam_workshop::query_workshop_item_details(&self.backend.steam, id.get())
             .map(workshop_item_from_backend)
-            .map_err(|error| UiError::from(&error))
+            .map_err(|error| UiError::from(&error))?;
+        self.cache_workshop_item_details(&item);
+        Ok(item)
     }
 
+    pub(crate) fn cached_workshop_item_details(
+        &self,
+        id: PublishedFileId,
+    ) -> Option<WorkshopMetadata> {
+        self.workshop_metadata
+            .lock()
+            .get(&id)
+            .map(|cached| cached.metadata.clone())
+            .filter(|metadata| metadata.full_description.is_some())
+    }
+
+    #[cfg(test)]
     pub(crate) fn steam_user_details(&self, steamid: u64) -> Result<SteamUser, UiError> {
         if !self.steam_connected() {
             return Err(UiError::from(&SteamRuntimeError::NotConnected));
@@ -446,6 +460,21 @@ impl BackendServices {
         Ok(steam_user_from_workshop_backend(
             steam_users::fetch_steam_user(&self.backend.steam, steamid),
         ))
+    }
+
+    pub(crate) fn steam_user_details_streaming(
+        &self,
+        steamid: u64,
+        mut on_user: impl FnMut(SteamUser),
+    ) -> Result<(), UiError> {
+        if !self.steam_connected() {
+            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+        }
+
+        steam_users::fetch_steam_user_streaming(&self.backend.steam, steamid, |user| {
+            on_user(steam_user_from_workshop_backend(user));
+        });
+        Ok(())
     }
 
     pub(crate) fn steam_connected(&self) -> bool {
@@ -653,6 +682,15 @@ impl BackendServices {
                 {
                     item.thumbhash.clone_from(&existing.metadata.thumbhash);
                 }
+                if let Some(existing) = cache.get(&item.id) {
+                    if item.full_description.is_none() {
+                        item.full_description
+                            .clone_from(&existing.metadata.full_description);
+                    }
+                    if item.owner_steamid.is_none() {
+                        item.owner_steamid = existing.metadata.owner_steamid;
+                    }
+                }
                 cache.insert(
                     item.id,
                     CachedWorkshopMetadata {
@@ -663,6 +701,35 @@ impl BackendServices {
             }
         }
         metadata
+    }
+
+    pub(super) fn cache_workshop_item_details(&self, item: &WorkshopItem) {
+        let Some(mut metadata) = WorkshopMetadata::from_workshop_item(item) else {
+            return;
+        };
+        metadata.full_description = Some(
+            item.description
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        metadata.owner_steamid = item.steamid;
+
+        let fetched_at = metadata_snapshot::now_unix_seconds();
+        let mut cache = self.workshop_metadata.lock();
+        if let Some(existing) = cache.get(&metadata.id)
+            && metadata.thumbhash.is_none()
+        {
+            metadata.thumbhash.clone_from(&existing.metadata.thumbhash);
+        }
+        cache.insert(
+            metadata.id,
+            CachedWorkshopMetadata {
+                metadata,
+                fetched_at,
+            },
+        );
     }
 
     /// Records the ThumbHash a media worker computed for a preview URL into the
@@ -705,6 +772,10 @@ impl BackendServices {
                 path.display()
             );
         }
+    }
+
+    pub(crate) fn persist_workshop_metadata_cache(&self) {
+        self.write_metadata_snapshot_best_effort();
     }
 
     #[cfg(test)]

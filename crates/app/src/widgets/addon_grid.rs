@@ -174,7 +174,18 @@ impl State {
 
     fn set_scroll_offset_at(&mut self, offset: f32, now: Instant) -> Vec<Message> {
         self.scroll_offset = finite_nonnegative(offset);
-        self.reconcile_layout_at(now)
+        let mut messages = self.reconcile_layout_at(now);
+        if self.viewport_height <= 0.0
+            && self.scroll_offset > 0.0
+            && !self.layout.rows.is_empty()
+            && self.has_more_pages
+            && !self.loading
+            && !self.next_page_requested
+        {
+            self.next_page_requested = true;
+            messages.push(Message::NextPageRequested);
+        }
+        messages
     }
 
     fn set_viewport_size_at(&mut self, size: Size, now: Instant) -> Vec<Message> {
@@ -413,7 +424,19 @@ pub fn scrollable_id(key: &'static str) -> iced::widget::Id {
 pub fn view<'a>(state: &State, tokens: &Tokens, key: &'static str) -> Element<'a, Message> {
     let tokens = *tokens;
     let layout = &state.layout;
-    let visible = state.visible_rows.clamped(layout.rows.len());
+    // A Sensor notification is an optimization prerequisite, not a
+    // correctness prerequisite. If Iced misses the initial on_show during a
+    // route-tree swap, render the whole currently loaded page until a real
+    // viewport measurement arrives. Clamping an empty range to one row here
+    // would otherwise paint that row followed by a full-height blank spacer.
+    let visible = if state.viewport_height > 0.0 {
+        state.visible_rows.clamped(layout.rows.len())
+    } else {
+        VisibleRowRange {
+            start: 0,
+            end: layout.rows.len(),
+        }
+    };
     let top_spacer = layout.top_offset(visible.start);
     let bottom_spacer = sub_clamped(layout.total_height(), layout.top_offset(visible.end));
 

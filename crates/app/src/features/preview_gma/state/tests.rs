@@ -348,6 +348,53 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     assert_eq!(author.name, "Ada");
     assert!(!author.failed);
 
+    // A live detail refresh racing the progressive author result must not
+    // replace the resolved persona with its owner-id placeholder.
+    let refreshed = WorkshopMetadata {
+        id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        title: "Refreshed".to_owned(),
+        author: None,
+        steamid64: Some(author_request.steamid64),
+        avatar: None,
+        time_created: 0,
+        time_updated: 0,
+        description: "Fresh description".to_owned(),
+        tags: Vec::new(),
+        preview_url: None,
+        subscriptions: 0,
+        score_bucket: 0,
+        score_label: String::new(),
+    };
+    assert!(state.apply_workshop_metadata(
+        request.request_id,
+        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        Ok(Some(refreshed)),
+    ));
+    assert_eq!(
+        state
+            .details()
+            .author
+            .as_ref()
+            .map(|author| author.name.as_str()),
+        Some("Ada")
+    );
+    assert_eq!(
+        state.details().description.plain_text(),
+        "Fresh description"
+    );
+
+    assert!(state.apply_workshop_metadata(
+        request.request_id,
+        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        Err(UiError::new(
+            gmpublished_backend::error_key::keys::STEAM_ERROR
+        )),
+    ));
+    assert_eq!(
+        state.details().description.plain_text(),
+        "Fresh description"
+    );
+
     // A failed fetch keeps the placeholder and flags the row.
     let mut failed_state = State::default();
     let request = failed_state.begin_open(target());

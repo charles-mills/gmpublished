@@ -8,20 +8,21 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::OpenRequested(target) => {
             let request = state.begin_open(target);
-            vec![
+            let mut effects = vec![
                 Effect::ModalOpenRequested,
                 Effect::ArchiveOpenRequested(request),
-                Effect::ThumbnailDemandsChanged,
-            ]
+            ];
+            if let Some(request) = state.take_workshop_metadata_request() {
+                effects.push(Effect::WorkshopMetadataRequested(request));
+            }
+            effects.push(Effect::ThumbnailDemandsChanged);
+            effects
         }
         Message::ArchiveOpened(request_id, result) => {
             if !state.apply_archive_opened(request_id, result) {
                 return Vec::new();
             }
             let mut effects = Vec::new();
-            if let Some(request) = state.take_workshop_metadata_request() {
-                effects.push(Effect::WorkshopMetadataRequested(request));
-            }
             #[cfg(feature = "asset-studio")]
             if let Some(request) = state.take_initial_entry_preview_request() {
                 effects.push(Effect::EntryPreviewRequested(request));
@@ -151,7 +152,7 @@ mod tests {
     use super::*;
     use crate::backend::domain::PublishedFileId;
     use crate::backend::gma::PreviewArchive;
-    use crate::features::preview_gma::{LoadedArchive, OpenRequest, OpenTarget};
+    use crate::features::preview_gma::{LoadedArchive, MetadataRequest, OpenRequest, OpenTarget};
     use crate::test_support::GmaFixtureBuilder;
 
     fn loaded_archive() -> LoadedArchive {
@@ -194,6 +195,11 @@ mod tests {
                         PublishedFileId::new(123).expect("test fixture ids are always nonzero")
                     ),
                 }),
+                Effect::WorkshopMetadataRequested(MetadataRequest {
+                    request_id: 1,
+                    workshop_id: PublishedFileId::new(123)
+                        .expect("test fixture ids are always nonzero"),
+                }),
                 Effect::ThumbnailDemandsChanged,
             ]
         );
@@ -220,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn loaded_archive_emits_metadata_nav_and_thumbnail_effects() {
+    fn loaded_archive_emits_nav_and_thumbnail_effects_after_parallel_metadata_start() {
         let mut state = State::default();
         let _effects = update(
             &mut state,
@@ -235,11 +241,7 @@ mod tests {
 
         assert!(matches!(
             effects.as_slice(),
-            [
-                Effect::WorkshopMetadataRequested(request),
-                Effect::BrowserPathChanged,
-                Effect::ThumbnailDemandsChanged,
-            ] if request.request_id == 1 && request.workshop_id == PublishedFileId::new(123).expect("test fixture ids are always nonzero")
+            [Effect::BrowserPathChanged, Effect::ThumbnailDemandsChanged,]
         ));
     }
 

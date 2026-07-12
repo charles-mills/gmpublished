@@ -928,7 +928,8 @@ fn installed_addons_executor_preview_schedules_preview_open() {
         App::run_installed_addons_effect,
     );
 
-    assert_eq!(task.units(), 2);
+    // Modal + local archive + Workshop details now start together.
+    assert_eq!(task.units(), 3);
     assert_eq!(
         app.state.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
@@ -1033,7 +1034,8 @@ fn size_analyzer_executor_preview_schedules_preview_open() {
         App::run_size_analyzer_effect,
     );
 
-    assert_eq!(task.units(), 1);
+    // Local archive and Workshop details start together from this route.
+    assert_eq!(task.units(), 2);
 }
 
 #[test]

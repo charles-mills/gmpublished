@@ -94,8 +94,17 @@ pub fn steam2_rendered_id(steamid64: u64) -> String {
     format!("STEAM_1:{}:{}", account & 1, account >> 1)
 }
 
-pub fn query_steam_user(ctx: &BackendServices, steamid64: u64) -> Result<AuthorInfo, UiError> {
-    let user = ctx.steam_user_details(steamid64)?;
+pub fn query_steam_user_streaming(
+    ctx: &BackendServices,
+    steamid64: u64,
+    mut on_author: impl FnMut(Result<AuthorInfo, UiError>),
+) -> Result<(), UiError> {
+    ctx.steam_user_details_streaming(steamid64, |user| {
+        on_author(author_info_from_user(user));
+    })
+}
+
+fn author_info_from_user(user: SteamUser) -> Result<AuthorInfo, UiError> {
     if user.dead {
         return Err(UiError::new(keys::STEAM_ERROR));
     }
@@ -195,6 +204,28 @@ pub fn query_workshop_metadata(
     let owner = item.owner.as_ref().filter(|owner| !owner.dead).cloned();
 
     Ok(workshop_metadata_from_item(item, owner))
+}
+
+pub fn cached_workshop_metadata(
+    ctx: &BackendServices,
+    workshop_id: PublishedFileId,
+) -> Option<WorkshopMetadata> {
+    let metadata = ctx.cached_workshop_item_details(workshop_id)?;
+    Some(WorkshopMetadata {
+        id: metadata.id,
+        title: metadata.title.trim().to_owned(),
+        author: None,
+        steamid64: metadata.owner_steamid,
+        avatar: None,
+        time_created: metadata.time_created,
+        time_updated: metadata.time_updated,
+        description: metadata.full_description.unwrap_or_default(),
+        tags: metadata.tags,
+        preview_url: metadata.preview_url,
+        subscriptions: metadata.subscriptions,
+        score_bucket: score_bucket(metadata.score),
+        score_label: score_label(metadata.score),
+    })
 }
 
 pub fn workshop_url(workshop_id: PublishedFileId) -> String {
