@@ -429,11 +429,13 @@ impl BackendServices {
         &self,
         id: PublishedFileId,
     ) -> Result<crate::backend::domain::WorkshopItem, UiError> {
-        Ok(self
-            .fetch_workshop_items(&[id])?
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| WorkshopItem::dead(id)))
+        if !self.steam_connected() {
+            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+        }
+
+        steam_workshop::query_workshop_item_details(&self.backend.steam, id.get())
+            .map(workshop_item_from_backend)
+            .map_err(|error| UiError::from(&error))
     }
 
     pub(crate) fn steam_user_details(&self, steamid: u64) -> Result<SteamUser, UiError> {

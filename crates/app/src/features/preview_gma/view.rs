@@ -10,6 +10,7 @@ use crate::{
     i18n::I18n,
     theme::{self, Tokens, ViewCtx},
     widgets::{
+        bbcode,
         download_count_icon::download_count_icon,
         file_browser::{self, Row as FileBrowserRowData, RowKind as FileBrowserEntryKind},
         spinner::spinner,
@@ -176,12 +177,7 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
 
     if !details.title.trim().is_empty() {
         content = content.push(Space::new().height(tokens.spacing.gap_md));
-        content = content.push(
-            text(details.title.as_str())
-                .size(tokens.typography.body)
-                .width(Length::Fill)
-                .align_x(Center),
-        );
+        content = content.push(addon_title(state, details, &tokens));
     }
 
     if !details.tag_rows.is_empty() {
@@ -194,23 +190,55 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
         content = content.push(info_table(state, details, ctx));
     }
 
-    if state.can_open_workshop_link() {
-        content = content.push(Space::new().height(tokens.spacing.gap));
-        content = content.push(workshop_link(ctx));
-        content = content.push(Space::new().height(tokens.spacing.gap));
-    }
-
-    if !details.description.trim().is_empty() {
+    if !details.description.is_empty() {
         content = content.push(Space::new().height(tokens.spacing.gap_sm));
         content = content.push(
-            text(details.description.as_str())
-                .size(tokens.typography.body_sm)
-                .color(Color::from(tokens.colors.text_dim))
-                .width(Length::Fill),
+            bbcode::view(
+                &details.description,
+                state.revealed_description_spoilers(),
+                &tokens,
+            )
+            .map(|event| match event {
+                bbcode::Event::OpenLink(url) => Message::DescriptionLinkRequested(url),
+                bbcode::Event::ToggleSpoiler(id) => Message::DescriptionSpoilerToggled(id),
+            }),
         );
     }
 
     content.into()
+}
+
+fn addon_title<'a>(state: &State, details: &'a Details, tokens: &Tokens) -> Element<'a, Message> {
+    let title = text(details.title.as_str())
+        .size(tokens.typography.body)
+        .width(Length::Fill)
+        .align_x(Center);
+
+    if state.can_open_workshop_link() {
+        let tokens = *tokens;
+        button(title)
+            .on_press(Message::WorkshopLinkRequested)
+            .padding(0.0)
+            .width(Length::Fill)
+            .style(move |_, status| addon_title_style(&tokens, status))
+            .into()
+    } else {
+        title.into()
+    }
+}
+
+fn addon_title_style(tokens: &Tokens, status: button::Status) -> button::Style {
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => tokens.colors.link,
+        button::Status::Active => tokens.colors.text,
+        button::Status::Disabled => tokens.colors.text_dim,
+    };
+
+    button::Style {
+        background: None,
+        text_color: text_color.into(),
+        ..button::Style::default()
+    }
 }
 
 fn stats_row<'a>(details: &'a Details, tokens: &Tokens) -> Element<'a, Message> {
@@ -417,31 +445,6 @@ fn relative_text(relative: &RelativeTime, i18n: &I18n) -> String {
     }
 }
 
-fn workshop_link(ctx: ViewCtx<'_>) -> Element<'_, Message> {
-    let tokens = *ctx.tokens;
-    let i18n = ctx.i18n;
-    let link = row![
-        text(i18n.tr("preview-gma-steam-workshop"))
-            .size(tokens.typography.body)
-            .color(Color::from(tokens.colors.link)),
-        icon(
-            assets::icons::context_link_out(),
-            tokens.colors.link.into(),
-            tokens.dims.icon_size_sm,
-        ),
-    ]
-    .align_y(Center)
-    .spacing(tokens.spacing.gap_xs);
-
-    container(
-        mouse_area(link)
-            .on_press(Message::WorkshopLinkRequested)
-            .interaction(iced::mouse::Interaction::Pointer),
-    )
-    .center_x(Length::Fill)
-    .into()
-}
-
 fn browser<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let snapshot = state.browser_snapshot();
@@ -619,4 +622,21 @@ fn icon<'a>(handle: iced::widget::svg::Handle, color: Color, size: f32) -> Eleme
         .height(Length::Fixed(size))
         .style(move |_, _| svg::Style { color: Some(color) })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addon_title_uses_link_color_only_while_interacting() {
+        let tokens = Tokens::dark();
+        let active = addon_title_style(&tokens, button::Status::Active);
+        let hovered = addon_title_style(&tokens, button::Status::Hovered);
+
+        assert_eq!(active.background, None);
+        assert_eq!(active.text_color, tokens.colors.text.into());
+        assert_eq!(hovered.background, None);
+        assert_eq!(hovered.text_color, tokens.colors.link.into());
+    }
 }

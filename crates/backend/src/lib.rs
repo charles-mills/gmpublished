@@ -22,6 +22,8 @@ pub mod events;
 pub mod addon;
 pub use addon::Addon;
 
+pub mod bbcode;
+
 pub mod appdata;
 pub use appdata::AppData;
 

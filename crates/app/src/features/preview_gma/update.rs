@@ -79,6 +79,12 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         Message::WorkshopLinkRequested => state
             .workshop_link_url()
             .map_or_else(Vec::new, |url| vec![Effect::OpenUrlRequested(url)]),
+        Message::DescriptionLinkRequested(url) => normalize_description_url(&url)
+            .map_or_else(Vec::new, |url| vec![Effect::OpenUrlRequested(url)]),
+        Message::DescriptionSpoilerToggled(id) => {
+            state.toggle_description_spoiler(id);
+            Vec::new()
+        }
         Message::CopyCurrentPathRequested => state
             .copy_current_path_text()
             .map_or_else(Vec::new, |text| vec![Effect::CopyTextRequested(text)]),
@@ -101,6 +107,22 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             vec![Effect::ThumbnailDemandsChanged]
         }
     }
+}
+
+fn normalize_description_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() || url.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        let (_, remainder) = url.split_once("://")?;
+        return (!remainder.is_empty()).then(|| url.to_owned());
+    }
+    if url.contains("://") {
+        return None;
+    }
+    Some(format!("https://{url}"))
 }
 
 #[cfg(test)]
@@ -263,5 +285,59 @@ mod tests {
         assert!(update(&mut state, Message::CopyCurrentPathRequested).is_empty());
         assert!(update(&mut state, Message::OpenLocationRequested).is_empty());
         assert!(update(&mut state, Message::UpRequested).is_empty());
+    }
+
+    #[test]
+    fn description_links_only_emit_safe_web_urls() {
+        let mut state = State::default();
+        assert_eq!(
+            update(
+                &mut state,
+                Message::DescriptionLinkRequested("example.com/path".to_owned())
+            ),
+            vec![Effect::OpenUrlRequested(
+                "https://example.com/path".to_owned()
+            )]
+        );
+        assert_eq!(
+            update(
+                &mut state,
+                Message::DescriptionLinkRequested("https://example.com".to_owned())
+            ),
+            vec![Effect::OpenUrlRequested("https://example.com".to_owned())]
+        );
+        assert!(
+            update(
+                &mut state,
+                Message::DescriptionLinkRequested("file:///tmp/addon".to_owned())
+            )
+            .is_empty()
+        );
+        assert!(
+            update(
+                &mut state,
+                Message::DescriptionLinkRequested("https://example.com/has space".to_owned())
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn description_spoilers_toggle_without_side_effects() {
+        use gmpublished_backend::bbcode::{Document, ElementKind, Node};
+
+        let document = Document::parse("[spoiler]secret[/spoiler]");
+        let Node::Element(element) = &document.nodes()[0] else {
+            panic!("expected spoiler element");
+        };
+        let ElementKind::Spoiler(id) = element.kind() else {
+            panic!("expected spoiler id");
+        };
+        let mut state = State::default();
+
+        assert!(update(&mut state, Message::DescriptionSpoilerToggled(*id)).is_empty());
+        assert!(state.revealed_description_spoilers().contains(id));
+        assert!(update(&mut state, Message::DescriptionSpoilerToggled(*id)).is_empty());
+        assert!(!state.revealed_description_spoilers().contains(id));
     }
 }

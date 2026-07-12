@@ -73,6 +73,7 @@ pub struct WorkshopItem {
 }
 
 impl WorkshopItem {
+    #[cfg(test)]
     pub(crate) fn dead(id: PublishedFileId) -> Self {
         Self::from(id)
     }

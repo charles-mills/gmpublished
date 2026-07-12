@@ -1,5 +1,6 @@
 pub mod addon_card;
 pub mod addon_grid;
+pub mod bbcode;
 pub mod context_area;
 pub mod download_count_icon;
 pub mod file_browser;

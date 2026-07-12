@@ -8,6 +8,18 @@ use crate::{Addon, GMOD_APP_ID, search::Search};
 
 type WorkshopChunkQueryResult = Result<Vec<WorkshopItem>, WorkshopQueryError>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DescriptionLength {
+    Summary,
+    Full,
+}
+
+impl DescriptionLength {
+    const fn returns_full_description(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WorkshopItem {
     pub id: PublishedFileId,
@@ -217,6 +229,22 @@ impl Steam {
         &self,
         ids: &[PublishedFileId],
     ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
+        self.query_workshop_items_with_description(ids, DescriptionLength::Summary)
+    }
+
+    pub fn query_workshop_item_details(
+        &self,
+        id: PublishedFileId,
+    ) -> Result<WorkshopItem, WorkshopQueryError> {
+        self.query_workshop_items_with_description(&[id], DescriptionLength::Full)
+            .map(|mut items| items.pop().unwrap_or_else(|| WorkshopItem::from(id)))
+    }
+
+    fn query_workshop_items_with_description(
+        &self,
+        ids: &[PublishedFileId],
+        description_length: DescriptionLength,
+    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
         main_thread_forbidden!();
 
         if ids.is_empty() {
@@ -228,7 +256,12 @@ impl Steam {
         let (result_tx, result_rx) = mpsc::channel();
 
         for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-            self.register_workshop_items_chunk_query(chunk_index, chunk, result_tx.clone());
+            self.register_workshop_items_chunk_query(
+                chunk_index,
+                chunk,
+                description_length,
+                result_tx.clone(),
+            );
         }
         drop(result_tx);
 
@@ -268,7 +301,12 @@ impl Steam {
         let (result_tx, result_rx) = mpsc::channel();
 
         for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-            self.register_workshop_items_chunk_query(chunk_index, chunk, result_tx.clone());
+            self.register_workshop_items_chunk_query(
+                chunk_index,
+                chunk,
+                DescriptionLength::Summary,
+                result_tx.clone(),
+            );
         }
         drop(result_tx);
 
@@ -279,6 +317,7 @@ impl Steam {
         &self,
         chunk_index: usize,
         ids: Vec<PublishedFileId>,
+        description_length: DescriptionLength,
         result_tx: mpsc::Sender<(usize, WorkshopChunkQueryResult)>,
     ) {
         let query = self
@@ -289,6 +328,11 @@ impl Steam {
 
         match query {
             Ok(query) => {
+                let query = if description_length.returns_full_description() {
+                    query.set_return_long_description(true)
+                } else {
+                    query
+                };
                 query.allow_cached_response(600).fetch(
                     move |results: Result<QueryResults<'_>, SteamError>| {
                         let _ = result_tx
@@ -526,6 +570,13 @@ pub fn query_workshop_items(
     steam.query_workshop_items(&ids)
 }
 
+pub fn query_workshop_item_details(
+    steam: &Steam,
+    id: u64,
+) -> Result<WorkshopItem, WorkshopQueryError> {
+    steam.query_workshop_item_details(PublishedFileId(id))
+}
+
 pub fn query_workshop_items_streaming(
     steam: &Steam,
     ids: Vec<u64>,
@@ -560,10 +611,16 @@ mod tests {
     use steamworks::PublishedFileId;
 
     use super::{
-        WorkshopItem, WorkshopQueryError, combine_workshop_chunk_results,
+        DescriptionLength, WorkshopItem, WorkshopQueryError, combine_workshop_chunk_results,
         drain_workshop_chunk_results, filter_new_workshop_ids, query_workshop_items,
         workshop_item_id_chunks,
     };
+
+    #[test]
+    fn detail_queries_request_full_descriptions() {
+        assert!(DescriptionLength::Full.returns_full_description());
+        assert!(!DescriptionLength::Summary.returns_full_description());
+    }
 
     #[test]
     fn query_workshop_items_empty_is_noop_without_steam() {

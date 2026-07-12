@@ -1,9 +1,11 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 
+use gmpublished_backend::bbcode::SpoilerId;
 use iced::widget::image;
 
 #[cfg(feature = "asset-studio")]
@@ -50,6 +52,7 @@ pub struct State {
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
     details: Details,
+    revealed_description_spoilers: HashSet<SpoilerId>,
     workshop_metadata: Option<WorkshopMetadata>,
     workshop_metadata_requested: bool,
     author_requested: bool,
@@ -80,6 +83,7 @@ impl Default for State {
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
             details: Details::default(),
+            revealed_description_spoilers: HashSet::new(),
             workshop_metadata: None,
             workshop_metadata_requested: false,
             author_requested: false,
@@ -187,6 +191,16 @@ impl State {
         &self.details
     }
 
+    pub(crate) const fn revealed_description_spoilers(&self) -> &HashSet<SpoilerId> {
+        &self.revealed_description_spoilers
+    }
+
+    pub(super) fn toggle_description_spoiler(&mut self, id: SpoilerId) {
+        if !self.revealed_description_spoilers.remove(&id) {
+            self.revealed_description_spoilers.insert(id);
+        }
+    }
+
     pub(crate) fn thumbnail_handle(&self) -> Option<&image::Handle> {
         match &self.thumbnail {
             ThumbnailState::Ready { still, animation } => animation
@@ -259,6 +273,7 @@ impl State {
         self.archive = None;
         self.browser = None;
         self.details = Details::default();
+        self.revealed_description_spoilers.clear();
         self.workshop_metadata = None;
         self.workshop_metadata_requested = self.workshop_id.is_none();
         self.author_requested = false;
@@ -551,6 +566,7 @@ impl State {
         self.archive = None;
         self.browser = None;
         self.details = Details::default();
+        self.revealed_description_spoilers.clear();
         self.workshop_metadata = None;
         self.workshop_metadata_requested = true;
         self.author_requested = true;
@@ -695,7 +711,7 @@ impl State {
             self.details = Details::default();
             return;
         };
-        self.details = details_for_archive(
+        let details = details_for_archive(
             archive,
             &self.archive_path_text(),
             &self.title,
@@ -703,6 +719,10 @@ impl State {
             self.author_fetch_failed,
             self.download_count_formatter,
         );
+        if details.description != self.details.description {
+            self.revealed_description_spoilers.clear();
+        }
+        self.details = details;
         // Click-time stats render on the first frame; hydration replaces them.
         if !self.details.has_stats
             && let Some(subscription_count) = self.seed.subscription_count
