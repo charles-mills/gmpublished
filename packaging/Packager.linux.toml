@@ -1,7 +1,7 @@
 name = "gmpublished"
 product-name = "gmpublished"
 identifier = "dev.charlesmills.gmpublished"
-version = "1.0.0"
+version = "0.1.0"
 description = "Native desktop app for gmpublished."
 category = "DeveloperTool"
 out-dir = "../target/packager"

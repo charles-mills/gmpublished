@@ -68,7 +68,7 @@ unnecessary_wraps = "warn"
 needless_pass_by_ref_mut = "warn"
 
 [workspace.package]
-version = "1.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 authors = [
