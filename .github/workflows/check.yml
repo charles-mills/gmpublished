@@ -93,7 +93,7 @@ jobs:
 
       - name: Lint all features
         if: steps.scope.outputs.rust == 'true'
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked --no-deps -- -D warnings
 
       - name: Check release configuration
         if: steps.scope.outputs.rust == 'true'

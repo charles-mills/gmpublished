@@ -134,8 +134,10 @@ fn run() -> Result<(), RunError> {
 }
 
 fn window_settings(chrome_strategy: features::shell::ChromeStrategy) -> iced::window::Settings {
-    let mut settings = iced::window::Settings::default();
-    settings.min_size = Some(iced::Size::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
+    let mut settings = iced::window::Settings {
+        min_size: Some(iced::Size::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)),
+        ..iced::window::Settings::default()
+    };
     apply_platform_chrome(&mut settings, chrome_strategy);
 
     settings

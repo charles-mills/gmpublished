@@ -92,7 +92,6 @@ fn rail_search_button(ctx: ViewCtx<'_>, drag_active: bool) -> Element<'_, Messag
         assets::icons::search(),
         search_label,
         (!drag_active).then_some(Message::SearchActivated),
-        true,
         tokens.dims.sidebar_rail_icon_button_size,
         tokens.dims.sidebar_rail_icon_glyph,
         tokens,
@@ -501,28 +500,17 @@ fn sidebar_icon_button<'a>(
     handle: svg::Handle,
     tooltip: String,
     message: Option<Message>,
-    enabled: bool,
     button_size: f32,
     glyph_size: f32,
     tokens: &Tokens,
     show_tooltip: bool,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let color = if enabled {
-        tokens.colors.text
-    } else {
-        tokens.colors.text_dim
-    };
-    let opacity = if enabled {
-        1.0
-    } else {
-        tokens.dims.disabled_opacity
-    };
     let control = button(
-        container(svg_icon(handle, glyph_size, color.into(), opacity))
+        container(svg_icon(handle, glyph_size, tokens.colors.text.into(), 1.0))
             .center(Length::Fixed(button_size)),
     )
-    .on_press_maybe(if enabled { message } else { None })
+    .on_press_maybe(message)
     .padding(0.0)
     .width(Length::Fixed(button_size))
     .height(Length::Fixed(button_size))
