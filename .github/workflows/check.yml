@@ -26,6 +26,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify version metadata
+        run: packaging/scripts/verify_version.sh
+
       - name: Determine validation scope
         id: scope
         env:
