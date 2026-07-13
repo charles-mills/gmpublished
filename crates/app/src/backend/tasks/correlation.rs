@@ -144,6 +144,7 @@ pub(super) enum BackendTaskSource {
     WorkshopDownload {
         item_id: Option<PublishedFileId>,
         start_emitted: bool,
+        request_id: Option<u64>,
     },
     WorkshopExtraction {
         item_id: Option<PublishedFileId>,
@@ -151,6 +152,7 @@ pub(super) enum BackendTaskSource {
         /// The on-disk `.gma` the extraction reads from, when it outlives
         /// the extraction (installed workshop content, not temp payloads).
         source_gma: Option<PathBuf>,
+        request_id: Option<u64>,
     },
 }
 
@@ -169,21 +171,25 @@ impl CorrelatedBackendTask {
             BackendTaskSource::WorkshopDownload {
                 item_id,
                 start_emitted,
+                request_id,
             } => take_workshop_start_action(
                 WorkshopDownloadTaskKind::Download,
                 *item_id,
                 start_emitted,
                 self.handle.id(),
+                *request_id,
             ),
             BackendTaskSource::WorkshopExtraction {
                 item_id,
                 start_emitted,
+                request_id,
                 ..
             } => take_workshop_start_action(
                 WorkshopDownloadTaskKind::Extract,
                 *item_id,
                 start_emitted,
                 self.handle.id(),
+                *request_id,
             ),
         }
     }
@@ -193,6 +199,7 @@ impl CorrelatedBackendTask {
             BackendTaskSource::WorkshopDownload {
                 item_id: slot,
                 start_emitted,
+                request_id,
             } => {
                 if slot.is_none() {
                     *slot = Some(item_id);
@@ -202,11 +209,13 @@ impl CorrelatedBackendTask {
                     *slot,
                     start_emitted,
                     self.handle.id(),
+                    *request_id,
                 )
             }
             BackendTaskSource::WorkshopExtraction {
                 item_id: slot,
                 start_emitted,
+                request_id,
                 ..
             } => {
                 if slot.is_none() {
@@ -217,6 +226,7 @@ impl CorrelatedBackendTask {
                     *slot,
                     start_emitted,
                     self.handle.id(),
+                    *request_id,
                 )
             }
             BackendTaskSource::Generic => Vec::new(),
@@ -234,7 +244,8 @@ impl CorrelatedBackendTask {
             return Vec::new();
         }
 
-        vec![BackendRuntimeAction::WorkshopDownloadFinished {
+        vec![BackendRuntimeAction::DownloadFinished {
+            request_id: self.source.request_id(),
             item_id,
             installed_path: self.source.source_gma().cloned(),
             extracted_path: extracted_path.clone(),
@@ -266,13 +277,21 @@ impl BackendTaskSource {
             Self::WorkshopExtraction { source_gma, .. } => source_gma.as_ref(),
         }
     }
+
+    const fn request_id(&self) -> Option<u64> {
+        match self {
+            Self::Generic => None,
+            Self::WorkshopDownload { request_id, .. }
+            | Self::WorkshopExtraction { request_id, .. } => *request_id,
+        }
+    }
 }
 
 impl BackendRuntimeAction {
     const fn task_id(&self) -> Option<TaskId> {
         match self {
-            Self::WorkshopDownloadTaskStarted { task_id, .. } => Some(*task_id),
-            Self::WorkshopDownloadFinished { .. } => None,
+            Self::DownloadTaskStarted { task_id, .. } => Some(*task_id),
+            Self::DownloadFinished { .. } | Self::SnapshotFailed { .. } => None,
         }
     }
 }
@@ -282,7 +301,11 @@ pub(super) fn take_workshop_start_action(
     item_id: Option<PublishedFileId>,
     start_emitted: &mut bool,
     task_id: TaskId,
+    request_id: Option<u64>,
 ) -> Vec<BackendRuntimeAction> {
+    if request_id.is_some() {
+        return Vec::new();
+    }
     if *start_emitted {
         return Vec::new();
     }
@@ -291,7 +314,7 @@ pub(super) fn take_workshop_start_action(
     };
 
     *start_emitted = true;
-    vec![BackendRuntimeAction::WorkshopDownloadTaskStarted {
+    vec![BackendRuntimeAction::DownloadTaskStarted {
         kind,
         item_id,
         task_id,
@@ -309,8 +332,17 @@ pub(super) fn apply_transaction_event_to_task(
             (true, actions)
         }
         TransactionRuntimeEvent::Error { error, .. } => {
+            let actions = task
+                .source
+                .request_id()
+                .map_or_else(Vec::new, |request_id| {
+                    vec![BackendRuntimeAction::SnapshotFailed {
+                        request_id,
+                        error: UiError::from(error.clone()),
+                    }]
+                });
             task.handle.error(UiError::from(error.clone()));
-            (true, Vec::new())
+            (true, actions)
         }
         TransactionRuntimeEvent::Data { payload, .. } => {
             let mut actions = match payload {

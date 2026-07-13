@@ -218,6 +218,7 @@ mod tests {
 
         state.open(ActiveModal::Settings, now);
 
+        assert!((0.05..0.25).contains(&state.opacity(now + Duration::from_millis(16))));
         assert!(state.is_animating(now + Duration::from_millis(80)));
         let opacity = state.opacity(now + Duration::from_millis(80));
         assert!(opacity > 0.0 && opacity < 1.0);

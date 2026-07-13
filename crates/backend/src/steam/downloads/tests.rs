@@ -338,6 +338,7 @@ fn installed_folder_without_gma_emits_download_missing_error() {
                 fixture.installed,
                 fixture.item,
                 ExtractDestination::Directory(fixture.extract_root.clone()),
+                None,
             );
 
             let (transaction_id, events) =
@@ -372,6 +373,7 @@ fn installed_folder_with_single_gma_extracts_and_finishes_without_live_steam_cli
                 fixture.installed,
                 fixture.item,
                 ExtractDestination::Directory(fixture.extract_root.clone()),
+                None,
             );
 
             let (transaction_id, events) =
@@ -441,6 +443,7 @@ fn installed_folder_with_multiple_gma_files_emits_download_missing_error() {
                 fixture.installed,
                 fixture.item,
                 ExtractDestination::Directory(fixture.extract_root.clone()),
+                None,
             );
 
             let (transaction_id, events) =

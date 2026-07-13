@@ -65,6 +65,10 @@ jobs:
   build_linux:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -137,6 +141,11 @@ jobs:
           cp "$appimage" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.AppImage"
           cp "$deb" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.deb"
 
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: artifacts/linux/gmpublished-*
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -149,6 +158,10 @@ jobs:
   build_windows:
     needs: verify
     runs-on: windows-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -204,6 +217,11 @@ jobs:
           test -n "$msi"
           cp "$msi" "artifacts/windows/gmpublished-${artifact_version}-x86_64-windows.msi"
 
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: artifacts/windows/gmpublished-*.msi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -216,6 +234,10 @@ jobs:
   build_macos:
     needs: verify
     runs-on: macos-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     env:
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -329,6 +351,11 @@ jobs:
           ditto -c -k --keepParent \
             target/packager/gmpublished.app \
             "artifacts/macos/gmpublished-${artifact_version}-universal-apple-darwin.app.zip"
+
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: artifacts/macos/gmpublished-*
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

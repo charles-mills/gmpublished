@@ -73,6 +73,7 @@ pub struct WorkshopItem {
 }
 
 impl WorkshopItem {
+    #[cfg(test)]
     pub(crate) fn dead(id: PublishedFileId) -> Self {
         Self::from(id)
     }
@@ -114,6 +115,10 @@ pub struct WorkshopMetadata {
     pub(crate) tags: Vec<String>,
     pub(crate) preview_url: Option<String>,
     pub(crate) subscriptions: u64,
+    /// Present only after the single-item detail query requested the full
+    /// Workshop description. `Some("")` is a known-empty description.
+    pub(crate) full_description: Option<String>,
+    pub(crate) owner_steamid: Option<u64>,
     /// ThumbHash of the preview image, computed locally the first time it is
     /// decoded (Steam never supplies it). Persisted so placeholders paint on
     /// the next launch.
@@ -140,6 +145,8 @@ impl WorkshopMetadata {
                 .filter(|url| !url.is_empty())
                 .map(str::to_owned),
             subscriptions: item.subscriptions,
+            full_description: None,
+            owner_steamid: item.steamid,
             thumbhash: None,
         })
     }

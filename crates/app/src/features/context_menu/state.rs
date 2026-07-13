@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use iced::Point;
+use iced::animation::Easing;
 
 use crate::theme::{Tokens, motion};
 
@@ -243,7 +244,7 @@ impl Default for State {
                 false,
                 Tokens::dark().motion.context_menu_enter_duration(),
                 Tokens::dark().motion.context_menu_exit_duration(),
-                motion::expo_ease(),
+                Easing::EaseOut,
             ),
         }
     }
@@ -340,7 +341,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn micro_scale_tracks_the_shared_presence_animation() {
+    fn entrance_starts_visibly_instead_of_snapping_open() {
         let mut state = State::default();
         let now = Instant::now();
         state.open_request(
@@ -352,9 +353,11 @@ mod tests {
             now,
         );
 
+        let first_frame = now + Duration::from_millis(16);
         let midpoint = now + Duration::from_millis(60);
         let settled = now + Duration::from_millis(300);
 
+        assert!((0.1..0.3).contains(&state.opacity(first_frame)));
         assert!(state.scale(midpoint) > motion::POPOVER_CLOSED_SCALE);
         assert!(state.scale(midpoint) < 1.0);
         assert_eq!(state.scale(settled), 1.0);

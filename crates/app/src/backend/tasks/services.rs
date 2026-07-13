@@ -31,6 +31,8 @@ pub struct BackendServices {
     workshop_metadata: Mutex<HashMap<PublishedFileId, CachedWorkshopMetadata>>,
     metadata_snapshot_file: Option<PathBuf>,
     _backend_event_sink: Option<BackendEventSinkRegistration>,
+    #[cfg(test)]
+    _test_data_root: Option<tempfile::TempDir>,
 }
 
 impl BackendServices {
@@ -46,17 +48,27 @@ impl BackendServices {
             || Arc::new(gmpublished_backend::events::NullEventSink) as _,
             BackendEventSinkRegistration::sink,
         );
+        #[cfg(not(test))]
         let backend = build_default_backend(event_sink)?;
+        #[cfg(test)]
+        let (backend, test_data_root) = build_default_backend(event_sink)?;
         let (settings, paths) =
             appdata_snapshot_from_backend(backend.app_data.snapshot(), &UiSettings::default());
         let steam_runtime = SteamRuntime::new(Arc::clone(&backend.steam));
-        Ok(Self::new_with_steam_runtime(
+        let services = Self::new_with_steam_runtime(
             backend,
             settings,
             paths,
             steam_runtime,
             backend_event_sink,
-        ))
+        );
+        #[cfg(test)]
+        let services = {
+            let mut services = services;
+            services._test_data_root = Some(test_data_root);
+            services
+        };
+        Ok(services)
     }
 
     fn new_with_steam_runtime(
@@ -106,6 +118,8 @@ impl BackendServices {
             workshop_metadata: Mutex::new(HashMap::new()),
             metadata_snapshot_file: None,
             _backend_event_sink: backend_event_sink,
+            #[cfg(test)]
+            _test_data_root: None,
         }
     }
 
@@ -142,7 +156,8 @@ impl BackendServices {
     pub(crate) fn for_test_with_event_sink(
         event_sink: Arc<dyn gmpublished_backend::events::BackendEventSink>,
     ) -> Self {
-        let backend = build_default_backend(event_sink).expect("test backend init");
+        let (backend, test_data_root) =
+            build_default_backend(event_sink).expect("test backend init");
         let settings = Settings::default();
         let paths = default_paths(&settings);
         let mut services = Self::with_steam_runtime(
@@ -153,13 +168,15 @@ impl BackendServices {
             None,
         );
         services.persist_appdata_settings = false;
+        services._test_data_root = Some(test_data_root);
         services
     }
 
     #[cfg(test)]
     pub(super) fn for_test_with_ui_settings_file(ui_settings_file: PathBuf) -> Self {
-        let backend = build_default_backend(Arc::new(gmpublished_backend::events::NullEventSink))
-            .expect("test backend init");
+        let (backend, test_data_root) =
+            build_default_backend(Arc::new(gmpublished_backend::events::NullEventSink))
+                .expect("test backend init");
         let ui = UiSettings::load_from_file_or_default(&ui_settings_file);
         let mut settings = Settings::default();
         settings.apply_ui_settings(&ui);
@@ -174,6 +191,7 @@ impl BackendServices {
         services.persist_appdata_settings = false;
         services.persist_ui_settings = true;
         services.ui_settings_file = ui_settings_file;
+        services._test_data_root = Some(test_data_root);
         services
     }
 
@@ -429,13 +447,29 @@ impl BackendServices {
         &self,
         id: PublishedFileId,
     ) -> Result<crate::backend::domain::WorkshopItem, UiError> {
-        Ok(self
-            .fetch_workshop_items(&[id])?
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| WorkshopItem::dead(id)))
+        if !self.steam_connected() {
+            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+        }
+
+        let item = steam_workshop::query_workshop_item_details(&self.backend.steam, id.get())
+            .map(workshop_item_from_backend)
+            .map_err(|error| UiError::from(&error))?;
+        self.cache_workshop_item_details(&item);
+        Ok(item)
     }
 
+    pub(crate) fn cached_workshop_item_details(
+        &self,
+        id: PublishedFileId,
+    ) -> Option<WorkshopMetadata> {
+        self.workshop_metadata
+            .lock()
+            .get(&id)
+            .map(|cached| cached.metadata.clone())
+            .filter(|metadata| metadata.full_description.is_some())
+    }
+
+    #[cfg(test)]
     pub(crate) fn steam_user_details(&self, steamid: u64) -> Result<SteamUser, UiError> {
         if !self.steam_connected() {
             return Err(UiError::from(&SteamRuntimeError::NotConnected));
@@ -444,6 +478,21 @@ impl BackendServices {
         Ok(steam_user_from_workshop_backend(
             steam_users::fetch_steam_user(&self.backend.steam, steamid),
         ))
+    }
+
+    pub(crate) fn steam_user_details_streaming(
+        &self,
+        steamid: u64,
+        mut on_user: impl FnMut(SteamUser),
+    ) -> Result<(), UiError> {
+        if !self.steam_connected() {
+            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+        }
+
+        steam_users::fetch_steam_user_streaming(&self.backend.steam, steamid, |user| {
+            on_user(steam_user_from_workshop_backend(user));
+        });
+        Ok(())
     }
 
     pub(crate) fn steam_connected(&self) -> bool {
@@ -476,6 +525,25 @@ impl BackendServices {
             item_ids
                 .into_iter()
                 .map(|id| gmpublished_backend::appdata::SettingsPublishedFileId(id.get())),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn submit_workshop_snapshot(
+        &self,
+        item_id: PublishedFileId,
+        destination: crate::backend::gma::ExtractDestination,
+        request_id: u64,
+    ) -> Result<(), UiError> {
+        if !self.steam_connected() {
+            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+        }
+
+        downloads::queue_workshop_download_to(
+            &self.backend.downloads,
+            gmpublished_backend::appdata::SettingsPublishedFileId(item_id.get()),
+            destination,
+            request_id,
         );
         Ok(())
     }
@@ -651,6 +719,15 @@ impl BackendServices {
                 {
                     item.thumbhash.clone_from(&existing.metadata.thumbhash);
                 }
+                if let Some(existing) = cache.get(&item.id) {
+                    if item.full_description.is_none() {
+                        item.full_description
+                            .clone_from(&existing.metadata.full_description);
+                    }
+                    if item.owner_steamid.is_none() {
+                        item.owner_steamid = existing.metadata.owner_steamid;
+                    }
+                }
                 cache.insert(
                     item.id,
                     CachedWorkshopMetadata {
@@ -661,6 +738,35 @@ impl BackendServices {
             }
         }
         metadata
+    }
+
+    pub(super) fn cache_workshop_item_details(&self, item: &WorkshopItem) {
+        let Some(mut metadata) = WorkshopMetadata::from_workshop_item(item) else {
+            return;
+        };
+        metadata.full_description = Some(
+            item.description
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        metadata.owner_steamid = item.steamid;
+
+        let fetched_at = metadata_snapshot::now_unix_seconds();
+        let mut cache = self.workshop_metadata.lock();
+        if let Some(existing) = cache.get(&metadata.id)
+            && metadata.thumbhash.is_none()
+        {
+            metadata.thumbhash.clone_from(&existing.metadata.thumbhash);
+        }
+        cache.insert(
+            metadata.id,
+            CachedWorkshopMetadata {
+                metadata,
+                fetched_at,
+            },
+        );
     }
 
     /// Records the ThumbHash a media worker computed for a preview URL into the
@@ -705,6 +811,10 @@ impl BackendServices {
         }
     }
 
+    pub(crate) fn persist_workshop_metadata_cache(&self) {
+        self.write_metadata_snapshot_best_effort();
+    }
+
     #[cfg(test)]
     pub(super) fn set_metadata_snapshot_file_for_test(&mut self, path: PathBuf) {
         self.metadata_snapshot_file = Some(path);
@@ -744,13 +854,11 @@ fn build_default_backend(
 #[cfg(test)]
 fn build_default_backend(
     event_sink: Arc<dyn gmpublished_backend::events::BackendEventSink>,
-) -> Result<Arc<Backend>, gmpublished_backend::BackendInitError> {
-    // Persisted deliberately: nextest runs one test per process, so a stray
-    // tempdir per test process is a non-issue, and keeping a `TempDir` guard
-    // alive would tie it to `Arc<Backend>`'s lifetime for no benefit.
-    let path = tempfile::tempdir().expect("test backend tempdir").keep();
-    gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
+) -> Result<(Arc<Backend>, tempfile::TempDir), gmpublished_backend::BackendInitError> {
+    let root = tempfile::tempdir().expect("test backend tempdir");
+    let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
         event_sink,
-        ..gmpublished_backend::BackendConfig::for_test(&path)
-    })
+        ..gmpublished_backend::BackendConfig::for_test(root.path())
+    })?;
+    Ok((backend, root))
 }

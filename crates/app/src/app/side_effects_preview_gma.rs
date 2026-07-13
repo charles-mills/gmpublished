@@ -1,9 +1,10 @@
 use super::{
-    App, RootMessage, Task, flatten_blocking_ui_result, gma, preview_gma,
-    run_preview_gma_archive_extraction, run_preview_gma_entry_extraction,
-    spawn_blocking_detached_or_warn,
+    App, RootMessage, Task, UiError, flatten_blocking_ui_result, gma, preview_gma,
+    run_preview_gma_archive_extraction, run_preview_gma_entry_extraction, send_root_message,
+    spawn_blocking_detached_or_warn, stream,
 };
 
+use gmpublished_backend::error_key::keys;
 use iced::widget::operation;
 
 impl App {
@@ -48,17 +49,56 @@ impl App {
     ) -> Task<RootMessage> {
         let request_id = request.request_id;
         let workshop_id = request.workshop_id;
-        self.ctx
-            .run_blocking("preview-gma-workshop-metadata", move |app| {
-                preview_gma::query_workshop_metadata(app, workshop_id)
-            })
-            .map(move |result| {
-                RootMessage::PreviewGma(preview_gma::Message::WorkshopMetadataCompleted(
-                    request_id,
-                    workshop_id,
-                    flatten_blocking_ui_result(result),
-                ))
-            })
+        let ctx = self.ctx.clone();
+        Task::stream(stream::channel(8, async move |output| {
+            let mut schedule_error_output = output.clone();
+            let scheduled = spawn_blocking_detached_or_warn(
+                &ctx,
+                "preview-gma-workshop-metadata",
+                "Preview GMA Workshop metadata",
+                move |app| {
+                    let mut output = output;
+                    if let Some(cached) = preview_gma::cached_workshop_metadata(&app, workshop_id) {
+                        let _sent = send_root_message(
+                            &mut output,
+                            RootMessage::PreviewGma(
+                                preview_gma::Message::WorkshopMetadataCompleted(
+                                    request_id,
+                                    workshop_id,
+                                    Ok(Some(cached)),
+                                ),
+                            ),
+                        );
+                    }
+
+                    let result = preview_gma::query_workshop_metadata(&app, workshop_id);
+                    let should_persist = matches!(&result, Ok(Some(_)));
+                    let _sent = send_root_message(
+                        &mut output,
+                        RootMessage::PreviewGma(preview_gma::Message::WorkshopMetadataCompleted(
+                            request_id,
+                            workshop_id,
+                            result,
+                        )),
+                    );
+                    // Keep snapshot I/O behind delivery so a cold detail query
+                    // can paint as soon as Steam responds.
+                    if should_persist {
+                        app.persist_workshop_metadata_cache();
+                    }
+                },
+            );
+            if !scheduled {
+                let _sent = send_root_message(
+                    &mut schedule_error_output,
+                    RootMessage::PreviewGma(preview_gma::Message::WorkshopMetadataCompleted(
+                        request_id,
+                        workshop_id,
+                        Err(UiError::new(keys::STEAM_ERROR)),
+                    )),
+                );
+            }
+        }))
     }
 
     pub(super) fn preview_gma_author_task(
@@ -67,17 +107,49 @@ impl App {
     ) -> Task<RootMessage> {
         let request_id = request.request_id;
         let steamid64 = request.steamid64;
-        self.ctx
-            .run_blocking("preview-gma-author", move |app| {
-                preview_gma::query_steam_user(app, steamid64)
-            })
-            .map(move |result| {
-                RootMessage::PreviewGma(preview_gma::Message::AuthorFetchCompleted(
-                    request_id,
-                    steamid64,
-                    flatten_blocking_ui_result(result),
-                ))
-            })
+        let ctx = self.ctx.clone();
+        Task::stream(stream::channel(8, async move |output| {
+            let mut schedule_error_output = output.clone();
+            let scheduled = spawn_blocking_detached_or_warn(
+                &ctx,
+                "preview-gma-author",
+                "Preview GMA author",
+                move |app| {
+                    let mut output = output;
+                    let result =
+                        preview_gma::query_steam_user_streaming(&app, steamid64, |result| {
+                            let _sent = send_root_message(
+                                &mut output,
+                                RootMessage::PreviewGma(
+                                    preview_gma::Message::AuthorFetchCompleted(
+                                        request_id, steamid64, result,
+                                    ),
+                                ),
+                            );
+                        });
+                    if let Err(error) = result {
+                        let _sent = send_root_message(
+                            &mut output,
+                            RootMessage::PreviewGma(preview_gma::Message::AuthorFetchCompleted(
+                                request_id,
+                                steamid64,
+                                Err(error),
+                            )),
+                        );
+                    }
+                },
+            );
+            if !scheduled {
+                let _sent = send_root_message(
+                    &mut schedule_error_output,
+                    RootMessage::PreviewGma(preview_gma::Message::AuthorFetchCompleted(
+                        request_id,
+                        steamid64,
+                        Err(UiError::new(keys::STEAM_ERROR)),
+                    )),
+                );
+            }
+        }))
     }
 
     pub(super) fn preview_gma_nav_autoscroll_task(&self) -> Task<RootMessage> {

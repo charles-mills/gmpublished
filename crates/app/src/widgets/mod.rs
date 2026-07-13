@@ -1,5 +1,6 @@
 pub mod addon_card;
 pub mod addon_grid;
+pub mod bbcode;
 pub mod context_area;
 pub mod download_count_icon;
 pub mod file_browser;
@@ -10,6 +11,7 @@ pub mod scaled;
 pub mod select_option;
 pub mod shortcut_capture;
 pub mod spinner;
+pub mod split_pane;
 pub mod star_rating;
 pub mod tag_chip;
 pub mod tooltip;

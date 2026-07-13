@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use iced::widget::text_editor;
 
+use crate::backend::domain::WorkshopDownloadSuccess;
 use crate::backend::ui_error::UiError;
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
@@ -22,6 +23,10 @@ pub enum Message {
         upscale_icon_default: bool,
     },
     CloseRequested,
+    WorkshopContentSubmissionCompleted(u64, Result<(), UiError>),
+    WorkshopContentDownloaded(u64, WorkshopDownloadSuccess),
+    WorkshopSnapshotFailed(u64, UiError),
+    WorkshopSnapshotInspected(u64, Result<Arc<VerifiedContentPath>, UiError>),
     AddonPathEdited(String),
     AddonPathAccepted,
     WorkshopLinkRequested,

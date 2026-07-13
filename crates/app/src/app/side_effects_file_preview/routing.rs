@@ -5,6 +5,7 @@ use crate::features::file_preview::{PreviewRequest, RelatedPreviewKind, RelatedP
 pub(super) enum EntryClass {
     Code { syntax: CodeSyntax },
     Image(ImageClass),
+    Font,
     Audio,
     Model,
     ModelCompanion,
@@ -47,6 +48,7 @@ pub(super) fn classify_entry_path(path: &str) -> EntryClass {
         },
         Some("png" | "jpg" | "jpeg") => EntryClass::Image(ImageClass::Encoded),
         Some("vtf") => EntryClass::Image(ImageClass::Vtf),
+        Some("ttf") => EntryClass::Font,
         Some("wav" | "mp3" | "ogg") => EntryClass::Audio,
         Some("mdl") => EntryClass::Model,
         Some("bsp") => EntryClass::Map,

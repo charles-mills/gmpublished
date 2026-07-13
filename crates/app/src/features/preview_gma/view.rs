@@ -1,5 +1,6 @@
 use iced::widget::{
-    Space, button, column, container, image, mouse_area, opaque, row, scrollable, svg, text,
+    Space, button, column, container, image, mouse_area, opaque, pane_grid, row, scrollable,
+    sensor, stack, svg, text,
 };
 use iced::{Center, Color, Element, Length, Size};
 
@@ -10,9 +11,11 @@ use crate::{
     i18n::I18n,
     theme::{self, Tokens, ViewCtx},
     widgets::{
+        bbcode,
         download_count_icon::download_count_icon,
         file_browser::{self, Row as FileBrowserRowData, RowKind as FileBrowserEntryKind},
         spinner::spinner,
+        split_pane,
         star_rating::star_rating,
         tag_chip::tag_chip,
         tooltip as tooltip_widget,
@@ -29,6 +32,9 @@ const DEAD_GLYPH_SIZE: f32 = 32.0;
 const SPINNER_SIZE: f32 = 32.0;
 const DEAD_ICON_SIZE: f32 = 16.0;
 const INFO_LABEL_WIDTH: f32 = 64.0;
+const SIDEBAR_MIN_WIDTH: f32 = 240.0;
+const CONTENT_MIN_WIDTH: f32 = 420.0;
+const SIDEBAR_MAX_FRACTION: f32 = 0.45;
 
 pub fn view<'a>(
     state: &'a State,
@@ -71,10 +77,12 @@ pub fn view<'a>(
         container(dead_icon(tokens.colors.text.into(), DEAD_GLYPH_SIZE))
             .center(Length::Fill)
             .into()
-    } else if let Some(preview) = embedded_preview_body(state, file_preview_state, ctx, expanded) {
+    } else if let Some(preview) =
+        embedded_preview_body(state, file_preview_state, ctx, expanded, modal_size.width)
+    {
         preview
     } else {
-        archive_body(state, ctx)
+        archive_body(state, ctx, modal_size.width)
     };
 
     let panel = opaque(
@@ -93,40 +101,124 @@ fn embedded_preview_body<'a>(
     file_preview_state: &'a file_preview::State,
     ctx: ViewCtx<'a>,
     expanded: bool,
+    modal_width: f32,
 ) -> Option<Element<'a, Message>> {
     #[cfg(feature = "asset-studio")]
     {
+        let tokens = *ctx.tokens;
         if !file_preview_state.is_open() {
             return None;
         }
 
-        let pane = file_preview::pane(file_preview_state, ctx, !expanded).map(Message::FilePreview);
+        let ratio = effective_sidebar_ratio(state.sidebar_ratio(), modal_width);
+        let sidebar_width = first_pane_width(modal_width, ratio);
+        let content_width = (modal_width - sidebar_width - split_pane::DIVIDER_WIDTH).max(1.0);
+        let pane = file_preview::pane(
+            file_preview_state,
+            ctx,
+            !expanded,
+            if expanded {
+                modal_width - tokens.spacing.pad * 2.0
+            } else {
+                content_width - tokens.spacing.pad * 2.0
+            },
+        )
+        .map(Message::FilePreview);
         if expanded {
             Some(pane)
         } else {
+            let grid = pane_grid(state.panes(), |_, pane_kind, _| {
+                pane_grid::Content::new(match pane_kind {
+                    super::state::Pane::Sidebar => sidebar(state, ctx, sidebar_width),
+                    super::state::Pane::Content => file_preview::pane(
+                        file_preview_state,
+                        ctx,
+                        true,
+                        content_width - tokens.spacing.pad * 2.0,
+                    )
+                    .map(Message::FilePreview),
+                })
+            })
+            .spacing(split_pane::DIVIDER_WIDTH)
+            .min_size(SIDEBAR_MIN_WIDTH)
+            .on_resize(split_pane::GRAB_LEEWAY, move |event| {
+                Message::PanesResized {
+                    split: event.split,
+                    ratio: effective_sidebar_ratio(event.ratio, modal_width),
+                }
+            })
+            .style(move |_| split_pane::style(&tokens));
+            let split = stack![
+                grid,
+                split_pane::reset_overlay(sidebar_width, Message::PanesReset(modal_width))
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill);
             Some(
-                row![sidebar(state, ctx), pane]
-                    .spacing(0.0)
-                    .height(Length::Fill)
+                sensor(split)
+                    .on_show(|size| Message::PanesLayoutChanged(size.width))
+                    .on_resize(|size| Message::PanesLayoutChanged(size.width))
                     .into(),
             )
         }
     }
     #[cfg(not(feature = "asset-studio"))]
     {
-        let _ = (state, file_preview_state, ctx, expanded);
+        let _ = (state, file_preview_state, ctx, expanded, modal_width);
         None
     }
 }
 
-fn archive_body<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
-    row![sidebar(state, ctx), browser(state, ctx)]
-        .spacing(0.0)
-        .height(Length::Fill)
+fn archive_body<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Message> {
+    let tokens = *ctx.tokens;
+    let ratio = effective_sidebar_ratio(state.sidebar_ratio(), width);
+    let sidebar_width = first_pane_width(width, ratio);
+    let grid = pane_grid(state.panes(), |_, pane_kind, _| {
+        pane_grid::Content::new(match pane_kind {
+            super::state::Pane::Sidebar => sidebar(state, ctx, sidebar_width),
+            super::state::Pane::Content => browser(state, ctx),
+        })
+    })
+    .spacing(split_pane::DIVIDER_WIDTH)
+    .min_size(SIDEBAR_MIN_WIDTH)
+    .on_resize(split_pane::GRAB_LEEWAY, move |event| {
+        Message::PanesResized {
+            split: event.split,
+            ratio: effective_sidebar_ratio(event.ratio, width),
+        }
+    })
+    .style(move |_| split_pane::style(&tokens));
+
+    let split = stack![
+        grid,
+        split_pane::reset_overlay(sidebar_width, Message::PanesReset(width))
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill);
+    sensor(split)
+        .on_show(|size| Message::PanesLayoutChanged(size.width))
+        .on_resize(|size| Message::PanesLayoutChanged(size.width))
         .into()
 }
 
-fn sidebar<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+pub(super) fn effective_sidebar_ratio(ratio: f32, width: f32) -> f32 {
+    split_pane::clamp_ratio(
+        ratio,
+        width,
+        SIDEBAR_MIN_WIDTH,
+        width * SIDEBAR_MAX_FRACTION,
+        CONTENT_MIN_WIDTH,
+        f32::INFINITY,
+    )
+}
+
+fn first_pane_width(width: f32, ratio: f32) -> f32 {
+    (width * ratio - split_pane::DIVIDER_WIDTH / 2.0)
+        .round()
+        .max(SIDEBAR_MIN_WIDTH)
+}
+
+fn sidebar<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let extract = button(
@@ -147,7 +239,7 @@ fn sidebar<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     .height(Length::Fixed(tokens.dims.control_height))
     .style(move |_, status| theme::styles::preview_extract_button(&tokens, status));
 
-    let card = scrollable(sidebar_card(state, ctx))
+    let card = scrollable(sidebar_card(state, ctx, width))
         .width(Length::Fill)
         .height(Length::Fill)
         .direction(scrollable::Direction::Vertical(
@@ -156,13 +248,13 @@ fn sidebar<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .style(move |_, status| theme::styles::scrollbar(&tokens, status));
 
     container(column![extract, card].height(Length::Fill))
-        .width(Length::Fixed(tokens.dims.preview_sidebar_width))
+        .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| theme::styles::preview_sidebar(&tokens))
         .into()
 }
 
-fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let details = state.details();
     let mut content = column![].padding(tokens.spacing.pad).spacing(0.0);
@@ -172,16 +264,11 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
     content = content.push(stats_row(details, &tokens));
     content = content.push(Space::new().height(tokens.spacing.gap_md));
 
-    content = content.push(preview_image(state, &tokens));
+    content = content.push(preview_image(state, &tokens, width));
 
     if !details.title.trim().is_empty() {
         content = content.push(Space::new().height(tokens.spacing.gap_md));
-        content = content.push(
-            text(details.title.as_str())
-                .size(tokens.typography.body)
-                .width(Length::Fill)
-                .align_x(Center),
-        );
+        content = content.push(addon_title(state, details, &tokens));
     }
 
     if !details.tag_rows.is_empty() {
@@ -194,23 +281,55 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
         content = content.push(info_table(state, details, ctx));
     }
 
-    if state.can_open_workshop_link() {
-        content = content.push(Space::new().height(tokens.spacing.gap));
-        content = content.push(workshop_link(ctx));
-        content = content.push(Space::new().height(tokens.spacing.gap));
-    }
-
-    if !details.description.trim().is_empty() {
+    if !details.description.is_empty() {
         content = content.push(Space::new().height(tokens.spacing.gap_sm));
         content = content.push(
-            text(details.description.as_str())
-                .size(tokens.typography.body_sm)
-                .color(Color::from(tokens.colors.text_dim))
-                .width(Length::Fill),
+            bbcode::view(
+                &details.description,
+                state.revealed_description_spoilers(),
+                &tokens,
+            )
+            .map(|event| match event {
+                bbcode::Event::OpenLink(url) => Message::DescriptionLinkRequested(url),
+                bbcode::Event::ToggleSpoiler(id) => Message::DescriptionSpoilerToggled(id),
+            }),
         );
     }
 
     content.into()
+}
+
+fn addon_title<'a>(state: &State, details: &'a Details, tokens: &Tokens) -> Element<'a, Message> {
+    let title = text(details.title.as_str())
+        .size(tokens.typography.body)
+        .width(Length::Fill)
+        .align_x(Center);
+
+    if state.can_open_workshop_link() {
+        let tokens = *tokens;
+        button(title)
+            .on_press(Message::WorkshopLinkRequested)
+            .padding(0.0)
+            .width(Length::Fill)
+            .style(move |_, status| addon_title_style(&tokens, status))
+            .into()
+    } else {
+        title.into()
+    }
+}
+
+fn addon_title_style(tokens: &Tokens, status: button::Status) -> button::Style {
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => tokens.colors.link,
+        button::Status::Active => tokens.colors.text,
+        button::Status::Disabled => tokens.colors.text_dim,
+    };
+
+    button::Style {
+        background: None,
+        text_color: text_color.into(),
+        ..button::Style::default()
+    }
 }
 
 fn stats_row<'a>(details: &'a Details, tokens: &Tokens) -> Element<'a, Message> {
@@ -245,15 +364,19 @@ fn stats_row<'a>(details: &'a Details, tokens: &Tokens) -> Element<'a, Message> 
     .into()
 }
 
-fn preview_image<'a>(state: &'a State, tokens: &Tokens) -> Element<'a, Message> {
-    // Natural aspect ratio: the image sizes itself to the sidebar width.
-    let inner_width = tokens.dims.preview_sidebar_width - tokens.spacing.pad * 2.0;
+fn preview_image<'a>(
+    state: &'a State,
+    tokens: &Tokens,
+    sidebar_width: f32,
+) -> Element<'a, Message> {
+    // Keep the thumbnail footprint stable while its content loads.
+    let inner_width = (sidebar_width - tokens.spacing.pad * 2.0).max(1.0);
     let content: Element<'a, Message> = state.thumbnail_handle().map_or_else(
         || {
             if state.thumbnail_loading() {
                 container(spinner(tokens, state.spinner_elapsed(), SPINNER_SIZE))
                     .width(Length::Fill)
-                    .height(Length::Fixed(inner_width))
+                    .height(Length::Fill)
                     .center(Length::Fill)
                     .into()
             } else {
@@ -262,17 +385,23 @@ fn preview_image<'a>(state: &'a State, tokens: &Tokens) -> Element<'a, Message> 
                     DEAD_GLYPH_SIZE * 2.0,
                 ))
                 .width(Length::Fill)
-                .height(Length::Fixed(inner_width))
+                .height(Length::Fill)
                 .center(Length::Fill)
                 .into()
             }
         },
-        |handle| image(handle.clone()).width(Length::Fill).into(),
+        |handle| {
+            image(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        },
     );
 
     let tokens = *tokens;
     container(content)
         .width(Length::Fill)
+        .height(Length::Fixed(inner_width))
         .style(move |_| theme::styles::preview_image_well(&tokens))
         .into()
 }
@@ -415,31 +544,6 @@ fn relative_text(relative: &RelativeTime, i18n: &I18n) -> String {
     } else {
         i18n.trn(relative.key, &[("arg0", relative.count.as_str())])
     }
-}
-
-fn workshop_link(ctx: ViewCtx<'_>) -> Element<'_, Message> {
-    let tokens = *ctx.tokens;
-    let i18n = ctx.i18n;
-    let link = row![
-        text(i18n.tr("preview-gma-steam-workshop"))
-            .size(tokens.typography.body)
-            .color(Color::from(tokens.colors.link)),
-        icon(
-            assets::icons::context_link_out(),
-            tokens.colors.link.into(),
-            tokens.dims.icon_size_sm,
-        ),
-    ]
-    .align_y(Center)
-    .spacing(tokens.spacing.gap_xs);
-
-    container(
-        mouse_area(link)
-            .on_press(Message::WorkshopLinkRequested)
-            .interaction(iced::mouse::Interaction::Pointer),
-    )
-    .center_x(Length::Fill)
-    .into()
 }
 
 fn browser<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
@@ -619,4 +723,21 @@ fn icon<'a>(handle: iced::widget::svg::Handle, color: Color, size: f32) -> Eleme
         .height(Length::Fixed(size))
         .style(move |_, _| svg::Style { color: Some(color) })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addon_title_uses_link_color_only_while_interacting() {
+        let tokens = Tokens::dark();
+        let active = addon_title_style(&tokens, button::Status::Active);
+        let hovered = addon_title_style(&tokens, button::Status::Hovered);
+
+        assert_eq!(active.background, None);
+        assert_eq!(active.text_color, tokens.colors.text.into());
+        assert_eq!(hovered.background, None);
+        assert_eq!(hovered.text_color, tokens.colors.link.into());
+    }
 }

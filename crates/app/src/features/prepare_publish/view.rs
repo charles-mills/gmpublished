@@ -60,7 +60,7 @@ pub fn view<'a>(
         .resolve(viewport_size, tokens.dims.modal_viewport_ratio)
     };
 
-    let preview = embedded_preview_body(state, file_preview_state, ctx, expanded);
+    let preview = embedded_preview_body(state, file_preview_state, ctx, expanded, modal_size.width);
     let preview_open = preview.is_some();
     let body: Element<'a, Message> = preview.unwrap_or_else(|| {
         row![
@@ -92,6 +92,7 @@ fn embedded_preview_body<'a>(
     file_preview_state: &'a file_preview::State,
     ctx: ViewCtx<'a>,
     expanded: bool,
+    modal_width: f32,
 ) -> Option<Element<'a, Message>> {
     #[cfg(feature = "asset-studio")]
     {
@@ -100,7 +101,13 @@ fn embedded_preview_body<'a>(
             return None;
         }
 
-        let pane = file_preview::pane(file_preview_state, ctx, !expanded).map(Message::FilePreview);
+        let content_width = if expanded {
+            modal_width - tokens.spacing.pad * 2.0
+        } else {
+            modal_width - tokens.dims.publish_left_column_width - tokens.spacing.pad * 4.0
+        };
+        let pane = file_preview::pane(file_preview_state, ctx, !expanded, content_width)
+            .map(Message::FilePreview);
         if expanded {
             Some(pane)
         } else {
@@ -121,7 +128,7 @@ fn embedded_preview_body<'a>(
     }
     #[cfg(not(feature = "asset-studio"))]
     {
-        let _ = (state, file_preview_state, ctx, expanded);
+        let _ = (state, file_preview_state, ctx, expanded, modal_width);
         None
     }
 }

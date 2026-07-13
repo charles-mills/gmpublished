@@ -24,6 +24,9 @@ use crate::media::{
 };
 
 const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
+const ADDON_THUMBNAIL_MIN_EDGE: u32 = 16;
+const SPATIAL_COLUMNS: usize = 16;
+const SPATIAL_ROWS: usize = 10;
 const LABEL_SCALE_BUCKET: f32 = 0.5;
 const MAX_LABEL_SCALE: f32 = 3.0;
 const ANALYZER_THUMBNAIL_GENERATION: u64 = 0;
@@ -48,6 +51,7 @@ pub struct State {
     /// resolve worker.
     preview_resolve_epoch: Option<u64>,
     preview_urls: HashMap<PublishedFileId, String>,
+    thumbnail_plan: Vec<(PublishedFileId, u32)>,
     thumbnails: HashMap<PublishedFileId, ThumbnailTile>,
     /// Blurred ThumbHash stand-ins painted until the real tile decodes; kept
     /// separate so `thumbnail_demands` still requests the sharp image.
@@ -76,6 +80,7 @@ impl Default for State {
             layout_workshop_ids: HashSet::new(),
             preview_resolve_epoch: None,
             preview_urls: HashMap::new(),
+            thumbnail_plan: Vec::new(),
             thumbnails: HashMap::new(),
             placeholder_thumbnails: HashMap::new(),
             failed_thumbnails: HashSet::new(),
@@ -353,16 +358,17 @@ impl State {
         }
 
         let demands = self
-            .preview_urls
+            .thumbnail_plan
             .iter()
-            .filter(|(workshop_id, _)| self.layout_workshop_ids.contains(workshop_id))
             .filter(|(workshop_id, _)| !self.thumbnails.contains_key(workshop_id))
             .filter(|(workshop_id, _)| !self.failed_thumbnails.contains(workshop_id))
-            .map(|(workshop_id, preview_url)| thumbnail_demand::Demand {
-                id: workshop_demand_id(*workshop_id),
-                input: ThumbnailInput::from_url(preview_url.clone()),
-                logical_max_edge: ADDON_THUMBNAIL_MAX_EDGE,
-                priority: thumbnail_demand::Priority::SizeAnalyzer,
+            .filter_map(|(workshop_id, max_edge)| {
+                Some(thumbnail_demand::Demand {
+                    id: workshop_demand_id(*workshop_id),
+                    input: ThumbnailInput::from_url(self.preview_urls.get(workshop_id)?.clone()),
+                    logical_max_edge: *max_edge,
+                    priority: thumbnail_demand::Priority::SizeAnalyzer,
+                })
             })
             .collect();
 
@@ -431,6 +437,7 @@ impl State {
                 self.mark_thumbnails_dirty()
             }
             DeliveryResult::Failed { .. } => {
+                self.placeholder_thumbnails.remove(&workshop_id);
                 self.failed_thumbnails.insert(workshop_id);
                 self.mark_thumbnails_dirty()
             }
@@ -581,6 +588,7 @@ impl State {
                 let workshop_ids = layout_workshop_ids(&layout);
                 self.retain_workshop_ids(&workshop_ids);
                 self.layout_workshop_ids = workshop_ids;
+                self.thumbnail_plan = spatial_thumbnail_plan(&layout);
                 // Labels rasterize synchronously with the layout so every
                 // frame of a live resize draws a coherent label set — the
                 // category count is small and the raster cache absorbs
@@ -604,6 +612,7 @@ impl State {
         self.projection_key = None;
         self.layout = None;
         self.layout_workshop_ids.clear();
+        self.thumbnail_plan.clear();
         self.preview_resolve_epoch = None;
         self.preview_urls.clear();
         self.thumbnails.clear();
@@ -679,6 +688,68 @@ fn layout_workshop_ids(layout: &TreemapLayout) -> HashSet<PublishedFileId> {
         .into_iter()
         .filter_map(|leaf| leaf.addon.workshop_id)
         .collect()
+}
+
+fn spatial_thumbnail_plan(layout: &TreemapLayout) -> Vec<(PublishedFileId, u32)> {
+    let mut tiles = HashMap::<PublishedFileId, (Rect, u32)>::new();
+    for leaf in layout.leaf_rects() {
+        let Some(id) = leaf.addon.workshop_id else {
+            continue;
+        };
+        let edge = analyzer_thumbnail_edge(leaf.rect);
+        tiles
+            .entry(id)
+            .and_modify(|(rect, max_edge)| {
+                *max_edge = (*max_edge).max(edge);
+                if leaf.rect.width * leaf.rect.height > rect.width * rect.height {
+                    *rect = leaf.rect;
+                }
+            })
+            .or_insert((leaf.rect, edge));
+    }
+
+    let mut buckets = (0..SPATIAL_COLUMNS * SPATIAL_ROWS)
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<(PublishedFileId, Rect, u32)>>>();
+
+    for (id, (rect, edge)) in tiles {
+        let column = (((rect.x + rect.width / 2.0) / layout.bounds.width) * SPATIAL_COLUMNS as f64)
+            .floor()
+            .clamp(0.0, (SPATIAL_COLUMNS - 1) as f64) as usize;
+        let row = (((rect.y + rect.height / 2.0) / layout.bounds.height) * SPATIAL_ROWS as f64)
+            .floor()
+            .clamp(0.0, (SPATIAL_ROWS - 1) as f64) as usize;
+        buckets[row * SPATIAL_COLUMNS + column].push((id, rect, edge));
+    }
+
+    for bucket in &mut buckets {
+        bucket.sort_by(|left, right| {
+            (left.1.width * left.1.height)
+                .total_cmp(&(right.1.width * right.1.height))
+                .then_with(|| right.0.cmp(&left.0))
+        });
+    }
+
+    let mut plan = Vec::new();
+    loop {
+        let mut added = false;
+        for bucket in &mut buckets {
+            if let Some((id, _, edge)) = bucket.pop() {
+                plan.push((id, edge));
+                added = true;
+            }
+        }
+        if !added {
+            return plan;
+        }
+    }
+}
+
+fn analyzer_thumbnail_edge(rect: Rect) -> u32 {
+    (rect.width.max(rect.height).ceil() as u32)
+        .clamp(ADDON_THUMBNAIL_MIN_EDGE, ADDON_THUMBNAIL_MAX_EDGE)
+        .next_power_of_two()
+        .min(ADDON_THUMBNAIL_MAX_EDGE)
 }
 
 /// Epoch differences alone do not count as a content change; everything

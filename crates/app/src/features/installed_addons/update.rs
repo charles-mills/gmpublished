@@ -7,8 +7,8 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::RouteEntered => {
             state.enter_route();
-            // Demands are visibility-gated: exit released every thumbnail,
-            // so entry must re-sync them even when the visible range is
+            // Demands are visibility-gated: exit dropped them to an empty
+            // set, so entry must re-sync them even when the visible range is
             // unchanged (an unchanged range emits no VisibleRangeChanged).
             let mut effects = metadata_request_effects(state);
             effects.push(Effect::ThumbnailDemandsChanged);
@@ -237,6 +237,31 @@ mod tests {
                 Effect::ThumbnailDemandsChanged,
             ]
         );
+    }
+
+    #[test]
+    fn first_scroll_recovers_paging_when_viewport_was_not_observed() {
+        let mut state = State::default();
+        state.enter_route();
+        let rows = (1..=105)
+            .map(|index| {
+                Row::for_test(
+                    &format!("/tmp/{index}.gma"),
+                    &format!("Addon {index}"),
+                    Some(
+                        PublishedFileId::new(index as u64)
+                            .expect("test fixture ids are always nonzero"),
+                    ),
+                )
+            })
+            .collect();
+        state.apply_snapshot(LibraryRefreshReason::Startup, Ok(rows));
+        assert_eq!(state.loaded_count(), 50);
+
+        let effects = update(&mut state, Message::Grid(addon_grid::Message::Scrolled(1)));
+
+        assert_eq!(state.loaded_count(), 100);
+        assert_eq!(effects, vec![Effect::ThumbnailDemandsChanged]);
     }
 
     #[test]

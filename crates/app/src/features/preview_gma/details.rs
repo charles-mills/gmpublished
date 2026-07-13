@@ -1,9 +1,10 @@
 use std::path::Path;
 
-use crate::backend::domain::{AvatarRgba, PublishedFileId};
+use gmpublished_backend::bbcode::Document as BbCodeDocument;
 use iced::widget::image;
 use jiff::{Timestamp, tz::TimeZone};
 
+use crate::backend::domain::{AvatarRgba, PublishedFileId};
 use crate::backend::gma::{GmaHeader, GmaMetadata, PreviewArchive, workshop_id_from_filename};
 use crate::format::DownloadCountFormatter;
 
@@ -23,7 +24,7 @@ pub struct Details {
     pub(crate) author: Option<AuthorDisplay>,
     pub(crate) metadata_rows: Vec<MetadataRow>,
     pub(crate) tag_rows: Vec<TagRow>,
-    pub(crate) description: String,
+    pub(crate) description: BbCodeDocument,
     pub(crate) has_stats: bool,
     pub(crate) subscriptions: String,
     pub(crate) score_bucket: i32,
@@ -124,7 +125,7 @@ pub fn details_for_archive(
         author: workshop.and_then(|workshop| author_display(workshop, author_fetch_failed)),
         metadata_rows,
         tag_rows: tag_rows(&header.metadata, workshop),
-        description: details_description(&header.metadata, workshop),
+        description: BbCodeDocument::parse(&details_description(&header.metadata, workshop)),
         has_stats,
         subscriptions,
         score_bucket,
@@ -419,7 +420,7 @@ mod tests {
                 .build(),
         )
         .expect("fixture archive should load");
-        let workshop = WorkshopMetadata {
+        let mut workshop = WorkshopMetadata {
             id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
             title: "Remote Title".to_owned(),
             author: Some("Ada".to_owned()),
@@ -452,7 +453,7 @@ mod tests {
         );
         assert!(!author.failed);
         assert_eq!(details.title, "Remote Title");
-        assert_eq!(details.description, "Remote description");
+        assert_eq!(details.description.plain_text(), "Remote description");
         assert!(details.has_stats);
         assert_eq!(details.subscriptions, "12,345");
         assert_eq!(details.score_bucket, 4);
@@ -475,6 +476,21 @@ mod tests {
                 .iter()
                 .any(|row| row.label_key == "preview-gma-updated")
         );
+
+        let long_body = "Long workshop text. ".repeat(40);
+        let long_body = long_body.trim_end();
+        let long_plain_text = format!("Full description\n{long_body}");
+        workshop.description = format!("[h1]Full description[/h1]\n{long_body}");
+        let long_details = details_for_archive(
+            &archive,
+            "/tmp/local.gma",
+            "Fallback",
+            Some(&workshop),
+            false,
+            DownloadCountFormatter::default(),
+        );
+        assert!(long_plain_text.len() > 255);
+        assert_eq!(long_details.description.plain_text(), long_plain_text);
     }
 
     #[test]

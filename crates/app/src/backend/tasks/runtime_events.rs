@@ -4,7 +4,7 @@ use super::{
     Arc, BackendAppDataSnapshot, BackendDownloadStartedEvent, BackendExtractionStartedEvent,
     BackendSinkEvent, BackendTransactionEvent, DOWNLOAD_STATUS_LOCATING, Duration, PathBuf,
     PublishedFileId, SyncSender, TaskId, TransactionError, TransactionPayload, TrySendError,
-    WorkshopDownloadTaskKind, fmt, mpsc,
+    UiError, WorkshopDownloadTaskKind, fmt, mpsc,
 };
 
 #[cfg(not(test))]
@@ -145,12 +145,14 @@ pub enum BackendRuntimeEvent {
     InstalledAddonsRefreshed,
     DownloadStarted {
         transaction_id: u32,
+        request_id: Option<u64>,
     },
     ExtractionStarted {
         transaction_id: u32,
         source_path: Option<PathBuf>,
         file_name: Option<String>,
         workshop_id: Option<PublishedFileId>,
+        request_id: Option<u64>,
     },
     Transaction(TransactionRuntimeEvent),
 }
@@ -222,15 +224,20 @@ impl BackendRuntimeEventEffects {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BackendRuntimeAction {
-    WorkshopDownloadTaskStarted {
+    DownloadTaskStarted {
         kind: WorkshopDownloadTaskKind,
         item_id: PublishedFileId,
         task_id: TaskId,
     },
-    WorkshopDownloadFinished {
+    DownloadFinished {
+        request_id: Option<u64>,
         item_id: PublishedFileId,
         installed_path: Option<PathBuf>,
         extracted_path: PathBuf,
+    },
+    SnapshotFailed {
+        request_id: u64,
+        error: UiError,
     },
 }
 
@@ -305,6 +312,7 @@ impl From<BackendDownloadStartedEvent> for BackendRuntimeEvent {
     fn from(event: BackendDownloadStartedEvent) -> Self {
         Self::DownloadStarted {
             transaction_id: event.transaction_id,
+            request_id: event.request_id,
         }
     }
 }
@@ -318,6 +326,7 @@ impl From<BackendExtractionStartedEvent> for BackendRuntimeEvent {
             workshop_id: event.workshop_id.map(|id| {
                 PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
             }),
+            request_id: event.request_id,
         }
     }
 }

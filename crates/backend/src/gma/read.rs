@@ -30,7 +30,7 @@ enum GmaBytes {
 impl GmaBytes {
     fn as_slice(&self) -> &[u8] {
         match self {
-            Self::Mem(bytes) => bytes.as_slice(),
+            Self::Mem(bytes) => bytes.as_ref(),
             Self::Mapped(map) | Self::TempBacked { map, .. } => map,
         }
     }

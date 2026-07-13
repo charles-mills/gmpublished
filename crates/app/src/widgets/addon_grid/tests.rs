@@ -158,6 +158,22 @@ fn next_page_request_is_emitted_near_the_end_once() {
 }
 
 #[test]
+fn unmeasured_viewport_requests_next_page_on_first_scroll() {
+    let mut state = State {
+        has_more_pages: true,
+        ..State::default()
+    };
+    let _ = state.set_items(items(&[100.0, 100.0, 100.0, 100.0]));
+
+    assert_eq!(
+        apply(&mut state, Message::Scrolled(1)),
+        vec![Message::NextPageRequested]
+    );
+    assert_eq!(apply(&mut state, Message::Scrolled(2)), Vec::new());
+    assert!(state.next_page_was_requested());
+}
+
+#[test]
 fn rows_use_addon_card_preferred_height() {
     let tokens = Tokens::dark();
     let card_width = 200.0;

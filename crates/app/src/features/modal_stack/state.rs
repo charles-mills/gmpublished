@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use iced::animation::Easing;
+
 use crate::theme::{Tokens, motion};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,7 +34,7 @@ impl Default for Layer {
                 false,
                 Tokens::dark().motion.modal_enter_duration(),
                 Tokens::dark().motion.modal_exit_duration(),
-                motion::expo_ease(),
+                Easing::EaseOut,
             ),
         }
     }

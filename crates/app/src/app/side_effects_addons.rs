@@ -79,12 +79,15 @@ impl App {
             my_workshop::PreparePublishTarget::New => prepare_publish::OpenTarget::New,
             my_workshop::PreparePublishTarget::Update(update) => {
                 let workshop_id = update.workshop_id;
+                let (snapshot_request_id, snapshot_destination) =
+                    self.prepare_publish_workshop_snapshot(workshop_id);
                 prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
                     workshop_id,
                     title: update.title,
                     tags: update.tags,
                     preview_url: update.preview_url,
-                    saved_path: self.prepare_publish_saved_path(workshop_id),
+                    snapshot_request_id,
+                    snapshot_destination,
                 })
             }
         };

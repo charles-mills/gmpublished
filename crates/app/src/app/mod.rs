@@ -440,11 +440,20 @@ fn archive_entry_extension(path: &str) -> Option<&str> {
 
 impl App {
     #[cfg(test)]
-    pub(crate) fn new_for_test() -> (Self, Task<RootMessage>) {
-        Self::new(BackendContext::new().expect("test backend context"))
+    pub(crate) fn new_for_test() -> Self {
+        Self::from_context(BackendContext::new().expect("test backend context"))
     }
 
     pub(crate) fn new(ctx: BackendContext) -> (Self, Task<RootMessage>) {
+        let mut app = Self::from_context(ctx);
+        let startup_tasks = app.startup_tasks();
+        (app, startup_tasks)
+    }
+
+    /// Deterministic construction shared by production and tests. External
+    /// startup work is deliberately kept in `startup_tasks`, so ordinary
+    /// state/effect tests never launch HTTP, discovery, or warm-up jobs.
+    fn from_context(ctx: BackendContext) -> Self {
         let thumbnails = thumbnail_demand::Manager::new(thumbnail_demand::Config {
             disk_cache_dir: gmpublished_backend::appdata::cache_dir()
                 .map(|dir| dir.join("thumbnails")),
@@ -481,32 +490,36 @@ impl App {
         // grids paint blurred-then-sharp instead of blank while decoding.
         app.thumbnails.seed_thumbhashes(app.ctx.thumbhash_seed());
 
+        app
+    }
+
+    fn startup_tasks(&mut self) -> Task<RootMessage> {
         let startup_snapshot_task =
-            app.ctx
+            self.ctx
                 .library_snapshot()
                 .map_or_else(Task::none, |snapshot| {
                     #[cfg(feature = "debug")]
-                    let snapshot = app.visible_library_snapshot(&snapshot);
-                    let installed = app.apply_installed_addons_message(
+                    let snapshot = self.visible_library_snapshot(&snapshot);
+                    let installed = self.apply_installed_addons_message(
                         installed_addons::Message::SnapshotPushed(
                             LibraryRefreshReason::Startup,
                             Ok(installed_addons::rows_from_snapshot(&snapshot)),
                         ),
                     );
                     let analyzer =
-                        app.apply_size_analyzer_message(size_analyzer::Message::SnapshotPushed(
+                        self.apply_size_analyzer_message(size_analyzer::Message::SnapshotPushed(
                             LibraryRefreshReason::Startup,
                             Ok(Some(snapshot.clone())),
                         ));
-                    sync_search_installed_addons(&app.ctx.backend().search, Some(&snapshot));
+                    sync_search_installed_addons(&self.ctx.backend().search, Some(&snapshot));
                     Task::batch([installed, analyzer])
                 });
-        let startup_route = app.state.shell.route();
-        let startup_route_task = app.route_lifecycle_task(startup_route, RouteLifecycle::Entered);
-        let startup_library_started = app.apply_installed_addons_message(
+        let startup_route = self.state.shell.route();
+        let startup_route_task = self.route_lifecycle_task(startup_route, RouteLifecycle::Entered);
+        let startup_library_started = self.apply_installed_addons_message(
             installed_addons::Message::LibraryRefreshStarted(LibraryRefreshReason::Startup),
         );
-        let startup_library_task = app
+        let startup_library_task = self
             .ctx
             .begin_library_refresh(LibraryRefreshReason::Startup)
             .map_or_else(Task::none, |task| {
@@ -519,14 +532,14 @@ impl App {
         // event fires before our event sink exists and is lost. Seed the
         // session from the current level; the session state machine dedups a
         // repeated Connected if the live event also arrives.
-        let steam_bootstrap_task = if app.ctx.steam_connected() {
+        let steam_bootstrap_task = if self.ctx.steam_connected() {
             Task::done(RootMessage::SteamSession(
                 steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
             ))
         } else {
             Task::none()
         };
-        let update_check_task = app
+        let update_check_task = self
             .ctx
             .run_blocking("shell-update-check", |_app| {
                 shell::fetch_latest_update(env!("CARGO_PKG_VERSION")).map_err(Arc::new)
@@ -536,26 +549,23 @@ impl App {
         // update(); loading the font database is the one expensive part, so
         // warm the shared context off the UI thread before the route is
         // first entered. One-shot — no timer.
-        let label_context_warmup_task = app
+        let label_context_warmup_task = self
             .ctx
             .run_blocking("label-context-warmup", |_app| {
                 crate::media::size_analyzer_render::with_shared_label_context(|_context| ());
             })
             .discard();
 
-        (
-            app,
-            Task::batch([
-                system::theme().map(RootMessage::SystemThemeObserved),
-                startup_snapshot_task,
-                startup_route_task,
-                startup_library_started,
-                startup_library_task,
-                steam_bootstrap_task,
-                update_check_task,
-                label_context_warmup_task,
-            ]),
-        )
+        Task::batch([
+            system::theme().map(RootMessage::SystemThemeObserved),
+            startup_snapshot_task,
+            startup_route_task,
+            startup_library_started,
+            startup_library_task,
+            steam_bootstrap_task,
+            update_check_task,
+            label_context_warmup_task,
+        ])
     }
 
     pub(crate) fn update(&mut self, message: RootMessage) -> Task<RootMessage> {

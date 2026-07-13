@@ -37,9 +37,6 @@ pub mod theme;
 mod util;
 mod widgets;
 
-#[global_allocator]
-static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 const PANIC_LOG_FILE_NAME: &str = "gmpublished-panic.log";
 const MIN_WINDOW_WIDTH: f32 = 800.0;
 const MIN_WINDOW_HEIGHT: f32 = 600.0;

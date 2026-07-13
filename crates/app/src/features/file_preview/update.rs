@@ -155,6 +155,28 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.set_particle_control_point(index, position);
             Vec::new()
         }
+        #[cfg(feature = "asset-studio")]
+        Message::InspectorResized { split, ratio } => {
+            state.resize_inspector(split, ratio);
+            Vec::new()
+        }
+        #[cfg(feature = "asset-studio")]
+        Message::InspectorLayoutChanged(width) => {
+            state.set_inspector_ratio(super::view::effective_inspector_ratio(
+                state.inspector_ratio(),
+                width,
+            ));
+            Vec::new()
+        }
+        #[cfg(feature = "asset-studio")]
+        Message::InspectorReset(width) => {
+            state.reset_inspector();
+            state.set_inspector_ratio(super::view::effective_inspector_ratio(
+                state.inspector_ratio(),
+                width,
+            ));
+            Vec::new()
+        }
         Message::BackRequested => vec![Effect::ModalCloseRequested],
         Message::ExpandToggled => {
             #[cfg(feature = "asset-studio")]

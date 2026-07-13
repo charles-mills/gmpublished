@@ -95,7 +95,6 @@ iced = { version = "0.14.0", default-features = false, features = ["advanced", "
 jiff = { version = "0.2.31", default-features = false, features = ["tz-system"] }
 log = "0.4"
 lzma-rust2 = { version = "0.16.4", default-features = false, features = ["std", "optimization"] }
-mimalloc = "0.1"
 # unicode-casefold is required by `CaseMatching::Ignore`, unicode-normalization
 # by `Normalization::Smart`; the omitted default (unicode-segmentation) only
 # collapses grapheme clusters to their first codepoint during matching.

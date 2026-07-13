@@ -10,7 +10,7 @@ use super::{
         bake_gif_animation, bake_lazy_gif_preview,
     },
     thumbnail::ThumbnailDecodeError,
-    thumbnail_key::{ThumbnailKey, normalize_url},
+    thumbnail_key::{ThumbnailKey, ThumbnailMode, normalize_url},
 };
 
 pub use super::thumbnail::{Thumbnail, ThumbnailMetadata};
@@ -36,6 +36,13 @@ impl ThumbnailInput {
     pub fn cache_key(&self, max_edge: u32) -> ThumbnailKey {
         match self {
             Self::Url { url } => ThumbnailKey::for_url(url.clone(), max_edge),
+        }
+    }
+
+    #[must_use]
+    pub fn cache_key_with_mode(&self, max_edge: u32, mode: ThumbnailMode) -> ThumbnailKey {
+        match self {
+            Self::Url { url } => ThumbnailKey::for_url_with_mode(url.clone(), max_edge, mode),
         }
     }
 

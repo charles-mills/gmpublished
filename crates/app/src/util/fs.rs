@@ -15,15 +15,6 @@ use std::{
 /// into a single `io::Error`; callers that need a typed error wrap it with
 /// their own context.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_write_with(path, |writer| writer.write_all(bytes))
-}
-
-/// Same as [`atomic_write`], but streams into the tempfile via `write`
-/// instead of requiring the caller to buffer to a `Vec` first.
-pub fn atomic_write_with(
-    path: &Path,
-    write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
-) -> io::Result<()> {
     let parent = path.parent();
     if let Some(parent) = parent {
         fs::create_dir_all(parent)?;
@@ -32,7 +23,7 @@ pub fn atomic_write_with(
     let mut tmp = parent.map_or_else(tempfile::NamedTempFile::new, |parent| {
         tempfile::NamedTempFile::new_in(parent)
     })?;
-    write(&mut tmp)?;
+    tmp.write_all(bytes)?;
     tmp.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
@@ -49,17 +40,6 @@ mod tests {
         atomic_write(&path, b"hello").expect("atomic_write should succeed");
 
         assert_eq!(fs::read(&path).expect("file should exist"), b"hello");
-    }
-
-    #[test]
-    fn atomic_write_with_streams_into_the_tempfile() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("file.txt");
-
-        atomic_write_with(&path, |writer| writer.write_all(b"streamed"))
-            .expect("atomic_write_with should succeed");
-
-        assert_eq!(fs::read(&path).expect("file should exist"), b"streamed");
     }
 
     #[test]

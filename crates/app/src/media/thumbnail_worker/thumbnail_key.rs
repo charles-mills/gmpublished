@@ -7,6 +7,13 @@ const CACHE_HASH_VERSION: &[u8] = b"gmpublished-thumbnail-v1";
 const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV1A64_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ThumbnailMode {
+    #[default]
+    Animated,
+    Static,
+}
+
 /// Cache key identifying a thumbnail source and requested output size.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ThumbnailKey {
@@ -14,6 +21,7 @@ pub struct ThumbnailKey {
     pub source: ThumbnailSourceKey,
     /// Requested maximum output width or height.
     pub max_edge: u32,
+    pub mode: ThumbnailMode,
 }
 
 impl ThumbnailKey {
@@ -23,6 +31,7 @@ impl ThumbnailKey {
         Self {
             source: ThumbnailSourceKey::Bytes { id: id.into() },
             max_edge,
+            mode: ThumbnailMode::Animated,
         }
     }
 
@@ -32,17 +41,38 @@ impl ThumbnailKey {
         Self {
             source: ThumbnailSourceKey::File { path: path.into() },
             max_edge,
+            mode: ThumbnailMode::Animated,
         }
     }
 
     #[must_use]
     pub fn for_url(url: impl Into<String>, max_edge: u32) -> Self {
+        Self::for_url_with_mode(url, max_edge, ThumbnailMode::Animated)
+    }
+
+    #[must_use]
+    pub fn for_url_with_mode(url: impl Into<String>, max_edge: u32, mode: ThumbnailMode) -> Self {
         Self {
             source: ThumbnailSourceKey::Url {
                 url: normalize_url(url),
             },
             max_edge,
+            mode,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_max_edge_and_mode(&self, max_edge: u32, mode: ThumbnailMode) -> Self {
+        Self {
+            source: self.source.clone(),
+            max_edge,
+            mode,
+        }
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> ThumbnailMode {
+        self.mode
     }
 
     #[cfg(test)]
@@ -119,6 +149,9 @@ fn stable_cache_hash(key: &ThumbnailKey) -> u64 {
     }
 
     write_hash_bytes(&mut hash, &key.max_edge.to_le_bytes());
+    if key.mode == ThumbnailMode::Static {
+        write_hash_byte(&mut hash, 3);
+    }
     hash
 }
 
@@ -180,6 +213,20 @@ mod tests {
         assert_eq!(large.max_edge(), 256);
         assert_ne!(small, large);
         assert_eq!(large.disk_file_name(), "9fd52d6942e50006-256.rgba");
+    }
+
+    #[test]
+    fn static_mode_is_distinct_without_changing_existing_animated_names() {
+        let animated = ThumbnailKey::for_url("https://example.invalid/preview.jpg", 128);
+        let static_key = ThumbnailKey::for_url_with_mode(
+            "https://example.invalid/preview.jpg",
+            128,
+            ThumbnailMode::Static,
+        );
+
+        assert_eq!(animated.disk_file_name(), "a5d4ac9462ab4731-128.rgba");
+        assert_ne!(animated, static_key);
+        assert_ne!(animated.disk_file_name(), static_key.disk_file_name());
     }
 
     #[test]

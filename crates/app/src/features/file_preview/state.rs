@@ -1,9 +1,19 @@
 use std::time::{Duration, Instant};
 
+use iced::widget::pane_grid;
+
 use super::message::PreviewLoadError;
 use super::model::{PreviewContent, PreviewData, PreviewLoadStage, PreviewRequest};
+use crate::widgets::split_pane;
 
 const FLY_SPEED_READOUT_VISIBLE_FOR: Duration = Duration::from_millis(800);
+const DEFAULT_VIEWER_RATIO: f32 = (704.0 - 236.0) / 704.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Pane {
+    Viewer,
+    Inspector,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyPose {
@@ -87,6 +97,7 @@ pub struct State {
     particle_speed: f32,
     particle_restart_epoch: u64,
     particle_control_points: [[f32; 3]; PARTICLE_CONTROL_POINTS],
+    inspector_panes: split_pane::State<Pane>,
 }
 
 pub(super) const PARTICLE_CONTROL_POINTS: usize = 8;
@@ -142,6 +153,11 @@ impl Default for State {
             particle_speed: 1.0,
             particle_restart_epoch: 0,
             particle_control_points: default_particle_control_points(),
+            inspector_panes: split_pane::State::vertical(
+                Pane::Viewer,
+                Pane::Inspector,
+                DEFAULT_VIEWER_RATIO,
+            ),
         }
     }
 }
@@ -169,6 +185,26 @@ impl State {
 
     pub(crate) const fn current(&self) -> Option<&PreviewData> {
         self.current.as_ref()
+    }
+
+    pub(super) const fn inspector_panes(&self) -> &pane_grid::State<Pane> {
+        self.inspector_panes.grid()
+    }
+
+    pub(super) const fn inspector_ratio(&self) -> f32 {
+        self.inspector_panes.ratio()
+    }
+
+    pub(super) fn resize_inspector(&mut self, split: pane_grid::Split, ratio: f32) {
+        self.inspector_panes.resize(split, ratio);
+    }
+
+    pub(super) fn set_inspector_ratio(&mut self, ratio: f32) {
+        self.inspector_panes.set_ratio(ratio);
+    }
+
+    pub(super) fn reset_inspector(&mut self) {
+        self.inspector_panes.reset();
     }
 
     pub(crate) const fn audio_playing(&self) -> bool {

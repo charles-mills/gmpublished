@@ -144,7 +144,7 @@ impl Default for State {
                 false,
                 tokens.motion.context_menu_enter_duration(),
                 tokens.motion.context_menu_exit_duration(),
-                motion::expo_ease(),
+                Easing::EaseOut,
             ),
         }
     }

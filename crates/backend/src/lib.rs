@@ -7,8 +7,10 @@ pub const GMOD_APP_ID: steamworks::AppId = steamworks::AppId(4000);
 
 #[macro_use]
 pub(crate) mod util;
-pub use util::{ArcBytes, path};
-pub(crate) use util::{NTStringWriter, stream_bytes};
+pub use util::path;
+pub(crate) use util::{stream_bytes, write_nt_string};
+
+pub type ArcBytes = std::sync::Arc<[u8]>;
 
 #[macro_use]
 pub mod transactions;
@@ -22,13 +24,10 @@ pub mod events;
 pub mod addon;
 pub use addon::Addon;
 
+pub mod bbcode;
+
 pub mod appdata;
 pub use appdata::AppData;
-
-// Only exercised by its own `#[cfg(test)]` warm-hydration coverage — no
-// production caller remains.
-#[cfg(test)]
-mod discovery_snapshot;
 
 pub mod gma;
 pub use gma::{GMAError, GMAFile, GMAHeader, GMAMetadata};

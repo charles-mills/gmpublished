@@ -153,6 +153,10 @@ pub enum PreviewContent {
         width: u32,
         height: u32,
     },
+    Font {
+        handle: image::Handle,
+        family: String,
+    },
     #[cfg(feature = "asset-studio")]
     Audio {
         bytes: Arc<Vec<u8>>,

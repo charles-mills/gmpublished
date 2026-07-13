@@ -157,15 +157,13 @@ impl State {
         changed
     }
 
-    /// Drops Ready thumbnails outside the visible+prefetch window (all of
-    /// them while the route is hidden); the demand/cache path re-delivers.
+    /// Drops Ready thumbnails outside the visible+prefetch window; the
+    /// demand/cache path re-delivers. The window is kept even while the
+    /// route is hidden so returning to it paints real pixels on the first
+    /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
-        let changed = if self.route_visible {
-            let visible_range = self.visible_row_range();
-            model::release_offscreen_thumbnails(&mut self.rows, visible_range)
-        } else {
-            model::invalidate_ready_thumbnails(&mut self.rows)
-        };
+        let visible_range = self.visible_row_range();
+        let changed = model::release_offscreen_thumbnails(&mut self.rows, visible_range);
         if changed {
             self.refresh_item_thumbnails();
         }
@@ -714,10 +712,11 @@ mod tests {
             "visible+prefetch window should retain a bounded set, kept {retained}"
         );
 
-        // Hidden route drops the rest; the demand/cache path re-delivers.
+        // The hidden route keeps its visible window so re-entry paints real
+        // pixels immediately instead of replaying every card's fade-in.
         state.exit_route();
-        assert!(state.release_offscreen_thumbnails());
-        assert_eq!(ready_row_count(&state), 0);
+        assert!(!state.release_offscreen_thumbnails());
+        assert_eq!(ready_row_count(&state), retained);
     }
 
     #[test]

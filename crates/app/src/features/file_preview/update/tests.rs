@@ -482,3 +482,16 @@ fn animation_tick_polls_audio_position_only_while_playing() {
         vec![Effect::AudioPositionPollRequested]
     );
 }
+
+#[cfg(feature = "asset-studio")]
+#[test]
+fn inspector_ratio_clamps_to_layout_and_survives_modal_close() {
+    let mut state = State::default();
+    state.set_inspector_ratio(0.2);
+
+    assert!(update(&mut state, Message::InspectorLayoutChanged(1000.0)).is_empty());
+    assert!((state.inspector_ratio() - 0.58).abs() < f32::EPSILON);
+
+    let _effects = update(&mut state, Message::CloseFinished);
+    assert!((state.inspector_ratio() - 0.58).abs() < f32::EPSILON);
+}

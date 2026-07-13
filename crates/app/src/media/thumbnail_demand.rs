@@ -1,7 +1,14 @@
 //! Views report visible rows. Feature updates translate those rows into demand
 //! sets, and this manager is the only path that starts decode work.
 
-use std::{collections::HashMap, fmt, ops::Range, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    ops::Range,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use iced::{Task, widget::image};
@@ -12,8 +19,8 @@ use crate::{
     media::thumbnail_worker::{
         FetchProfile, PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail,
         ThumbnailCancellation, ThumbnailError, ThumbnailInput, ThumbnailKey, ThumbnailMetadata,
-        ThumbnailWorkerOutcome, WorkerDiskCache, normalize_url, run_prepared_thumbnail_request,
-        validate_max_edge,
+        ThumbnailMode, ThumbnailWorkerOutcome, WorkerDiskCache, normalize_url,
+        run_prepared_thumbnail_request, validate_max_edge,
     },
 };
 
@@ -227,12 +234,26 @@ impl Manager {
         match set.replace {
             ReplaceMode::Owner => self.index.remove_owner(&set.owner),
         }
+        if set.owner == Owner::SizeAnalyzer {
+            let ids = set
+                .demands
+                .iter()
+                .map(|demand| demand.id.clone())
+                .collect::<HashSet<_>>();
+            self.index.remove_queued_warm(&ids);
+        }
 
         let mut immediate = Vec::new();
         for demand in set.demands {
             let physical_max_edge =
                 physical_thumbnail_edge(demand.logical_max_edge, self.scale_factor);
-            let key = demand.input.cache_key(physical_max_edge);
+            let key = if set.owner == Owner::SizeAnalyzer {
+                demand
+                    .input
+                    .cache_key_with_mode(physical_max_edge, ThumbnailMode::Static)
+            } else {
+                demand.input.cache_key(physical_max_edge)
+            };
             if let Err(error) = validate_max_edge(physical_max_edge) {
                 immediate.push(Message::Delivered(Delivery::failed(
                     set.owner.clone(),
@@ -284,7 +305,9 @@ impl Manager {
             // No pixels yet: paint a ThumbHash placeholder now if we know one for
             // this URL. Surfaces ignore a placeholder once they hold real pixels,
             // so re-emitting during the in-flight window is a harmless no-op.
-            if let Some(placeholder) = self.placeholder_for(demand.input.source_url()) {
+            if set.owner != Owner::SizeAnalyzer
+                && let Some(placeholder) = self.placeholder_for(demand.input.source_url())
+            {
                 immediate.push(Message::Delivered(Delivery::placeholder(
                     set.owner.clone(),
                     set.generation,
@@ -908,10 +931,22 @@ impl DemandIndex {
     }
 
     fn remove_owner(&mut self, owner: &Owner) {
+        self.remove_where(|entry| entry.owner == *owner);
+    }
+
+    fn remove_queued_warm(&mut self, ids: &HashSet<DemandId>) {
+        self.remove_where(|entry| {
+            entry.owner == Owner::WarmLibrary
+                && entry.state != DemandState::InFlight
+                && ids.contains(&entry.id)
+        });
+    }
+
+    fn remove_where(&mut self, predicate: impl Fn(&DemandEntry) -> bool) {
         let interests = self
             .entries
             .iter()
-            .filter_map(|(interest, entry)| (entry.owner == *owner).then_some(interest.clone()))
+            .filter_map(|(interest, entry)| predicate(entry).then_some(interest.clone()))
             .collect::<Vec<_>>();
         for interest in interests {
             self.remove_interest(&interest);
@@ -960,6 +995,11 @@ impl DemandIndex {
                 entry.state == DemandState::Queued
                     && !self.active_jobs.contains_key(&entry.key)
                     && (allow_warm || entry.priority != Priority::WarmLibrary)
+                    && !(entry.key.mode() == ThumbnailMode::Static
+                        && self.active_jobs.keys().any(|active| {
+                            active.mode() == ThumbnailMode::Animated
+                                && active.source == entry.key.source
+                        }))
             })
             .min_by_key(|entry| (entry.priority, entry.sequence))
             .map(|entry| {
@@ -1459,6 +1499,88 @@ mod tests {
                 ..
             })
         )));
+    }
+
+    #[test]
+    fn size_analyzer_uses_static_keys_without_creating_image_placeholders() {
+        let mut manager = Manager::new(Config::default());
+        let url = "https://example.invalid/poster.jpg";
+        let input = ThumbnailInput::from_url(url);
+        let hash = crate::media::thumbhash::encode(4, 4, &[128; 4 * 4 * 4]).expect("hash encodes");
+        manager.seed_thumbhashes([(url.to_owned(), Arc::from(hash))]);
+
+        let messages = manager.apply_demands(DemandSet {
+            owner: Owner::SizeAnalyzer,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row-1", input, 64, Priority::SizeAnalyzer)],
+        });
+
+        assert!(messages.is_empty());
+        let candidate = manager
+            .next_candidate_for_test()
+            .expect("analyzer decode should be queued");
+        assert_eq!(candidate.key.mode(), ThumbnailMode::Static);
+    }
+
+    #[test]
+    fn size_analyzer_replaces_queued_warm_work_for_the_same_addon() {
+        let mut manager = Manager::new(Config::default());
+        let input = ThumbnailInput::from_url("https://example.invalid/shared.jpg");
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
+        });
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::SizeAnalyzer,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("101", input, 64, Priority::SizeAnalyzer)],
+        });
+
+        assert_eq!(manager.pending_count(), 1);
+        let candidate = manager
+            .next_candidate_for_test()
+            .expect("static analyzer work remains");
+        assert_eq!(candidate.key.mode(), ThumbnailMode::Static);
+    }
+
+    #[test]
+    fn size_analyzer_waits_for_an_active_animated_source() {
+        let mut manager = Manager::new(Config::default());
+        let input = ThumbnailInput::from_url("https://example.invalid/shared.jpg");
+        let animated_key = input.cache_key(256);
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
+        });
+        let warm = manager
+            .next_candidate_for_test()
+            .expect("warm source starts first");
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::SizeAnalyzer,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("101", input, 64, Priority::SizeAnalyzer)],
+        });
+
+        assert!(manager.next_candidate_for_test().is_none());
+        let _ = manager.complete_job(
+            &animated_key,
+            warm.job_id,
+            warm.attempt,
+            Ok(ThumbnailWorkerOutcome::Completed(prepared_thumbnail(
+                solid_thumbnail(16, 12, 3),
+            ))),
+        );
+        let candidate = manager
+            .next_candidate_for_test()
+            .expect("static work follows the shared source");
+        assert_eq!(candidate.key.mode(), ThumbnailMode::Static);
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadStartedEvent {
     pub transaction_id: u32,
+    pub request_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +35,7 @@ pub struct ExtractionStartedEvent {
     pub source_path: Option<PathBuf>,
     pub file_name: Option<String>,
     pub workshop_id: Option<PublishedFileId>,
+    pub request_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

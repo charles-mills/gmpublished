@@ -1,10 +1,13 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 
+use gmpublished_backend::bbcode::SpoilerId;
 use iced::widget::image;
+use iced::widget::pane_grid;
 
 #[cfg(feature = "asset-studio")]
 use crate::backend::archive::PreviewArchiveSource;
@@ -17,6 +20,7 @@ use crate::media::{
     thumbnail_worker::ThumbnailInput,
 };
 use crate::widgets::file_browser::{Row as FileBrowserRowData, State as FileBrowserState};
+use crate::widgets::split_pane;
 
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview::PreviewRequest;
@@ -31,6 +35,13 @@ use super::model::{
 
 const PREVIEW_THUMBNAIL_MAX_EDGE: u32 = 256;
 const PREVIEW_THUMBNAIL_DEMAND_ID: &str = "preview-gma";
+const DEFAULT_SIDEBAR_RATIO: f32 = 272.0 / 1008.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Pane {
+    Sidebar,
+    Content,
+}
 
 #[expect(
     clippy::struct_excessive_bools,
@@ -50,6 +61,7 @@ pub struct State {
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
     details: Details,
+    revealed_description_spoilers: HashSet<SpoilerId>,
     workshop_metadata: Option<WorkshopMetadata>,
     workshop_metadata_requested: bool,
     author_requested: bool,
@@ -63,6 +75,7 @@ pub struct State {
     window_focused: bool,
     pending_extraction: Option<ExtractionRequest>,
     pending_initial_entry_preview: Option<String>,
+    panes: split_pane::State<Pane>,
 }
 
 impl Default for State {
@@ -80,6 +93,7 @@ impl Default for State {
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
             details: Details::default(),
+            revealed_description_spoilers: HashSet::new(),
             workshop_metadata: None,
             workshop_metadata_requested: false,
             author_requested: false,
@@ -93,6 +107,7 @@ impl Default for State {
             window_focused: true,
             pending_extraction: None,
             pending_initial_entry_preview: None,
+            panes: split_pane::State::vertical(Pane::Sidebar, Pane::Content, DEFAULT_SIDEBAR_RATIO),
         }
     }
 }
@@ -187,6 +202,36 @@ impl State {
         &self.details
     }
 
+    pub(crate) const fn revealed_description_spoilers(&self) -> &HashSet<SpoilerId> {
+        &self.revealed_description_spoilers
+    }
+
+    pub(super) const fn panes(&self) -> &pane_grid::State<Pane> {
+        self.panes.grid()
+    }
+
+    pub(super) const fn sidebar_ratio(&self) -> f32 {
+        self.panes.ratio()
+    }
+
+    pub(super) fn resize_panes(&mut self, split: pane_grid::Split, ratio: f32) {
+        self.panes.resize(split, ratio);
+    }
+
+    pub(super) fn set_pane_ratio(&mut self, ratio: f32) {
+        self.panes.set_ratio(ratio);
+    }
+
+    pub(super) fn reset_panes(&mut self) {
+        self.panes.reset();
+    }
+
+    pub(super) fn toggle_description_spoiler(&mut self, id: SpoilerId) {
+        if !self.revealed_description_spoilers.remove(&id) {
+            self.revealed_description_spoilers.insert(id);
+        }
+    }
+
     pub(crate) fn thumbnail_handle(&self) -> Option<&image::Handle> {
         match &self.thumbnail {
             ThumbnailState::Ready { still, animation } => animation
@@ -259,6 +304,7 @@ impl State {
         self.archive = None;
         self.browser = None;
         self.details = Details::default();
+        self.revealed_description_spoilers.clear();
         self.workshop_metadata = None;
         self.workshop_metadata_requested = self.workshop_id.is_none();
         self.author_requested = false;
@@ -408,12 +454,7 @@ impl State {
     }
 
     pub(super) fn take_workshop_metadata_request(&mut self) -> Option<MetadataRequest> {
-        if !self.open
-            || self.loading
-            || self.error.is_some()
-            || self.archive.is_none()
-            || self.workshop_metadata_requested
-        {
+        if !self.open || self.workshop_metadata_requested {
             return None;
         }
 
@@ -431,12 +472,34 @@ impl State {
         workshop_id: PublishedFileId,
         result: Result<Option<WorkshopMetadata>, UiError>,
     ) -> bool {
-        if !self.open || self.request_id != request_id || self.workshop_id != Some(workshop_id) {
+        if !self.open
+            || self.request_id != request_id
+            || self.workshop_id != Some(workshop_id)
+            || self.error.is_some()
+        {
             return false;
         }
 
         match result {
-            Ok(Some(metadata)) if metadata.id == workshop_id => {
+            Ok(Some(mut metadata)) if metadata.id == workshop_id => {
+                let owner_changed = self
+                    .workshop_metadata
+                    .as_ref()
+                    .is_some_and(|existing| existing.steamid64 != metadata.steamid64);
+                if let Some(existing) = self.workshop_metadata.as_ref()
+                    && existing.steamid64 == metadata.steamid64
+                {
+                    if metadata.author.is_none() {
+                        metadata.author.clone_from(&existing.author);
+                    }
+                    if metadata.avatar.is_none() {
+                        metadata.avatar.clone_from(&existing.avatar);
+                    }
+                }
+                if owner_changed {
+                    self.author_requested = false;
+                    self.author_fetch_failed = false;
+                }
                 metadata.title.trim().clone_into(&mut self.title);
                 if metadata.preview_url != self.thumbnail_url {
                     self.thumbnail_url.clone_from(&metadata.preview_url);
@@ -458,8 +521,9 @@ impl State {
             }
             Err(error) => {
                 log::debug!("Preview GMA workshop metadata lookup failed: {error}");
-                self.workshop_metadata = None;
-                self.settle_thumbnail_without_metadata();
+                if self.workshop_metadata.is_none() {
+                    self.settle_thumbnail_without_metadata();
+                }
                 self.refresh_details();
             }
         }
@@ -551,6 +615,7 @@ impl State {
         self.archive = None;
         self.browser = None;
         self.details = Details::default();
+        self.revealed_description_spoilers.clear();
         self.workshop_metadata = None;
         self.workshop_metadata_requested = true;
         self.author_requested = true;
@@ -695,7 +760,7 @@ impl State {
             self.details = Details::default();
             return;
         };
-        self.details = details_for_archive(
+        let details = details_for_archive(
             archive,
             &self.archive_path_text(),
             &self.title,
@@ -703,6 +768,10 @@ impl State {
             self.author_fetch_failed,
             self.download_count_formatter,
         );
+        if details.description != self.details.description {
+            self.revealed_description_spoilers.clear();
+        }
+        self.details = details;
         // Click-time stats render on the first frame; hydration replaces them.
         if !self.details.has_stats
             && let Some(subscription_count) = self.seed.subscription_count

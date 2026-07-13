@@ -35,7 +35,7 @@ nix run github:charles-mills/gmpublished
 
 gmpublished is implemented in [Iced](https://iced.rs/), and so doesn't require a system or bundled web-view, instead rendering with [wgpu](https://github.com/gfx-rs/wgpu). This is mostly relevant to Linux users, since gmpublisher's Tauri dependency is not regularly updated to use a widely available version of webkitgtk.
 
-Whilst a little awkward, it's still perfectly possible to use gmpublisher on the vast majority of Linux distros, such as with my [gmpublisher Nix flake](https://github.com/charles-mills/gmpublisher-flake), the [Arch User Repository](https://aur.archlinux.org/packages/gmpublisher-bin), or by installing an archived libwebkit2gtk-4.0-37 package.
+Whilst a little awkward, it's still perfectly possible to use gmpublisher on the vast majority of Linux distros, such as through the [Arch User Repository](https://aur.archlinux.org/packages/gmpublisher-bin), or by installing an archived libwebkit2gtk-4.0-37 package.
 
 ### In-app Previewer
 
@@ -61,3 +61,4 @@ All navigation and app control happens in the sidebar to give more space to cont
 - Drag & drop an addon from anywhere into the Downloader tab.
 - Installed addons are updated as you remove or subscribe to addons.
 - App themes, including auto OS theme setting.
+- Much more!

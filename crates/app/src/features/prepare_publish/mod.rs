@@ -12,8 +12,9 @@ pub use message::Message;
 pub use model::{
     ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation, IgnoredPattern,
     PublishIconSubmitRequestEnvelope, PublishSubmitContext, PublishSubmitRequestEnvelope,
-    PublishSubmitResult, apply_ignore_pattern_mutation, ignored_patterns_from_settings,
-    run_publish_icon_submit, run_publish_submit, verify_content_path, verify_icon_preview,
+    PublishSubmitResult, WorkshopContentRequest, apply_ignore_pattern_mutation,
+    ignored_patterns_from_settings, inspect_workshop_snapshot, run_publish_icon_submit,
+    run_publish_submit, verify_content_path, verify_icon_preview,
 };
 pub use state::{OpenTarget, State, UpdateTarget};
 pub use update::update;

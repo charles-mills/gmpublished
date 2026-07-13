@@ -1,5 +1,8 @@
 use std::time::Instant;
 
+use gmpublished_backend::bbcode::SpoilerId;
+use iced::widget::pane_grid;
+
 use crate::backend::domain::PublishedFileId;
 use crate::backend::ui_error::UiError;
 #[cfg(feature = "asset-studio")]
@@ -8,7 +11,6 @@ use crate::features::file_preview;
 use super::model::{AuthorInfo, LoadedArchive, OpenTarget, WorkshopMetadata};
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(feature = "asset-studio"), derive(Eq))]
 pub enum Message {
     OpenRequested(OpenTarget),
     ArchiveOpened(u64, Result<LoadedArchive, UiError>),
@@ -28,6 +30,14 @@ pub enum Message {
     #[cfg(feature = "asset-studio")]
     FilePreview(file_preview::Message),
     WorkshopLinkRequested,
+    DescriptionLinkRequested(String),
+    DescriptionSpoilerToggled(SpoilerId),
+    PanesResized {
+        split: pane_grid::Split,
+        ratio: f32,
+    },
+    PanesLayoutChanged(f32),
+    PanesReset(f32),
     CopyCurrentPathRequested,
     OpenLocationRequested,
     AnimationTick(Instant),

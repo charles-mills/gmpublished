@@ -204,26 +204,22 @@ fn download_addon_whitelist() -> Result<Vec<String>, std::io::Error> {
 
     let mut wildcard = Vec::new();
 
-    let captures = regex_lite::Regex::new(
-        r"static +const +char\* +Wildcard\s*\[\s*\]\s*=\s*\{\s*([\s\S]*?)\s*NULL,?\s*};",
-    )
-    .unwrap()
-    .captures(&body)
-    .and_then(|captures| captures.get(1))
-    .ok_or_else(|| std::io::Error::other("Failed to parse addon whitelist"))?;
+    let entries = body
+        .split_once("Wildcard")
+        .and_then(|(_, rest)| rest.split_once('{'))
+        .map(|(_, entries)| entries)
+        .ok_or_else(|| std::io::Error::other("Failed to parse addon whitelist"))?;
 
-    let line_regex = regex_lite::Regex::new(r#""(.+?)","#).unwrap();
-
-    for line in captures.as_str().lines() {
+    for line in entries.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
 
-        if line == "NULL" {
+        if line.starts_with("NULL") {
             break;
-        } else if let Some(capture) = line_regex.captures(line) {
-            wildcard.push(capture.get(1).unwrap().as_str().to_owned());
+        } else if let Some(value) = line.split('"').nth(1) {
+            wildcard.push(value.to_owned());
         }
     }
 

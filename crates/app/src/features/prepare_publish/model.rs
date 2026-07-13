@@ -41,6 +41,13 @@ pub struct ContentPathVerificationRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkshopContentRequest {
+    pub(crate) request_id: u64,
+    pub(crate) workshop_id: PublishedFileId,
+    pub(crate) destination: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedContentPath {
     pub(crate) display_path: String,
     pub(crate) path: PathBuf,
@@ -162,8 +169,21 @@ pub fn verify_content_path(
     verify_content_tree(
         request.display_path,
         request.path,
-        &settings.ignore_globs,
-        &ctx.whitelist_snapshot(),
+        ContentCollectionPolicy::Publish {
+            ignore_globs: &settings.ignore_globs,
+            whitelist: &ctx.whitelist_snapshot(),
+        },
+    )
+    .map(Arc::new)
+}
+
+pub fn inspect_workshop_snapshot(
+    request: ContentPathVerificationRequest,
+) -> Result<Arc<VerifiedContentPath>, UiError> {
+    verify_content_tree(
+        request.display_path,
+        request.path,
+        ContentCollectionPolicy::Snapshot,
     )
     .map(Arc::new)
 }
@@ -313,18 +333,26 @@ pub fn publish_selected_preview(icon: &VerifiedIcon, upscale_icon: bool) -> Publ
     }
 }
 
+#[derive(Clone, Copy)]
+enum ContentCollectionPolicy<'a> {
+    Publish {
+        ignore_globs: &'a [String],
+        whitelist: &'a [String],
+    },
+    Snapshot,
+}
+
 fn verify_content_tree(
     display_path: String,
     path: PathBuf,
-    ignore_globs: &[String],
-    whitelist_snapshot: &[String],
+    policy: ContentCollectionPolicy<'_>,
 ) -> Result<VerifiedContentPath, UiError> {
     if !path.is_dir() || !path.is_absolute() {
         return Err(UiError::new(keys::INVALID_CONTENT_PATH));
     }
 
     let mut state = ContentCollectionState::default();
-    collect_content_entries(&path, &path, ignore_globs, whitelist_snapshot, &mut state)?;
+    collect_content_entries(&path, &path, policy, &mut state)?;
     let ContentCollectionState {
         entries,
         total_size,
@@ -388,8 +416,7 @@ struct ContentCollectionState {
 fn collect_content_entries(
     root: &Path,
     dir: &Path,
-    ignore_globs: &[String],
-    whitelist_snapshot: &[String],
+    policy: ContentCollectionPolicy<'_>,
     state: &mut ContentCollectionState,
 ) -> Result<(), UiError> {
     let read_dir = dir.read_dir().map_err(|_| UiError::new(keys::IO_ERROR))?;
@@ -403,7 +430,7 @@ fn collect_content_entries(
             continue;
         }
         if file_type.is_dir() {
-            collect_content_entries(root, &path, ignore_globs, whitelist_snapshot, state)?;
+            collect_content_entries(root, &path, policy, state)?;
             continue;
         }
         if !file_type.is_file() {
@@ -411,8 +438,9 @@ fn collect_content_entries(
         }
 
         let relative_path = relative_slash_path(root, &path)?;
-        if whitelist::is_default_ignored(&relative_path)
-            || whitelist::is_ignored(&relative_path, ignore_globs)
+        if let ContentCollectionPolicy::Publish { ignore_globs, .. } = policy
+            && (whitelist::is_default_ignored(&relative_path)
+                || whitelist::is_ignored(&relative_path, ignore_globs))
         {
             continue;
         }
@@ -420,7 +448,9 @@ fn collect_content_entries(
             state.duplicate = Some(relative_path);
             continue;
         }
-        if !whitelist::is_whitelisted_in(whitelist_snapshot, &relative_path) {
+        if let ContentCollectionPolicy::Publish { whitelist, .. } = policy
+            && !whitelist::is_whitelisted_in(whitelist, &relative_path)
+        {
             state.failed.push(relative_path);
             continue;
         }
@@ -705,6 +735,22 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn workshop_snapshot_inventory_does_not_apply_publish_ignores() {
+        let root = TestDir::new("prepare-publish-workshop-snapshot");
+        root.file("lua/autorun/init.lua", b"print('ready')");
+        root.file(".git/config", b"published historical file");
+
+        let snapshot = inspect_workshop_snapshot(ContentPathVerificationRequest {
+            generation: 1,
+            display_path: root.path_text(),
+            path: root.path().to_path_buf(),
+        })
+        .expect("Workshop snapshot should ignore local publish filters");
+
+        assert_eq!(snapshot.entries.len(), 2);
     }
 
     #[test]

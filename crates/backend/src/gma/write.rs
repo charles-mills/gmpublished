@@ -12,10 +12,9 @@ use std::{
     time::SystemTime,
 };
 
-use path_slash::PathExt;
 use walkdir::WalkDir;
 
-use crate::{GMAFile, NTStringWriter, transactions::Transaction};
+use crate::{GMAFile, transactions::Transaction, write_nt_string};
 
 use super::{GMAError, GMAMetadata, whitelist, whitelist::AddonWhitelist};
 
@@ -30,8 +29,6 @@ const BATCH_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// a fixed-size chunk buffer.
 const BATCH_FILE_MAX: u64 = 8 * 1024 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
-
-impl NTStringWriter for BufWriter<File> {}
 
 /// A unique path in `final_path`'s own directory, so a pack that never
 /// finishes leaves nothing at `final_path` and two packs to the same
@@ -85,8 +82,8 @@ impl Drop for TempFileGuard {
 /// error by the caller, never silently mangled.
 fn relative_entry_name(relative: &Path) -> Option<String> {
     relative
-        .to_slash()
-        .map(|slash_path| slash_path.trim_matches('/').to_lowercase())
+        .to_str()
+        .map(|path| path.replace('\\', "/").trim_matches('/').to_lowercase())
 }
 
 impl GMAFile {
@@ -131,18 +128,21 @@ impl GMAFile {
         f.write_all(&[0])?;
 
         // addon name
-        f.write_nt_string(title)?;
+        write_nt_string(&mut f, title)?;
 
         // addon description
         match addon_json {
             Some(addon_json) => {
-                f.write_nt_string(serde_json::ser::to_string(addon_json).as_deref().unwrap())?;
+                write_nt_string(
+                    &mut f,
+                    serde_json::ser::to_string(addon_json).as_deref().unwrap(),
+                )?;
             }
-            None => f.write_nt_string("Description")?,
+            None => write_nt_string(&mut f, "Description")?,
         };
 
         // addon author [unused]
-        f.write_nt_string("Author Name")?;
+        write_nt_string(&mut f, "Author Name")?;
 
         // addon version [unused]
         f.write_all(&1i32.to_le_bytes())?;

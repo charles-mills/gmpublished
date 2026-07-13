@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -10,7 +11,7 @@ use iced::widget::text_editor;
 use crate::theme::{Tokens, motion};
 
 use crate::backend::{
-    domain::{PublishedFileId, workshop_url},
+    domain::{PublishedFileId, WorkshopDownloadSuccess, workshop_url},
     publish::{PublishSubmitMode, PublishSubmitPreview, PublishSubmitRequest},
     ui_error::UiError,
 };
@@ -32,7 +33,7 @@ use super::model::{
     IgnorePatternMutationResult, IgnoredPattern, PublishIconSubmitRequestEnvelope,
     PublishIconSubmitResult, PublishSubmitContext, PublishSubmitRequestEnvelope,
     PublishSubmitResult, SelectOption, VerifiedContentPath, VerifiedContentPathState,
-    VerifiedIconPreview, default_icon_path, publish_selected_preview,
+    VerifiedIconPreview, WorkshopContentRequest, default_icon_path, publish_selected_preview,
 };
 
 const DEFAULT_VALUE: &str = "";
@@ -162,7 +163,14 @@ pub struct UpdateTarget {
     pub(crate) title: String,
     pub(crate) tags: Vec<String>,
     pub(crate) preview_url: Option<String>,
-    pub(crate) saved_path: Option<PathBuf>,
+    pub(crate) snapshot_request_id: u64,
+    pub(crate) snapshot_destination: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkshopContentLoad {
+    workshop_id: PublishedFileId,
+    destination: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,6 +247,10 @@ pub struct State {
     open: bool,
     mode: Mode,
     request_generation: u64,
+    workshop_loads: HashMap<u64, WorkshopContentLoad>,
+    active_workshop_request: Option<u64>,
+    workshop_snapshot_path: Option<PathBuf>,
+    pending_cleanup: Vec<PathBuf>,
     icon_generation: u64,
     submit_generation: u64,
     addon_path: String,
@@ -288,6 +300,10 @@ impl Default for State {
             open: false,
             mode: Mode::New,
             request_generation: 0,
+            workshop_loads: HashMap::new(),
+            active_workshop_request: None,
+            workshop_snapshot_path: None,
+            pending_cleanup: Vec::new(),
             icon_generation: 0,
             submit_generation: 0,
             addon_path: String::new(),
@@ -664,13 +680,20 @@ impl State {
         target: OpenTarget,
         ignored_patterns: Vec<IgnoredPattern>,
         upscale_icon_default: bool,
-    ) -> Option<ContentPathVerificationRequest> {
+    ) -> Option<WorkshopContentRequest> {
         // Stays monotonic across reopens so a stale thumbnail delivery from a
         // previous target can never seed the new one.
         let thumbnail_generation = self.thumbnail_generation.saturating_add(1);
+        let workshop_loads = std::mem::take(&mut self.workshop_loads);
+        let mut pending_cleanup = std::mem::take(&mut self.pending_cleanup);
+        if let Some(path) = self.workshop_snapshot_path.take() {
+            pending_cleanup.push(path);
+        }
         *self = Self::default();
         self.open = true;
         self.thumbnail_generation = thumbnail_generation;
+        self.workshop_loads = workshop_loads;
+        self.pending_cleanup = pending_cleanup;
         self.ignored_patterns = ignored_patterns;
         self.upscale_icon = upscale_icon_default;
         match target {
@@ -678,16 +701,86 @@ impl State {
             OpenTarget::Update(target) => {
                 self.title.clone_from(&target.title);
                 self.prefill_from_workshop_tags(&target.tags);
-                let saved_path = target.saved_path.clone();
+                let request = WorkshopContentRequest {
+                    request_id: target.snapshot_request_id,
+                    workshop_id: target.workshop_id,
+                    destination: target.snapshot_destination.clone(),
+                };
+                self.path_pending = true;
+                self.workshop_loads.insert(
+                    request.request_id,
+                    WorkshopContentLoad {
+                        workshop_id: request.workshop_id,
+                        destination: request.destination.clone(),
+                    },
+                );
+                self.active_workshop_request = Some(request.request_id);
                 self.mode = Mode::Update(target);
-                saved_path
-                    .and_then(|path| self.begin_content_path_verification(&path.to_string_lossy()))
+                Some(request)
             }
         }
     }
 
-    pub(super) fn close(&mut self) {
+    pub(super) fn close(&mut self) -> Vec<PathBuf> {
+        let workshop_loads = std::mem::take(&mut self.workshop_loads);
+        let mut cleanup = std::mem::take(&mut self.pending_cleanup);
+        if let Some(path) = self.workshop_snapshot_path.take() {
+            cleanup.push(path);
+        }
         *self = Self::default();
+        self.workshop_loads = workshop_loads;
+        cleanup
+    }
+
+    pub(super) fn take_pending_cleanup(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.pending_cleanup)
+    }
+
+    pub(super) fn apply_workshop_submission_result(
+        &mut self,
+        request_id: u64,
+        result: Result<(), UiError>,
+    ) {
+        if result.is_ok() || !self.workshop_loads.contains_key(&request_id) {
+            return;
+        }
+        let error = result.expect_err("checked error above");
+        if let Some(load) = self.workshop_loads.remove(&request_id) {
+            self.pending_cleanup.push(load.destination);
+        }
+        if self.active_workshop_request == Some(request_id) {
+            self.active_workshop_request = None;
+            self.path_pending = false;
+            self.path_error = Some(error);
+        }
+    }
+
+    pub(super) fn apply_workshop_download(
+        &mut self,
+        request_id: u64,
+        success: WorkshopDownloadSuccess,
+    ) -> Option<ContentPathVerificationRequest> {
+        let load = self.workshop_loads.remove(&request_id)?;
+        let matches_load =
+            load.workshop_id == success.item_id && load.destination == success.extracted_path;
+        if matches_load && self.open && self.active_workshop_request == Some(request_id) {
+            self.active_workshop_request = None;
+            self.workshop_snapshot_path = Some(success.extracted_path.clone());
+            return Some(ContentPathVerificationRequest {
+                generation: self.bump_request_generation(),
+                display_path: success.extracted_path.to_string_lossy().into_owned(),
+                path: success.extracted_path,
+            });
+        }
+        if success.extracted_path != load.destination {
+            self.pending_cleanup.push(success.extracted_path);
+        }
+        self.pending_cleanup.push(load.destination);
+        None
+    }
+
+    fn detach_workshop_load(&mut self) {
+        self.active_workshop_request = None;
     }
 
     #[cfg_attr(
@@ -734,6 +827,7 @@ impl State {
                 return;
             }
 
+            self.detach_workshop_load();
             self.bump_request_generation();
             self.addon_path = value;
             self.verified_addon_path = None;
@@ -788,6 +882,14 @@ impl State {
     }
 
     pub(super) fn begin_content_path_verification(
+        &mut self,
+        addon_path: &str,
+    ) -> Option<ContentPathVerificationRequest> {
+        self.detach_workshop_load();
+        self.begin_content_path_verification_inner(addon_path)
+    }
+
+    fn begin_content_path_verification_inner(
         &mut self,
         addon_path: &str,
     ) -> Option<ContentPathVerificationRequest> {
@@ -850,6 +952,40 @@ impl State {
                 self.path_error = Some(error);
                 self.browser = None;
                 self.clear_preview_source();
+            }
+        }
+        true
+    }
+
+    pub(super) fn apply_snapshot_inspection_result(
+        &mut self,
+        generation: u64,
+        result: Result<Arc<VerifiedContentPath>, UiError>,
+    ) -> bool {
+        if !self.open || self.request_generation != generation {
+            return false;
+        }
+
+        self.path_pending = false;
+        match result {
+            Ok(snapshot) => {
+                self.path_error = None;
+                self.browser = Some(FileBrowserState::from_entries(
+                    snapshot.entries.iter().cloned(),
+                ));
+                #[cfg(feature = "asset-studio")]
+                {
+                    self.preview_source = Some(Arc::clone(&snapshot.preview_source));
+                }
+            }
+            Err(error) => {
+                log::warn!("Prepare Publish Workshop snapshot inspection failed: {error}");
+                self.path_error = Some(error);
+                self.browser = None;
+                self.clear_preview_source();
+                if let Some(path) = self.workshop_snapshot_path.take() {
+                    self.pending_cleanup.push(path);
+                }
             }
         }
         true
