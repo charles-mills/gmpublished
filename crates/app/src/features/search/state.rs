@@ -15,7 +15,7 @@ use crate::backend::{
     },
     tasks::BackendServices,
 };
-use iced::widget::image;
+use iced::{animation::Easing, widget::image};
 
 use crate::media::{thumbnail_demand, thumbnail_worker::ThumbnailInput};
 use crate::theme::{Tokens, motion};
@@ -78,7 +78,7 @@ impl Default for State {
                 false,
                 tokens.motion.modal_enter_duration(),
                 tokens.motion.modal_exit_duration(),
-                motion::expo_ease(),
+                Easing::EaseOut,
             ),
             pending_quick: None,
             thumbnail_generation: 0,
@@ -1006,6 +1006,15 @@ mod tests {
         assert!(state.focus(started + Duration::from_millis(600)));
         assert!(state.palette_open());
         assert!(!state.dropdown_open());
+    }
+
+    #[test]
+    fn palette_entrance_starts_visibly_instead_of_snapping_open() {
+        let mut state = State::default();
+        let started = Instant::now();
+
+        assert!(state.focus(started));
+        assert!((0.05..0.25).contains(&state.opacity(started + Duration::from_millis(16))));
     }
 
     #[test]

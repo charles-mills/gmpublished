@@ -219,6 +219,7 @@ fn account_menu_open_close_transitions_are_state_local() {
 
     state.toggle_account_menu(started);
     assert!(state.account_menu_open());
+    assert!((0.1..0.3).contains(&state.account_menu_opacity(started + Duration::from_millis(16))));
 
     state.dismiss_account_menu(started + Duration::from_millis(1));
     assert!(!state.account_menu_open());
