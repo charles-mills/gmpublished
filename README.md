@@ -61,3 +61,4 @@ All navigation and app control happens in the sidebar to give more space to cont
 - Drag & drop an addon from anywhere into the Downloader tab.
 - Installed addons are updated as you remove or subscribe to addons.
 - App themes, including auto OS theme setting.
+- Much more!
