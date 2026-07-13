@@ -61,7 +61,7 @@ Exec=${_pkgname} -e %f
 Icon=${_pkgname}
 Terminal=false
 Type=Application
-Categories=Utility;Game;Development;
+Categories=Utility;
 MimeType=application/gma;
 EOF
   install -Dm644 "${srcdir}/${_pkgname}.desktop" \

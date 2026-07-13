@@ -69,7 +69,7 @@ jobs:
 
   build_linux:
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       attestations: write
       contents: read
