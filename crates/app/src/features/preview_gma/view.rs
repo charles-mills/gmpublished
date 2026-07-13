@@ -369,14 +369,14 @@ fn preview_image<'a>(
     tokens: &Tokens,
     sidebar_width: f32,
 ) -> Element<'a, Message> {
-    // Natural aspect ratio: the image sizes itself to the sidebar width.
+    // Keep the thumbnail footprint stable while its content loads.
     let inner_width = (sidebar_width - tokens.spacing.pad * 2.0).max(1.0);
     let content: Element<'a, Message> = state.thumbnail_handle().map_or_else(
         || {
             if state.thumbnail_loading() {
                 container(spinner(tokens, state.spinner_elapsed(), SPINNER_SIZE))
                     .width(Length::Fill)
-                    .height(Length::Fixed(inner_width))
+                    .height(Length::Fill)
                     .center(Length::Fill)
                     .into()
             } else {
@@ -385,17 +385,23 @@ fn preview_image<'a>(
                     DEAD_GLYPH_SIZE * 2.0,
                 ))
                 .width(Length::Fill)
-                .height(Length::Fixed(inner_width))
+                .height(Length::Fill)
                 .center(Length::Fill)
                 .into()
             }
         },
-        |handle| image(handle.clone()).width(Length::Fill).into(),
+        |handle| {
+            image(handle.clone())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        },
     );
 
     let tokens = *tokens;
     container(content)
         .width(Length::Fill)
+        .height(Length::Fixed(inner_width))
         .style(move |_| theme::styles::preview_image_well(&tokens))
         .into()
 }
