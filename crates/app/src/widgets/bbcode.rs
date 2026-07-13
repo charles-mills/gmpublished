@@ -333,6 +333,7 @@ fn render_block<'a>(
                 text(raw)
                     .font(Font::MONOSPACE)
                     .size(tokens.caption)
+                    .wrapping(text::Wrapping::WordOrGlyph)
                     .width(Length::Fill),
             )
             .padding(tokens.pad_sm)
