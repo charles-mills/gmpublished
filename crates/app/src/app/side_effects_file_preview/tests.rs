@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use image::{DynamicImage, RgbaImage};
+use vformats::vtf::VtfFormat;
 
 use super::*;
 use crate::backend::{archive::PreviewArchiveSource, gma::PreviewArchive};
-use crate::test_support::GmaFixtureBuilder;
+use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
 
 fn test_tokens() -> Tokens {
     Tokens::dark()
@@ -1810,10 +1810,5 @@ fn tiny_wav_bytes() -> Vec<u8> {
 }
 
 fn create_vtf_bytes(rgba: &[u8]) -> Vec<u8> {
-    let image = RgbaImage::from_raw(2, 2, rgba.to_vec()).expect("fixture rgba image");
-    ::vtf::create(
-        DynamicImage::ImageRgba8(image),
-        ::vtf::ImageFormat::Rgba8888,
-    )
-    .expect("fixture vtf should encode")
+    fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[rgba])
 }

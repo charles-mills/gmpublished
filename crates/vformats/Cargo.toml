@@ -35,15 +35,8 @@ flate2 = "1"
 lzma-rust2 = { version = "0.16.4", default-features = false, features = ["std", "optimization"], optional = true }
 
 [dev-dependencies]
-# Test-only reference implementations: crc32fast cross-checks our CRC,
-# the vtf crate (the pipeline being replaced) cross-checks VTF decoding.
-image.workspace = true
-vtf.workspace = true
 # Encoder for gma::decompress round-trip tests only.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
-# The crates.io implementation being replaced; differential oracle.
-vmdl.workspace = true
-bytemuck = "1"
 
 [package.metadata.docs.rs]
 all-features = true

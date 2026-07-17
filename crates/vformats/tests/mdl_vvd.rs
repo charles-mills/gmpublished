@@ -1,7 +1,9 @@
-//! VVD differential tests: synthetic files parsed by both this crate
-//! and the `vmdl` crate (the implementation being replaced) must agree
-//! on geometry — and disagree on exactly one thing, deliberately: raw
-//! bone weights, where vmdl's accessor divides by bone count.
+//! VVD tests: synthetic files whose parsed geometry must reproduce the
+//! spec they were built from. Golden expectations were captured once
+//! from the `vmdl` crate v0.2.0 (the implementation being replaced) as
+//! a one-time differential oracle; it agreed on all geometry and
+//! disagreed on exactly one thing, deliberately: raw bone weights,
+//! where vmdl's accessor divides by bone count.
 
 use vformats::Limits;
 use vformats::mdl::{MdlError, parse_vvd};
@@ -70,45 +72,34 @@ fn vertex(tag: f32, weights: [f32; 3], bones: [u8; 3], bone_count: u8) -> Vertex
     )
 }
 
-fn assert_matches_vmdl(bytes: &[u8]) {
+/// Asserts the parse reproduces `spec`'s vertices in `order` (output
+/// index -> source vertex index), tangents following their vertices.
+/// The vmdl v0.2.0 oracle (since removed) confirmed exactly this
+/// output — same geometry and tangent reordering, with its weights()
+/// equal to our raw weights divided by bone count (its documented
+/// divide-by-count bug), proving both read the same stored bytes.
+fn assert_matches_vmdl(bytes: &[u8], spec: &VvdSpec, order: &[usize]) {
     let ours = parse_vvd(bytes, &Limits::default()).expect("our parse");
-    let theirs = vmdl::vvd::Vvd::read(bytes).expect("vmdl parse");
 
-    assert_eq!(ours.vertices.len(), theirs.vertices.len(), "vertex count");
-    for (index, (a, b)) in ours.vertices.iter().zip(&theirs.vertices).enumerate() {
-        assert_eq!(
-            a.position,
-            [b.position.x, b.position.y, b.position.z],
-            "vertex {index} position"
-        );
-        assert_eq!(
-            a.normal,
-            [b.normal.x, b.normal.y, b.normal.z],
-            "vertex {index} normal"
-        );
-        assert_eq!(a.uv, b.texture_coordinates, "vertex {index} uv");
-        // vmdl keeps the raw slots private; its weights() accessor is the
-        // documented divide-by-count bug. Verify our raw weights times the
-        // inverse of vmdl's division reproduce its output, proving both
-        // read the same stored bytes.
-        let vmdl_weights: Vec<(u8, f32)> = b
-            .bone_weights
-            .weights()
-            .map(|w| (w.bone_id, w.weight))
-            .collect();
-        assert_eq!(
-            vmdl_weights.len(),
-            usize::from(a.bone_count.min(3)),
-            "vertex {index} slots"
-        );
-        for (slot, (bone_id, divided)) in vmdl_weights.iter().enumerate() {
-            assert_eq!(*bone_id, a.bones[slot], "vertex {index} bone {slot}");
-            let expected = a.weights[slot] / f32::from(a.bone_count);
-            assert_eq!(*divided, expected, "vertex {index} weight {slot}");
-        }
+    assert_eq!(ours.vertices.len(), order.len(), "vertex count");
+    for (index, (a, &source)) in ours.vertices.iter().zip(order).enumerate() {
+        let (position, normal, uv, weights, bones, bone_count) = &spec.vertices[source];
+        assert_eq!(a.position, *position, "vertex {index} position");
+        assert_eq!(a.normal, *normal, "vertex {index} normal");
+        assert_eq!(a.uv, *uv, "vertex {index} uv");
+        assert_eq!(a.weights, *weights, "vertex {index} weights");
+        assert_eq!(a.bones, *bones, "vertex {index} bones");
+        assert_eq!(a.bone_count, *bone_count, "vertex {index} bone count");
     }
-    assert_eq!(ours.tangents.len(), theirs.tangents.len(), "tangent count");
-    assert_eq!(ours.tangents, theirs.tangents, "tangents");
+    assert_eq!(ours.tangents.len(), order.len(), "tangent count");
+    for (index, (tangent, &source)) in ours.tangents.iter().zip(order).enumerate() {
+        let base = (source * 4) as f32;
+        assert_eq!(
+            *tangent,
+            [base, base + 1.0, base + 2.0, base + 3.0],
+            "tangent {index}"
+        );
+    }
 }
 
 #[test]
@@ -121,7 +112,7 @@ fn no_fixup_files_match_vmdl() {
         ],
         fixups: vec![],
     };
-    assert_matches_vmdl(&build_vvd(&spec));
+    assert_matches_vmdl(&build_vvd(&spec), &spec, &[0, 1, 2]);
 }
 
 #[test]
@@ -137,7 +128,7 @@ fn fixup_files_reorder_identically_to_vmdl() {
         fixups: vec![(0, 2, 2), (1, 0, 1)],
     };
     let bytes = build_vvd(&spec);
-    assert_matches_vmdl(&bytes);
+    assert_matches_vmdl(&bytes, &spec, &[2, 3, 0]);
 
     let ours = parse_vvd(&bytes, &Limits::default()).expect("parse");
     assert_eq!(ours.vertices.len(), 3);

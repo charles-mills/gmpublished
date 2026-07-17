@@ -5,13 +5,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use image::{DynamicImage, RgbaImage};
 use lzma_rust2::{LzmaOptions, LzmaWriter};
+use vformats::vtf::VtfFormat;
 
 use super::*;
 use crate::{
     backend::gma::PreviewArchive,
-    test_support::{GmaFixtureBuilder, write_gma_fixture},
+    test_support::{GmaFixtureBuilder, fixture_vtf_bytes, write_gma_fixture},
 };
 
 const VPK_SIGNATURE: u32 = 0x55aa1234;
@@ -566,7 +566,7 @@ fn bc_resolution_reorders_vtf_mips_largest_first() {
     let bytes = create_bc_vtf_bytes(
         8,
         4,
-        ::vtf::ImageFormat::Dxt1,
+        VtfFormat::Dxt1,
         &[smallest.as_slice(), middle.as_slice(), largest.as_slice()],
     );
 
@@ -594,7 +594,7 @@ fn bc_texture_budget_counts_compressed_mip_bytes() {
             )
             .entry(
                 "materials/test/first.vtf",
-                create_bc_vtf_bytes(4, 4, ::vtf::ImageFormat::Dxt1, &[block.as_slice()]),
+                create_bc_vtf_bytes(4, 4, VtfFormat::Dxt1, &[block.as_slice()]),
             )
             .build(),
     )
@@ -628,7 +628,7 @@ fn bc_texture_cache_reuses_path_across_alpha_modes() {
             )
             .entry(
                 "materials/models/test/shared_dxt.vtf",
-                create_bc_vtf_bytes(4, 4, ::vtf::ImageFormat::Dxt1, &[block.as_slice()]),
+                create_bc_vtf_bytes(4, 4, VtfFormat::Dxt1, &[block.as_slice()]),
             )
             .build(),
     )
@@ -663,7 +663,7 @@ fn dxt1_material_resolves_to_bc_and_rgb888_stays_rgba() {
             )
             .entry(
                 "materials/test/dxt.vtf",
-                create_bc_vtf_bytes(4, 4, ::vtf::ImageFormat::Dxt1, &[block.as_slice()]),
+                create_bc_vtf_bytes(4, 4, VtfFormat::Dxt1, &[block.as_slice()]),
             )
             .entry(
                 "materials/test/rgb.vtf",
@@ -1250,12 +1250,12 @@ fn resolved_bc_mip(width: u32, height: u32, marker: u8) -> ResolvedBcMip {
 }
 
 fn create_vtf_bytes_with_dimensions(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
-    let image = RgbaImage::from_raw(width, height, rgba.to_vec()).expect("fixture rgba image");
-    ::vtf::create(
-        DynamicImage::ImageRgba8(image),
-        ::vtf::ImageFormat::Rgba8888,
+    fixture_vtf_bytes(
+        u16::try_from(width).expect("fixture width"),
+        u16::try_from(height).expect("fixture height"),
+        VtfFormat::Rgba8888,
+        &[rgba],
     )
-    .expect("fixture vtf should encode")
 }
 
 fn solid_bc1_red_block() -> [u8; 8] {
@@ -1267,42 +1267,19 @@ fn solid_bc1_red_block() -> [u8; 8] {
 fn create_bc_vtf_bytes(
     width: u16,
     height: u16,
-    format: ::vtf::ImageFormat,
+    format: VtfFormat,
     stored_mips: &[&[u8]],
 ) -> Vec<u8> {
-    let header = ::vtf::header::VTFHeader {
-        signature: ::vtf::header::VTFHeader::SIGNATURE,
-        version: [7, 1],
-        header_size: 64,
-        width,
-        height,
-        flags: 0,
-        frames: 1,
-        first_frame: 0,
-        reflectivity: [0.0; 3],
-        bumpmap_scale: 1.0,
-        highres_image_format: format,
-        mipmap_count: u8::try_from(stored_mips.len()).expect("fixture mip count"),
-        lowres_image_format: ::vtf::ImageFormat::None,
-        lowres_image_width: 0,
-        lowres_image_height: 0,
-        depth: 1,
-        resources: ::vtf::resources::ResourceList::empty(),
-    };
-    let mut bytes = Vec::new();
-    header.write(&mut bytes).expect("fixture header");
-    bytes.resize(header.header_size as usize, 0);
-    for mip in stored_mips {
-        bytes.extend_from_slice(mip);
-    }
-    bytes
+    fixture_vtf_bytes(width, height, format, stored_mips)
 }
 
 fn create_rgb888_vtf_bytes(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
-    let image =
-        ::image::RgbImage::from_raw(width, height, rgb.to_vec()).expect("fixture rgb image");
-    ::vtf::create(DynamicImage::ImageRgb8(image), ::vtf::ImageFormat::Rgb888)
-        .expect("fixture vtf should encode")
+    fixture_vtf_bytes(
+        u16::try_from(width).expect("fixture width"),
+        u16::try_from(height).expect("fixture height"),
+        VtfFormat::Rgb888,
+        &[rgb],
+    )
 }
 
 fn compress_lzma(input: &[u8]) -> Vec<u8> {

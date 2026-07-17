@@ -480,41 +480,58 @@ fn bc_blocks_decode_including_edge_clamping_and_alpha_modes() {
 }
 
 // -----------------------------------------------------------------
-// Cross-checks against the `vtf` crate on formats it can decode
+// Cross-checks against files written by the `vtf` crate. The
+// gradient_*.vtf fixtures under tests/fixtures/ were generated once
+// by `vtf` v0.4.1 (its `create` encoder over the gradient below) and are
+// committed goldens; gradient_16x8_dxt5.rgba.bin is that crate's
+// decode of the DXT5 file (DXT5 is lossy, so the source gradient is
+// not the expected output).
 // -----------------------------------------------------------------
 
-fn gradient(width: u32, height: u32) -> image::DynamicImage {
-    image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(width, height, |x, y| {
-        image::Rgba([
-            (x * 37 % 256) as u8,
-            (y * 91 % 256) as u8,
-            ((x + y) * 53 % 256) as u8,
-            255,
-        ])
-    }))
+fn gradient(width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            rgba.extend_from_slice(&[
+                (x * 37 % 256) as u8,
+                (y * 91 % 256) as u8,
+                ((x + y) * 53 % 256) as u8,
+                255,
+            ]);
+        }
+    }
+    rgba
 }
 
 #[test]
 fn decode_matches_the_vtf_crate_on_its_supported_formats() {
-    for (format, label) in [
-        (::vtf::ImageFormat::Rgba8888, "rgba8888"),
-        (::vtf::ImageFormat::Rgb888, "rgb888"),
-        (::vtf::ImageFormat::Dxt5, "dxt5"),
+    let dxt5_golden = include_bytes!("../tests/fixtures/gradient_16x8_dxt5.rgba.bin");
+    for (bytes, expected, label) in [
+        // Rgba8888 and Rgb888 are lossless: the expected decode is the
+        // gradient itself (verified against the vtf crate at generation).
+        (
+            &include_bytes!("../tests/fixtures/gradient_16x8_rgba8888.vtf")[..],
+            gradient(16, 8),
+            "rgba8888",
+        ),
+        (
+            &include_bytes!("../tests/fixtures/gradient_16x8_rgb888.vtf")[..],
+            gradient(16, 8),
+            "rgb888",
+        ),
+        (
+            &include_bytes!("../tests/fixtures/gradient_16x8_dxt5.vtf")[..],
+            dxt5_golden.to_vec(),
+            "dxt5",
+        ),
     ] {
-        let bytes = ::vtf::create(gradient(16, 8), format).expect("encode fixture");
-        let theirs = ::vtf::from_bytes(&bytes)
-            .expect("their parse")
-            .highres_image
-            .decode(0)
-            .expect("their decode")
-            .to_rgba8();
-        let ours = parse(&bytes, &limits())
+        let ours = parse(bytes, &limits())
             .expect("our parse")
             .decode_rgba(0, 0, 0, &limits())
             .expect("our decode");
-        assert_eq!(ours.width, theirs.width(), "{label} width");
-        assert_eq!(ours.height, theirs.height(), "{label} height");
-        assert_eq!(ours.rgba, theirs.into_raw(), "{label} pixels");
+        assert_eq!(ours.width, 16, "{label} width");
+        assert_eq!(ours.height, 8, "{label} height");
+        assert_eq!(ours.rgba, expected, "{label} pixels");
     }
 }
 
@@ -522,8 +539,8 @@ fn decode_matches_the_vtf_crate_on_its_supported_formats() {
 fn full_mip_chain_matches_the_vtf_crate_frame_size_walk() {
     // The vtf crate can only decode mip 0, but our raw_bc walk must agree
     // with the offsets its writer produced for every stored mip.
-    let bytes = ::vtf::create(gradient(32, 16), ::vtf::ImageFormat::Dxt5).expect("encode");
-    let vtf = parse(&bytes, &limits()).expect("parse");
+    let bytes = include_bytes!("../tests/fixtures/gradient_32x16_dxt5.vtf");
+    let vtf = parse(bytes, &limits()).expect("parse");
     let texture = vtf.raw_bc(0, 0).expect("bc");
     assert_eq!(texture.mips.len(), usize::from(vtf.mip_count()));
     let largest = texture.mips.last().expect("mips");

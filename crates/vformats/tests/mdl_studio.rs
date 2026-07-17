@@ -1,8 +1,9 @@
-//! `.mdl` differential tests: a full synthetic studio model parsed by
-//! this crate and by `vmdl`. Agreement is asserted wherever vmdl is
-//! correct; where it is defective (model record stride, RLE value
-//! sign, euler→quaternion conversion), the tests prove both sides read
-//! the same bytes and pin OUR output to the studio.h-correct value.
+//! `.mdl` tests: a full synthetic studio model. Golden expectations
+//! were captured once from the `vmdl` crate v0.2.0 as a one-time
+//! differential oracle, wherever vmdl was correct; where it was
+//! defective (model record stride, RLE value sign, euler→quaternion
+//! conversion), the tests pin OUR output to the studio.h-correct
+//! value.
 
 use vformats::Limits;
 use vformats::mdl::{FLAG_STATIC_PROP, MdlError, parse_mdl};
@@ -256,112 +257,83 @@ fn put_span(b: &mut [u8], at: usize, valid: u8, total: u8, values: &[i16]) {
 
 #[test]
 fn parses_and_matches_vmdl_where_vmdl_is_correct() {
+    // Golden values captured from the `vmdl` crate v0.2.0 as a
+    // one-time differential oracle; they mirror the builder inputs.
     let fixture = build_mdl();
     let ours = parse_mdl(&fixture.bytes, &Limits::default()).expect("our parse");
-    let theirs = vmdl::Mdl::read(&fixture.bytes).expect("vmdl parse");
 
     assert_eq!(ours.name, "test.mdl");
     assert_eq!(ours.checksum, 0x0BADF00D);
     assert_eq!(ours.version, 48);
     assert_ne!(ours.flags & FLAG_STATIC_PROP, 0);
-    assert!(
-        theirs
-            .header
-            .flags
-            .contains(vmdl::mdl::ModelFlags::STATIC_PROP)
-    );
     assert_eq!(ours.sequence_count, 0);
 
     // Bones.
-    assert_eq!(ours.bones.len(), theirs.bones.len());
-    for (a, b) in ours.bones.iter().zip(&theirs.bones) {
-        assert_eq!(a.name, b.name);
-        assert_eq!(a.parent, b.parent);
-        assert_eq!(a.position, [b.pos.x, b.pos.y, b.pos.z]);
+    assert_eq!(ours.bones.len(), 2);
+    for (index, (a, (name, parent))) in ours
+        .bones
+        .iter()
+        .zip([("root", -1), ("door", 0)])
+        .enumerate()
+    {
+        assert_eq!(a.name, name);
+        assert_eq!(a.parent, parent);
+        assert_eq!(a.position, [1.0 + index as f32, 2.0, 3.0]);
+        assert_eq!(a.quaternion, [0.0, 0.0, 0.382_683_43, 0.923_879_5]);
+        assert_eq!(a.rotation, [0.1, 0.2, 0.3]);
+        assert_eq!(a.position_scale, [0.25, 0.5, 0.75]);
         assert_eq!(
-            a.quaternion,
+            a.pose_to_bone,
             [
-                b.quaternion.x,
-                b.quaternion.y,
-                b.quaternion.z,
-                b.quaternion.w
+                [1.0, 0.0, 0.0, 10.0],
+                [0.0, 1.0, 0.0, 20.0],
+                [0.0, 0.0, 1.0, 30.0]
             ]
         );
-        assert_eq!(a.rotation, [b.rot.x, b.rot.y, b.rot.z]);
-        assert_eq!(
-            a.position_scale,
-            [b.pos_scale.x, b.pos_scale.y, b.pos_scale.z]
-        );
-        let theirs_p2b: [[f32; 4]; 3] = bytemuck::cast(b.pose_to_bone);
-        assert_eq!(a.pose_to_bone, theirs_p2b);
     }
 
-    // Textures, dirs (both normalize backslashes), skins.
+    // Textures, dirs (backslashes normalized), skins.
     assert_eq!(ours.textures, ["metal/wall01", "glass/pane"]);
-    assert_eq!(
-        ours.textures,
-        theirs
-            .textures
-            .iter()
-            .map(|t| t.name.clone())
-            .collect::<Vec<_>>()
-    );
     assert_eq!(ours.texture_paths, ["models/props/", "materials/shared/"]);
-    assert_eq!(ours.texture_paths, theirs.texture_paths);
     assert_eq!(ours.skin_table, [0, 1, 1, 0]);
-    assert_eq!(ours.skin_table, theirs.skin_table);
     assert_eq!(ours.skin_reference_count, 2);
 
-    // Bodypart tree: model 0 agrees with vmdl...
+    // Bodypart tree: model 0 agreed with vmdl exactly...
     assert_eq!(ours.body_parts.len(), 1);
     let our_models = &ours.body_parts[0].models;
-    let their_models = &theirs.body_parts[0].models;
-    assert_eq!(our_models.len(), their_models.len());
+    assert_eq!(our_models.len(), 2);
     assert_eq!(our_models[0].name, "choice_a");
-    assert_eq!(their_models[0].name.as_str(), "choice_a");
     assert_eq!(our_models[0].vertex_offset, 0);
-    assert_eq!(their_models[0].vertex_offset, 0);
     assert_eq!(
         our_models[0]
             .meshes
             .iter()
             .map(|m| (m.material, m.vertex_offset))
             .collect::<Vec<_>>(),
-        their_models[0]
-            .meshes
-            .iter()
-            .map(|m| (m.material, m.vertex_offset))
-            .collect::<Vec<_>>()
+        [(0, 0), (1, 2)]
     );
 
-    // ...model 1 is where vmdl's 144-byte stride defect bites: it reads
+    // ...model 1 is where vmdl's 144-byte stride defect bit: it read
     // the second record 4 bytes early, landing the name field on the
-    // previous record's zero padding. Ours reads studio.h's 148.
+    // previous record's zero padding (its captured name was ""). Ours
+    // reads studio.h's 148.
     assert_eq!(our_models[1].name, "choice_b");
     assert_eq!(our_models[1].vertex_offset, 4);
     assert_eq!(our_models[1].meshes.len(), 1);
-    assert_eq!(
-        their_models[1].name.as_str(),
-        "",
-        "vmdl 0.2.0's model stride defect appears fixed — re-audit this probe"
-    );
 
-    // Animation A (RAWROT + RAWPOS): both decode identically.
+    // Animation A (RAWROT + RAWPOS): vmdl decoded identically; its
+    // captured q48 decode was [0.0, 0.0, 0.70709234, 0.7071213].
     let our_idle = &ours.local_animations[0];
-    let their_idle = &theirs.local_animations[0];
-    assert_eq!(our_idle.name, their_idle.name);
+    assert_eq!(our_idle.name, "@idle");
     assert_eq!(our_idle.frame_count, 1);
     assert_eq!(our_idle.animations.len(), 1);
     assert_eq!(our_idle.animations[0].bone, 1);
     let ours_q = our_idle.animations[0].rotation(0);
-    let theirs_q = their_idle.animations[0].rotation(0);
-    let theirs_q = [theirs_q.x, theirs_q.y, theirs_q.z, theirs_q.w];
-    for (a, b) in ours_q.iter().zip(theirs_q) {
-        assert!((a - b).abs() < 1e-6, "q48 {ours_q:?} vs {theirs_q:?}");
+    let golden_q = [0.0, 0.0, 0.707_092_34, 0.707_121_3];
+    for (a, b) in ours_q.iter().zip(golden_q) {
+        assert!((a - b).abs() < 1e-6, "q48 {ours_q:?} vs {golden_q:?}");
     }
-    let their_pos = their_idle.animations[0].position(0);
     assert_eq!(our_idle.animations[0].position(0), [1.0, 0.5, 2.0]);
-    assert_eq!([their_pos.x, their_pos.y, their_pos.z], [1.0, 0.5, 2.0]);
 }
 
 #[test]
@@ -383,7 +355,10 @@ fn rle_animation_decodes_signed_values_with_scale_and_axis_fixup() {
     // Rotation eulers: raw component 0 = [10, -6, 4]; the axis fixup
     // maps final (roll, pitch, yaw) = (v2*s2, v0*s0, v1*s1) with
     // rot_scale = [0.5, 1.0, 1.5], so pitch = v0 * 0.5 and the rest 0.
-    // Frame 1's -6 is the signed-read probe: vmdl decodes it as 65530.
+    // Frame 1's -6 is the signed-read probe: the vmdl v0.2.0 oracle
+    // decoded it as 65530 (unsigned defect), while its frame 0 agreed
+    // with our decoded euler under its own conversion — proving both
+    // read identical spans before the oracle was removed.
     let expected_pitch = [5.0f32, -3.0, 2.0];
     for (frame, pitch) in expected_pitch.iter().enumerate() {
         let quat = channel.rotation(frame);
@@ -394,31 +369,6 @@ fn rle_animation_decodes_signed_values_with_scale_and_axis_fixup() {
                 "frame {frame}: {quat:?} vs {expected:?}"
             );
         }
-    }
-
-    // Same bytes through vmdl: frame 0 (positive value) agrees with our
-    // decoded euler when converted with vmdl's own defective formula —
-    // proving both read identical spans; frame 1 shows the sign defect.
-    let theirs = vmdl::Mdl::read(&fixture.bytes).expect("vmdl parse");
-    let their_motion = &theirs.local_animations[1];
-    let their_q0 = their_motion.animations[0].rotation(0);
-    let vmdl_style = vmdl_defective_euler_to_quat([0.0, 5.0, 0.0]);
-    for (a, b) in [their_q0.x, their_q0.y, their_q0.z, their_q0.w]
-        .iter()
-        .zip(vmdl_style)
-    {
-        assert!((a - b).abs() < 1e-5, "vmdl frame 0 read differs");
-    }
-    let their_q1 = their_motion.animations[0].rotation(1);
-    let unsigned_read = vmdl_defective_euler_to_quat([0.0, 65530.0 * 0.5, 0.0]);
-    for (a, b) in [their_q1.x, their_q1.y, their_q1.z, their_q1.w]
-        .iter()
-        .zip(unsigned_read)
-    {
-        assert!(
-            (a - b).abs() < 1e-5,
-            "vmdl 0.2.0's unsigned RLE read appears fixed — re-audit this probe"
-        );
     }
 }
 
@@ -434,31 +384,6 @@ fn angle_quaternion_reference(euler: [f32; 3]) -> [f32; 4] {
         cr * cp * sy - sr * sp * cy,
         cr * cp * cy + sr * sp * sy,
     ]
-}
-
-/// vmdl's euler→quaternion: q_y(pitch) * q_x(-roll) * q_z(yaw), with
-/// the euler pre-permuted by its scale fixup — reproduced here only to
-/// prove byte-level agreement on the decoded values.
-fn vmdl_defective_euler_to_quat(euler: [f32; 3]) -> [f32; 4] {
-    fn axis(v: f32, x: f32, y: f32, z: f32) -> [f32; 4] {
-        let (s, c) = (v * 0.5).sin_cos();
-        [x * s, y * s, z * s, c]
-    }
-    fn mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-        [
-            a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-            a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-            a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-        ]
-    }
-    mul(
-        mul(
-            axis(euler[1], 0.0, 1.0, 0.0),
-            axis(-euler[0], 1.0, 0.0, 0.0),
-        ),
-        axis(euler[2], 0.0, 0.0, 1.0),
-    )
 }
 
 #[test]

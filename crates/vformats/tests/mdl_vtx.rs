@@ -1,7 +1,7 @@
-//! VTX differential tests: a synthetic file with relative offsets at
-//! every tree level, parsed by this crate and by `vmdl`; trees and
-//! strip emission order must agree (except vmdl's tri-strip tail
-//! overrun).
+//! VTX tests: a synthetic file with relative offsets at every tree
+//! level. Golden expectations were captured once from the `vmdl` crate
+//! v0.2.0 as a one-time differential oracle (trees and strip emission
+//! agreed, except vmdl's tri-strip tail overrun).
 
 use vformats::Limits;
 use vformats::mdl::{MdlError, VtxStrip, parse_vtx};
@@ -104,83 +104,61 @@ fn two_group_fixture() -> Vec<u8> {
 
 #[test]
 fn tree_and_fields_match_vmdl() {
+    // Expected values captured from the `vmdl` crate v0.2.0 as a
+    // one-time differential oracle; they mirror the GroupSpec inputs.
     let bytes = two_group_fixture();
     let ours = parse_vtx(&bytes, &Limits::default()).expect("our parse");
-    let theirs = vmdl::vtx::Vtx::read(&bytes).expect("vmdl parse");
 
     assert_eq!(ours.checksum, 0x11223344);
-    assert_eq!(ours.body_parts.len(), theirs.body_parts.len());
+    assert_eq!(ours.body_parts.len(), 1);
     let our_lod = &ours.body_parts[0].models[0].lods[0];
-    let their_lod = &theirs.body_parts[0].models[0].lods[0];
-    assert_eq!(our_lod.meshes.len(), their_lod.meshes.len());
+    assert_eq!(our_lod.meshes.len(), 2);
 
-    for (mesh, (a, b)) in our_lod.meshes.iter().zip(&their_lod.meshes).enumerate() {
-        assert_eq!(a.strip_groups.len(), b.strip_groups.len(), "mesh {mesh}");
-        for (ga, gb) in a.strip_groups.iter().zip(&b.strip_groups) {
-            assert_eq!(ga.indices, gb.indices, "mesh {mesh} indices");
-            assert_eq!(ga.vertices.len(), gb.vertices.len());
-            for (va, vb) in ga.vertices.iter().zip(&gb.vertices) {
-                // vmdl's vtx::Vertex is repr(packed): copy fields out.
-                let (id, weights, count, bones) = (
-                    { vb.original_mesh_vertex_id },
-                    { vb.bone_weight_indexes },
-                    { vb.bone_count },
-                    { vb.bone_id },
-                );
-                assert_eq!(va.original_mesh_vertex_id, id);
-                assert_eq!(va.bone_weight_indexes, weights);
-                assert_eq!(va.bone_count, count);
-                assert_eq!(va.bone_ids, bones);
-            }
+    let expected: [(&[u16], &[u16]); 2] = [
+        (&[0, 1, 2, 2, 1, 3], &[10, 11, 12, 13]),
+        (&[0, 1, 2, 3, 4, 0, 2, 4], &[20, 21, 22, 23, 24]),
+    ];
+    for (mesh, (a, (indices, vertex_ids))) in our_lod.meshes.iter().zip(expected).enumerate() {
+        assert_eq!(a.strip_groups.len(), 1, "mesh {mesh}");
+        let group = &a.strip_groups[0];
+        assert_eq!(group.indices, indices, "mesh {mesh} indices");
+        assert_eq!(group.vertices.len(), vertex_ids.len());
+        for (va, id) in group.vertices.iter().zip(vertex_ids) {
+            assert_eq!(va.original_mesh_vertex_id, *id);
+            assert_eq!(va.bone_weight_indexes, [9, 8, 7]);
+            assert_eq!(va.bone_count, 1);
+            assert_eq!(va.bone_ids, [4, 5, 6]);
         }
     }
 }
 
 #[test]
 fn strip_emission_matches_vmdl_modulo_its_overrun() {
+    // Expected emissions captured from the `vmdl` crate v0.2.0 as a
+    // one-time differential oracle. Both tri-lists agreed exactly. For
+    // the tri-strip vmdl emitted [2,1,0, 2,1,1, 4,3,2, 4,3,3, 6,5,4] —
+    // len triangles (two overrun) with degenerate odd triangles; we
+    // emit the correct len-2 with proper alternation, agreeing on the
+    // even triangles ([2,1,0] and [4,3,2]), proving both read the same
+    // ranges.
     let bytes = two_group_fixture();
     let ours = parse_vtx(&bytes, &Limits::default()).expect("our parse");
-    let theirs = vmdl::vtx::Vtx::read(&bytes).expect("vmdl parse");
 
-    let our_groups: Vec<_> = ours.body_parts[0].models[0].lods[0]
+    let strips: Vec<_> = ours.body_parts[0].models[0].lods[0]
         .meshes
         .iter()
         .flat_map(|m| m.strip_groups.iter())
+        .flat_map(|g| g.strips.iter())
         .collect();
-    let their_groups: Vec<_> = theirs.body_parts[0].models[0].lods[0]
-        .meshes
-        .iter()
-        .flat_map(|m| m.strip_groups.iter())
-        .collect();
-
-    for (ga, gb) in our_groups.iter().zip(&their_groups) {
-        for (sa, sb) in ga.strips.iter().zip(&gb.strips) {
-            let our_positions: Vec<usize> = sa.triangle_index_positions().collect();
-            let their_positions: Vec<usize> = sb.indices().collect();
-            if sa.flags & TRI_STRIP != 0 {
-                // Documented divergence: vmdl emits len triangles (two
-                // overrun) and its odd triangles are degenerate
-                // ([i, i, i+1]); we emit the correct len-2 with proper
-                // alternation. Even triangles must still agree exactly,
-                // proving both read the same ranges.
-                assert_eq!(our_positions.len(), (sa.index_count - 2) * 3);
-                assert_eq!(their_positions.len(), sa.index_count * 3);
-                for (tri, (ours, theirs)) in our_positions
-                    .chunks(3)
-                    .zip(their_positions.chunks(3))
-                    .enumerate()
-                {
-                    if tri % 2 == 0 {
-                        assert_eq!(ours, theirs, "even strip triangle {tri}");
-                    } else {
-                        assert_eq!(theirs[1], theirs[2], "vmdl odd tri {tri} is degenerate");
-                        assert_ne!(ours[0], ours[1], "our odd tri {tri} is not");
-                    }
-                }
-            } else {
-                assert_eq!(our_positions, their_positions);
-            }
-        }
+    let expected: [&[usize]; 3] = [
+        &[5, 4, 3, 2, 1, 0],
+        &[2, 1, 0, 2, 3, 1, 4, 3, 2],
+        &[7, 6, 5],
+    ];
+    assert_eq!(strips.len(), expected.len());
+    for (strip, (s, want)) in strips.iter().zip(expected).enumerate() {
+        let positions: Vec<usize> = s.triangle_index_positions().collect();
+        assert_eq!(positions, want, "strip {strip}");
     }
 }
 

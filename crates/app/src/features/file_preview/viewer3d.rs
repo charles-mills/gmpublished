@@ -251,8 +251,11 @@ pub(super) fn mat_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 
 #[cfg(test)]
 mod tests {
+    use vformats::vtf::VtfFormat;
+
     use super::super::model::ModelStats;
     use super::*;
+    use crate::test_support::fixture_vtf_bytes;
 
     fn empty_preview(bounds_min: [f32; 3], bounds_max: [f32; 3]) -> ModelPreview {
         ModelPreview {
@@ -1750,17 +1753,17 @@ mod tests {
         let fixtures = [
             (
                 BcFormat::Bc1,
-                ::vtf::ImageFormat::Dxt1,
+                VtfFormat::Dxt1,
                 solid_bc1_color_block(0xf800),
             ),
             (
                 BcFormat::Bc2,
-                ::vtf::ImageFormat::Dxt3,
+                VtfFormat::Dxt3,
                 solid_bc2_color_block(0x07e0, 0x0f),
             ),
             (
                 BcFormat::Bc3,
-                ::vtf::ImageFormat::Dxt5,
+                VtfFormat::Dxt5,
                 solid_bc3_color_block(0x001f, 255),
             ),
         ];
@@ -2093,30 +2096,7 @@ mod tests {
         block
     }
 
-    fn bc_vtf_bytes(width: u16, height: u16, format: ::vtf::ImageFormat, block: &[u8]) -> Vec<u8> {
-        let header = ::vtf::header::VTFHeader {
-            signature: ::vtf::header::VTFHeader::SIGNATURE,
-            version: [7, 1],
-            header_size: 64,
-            width,
-            height,
-            flags: 0,
-            frames: 1,
-            first_frame: 0,
-            reflectivity: [0.0; 3],
-            bumpmap_scale: 1.0,
-            highres_image_format: format,
-            mipmap_count: 1,
-            lowres_image_format: ::vtf::ImageFormat::None,
-            lowres_image_width: 0,
-            lowres_image_height: 0,
-            depth: 1,
-            resources: ::vtf::resources::ResourceList::empty(),
-        };
-        let mut bytes = Vec::new();
-        header.write(&mut bytes).expect("fixture header");
-        bytes.resize(header.header_size as usize, 0);
-        bytes.extend_from_slice(block);
-        bytes
+    fn bc_vtf_bytes(width: u16, height: u16, format: VtfFormat, block: &[u8]) -> Vec<u8> {
+        fixture_vtf_bytes(width, height, format, &[block])
     }
 }

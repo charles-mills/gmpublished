@@ -116,8 +116,6 @@ thiserror = { version = "2", default-features = false }
 trash = { version = "5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
 unic-langid = { version = "0.9.6", default-features = false }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
-vtf = "0.4.1"
-vmdl = "0.2.0"
 # `rustls-no-provider` + `_ring` gives rustls with the ring crypto provider but
 # WITHOUT the bundled Mozilla webpki roots; `platform-verifier` enables
 # certificate verification against the OS trust store (rustls-platform-verifier).
