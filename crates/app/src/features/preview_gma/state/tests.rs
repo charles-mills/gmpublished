@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::gma::PreviewArchive;
+use crate::bridge::gma::PreviewArchive;
 use crate::test_support::GmaFixtureBuilder;
 
 fn target() -> OpenTarget {

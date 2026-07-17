@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use gmpublished_backend::error_key::keys;
 
-use crate::backend::tasks::{StatusKey, TaskEvent, TaskId, TaskKind, TaskUpdate};
-use crate::backend::ui_error::UiError;
+use crate::bridge::tasks::{StatusKey, TaskEvent, TaskId, TaskKind, TaskUpdate};
+use crate::bridge::ui_error::UiError;
 use crate::theme::{Tokens, motion};
 
 /// How long a settled toast lingers before its exit animation starts.
@@ -230,7 +230,7 @@ impl State {
 mod tests {
     use std::time::Duration;
 
-    use crate::backend::tasks::SharedTaskUpdate;
+    use crate::bridge::tasks::SharedTaskUpdate;
 
     use super::*;
 

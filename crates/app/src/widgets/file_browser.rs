@@ -4,7 +4,7 @@ use iced::widget::{button, container, image, row, text};
 use iced::{Center, Color, Element, Length};
 
 use crate::assets;
-use crate::backend::gma::{ArchiveDirectoryPath, ArchiveEntryPath};
+use crate::bridge::gma::{ArchiveDirectoryPath, ArchiveEntryPath};
 use crate::format::format_bytes;
 use crate::theme::{self, ViewCtx};
 use crate::widgets::file_types::{SilkIcon, file_type_info};
@@ -462,7 +462,7 @@ fn saturating_i32(value: usize) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::gma::ArchiveEntryPath;
+    use crate::bridge::gma::ArchiveEntryPath;
 
     use super::*;
 

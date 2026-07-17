@@ -1,5 +1,5 @@
 use super::{App, RootMessage, Task, search, thumbnail_demand};
-use crate::backend::library::LibrarySnapshot;
+use crate::bridge::library::LibrarySnapshot;
 
 /// Must equal the grids' demand edge (installed addons, size analyzer, My
 /// Workshop all use 256) so a warm fill lands on the exact keys they read.
@@ -140,7 +140,7 @@ impl App {
 
     pub(super) fn warm_library_demands_task(
         &mut self,
-        preview_urls: Vec<(crate::backend::domain::PublishedFileId, String)>,
+        preview_urls: Vec<(crate::bridge::domain::PublishedFileId, String)>,
     ) -> Task<RootMessage> {
         if preview_urls.is_empty() {
             return Task::none();

@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use iced::widget::image;
 
-use crate::backend::Settings;
-use crate::backend::domain::PublishedFileId;
-use crate::backend::ui_error::UiError;
+use crate::bridge::Settings;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::ui_error::UiError;
 use crate::format::DownloadCountFormatter;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
@@ -629,7 +629,7 @@ fn grid_range_to_row_range(range: Range<usize>, row_count: usize) -> Range<usize
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::domain::PublishedFileId;
+    use crate::bridge::domain::PublishedFileId;
     use crate::widgets::addon_grid;
 
     use super::super::model::PageResult;

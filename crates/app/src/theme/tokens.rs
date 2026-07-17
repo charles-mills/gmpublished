@@ -1,4 +1,4 @@
-use crate::backend::{EffectiveThemePreset, ThemePreset, theme as core_theme};
+use crate::bridge::{EffectiveThemePreset, ThemePreset, theme as core_theme};
 use iced::{Color, Theme, theme::Palette};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1095,7 +1095,7 @@ const fn dimensions() -> Dimensions {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::{SystemColorScheme, ThemePreset, effective_theme_preset};
+    use crate::bridge::{SystemColorScheme, ThemePreset, effective_theme_preset};
 
     use super::{AccentInputs, Rgba, ThemeVariant, Tokens, alpha};
 

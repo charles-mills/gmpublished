@@ -11,7 +11,7 @@ use iced::{
 
 use crate::{
     assets,
-    backend::domain::SearchMode,
+    bridge::domain::SearchMode,
     theme::{self, Tokens, ViewCtx},
     widgets,
 };

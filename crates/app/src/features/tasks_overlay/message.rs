@@ -1,4 +1,4 @@
-use crate::backend::tasks::{TaskEvent, TaskId};
+use crate::bridge::tasks::{TaskEvent, TaskId};
 
 #[derive(Clone, Debug)]
 pub enum Message {

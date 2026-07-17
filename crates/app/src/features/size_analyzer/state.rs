@@ -9,13 +9,13 @@ use gmpublished_backend::error_key::keys;
 use iced::widget::{canvas, image};
 use iced::{Point, Size};
 
-use crate::backend::domain::PublishedFileId;
-use crate::backend::library::LibrarySnapshot;
-use crate::backend::size_analyzer::{
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::library::LibrarySnapshot;
+use crate::bridge::size_analyzer::{
     Rect, SizeAnalyzerAddon, SizeAnalyzerError, TreemapBounds, TreemapLayout,
     analyze_installed_addons,
 };
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 use crate::features::context_menu;
 use crate::media::{
     size_analyzer_render::{RgbaColor, SizeAnalyzerLabelSprite, tag_color},

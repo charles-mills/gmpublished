@@ -11,8 +11,10 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use rayon::prelude::*;
 
-use crate::backend::{archive::PreviewArchiveSource, gma::PreviewArchive, vpk::VpkArchive};
+use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive, vpk::VpkArchive};
+use gmpublished_backend::gma::read::GmaView;
 use gmpublished_backend::scene::map::MapPakFile;
 use iced::wgpu;
 use vformats::vtf::BcFormat;
@@ -708,8 +710,8 @@ impl MaterialResolver {
                 return self.cache_decoded_texture(bc_cache_key.clone(), texture);
             }
 
-            match decode_vtf_rgba(&vtf_bytes) {
-                Ok(decoded) => {
+            match decode_vtf_rgba_max(&vtf_bytes, self.config.decoded_texture_max_dimension) {
+                Ok((decoded, source_width, source_height)) => {
                     let mut rgba = decoded.rgba;
                     if !preserve_alpha {
                         force_opaque_alpha(&mut rgba);
@@ -719,8 +721,8 @@ impl MaterialResolver {
                             rgba,
                             decoded.width,
                             decoded.height,
-                            decoded.width,
-                            decoded.height,
+                            source_width,
+                            source_height,
                             false,
                         ),
                         self.config.decoded_texture_max_dimension,
@@ -917,6 +919,10 @@ impl MaterialResolver {
     }
 
     /// Every content source this resolver can read from, in lookup-priority order.
+    /// The sibling-GMA and game-VPK tails are `once_with`-deferred: building
+    /// them means indexing the whole workshop folder / opening every game
+    /// VPK, so it must only happen when an earlier tier misses — for
+    /// self-contained addons it never happens at all.
     fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.config
             .prepended
@@ -926,8 +932,11 @@ impl MaterialResolver {
             .chain(self.config.pakfile.as_deref().map(SourceRef::Pakfile))
             .chain(std::iter::once(SourceRef::Addon(&self.config.addon)))
             .chain(self.config.loose_source_dirs.iter().map(SourceRef::Loose))
-            .chain(std::iter::once(SourceRef::SiblingGma(self.sibling_gmas())))
-            .chain(self.game_vpks().iter().map(SourceRef::GameVpk))
+            .chain(std::iter::once_with(|| SourceRef::SiblingGma(self.sibling_gmas())))
+            .chain(
+                std::iter::once_with(|| self.game_vpks().iter().map(SourceRef::GameVpk))
+                    .flatten(),
+            )
     }
 
     fn find_content_bytes<P: AsRef<str>>(&self, paths: &[P]) -> Option<ResolvedContentBytes> {
@@ -1041,6 +1050,40 @@ impl SourceRef<'_> {
 /// "show me this texture" decode.
 pub fn decode_vtf_rgba(bytes: &[u8]) -> Result<vformats::vtf::RgbaImage, vformats::vtf::VtfError> {
     vformats::vtf::parse(bytes, &Limits::default())?.decode_rgba(0, 0, 0, &Limits::default())
+}
+
+/// Like [`decode_vtf_rgba`], but when `max_dimension` is set, decodes the
+/// stored mip nearest (at or below) that size instead of decoding mip 0
+/// and downscaling — the same stored-mip strategy the BC path already
+/// ships via `drop_bc_mips_to_max_dimension`. Falls back to mip 0 when
+/// the chosen mip fails to decode (truncated files lose the *large* mips,
+/// so this fallback rarely helps, but it never makes things worse).
+///
+/// Returns the decoded image plus the texture's TRUE mip-0 dimensions:
+/// BSP texel UVs normalize against the source size, not the decoded mip
+/// (see [`ResolvedTexture::original_dimensions`]).
+fn decode_vtf_rgba_max(
+    bytes: &[u8],
+    max_dimension: Option<u32>,
+) -> Result<(vformats::vtf::RgbaImage, u32, u32), vformats::vtf::VtfError> {
+    let limits = Limits::default();
+    let vtf = vformats::vtf::parse(bytes, &limits)?;
+    let (source_width, source_height) = (vtf.width(), vtf.height());
+    let side = source_width.max(source_height);
+    let mip = match max_dimension {
+        Some(max) if max > 0 && side > max => {
+            let want = (f64::from(side) / f64::from(max)).log2().ceil() as u8;
+            want.min(vtf.mip_count().saturating_sub(1))
+        }
+        _ => 0,
+    };
+    let image = if mip == 0 {
+        vtf.decode_rgba(0, 0, 0, &limits)?
+    } else {
+        vtf.decode_rgba(0, 0, mip, &limits)
+            .or_else(|_| vtf.decode_rgba(0, 0, 0, &limits))?
+    };
+    Ok((image, source_width, source_height))
 }
 
 fn push_matching_paths<'a, I, P>(
@@ -1779,61 +1822,60 @@ fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaIndex {
         );
     }
 
-    let mut archives = Vec::new();
-    let mut entries = HashMap::new();
-    for path in paths.iter().take(MAX_SIBLING_GMA_ARCHIVES) {
-        let archive_index = archives.len();
-        let archive = match path.kind {
+    // Opening every archive (and LZMA-decompressing every legacy-bin entry
+    // table) is the expensive part and each path is independent — do it in
+    // parallel, then merge sequentially so first-wins entry priority keeps
+    // the original path order.
+    type IndexedArchive = (SiblingGmaArchive, Vec<(String, SiblingGmaEntryLocation)>);
+    let indexed: Vec<Option<IndexedArchive>> = paths
+        [..paths.len().min(MAX_SIBLING_GMA_ARCHIVES)]
+        .par_iter()
+        .map(|path| match path.kind {
             SiblingGmaPathKind::Plain => {
-                let gma = match gmpublished_backend::GMAFile::open(&path.path) {
-                    Ok(gma) => gma,
+                // One mmap + one parse for the entry table; the view is
+                // retained for entry fetches.
+                let view = match GmaView::open(&path.path) {
+                    Ok(view) => view,
                     Err(error) => {
                         log::debug!(
                             "sibling material GMA open failed for {}: {error}",
                             path.path.display()
                         );
-                        continue;
+                        return None;
                     }
                 };
-                let view = match gma.view() {
-                    Ok(view) => view,
-                    Err(error) => {
-                        log::debug!(
-                            "sibling material GMA view failed for {}: {error}",
-                            path.path.display()
-                        );
-                        continue;
-                    }
-                };
-                let gma_entries = match view.entries() {
-                    Ok(entries) => entries,
+                let bundle = match view.meta(&path.path) {
+                    Ok(bundle) => bundle,
                     Err(error) => {
                         log::debug!(
                             "sibling material GMA entry table failed for {}: {error}",
                             path.path.display()
                         );
-                        continue;
+                        return None;
                     }
                 };
-
-                for entry in gma_entries.values() {
-                    if let Some(normalized) = normalize_archive_path(&entry.path) {
-                        entries
-                            .entry(normalized)
-                            .or_insert_with(|| SiblingGmaEntryRef {
-                                archive_index,
-                                location: SiblingGmaEntryLocation::Plain {
-                                    entry_path: entry.path.clone(),
-                                },
-                            });
-                    }
-                }
-                SiblingGmaArchive {
-                    kind: SiblingGmaArchiveKind::Plain {
-                        gma: Box::new(gma),
-                        view: Box::new(view),
+                let entries = bundle
+                    .entries
+                    .into_iter()
+                    .filter_map(|entry| {
+                        let normalized = normalize_archive_path(&entry.path)?;
+                        Some((
+                            normalized,
+                            SiblingGmaEntryLocation::Plain {
+                                entry_path: entry.path,
+                            },
+                        ))
+                    })
+                    .collect();
+                Some((
+                    SiblingGmaArchive {
+                        kind: SiblingGmaArchiveKind::Plain {
+                            gma: Box::new(bundle.handle),
+                            view: Box::new(view),
+                        },
                     },
-                }
+                    entries,
+                ))
             }
             SiblingGmaPathKind::LegacyBin => {
                 let legacy_index = match read_legacy_bin_index(&path.path) {
@@ -1843,28 +1885,47 @@ fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaIndex {
                             "sibling material legacy GMA index failed for {}: {error}",
                             path.path.display()
                         );
-                        continue;
+                        return None;
                     }
                 };
-                for entry in &legacy_index.entries {
-                    entries
-                        .entry(entry.normalized_path.clone())
-                        .or_insert_with(|| SiblingGmaEntryRef {
-                            archive_index,
-                            location: SiblingGmaEntryLocation::LegacyBin {
+                let entries = legacy_index
+                    .entries
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.normalized_path,
+                            SiblingGmaEntryLocation::LegacyBin {
                                 offset: entry.offset,
                                 len: entry.len,
                             },
-                        });
-                }
-                SiblingGmaArchive {
-                    kind: SiblingGmaArchiveKind::LegacyBin {
-                        path: path.path.clone(),
-                        data_end: legacy_index.data_end,
+                        )
+                    })
+                    .collect();
+                Some((
+                    SiblingGmaArchive {
+                        kind: SiblingGmaArchiveKind::LegacyBin {
+                            path: path.path.clone(),
+                            data_end: legacy_index.data_end,
+                        },
                     },
-                }
+                    entries,
+                ))
             }
-        };
+        })
+        .collect();
+
+    let mut archives = Vec::new();
+    let mut entries = HashMap::new();
+    for (archive, archive_entries) in indexed.into_iter().flatten() {
+        let archive_index = archives.len();
+        for (normalized, location) in archive_entries {
+            entries
+                .entry(normalized)
+                .or_insert_with(|| SiblingGmaEntryRef {
+                    archive_index,
+                    location,
+                });
+        }
         archives.push(archive);
     }
 

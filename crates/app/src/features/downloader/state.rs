@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::backend::domain::PublishedFileId;
-use crate::backend::domain::workshop_url::parse_workshop_ids;
-use crate::backend::tasks::{TaskEvent, TaskId};
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::domain::workshop_url::parse_workshop_ids;
+use crate::bridge::tasks::{TaskEvent, TaskId};
 
 use super::model::{DownloaderEvent, DownloaderJob, DownloaderUiState, RowId, Section};
 

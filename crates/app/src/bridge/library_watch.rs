@@ -13,7 +13,7 @@ use notify::{
     event::{CreateKind, ModifyKind, RemoveKind},
 };
 
-use crate::backend::gma::is_gma_path;
+use crate::bridge::gma::is_gma_path;
 
 const QUIET_WINDOW: Duration = Duration::from_secs(1);
 /// Sustained disk churn (e.g. Steam mass-updating workshop items) never

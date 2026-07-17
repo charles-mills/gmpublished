@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::backend::{archive::PreviewArchiveSource, gma::PreviewArchive};
+use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::features::file_preview::model::{
     InfoReason, PreviewContent, PreviewData, RelatedPreviewKind, RelatedPreviewTarget,
 };

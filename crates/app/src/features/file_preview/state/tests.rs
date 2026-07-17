@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::*;
 #[cfg(feature = "asset-studio")]
-use crate::backend::materials::RenderMode;
-use crate::backend::{archive::PreviewArchiveSource, gma::PreviewArchive};
+use crate::bridge::materials::RenderMode;
+use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview::model::ModelVertex;
 use crate::features::file_preview::model::{InfoReason, PreviewContent};

@@ -8,7 +8,7 @@ use iced::{
     Shadow, Size, Theme,
 };
 
-use crate::backend::size_analyzer::{
+use crate::bridge::size_analyzer::{
     Rect as TreemapRect, TreemapBounds, TreemapLayout, TreemapSquareData,
 };
 use crate::format::format_bytes;

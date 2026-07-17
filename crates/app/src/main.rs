@@ -23,7 +23,7 @@ use app::App;
 
 mod app;
 mod assets;
-mod backend;
+mod bridge;
 mod features;
 mod format;
 mod i18n;
@@ -117,7 +117,7 @@ fn run() -> Result<(), RunError> {
     let chrome_strategy =
         features::shell::ChromeStrategy::resolve(early_app_data.settings.load().titlebar);
 
-    let ctx = backend::tasks::BackendContext::new()?;
+    let ctx = bridge::tasks::BackendContext::new()?;
     let application = iced::application(move || App::new(ctx.clone()), App::update, App::view);
     let application = assets::fonts::bundled_fonts()
         .into_iter()

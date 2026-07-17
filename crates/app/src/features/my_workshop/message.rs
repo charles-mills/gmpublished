@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::backend::domain::PublishedFileId;
-use crate::backend::ui_error::UiError;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::ui_error::UiError;
 use crate::widgets::addon_grid;
 
 use super::model::PageResult;

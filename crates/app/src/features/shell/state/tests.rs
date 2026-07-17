@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::backend::{
+use crate::bridge::{
     TitlebarPreference,
     domain::{AvatarRgba, SteamUser},
 };

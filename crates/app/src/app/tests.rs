@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::backend::domain::{
+use crate::bridge::domain::{
     AvatarRgba, InstalledAddon, PublishedFileId, SearchHit, SearchItem, SearchItemSource,
     SearchQuickBatch, SearchQuickCarry, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess,
     workshop_url,
@@ -16,9 +16,9 @@ use gmpublished_backend::appdata::{
 use iced::{Point, Size, Task, keyboard, theme::Mode, widget::image, window};
 
 #[cfg(feature = "asset-studio")]
-use crate::{backend::archive::PreviewArchiveSource, features::file_preview};
+use crate::{bridge::archive::PreviewArchiveSource, features::file_preview};
 use crate::{
-    backend::{
+    bridge::{
         DownloadCountFormat, ExtractDestination, SystemColorScheme, ThemePreset,
         gma::{GmaError, GmaHeader, GmaMeta, GmaMetadata, PreviewArchive, PreviewExtractOptions},
         library::{LibraryRefresh, LibraryRefreshReason, LibrarySnapshot},
@@ -39,7 +39,7 @@ use super::{
     GlobalShortcut, LocalMenuTarget, RootMessage, State, backend_runtime_action_message,
     map_global_shortcut, map_settings_toggle_shortcut, system_scheme_from_mode,
 };
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 
 fn assert_task_scheduled(task: &Task<RootMessage>) {
     assert!(task.units() > 0, "expected a scheduled task");
@@ -311,7 +311,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     let actions = app
         .ctx
         .handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-            crate::backend::tasks::TransactionRuntimeEvent::Data {
+            crate::bridge::tasks::TransactionRuntimeEvent::Data {
                 id: transaction.id,
                 payload: gmpublished_backend::events::TransactionPayload::WorkshopItem(
                     gmpublished_backend::appdata::SettingsPublishedFileId(123),
@@ -2223,7 +2223,7 @@ fn uncorrelated_backend_transaction_events_are_data_only() {
     let initial_steam_status = app.state.steam_session.status();
 
     let _task = app.update(RootMessage::BackendEvent(BackendRuntimeEvent::Transaction(
-        crate::backend::tasks::TransactionRuntimeEvent::Progress {
+        crate::bridge::tasks::TransactionRuntimeEvent::Progress {
             id: 42,
             progress: 5000,
         },

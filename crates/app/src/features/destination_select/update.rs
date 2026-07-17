@@ -74,7 +74,7 @@ mod tests {
     use super::super::model::{DestinationKind, SettingsSnapshot};
     use super::super::state::OpenContext;
     use super::*;
-    use crate::backend::{AppPaths, Settings};
+    use crate::bridge::{AppPaths, Settings};
 
     fn opened_state(temp: &tempfile::TempDir) -> State {
         let paths = AppPaths {
@@ -114,8 +114,8 @@ mod tests {
             [Effect::DestinationPersistRequested(request)]
                 if matches!(
                     request.destination,
-                    crate::backend::ExtractDestination::Directory(_)
-                        | crate::backend::ExtractDestination::NamedDirectory(_)
+                    crate::bridge::ExtractDestination::Directory(_)
+                        | crate::bridge::ExtractDestination::NamedDirectory(_)
                 )
         ));
         assert!(!state.can_confirm());
@@ -206,7 +206,7 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::SaveCompleted(Err(crate::backend::ui_error::UiError::detailed(
+            Message::SaveCompleted(Err(crate::bridge::ui_error::UiError::detailed(
                 gmpublished_backend::error_key::keys::IO_ERROR,
                 Some("failed".to_owned()),
             ))),

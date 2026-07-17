@@ -1,4 +1,4 @@
-use crate::backend::{
+use crate::bridge::{
     domain::{PublishedFileId, SearchQuickRequest},
     tasks::TaskId,
 };

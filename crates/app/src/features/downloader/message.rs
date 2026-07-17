@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::backend::domain::PublishedFileId;
-use crate::backend::tasks::TaskEvent;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::tasks::TaskEvent;
 
 use super::model::{DownloaderEvent, RowId, Section};
 

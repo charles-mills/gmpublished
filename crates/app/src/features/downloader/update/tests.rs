@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::backend::domain::{PublishedFileId, WorkshopMetadata};
-use crate::backend::tasks::{
+use crate::bridge::domain::{PublishedFileId, WorkshopMetadata};
+use crate::bridge::tasks::{
     SharedTaskUpdate, StatusKey, TaskId, TaskKind, TaskUpdate, WorkshopDownloadTaskKind,
 };
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 use gmpublished_backend::error_key::keys;
 
 use super::super::model::{

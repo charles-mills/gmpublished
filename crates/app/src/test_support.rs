@@ -10,7 +10,7 @@ use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use tempfile::TempDir;
 use vformats::vtf::VtfFormat;
 
-use crate::backend::gma::{FixtureGmaEntry, FixtureGmaFile, GMA_VERSION, GmaHeader, GmaMetadata};
+use crate::bridge::gma::{FixtureGmaEntry, FixtureGmaFile, GMA_VERSION, GmaHeader, GmaMetadata};
 
 pub struct TestDir {
     inner: TempDir,
@@ -154,7 +154,7 @@ pub fn fixture_vtf_bytes(
 }
 
 pub fn crc32(bytes: &[u8]) -> u32 {
-    crate::backend::gma::crc32(bytes)
+    crate::bridge::gma::crc32(bytes)
 }
 
 pub fn write_gma_fixture(path: impl AsRef<Path>, archive: &FixtureGmaFile) -> PathBuf {

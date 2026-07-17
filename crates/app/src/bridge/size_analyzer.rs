@@ -579,7 +579,7 @@ impl TreeMap {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::{
+    use crate::bridge::{
         domain::InstalledAddon,
         gma::{GmaHeader, GmaMeta, GmaMetadata},
     };

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::backend::{
+use crate::bridge::{
     domain::{InstalledAddon, PublishedFileId},
     gma::{GmaHeader, GmaMeta, GmaMetadata},
     library::LibrarySnapshot,

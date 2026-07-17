@@ -126,8 +126,8 @@ fn metadata_request_effects(state: &mut State) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::domain::PublishedFileId;
-    use crate::backend::library::LibraryRefreshReason;
+    use crate::bridge::domain::PublishedFileId;
+    use crate::bridge::library::LibraryRefreshReason;
     use crate::widgets::addon_grid;
 
     use super::super::model::{MetadataResolution, Row};
@@ -190,7 +190,7 @@ mod tests {
 
         assert_eq!(
             state.loaded_count(),
-            crate::backend::domain::RESULTS_PER_PAGE
+            crate::bridge::domain::RESULTS_PER_PAGE
         );
         assert_eq!(state.total_count(), 55);
         assert_eq!(effects, vec![Effect::ThumbnailDemandsChanged]);

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use vformats::vtf::VtfFormat;
 
 use super::*;
-use crate::backend::{archive::PreviewArchiveSource, gma::PreviewArchive};
+use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
 
 fn test_tokens() -> Tokens {

@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::OnceLock};
 use parking_lot::Mutex;
 use quick_cache::unsync::Cache;
 
-use crate::backend::size_analyzer::{
+use crate::bridge::size_analyzer::{
     Rect as TreemapRect, TreemapLayout, TreemapSquare, TreemapSquareData,
 };
 use crate::media::text;
@@ -740,7 +740,7 @@ fn premultiply(rgba: [u8; 4]) -> [u8; 4] {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::backend::{
+    use crate::bridge::{
         domain::PublishedFileId,
         size_analyzer::{SizeAnalyzerAddon, TreemapBounds, TreemapLayout, analyze_addons},
     };

@@ -81,7 +81,7 @@ pub fn update(
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::domain::{AvatarRgba, SteamUser};
+    use crate::bridge::domain::{AvatarRgba, SteamUser};
 
     use super::{Message, State, update};
     use crate::{

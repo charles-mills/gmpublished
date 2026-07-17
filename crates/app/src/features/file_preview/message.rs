@@ -7,8 +7,8 @@ use super::model::DoorAudioEvent;
 use super::model::{PreviewData, PreviewLoadStage, PreviewRequest};
 #[cfg(feature = "asset-studio")]
 use super::state::{FlyPose, MovementMode, OrbitPose};
-use crate::backend::archive::PreviewArchiveSourceError;
-use crate::backend::tasks::ScheduleError;
+use crate::bridge::archive::PreviewArchiveSourceError;
+use crate::bridge::tasks::ScheduleError;
 
 /// Why loading a preview entry failed. Variants carry the actual producer
 /// error so its `Display` reaches the user verbatim; only the wire boundary

@@ -1,14 +1,15 @@
 use std::{
-    collections::HashMap,
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use gmpublished_backend::{
-    GMAFile, Transaction,
-    gma::{GMAEntry, read::GmaView},
-};
+#[cfg(test)]
+use std::collections::HashMap;
+
+#[cfg(test)]
+use gmpublished_backend::gma::GMAEntry;
+use gmpublished_backend::{GMAFile, Transaction, gma::read::GmaView};
 
 pub use gmpublished_backend::{
     GMAError as GmaError,
@@ -311,10 +312,10 @@ impl GmaMeta {
     #[cfg(any(test, not(feature = "asset-studio")))]
     pub(crate) fn open_header_only(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        let gma = GMAFile::open(path)?;
+        let bundle = GMAFile::open_meta(path)?;
         Ok(Self {
             path: path.to_path_buf(),
-            header: gma.header()?.into(),
+            header: bundle.header.into(),
             entries: Vec::new(),
         })
     }
@@ -322,19 +323,22 @@ impl GmaMeta {
     #[cfg(feature = "asset-studio")]
     pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        let gma = GMAFile::open(path)?;
-        let header = gma.header()?.into();
-        let entries = index_entries_from_backend(&gma.view()?.entries()?)
+        // One mmap + one parse; the previous open/header/entries chain
+        // re-parsed the whole entry table three times.
+        let bundle = GMAFile::open_meta(path)?;
+        let mut entries: Vec<GmaMetaEntry> = bundle
+            .entries
             .into_iter()
             .map(|entry| GmaMetaEntry {
                 path: entry.path,
                 size: entry.size,
-                crc32: entry.crc32,
+                crc32: entry.crc,
             })
             .collect();
+        entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         Ok(Self {
             path: path.to_path_buf(),
-            header,
+            header: bundle.header.into(),
             entries,
         })
     }
@@ -407,17 +411,28 @@ impl PreviewArchive {
         workshop_id: Option<u64>,
     ) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        let mut gma = GMAFile::open(path)?;
+        // One mmap + one parse for handle, header and entries together;
+        // the view is kept for entry fetches during the preview session.
+        let view = GmaView::open(path)?;
+        let bundle = view.meta(path)?;
+        let mut gma = bundle.handle;
         if let Some(id) = workshop_id.or_else(|| workshop_id_from_path(path)) {
-            // Set the id before fetching the header so the recomputed
-            // extracted_name includes both title and id.
+            // Recomputes extracted_name so it includes both title and id.
             gma.set_ws_id(gmpublished_backend::appdata::SettingsPublishedFileId(id));
         }
-        let header = gma.header()?.into();
-        let view = gma.view()?;
-        let index_entries = index_entries_from_backend(&view.entries()?);
+        let mut index_entries: Vec<GmaIndexEntry> = bundle
+            .entries
+            .into_iter()
+            .map(|entry| GmaIndexEntry {
+                path: entry.path,
+                size: entry.size,
+                crc32: entry.crc,
+                data_offset: entry.index,
+            })
+            .collect();
+        index_entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         let index = GmaIndex {
-            header,
+            header: bundle.header.into(),
             entries: index_entries,
         };
         let entries = preview_entries_from_index(&index);
@@ -585,6 +600,9 @@ pub fn crc32(bytes: &[u8]) -> u32 {
     crc32fast::hash(bytes)
 }
 
+// Production reads go through the parse-once `GmaView::meta`; only the
+// fixture path (which parses through `GmaView::entries`) still needs this.
+#[cfg(test)]
 fn index_entries_from_backend(entries: &HashMap<String, GMAEntry>) -> Vec<GmaIndexEntry> {
     let mut entries = entries
         .values()

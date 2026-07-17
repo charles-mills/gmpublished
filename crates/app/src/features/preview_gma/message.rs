@@ -3,8 +3,8 @@ use std::time::Instant;
 use gmpublished_backend::bbcode::SpoilerId;
 use iced::widget::pane_grid;
 
-use crate::backend::domain::PublishedFileId;
-use crate::backend::ui_error::UiError;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::ui_error::UiError;
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
 

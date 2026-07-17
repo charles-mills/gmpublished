@@ -10,7 +10,7 @@ use vformats::vtf::VtfFormat;
 
 use super::*;
 use crate::{
-    backend::gma::PreviewArchive,
+    bridge::gma::PreviewArchive,
     test_support::{GmaFixtureBuilder, fixture_vtf_bytes, write_gma_fixture},
 };
 

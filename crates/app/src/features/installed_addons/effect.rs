@@ -1,5 +1,5 @@
 use super::model::{ContextMenuRequest, PreviewTarget};
-use crate::backend::domain::PublishedFileId;
+use crate::bridge::domain::PublishedFileId;
 
 /// Outward consequences of an Installed Addons state transition.
 #[derive(Clone, Debug, PartialEq)]

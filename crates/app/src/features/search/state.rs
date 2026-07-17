@@ -5,9 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::backend::tasks::TaskId;
-use crate::backend::ui_error::UiError;
-use crate::backend::{
+use crate::bridge::tasks::TaskId;
+use crate::bridge::ui_error::UiError;
+use crate::bridge::{
     domain::{
         PublishedFileId, SearchFullBatch, SearchFullBatchMode, SearchFullHits, SearchFullRequest,
         SearchHit, SearchItem, SearchItemSource, SearchMode, SearchQuickBatch, SearchQuickRequest,
@@ -964,7 +964,7 @@ fn my_workshop_tags_from_terms(terms: &[impl AsRef<str>], id: PublishedFileId) -
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::backend::domain::{
+    use crate::bridge::domain::{
         SearchFullBatch, SearchItem, SearchItemSource, SearchQuickBatch, SearchQuickCarry,
     };
 
@@ -980,7 +980,7 @@ mod tests {
             outcome
                 .quick_request
                 .as_ref()
-                .map(crate::backend::domain::SearchQuickRequest::query),
+                .map(crate::bridge::domain::SearchQuickRequest::query),
             Some("wire")
         );
         assert!(state.dropdown_open());

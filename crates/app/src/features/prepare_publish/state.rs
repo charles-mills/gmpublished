@@ -10,7 +10,7 @@ use iced::widget::text_editor;
 
 use crate::theme::{Tokens, motion};
 
-use crate::backend::{
+use crate::bridge::{
     domain::{PublishedFileId, WorkshopDownloadSuccess, workshop_url},
     publish::{PublishSubmitMode, PublishSubmitPreview, PublishSubmitRequest},
     ui_error::UiError,
@@ -22,7 +22,7 @@ use crate::media::{
 };
 
 #[cfg(feature = "asset-studio")]
-use crate::backend::archive::PreviewArchiveSource;
+use crate::bridge::archive::PreviewArchiveSource;
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview::PreviewRequest;
 use crate::util::paths::path_to_display;

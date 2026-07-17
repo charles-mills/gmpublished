@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::backend::ui_error::UiError;
-use crate::backend::{AppPaths, Settings};
+use crate::bridge::ui_error::UiError;
+use crate::bridge::{AppPaths, Settings};
 use crate::util::paths::{fallback_current_dir, fallback_paths, path_to_display};
 
 use super::model::{
@@ -314,7 +314,7 @@ fn compose_placeholder(base: &Path, append_name: bool, name: &str) -> String {
 mod tests {
     use std::fs;
 
-    use crate::backend::ExtractDestination;
+    use crate::bridge::ExtractDestination;
 
     use super::*;
 

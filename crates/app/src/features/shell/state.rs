@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use crate::assets;
-use crate::backend::TitlebarPreference;
-use crate::backend::domain::AvatarRgba;
+use crate::bridge::TitlebarPreference;
+use crate::bridge::domain::AvatarRgba;
 use iced::animation::Easing;
 use iced::widget::{image, svg};
 

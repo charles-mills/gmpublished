@@ -10,7 +10,7 @@ use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
 use super::model::ModelVertex;
-use crate::backend::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
+use crate::bridge::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
 use gmpublished_backend::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDirection};
 use vformats::vtf::BcFormat;
 
@@ -1770,7 +1770,7 @@ mod tests {
 
         for (format, image_format, block) in fixtures {
             let bytes = bc_vtf_bytes(4, 4, image_format, &block);
-            let decoded = crate::backend::materials::decode_vtf_rgba(&bytes).expect("vtf decode");
+            let decoded = crate::bridge::materials::decode_vtf_rgba(&bytes).expect("vtf decode");
             let software = decode_bc_texture(format, decoded.width, decoded.height, &block)
                 .expect("BC decode");
 

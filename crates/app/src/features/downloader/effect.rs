@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use super::model::DownloadPreviewTarget;
-use crate::backend::domain::PublishedFileId;
-use crate::backend::tasks::TaskId;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::tasks::TaskId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {

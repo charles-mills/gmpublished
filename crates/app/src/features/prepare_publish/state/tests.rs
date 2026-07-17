@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use crate::backend::{
+use crate::bridge::{
     domain::{PublishedFileId, WorkshopDownloadSuccess, workshop_url},
     publish::{
         DEFAULT_WORKSHOP_ICON_FILE_NAME, IconFormat, PublishSubmitMode, PublishSubmitPreview,
@@ -808,7 +808,7 @@ fn set_verified_path(state: &mut State) {
 #[cfg(feature = "asset-studio")]
 #[test]
 fn entry_preview_request_reads_the_verified_folder_source() {
-    use crate::backend::archive::PreviewArchiveSource;
+    use crate::bridge::archive::PreviewArchiveSource;
 
     let mut state = State::default();
     let _request = state.open_target(OpenTarget::New, Vec::new(), true);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::{DownloadCountFormat, ThemePreset};
+use crate::bridge::{DownloadCountFormat, ThemePreset};
 use std::{fs, path::PathBuf};
 
 static BACKEND_EVENT_SINK_TEST_LOCK: Mutex<()> = Mutex::new(());

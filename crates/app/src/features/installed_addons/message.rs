@@ -1,9 +1,9 @@
 use crate::widgets::addon_grid;
 use std::time::Instant;
 
-use crate::backend::domain::PublishedFileId;
-use crate::backend::library::LibraryRefreshReason;
-use crate::backend::ui_error::UiError;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::library::LibraryRefreshReason;
+use crate::bridge::ui_error::UiError;
 
 use super::model::{MetadataPatch, MetadataResolution, Row};
 

@@ -917,8 +917,8 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::backend::domain::PublishedFileId;
-    use crate::backend::tasks::{TaskId, WorkshopDownloadTaskKind};
+    use crate::bridge::domain::PublishedFileId;
+    use crate::bridge::tasks::{TaskId, WorkshopDownloadTaskKind};
     use crate::i18n::I18n;
     use crate::theme::{Tokens, ViewCtx};
 

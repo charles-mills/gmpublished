@@ -1,6 +1,6 @@
-use crate::backend::domain::{AvatarRgba, PublishedFileId, SteamUser};
-use crate::backend::tasks::BackendServices;
-use crate::backend::ui_error::UiError;
+use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
+use crate::bridge::tasks::BackendServices;
+use crate::bridge::ui_error::UiError;
 
 /// Startup connection policy retained for the Iced shell.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -351,7 +351,7 @@ mod tests {
     use gmpublished_backend::error_key::keys;
     use std::{cell::Cell, sync::Arc};
 
-    use crate::backend::domain::{AvatarRgba, SteamUser};
+    use crate::bridge::domain::{AvatarRgba, SteamUser};
 
     use super::{
         ConnectionChange, ConnectionEvent, ConnectionStatus, PendingRetry, StartupConnectPolicy,

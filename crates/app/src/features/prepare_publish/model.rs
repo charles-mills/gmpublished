@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
-use crate::backend::ui_error::UiError;
-use crate::backend::{
+use crate::bridge::ui_error::UiError;
+use crate::bridge::{
     Settings,
     domain::PublishedFileId,
     publish::{
@@ -23,7 +23,7 @@ use gmpublished_backend::error_key::keys;
 use iced::widget::image;
 
 use crate::{
-    backend::gma::{ArchiveEntryPath, GmaMetaEntry, whitelist},
+    bridge::gma::{ArchiveEntryPath, GmaMetaEntry, whitelist},
     media::{thumbnail_animation, thumbnail_worker::PreparedAnimation},
     widgets::file_browser,
 };
@@ -54,7 +54,7 @@ pub struct VerifiedContentPath {
     pub(crate) total_size: u64,
     pub(crate) entries: Vec<file_browser::Entry>,
     #[cfg(feature = "asset-studio")]
-    pub(crate) preview_source: Arc<crate::backend::archive::PreviewArchiveSource>,
+    pub(crate) preview_source: Arc<crate::bridge::archive::PreviewArchiveSource>,
 }
 
 /// Minimal verified path state retained after the browser tree is built.
@@ -382,7 +382,7 @@ fn verify_content_tree(
         .collect::<Result<Vec<_>, _>>()?;
 
     #[cfg(feature = "asset-studio")]
-    let preview_source = crate::backend::archive::PreviewArchiveSource::from_folder(
+    let preview_source = crate::bridge::archive::PreviewArchiveSource::from_folder(
         entries
             .into_iter()
             .map(|(entry, disk_path)| (entry.path, entry.size, disk_path)),
@@ -669,7 +669,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::backend::tasks::BackendServices;
+    use crate::bridge::tasks::BackendServices;
     use crate::test_support::TestDir;
 
     #[test]

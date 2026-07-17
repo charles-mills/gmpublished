@@ -1,4 +1,4 @@
-use crate::backend::archive::PreviewArchiveSource;
+use crate::bridge::archive::PreviewArchiveSource;
 use crate::features::file_preview::{PreviewRequest, RelatedPreviewKind, RelatedPreviewTarget};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

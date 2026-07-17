@@ -1,9 +1,9 @@
 use super::state::{MetadataPatch, MetadataResolution};
-use crate::backend::domain::{
+use crate::bridge::domain::{
     PublishedFileId, SearchFullBatch, SearchFullRequest, SearchMode, SearchQuickBatch,
     SearchQuickRequest, SearchRequestKey,
 };
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 
 #[derive(Clone, Debug)]
 pub enum Message {

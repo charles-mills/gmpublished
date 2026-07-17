@@ -1,7 +1,7 @@
 use iced::{Event, Subscription, event, keyboard};
 
 #[cfg(target_os = "macos")]
-use crate::backend::TitlebarPreference;
+use crate::bridge::TitlebarPreference;
 
 use super::{Effect, Message, State};
 
@@ -171,7 +171,7 @@ fn keyboard_event(
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::{AppPaths, Settings, SystemColorScheme};
+    use crate::bridge::{AppPaths, Settings, SystemColorScheme};
 
     use super::super::state::{
         ColorSetting, PathSetting, ResetAction, SettingsMutation, SettingsSnapshot, Tab,
@@ -325,7 +325,7 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::SaveCompleted(Err(crate::backend::ui_error::UiError::detailed(
+            Message::SaveCompleted(Err(crate::bridge::ui_error::UiError::detailed(
                 gmpublished_backend::error_key::keys::IO_ERROR,
                 Some("failed".to_owned()),
             ))),

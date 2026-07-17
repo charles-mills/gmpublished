@@ -141,7 +141,7 @@ impl App {
                 prepare_publish_connect_steam(app)?;
                 app.submit_workshop_snapshot(
                     request.workshop_id,
-                    crate::backend::gma::ExtractDestination::Directory(request.destination),
+                    crate::bridge::gma::ExtractDestination::Directory(request.destination),
                     request_id,
                 )
             })

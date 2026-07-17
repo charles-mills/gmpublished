@@ -150,8 +150,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::backend::domain::PublishedFileId;
-    use crate::backend::gma::PreviewArchive;
+    use crate::bridge::domain::PublishedFileId;
+    use crate::bridge::gma::PreviewArchive;
     use crate::features::preview_gma::{LoadedArchive, MetadataRequest, OpenRequest, OpenTarget};
     use crate::test_support::GmaFixtureBuilder;
 

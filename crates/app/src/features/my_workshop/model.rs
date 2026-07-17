@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::Range, time::Duration};
 
 use iced::widget::image;
 
-use crate::backend::{
+use crate::bridge::{
     domain::{PublishedFileId, WorkshopItem, WorkshopPage, workshop_url::workshop_item_url},
     tasks::BackendServices,
     ui_error::UiError,
@@ -543,7 +543,7 @@ fn duration_progress(elapsed: Duration, duration: Duration) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::DownloadCountFormat;
+    use crate::bridge::DownloadCountFormat;
 
     #[test]
     fn grid_items_format_subscription_count_with_formatter() {

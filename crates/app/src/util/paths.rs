@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::backend::{AppPaths, Settings};
+use crate::bridge::{AppPaths, Settings};
 
 /// Renders `path` for display, lossily substituting any non-UTF-8 bytes.
 pub fn path_to_display(path: impl AsRef<Path>) -> String {

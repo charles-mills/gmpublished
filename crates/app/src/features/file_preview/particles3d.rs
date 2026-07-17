@@ -20,7 +20,7 @@ use super::Message;
 use super::model::{ParticlePreview, normalize_particle_material};
 use super::state::OrbitPose;
 use super::viewer3d::{look_at, mat_mul, perspective};
-use crate::backend::materials::ResolvedTexture;
+use crate::bridge::materials::ResolvedTexture;
 
 const SHADER_SOURCE: &str = include_str!("particles.wgsl");
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;

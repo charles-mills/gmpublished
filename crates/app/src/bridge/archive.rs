@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::backend::gma::{GmaError, PreviewArchive};
+use crate::bridge::gma::{GmaError, PreviewArchive};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ArchivePreviewEntry {

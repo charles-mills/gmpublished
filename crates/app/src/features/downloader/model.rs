@@ -4,14 +4,14 @@ use std::{
     time::Instant,
 };
 
-use crate::backend::domain::{
+use crate::bridge::domain::{
     PublishedFileId, WorkshopDownloadResult, WorkshopDownloadSuccess, WorkshopMetadata,
 };
-use crate::backend::tasks::{
+use crate::bridge::tasks::{
     CoalescedTaskTerminal, CoalescedTaskUpdate, DOWNLOAD_STATUS_DOWNLOADING,
     DOWNLOAD_STATUS_LOCATING, TaskEvent, TaskId, TaskKind, TaskUpdate, WorkshopDownloadTaskKind,
 };
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 use crate::theme::motion;
 use gmpublished_backend::error_key::keys;
 use iced::animation::Easing;
@@ -1249,10 +1249,10 @@ pub fn workshop_result_success_with_gma(
     installed_path: Option<PathBuf>,
 ) -> WorkshopDownloadResult {
     WorkshopDownloadResult {
-        item_id: crate::backend::domain::PublishedFileId::new(item_id)
+        item_id: crate::bridge::domain::PublishedFileId::new(item_id)
             .expect("test fixture ids are always nonzero"),
         outcome: Ok(WorkshopDownloadSuccess {
-            item_id: crate::backend::domain::PublishedFileId::new(item_id)
+            item_id: crate::bridge::domain::PublishedFileId::new(item_id)
                 .expect("test fixture ids are always nonzero"),
             installed_path,
             extracted_path,

@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use iced::widget::image;
 
-use crate::backend::Settings;
-use crate::backend::domain::PublishedFileId;
-use crate::backend::ui_error::UiError;
+use crate::bridge::Settings;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::ui_error::UiError;
 use crate::format::DownloadCountFormatter;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
@@ -314,10 +314,7 @@ impl State {
         let _ = self.grid.set_page_status(false, false);
     }
 
-    pub(super) fn refresh_started(
-        &mut self,
-        reason: crate::backend::library::LibraryRefreshReason,
-    ) {
+    pub(super) fn refresh_started(&mut self, reason: crate::bridge::library::LibraryRefreshReason) {
         log::info!(
             "installed addons refresh started: {reason:?}, route_visible {}, discovered {}",
             self.route_visible,
@@ -361,7 +358,7 @@ impl State {
 
     pub(super) fn apply_snapshot(
         &mut self,
-        reason: crate::backend::library::LibraryRefreshReason,
+        reason: crate::bridge::library::LibraryRefreshReason,
         result: Result<Vec<Row>, UiError>,
     ) {
         self.generation = self.generation.wrapping_add(1).max(1);
