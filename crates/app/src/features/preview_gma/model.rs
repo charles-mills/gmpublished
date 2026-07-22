@@ -3,13 +3,13 @@ use std::{
     sync::Arc,
 };
 
-use crate::backend::domain::{
+use crate::bridge::domain::{
     AvatarRgba, PublishedFileId, SteamUser, WorkshopItem, workshop_url::workshop_item_url,
 };
 
-use crate::backend::gma::PreviewArchive;
-use crate::backend::tasks::BackendServices;
-use crate::backend::ui_error::UiError;
+use crate::bridge::gma::PreviewArchive;
+use crate::bridge::tasks::BackendServices;
+use crate::bridge::ui_error::UiError;
 use crate::features::steam_session;
 use crate::widgets::file_browser::{Entry as FileBrowserEntry, State as FileBrowserState};
 use gmpublished_backend::error_key::keys;

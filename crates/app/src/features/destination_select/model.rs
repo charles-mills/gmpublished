@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::backend::ui_error::UiError;
-use crate::backend::{AppPaths, ExtractDestination, Settings};
+use crate::bridge::ui_error::UiError;
+use crate::bridge::{AppPaths, ExtractDestination, Settings};
 use crate::util::paths::path_to_display;
 
 const HISTORY_LIMIT: usize = 20;
@@ -190,7 +190,7 @@ pub(super) fn valid_custom_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::ExtractDestination;
+    use crate::bridge::ExtractDestination;
 
     #[test]
     fn history_is_capped_and_deduped() {

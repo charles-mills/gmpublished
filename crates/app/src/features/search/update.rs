@@ -3,7 +3,7 @@ use std::time::Instant;
 use iced::{Event, Subscription, event, keyboard};
 
 use super::{Effect, Message, State};
-use crate::backend::tasks::TaskId;
+use crate::bridge::tasks::TaskId;
 
 pub const SEARCH_INPUT_ID: &str = "search-palette-input";
 
@@ -191,11 +191,11 @@ fn keyboard_event(
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::domain::{
+    use crate::bridge::domain::{
         PublishedFileId, SearchHit, SearchItem, SearchItemSource, SearchQuickBatch,
         SearchQuickCarry,
     };
-    use crate::backend::tasks::TaskId;
+    use crate::bridge::tasks::TaskId;
     use crate::features::search::state::{MetadataPatch, MetadataResolution};
 
     use super::{Effect, Message, State, update};
@@ -477,7 +477,7 @@ mod tests {
         assert!(update(&mut state, Message::DismissRequested).is_empty());
     }
 
-    fn quick_request_from(effects: Vec<Effect>) -> crate::backend::domain::SearchQuickRequest {
+    fn quick_request_from(effects: Vec<Effect>) -> crate::bridge::domain::SearchQuickRequest {
         effects
             .into_iter()
             .find_map(|effect| match effect {

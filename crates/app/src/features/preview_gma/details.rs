@@ -4,8 +4,8 @@ use gmpublished_backend::bbcode::Document as BbCodeDocument;
 use iced::widget::image;
 use jiff::{Timestamp, tz::TimeZone};
 
-use crate::backend::domain::{AvatarRgba, PublishedFileId};
-use crate::backend::gma::{GmaHeader, GmaMetadata, PreviewArchive, workshop_id_from_filename};
+use crate::bridge::domain::{AvatarRgba, PublishedFileId};
+use crate::bridge::gma::{GmaHeader, GmaMetadata, PreviewArchive, workshop_id_from_filename};
 use crate::format::DownloadCountFormatter;
 
 use super::model::WorkshopMetadata;
@@ -376,7 +376,7 @@ fn avatar_handle_from_rgba(avatar: &AvatarRgba) -> Option<image::Handle> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::gma::PreviewArchive;
+    use crate::bridge::gma::PreviewArchive;
     use crate::test_support::GmaFixtureBuilder;
 
     #[test]
@@ -464,7 +464,7 @@ mod tests {
             Some(&workshop),
             false,
             DownloadCountFormatter::from_format_and_locale(
-                crate::backend::DownloadCountFormat::Period,
+                crate::bridge::DownloadCountFormat::Period,
                 None,
             ),
         );

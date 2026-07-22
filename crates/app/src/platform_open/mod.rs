@@ -23,7 +23,7 @@ use std::{
 use iced::{Subscription, futures::channel::mpsc as iced_mpsc, stream};
 use parking_lot::Mutex;
 
-use crate::backend::gma;
+use crate::bridge::gma;
 
 pub mod macos;
 

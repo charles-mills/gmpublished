@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::backend::domain::WORKSHOP_LEGAL_URL;
+use crate::bridge::domain::WORKSHOP_LEGAL_URL;
 
 use super::{Effect, Message, State};
 

@@ -1,5 +1,5 @@
 use super::state::{ContextMenuRequest, PreviewTarget};
-use crate::backend::domain::PublishedFileId;
+use crate::bridge::domain::PublishedFileId;
 
 /// Outward consequences of a Size Analyzer state transition.
 #[derive(Clone, Debug, PartialEq)]

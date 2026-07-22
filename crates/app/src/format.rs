@@ -1,4 +1,4 @@
-use crate::backend::DownloadCountFormat;
+use crate::bridge::DownloadCountFormat;
 
 use crate::i18n::I18n;
 

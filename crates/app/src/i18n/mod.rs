@@ -192,11 +192,11 @@ impl PartialEq for I18n {
 
 impl Eq for I18n {}
 
-/// Translates a backend [`UiError`](crate::backend::ui_error::UiError)
+/// Translates a backend [`UiError`](crate::bridge::ui_error::UiError)
 /// through the Fluent catalogs: `ERR_FOO_BAR` looks up `err-foo-bar` (and
 /// `err-foo-bar-detail` when the error carries detail text), falling back to
 /// the raw error string when no entry exists.
-pub fn translated_error(i18n: &I18n, error: &crate::backend::ui_error::UiError) -> String {
+pub fn translated_error(i18n: &I18n, error: &crate::bridge::ui_error::UiError) -> String {
     let key = format!(
         "err-{}",
         error

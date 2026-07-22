@@ -153,7 +153,7 @@ pub(super) fn run_size_analyzer_preview_urls(
 }
 
 fn preview_urls_from_metadata(
-    metadata: Vec<crate::backend::domain::WorkshopMetadata>,
+    metadata: Vec<crate::bridge::domain::WorkshopMetadata>,
 ) -> HashMap<PublishedFileId, String> {
     metadata
         .into_iter()

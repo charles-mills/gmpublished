@@ -1,4 +1,4 @@
-use crate::backend::library::LibraryRefreshReason;
+use crate::bridge::library::LibraryRefreshReason;
 
 use super::model::MetadataPatch;
 use super::*;

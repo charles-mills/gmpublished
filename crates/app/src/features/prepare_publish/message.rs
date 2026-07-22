@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use iced::widget::text_editor;
 
-use crate::backend::domain::WorkshopDownloadSuccess;
-use crate::backend::ui_error::UiError;
+use crate::bridge::domain::WorkshopDownloadSuccess;
+use crate::bridge::ui_error::UiError;
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
 

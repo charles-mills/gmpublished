@@ -4,7 +4,7 @@ use iced::widget::text::{Shaping as TextShaping, Wrapping};
 use iced::widget::{Space, button, column, container, row, stack, svg, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Size, Vector, alignment};
 
-use crate::backend::tasks::TaskKind;
+use crate::bridge::tasks::TaskKind;
 use crate::format::format_bytes;
 use crate::i18n::{I18n, translated_error};
 use crate::theme::{Rgba, Tokens, ViewCtx};

@@ -1,5 +1,5 @@
 use super::model::{ContextMenuRequest, PreparePublishTarget};
-use crate::backend::domain::PublishedFileId;
+use crate::bridge::domain::PublishedFileId;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {

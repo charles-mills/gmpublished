@@ -15,7 +15,7 @@ use iced::{
     mouse, stream, system, theme::Mode, window,
 };
 
-use crate::backend::{
+use crate::bridge::{
     DownloadCountFormat, Settings, SystemColorScheme, ThemePreset,
     domain::{
         PublishedFileId, SearchFullRequest, SearchMode, SearchQuickRequest, WORKSHOP_LEGAL_URL,
@@ -394,30 +394,20 @@ fn search_file_items_from_library(
         .addons
         .iter()
         .flat_map(|addon| {
-            let addon_title = addon.display_title();
-            let workshop_id = addon.workshop_id.map(PublishedFileId::get);
-            let canonical_path = addon.canonical_path.clone();
+            // One shared identity per addon; every file item Arc-shares it
+            // instead of copying the path/title/id per file. Label and
+            // extension derive from the entry path inside the backend.
+            let shared = gmpublished_backend::search::FileSearchAddon::new(
+                addon.canonical_path.clone(),
+                addon.display_title(),
+                addon.workshop_id.map(PublishedFileId::get),
+            );
             addon.meta.entries.iter().map(move |entry| {
-                let label = archive_entry_file_name(&entry.path).to_owned();
-                let mut terms = vec![entry.path.clone(), addon_title.clone()];
-                if let Some(workshop_id) = workshop_id {
-                    terms.push(workshop_id.to_string());
-                }
-                if let Some(extension) = archive_entry_extension(&entry.path) {
-                    terms.push(extension.to_owned());
-                }
-
                 gmpublished_backend::search::SearchItem::new_installed_addon_file(
-                    gmpublished_backend::search::InstalledAddonFileInfo {
-                        addon_path: canonical_path.clone(),
-                        addon_title: addon_title.clone(),
-                        workshop_id,
-                        entry_path: entry.path.clone(),
-                        size_bytes: entry.size,
-                        crc32: entry.crc32,
-                    },
-                    label,
-                    terms,
+                    shared.clone(),
+                    entry.path.clone(),
+                    entry.size,
+                    entry.crc32,
                     addon.modified_epoch_seconds,
                 )
             })
@@ -425,18 +415,6 @@ fn search_file_items_from_library(
         .collect()
 }
 
-#[cfg(feature = "asset-studio")]
-fn archive_entry_file_name(path: &str) -> &str {
-    path.rsplit_once('/').map_or(path, |(_, name)| name)
-}
-
-#[cfg(feature = "asset-studio")]
-fn archive_entry_extension(path: &str) -> Option<&str> {
-    archive_entry_file_name(path)
-        .rsplit_once('.')
-        .map(|(_, extension)| extension)
-        .filter(|extension| !extension.is_empty())
-}
 
 impl App {
     #[cfg(test)]

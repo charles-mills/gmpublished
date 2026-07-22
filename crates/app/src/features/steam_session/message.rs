@@ -1,4 +1,4 @@
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 
 use super::{ConnectionAttempt, ConnectionEvent, PendingRetry, SteamIdentity};
 

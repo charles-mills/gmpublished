@@ -171,65 +171,118 @@ struct MapBsp {
 }
 
 impl MapBsp {
+    /// Decodes every lump the scene builder needs. The per-lump decodes are
+    /// independent passes over disjoint byte ranges — and on repacked
+    /// workshop maps each one is an LZMA decompression that dominates load
+    /// time — so they run in one `rayon::scope`. Only the *selected*
+    /// lighting set is decoded: `selected_lightmap_samples` /
+    /// `selected_ambient_lighting` prefer LDR and use exactly one of each
+    /// pair, and the preference is decidable from raw lump lengths (an
+    /// empty raw lump decodes to an empty vec) before decompressing
+    /// anything.
     fn parse(bytes: &[u8], limits: &Limits) -> Result<Self, BspError> {
+        use bsp::lump_ids as ids;
         let bsp = bsp::parse(bytes, limits).map_err(decode_error)?;
-        let entities = bsp
-            .entities(limits)
+
+        let raw_len = |id: usize| bsp.lump(id).map_or(0, <[u8]>::len);
+        let use_ldr_lightmap = raw_len(ids::LIGHTING) > 0;
+        let want_lighting_hdr = !use_ldr_lightmap && raw_len(ids::LIGHTING_HDR) > 0;
+        let ldr_ambient =
+            raw_len(ids::LEAF_AMBIENT_LIGHTING) > 0 && raw_len(ids::LEAF_AMBIENT_INDEX) > 0;
+        let want_ambient_hdr = !ldr_ambient
+            && raw_len(ids::LEAF_AMBIENT_LIGHTING_HDR) > 0
+            && raw_len(ids::LEAF_AMBIENT_INDEX_HDR) > 0;
+
+        macro_rules! par_decode {
+            ($( $slot:ident = $decode:expr ; )+) => {
+                $( let mut $slot = None; )+
+                rayon::scope(|s| {
+                    $( s.spawn(|_| $slot = Some($decode)); )+
+                });
+                $( let $slot = $slot.expect("rayon scope runs every spawn to completion"); )+
+            };
+        }
+
+        par_decode! {
+            entities = bsp.entities(limits);
+            visibility = bsp.visibility(limits);
+            faces = bsp.faces(limits);
+            edges = bsp.edges(limits);
+            surfedges = bsp.surfedges(limits);
+            vertices = bsp.vertices(limits);
+            planes = bsp.planes(limits);
+            texinfos = bsp.texinfos(limits);
+            texdatas = bsp.texdatas(limits);
+            texdata_strings = bsp.texdata_strings(limits);
+            models = bsp.models(limits);
+            brushes = bsp.brushes(limits);
+            brush_sides = bsp.brush_sides(limits);
+            nodes = bsp.nodes(limits);
+            leaves = bsp.leafs(limits);
+            leaf_faces = bsp.leaf_faces(limits);
+            leaf_brushes = bsp.leaf_brushes(limits);
+            displacements = bsp.displacement_infos(limits);
+            displacement_verts = bsp.displacement_verts(limits);
+            lighting = if use_ldr_lightmap { bsp.lighting(limits) } else { Ok(Vec::new()) };
+            lighting_hdr = if want_lighting_hdr { bsp.lighting_hdr(limits) } else { Ok(Vec::new()) };
+            leaf_ambient_lighting = if ldr_ambient { bsp.leaf_ambient_lighting(limits) } else { Ok(Vec::new()) };
+            leaf_ambient_indices = if ldr_ambient { bsp.leaf_ambient_indices(limits) } else { Ok(Vec::new()) };
+            leaf_ambient_lighting_hdr = if want_ambient_hdr { bsp.leaf_ambient_lighting_hdr(limits) } else { Ok(Vec::new()) };
+            leaf_ambient_indices_hdr = if want_ambient_hdr { bsp.leaf_ambient_indices_hdr(limits) } else { Ok(Vec::new()) };
+            overlays = bsp.overlays(limits);
+            static_props = bsp.static_props(limits);
+            detail_props = bsp.detail_props(limits);
+            pakfile_bytes = Ok::<_, BspError>(bsp.lump(ids::PAKFILE).unwrap_or_default().to_vec());
+        }
+
+        let entities = entities
             .map_err(decode_error)?
             .iter()
             .map(MapEntity::from_document)
             .collect();
-        let visibility = bsp
-            .visibility(limits)
+        let visibility = visibility
             .map_err(decode_error)?
             .map(Visibility::into_owned);
-        let mut faces = bsp.faces(limits).map_err(decode_error)?;
-        let edges = bsp.edges(limits).map_err(decode_error)?;
-        let surfedges = bsp.surfedges(limits).map_err(decode_error)?;
-        let vertices = bsp.vertices(limits).map_err(decode_error)?;
+        let mut faces = faces.map_err(decode_error)?;
+        let edges = edges.map_err(decode_error)?;
+        let surfedges = surfedges.map_err(decode_error)?;
+        let vertices = vertices.map_err(decode_error)?;
         discard_faces_with_invalid_vertices(&mut faces, &surfedges, &edges, vertices.len());
-        let pakfile_bytes = bsp
-            .lump(bsp::lump_ids::PAKFILE)
-            .unwrap_or_default()
-            .to_vec();
 
         Ok(Self {
-            planes: bsp.planes(limits).map_err(decode_error)?,
-            texinfos: bsp.texinfos(limits).map_err(decode_error)?,
-            texdatas: bsp.texdatas(limits).map_err(decode_error)?,
-            texdata_strings: bsp
-                .texdata_strings(limits)
+            planes: planes.map_err(decode_error)?,
+            texinfos: texinfos.map_err(decode_error)?,
+            texdatas: texdatas.map_err(decode_error)?,
+            texdata_strings: texdata_strings
                 .map_err(decode_error)?
                 .into_iter()
                 .map(Cow::into_owned)
                 .collect(),
-            models: bsp.models(limits).map_err(decode_error)?,
-            brushes: bsp.brushes(limits).map_err(decode_error)?,
-            brush_sides: bsp.brush_sides(limits).map_err(decode_error)?,
-            nodes: bsp.nodes(limits).map_err(decode_error)?,
-            leaves: bsp.leafs(limits).map_err(decode_error)?,
-            leaf_faces: bsp.leaf_faces(limits).map_err(decode_error)?,
-            leaf_brushes: bsp.leaf_brushes(limits).map_err(decode_error)?,
-            displacements: bsp.displacement_infos(limits).map_err(decode_error)?,
-            displacement_verts: bsp.displacement_verts(limits).map_err(decode_error)?,
-            lighting: bsp.lighting(limits).map_err(decode_error)?,
-            lighting_hdr: bsp.lighting_hdr(limits).map_err(decode_error)?,
-            leaf_ambient_lighting: bsp.leaf_ambient_lighting(limits).map_err(decode_error)?,
-            leaf_ambient_lighting_hdr: bsp
-                .leaf_ambient_lighting_hdr(limits)
-                .map_err(decode_error)?,
-            leaf_ambient_indices: bsp.leaf_ambient_indices(limits).map_err(decode_error)?,
-            leaf_ambient_indices_hdr: bsp.leaf_ambient_indices_hdr(limits).map_err(decode_error)?,
-            overlays: bsp.overlays(limits).map_err(decode_error)?,
-            static_props: bsp.static_props(limits).map_err(decode_error)?,
-            detail_props: bsp.detail_props(limits).map_err(decode_error)?,
+            models: models.map_err(decode_error)?,
+            brushes: brushes.map_err(decode_error)?,
+            brush_sides: brush_sides.map_err(decode_error)?,
+            nodes: nodes.map_err(decode_error)?,
+            leaves: leaves.map_err(decode_error)?,
+            leaf_faces: leaf_faces.map_err(decode_error)?,
+            leaf_brushes: leaf_brushes.map_err(decode_error)?,
+            displacements: displacements.map_err(decode_error)?,
+            displacement_verts: displacement_verts.map_err(decode_error)?,
+            lighting: lighting.map_err(decode_error)?,
+            lighting_hdr: lighting_hdr.map_err(decode_error)?,
+            leaf_ambient_lighting: leaf_ambient_lighting.map_err(decode_error)?,
+            leaf_ambient_lighting_hdr: leaf_ambient_lighting_hdr.map_err(decode_error)?,
+            leaf_ambient_indices: leaf_ambient_indices.map_err(decode_error)?,
+            leaf_ambient_indices_hdr: leaf_ambient_indices_hdr.map_err(decode_error)?,
+            overlays: overlays.map_err(decode_error)?,
+            static_props: static_props.map_err(decode_error)?,
+            detail_props: detail_props.map_err(decode_error)?,
             vertices,
             faces,
             edges,
             surfedges,
             entities,
             visibility,
-            pakfile_bytes,
+            pakfile_bytes: pakfile_bytes.map_err(decode_error)?,
         })
     }
 
@@ -390,21 +443,32 @@ impl MapBsp {
         else {
             return vec![false; cluster_count];
         };
-        let mut reached = vec![false; cluster_count];
-        reached[start] = true;
+        // u64-bitset fill: the BFS visits ~every cluster, and a Vec<bool>
+        // row per visit is O(clusters²) byte traffic plus an allocation per
+        // cluster. Word-wise rows into a reusable buffer are ~64× less
+        // traffic; expand to Vec<bool> once at the end for the consumers.
+        let words = cluster_count.div_ceil(64);
+        let mut reached = vec![0u64; words];
+        let mut row = vec![0u64; words];
+        reached[start / 64] |= 1u64 << (start % 64);
         let mut queue = std::collections::VecDeque::from([start]);
         while let Some(cluster) = queue.pop_front() {
-            let Some(row) = vis.pvs(cluster) else {
+            if vis.pvs_into(cluster, &mut row).is_none() {
                 continue;
-            };
-            for (next, visible) in row.into_iter().enumerate() {
-                if visible && !reached[next] {
-                    reached[next] = true;
-                    queue.push_back(next);
+            }
+            for (word, row_word) in row.iter().enumerate() {
+                let mut new = row_word & !reached[word];
+                reached[word] |= new;
+                while new != 0 {
+                    let bit = new.trailing_zeros() as usize;
+                    queue.push_back(word * 64 + bit);
+                    new &= new - 1;
                 }
             }
         }
-        reached
+        (0..cluster_count)
+            .map(|cluster| (reached[cluster / 64] >> (cluster % 64)) & 1 == 1)
+            .collect()
     }
 
     /// Find the leaf containing `point` (see [`walk_to_leaf`]).

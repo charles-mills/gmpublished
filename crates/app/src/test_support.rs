@@ -8,8 +8,9 @@ use std::{
 use gif::{DisposalMethod, Encoder, Frame, Repeat};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use tempfile::TempDir;
+use vformats::vtf::VtfFormat;
 
-use crate::backend::gma::{FixtureGmaEntry, FixtureGmaFile, GMA_VERSION, GmaHeader, GmaMetadata};
+use crate::bridge::gma::{FixtureGmaEntry, FixtureGmaFile, GMA_VERSION, GmaHeader, GmaMetadata};
 
 pub struct TestDir {
     inner: TempDir,
@@ -108,8 +109,52 @@ fn solid_gif_frame(width: u16, height: u16, color: [u8; 4], delay_ms: u32) -> Fr
     frame
 }
 
+/// Minimal VTF 7.1 container wrapping raw high-resolution mip payloads,
+/// laid out exactly as `vformats::vtf::parse` expects: one frame, no
+/// lowres image, mips stored smallest-first (VTF file order).
+pub fn fixture_vtf_bytes(
+    width: u16,
+    height: u16,
+    format: VtfFormat,
+    stored_mips: &[&[u8]],
+) -> Vec<u8> {
+    const HEADER_SIZE: u32 = 64;
+    let format_raw: i32 = match format {
+        VtfFormat::Rgba8888 => 0,
+        VtfFormat::Rgb888 => 2,
+        VtfFormat::Dxt1 => 13,
+        VtfFormat::Dxt3 => 14,
+        VtfFormat::Dxt5 => 15,
+        other => panic!("fixture format {other:?} has no on-disk code mapped"),
+    };
+    let mut bytes = Vec::with_capacity(HEADER_SIZE as usize);
+    bytes.extend_from_slice(b"VTF\0");
+    bytes.extend_from_slice(&7_u32.to_le_bytes()); // version major
+    bytes.extend_from_slice(&1_u32.to_le_bytes()); // version minor
+    bytes.extend_from_slice(&HEADER_SIZE.to_le_bytes());
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&height.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes()); // flags
+    bytes.extend_from_slice(&1_u16.to_le_bytes()); // frames
+    bytes.extend_from_slice(&0_u16.to_le_bytes()); // first frame
+    bytes.extend_from_slice(&[0; 4]); // padding
+    bytes.extend_from_slice(&[0; 12]); // reflectivity [0.0; 3]
+    bytes.extend_from_slice(&[0; 4]); // padding
+    bytes.extend_from_slice(&1.0_f32.to_le_bytes()); // bumpmap scale
+    bytes.extend_from_slice(&format_raw.to_le_bytes());
+    bytes.push(u8::try_from(stored_mips.len()).expect("fixture mip count"));
+    bytes.extend_from_slice(&(-1_i32).to_le_bytes()); // no lowres image
+    bytes.push(0); // lowres width
+    bytes.push(0); // lowres height
+    bytes.resize(HEADER_SIZE as usize, 0);
+    for mip in stored_mips {
+        bytes.extend_from_slice(mip);
+    }
+    bytes
+}
+
 pub fn crc32(bytes: &[u8]) -> u32 {
-    crate::backend::gma::crc32(bytes)
+    crate::bridge::gma::crc32(bytes)
 }
 
 pub fn write_gma_fixture(path: impl AsRef<Path>, archive: &FixtureGmaFile) -> PathBuf {

@@ -40,7 +40,7 @@ fn connection_follow_up_effects(state: &mut State, change: ConnectionChange) -> 
 #[cfg(test)]
 mod tests {
     use super::{Message, State, update};
-    use crate::backend::domain::PublishedFileId;
+    use crate::bridge::domain::PublishedFileId;
     use crate::features::steam_session::{ConnectionEvent, ConnectionStatus, PendingRetry};
 
     #[test]
@@ -88,7 +88,7 @@ mod tests {
     fn completed_attempt_applies_all_connection_events() {
         let mut state = State::default();
         let attempt = crate::features::steam_session::ConnectionAttempt::unavailable(
-            crate::backend::ui_error::UiError::detailed(
+            crate::bridge::ui_error::UiError::detailed(
                 gmpublished_backend::error_key::keys::STEAM_ERROR,
                 Some("down".to_owned()),
             ),

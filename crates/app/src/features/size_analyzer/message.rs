@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use iced::{Point, Size};
 
-use crate::backend::domain::PublishedFileId;
-use crate::backend::library::{LibraryRefreshReason, LibrarySnapshot};
-use crate::backend::ui_error::UiError;
+use crate::bridge::domain::PublishedFileId;
+use crate::bridge::library::{LibraryRefreshReason, LibrarySnapshot};
+use crate::bridge::ui_error::UiError;
 
 /// Facts emitted by the Size Analyzer route.
 #[derive(Clone, Debug, PartialEq)]

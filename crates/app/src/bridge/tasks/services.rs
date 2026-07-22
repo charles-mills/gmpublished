@@ -446,7 +446,7 @@ impl BackendServices {
     pub(crate) fn workshop_item_details(
         &self,
         id: PublishedFileId,
-    ) -> Result<crate::backend::domain::WorkshopItem, UiError> {
+    ) -> Result<crate::bridge::domain::WorkshopItem, UiError> {
         if !self.steam_connected() {
             return Err(UiError::from(&SteamRuntimeError::NotConnected));
         }
@@ -532,7 +532,7 @@ impl BackendServices {
     pub(crate) fn submit_workshop_snapshot(
         &self,
         item_id: PublishedFileId,
-        destination: crate::backend::gma::ExtractDestination,
+        destination: crate::bridge::gma::ExtractDestination,
         request_id: u64,
     ) -> Result<(), UiError> {
         if !self.steam_connected() {

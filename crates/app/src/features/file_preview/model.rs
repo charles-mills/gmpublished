@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use iced::widget::image;
 
-use crate::backend::archive::PreviewArchiveSource;
+use crate::bridge::archive::PreviewArchiveSource;
 #[cfg(feature = "asset-studio")]
-use crate::backend::materials::{RenderMode, ResolvedTexture};
+use crate::bridge::materials::{RenderMode, ResolvedTexture};
 #[cfg(feature = "asset-studio")]
 pub use gmpublished_backend::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
@@ -683,7 +683,7 @@ impl PreviewData {
 #[cfg(all(test, feature = "asset-studio"))]
 mod tests {
     use super::*;
-    use crate::backend::materials::RenderMode;
+    use crate::bridge::materials::RenderMode;
 
     fn vertex(x: f32) -> ModelVertex {
         ModelVertex {

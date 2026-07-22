@@ -24,6 +24,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify release version
+        run: packaging/scripts/verify_version.sh "$GITHUB_REF_NAME"
+
       - name: Require successful main-branch CI
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,7 +69,7 @@ jobs:
 
   build_linux:
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       attestations: write
       contents: read

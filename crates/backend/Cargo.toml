@@ -46,8 +46,6 @@ ureq.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
-# Encoder only: builds synthetic VTF fuzz seeds.
-vtf.workspace = true
 # The encoder feature is only needed to build LZMA-alone test fixtures.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 steamworks-sys = "0.13.0"

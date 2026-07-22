@@ -2,7 +2,15 @@ name = "gmpublished"
 product-name = "gmpublished"
 identifier = "dev.charlesmills.gmpublished"
 version = "0.1.0"
-description = "Native desktop app for gmpublished."
+description = "Native Workshop publishing and addon inspection utility for Garry's Mod."
+long-description = "gmpublished is a native desktop application for publishing, updating, downloading, inspecting, and extracting Garry's Mod Workshop addons."
+homepage = "https://github.com/charles-mills/gmpublished"
+authors = [
+    "Charles Mills <charles@charlesmills.dev>",
+]
+publisher = "Charles Mills"
+license-file = "../LICENSE"
+copyright = "Copyright © 2026 gmpublished contributors"
 category = "DeveloperTool"
 out-dir = "../target/packager"
 binaries-dir = "../target/release"

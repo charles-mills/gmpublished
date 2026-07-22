@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::backend::ExtractionOverwriteMode;
-use crate::backend::ui_error::UiError;
-use crate::backend::{
+use crate::bridge::ExtractionOverwriteMode;
+use crate::bridge::ui_error::UiError;
+use crate::bridge::{
     AppPaths, DownloadCountFormat, EffectiveThemePreset, Settings, SystemColorScheme, ThemePreset,
     TitlebarPreference, effective_theme_preset, validate_gmod,
 };
@@ -1074,7 +1074,7 @@ pub fn accent_inputs_from_settings(settings: &Settings) -> AccentInputs {
 mod tests {
     use std::fs;
 
-    use crate::backend::{DownloadCountFormat, ThemePreset};
+    use crate::bridge::{DownloadCountFormat, ThemePreset};
 
     use super::*;
 

@@ -908,7 +908,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::backend::gma::{GmaError, GmaHeader, GmaMetadata};
+    use crate::bridge::gma::{GmaError, GmaHeader, GmaMetadata};
     use crate::test_support::{GmaFixtureBuilder, TestDir, write_gma_fixture};
 
     fn test_meta(title: &str) -> GmaMeta {

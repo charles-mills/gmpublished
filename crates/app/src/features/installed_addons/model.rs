@@ -2,10 +2,10 @@ use std::{ops::Range, path::PathBuf};
 
 use iced::widget::image;
 
-use crate::backend::gma::is_gma_path;
-use crate::backend::tasks::BackendServices;
-use crate::backend::ui_error::UiError;
-use crate::backend::{
+use crate::bridge::gma::is_gma_path;
+use crate::bridge::tasks::BackendServices;
+use crate::bridge::ui_error::UiError;
+use crate::bridge::{
     domain::{
         InstalledAddon, PublishedFileId, RESULTS_PER_PAGE, WorkshopMetadata,
         workshop_url::workshop_item_url,
@@ -540,7 +540,7 @@ pub fn thumbnail_owner() -> thumbnail_demand::Owner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::DownloadCountFormat;
+    use crate::bridge::DownloadCountFormat;
 
     #[test]
     fn placeholder_paints_a_loading_row_and_real_pixels_replace_it() {

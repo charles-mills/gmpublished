@@ -117,7 +117,7 @@ mod tests {
 
     use super::super::model::{PUBLISH_NEW_ROW_ID, PageResult, PreparePublishTarget, Row};
     use super::{Effect, Message, State, update};
-    use crate::backend::domain::PublishedFileId;
+    use crate::bridge::domain::PublishedFileId;
     use crate::widgets::addon_grid;
 
     #[test]

@@ -19,12 +19,26 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  nix:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31.10.7
+
+      - name: Check Nix flake
+        run: nix flake check --all-systems
+
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Verify version metadata
+        run: packaging/scripts/verify_version.sh
 
       - name: Determine validation scope
         id: scope

@@ -15,7 +15,7 @@ use iced::{Task, widget::image};
 use quick_cache::{Weighter, unsync::Cache};
 
 use crate::{
-    backend::tasks::{BackendContext, RunBlockingError, ScheduleError},
+    bridge::tasks::{BackendContext, RunBlockingError, ScheduleError},
     media::thumbnail_worker::{
         FetchProfile, PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail,
         ThumbnailCancellation, ThumbnailError, ThumbnailInput, ThumbnailKey, ThumbnailMetadata,

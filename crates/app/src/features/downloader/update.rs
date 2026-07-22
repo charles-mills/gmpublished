@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::backend::domain::PublishedFileId;
+use crate::bridge::domain::PublishedFileId;
 
 use super::model::Section;
 use super::{Effect, Message, State};
@@ -136,7 +136,7 @@ fn append_workshop_title_query_effect(effects: &mut Vec<Effect>, item_ids: Vec<P
 
 fn append_pending_cancellation_effect(
     effects: &mut Vec<Effect>,
-    task_ids: Vec<crate::backend::tasks::TaskId>,
+    task_ids: Vec<crate::bridge::tasks::TaskId>,
 ) {
     if !task_ids.is_empty() {
         effects.push(Effect::TaskCancellationRequested(task_ids));

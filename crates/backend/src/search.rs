@@ -64,13 +64,27 @@ fn best_search_item_score(pattern: &Pattern, query: &str, search_item: &SearchIt
             .flatten()
     };
 
-    let term_score = {
-        let terms = search_item.terms();
-        terms
+    // File items don't carry a `terms` vec — their haystacks live on the
+    // shared source (entry path subsumes file name and extension).
+    let term_score = match &search_item.source {
+        SearchItemSource::InstalledAddonFile {
+            addon, entry_path, ..
+        } => [
+            Some(entry_path.as_str()),
+            Some(addon.title.as_str()),
+            addon.id_str.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|term| term.len() >= query.len())
+        .filter_map(|term| score(pattern, term))
+        .max(),
+        _ => search_item
+            .terms()
             .iter()
             .filter(|term| term.len() >= query.len())
             .filter_map(|term| score(pattern, term))
-            .max()
+            .max(),
     };
 
     label_score.into_iter().chain(term_score).max()
@@ -102,9 +116,8 @@ pub enum SearchScope {
 pub enum SearchItemSource {
     InstalledAddons(PathBuf, Option<PublishedFileId>),
     InstalledAddonFile {
-        addon_path: PathBuf,
-        addon_title: String,
-        workshop_id: Option<PublishedFileId>,
+        #[serde(serialize_with = "serialize_shared_addon")]
+        addon: Arc<FileSearchAddon>,
         entry_path: String,
         size_bytes: u64,
         crc32: u32,
@@ -113,19 +126,40 @@ pub enum SearchItemSource {
     WorkshopItem(PublishedFileId),
 }
 
-/// Identity of a single file entry inside an installed addon, as passed to
-/// [`SearchItem::new_installed_addon_file`]. Bundled into a struct (rather
-/// than passed positionally) because these fields travel together end to
-/// end: they're assembled by the caller and copied straight into the
-/// matching fields of [`SearchItemSource::InstalledAddonFile`].
-#[derive(Debug)]
-pub struct InstalledAddonFileInfo {
-    pub addon_path: PathBuf,
-    pub addon_title: String,
-    pub workshop_id: Option<u64>,
-    pub entry_path: String,
-    pub size_bytes: u64,
-    pub crc32: u32,
+/// Shared per-addon identity for file search items: a library has ~10³
+/// addons but ~10⁵ file entries, so per-file copies of the addon path,
+/// title and id string dominated the file index's memory. One `Arc` per
+/// addon, shared by all of its files; the file items themselves carry only
+/// their entry path (label and extension are substrings of it).
+#[derive(Debug, Serialize)]
+pub struct FileSearchAddon {
+    /// Canonicalized addon path (see [`SearchItem::new_installed_addon`]).
+    pub path: PathBuf,
+    pub title: String,
+    pub workshop_id: Option<PublishedFileId>,
+    /// The workshop id formatted once, so id queries can match file items
+    /// without a per-file copy.
+    pub id_str: Option<Box<str>>,
+}
+
+impl FileSearchAddon {
+    pub fn new(path: PathBuf, title: String, workshop_id: Option<u64>) -> Arc<Self> {
+        Arc::new(Self {
+            path,
+            title,
+            workshop_id: workshop_id.map(PublishedFileId),
+            id_str: workshop_id.map(|id| id.to_string().into_boxed_str()),
+        })
+    }
+}
+
+// serde's blanket `Arc<T>` impl is feature-gated (`rc`); serialize the
+// shared struct directly — this only feeds transaction detail logging.
+fn serialize_shared_addon<S>(addon: &Arc<FileSearchAddon>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    FileSearchAddon::serialize(addon, serializer)
 }
 
 #[derive(Debug)]
@@ -138,7 +172,15 @@ pub struct SearchItem {
 }
 impl SearchItem {
     pub fn label(&self) -> &str {
-        &self.label
+        // File items derive their label (the file name) from the entry
+        // path instead of storing a per-file copy.
+        if let SearchItemSource::InstalledAddonFile { entry_path, .. } = &self.source {
+            entry_path
+                .rsplit_once('/')
+                .map_or(entry_path.as_str(), |(_, name)| name)
+        } else {
+            &self.label
+        }
     }
 
     pub fn terms(&self) -> &[String] {
@@ -170,10 +212,8 @@ fn source_order_key(
     match source {
         SearchItemSource::InstalledAddons(path, _) => (0, Some(path.as_path()), None, 0),
         SearchItemSource::InstalledAddonFile {
-            addon_path,
-            entry_path,
-            ..
-        } => (1, Some(addon_path.as_path()), Some(entry_path.as_str()), 0),
+            addon, entry_path, ..
+        } => (1, Some(addon.path.as_path()), Some(entry_path.as_str()), 0),
         SearchItemSource::MyWorkshop(id) => (2, None, None, id.0),
         SearchItemSource::WorkshopItem(id) => (3, None, None, id.0),
     }
@@ -245,27 +285,36 @@ impl SearchItem {
         )
     }
 
-    /// `file.addon_path` must already be canonicalized by the caller; see
-    /// [`Self::new_installed_addon`].
+    /// One file entry of an installed addon. `addon` is the shared
+    /// per-addon identity ([`FileSearchAddon::new`], one per addon, its
+    /// `path` already canonicalized); the item itself owns only its entry
+    /// path. Label, extension and search terms all derive from the source,
+    /// so `label`/`terms` stay empty.
     pub fn new_installed_addon_file<D: Into<u64>>(
-        file: InstalledAddonFileInfo,
-        label: String,
-        terms: Vec<String>,
+        addon: Arc<FileSearchAddon>,
+        entry_path: String,
+        size_bytes: u64,
+        crc32: u32,
         timestamp: D,
     ) -> Self {
-        Self::new(
-            SearchItemSource::InstalledAddonFile {
-                addon_path: file.addon_path,
-                addon_title: file.addon_title,
-                workshop_id: file.workshop_id.map(PublishedFileId),
-                entry_path: file.entry_path,
-                size_bytes: file.size_bytes,
-                crc32: file.crc32,
+        // Mirrors `new`'s len: the longest haystack this item can match
+        // (see `best_search_item_score`'s file-item arm).
+        let len = entry_path
+            .len()
+            .max(addon.title.len())
+            .max(addon.id_str.as_deref().map_or(0, str::len));
+        Self {
+            len,
+            label: String::new(),
+            terms: Vec::new(),
+            timestamp: timestamp.into(),
+            source: SearchItemSource::InstalledAddonFile {
+                addon,
+                entry_path,
+                size_bytes,
+                crc32,
             },
-            label,
-            terms,
-            timestamp,
-        )
+        }
     }
 }
 impl Serialize for SearchItem {

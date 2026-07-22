@@ -10,9 +10,9 @@ use iced::widget::image;
 use iced::widget::pane_grid;
 
 #[cfg(feature = "asset-studio")]
-use crate::backend::archive::PreviewArchiveSource;
-use crate::backend::gma::PreviewArchive;
-use crate::backend::ui_error::UiError;
+use crate::bridge::archive::PreviewArchiveSource;
+use crate::bridge::gma::PreviewArchive;
+use crate::bridge::ui_error::UiError;
 use crate::format::DownloadCountFormatter;
 use crate::media::{
     thumbnail_animation,
@@ -25,7 +25,7 @@ use crate::widgets::split_pane;
 #[cfg(feature = "asset-studio")]
 use crate::features::file_preview::PreviewRequest;
 
-use crate::backend::domain::PublishedFileId;
+use crate::bridge::domain::PublishedFileId;
 
 use super::details::{Details, details_for_archive, infer_workshop_id_from_path};
 use super::model::{

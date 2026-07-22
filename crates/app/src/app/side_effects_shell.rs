@@ -505,7 +505,7 @@ impl App {
         use gmpublished_backend::error_key::keys;
         use gmpublished_backend::events::TransactionPayload;
 
-        use crate::backend::tasks::TaskKind;
+        use crate::bridge::tasks::TaskKind;
         use context_menu::SimulatedToast;
 
         const SIMULATED_TOTAL_BYTES: u64 = 25 * 1024 * 1024;

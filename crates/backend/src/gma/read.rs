@@ -145,13 +145,27 @@ impl GmaView {
             .map_err(|error| map_parse_error(&error))
     }
 
+    /// Memory-maps `path` read-only, like [`Self::mmap`], for callers
+    /// outside the crate that keep the view alive across several reads
+    /// (the preview modal holds it for entry fetches).
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, GMAError> {
+        Self::mmap(path.as_ref())
+    }
+
     /// Parses the header + metadata and builds the identity handle for
     /// this view's content; `path` names the addon for identity purposes
     /// (see the constructors above).
     pub fn handle(&self, path: impl AsRef<Path>) -> Result<GMAFile, GMAError> {
         let parsed = self.parse()?;
-        let meta = &parsed.metadata;
+        Ok(self.handle_from_parsed(&parsed, path))
+    }
 
+    fn handle_from_parsed(
+        &self,
+        parsed: &vformats::gma::Gma<'_>,
+        path: impl AsRef<Path>,
+    ) -> GMAFile {
+        let meta = &parsed.metadata;
         let mut gma = GMAFile {
             path: path.as_ref().to_owned(),
             size: self.bytes.as_slice().len() as u64,
@@ -165,7 +179,42 @@ impl GmaView {
             modified: None,
         };
         gma.compute_extracted_name();
-        Ok(gma)
+        gma
+    }
+
+    /// Identity handle, header, and safe-path entry list from a **single**
+    /// parse. [`Self::handle`], [`Self::header`] and [`Self::entries`]
+    /// each re-walk the whole entry table; index and discovery reads use
+    /// this instead.
+    pub fn meta(&self, path: impl AsRef<Path>) -> Result<GmaMetaBundle, GMAError> {
+        let parsed = self.parse()?;
+        let handle = self.handle_from_parsed(&parsed, path);
+        let header = GMAHeader {
+            version: parsed.metadata.version,
+            timestamp: parsed.metadata.timestamp,
+            metadata: handle.metadata.clone(),
+            author: parsed.metadata.author.to_string(),
+            addon_version: parsed.metadata.addon_version,
+        };
+        let mut entries = Vec::with_capacity(parsed.entries().len());
+        for (index, entry) in parsed.entries().iter().enumerate() {
+            // Same tolerance as `entries()`: unsafe paths are skipped.
+            if is_unsafe_entry_path(&entry.path) {
+                log::warn!("Illegal GMA entry: {}", entry.path);
+                continue;
+            }
+            entries.push(GMAEntry {
+                path: entry.path.to_string(),
+                size: entry.size,
+                crc: entry.crc32,
+                index: index as u64,
+            });
+        }
+        Ok(GmaMetaBundle {
+            handle,
+            header,
+            entries,
+        })
     }
 
     pub fn header(&self) -> Result<GMAHeader, GMAError> {
@@ -221,6 +270,16 @@ impl GmaView {
     }
 }
 
+/// Everything a single [`GmaView::meta`] parse yields: the identity
+/// handle, the header, and the safe-path entry list (in table order,
+/// `index` = table position).
+#[derive(Debug, Clone)]
+pub struct GmaMetaBundle {
+    pub handle: GMAFile,
+    pub header: GMAHeader,
+    pub entries: Vec<GMAEntry>,
+}
+
 impl GMAFile {
     /// Memory-maps this addon's bytes for one read/extract operation.
     /// Only valid for on-disk addons; membuffer/spill flows hold the view
@@ -231,6 +290,11 @@ impl GMAFile {
 
     pub fn header(&self) -> Result<GMAHeader, GMAError> {
         self.view()?.header()
+    }
+
+    /// One-mmap, one-parse open: handle + header + entry list together.
+    pub fn open_meta<P: AsRef<Path>>(path: P) -> Result<GmaMetaBundle, GMAError> {
+        GmaView::mmap(path.as_ref())?.meta(path)
     }
 }
 

@@ -26,7 +26,7 @@ use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
 use vformats::phy::{ConvexLedge, ReadStats, SkipReason};
 
-use crate::backend::materials::{
+use crate::bridge::materials::{
     ContentSourceTier, DecodedTextureBudget, MaterialResolver, RenderMode,
     ResolvedMaterialTextures, ResolvedPrimaryMaterial, ResolvedSoundReference, srgb_byte_to_linear,
 };
@@ -401,7 +401,7 @@ fn vtf_preview_data(request: &PreviewRequest, bytes: &[u8]) -> PreviewData {
 
     let context = format!("vtf {}", request.entry_path);
     match catch_asset_decode(&context, || {
-        crate::backend::materials::decode_vtf_rgba(bytes)
+        crate::bridge::materials::decode_vtf_rgba(bytes)
     }) {
         Some(Ok(decoded)) => PreviewData::from_request(
             request,

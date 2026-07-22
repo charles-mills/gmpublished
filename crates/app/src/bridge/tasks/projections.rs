@@ -117,16 +117,14 @@ pub(super) fn search_item_source_from_backend(
             )
         }
         gmpublished_backend::search::SearchItemSource::InstalledAddonFile {
-            addon_path,
-            addon_title,
-            workshop_id,
+            addon,
             entry_path,
             size_bytes,
             crc32,
         } => SearchItemSource::InstalledAddonFile {
-            addon_path: addon_path.clone(),
-            addon_title: addon_title.clone(),
-            workshop_id: workshop_id.map(|id| {
+            addon_path: addon.path.clone(),
+            addon_title: addon.title.clone(),
+            workshop_id: addon.workshop_id.map(|id| {
                 PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
             }),
             entry_path: entry_path.clone(),
@@ -187,8 +185,8 @@ pub(super) fn workshop_item_from_backend(item: gmpublished_backend::WorkshopItem
 
 pub(super) fn avatar_from_backend(
     avatar: SteamAvatarRgba,
-) -> Option<crate::backend::domain::AvatarRgba> {
-    crate::backend::domain::AvatarRgba::new(avatar.width, avatar.height, avatar.rgba)
+) -> Option<crate::bridge::domain::AvatarRgba> {
+    crate::bridge::domain::AvatarRgba::new(avatar.width, avatar.height, avatar.rgba)
 }
 
 #[derive(Debug, thiserror::Error)]

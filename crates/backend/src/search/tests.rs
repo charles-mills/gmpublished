@@ -188,37 +188,24 @@ fn sync_installed_addon_files_searches_file_scope_only() {
         vec!["roleplay".to_owned()],
         6_u64,
     )]);
+    let riverden = FileSearchAddon::new(
+        PathBuf::from("/tmp/riverden.gma"),
+        "Riverden Addon".to_owned(),
+        Some(66),
+    );
     search.sync_installed_addon_files(vec![
         SearchItem::new_installed_addon_file(
-            InstalledAddonFileInfo {
-                addon_path: PathBuf::from("/tmp/riverden.gma"),
-                addon_title: "Riverden Addon".to_owned(),
-                workshop_id: Some(66),
-                entry_path: "maps/rp_riverden_v1a.bsp".to_owned(),
-                size_bytes: 123,
-                crc32: 456,
-            },
-            "rp_riverden_v1a.bsp".to_owned(),
-            vec![
-                "maps/rp_riverden_v1a.bsp".to_owned(),
-                "Riverden Addon".to_owned(),
-            ],
+            riverden.clone(),
+            "maps/rp_riverden_v1a.bsp".to_owned(),
+            123,
+            456,
             6_u64,
         ),
         SearchItem::new_installed_addon_file(
-            InstalledAddonFileInfo {
-                addon_path: PathBuf::from("/tmp/riverden.gma"),
-                addon_title: "Riverden Addon".to_owned(),
-                workshop_id: Some(66),
-                entry_path: "maps/gm_flatgrass.bsp".to_owned(),
-                size_bytes: 123,
-                crc32: 789,
-            },
-            "gm_flatgrass.bsp".to_owned(),
-            vec![
-                "maps/gm_flatgrass.bsp".to_owned(),
-                "Riverden Addon".to_owned(),
-            ],
+            riverden,
+            "maps/gm_flatgrass.bsp".to_owned(),
+            123,
+            789,
             6_u64,
         ),
     ]);
@@ -234,12 +221,10 @@ fn sync_installed_addon_files_searches_file_scope_only() {
     assert_eq!(result.hits.len(), 1);
     match &result.hits[0].item.source {
         SearchItemSource::InstalledAddonFile {
-            entry_path,
-            addon_title,
-            ..
+            entry_path, addon, ..
         } => {
             assert_eq!(entry_path, "maps/rp_riverden_v1a.bsp");
-            assert_eq!(addon_title, "Riverden Addon");
+            assert_eq!(addon.title, "Riverden Addon");
         }
         source => panic!("expected file source, got {source:?}"),
     }

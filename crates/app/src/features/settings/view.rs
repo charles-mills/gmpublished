@@ -243,7 +243,7 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     {
         content = content.push(switch_row(
             i18n.tr("settings-system-titlebar"),
-            state.settings().titlebar == crate::backend::TitlebarPreference::System,
+            state.settings().titlebar == crate::bridge::TitlebarPreference::System,
             Message::SystemTitlebarToggled,
             &tokens,
         ));

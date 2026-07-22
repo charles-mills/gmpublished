@@ -1,6 +1,6 @@
 use gmpublished_backend::error_key::keys;
 
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 use std::path::{Path, PathBuf};
 
 use super::domain::PublishedFileId;

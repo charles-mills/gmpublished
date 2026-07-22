@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::model::{DestinationKind, SettingsSnapshot};
 use super::state::OpenContext;
-use crate::backend::ui_error::UiError;
+use crate::bridge::ui_error::UiError;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {

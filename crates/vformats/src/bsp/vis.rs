@@ -99,6 +99,52 @@ impl Visibility<'_> {
         self.row(cluster, 1)
     }
 
+    /// Decodes `cluster`'s PVS row into a u64 bitset (bit `i` = cluster
+    /// `i` visible), reusing the caller's buffer — no allocation per row.
+    /// `out` must hold `cluster_count.div_ceil(64)` words; it is zeroed
+    /// and refilled. Returns `None` (leaving `out` zeroed) when the
+    /// cluster index or its row offset is out of range, matching
+    /// [`pvs`](Self::pvs). Repeated-row callers (visibility flood fills
+    /// are O(clusters) rows) use this to skip the `Vec<bool>` per row.
+    pub fn pvs_into(&self, cluster: usize, out: &mut [u64]) -> Option<()> {
+        debug_assert!(out.len() >= self.cluster_count.div_ceil(64));
+        out.iter_mut().for_each(|word| *word = 0);
+        let offset = usize::try_from(self.offsets.get(cluster)?[0]).ok()?;
+        let row = self.data.get(offset..)?;
+        let mut at = 0;
+        let mut bit = 0;
+        while bit < self.cluster_count {
+            let Some(packed) = row.get(at) else {
+                break; // Truncated row: the tail stays invisible.
+            };
+            at += 1;
+            if *packed == 0 {
+                let Some(run) = row.get(at) else {
+                    break;
+                };
+                at += 1;
+                if *run == 0 {
+                    break; // A zero run length would never advance.
+                }
+                bit += usize::from(*run) * 8;
+            } else {
+                // Rows are byte-aligned, so bit % 64 <= 56 and the byte
+                // never straddles a word boundary.
+                out[bit / 64] |= u64::from(*packed) << (bit % 64);
+                bit += 8;
+            }
+        }
+        // A trailing partial byte may set bits past cluster_count; mask
+        // them so equality with the bool decoder holds.
+        let tail_bits = self.cluster_count % 64;
+        if tail_bits != 0
+            && let Some(last) = out.get_mut(self.cluster_count / 64)
+        {
+            *last &= (1u64 << tail_bits) - 1;
+        }
+        Some(())
+    }
+
     fn row(&self, cluster: usize, which: usize) -> Option<Vec<bool>> {
         let offset = usize::try_from(self.offsets.get(cluster)?[which]).ok()?;
         let row = self.data.get(offset..)?;
