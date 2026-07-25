@@ -12,14 +12,13 @@ url="https://github.com/${_github_repo}"
 license=('GPL-3.0-only')
 depends=(
   'alsa-lib'
-  'desktop-file-utils'
   'fontconfig'
-  'gtk-update-icon-cache'
+  'gcc-libs'
+  'glibc'
   'hicolor-icon-theme'
   'libx11'
   'libxcb'
   'libxkbcommon'
-  'shared-mime-info'
   'vulkan-driver'
   'vulkan-icd-loader'
   'wayland'
