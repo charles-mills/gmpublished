@@ -19,14 +19,6 @@ formats = ["app"]
 
 binaries = [{ path = "gmpublished", main = true }]
 
-icons = [
-    "icons/32x32.png",
-    "icons/128x128.png",
-    "icons/128x128@2x.png",
-    "icons/icon.icns",
-    "icons/icon.ico",
-]
-
 resources = [
     { src = "macos/Credits.rtf", target = "Credits.rtf" },
     { src = "../THIRD-PARTY-NOTICES.md", target = "THIRD-PARTY-NOTICES.md" },

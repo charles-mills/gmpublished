@@ -317,7 +317,13 @@ jobs:
       - name: Verify macOS universal app executable
         run: |
           app_executable="target/packager/gmpublished.app/Contents/MacOS/gmpublished"
+          app_resources="target/packager/gmpublished.app/Contents/Resources"
+          app_info="target/packager/gmpublished.app/Contents/Info.plist"
           test -f "$app_executable"
+          test -f "$app_resources/Assets.car"
+          test -f "$app_resources/AppIcon.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app_info")" = "AppIcon"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_info")" = "AppIcon"
           lipo -info "$app_executable"
           lipo "$app_executable" -verify_arch arm64
           lipo "$app_executable" -verify_arch x86_64
