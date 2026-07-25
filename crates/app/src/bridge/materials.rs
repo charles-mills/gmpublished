@@ -932,10 +932,11 @@ impl MaterialResolver {
             .chain(self.config.pakfile.as_deref().map(SourceRef::Pakfile))
             .chain(std::iter::once(SourceRef::Addon(&self.config.addon)))
             .chain(self.config.loose_source_dirs.iter().map(SourceRef::Loose))
-            .chain(std::iter::once_with(|| SourceRef::SiblingGma(self.sibling_gmas())))
+            .chain(std::iter::once_with(|| {
+                SourceRef::SiblingGma(self.sibling_gmas())
+            }))
             .chain(
-                std::iter::once_with(|| self.game_vpks().iter().map(SourceRef::GameVpk))
-                    .flatten(),
+                std::iter::once_with(|| self.game_vpks().iter().map(SourceRef::GameVpk)).flatten(),
             )
     }
 
@@ -1827,8 +1828,7 @@ fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaIndex {
     // parallel, then merge sequentially so first-wins entry priority keeps
     // the original path order.
     type IndexedArchive = (SiblingGmaArchive, Vec<(String, SiblingGmaEntryLocation)>);
-    let indexed: Vec<Option<IndexedArchive>> = paths
-        [..paths.len().min(MAX_SIBLING_GMA_ARCHIVES)]
+    let indexed: Vec<Option<IndexedArchive>> = paths[..paths.len().min(MAX_SIBLING_GMA_ARCHIVES)]
         .par_iter()
         .map(|path| match path.kind {
             SiblingGmaPathKind::Plain => {
