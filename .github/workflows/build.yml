@@ -412,8 +412,7 @@ jobs:
       - name: Commit updated metadata
         working-directory: packaging/arch
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config --global --add safe.directory '*'
 
           # Scoped: updpkgsums leaves downloaded sources in this directory.
           git add PKGBUILD
@@ -425,5 +424,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Update AUR package checksums for $GITHUB_REF_NAME"
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "Update AUR package checksums for $GITHUB_REF_NAME"
           git push origin HEAD:main

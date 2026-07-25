@@ -1,0 +1,30 @@
+pkgbase = gmpublished-bin
+	pkgdesc = Native Workshop Publishing Utility for Garry's Mod
+	pkgver = 0.2.1
+	pkgrel = 1
+	url = https://github.com/charles-mills/gmpublished
+	arch = x86_64
+	license = GPL-3.0-only
+	depends = alsa-lib
+	depends = fontconfig
+	depends = gcc-libs
+	depends = glibc
+	depends = hicolor-icon-theme
+	depends = libx11
+	depends = libxcb
+	depends = libxkbcommon
+	depends = vulkan-driver
+	depends = vulkan-icd-loader
+	depends = wayland
+	provides = gmpublished=0.2.1
+	conflicts = gmpublished
+	options = strip
+	options = !debug
+	source = gmpublished-0.2.1-x86_64-linux.zip::https://github.com/charles-mills/gmpublished/releases/download/v0.2.1/gmpublished-0.2.1-x86_64-linux.zip
+	source = gmpublished-bin-0.2.1-LICENSE::https://raw.githubusercontent.com/charles-mills/gmpublished/v0.2.1/LICENSE
+	source = gmpublished-bin-0.2.1.png::https://raw.githubusercontent.com/charles-mills/gmpublished/v0.2.1/packaging/icons/128x128.png
+	sha256sums = ae06952e62b493676c0683f3efb066e808970b075dd31e0406b030127722ca9b
+	sha256sums = 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
+	sha256sums = f2051aabe232caaf972db91dddafe4c3307a9cbdaf930b093bd107dbf74a18c8
+
+pkgname = gmpublished-bin
