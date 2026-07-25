@@ -394,3 +394,46 @@ jobs:
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+  # Refreshes AUR checksums against the published assets. Does not push to the AUR.
+  aur_metadata:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    container:
+      image: archlinux:base-devel
+    steps:
+      # Without git, checkout falls back to a tarball and leaves nothing to commit from.
+      - name: Install packaging tools
+        run: pacman -Syu --noconfirm --needed git pacman-contrib
+
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      # makepkg and updpkgsums refuse to run as root.
+      - name: Refresh checksums and .SRCINFO
+        run: |
+          useradd -m builder
+          chown -R builder:builder packaging/arch
+          sudo -u builder packaging/scripts/update_aur_metadata.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Commit updated metadata
+        working-directory: packaging/arch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Scoped: updpkgsums leaves downloaded sources in this directory.
+          git add PKGBUILD
+          if [ -f .SRCINFO ]; then
+            git add .SRCINFO
+          fi
+          if git diff --cached --quiet; then
+            echo "checksums already current"
+            exit 0
+          fi
+
+          git commit -m "Update AUR package checksums for $GITHUB_REF_NAME"
+          git push origin HEAD:main

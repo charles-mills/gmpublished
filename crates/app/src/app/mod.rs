@@ -415,7 +415,6 @@ fn search_file_items_from_library(
         .collect()
 }
 
-
 impl App {
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
