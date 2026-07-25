@@ -31,16 +31,22 @@ package-name = "gmpublished"
 section = "utils"
 priority = "optional"
 desktop-template = "linux/gmpublished.desktop"
+# Keep in sync with the depends array in packaging/arch/PKGBUILD.
 depends = [
     "libc6",
     "libasound2",
     "libgcc-s1",
-    "libx11-6",
-    "libxcb1",
-    "libxkbcommon0",
+    "libdbus-1-3",
     "libfontconfig1",
     "libgl1",
+    "libvulkan1",
     "libwayland-client0",
+    "libx11-6",
+    "libxcb1",
+    "libxcursor1",
+    "libxi6",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
 ]
 
 [deb.files]

@@ -60,26 +60,36 @@
         }
       );
 
+      # `nix flake check` builds `checks` but only evaluates `packages`.
+      checks = eachSystem (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          gmpublished = pkgs.gmpublished;
+        }
+      );
+
       devShells = eachSystem (
         system:
         let
           pkgs = pkgsFor system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+          # Must match `runtimeLibs` in packaging/nix/package.nix.
           nativeLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.alsa-lib
+            pkgs.dbus
             pkgs.fontconfig
-            pkgs.freetype
             pkgs.libGL
-            pkgs.libxkbcommon
-            pkgs.vulkan-loader
-            pkgs.udev
-            pkgs.wayland
             pkgs.libx11
             pkgs.libxcb
             pkgs.libxcursor
             pkgs.libxi
-            pkgs.libxrandr
+            pkgs.libxkbcommon
+            pkgs.vulkan-loader
+            pkgs.wayland
           ];
         in
         {

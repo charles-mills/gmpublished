@@ -3,7 +3,7 @@ name: build
 on:
   push:
     tags:
-      - "*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   actions: read
@@ -439,16 +439,45 @@ jobs:
           chown -R builder:builder packaging/arch
           sudo -u builder packaging/scripts/update_aur_metadata.sh "${GITHUB_REF_NAME#v}"
 
+      - name: Reject unverified checksums
+        working-directory: packaging/arch
+        run: |
+          if grep -qE "^\s*(sha256sums|b2sums)=.*SKIP" PKGBUILD; then
+            echo "PKGBUILD ships a SKIP checksum; refusing to publish" >&2
+            exit 1
+          fi
+
+      # Root-side: `makepkg --syncdeps` would need a sudoers entry for builder.
+      - name: Install declared dependencies
+        working-directory: packaging/arch
+        run: |
+          deps="$(awk -F' = ' '/^\s*(depends|checkdepends) = /{print $2}' .SRCINFO)"
+          echo "resolving: $deps"
+          # shellcheck disable=SC2086
+          pacman -S --noconfirm --needed $deps
+
       # Proves the published zip actually satisfies the PKGBUILD before its
       # checksums are committed. Without this nothing on the release path ever
       # builds the package the AUR will tell users to build.
       - name: Smoke-build the package
         working-directory: packaging/arch
+        # Without pipefail, `namcap | tee` returns tee's status.
+        shell: bash -euo pipefail {0}
         run: |
           chown -R builder:builder .
-          sudo -u builder makepkg --nodeps --noconfirm --clean
-          namcap PKGBUILD
-          namcap ./*.pkg.tar.zst
+          sudo -u builder makepkg --noconfirm --clean
+
+          package="$(find . -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)"
+          test -n "$package"
+
+          # namcap exits 0 regardless of findings, so gate on its output.
+          namcap PKGBUILD | tee /tmp/namcap-pkgbuild.txt
+          namcap "$package" | tee /tmp/namcap-package.txt
+          if grep -h ' E: ' /tmp/namcap-pkgbuild.txt /tmp/namcap-package.txt; then
+            echo "namcap reported errors" >&2
+            exit 1
+          fi
+
           rm -rf ./*.pkg.tar.zst src pkg
 
       - name: Commit updated metadata
@@ -469,4 +498,15 @@ jobs:
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m "Update AUR package checksums for $GITHUB_REF_NAME"
-          git push origin HEAD:main
+
+          attempt=1
+          until git push origin HEAD:main; do
+            if [ "$attempt" -ge 3 ]; then
+              echo "could not push AUR metadata after $attempt attempts" >&2
+              exit 1
+            fi
+            echo "push rejected, rebasing onto main (attempt $attempt)" >&2
+            git fetch origin main
+            git rebase origin/main
+            attempt=$((attempt + 1))
+          done

@@ -56,7 +56,7 @@ fragments = ['''
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities" Name="ApplicationIcon" Value="&quot;[INSTALLDIR]gmpublished.exe&quot;,0" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities" Name="ApplicationName" Value="gmpublished" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\FileAssociations" Name=".gma" Value="gmpublished.gma.Document" Type="string" />
-        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\MIMEAssociations" Name="application/gma" Value="gmpublished.gma.Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\MIMEAssociations" Name="application/x-garrys-mod-addon" Value="gmpublished.gma.Document" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\shell\Open\command" Value="&quot;[INSTALLDIR]gmpublished.exe&quot; -e &quot;%1&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\RegisteredApplications" Name="gmpublished" Value="SOFTWARE\gmpublished\Capabilities" Type="string" KeyPath="yes" />
 
@@ -64,7 +64,7 @@ fragments = ['''
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\gmpublished.gma.Document\DefaultIcon" Value="&quot;[INSTALLDIR]gmpublished.exe&quot;,0" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\gmpublished.gma.Document\shell\open\command" Value="&quot;[INSTALLDIR]gmpublished.exe&quot; -e &quot;%1&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Value="gmpublished.gma.Document" Type="string" />
-        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Name="Content Type" Value="application/gma" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Name="Content Type" Value="application/x-garrys-mod-addon" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma\OpenWithList\gmpublished.exe" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma\OpenWithProgids" Name="gmpublished.gma.Document" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Applications\gmpublished.exe\SupportedTypes" Name=".gma" Value="" Type="string" />

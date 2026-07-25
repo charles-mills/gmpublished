@@ -37,9 +37,8 @@ pub fn stdin() -> bool {
 }
 
 fn command() -> Command {
-    Command::new("gmpublisher")
+    Command::new("gmpublished")
         .version(env!("CARGO_PKG_VERSION"))
-        .author("William Venner <william@venner.io>")
         .about("Publish, extract and work with GMA files")
         .args(&[
             Arg::new("extract")

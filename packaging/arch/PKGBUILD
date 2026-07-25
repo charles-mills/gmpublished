@@ -3,15 +3,18 @@
 pkgname=gmpublished-bin
 _pkgname=gmpublished
 _github_repo='charles-mills/gmpublished'
-pkgver=0.2.1
+pkgver=0.2.2
 _release_tag="v${pkgver}"
 pkgrel=1
-pkgdesc="Native Workshop Publishing Utility for Garry's Mod"
+pkgdesc="Native Workshop publishing and addon inspection utility for Garry's Mod"
 arch=('x86_64')
 url="https://github.com/${_github_repo}"
-license=('GPL-3.0-only')
+license=('GPL-3.0-only' 'LicenseRef-Steamworks-SDK')
+# Mostly dlopen'd, so namcap reports these as unnecessary. Do not trim on its
+# say-so; re-derive from `strings` on the binary instead.
 depends=(
   'alsa-lib'
+  'dbus'
   'fontconfig'
   'gcc-libs'
   'glibc'
@@ -19,14 +22,18 @@ depends=(
   'libglvnd'
   'libx11'
   'libxcb'
+  'libxcursor'
+  'libxi'
   'libxkbcommon'
-  'vulkan-driver'
+  'libxkbcommon-x11'
   'vulkan-icd-loader'
   'wayland'
 )
 checkdepends=('desktop-file-utils')
 optdepends=(
   'steam: Workshop publishing and Garry'"'"'s Mod detection; must be running and signed in'
+  'vulkan-driver: hardware-accelerated rendering; falls back to the OpenGL backend without one'
+  'xdg-desktop-portal: required for open/save dialogs, with a backend such as xdg-desktop-portal-gtk'
   'xdg-utils: open files and folders in the file manager'
 )
 provides=("${_pkgname}=${pkgver}")
@@ -36,6 +43,7 @@ source=(
   "${_pkgname}-${pkgver}-${CARCH}-linux.zip::\
 ${url}/releases/download/${_release_tag}/${_pkgname}-${pkgver}-${CARCH}-linux.zip"
 )
+# Refreshed by update_aur_metadata.sh post-publish; never SKIP.
 sha256sums=('ae06952e62b493676c0683f3efb066e808970b075dd31e0406b030127722ca9b')
 
 check() {

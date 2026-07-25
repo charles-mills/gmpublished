@@ -4,18 +4,17 @@
   rustPlatform,
 
   alsa-lib,
+  dbus,
   fontconfig,
-  freetype,
   libGL,
   libx11,
   libxcb,
   libxcursor,
   libxi,
   libxkbcommon,
-  libxrandr,
   makeWrapper,
+  patchelf,
   pkg-config,
-  udev,
   vulkan-loader,
   wayland,
 }:
@@ -25,6 +24,21 @@ let
 
   pname = "gmpublished";
   version = cargoToml.workspace.package.version;
+
+  # Keep in step with flake.nix's devShell list.
+  runtimeLibs = [
+    alsa-lib
+    dbus
+    fontconfig
+    libGL
+    libx11
+    libxcb
+    libxcursor
+    libxi
+    libxkbcommon
+    vulkan-loader
+    wayland
+  ];
 
   infoPlist = builtins.toFile "${pname}-Info.plist" (
     lib.generators.toPlist { escape = true; } {
@@ -60,7 +74,7 @@ let
           UTTypeIdentifier = "dev.charlesmills.gmpublished.gma";
           UTTypeTagSpecification = {
             "public.filename-extension" = [ "gma" ];
-            "public.mime-type" = "application/gma";
+            "public.mime-type" = "application/x-garrys-mod-addon";
           };
         }
       ];
@@ -72,9 +86,12 @@ rustPlatform.buildRustPackage {
 
   src = lib.fileset.toSource {
     root = ../..;
+    # Excludes ../../.cargo on purpose: its -Ctarget-cpu=x86-64-v2 is for the
+    # release artifacts only.
     fileset = lib.fileset.unions [
       ../../Cargo.lock
       ../../Cargo.toml
+      ../../LICENSE
       ../../THIRD-PARTY-NOTICES.md
       ../../crates
       ../../packaging/icons
@@ -98,25 +115,13 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [
     makeWrapper
+    patchelf
     pkg-config
   ];
 
-  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
-    alsa-lib
-    fontconfig
-    freetype
-    libGL
-    libx11
-    libxcb
-    libxcursor
-    libxi
-    libxkbcommon
-    libxrandr
-    stdenv.cc.cc.lib
-    udev
-    vulkan-loader
-    wayland
-  ];
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux (
+    runtimeLibs ++ [ stdenv.cc.cc.lib ]
+  );
 
   postInstall =
     lib.optionalString stdenv.hostPlatform.isLinux ''
@@ -132,12 +137,10 @@ rustPlatform.buildRustPackage {
         "$out/share/mime/packages/application-gma.xml"
       install -Dm0644 packaging/linux/${pname}.desktop \
         "$out/share/applications/${pname}.desktop"
+      install -Dm0644 LICENSE \
+        "$out/share/doc/${pname}/LICENSE"
       install -Dm0644 THIRD-PARTY-NOTICES.md \
         "$out/share/doc/${pname}/THIRD-PARTY-NOTICES.md"
-
-      wrapProgram "$out/bin/${pname}" \
-        --prefix LD_LIBRARY_PATH : \
-          "$out/lib:${lib.makeLibraryPath [ vulkan-loader ]}"
     ''
     + lib.optionalString stdenv.hostPlatform.isDarwin ''
       app="$out/Applications/${pname}.app"
@@ -151,6 +154,8 @@ rustPlatform.buildRustPackage {
         "$contents/Resources/icon.icns"
       install -Dm0644 packaging/macos/Credits.rtf \
         "$contents/Resources/Credits.rtf"
+      install -Dm0644 LICENSE \
+        "$contents/Resources/LICENSE"
       install -Dm0644 THIRD-PARTY-NOTICES.md \
         "$contents/Resources/THIRD-PARTY-NOTICES.md"
       install -Dm0644 ${infoPlist} "$contents/Info.plist"
@@ -158,8 +163,15 @@ rustPlatform.buildRustPackage {
       makeWrapper "$contents/MacOS/${pname}" "$out/bin/${pname}"
     '';
 
+  # fixupPhase's `patchelf --shrink-rpath` drops runtimeLibs and build.rs's
+  # $ORIGIN, since nothing DT_NEEDED resolves against them. Re-add after.
+  postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+    patchelf --add-rpath "$out/lib:${lib.makeLibraryPath runtimeLibs}" \
+      "$out/bin/${pname}"
+  '';
+
   meta = {
-    description = "Native Workshop Publishing Utility for Garry's Mod";
+    description = "Native Workshop publishing and addon inspection utility for Garry's Mod";
     homepage = "https://github.com/charles-mills/gmpublished";
     license = lib.licenses.gpl3Only;
     mainProgram = pname;

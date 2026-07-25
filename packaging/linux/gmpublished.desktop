@@ -10,4 +10,4 @@ StartupNotify=true
 StartupWMClass=gmpublished
 Categories=Utility;FileTools;
 Keywords=garrysmod;gmod;workshop;addon;gma;steam;
-MimeType=application/gma;
+MimeType=application/x-garrys-mod-addon;

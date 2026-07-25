@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="application/gma">
+  <mime-type type="application/x-garrys-mod-addon">
     <comment>Garry's Mod Addon</comment>
+    <generic-icon name="package-x-generic"/>
     <glob pattern="*.gma"/>
+    <magic priority="50">
+      <match type="string" value="GMAD" offset="0"/>
+    </magic>
   </mime-type>
 </mime-info>

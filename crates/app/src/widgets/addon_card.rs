@@ -529,16 +529,27 @@ fn thumb_image<'a>(handle: &image::Handle, size: f32, opacity: f32) -> Element<'
 
 /// The visual an arriving thumbnail fades in over: the blurred stand-in when
 /// there was one, otherwise the loading glyph.
+///
+/// Always sized to the full preview box. This is the crossfade stack's base
+/// layer, and `Stack` resolves its own size from the base and then clamps
+/// every other layer to it — a bare `loading_glyph` base would squeeze the
+/// arriving full-size image down to the glyph's 32x32 for the whole reveal.
 fn under_element<'a>(
     under: &Thumbnail,
     size: f32,
     tokens: &Tokens,
     opacity: f32,
 ) -> Element<'a, Message> {
-    match under {
+    let content: Element<'a, Message> = match under {
         Thumbnail::Placeholder(handle) => thumb_image(handle, size, opacity),
         _ => loading_glyph(tokens),
-    }
+    };
+
+    container(content)
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .center(Length::Fixed(size))
+        .into()
 }
 
 fn plus_glyph<'a>(data: &Data, tokens: &Tokens, hover_progress: f32) -> Element<'a, Message> {

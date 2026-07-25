@@ -213,6 +213,7 @@ fn resolved_panic_log_path() -> PathBuf {
 }
 
 fn fallback_panic_log_path() -> PathBuf {
+    // "gmpublisher", not APP_NAME: mirrors `AppDataPaths::default_temp_dir`.
     std::env::temp_dir()
         .join("gmpublisher")
         .join("logs")
