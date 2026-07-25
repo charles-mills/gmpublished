@@ -656,6 +656,14 @@ impl AppData {
     }
 }
 
+/// Whether a Steam client installation exists on this machine at all, as
+/// distinct from one that exists but isn't running. Reads only the Steam
+/// directory layout, so it answers with Steam closed.
+#[must_use]
+pub fn steam_client_installed() -> bool {
+    steamlocate::SteamDir::locate().is_ok()
+}
+
 pub fn validate_gmod(mut path: PathBuf) -> bool {
     path.push("GarrysMod");
     path.push("addons");

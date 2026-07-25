@@ -5,10 +5,10 @@ use super::{
     BackendEventSinkRegistration, BackendEventStreamFactory, BackendRuntimeEvent,
     BackendRuntimeEventEffects, BackendServices, BackendTaskCancelResult, BackendTaskSource,
     BackendTransactionTasks, DOWNLOAD_STATUS_DOWNLOADING, EXTRACT_STATUS, LibraryRefresh,
-    LibraryRefreshReason, LibrarySnapshot, NativeOpenTarget, RunBlockingError, ScheduleError,
-    Settings, StatusKey, Subscription, Task, TaskEvent, TaskEventStreamFactory, TaskHandle, TaskId,
-    TaskKind, Tasks, UiError, WorkerPoolSpawner, fmt, install_backend_event_sink_by_default, mpsc,
-    oneshot, show_native_open_error_dialog,
+    LibraryRefreshReason, LibrarySnapshot, NativeOpenTarget, PathBuf, RunBlockingError,
+    ScheduleError, Settings, StatusKey, Subscription, Task, TaskEvent, TaskEventStreamFactory,
+    TaskHandle, TaskId, TaskKind, Tasks, UiError, WorkerPoolSpawner, fmt,
+    install_backend_event_sink_by_default, mpsc, oneshot, show_native_open_error_dialog,
 };
 
 /// Root-owned backend boundary cloned into Iced workers and subscriptions.
@@ -137,6 +137,11 @@ impl BackendContext {
 
     pub(crate) fn settings_and_paths_snapshot(&self) -> (Settings, AppPaths) {
         self.services.settings_and_paths_snapshot()
+    }
+
+    /// The configured Garry's Mod path paired with the one that resolved.
+    pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        self.services.game_paths()
     }
 
     pub(crate) fn begin_transaction(&self) -> gmpublished_backend::Transaction {

@@ -296,6 +296,15 @@ pub fn context_menu(tokens: &Tokens) -> container::Style {
     )
 }
 
+/// Flat filled disc: no border, no shadow, radius half the edge.
+pub fn circle(fill: Rgba, radius: f32) -> container::Style {
+    container::Style {
+        background: Some(Color::from(fill).into()),
+        border: border::rounded(radius),
+        ..container::Style::default()
+    }
+}
+
 pub fn tag(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.surface_2,

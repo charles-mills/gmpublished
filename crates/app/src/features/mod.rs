@@ -6,6 +6,7 @@ pub mod installed_addons;
 pub mod modal_stack;
 pub mod my_workshop;
 pub mod prepare_publish;
+pub mod prerequisites;
 pub mod preview_gma;
 pub mod search;
 pub mod settings;

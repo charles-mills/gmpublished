@@ -24,6 +24,7 @@ impl App {
         );
         let label = destination_select::destination_label(&snapshot.settings, &snapshot.paths);
         self.state.downloader.set_destination_label(label);
+        self.sync_game_prerequisite();
         let library_refresh = if previous_gmod_dir != snapshot.paths.gmod_dir {
             Task::done(RootMessage::LibraryRefreshRequested(
                 LibraryRefreshReason::SettingsChanged,

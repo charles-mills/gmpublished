@@ -1,9 +1,9 @@
 use gmpublished_backend::error_key::keys;
 
 use super::{
-    App, BackendRuntimeEvent, LibraryRefreshReason, RootMessage, Task, UiError,
+    App, BackendRuntimeEvent, LibraryRefreshReason, RootMessage, RouteLifecycle, Task, UiError,
     backend_runtime_action_message, flatten_blocking_ui_result, installed_addons, my_workshop,
-    search, settings, shell, steam_session,
+    prerequisites, search, settings, shell, steam_session,
 };
 
 impl App {
@@ -18,8 +18,20 @@ impl App {
         let identity_completed = matches!(message, steam_session::Message::IdentityFetched(_, _));
 
         let effects = steam_session::update(&mut self.state.steam_session, message);
+        // Prerequisite panels need the edge, not just the level: a Connecting
+        // that follows a failure is a retry, and must not read as a first
+        // attempt.
+        let reconnected = self
+            .state
+            .prerequisites
+            .observe_steam(self.state.steam_session.status());
         let session_task = self.run_steam_session_effects(effects);
         let shell_status_task = self.sync_shell_steam_status();
+        let reload_task = if reconnected {
+            self.reload_steam_route_after_reconnect()
+        } else {
+            Task::none()
+        };
         let retry_task = if self.state.steam_session.status().connected() {
             self.retry_pending_steam_operation()
         } else {
@@ -35,10 +47,30 @@ impl App {
         Task::batch([
             session_task,
             shell_status_task,
+            reload_task,
             retry_task,
             shell_identity_task,
             failure_task,
         ])
+    }
+
+    /// Steam came up after a route had already given up on it. The prerequisite
+    /// panel hides that route's stale failure while the connection is down, so
+    /// the moment it clears, the error underneath would be the first thing the
+    /// user sees — reporting an outage that is already over.
+    ///
+    /// Re-entering is exactly what leaving the route and coming back does, and
+    /// it is what people were doing by hand to clear this.
+    fn reload_steam_route_after_reconnect(&mut self) -> Task<RootMessage> {
+        let route = self.state.shell.route();
+        if !prerequisites::requires_steam(route) {
+            return Task::none();
+        }
+
+        // The features' own enter guards decide whether this actually refetches:
+        // a route holding rows keeps them, and only an idle or failed one asks
+        // again.
+        self.route_lifecycle_task(route, RouteLifecycle::Entered)
     }
 
     fn run_steam_session_effects(

@@ -87,6 +87,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.set_destination_label(label);
             Vec::new()
         }
+        Message::Prerequisite(action) => vec![Effect::PrerequisiteActivated(action)],
     };
 
     if jobs_may_change {

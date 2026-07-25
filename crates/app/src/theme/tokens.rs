@@ -115,6 +115,11 @@ pub struct Colors {
     pub(crate) download_count_icon: Rgba,
     pub(crate) error: Rgba,
     pub(crate) error_dark: Rgba,
+    /// Unmet-prerequisite status (Steam down, Garry's Mod absent). Deliberately
+    /// short of `error`: nothing has failed, something simply isn't there yet.
+    pub(crate) warn: Rgba,
+    /// Tinted disc behind a `warn` glyph, pre-composited over the route canvas.
+    pub(crate) warn_fill: Rgba,
     pub(crate) link: Rgba,
     pub(crate) text: Rgba,
     pub(crate) text_dim: Rgba,
@@ -576,6 +581,9 @@ fn dark_colors() -> Colors {
         download_count_icon: rgb(0x6BB64D),
         error: rgb(0xA80000),
         error_dark: rgb(0x7E0000),
+        warn: rgb(0xD9922E),
+        // warn_fill = warn@14% over the sunken route canvas #151515
+        warn_fill: rgb(0x322616),
         link: rgb(0x46B0FF),
         text: rgb(0xFFFFFF),
         text_dim: rgb(0x888888),
@@ -698,6 +706,11 @@ fn light_colors() -> Colors {
         download_count_icon: rgb(0x258F52),
         error: rgb(0xB3261E),
         error_dark: rgb(0x982019),
+        // The dark amber fails contrast on a light canvas; a desaturated
+        // ochre keeps the status reading as status rather than decoration.
+        warn: rgb(0x9A6206),
+        // warn_fill = warn@10% over the sunken route canvas #E9ECEF
+        warn_fill: rgb(0xDFDEDA),
         link: rgb(0x006DC7),
         text: rgb(0x1D232A),
         text_dim: rgb(0x626E7A),
@@ -816,6 +829,11 @@ fn classic_source_colors() -> Colors {
         download_count_icon: rgb(0x879A57),
         error: rgb(0xB85E42),
         error_dark: rgb(0x9C5038),
+        // Pushed yellow-gold: the classic accent is already orange, so the
+        // usual amber would read as a second accent rather than a status.
+        warn: rgb(0xD6B23C),
+        // warn_fill = warn@14% over the sunken classic canvas #0F130D
+        warn_fill: rgb(0x2A2916),
         link: rgb(0xE08A2E),
         text: rgb(0xF2ECD8),
         text_dim: rgb(0xBBB696),
