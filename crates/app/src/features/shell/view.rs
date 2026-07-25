@@ -654,9 +654,9 @@ fn footer<'a>(
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let version = if state.app_version().is_empty() {
-        i18n.tr("gmpublished-name")
+        crate::APP_NAME.to_owned()
     } else {
-        i18n.trn("gmpublished-version", &[("arg0", state.app_version())])
+        format!("{} v{}", crate::APP_NAME, state.app_version())
     };
 
     let upstream_link = button(
