@@ -337,7 +337,7 @@ fn overwrite_field<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
             text(i18n.tr("settings-overwrite-tooltip"))
                 .size(tokens.typography.body_sm)
                 .font(theme::styles::inter_font(font::Weight::Normal))
-                .color(Color::from(tokens.colors.text))
+                .color(Color::from(tokens.colors.tooltip_text))
                 .width(Length::Fixed(320.0)),
         )
         .padding(8.0)

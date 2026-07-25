@@ -2,7 +2,6 @@ use crate::{
     GMOD_APP_ID, Transaction,
     appdata::AppData,
     gma::{GMAEntry, GMAFile, GMAMetadata, whitelist::AddonWhitelist},
-    transactions::Transactions,
 };
 use image::{DynamicImage, ImageError, ImageFormat};
 use std::{
@@ -10,7 +9,6 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -148,8 +146,6 @@ const WORKSHOP_ICON_MIN_SIZE: u64 = 16;
 const WORKSHOP_DEFAULT_ICON: &[u8] = include_bytes!("../../assets/gmpublisher_default_icon.png");
 const WORKSHOP_DEFAULT_DESCRIPTION: &str =
     "Uploaded with [url=https://github.com/charles-mills/gmpublished]gmpublished[/url]";
-const WORKSHOP_LEGAL_AGREEMENT_URL: &str =
-    "https://steamcommunity.com/workshop/workshoplegalagreement";
 
 /// A suffix that's unique across concurrent publishes in this process and
 /// across restarts (a crashed run's temp names never repeat), so per-run
@@ -885,51 +881,15 @@ pub fn verify_whitelist(
     }
 }
 
-pub fn publish_icon(
-    icon_path: PathBuf,
-    upscale: bool,
-    addon_id: PublishedFileId,
-    steam: Arc<Steam>,
-    app_data: Arc<AppData>,
-    transactions: &Transactions,
-) -> u32 {
-    let transaction = transactions.begin();
-    let id = transaction.id;
-
-    rayon::spawn(move || {
-        let preview = match WorkshopIcon::new(icon_path, upscale) {
-            Ok(icon) => icon,
-            Err(error) => {
-                transaction.error(&error);
-                return;
-            }
-        };
-
-        let result = steam.update_icon(addon_id, preview, &transaction, &app_data);
-
-        match result {
-            Ok(legal_agreement) => {
-                if legal_agreement {
-                    let _ = crate::path::open(WORKSHOP_LEGAL_AGREEMENT_URL);
-                }
-                transaction.finished(crate::transactions::TransactionPayload::None);
-            }
-            Err(error) => {
-                transaction.error(&error);
-            }
-        };
-    });
-
-    id
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::appdata::AppDataPaths;
     use crate::events::BackendEventCollector;
+    use crate::transactions::Transactions;
     use image::GenericImageView;
     use std::fs;
+    use std::sync::Arc;
 
     struct Fixture {
         app_data: AppData,
@@ -1247,10 +1207,6 @@ mod tests {
         assert_eq!(
             WORKSHOP_DEFAULT_DESCRIPTION,
             "Uploaded with [url=https://github.com/charles-mills/gmpublished]gmpublished[/url]"
-        );
-        assert_eq!(
-            WORKSHOP_LEGAL_AGREEMENT_URL,
-            "https://steamcommunity.com/workshop/workshoplegalagreement"
         );
         assert_eq!(
             publish_update_status_key(steamworks::UpdateStatus::Invalid),

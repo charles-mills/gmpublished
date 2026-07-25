@@ -154,6 +154,11 @@ pub struct Colors {
     pub(crate) row_stripe: Rgba,
     pub(crate) browser_empty_dim: Rgba,
     pub(crate) tooltip_bg: Rgba,
+    /// Tooltips are inverted slabs: the light theme paints a dark panel, so its
+    /// label and hairline cannot borrow the page-level `text` / `border_subtle`
+    /// tokens (near-black on near-black).
+    pub(crate) tooltip_text: Rgba,
+    pub(crate) tooltip_border: Rgba,
     pub(crate) menu_bg: Rgba,
     pub(crate) dropdown_bg: Rgba,
     pub(crate) modal_bg: Rgba,
@@ -634,6 +639,8 @@ fn dark_colors() -> Colors {
         // browser_empty_dim = white@25% over surface_raised #292929
         browser_empty_dim: rgb(0x5F5F5F),
         tooltip_bg: rgb(0x0F0F0F),
+        tooltip_text: rgb(0xFFFFFF),
+        tooltip_border: rgba(0xFFFFFF, 18),
         menu_bg: rgb(0x4A4A4A),
         dropdown_bg: rgb(0x474747),
         modal_bg: rgb(0x1A1A1A),
@@ -756,7 +763,11 @@ fn light_colors() -> Colors {
         row_stripe: rgb(0xE0E0E0),
         // browser_empty_dim = text@25% over surface_raised #FFFFFF
         browser_empty_dim: rgb(0xC7C8CA),
+        // The tooltip inverts against the light canvas (same trick as
+        // `menu_option_selected_*`), so it carries its own light-on-dark pair.
         tooltip_bg: rgb(0x242A30),
+        tooltip_text: rgb(0xEEF2F6),
+        tooltip_border: rgba(0xFFFFFF, 18),
         menu_bg: rgb(0xFFFFFF),
         dropdown_bg: rgb(0xFFFFFF),
         modal_bg: rgb(0xFFFFFF),
@@ -880,6 +891,8 @@ fn classic_source_colors() -> Colors {
         // browser_empty_dim = text@25% over surface_raised #293223
         browser_empty_dim: rgb(0x5B6150),
         tooltip_bg: rgb(0x0D100B),
+        tooltip_text: rgb(0xF2ECD8),
+        tooltip_border: rgba(0xF2ECD8, 22),
         menu_bg: rgb(0x394230),
         dropdown_bg: rgb(0x343D2B),
         modal_bg: rgb(0x141811),
@@ -1288,5 +1301,44 @@ mod tests {
         assert_eq!(tokens.variant, ThemeVariant::Light);
         assert_eq!(tokens.colors.bg, Rgba::rgb(0xF3F5F7));
         assert_eq!(tokens.colors.neutral, Rgba::rgb(0x006DC7));
+    }
+
+    /// WCAG relative luminance of an opaque token.
+    fn luminance(color: Rgba) -> f32 {
+        let channel = |value: u8| {
+            let value = value as f32 / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    }
+
+    fn contrast(a: Rgba, b: Rgba) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The light theme paints an inverted (dark) tooltip slab, so its label has
+    /// to come from `tooltip_text`; borrowing the page-level `text` token left
+    /// near-black glyphs on a near-black panel.
+    #[test]
+    fn tooltip_label_is_legible_in_every_theme() {
+        for variant in [
+            ThemeVariant::Dark,
+            ThemeVariant::Light,
+            ThemeVariant::ClassicSource,
+        ] {
+            let colors = Tokens::for_variant(variant).colors;
+            let ratio = contrast(colors.tooltip_bg, colors.tooltip_text);
+
+            assert!(
+                ratio >= 4.5,
+                "{}: tooltip text contrast {ratio:.2}:1 is below AA",
+                variant.name(),
+            );
+        }
     }
 }

@@ -564,10 +564,6 @@ impl MapWalkPropModel {
         Self { brushes }
     }
 
-    pub fn hull_count(&self) -> usize {
-        self.brushes.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.brushes.is_empty()
     }

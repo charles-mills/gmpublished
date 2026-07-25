@@ -4,7 +4,7 @@ use steamworks::{PublishedFileId, QueryResult, QueryResults, SteamError, SteamId
 
 use super::{Steam, users::SteamUser};
 
-use crate::{Addon, GMOD_APP_ID, search::Search};
+use crate::{GMOD_APP_ID, search::Search};
 
 type WorkshopChunkQueryResult = Result<Vec<WorkshopItem>, WorkshopQueryError>;
 
@@ -346,35 +346,6 @@ impl Steam {
         }
     }
 
-    pub fn fetch_collection_items(
-        &self,
-        collection: PublishedFileId,
-    ) -> Option<Vec<PublishedFileId>> {
-        main_thread_forbidden!();
-
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.client()
-            .ok()?
-            .ugc()
-            .query_item(collection)
-            .ok()?
-            .include_children(true)
-            .fetch(move |query: Result<QueryResults<'_>, SteamError>| {
-                let children = query.ok().and_then(|results| {
-                    let result = results.get(0)?;
-                    if !matches!(result.file_type, steamworks::FileType::Collection) {
-                        return None;
-                    }
-                    results
-                        .get_children(0)
-                        .filter(|children| !children.is_empty())
-                });
-                let _ = tx.send(children);
-            });
-
-        rx.recv().ok().flatten()
-    }
-
     pub fn browse_my_workshop_page(&self, page: u32, search: &Arc<Search>) -> Option<WorkshopPage> {
         self.browse_user_workshop_page(
             steamworks::UserList::Published,
@@ -435,32 +406,10 @@ impl Steam {
 
         rx.recv().ok().flatten()
     }
-
-    pub fn browse_my_workshop(&self, page: u32, search: &Arc<Search>) -> Option<(u32, Vec<Addon>)> {
-        self.browse_my_workshop_page(page, search).map(|page| {
-            (
-                page.total_results,
-                page.items.into_iter().map(Addon::from).collect(),
-            )
-        })
-    }
-}
-
-pub fn browse_my_workshop(
-    steam: &Steam,
-    search: &Arc<Search>,
-    page: u32,
-) -> Option<(u32, Vec<Addon>)> {
-    steam.client_wait(super::CLIENT_WAIT_DEFAULT_TIMEOUT).ok()?;
-    rayon::scope(|_| steam.browse_my_workshop(page, search))
 }
 
 pub fn fetch_workshop_items(steam: &Steam, items: Vec<PublishedFileId>) {
     steam.fetch_workshop_items(items);
-}
-
-pub fn fetch_workshop_item(steam: &Steam, item: PublishedFileId) {
-    steam.fetch_workshop_items(vec![item]);
 }
 
 fn workshop_item_id_chunks(ids: &[PublishedFileId]) -> Vec<Vec<PublishedFileId>> {
@@ -597,11 +546,6 @@ pub fn browse_my_workshop_page(
 ) -> Option<WorkshopPage> {
     steam.client_wait(super::CLIENT_WAIT_DEFAULT_TIMEOUT).ok()?;
     rayon::scope(|_| steam.browse_my_workshop_page(page, search))
-}
-
-pub fn free_caches(steam: &Steam) {
-    steam.users.write().clear();
-    steam.workshop_dedup.lock().clear();
 }
 
 #[cfg(test)]

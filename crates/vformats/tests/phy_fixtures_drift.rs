@@ -1,12 +1,12 @@
 //! The committed fixture files are generated from the synthetic builders in
-//! `tests/common`. The drift test keeps them byte-identical forever; the
+//! `tests/phy_common`. The drift test keeps them byte-identical forever; the
 //! ignored test regenerates them after intentional builder changes:
 //!
 //! ```sh
 //! cargo test --test phy_fixtures_drift -- --ignored regenerate_fixtures
 //! ```
 
-#[path = "phy_wild_common/mod.rs"]
+#[path = "phy_common/mod.rs"]
 mod common;
 
 use common::compact_phy;

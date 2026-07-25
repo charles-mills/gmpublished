@@ -283,8 +283,8 @@ pub fn striped_row(tokens: &Tokens, shaded: bool) -> container::Style {
 pub fn tooltip(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.tooltip_bg,
-        tokens.colors.text,
-        border(tokens, tokens.colors.border_subtle, tokens.radii.base),
+        tokens.colors.tooltip_text,
+        border(tokens, tokens.colors.tooltip_border, tokens.radii.base),
     )
 }
 

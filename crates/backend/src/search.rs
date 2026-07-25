@@ -41,18 +41,6 @@ fn score(pattern: &Pattern, haystack: &str) -> Option<u32> {
     })
 }
 
-pub fn fuzzy_score_terms<'a>(query: &str, terms: impl IntoIterator<Item = &'a str>) -> Option<u32> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Some(0);
-    }
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-    terms
-        .into_iter()
-        .filter_map(|term| score(&pattern, term))
-        .max()
-}
-
 /// Best fuzzy-match score for `search_item` against `pattern`: its label if
 /// long enough to match `query`, and its best-scoring qualifying term,
 /// whichever is higher.

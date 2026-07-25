@@ -558,7 +558,7 @@ fn tooltip_title_value<'a>(
 ) -> Element<'a, Message> {
     text(title)
         .size(TOOLTIP_TEXT_SIZE)
-        .color(Color::from(tokens.colors.text))
+        .color(Color::from(tokens.colors.tooltip_text))
         .wrapping(text::Wrapping::WordOrGlyph)
         .width(Length::Fixed(value_width))
         .into()
@@ -567,7 +567,7 @@ fn tooltip_title_value<'a>(
 fn tooltip_plain_value<'a>(value: String, tokens: &Tokens) -> Element<'a, Message> {
     text(value)
         .size(TOOLTIP_TEXT_SIZE)
-        .color(Color::from(tokens.colors.text))
+        .color(Color::from(tokens.colors.tooltip_text))
         .into()
 }
 

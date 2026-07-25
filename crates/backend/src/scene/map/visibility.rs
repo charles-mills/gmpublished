@@ -30,12 +30,6 @@ impl MapVisibility {
         self.cluster_count
     }
 
-    /// The decompressed visibility lump's byte length (the RLE row
-    /// payload retained on `self.vis`).
-    pub fn compressed_memory_bytes(&self) -> usize {
-        self.vis.lump_len()
-    }
-
     pub fn cluster_at(&self, point: [f32; 3]) -> Option<i16> {
         let leaf = self.locator.leaf_at(point)?;
         let cluster = self.locator.leaves.get(leaf)?.cluster;

@@ -25,7 +25,7 @@ pub fn below<'a, Message: 'a>(
         container(
             text(label)
                 .size(tokens.typography.body_sm)
-                .color(Color::from(tokens.colors.text))
+                .color(Color::from(tokens.colors.tooltip_text))
                 .wrapping(text::Wrapping::WordOrGlyph),
         )
         .padding([VERTICAL_PADDING, HORIZONTAL_PADDING])

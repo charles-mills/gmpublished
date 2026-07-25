@@ -6,7 +6,7 @@
 //! Run a longer local pass:
 //! `FUZZ_SECONDS=600 FUZZ_SEED=0xfeed_f00d_5653_5048 cargo test --test phy_fuzz -- --ignored --nocapture`
 
-#[path = "phy_wild_common/mod.rs"]
+#[path = "phy_common/mod.rs"]
 mod common;
 
 use std::{
