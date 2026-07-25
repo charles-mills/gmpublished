@@ -53,7 +53,7 @@ bins = []
 
 [appimage.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
-"steam/redistributable/linux/libsteam_api.so" = "usr/lib/libsteam_api.so"
+"steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
 
 [pacman]
 depends = [

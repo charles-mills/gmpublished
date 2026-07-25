@@ -109,18 +109,15 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Restore cargo-packager
-        id: cargo-packager
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-packager*
           key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
 
-      - name: Install cargo-packager
-        if: steps.cargo-packager.outputs.cache-hit != 'true'
-        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
-
-      - name: Verify cargo-packager
-        run: cargo packager --version
+      - name: Ensure cargo-packager
+        run: >-
+          cargo packager --version ||
+          cargo install cargo-packager --locked --force --version "$CARGO_PACKAGER_VERSION"
 
       - name: Verify Steam runtime input
         run: test -f packaging/steam/redistributable/linux/libsteam_api.so
@@ -185,20 +182,16 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Restore cargo-packager
-        id: cargo-packager
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-packager*
           key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
 
-      - name: Install cargo-packager
-        if: steps.cargo-packager.outputs.cache-hit != 'true'
+      - name: Ensure cargo-packager
         shell: bash
-        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
-
-      - name: Verify cargo-packager
-        shell: bash
-        run: cargo packager --version
+        run: >-
+          cargo packager --version ||
+          cargo install cargo-packager --locked --force --version "$CARGO_PACKAGER_VERSION"
 
       - name: Verify Steam runtime input
         shell: bash
@@ -268,18 +261,15 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Restore cargo-packager
-        id: cargo-packager
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-packager*
           key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
 
-      - name: Install cargo-packager
-        if: steps.cargo-packager.outputs.cache-hit != 'true'
-        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
-
-      - name: Verify cargo-packager
-        run: cargo packager --version
+      - name: Ensure cargo-packager
+        run: >-
+          cargo packager --version ||
+          cargo install cargo-packager --locked --force --version "$CARGO_PACKAGER_VERSION"
 
       - name: Install Apple Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
