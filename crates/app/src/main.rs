@@ -41,6 +41,11 @@ pub mod theme;
 mod util;
 mod widgets;
 
+/// The product name. Brand identity, not a translatable string, so it is a
+/// constant rather than a Fluent message duplicated across twelve catalogs —
+/// see `i18n::tests::translated_catalogs_do_not_leak_english_values`.
+pub(crate) const APP_NAME: &str = "gmpublished";
+
 const PANIC_LOG_FILE_NAME: &str = "gmpublished-panic.log";
 const MIN_WINDOW_WIDTH: f32 = 800.0;
 const MIN_WINDOW_HEIGHT: f32 = 600.0;
@@ -157,7 +162,20 @@ fn apply_platform_chrome(
     };
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Sets the Wayland `app_id` and X11 `WM_CLASS`, which iced otherwise leaves
+/// empty. Must stay equal to the `StartupWMClass` in `gmpublished.desktop`.
+#[cfg(target_os = "linux")]
+fn apply_platform_chrome(
+    settings: &mut iced::window::Settings,
+    _chrome_strategy: features::shell::ChromeStrategy,
+) {
+    settings.platform_specific = iced::window::settings::PlatformSpecific {
+        application_id: APP_NAME.to_owned(),
+        ..iced::window::settings::PlatformSpecific::default()
+    };
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn apply_platform_chrome(
     _settings: &mut iced::window::Settings,
     _chrome_strategy: features::shell::ChromeStrategy,

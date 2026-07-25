@@ -30,7 +30,7 @@ icons = [
 package-name = "gmpublished"
 section = "utils"
 priority = "optional"
-desktop-template = "linux/gmpublished.desktop.hbs"
+desktop-template = "linux/gmpublished.desktop"
 depends = [
     "libc6",
     "libasound2",
@@ -46,6 +46,7 @@ depends = [
 [deb.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
 "steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
+"../THIRD-PARTY-NOTICES.md" = "usr/share/doc/gmpublished/THIRD-PARTY-NOTICES.md"
 
 [appimage]
 libs = []
@@ -54,17 +55,4 @@ bins = []
 [appimage.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
 "steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
-
-[pacman]
-depends = [
-    "hicolor-icon-theme",
-    "mesa",
-    "fontconfig",
-    "libxkbcommon",
-    "libx11",
-    "libxcb",
-    "wayland",
-]
-
-[pacman.files]
-"linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
+"../THIRD-PARTY-NOTICES.md" = "usr/share/doc/gmpublished/THIRD-PARTY-NOTICES.md"

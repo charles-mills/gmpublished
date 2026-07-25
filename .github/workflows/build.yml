@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Verify release version
         run: packaging/scripts/verify_version.sh "$GITHUB_REF_NAME"
@@ -75,7 +75,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install system packages
         run: |
@@ -90,12 +90,13 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev \
             curl \
+            desktop-file-utils \
             file \
             pkg-config \
             zip
 
       - name: Restore Cargo sources
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -109,7 +110,7 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Restore cargo-packager
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cargo/bin/cargo-packager*
           key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
@@ -132,24 +133,46 @@ jobs:
         run: |
           artifact_version="${GITHUB_REF_NAME##*/}"
           artifact_version="${artifact_version#v}"
-          mkdir -p artifacts/linux/zip-root
-          cp target/release/gmpublished artifacts/linux/zip-root/
-          cp target/release/libsteam_api.so artifacts/linux/zip-root/
-          (cd artifacts/linux/zip-root && zip -r "../gmpublished-${artifact_version}-x86_64-linux.zip" gmpublished libsteam_api.so)
+
           appimage="$(find target/packager -type f -iname '*.AppImage' -print -quit)"
           deb="$(find target/packager -type f -iname '*.deb' -print -quit)"
           test -n "$appimage"
           test -n "$deb"
+
+          root=artifacts/linux/zip-root
+          mkdir -p "$root/share/applications" \
+                   "$root/share/mime/packages" \
+                   "$root/share/icons/hicolor/32x32/apps" \
+                   "$root/share/icons/hicolor/128x128/apps" \
+                   "$root/share/icons/hicolor/256x256/apps"
+
+          cp target/release/gmpublished "$root/"
+          cp target/release/libsteam_api.so "$root/"
+          cp LICENSE THIRD-PARTY-NOTICES.md "$root/"
+          cp packaging/linux/application-gma.xml "$root/share/mime/packages/"
+          cp packaging/icons/32x32.png "$root/share/icons/hicolor/32x32/apps/gmpublished.png"
+          cp packaging/icons/128x128.png "$root/share/icons/hicolor/128x128/apps/gmpublished.png"
+          cp packaging/icons/128x128@2x.png "$root/share/icons/hicolor/256x256/apps/gmpublished.png"
+
+          cp packaging/linux/gmpublished.desktop "$root/share/applications/"
+          desktop-file-validate "$root/share/applications/gmpublished.desktop"
+          diff "$root/share/applications/gmpublished.desktop" \
+            <(dpkg-deb --fsys-tarfile "$deb" \
+              | tar -xOf - ./usr/share/applications/gmpublished.desktop)
+
+          (cd "$root" && zip -r "../gmpublished-${artifact_version}-x86_64-linux.zip" \
+            gmpublished libsteam_api.so LICENSE THIRD-PARTY-NOTICES.md share)
+
           cp "$appimage" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.AppImage"
           cp "$deb" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.deb"
 
       - name: Attest release artifacts
-        uses: actions/attest@v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: artifacts/linux/gmpublished-*
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-linux
           path: artifacts/linux/gmpublished-*
@@ -165,10 +188,10 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Restore Cargo sources
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -182,7 +205,7 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Restore cargo-packager
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cargo/bin/cargo-packager*
           key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
@@ -216,12 +239,12 @@ jobs:
           cp "$msi" "artifacts/windows/gmpublished-${artifact_version}-x86_64-windows.msi"
 
       - name: Attest release artifacts
-        uses: actions/attest@v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: artifacts/windows/gmpublished-*.msi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-windows
           path: artifacts/windows/gmpublished-*.msi
@@ -244,10 +267,10 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Restore Cargo sources
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -261,7 +284,7 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
 
       - name: Restore cargo-packager
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cargo/bin/cargo-packager*
           key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_PACKAGER_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
@@ -348,12 +371,12 @@ jobs:
             "artifacts/macos/gmpublished-${artifact_version}-universal-apple-darwin.app.zip"
 
       - name: Attest release artifacts
-        uses: actions/attest@v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: artifacts/macos/gmpublished-*
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-macos
           path: artifacts/macos/gmpublished-*
@@ -371,7 +394,7 @@ jobs:
       contents: write
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-*
           path: artifacts
@@ -382,6 +405,7 @@ jobs:
         with:
           files: artifacts/gmpublished-*
           fail_on_unmatched_files: true
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -396,9 +420,9 @@ jobs:
     steps:
       # Without git, checkout falls back to a tarball and leaves nothing to commit from.
       - name: Install packaging tools
-        run: pacman -Syu --noconfirm --needed git pacman-contrib
+        run: pacman -Syu --noconfirm --needed git pacman-contrib desktop-file-utils namcap
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
 
@@ -408,6 +432,18 @@ jobs:
           useradd -m builder
           chown -R builder:builder packaging/arch
           sudo -u builder packaging/scripts/update_aur_metadata.sh "${GITHUB_REF_NAME#v}"
+
+      # Proves the published zip actually satisfies the PKGBUILD before its
+      # checksums are committed. Without this nothing on the release path ever
+      # builds the package the AUR will tell users to build.
+      - name: Smoke-build the package
+        working-directory: packaging/arch
+        run: |
+          chown -R builder:builder .
+          sudo -u builder makepkg --nodeps --noconfirm --clean
+          namcap PKGBUILD
+          namcap ./*.pkg.tar.zst
+          rm -rf ./*.pkg.tar.zst src pkg
 
       - name: Commit updated metadata
         working-directory: packaging/arch

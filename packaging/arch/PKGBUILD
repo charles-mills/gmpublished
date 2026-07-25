@@ -4,7 +4,7 @@ pkgname=gmpublished-bin
 _pkgname=gmpublished
 _github_repo='charles-mills/gmpublished'
 pkgver=0.2.1
-_release_tag='v0.2.1'
+_release_tag="v${pkgver}"
 pkgrel=1
 pkgdesc="Native Workshop Publishing Utility for Garry's Mod"
 arch=('x86_64')
@@ -16,6 +16,7 @@ depends=(
   'gcc-libs'
   'glibc'
   'hicolor-icon-theme'
+  'libglvnd'
   'libx11'
   'libxcb'
   'libxkbcommon'
@@ -23,22 +24,26 @@ depends=(
   'vulkan-icd-loader'
   'wayland'
 )
+checkdepends=('desktop-file-utils')
+optdepends=(
+  'steam: Workshop publishing and Garry'"'"'s Mod detection; must be running and signed in'
+  'xdg-utils: open files and folders in the file manager'
+)
 provides=("${_pkgname}=${pkgver}")
 conflicts=("${_pkgname}")
-options=('strip' '!debug')
+options=('!strip' '!debug')
 source=(
   "${_pkgname}-${pkgver}-${CARCH}-linux.zip::\
 ${url}/releases/download/${_release_tag}/${_pkgname}-${pkgver}-${CARCH}-linux.zip"
-  "${pkgname}-${pkgver}-LICENSE::\
-https://raw.githubusercontent.com/${_github_repo}/${_release_tag}/LICENSE"
-  "${pkgname}-${pkgver}.png::\
-https://raw.githubusercontent.com/${_github_repo}/${_release_tag}/packaging/icons/128x128.png"
 )
-sha256sums=('ae06952e62b493676c0683f3efb066e808970b075dd31e0406b030127722ca9b'
-            '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986'
-            'f2051aabe232caaf972db91dddafe4c3307a9cbdaf930b093bd107dbf74a18c8')
+sha256sums=('ae06952e62b493676c0683f3efb066e808970b075dd31e0406b030127722ca9b')
+
+check() {
+  desktop-file-validate "${srcdir}/share/applications/${_pkgname}.desktop"
+}
 
 package() {
+  # $ORIGIN rpath: libsteam_api.so must sit beside the real binary.
   install -Dm755 "${srcdir}/${_pkgname}" \
     "${pkgdir}/usr/lib/${_pkgname}/${_pkgname}"
   install -Dm644 "${srcdir}/libsteam_api.so" \
@@ -47,34 +52,13 @@ package() {
   install -d "${pkgdir}/usr/bin"
   ln -s "../lib/${_pkgname}/${_pkgname}" "${pkgdir}/usr/bin/${_pkgname}"
 
-  install -Dm644 "${srcdir}/${pkgname}-${pkgver}-LICENSE" \
+  install -Dm644 "${srcdir}/LICENSE" \
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
-  install -Dm644 "${srcdir}/${pkgname}-${pkgver}.png" \
-    "${pkgdir}/usr/share/icons/hicolor/128x128/apps/${_pkgname}.png"
+  install -Dm644 "${srcdir}/THIRD-PARTY-NOTICES.md" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/THIRD-PARTY-NOTICES.md"
 
-  cat > "${srcdir}/${_pkgname}.desktop" <<EOF
-[Desktop Entry]
-Name=gmpublished
-Comment=${pkgdesc}
-Exec=${_pkgname} -e %f
-Icon=${_pkgname}
-Terminal=false
-Type=Application
-Categories=Utility;
-MimeType=application/gma;
-EOF
-  install -Dm644 "${srcdir}/${_pkgname}.desktop" \
-    "${pkgdir}/usr/share/applications/${_pkgname}.desktop"
-
-  cat > "${srcdir}/application-gma.xml" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="application/gma">
-    <comment>Garry's Mod Addon</comment>
-    <glob pattern="*.gma"/>
-  </mime-type>
-</mime-info>
-EOF
-  install -Dm644 "${srcdir}/application-gma.xml" \
-    "${pkgdir}/usr/share/mime/packages/application-gma.xml"
+  install -d "${pkgdir}/usr/share"
+  cp -r "${srcdir}/share/." "${pkgdir}/usr/share/"
+  find "${pkgdir}/usr/share" -type d -exec chmod 755 {} +
+  find "${pkgdir}/usr/share" -type f -exec chmod 644 {} +
 }

@@ -29,6 +29,7 @@ icons = [
 
 resources = [
     { src = "macos/Credits.rtf", target = "Credits.rtf" },
+    { src = "../THIRD-PARTY-NOTICES.md", target = "THIRD-PARTY-NOTICES.md" },
 ]
 
 # cargo-packager copies external binaries to Contents/MacOS for macOS .app

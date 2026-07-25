@@ -4,7 +4,6 @@
   rustPlatform,
 
   alsa-lib,
-  copyDesktopItems,
   fontconfig,
   freetype,
   libGL,
@@ -14,7 +13,6 @@
   libxi,
   libxkbcommon,
   libxrandr,
-  makeDesktopItem,
   makeWrapper,
   pkg-config,
   udev,
@@ -27,21 +25,6 @@ let
 
   pname = "gmpublished";
   version = cargoToml.workspace.package.version;
-
-  desktopItem = makeDesktopItem {
-    name = pname;
-    desktopName = pname;
-    comment = "Native Workshop Publishing Utility for Garry's Mod";
-    exec = "${pname} -e %f";
-    icon = pname;
-    terminal = false;
-    mimeTypes = [ "application/gma" ];
-    categories = [
-      "Utility"
-      "Game"
-      "Development"
-    ];
-  };
 
   infoPlist = builtins.toFile "${pname}-Info.plist" (
     lib.generators.toPlist { escape = true; } {
@@ -92,6 +75,7 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions [
       ../../Cargo.lock
       ../../Cargo.toml
+      ../../THIRD-PARTY-NOTICES.md
       ../../crates
       ../../packaging/icons
       ../../packaging/linux
@@ -115,8 +99,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     makeWrapper
     pkg-config
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [ copyDesktopItems ];
+  ];
 
   buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
     alsa-lib
@@ -135,16 +118,22 @@ rustPlatform.buildRustPackage {
     wayland
   ];
 
-  desktopItems = lib.optionals stdenv.hostPlatform.isLinux [ desktopItem ];
-
   postInstall =
     lib.optionalString stdenv.hostPlatform.isLinux ''
       install -Dm0644 packaging/steam/redistributable/linux/libsteam_api.so \
         "$out/lib/libsteam_api.so"
+      install -Dm0644 packaging/icons/32x32.png \
+        "$out/share/icons/hicolor/32x32/apps/${pname}.png"
       install -Dm0644 packaging/icons/128x128.png \
         "$out/share/icons/hicolor/128x128/apps/${pname}.png"
+      install -Dm0644 packaging/icons/128x128@2x.png \
+        "$out/share/icons/hicolor/256x256/apps/${pname}.png"
       install -Dm0644 packaging/linux/application-gma.xml \
         "$out/share/mime/packages/application-gma.xml"
+      install -Dm0644 packaging/linux/${pname}.desktop \
+        "$out/share/applications/${pname}.desktop"
+      install -Dm0644 THIRD-PARTY-NOTICES.md \
+        "$out/share/doc/${pname}/THIRD-PARTY-NOTICES.md"
 
       wrapProgram "$out/bin/${pname}" \
         --prefix LD_LIBRARY_PATH : \
@@ -162,6 +151,8 @@ rustPlatform.buildRustPackage {
         "$contents/Resources/icon.icns"
       install -Dm0644 packaging/macos/Credits.rtf \
         "$contents/Resources/Credits.rtf"
+      install -Dm0644 THIRD-PARTY-NOTICES.md \
+        "$contents/Resources/THIRD-PARTY-NOTICES.md"
       install -Dm0644 ${infoPlist} "$contents/Info.plist"
 
       makeWrapper "$contents/MacOS/${pname}" "$out/bin/${pname}"

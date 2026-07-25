@@ -53,7 +53,6 @@ fn assert_no_task(task: &Task<RootMessage>) {
 fn test_constructor_uses_default_root_state_without_running_startup() {
     let app = App::new_for_test();
 
-    assert_eq!(app.state.title, State::default().title);
     assert_eq!(app.state.shell.route(), shell::Route::MyWorkshop);
     assert_eq!(app.state.shell.account_name(), None);
     assert!(!app.state.my_workshop.is_route_visible());

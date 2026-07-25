@@ -119,7 +119,6 @@ impl Drop for App {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
-    title: &'static str,
     shell: shell::State,
     my_workshop: my_workshop::State,
     installed_addons: installed_addons::State,
@@ -160,7 +159,6 @@ impl Default for State {
         let system_scheme = SystemColorScheme::Dark;
         let accent_inputs = theme::AccentInputs::for_preset(theme_preset);
         let mut state = Self {
-            title: "app-title",
             shell: shell::State::default(),
             my_workshop: my_workshop::State::default(),
             installed_addons: installed_addons::State::default(),
@@ -1655,7 +1653,7 @@ impl App {
     }
 
     pub(crate) fn title(&self) -> String {
-        self.state.i18n.tr(self.state.title)
+        crate::APP_NAME.to_owned()
     }
 }
 

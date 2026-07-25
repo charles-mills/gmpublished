@@ -28,6 +28,7 @@ icons = [
 
 resources = [
     { src = "steam/generated/steam_api64.dll", target = "steam_api64.dll" },
+    { src = "../THIRD-PARTY-NOTICES.md", target = "THIRD-PARTY-NOTICES.md" },
 ]
 
 [wix]
