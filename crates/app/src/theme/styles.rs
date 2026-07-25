@@ -1,8 +1,8 @@
 use iced::border;
 use iced::widget::{
-    button as button_widget, checkbox as checkbox_widget, container, overlay::menu,
-    pick_list as pick_list_widget, progress_bar as progress_bar_widget, scrollable, svg,
-    text_editor as text_editor_widget, text_input,
+    button as button_widget, checkbox as checkbox_widget, container,
+    progress_bar as progress_bar_widget, scrollable, svg, text_editor as text_editor_widget,
+    text_input,
 };
 use iced::{Border, Color, Font, Shadow, Vector, font};
 
@@ -288,6 +288,82 @@ pub fn tooltip(tokens: &Tokens) -> container::Style {
     )
 }
 
+/// A select control's own face. `open` squares the bottom corners and lights
+/// the focus ring, so the menu below reads as part of the same control.
+pub fn select_face(tokens: &Tokens, open: bool) -> container::Style {
+    container_style(
+        tokens.colors.input_bg,
+        tokens.colors.text,
+        Border {
+            color: tokens.colors.focus_ring.into(),
+            width: if open {
+                tokens.dims.focus_border_width
+            } else {
+                0.0
+            },
+            radius: if open {
+                border::top(tokens.radii.base)
+            } else {
+                tokens.radii.base.into()
+            },
+        },
+    )
+}
+
+/// Floating panel behind a select menu's option list.
+///
+/// It carries the control's own fill and focus ring so the pair reads as one
+/// slab, and only the corners away from the join are rounded.
+pub fn select_menu(tokens: &Tokens, radius: f32) -> container::Style {
+    container::Style {
+        shadow: Shadow {
+            color: tokens.colors.shadow_dropdown.into(),
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 12.0,
+        },
+        ..container_style(
+            tokens.colors.input_bg,
+            tokens.colors.text,
+            Border {
+                color: tokens.colors.focus_ring.into(),
+                width: tokens.dims.focus_border_width,
+                radius: border::bottom(radius),
+            },
+        )
+    }
+}
+
+/// One option row inside a select menu. The chosen option keeps the accent fill
+/// while the pointer moves, so the menu always shows what is currently set.
+///
+/// The accent is what makes that legible: `selected_fill` sits within 3% of the
+/// panel's own `input_bg` on the dark themes — and *darker* than the hover fill —
+/// so the current option would read as fainter than whatever the pointer
+/// happens to be over. Hover stays theme-directional (`hover_fill` lightens on
+/// the dark themes, darkens on the light one); the `row_*` fills are black in
+/// every theme and would vanish into a dark panel.
+pub fn select_option(
+    tokens: &Tokens,
+    selected: bool,
+    status: button_widget::Status,
+) -> button_widget::Style {
+    let (background, text) = match (selected, status) {
+        (true, _) => (Some(tokens.colors.neutral), tokens.colors.text_on_neutral),
+        (false, button_widget::Status::Hovered | button_widget::Status::Pressed) => {
+            (Some(tokens.colors.hover_fill), tokens.colors.text)
+        }
+        (false, _) => (None, tokens.colors.text),
+    };
+
+    button_widget::Style {
+        background: background.map(|fill| Color::from(fill).into()),
+        text_color: text.into(),
+        border: Border::default(),
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
 pub fn context_menu(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.menu_bg,
@@ -509,38 +585,6 @@ pub fn text_editor(
         placeholder: tokens.colors.text_dim.into(),
         value: tokens.colors.text.into(),
         selection: tokens.colors.selected_fill.into(),
-    }
-}
-
-pub fn pick_list(tokens: &Tokens, status: pick_list_widget::Status) -> pick_list_widget::Style {
-    let border = match status {
-        pick_list_widget::Status::Opened { .. } => focus_ring(tokens, tokens.colors.focus_ring),
-        pick_list_widget::Status::Active | pick_list_widget::Status::Hovered => {
-            border::rounded(tokens.radii.base)
-        }
-    };
-
-    pick_list_widget::Style {
-        text_color: tokens.colors.text.into(),
-        placeholder_color: tokens.colors.text_dim.into(),
-        handle_color: tokens.colors.text.into(),
-        background: Color::from(tokens.colors.input_bg).into(),
-        border,
-    }
-}
-
-pub fn pick_list_menu(tokens: &Tokens) -> menu::Style {
-    menu::Style {
-        background: Color::from(tokens.colors.button_bg).into(),
-        border: border::rounded(tokens.radii.base),
-        text_color: tokens.colors.text.into(),
-        selected_text_color: tokens.colors.menu_option_selected_text.into(),
-        selected_background: Color::from(tokens.colors.menu_option_selected_bg).into(),
-        shadow: Shadow {
-            color: tokens.colors.shadow_dropdown.into(),
-            offset: Vector::new(0.0, 2.0),
-            blur_radius: 8.0,
-        },
     }
 }
 
@@ -799,18 +843,72 @@ mod tests {
     }
 
     #[test]
-    fn pick_list_menu_uses_button_grey_background() {
+    fn select_menu_rounds_only_the_edge_away_from_its_control() {
         let tokens = Tokens::dark();
-        let style = styles::pick_list_menu(&tokens);
+        let style = styles::select_menu(&tokens, tokens.radii.md);
 
         assert_eq!(
             style.background,
-            Color::from(tokens.colors.button_bg).into()
+            Some(Color::from(tokens.colors.input_bg).into())
         );
+        assert_eq!(style.border.radius.top_left, 0.0);
+        assert_eq!(style.border.radius.top_right, 0.0);
+        assert_eq!(style.border.radius.bottom_left, tokens.radii.md);
+        assert_eq!(style.border.radius.bottom_right, tokens.radii.md);
+    }
+
+    #[test]
+    fn open_select_face_squares_the_seam_and_lights_the_focus_ring() {
+        let tokens = Tokens::dark();
+        let open = styles::select_face(&tokens, true);
+        let closed = styles::select_face(&tokens, false);
+
+        assert_eq!(open.border.width, tokens.dims.focus_border_width);
+        assert_eq!(open.border.radius.bottom_left, 0.0);
+        assert_eq!(open.border.radius.top_left, tokens.radii.base);
+        assert_eq!(closed.border.width, 0.0);
+        assert_eq!(closed.border.radius.bottom_left, tokens.radii.base);
+    }
+
+    #[test]
+    fn the_chosen_option_keeps_its_accent_fill_while_the_pointer_moves() {
+        let tokens = Tokens::dark();
+        let selected = styles::select_option(&tokens, true, button::Status::Active);
+        let hovered = styles::select_option(&tokens, false, button::Status::Hovered);
+        let idle = styles::select_option(&tokens, false, button::Status::Active);
+
         assert_eq!(
-            style.selected_background,
-            Color::from(tokens.colors.menu_option_selected_bg).into()
+            selected.background,
+            Some(Color::from(tokens.colors.neutral).into())
         );
+        assert_eq!(selected.text_color, tokens.colors.text_on_neutral.into());
+        assert_eq!(
+            hovered.background,
+            Some(Color::from(tokens.colors.hover_fill).into())
+        );
+        assert_eq!(idle.background, None);
+    }
+
+    /// The chosen row has to out-read a hovered one in every theme; on the dark
+    /// palettes `selected_fill` is within a few percent of the panel's own fill.
+    #[test]
+    fn the_chosen_option_outreads_a_hovered_one_in_every_theme() {
+        for variant in [
+            super::super::ThemeVariant::Dark,
+            super::super::ThemeVariant::Light,
+            super::super::ThemeVariant::ClassicSource,
+        ] {
+            let tokens = Tokens::for_variant(variant);
+            let selected = styles::select_option(&tokens, true, button::Status::Active);
+            let panel = styles::select_menu(&tokens, tokens.radii.md);
+
+            assert_ne!(
+                selected.background,
+                panel.background,
+                "{}: the chosen option is indistinguishable from the panel",
+                variant.name(),
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// A labeled value for `pick_list` widgets; displays as `label`, compares and
+/// A labeled value for select controls; displays as `label`, compares and
 /// submits as `value`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SelectOption {
