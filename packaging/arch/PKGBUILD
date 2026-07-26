@@ -10,8 +10,7 @@ pkgdesc="Native Workshop publishing and addon inspection utility for Garry's Mod
 arch=('x86_64')
 url="https://github.com/${_github_repo}"
 license=('GPL-3.0-only' 'LicenseRef-Steamworks-SDK')
-# Mostly dlopen'd, so namcap reports these as unnecessary. Do not trim on its
-# say-so; re-derive from `strings` on the binary instead.
+
 depends=(
   'alsa-lib'
   'dbus'
@@ -43,7 +42,6 @@ source=(
   "${_pkgname}-${pkgver}-${CARCH}-linux.zip::\
 ${url}/releases/download/${_release_tag}/${_pkgname}-${pkgver}-${CARCH}-linux.zip"
 )
-# Refreshed by update_aur_metadata.sh post-publish; never SKIP.
 sha256sums=('0fe7b9566f0768b34bf7127f9e527fb5d515b925504c0196b88441932402e8d5')
 
 check() {
@@ -51,7 +49,6 @@ check() {
 }
 
 package() {
-  # $ORIGIN rpath: libsteam_api.so must sit beside the real binary.
   install -Dm755 "${srcdir}/${_pkgname}" \
     "${pkgdir}/usr/lib/${_pkgname}/${_pkgname}"
   install -Dm644 "${srcdir}/libsteam_api.so" \
