@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{
-    FetchProfile, Thumbnail, ThumbnailCancellation, ThumbnailError, ThumbnailResult,
-    ThumbnailWorkerOutcome, thumbnail::ThumbnailDecoder as AppThumbnailDecoder,
+    Thumbnail, ThumbnailCancellation, ThumbnailError, ThumbnailResult, ThumbnailWorkerOutcome,
+    thumbnail::ThumbnailDecoder as AppThumbnailDecoder,
 };
 use crate::net::build_agent_with_max_idle_connections_per_host;
 
@@ -57,61 +57,71 @@ impl ThumbnailDecoder {
             .map_err(Into::into)
     }
 
+    /// Fetches, decodes, and resizes a URL — the interactive path.
+    ///
+    /// Deliberately has no `FetchProfile`: it is only ever reached
+    /// interactively. Background warming stops at bytes and takes
+    /// [`fetch_source_bytes_with_agent`] instead, so a CDN-variant branch here
+    /// would be dead code that reads as live — and two copies of the
+    /// variant-then-bare fallback free to drift apart.
     pub(super) fn fetch_decode_and_resize_url_with_agent(
         &mut self,
         agent: &ureq::Agent,
         url: &str,
         max_edge: u32,
-        profile: FetchProfile,
         cancellation: &ThumbnailCancellation,
+        disk_cache: Option<&super::WorkerDiskCache>,
     ) -> ThumbnailResult<ThumbnailWorkerOutcome<Thumbnail>> {
-        self.fetch_decode_and_resize_url_with_fetch(
+        let banked = self.fetch_decode_and_resize_url_with_fetch(
             url,
             max_edge,
-            profile,
             cancellation,
-            |fetch_url, gif_policy| fetch_url_bytes(agent, fetch_url, gif_policy),
-        )
+            |fetch_url| fetch_url_bytes(agent, fetch_url, GifPolicy::Allow),
+        )?;
+
+        // Interactive fetches bank their bytes too, so a URL the user scrolled
+        // past is local for the next size that asks — the same product warming
+        // produces, obtained for free.
+        //
+        // Banked *after* a successful decode, not from inside the fetch. Banking
+        // on fetch meant undecodable bytes were written to the source tier, and
+        // the read path's poison-drop then removed them on the very next
+        // request — which fell through to a fetch that banked them again. A
+        // permanently-corrupt URL re-poisoned itself forever, paying a local
+        // decode, a disk write, and index churn every time.
+        if let (Some(cache), Some((bytes, _))) = (disk_cache, banked.as_ref()) {
+            super::write_source_bytes(cache, url, bytes);
+        }
+        Ok(match banked {
+            Some((_, thumbnail)) => ThumbnailWorkerOutcome::Completed(thumbnail),
+            None => ThumbnailWorkerOutcome::Cancelled,
+        })
     }
 
+    /// Returns the fetched bytes alongside the thumbnail they decoded to, so
+    /// the caller can bank a source it knows to be good.
     fn fetch_decode_and_resize_url_with_fetch(
         &mut self,
         url: &str,
         max_edge: u32,
-        profile: FetchProfile,
         cancellation: &ThumbnailCancellation,
-        mut fetch: impl FnMut(&str, GifPolicy) -> ThumbnailResult<FetchedBody>,
-    ) -> ThumbnailResult<ThumbnailWorkerOutcome<Thumbnail>> {
+        mut fetch: impl FnMut(&str) -> ThumbnailResult<FetchedBody>,
+    ) -> ThumbnailResult<Option<(Vec<u8>, Thumbnail)>> {
         if cancellation.is_cancelled() {
-            return Ok(ThumbnailWorkerOutcome::Cancelled);
+            return Ok(None);
         }
 
-        if profile == FetchProfile::BackgroundWarm
-            && let Some(variant_url) = steam_cdn_variant_url(url, max_edge)
-        {
-            // A rejected GIF or any variant failure falls back to the bare
-            // URL below.
-            if let Ok(Some(outcome)) = fetch_decode_candidate(
-                self,
-                &variant_url,
-                max_edge,
-                cancellation,
-                GifPolicy::Reject,
-                &mut fetch,
-            ) {
-                return Ok(outcome);
+        let bytes = match fetch(url)? {
+            FetchedBody::Bytes(bytes) => bytes,
+            FetchedBody::RejectedGif => {
+                unreachable!("the interactive path never rejects a GIF body")
             }
-        }
+        };
 
-        fetch_decode_candidate(
-            self,
-            url,
-            max_edge,
-            cancellation,
-            GifPolicy::Allow,
-            &mut fetch,
-        )
-        .map(|outcome| outcome.expect("GifPolicy::Allow never rejects a body"))
+        // The bytes are paid for — always decode so they reach the caches.
+        let decoded = self.decode_and_resize_bytes(&bytes, max_edge);
+
+        decoded.map(|thumbnail| Some((bytes, thumbnail)))
     }
 }
 
@@ -131,26 +141,59 @@ pub(super) enum FetchedBody {
     RejectedGif,
 }
 
-fn fetch_decode_candidate(
-    decoder: &mut ThumbnailDecoder,
+/// Fetches a URL's bytes for the source tier, without decoding them.
+///
+/// This is the whole of a background-warm job. Warm's product is the source
+/// tier: its bytes are what makes a later interactive request local. Decoding
+/// and resizing here would produce a tile at whatever size warm happened to
+/// ask for, which is not necessarily the size anything will paint — and would
+/// spend the decode twice over when the interactive request arrives at a
+/// different edge or a different DPI.
+pub(super) fn fetch_source_bytes_with_agent(
+    agent: &ureq::Agent,
     url: &str,
-    max_edge: u32,
     cancellation: &ThumbnailCancellation,
-    gif_policy: GifPolicy,
-    fetch: &mut impl FnMut(&str, GifPolicy) -> ThumbnailResult<FetchedBody>,
-) -> ThumbnailResult<Option<ThumbnailWorkerOutcome<Thumbnail>>> {
-    if cancellation.is_cancelled() {
-        return Ok(Some(ThumbnailWorkerOutcome::Cancelled));
-    }
-    let bytes = match fetch(url, gif_policy)? {
-        FetchedBody::Bytes(bytes) => bytes,
-        FetchedBody::RejectedGif => return Ok(None),
-    };
-    // The bytes are paid for — always decode so they reach the caches.
-    decoder
-        .decode_and_resize_bytes(&bytes, max_edge)
-        .map(|thumbnail| Some(ThumbnailWorkerOutcome::Completed(thumbnail)))
+) -> ThumbnailResult<ThumbnailWorkerOutcome<Vec<u8>>> {
+    fetch_source_bytes_with_fetch(url, cancellation, |fetch_url, gif_policy| {
+        fetch_url_bytes(agent, fetch_url, gif_policy)
+    })
 }
+
+fn fetch_source_bytes_with_fetch(
+    url: &str,
+    cancellation: &ThumbnailCancellation,
+    mut fetch: impl FnMut(&str, GifPolicy) -> ThumbnailResult<FetchedBody>,
+) -> ThumbnailResult<ThumbnailWorkerOutcome<Vec<u8>>> {
+    if cancellation.is_cancelled() {
+        return Ok(ThumbnailWorkerOutcome::Cancelled);
+    }
+
+    // Same variant-then-bare fallback the decoding path uses, and for the same
+    // reason: the CDN rendition is 10-100x fewer bytes, but a rejected GIF or
+    // any variant failure has to fall back to the URL as authored. The variant
+    // is requested at `SOURCE_VARIANT_EDGE` rather than at any one request's
+    // size, since these bytes become the source every later size derives from.
+    if let Some(variant_url) = steam_cdn_variant_url(url, SOURCE_VARIANT_EDGE)
+        && let Ok(FetchedBody::Bytes(bytes)) = fetch(&variant_url, GifPolicy::Reject)
+    {
+        return Ok(ThumbnailWorkerOutcome::Completed(bytes));
+    }
+
+    if cancellation.is_cancelled() {
+        return Ok(ThumbnailWorkerOutcome::Cancelled);
+    }
+
+    match fetch(url, GifPolicy::Allow)? {
+        FetchedBody::Bytes(bytes) => Ok(ThumbnailWorkerOutcome::Completed(bytes)),
+        FetchedBody::RejectedGif => unreachable!("GifPolicy::Allow never rejects a body"),
+    }
+}
+
+/// Edge requested for the warm path's CDN variant.
+///
+/// Must be at least `physical_thumbnail_edge`'s ceiling, since the fetched
+/// bytes become the source every later size derives from.
+const SOURCE_VARIANT_EDGE: u32 = 512;
 
 fn steam_cdn_variant_url(url: &str, max_edge: u32) -> Option<String> {
     let (_, authority_and_path) = url.split_once("://")?;
@@ -243,6 +286,128 @@ fn validate_http_url(url: &str) -> ThumbnailResult<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The warm path fetches a Steam CDN *variant* URL, but the source tier is
+    /// read by the bare URL from the cache key. Banking under the fetch URL
+    /// wrote a file nothing could find — budgeted and evicted, never read — so
+    /// every source the background warm produced was dead weight.
+    ///
+    /// Asserted through the public read path rather than by file name, so it
+    /// stays honest if the naming scheme changes.
+    #[test]
+    fn warm_banks_its_source_under_the_bare_url_not_the_variant_it_fetched() {
+        let root = crate::test_support::TestDir::new("warm-source-keying");
+        let cache = super::super::WorkerDiskCache::new(root.path().to_path_buf(), 4 * 1024 * 1024);
+        // Only this host gets a variant rewrite, which is what made the bug
+        // warm-and-Steam-specific.
+        let url = "https://images.steamusercontent.com/ugc/123/ABC/";
+
+        let payload = solid_png_bytes();
+        let mut fetched_urls = Vec::new();
+        let outcome = fetch_source_bytes_with_fetch(
+            url,
+            &ThumbnailCancellation::default(),
+            |fetch_url, _policy| {
+                fetched_urls.push(fetch_url.to_owned());
+                Ok(FetchedBody::Bytes(payload.clone()))
+            },
+        )
+        .expect("warm fetch succeeds");
+
+        let ThumbnailWorkerOutcome::Completed(bytes) = outcome else {
+            panic!("expected banked bytes, got {outcome:?}");
+        };
+        super::super::write_source_bytes(&cache, url, &bytes);
+
+        assert!(
+            fetched_urls
+                .first()
+                .is_some_and(|fetched| fetched != url && fetched.contains("imw=512")),
+            "warm should fetch a 512 variant, got {fetched_urls:?}"
+        );
+        assert!(
+            super::super::read_source_bytes(&cache, url).is_some(),
+            "the banked source must be readable by the bare URL the cache key carries"
+        );
+    }
+
+    /// The read path drops a source that will not decode. If the fetch that
+    /// follows banked its bytes regardless, the two fought forever: every
+    /// request re-banked the corrupt bytes, and the next paid a local decode, a
+    /// disk write, and index churn to drop them again.
+    ///
+    /// The poison-drop test in `mod.rs` cannot see this — its fetch fails
+    /// (nothing is reachable from a test), so nothing re-banks there.
+    #[test]
+    fn a_fetch_that_will_not_decode_yields_no_bytes_to_bank() {
+        let mut decoder = ThumbnailDecoder::new();
+        let banked = decoder.fetch_decode_and_resize_url_with_fetch(
+            "https://example.invalid/corrupt.png",
+            256,
+            &ThumbnailCancellation::default(),
+            |_| Ok(FetchedBody::Bytes(b"not an image".to_vec())),
+        );
+
+        // Banking is the caller's job and is driven entirely by this result, so
+        // a failed decode handing back nothing is exactly what keeps corrupt
+        // bytes out of the source tier.
+        assert!(
+            banked.is_err(),
+            "undecodable bytes must surface as an error, not as bankable bytes"
+        );
+    }
+
+    /// Warming stops at bytes. It must not decode: the size it would pick is a
+    /// guess, and the interactive request that eventually paints will decode at
+    /// the size it actually needs.
+    #[test]
+    fn warm_returns_raw_bytes_without_decoding_them() {
+        let outcome = fetch_source_bytes_with_fetch(
+            "https://images.steamusercontent.com/ugc/456/DEF/",
+            &ThumbnailCancellation::default(),
+            // Bytes that are not a decodable image at all. A path that decoded
+            // would fail here; a path that only banks does not care.
+            |_url, _policy| Ok(FetchedBody::Bytes(b"not an image".to_vec())),
+        )
+        .expect("warm does not decode, so undecodable bytes are not an error");
+
+        let ThumbnailWorkerOutcome::Completed(bytes) = outcome else {
+            panic!("expected banked bytes, got {outcome:?}");
+        };
+        assert_eq!(bytes, b"not an image");
+    }
+
+    #[test]
+    fn a_cancelled_warm_request_never_fetches() {
+        let cancellation = ThumbnailCancellation::default();
+        cancellation.cancel();
+        let fetches = AtomicUsize::new(0);
+
+        let result = fetch_source_bytes_with_fetch(
+            "https://images.steamusercontent.com/ugc/preview.png",
+            &cancellation,
+            |_, _| {
+                fetches.fetch_add(1, Ordering::Relaxed);
+                Ok(FetchedBody::Bytes(Vec::new()))
+            },
+        )
+        .expect("cancelled request should not fail");
+
+        assert!(matches!(result, ThumbnailWorkerOutcome::Cancelled));
+        assert_eq!(fetches.load(Ordering::Relaxed), 0);
+    }
+
+    fn solid_png_bytes() -> Vec<u8> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("fixture encodes");
+        png.into_inner()
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -303,35 +468,50 @@ mod tests {
         );
     }
 
+    /// `SOURCE_VARIANT_EDGE`'s doc says it "must be at least
+    /// `physical_thumbnail_edge`'s ceiling", and it is — but nothing tied the
+    /// two together. Raising the display ceiling without raising this would
+    /// silently make every warm-banked source too small to derive the largest
+    /// size the app can ask for, and the only symptom would be soft thumbnails
+    /// on hi-DPI displays.
+    #[test]
+    fn the_warm_variant_is_large_enough_for_every_size_the_app_can_request() {
+        use crate::media::thumbnail_demand::physical_thumbnail_edge;
+
+        // The ceiling is a clamp, so any absurd scale factor lands on it.
+        let ceiling = physical_thumbnail_edge(4_096, f32::MAX);
+        assert!(
+            SOURCE_VARIANT_EDGE >= ceiling,
+            "warm banks at {SOURCE_VARIANT_EDGE}px but the app can request {ceiling}px, \
+             so every derived size above the bank would be an upscale"
+        );
+    }
+
     #[test]
     fn steam_cdn_variant_failure_falls_back_to_bare_url() {
         let dir = crate::test_support::TestDir::new("gmpublished-cdn-variant-fallback");
         let image = std::fs::read(dir.image("fallback.png", image::ImageFormat::Png, 8, 6))
             .expect("PNG fixture");
         let bare_url = "https://images.steamusercontent.com/ugc/preview.png";
-        let variant_url = steam_cdn_variant_url(bare_url, 128).expect("Steam variant URL");
+        // Warm always requests the largest edge it may later need, independent
+        // of this request's max_edge.
+        let variant_url =
+            steam_cdn_variant_url(bare_url, SOURCE_VARIANT_EDGE).expect("Steam variant URL");
         let requested = std::cell::RefCell::new(Vec::new());
-        let mut decoder = ThumbnailDecoder::new();
 
-        let result = decoder
-            .fetch_decode_and_resize_url_with_fetch(
-                bare_url,
-                128,
-                FetchProfile::BackgroundWarm,
-                &ThumbnailCancellation::default(),
-                |url, _| {
-                    requested.borrow_mut().push(url.to_owned());
-                    if url == variant_url {
-                        Err(ThumbnailError::UrlFetch {
-                            url: url.to_owned(),
-                            source: ureq::Error::StatusCode(503),
-                        })
-                    } else {
-                        Ok(FetchedBody::Bytes(image.clone()))
-                    }
-                },
-            )
-            .expect("bare URL fallback should decode");
+        let result =
+            fetch_source_bytes_with_fetch(bare_url, &ThumbnailCancellation::default(), |url, _| {
+                requested.borrow_mut().push(url.to_owned());
+                if url == variant_url {
+                    Err(ThumbnailError::UrlFetch {
+                        url: url.to_owned(),
+                        source: ureq::Error::StatusCode(503),
+                    })
+                } else {
+                    Ok(FetchedBody::Bytes(image.clone()))
+                }
+            })
+            .expect("bare URL fallback should fetch");
 
         assert!(matches!(result, ThumbnailWorkerOutcome::Completed(_)));
         assert_eq!(
@@ -346,26 +526,25 @@ mod tests {
         let image = std::fs::read(dir.image("anim.png", image::ImageFormat::Png, 8, 6))
             .expect("PNG fixture");
         let bare_url = "https://images.steamusercontent.com/ugc/preview.gif";
-        let variant_url = steam_cdn_variant_url(bare_url, 128).expect("Steam variant URL");
+        // Warm always requests the largest edge it may later need, independent
+        // of this request's max_edge.
+        let variant_url =
+            steam_cdn_variant_url(bare_url, SOURCE_VARIANT_EDGE).expect("Steam variant URL");
         let requested = std::cell::RefCell::new(Vec::new());
-        let mut decoder = ThumbnailDecoder::new();
 
-        let result = decoder
-            .fetch_decode_and_resize_url_with_fetch(
-                bare_url,
-                128,
-                FetchProfile::BackgroundWarm,
-                &ThumbnailCancellation::default(),
-                |url, gif_policy| {
-                    requested.borrow_mut().push(url.to_owned());
-                    if gif_policy == GifPolicy::Reject {
-                        Ok(FetchedBody::RejectedGif)
-                    } else {
-                        Ok(FetchedBody::Bytes(image.clone()))
-                    }
-                },
-            )
-            .expect("bare URL fallback should decode");
+        let result = fetch_source_bytes_with_fetch(
+            bare_url,
+            &ThumbnailCancellation::default(),
+            |url, gif_policy| {
+                requested.borrow_mut().push(url.to_owned());
+                if gif_policy == GifPolicy::Reject {
+                    Ok(FetchedBody::RejectedGif)
+                } else {
+                    Ok(FetchedBody::Bytes(image.clone()))
+                }
+            },
+        )
+        .expect("bare URL fallback should fetch");
 
         assert!(matches!(result, ThumbnailWorkerOutcome::Completed(_)));
         assert_eq!(
@@ -387,16 +566,15 @@ mod tests {
             .fetch_decode_and_resize_url_with_fetch(
                 bare_url,
                 128,
-                FetchProfile::Interactive,
                 &ThumbnailCancellation::default(),
-                |url, _| {
+                |url| {
                     requested.borrow_mut().push(url.to_owned());
                     Ok(FetchedBody::Bytes(image.clone()))
                 },
             )
             .expect("bare URL should decode");
 
-        assert!(matches!(result, ThumbnailWorkerOutcome::Completed(_)));
+        assert!(result.is_some(), "a bare URL fetch should decode");
         assert_eq!(requested.into_inner(), vec![bare_url.to_owned()]);
     }
 
@@ -407,20 +585,13 @@ mod tests {
             .expect("PNG fixture");
         let bare_url = "https://example.com/ugc/preview.png";
         let requested = std::cell::RefCell::new(Vec::new());
-        let mut decoder = ThumbnailDecoder::new();
 
-        let result = decoder
-            .fetch_decode_and_resize_url_with_fetch(
-                bare_url,
-                128,
-                FetchProfile::BackgroundWarm,
-                &ThumbnailCancellation::default(),
-                |url, _| {
-                    requested.borrow_mut().push(url.to_owned());
-                    Ok(FetchedBody::Bytes(image.clone()))
-                },
-            )
-            .expect("bare URL should decode");
+        let result =
+            fetch_source_bytes_with_fetch(bare_url, &ThumbnailCancellation::default(), |url, _| {
+                requested.borrow_mut().push(url.to_owned());
+                Ok(FetchedBody::Bytes(image.clone()))
+            })
+            .expect("bare URL should fetch");
 
         assert!(matches!(result, ThumbnailWorkerOutcome::Completed(_)));
         assert_eq!(requested.into_inner(), vec![bare_url.to_owned()]);
@@ -437,16 +608,15 @@ mod tests {
             .fetch_decode_and_resize_url_with_fetch(
                 "https://images.steamusercontent.com/ugc/preview.png",
                 128,
-                FetchProfile::Interactive,
                 &cancellation,
-                |_, _| {
+                |_| {
                     fetches.fetch_add(1, Ordering::Relaxed);
                     Ok(FetchedBody::Bytes(Vec::new()))
                 },
             )
             .expect("cancelled request should not fail");
 
-        assert!(matches!(result, ThumbnailWorkerOutcome::Cancelled));
+        assert!(result.is_none(), "a cancelled request decodes nothing");
         assert_eq!(fetches.load(Ordering::Relaxed), 0);
     }
 }

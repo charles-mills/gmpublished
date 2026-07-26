@@ -1,7 +1,7 @@
 name = "gmpublished"
 product-name = "gmpublished"
 identifier = "dev.charlesmills.gmpublished"
-version = "0.2.1"
+version = "0.2.2"
 description = "Native Workshop publishing and addon inspection utility for Garry's Mod."
 long-description = "gmpublished is a native desktop application for publishing, updating, downloading, inspecting, and extracting Garry's Mod Workshop addons."
 homepage = "https://github.com/charles-mills/gmpublished"
@@ -19,16 +19,9 @@ formats = ["app"]
 
 binaries = [{ path = "gmpublished", main = true }]
 
-icons = [
-    "icons/32x32.png",
-    "icons/128x128.png",
-    "icons/128x128@2x.png",
-    "icons/icon.icns",
-    "icons/icon.ico",
-]
-
 resources = [
     { src = "macos/Credits.rtf", target = "Credits.rtf" },
+    { src = "../THIRD-PARTY-NOTICES.md", target = "THIRD-PARTY-NOTICES.md" },
 ]
 
 # cargo-packager copies external binaries to Contents/MacOS for macOS .app

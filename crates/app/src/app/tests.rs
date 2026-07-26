@@ -53,7 +53,6 @@ fn assert_no_task(task: &Task<RootMessage>) {
 fn test_constructor_uses_default_root_state_without_running_startup() {
     let app = App::new_for_test();
 
-    assert_eq!(app.state.title, State::default().title);
     assert_eq!(app.state.shell.route(), shell::Route::MyWorkshop);
     assert_eq!(app.state.shell.account_name(), None);
     assert!(!app.state.my_workshop.is_route_visible());
@@ -2898,4 +2897,66 @@ fn installed_addon_for_library(
             entries: Vec::new(),
         },
     }
+}
+
+/// Launch with Steam closed, start Steam while the app is open, and stay on
+/// My Workshop the whole time. The route had already recorded the Steam
+/// failure, the panel hid it, and clearing the panel used to reveal a stale
+/// "load failed: ERR_STEAM_ERROR:STEAM_UNAVAILABLE" for an outage that was
+/// over. Navigating away and back fixed it by hand; the reconnect edge now
+/// does the same thing on its own.
+#[test]
+fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
+    let mut app = App::new_for_test();
+    assert_eq!(app.state.shell.route(), shell::Route::MyWorkshop);
+
+    let _task = app.update(RootMessage::SteamSession(
+        steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Unavailable),
+    ));
+    // Entering the route opens page 1; Steam then refuses it, exactly as it
+    // does on a launch with the client closed.
+    let _task = app.update(RootMessage::MyWorkshop(my_workshop::Message::RouteEntered));
+    let _task = app.update(RootMessage::MyWorkshop(
+        my_workshop::Message::PageCompleted(
+            1,
+            1,
+            Err(UiError::detailed(
+                gmpublished_backend::error_key::keys::STEAM_ERROR,
+                Some("STEAM_UNAVAILABLE".to_owned()),
+            )),
+        ),
+    ));
+    assert!(matches!(
+        app.state.my_workshop.load_status(),
+        my_workshop::LoadStatus::Error(_)
+    ));
+
+    let _task = app.update(RootMessage::SteamSession(
+        steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
+    ));
+
+    assert!(
+        !matches!(
+            app.state.my_workshop.load_status(),
+            my_workshop::LoadStatus::Error(_)
+        ),
+        "the stale Steam failure survived the reconnect that resolved it"
+    );
+}
+
+/// The edge, not the level: a second Connected message (the backend event and
+/// the attempt completion both land) must not re-enter the route again.
+#[test]
+fn a_repeated_connected_message_does_not_re_enter_the_route() {
+    let mut app = App::new_for_test();
+    let _task = app.update(RootMessage::SteamSession(
+        steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
+    ));
+
+    assert!(
+        !app.state
+            .prerequisites
+            .observe_steam(steam_session::ConnectionStatus::Connected),
+        "a repeated Connected reported a fresh reconnect edge"
+    );
 }

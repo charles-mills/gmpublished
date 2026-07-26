@@ -658,16 +658,6 @@ pub enum MapPropVisibility {
 }
 
 impl MapPropVisibility {
-    pub fn from_clusters(mut clusters: Vec<u32>) -> Self {
-        clusters.sort_unstable();
-        clusters.dedup();
-        if clusters.is_empty() {
-            Self::Always
-        } else {
-            Self::Clusters(clusters)
-        }
-    }
-
     pub const fn always() -> Self {
         Self::Always
     }
@@ -677,10 +667,6 @@ impl MapPropVisibility {
             Self::Always => &[],
             Self::Clusters(clusters) => clusters,
         }
-    }
-
-    pub const fn is_always(&self) -> bool {
-        matches!(self, Self::Always)
     }
 }
 

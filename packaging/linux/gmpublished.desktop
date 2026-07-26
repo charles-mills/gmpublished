@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=gmpublished
+GenericName=Workshop Publisher
+Comment=Native Workshop publishing and addon inspection utility for Garry's Mod.
+Exec=gmpublished %f
+Icon=gmpublished
+Terminal=false
+StartupNotify=true
+StartupWMClass=gmpublished
+Categories=Utility;FileTools;
+Keywords=garrysmod;gmod;workshop;addon;gma;steam;
+MimeType=application/x-garrys-mod-addon;

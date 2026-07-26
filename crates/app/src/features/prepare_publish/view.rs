@@ -1,10 +1,10 @@
 use std::time::Instant;
 
 use iced::widget::{
-    Space, button, checkbox, column, container, image, mouse_area, opaque, pick_list, row,
-    scrollable, stack, svg, text, text_editor, text_input,
+    Space, button, checkbox, column, container, image, mouse_area, opaque, row, scrollable, stack,
+    svg, text, text_editor, text_input,
 };
-use iced::{Alignment, Center, Color, ContentFit, Element, Length, Size};
+use iced::{Alignment, Center, Color, ContentFit, Element, Length, Padding, Size};
 
 use crate::{
     assets,
@@ -14,6 +14,8 @@ use crate::{
     i18n::translated_error,
     theme::{self, Tokens, ViewCtx},
     widgets::file_browser::{self, Row as FileBrowserRowData, RowKind as FileBrowserEntryKind},
+    widgets::select,
+    widgets::select_option::SelectOption,
     widgets::tooltip as tooltip_widget,
 };
 
@@ -385,21 +387,47 @@ fn title_input<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     }
 }
 
+fn select_metrics(tokens: &Tokens) -> select::Metrics {
+    select::Metrics {
+        text_size: tokens.typography.caption,
+        padding: Padding::new(tokens.spacing.pad_control),
+        radius: tokens.radii.base,
+        max_rows: select::MAX_ROWS,
+    }
+}
+
+/// Turns the state's labelled options into menu rows, marking the current one.
+fn select_rows(
+    options: Vec<SelectOption>,
+    selected: &SelectOption,
+    on_select: impl Fn(SelectOption) -> Message,
+) -> Vec<select::Row<Message>> {
+    options
+        .into_iter()
+        .map(|option| select::Row {
+            selected: option == *selected,
+            label: option.label.clone(),
+            on_select: on_select(option),
+        })
+        .collect()
+}
+
 fn addon_type_select<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    pick_list(
-        state.addon_type_options(i18n),
-        Some(state.selected_addon_type_option(i18n)),
-        Message::AddonTypeSelected,
+    let selected = state.selected_addon_type_option(i18n);
+
+    select::field(
+        selected.label.clone(),
+        select_rows(
+            state.addon_type_options(i18n),
+            &selected,
+            Message::AddonTypeSelected,
+        ),
+        select_metrics(&tokens),
+        select::Chevron::Hidden,
+        &tokens,
     )
-    .handle(pick_list::Handle::None)
-    .width(Length::Fill)
-    .padding(tokens.spacing.pad_control)
-    .text_size(tokens.typography.caption)
-    .style(move |_, status| theme::styles::pick_list(&tokens, status))
-    .menu_style(move |_| theme::styles::pick_list_menu(&tokens))
-    .into()
 }
 
 fn tag_selects<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
@@ -407,19 +435,16 @@ fn tag_selects<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let i18n = ctx.i18n;
     let mut tag_row = row![].spacing(tokens.spacing.gap);
     for index in 0..3 {
-        tag_row = tag_row.push(
-            pick_list(
-                state.tag_options(index, i18n),
-                Some(state.selected_tag_option(index, i18n)),
-                move |option| Message::TagSelected(index, option),
-            )
-            .handle(pick_list::Handle::None)
-            .width(Length::Fill)
-            .padding(tokens.spacing.pad_control)
-            .text_size(tokens.typography.caption)
-            .style(move |_, status| theme::styles::pick_list(&tokens, status))
-            .menu_style(move |_| theme::styles::pick_list_menu(&tokens)),
-        );
+        let selected = state.selected_tag_option(index, i18n);
+        tag_row = tag_row.push(select::field(
+            selected.label.clone(),
+            select_rows(state.tag_options(index, i18n), &selected, move |option| {
+                Message::TagSelected(index, option)
+            }),
+            select_metrics(&tokens),
+            select::Chevron::Hidden,
+            &tokens,
+        ));
     }
     tag_row.into()
 }

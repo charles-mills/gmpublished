@@ -40,7 +40,7 @@
           <string>gma</string>
         </array>
         <key>public.mime-type</key>
-        <string>application/gma</string>
+        <string>application/x-garrys-mod-addon</string>
       </dict>
     </dict>
   </array>

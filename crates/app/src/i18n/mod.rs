@@ -336,9 +336,183 @@ fn format_from_bundle(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{CATALOGS, I18n, catalog_source, resolve_locale_id};
+
+    /// `(locale, message id)` pairs where the target language genuinely renders
+    /// the message as the English string, so an identical value is a correct
+    /// translation rather than a missing one: loanwords ("Addons", "Skin",
+    /// "Roleplay"), cognates ("Name", "Audio", "Water"), Valve/Source format
+    /// names, acronyms ("CRC", "NPC"), and byte units in the languages that do
+    /// not localize them.
+    ///
+    /// This records facts about languages, not decisions about this codebase.
+    /// Anything that is untranslatable *by construction* does not belong here:
+    /// brand names live in [`crate::APP_NAME`], and pure format templates are
+    /// skipped by [`has_translatable_text`]. Adding an entry asserts that a
+    /// speaker of that language would write the English word in this place.
+    const LOCALE_KEEPS_ENGLISH: &[(&str, &str)] = &[
+        ("de", "byte-rate-per-second"),
+        ("de", "byte-unit-b"),
+        ("de", "byte-unit-gb"),
+        ("de", "byte-unit-kb"),
+        ("de", "byte-unit-mb"),
+        ("de", "byte-unit-tb"),
+        ("de", "destination-addons"),
+        ("de", "destination-downloads"),
+        ("de", "downloader-workshop-id"),
+        ("de", "file-preview-crc"),
+        ("de", "file-preview-model-bodygroup"),
+        ("de", "file-preview-model-skin"),
+        ("de", "file-preview-model-skin-option"),
+        ("de", "file-preview-particle-system"),
+        ("de", "file-type-audio"),
+        ("de", "file-type-map"),
+        ("de", "file-type-txt"),
+        ("de", "prepare-publish-tag-cartoon"),
+        ("de", "prepare-publish-tag-comic"),
+        ("de", "prepare-publish-tag-fun"),
+        ("de", "prepare-publish-type-map"),
+        ("de", "prepare-publish-type-npc"),
+        ("de", "preview-gma-steam-workshop"),
+        ("de", "search-source-steam-workshop"),
+        ("de", "size-analyzer-name"),
+        ("es", "byte-rate-per-second"),
+        ("es", "byte-unit-b"),
+        ("es", "byte-unit-gb"),
+        ("es", "byte-unit-kb"),
+        ("es", "byte-unit-mb"),
+        ("es", "byte-unit-tb"),
+        ("es", "destination-addons"),
+        ("es", "downloader-status-error"),
+        ("es", "downloader-workshop-id"),
+        ("es", "file-preview-crc"),
+        ("es", "file-type-audio"),
+        ("es", "menu-zoom"),
+        ("es", "prepare-publish-type-npc"),
+        ("es", "preview-gma-steam-workshop"),
+        ("es", "search-source-steam-workshop"),
+        ("es", "settings-tab-general"),
+        ("fr", "byte-rate-per-second"),
+        ("fr", "destination-addons"),
+        ("fr", "downloader-workshop-id"),
+        ("fr", "file-preview-audio-pause"),
+        ("fr", "file-preview-crc"),
+        ("fr", "file-preview-map-faces"),
+        ("fr", "file-preview-model-triangles"),
+        ("fr", "file-type-audio"),
+        ("fr", "file-type-image"),
+        ("fr", "menu-zoom"),
+        ("fr", "prepare-publish-addon-type"),
+        ("fr", "prepare-publish-tag-fun"),
+        ("fr", "settings-accessibility-color-picker-saturation"),
+        ("fr", "settings-theme-classic-source"),
+        ("fr", "size-analyzer-type"),
+        ("kr", "byte-rate-per-second"),
+        ("kr", "byte-unit-b"),
+        ("kr", "byte-unit-gb"),
+        ("kr", "byte-unit-kb"),
+        ("kr", "byte-unit-mb"),
+        ("kr", "byte-unit-tb"),
+        ("kr", "file-preview-crc"),
+        ("kr", "prepare-publish-type-npc"),
+        ("kr", "settings-theme-classic-source"),
+        ("nl", "byte-rate-per-second"),
+        ("nl", "byte-unit-b"),
+        ("nl", "byte-unit-gb"),
+        ("nl", "byte-unit-kb"),
+        ("nl", "byte-unit-mb"),
+        ("nl", "byte-unit-tb"),
+        ("nl", "destination-addons"),
+        ("nl", "destination-downloads"),
+        ("nl", "downloader"),
+        ("nl", "downloader-workshop-id"),
+        ("nl", "file-preview-crc"),
+        ("nl", "file-preview-model-meshes"),
+        ("nl", "file-preview-model-skin"),
+        ("nl", "file-preview-model-skin-option"),
+        ("nl", "file-type-audio"),
+        ("nl", "file-type-mdl"),
+        ("nl", "menu-help"),
+        ("nl", "menu-zoom"),
+        ("nl", "prepare-publish-addon-type"),
+        ("nl", "prepare-publish-items-num"),
+        ("nl", "prepare-publish-items-one"),
+        ("nl", "prepare-publish-tag-1"),
+        ("nl", "prepare-publish-tag-2"),
+        ("nl", "prepare-publish-tag-3"),
+        ("nl", "prepare-publish-tag-cartoon"),
+        ("nl", "prepare-publish-tag-fun"),
+        ("nl", "prepare-publish-tag-roleplay"),
+        ("nl", "prepare-publish-tag-water"),
+        ("nl", "prepare-publish-type-model"),
+        ("nl", "prepare-publish-type-npc"),
+        ("nl", "preview-gma-steam-workshop"),
+        ("nl", "search-source-steam-workshop"),
+        ("nl", "size-analyzer-summary-cells"),
+        ("nl", "size-analyzer-type"),
+        ("pl", "byte-rate-per-second"),
+        ("pl", "byte-unit-b"),
+        ("pl", "byte-unit-gb"),
+        ("pl", "byte-unit-kb"),
+        ("pl", "byte-unit-mb"),
+        ("pl", "byte-unit-tb"),
+        ("pl", "file-preview-crc"),
+        ("pl", "file-preview-particle-system"),
+        ("pl", "file-type-fgd"),
+        ("pl", "file-type-folder"),
+        ("pl", "file-type-mdl"),
+        ("pl", "prepare-publish-tag-1"),
+        ("pl", "prepare-publish-tag-2"),
+        ("pl", "prepare-publish-tag-3"),
+        ("pl", "prepare-publish-tag-roleplay"),
+        ("pl", "prepare-publish-type-model"),
+        ("pl", "prepare-publish-type-npc"),
+        ("pt-BR", "byte-rate-per-second"),
+        ("pt-BR", "byte-unit-b"),
+        ("pt-BR", "byte-unit-gb"),
+        ("pt-BR", "byte-unit-kb"),
+        ("pt-BR", "byte-unit-mb"),
+        ("pt-BR", "byte-unit-tb"),
+        ("pt-BR", "destination-addons"),
+        ("pt-BR", "destination-downloads"),
+        ("pt-BR", "file-preview-crc"),
+        ("pt-BR", "file-preview-map-faces"),
+        ("pt-BR", "file-preview-model-skin"),
+        ("pt-BR", "file-preview-model-skin-option"),
+        ("pt-BR", "file-type-fgd"),
+        ("pt-BR", "file-type-vcd"),
+        ("pt-BR", "file-type-vmt"),
+        ("pt-BR", "file-type-vtf"),
+        ("pt-BR", "menu-zoom"),
+        ("pt-BR", "prepare-publish-items-one"),
+        ("pt-BR", "prepare-publish-tag-1"),
+        ("pt-BR", "prepare-publish-tag-2"),
+        ("pt-BR", "prepare-publish-tag-3"),
+        ("pt-BR", "prepare-publish-tag-roleplay"),
+        ("pt-BR", "prepare-publish-type-npc"),
+        ("ru", "file-preview-crc"),
+        ("tr", "byte-rate-per-second"),
+        ("tr", "byte-unit-b"),
+        ("tr", "byte-unit-gb"),
+        ("tr", "byte-unit-kb"),
+        ("tr", "byte-unit-mb"),
+        ("tr", "byte-unit-tb"),
+        ("tr", "file-preview-crc"),
+        ("tr", "file-type-mdl"),
+        ("tr", "prepare-publish-type-model"),
+        ("tr", "prepare-publish-type-npc"),
+        ("uk", "file-preview-crc"),
+        ("zh-cn", "byte-rate-per-second"),
+        ("zh-cn", "byte-unit-b"),
+        ("zh-cn", "byte-unit-gb"),
+        ("zh-cn", "byte-unit-kb"),
+        ("zh-cn", "byte-unit-mb"),
+        ("zh-cn", "byte-unit-tb"),
+        ("zh-cn", "file-preview-crc"),
+        ("zh-cn", "prepare-publish-type-npc"),
+    ];
 
     #[test]
     fn locale_resolution_handles_exact_alias_base_and_fallback() {
@@ -391,6 +565,36 @@ mod tests {
         }
     }
 
+    /// Key parity alone is not coverage: pasting the English block into every
+    /// catalog satisfies [`fluent_catalogs_have_matching_key_sets`] while leaving
+    /// the UI in English. This asserts the values actually got translated.
+    #[test]
+    fn translated_catalogs_do_not_leak_english_values() {
+        let english = catalog_messages(catalog_source("en"));
+        for catalog in CATALOGS {
+            if catalog.id == "en" {
+                continue;
+            }
+            let translated = catalog_messages(catalog_source(catalog.id));
+            let leaked = english
+                .iter()
+                .filter(|(_, value)| has_translatable_text(value))
+                .filter(|(key, _)| !LOCALE_KEEPS_ENGLISH.contains(&(catalog.id, *key)))
+                .filter(|(key, value)| translated.get(*key) == Some(*value))
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>();
+
+            assert!(
+                leaked.is_empty(),
+                "{} still uses the English value for {} message(s): {:?}\n\
+                 Translate them, or record the overlap in LOCALE_KEEPS_ENGLISH.",
+                catalog.id,
+                leaked.len(),
+                leaked
+            );
+        }
+    }
+
     #[test]
     fn packed_catalogs_match_the_source_ftl_files() {
         for catalog in CATALOGS {
@@ -421,6 +625,71 @@ mod tests {
             i18n.trn("relative-time-past-years", &[("arg0", "5")]),
             "5 lat temu"
         );
+    }
+
+    /// Message id -> value, with Fluent block values (a bare `=` followed by
+    /// indented lines) folded into a single newline-joined string so they are
+    /// compared as a whole rather than skipped.
+    fn catalog_messages(source: &str) -> BTreeMap<&str, String> {
+        let mut messages = BTreeMap::new();
+        let mut current: Option<&str> = None;
+
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            if line.starts_with([' ', '\t']) {
+                if let Some(key) = current {
+                    let value: &mut String = messages
+                        .get_mut(key)
+                        .expect("current key is inserted before it is set");
+                    if !value.is_empty() {
+                        value.push('\n');
+                    }
+                    value.push_str(trimmed);
+                }
+                continue;
+            }
+
+            current = match line.split_once('=') {
+                Some((key, value)) if is_message_id(key.trim()) => {
+                    let key = key.trim();
+                    messages.insert(key, value.trim().to_owned());
+                    Some(key)
+                }
+                _ => None,
+            };
+        }
+
+        messages
+    }
+
+    /// Whether a value contains anything a translator could act on. Templates
+    /// built purely from placeholders and punctuation (`{$arg0} {$arg1}`,
+    /// `{$arg0}% {$arg1}`) render identically in every language, so an
+    /// identical value there is correct rather than a missed translation.
+    fn has_translatable_text(value: &str) -> bool {
+        let mut depth = 0usize;
+        value.chars().any(|ch| match ch {
+            '{' => {
+                depth += 1;
+                false
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                false
+            }
+            _ => depth == 0 && ch.is_alphabetic(),
+        })
+    }
+
+    fn is_message_id(key: &str) -> bool {
+        !key.is_empty()
+            && key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     }
 
     fn catalog_message_ids(source: &str) -> BTreeSet<&str> {

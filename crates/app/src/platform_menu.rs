@@ -121,7 +121,7 @@ fn app_menu(i18n: &I18n) -> muda::Result<Submenu> {
     let quit = PredefinedMenuItem::quit(None);
 
     Submenu::with_items(
-        i18n.tr("gmpublished-name"),
+        crate::APP_NAME,
         true,
         &[
             &about,

@@ -27,6 +27,13 @@ pub struct State {
     load_status: LoadStatus,
     generation: u64,
     rows: Vec<Row>,
+    /// Row id -> index into `rows`.
+    ///
+    /// A delivery names exactly one row, so without this every delivery scanned
+    /// every row to find it and then walked them all again to refresh. That is
+    /// O(rows) twice per delivery, and a scroll-back produces deliveries in
+    /// bursts — measured as the dominant contributor to per-tick tail latency.
+    row_index: HashMap<String, usize>,
     publish_new_title: String,
     next_page: u32,
     loaded_pages: u32,
@@ -61,6 +68,7 @@ impl Default for State {
             load_status: LoadStatus::Idle,
             generation: 0,
             rows: Vec::new(),
+            row_index: HashMap::new(),
             publish_new_title: String::new(),
             next_page: FIRST_WORKSHOP_PAGE,
             loaded_pages: 0,
@@ -138,14 +146,18 @@ impl State {
             return false;
         }
 
-        let mut changed = false;
-        for row in &mut self.rows {
-            changed |= row.apply_thumbnail_delivery(delivery);
+        let Some(&index) = self.row_index.get(delivery.id.as_str()) else {
+            return false;
+        };
+        let Some(row) = self.rows.get_mut(index) else {
+            return false;
+        };
+        if !row.apply_thumbnail_delivery(delivery) {
+            return false;
         }
-        if changed {
-            self.refresh_item_thumbnails();
-        }
-        changed
+
+        self.refresh_item_thumbnail(index);
+        true
     }
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
@@ -164,10 +176,10 @@ impl State {
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
         let visible_range = self.visible_row_range();
         let changed = model::release_offscreen_thumbnails(&mut self.rows, visible_range);
-        if changed {
-            self.refresh_item_thumbnails();
+        for index in &changed {
+            self.refresh_item_thumbnail(*index);
         }
-        changed
+        !changed.is_empty()
     }
 
     pub(crate) fn has_active_animations(&self) -> bool {
@@ -414,7 +426,7 @@ impl State {
                     // Grid item 0 is the publish-new lead card; rows start at 1.
                     let _ = self.grid.update_item_thumbnail(
                         visible.start + offset + 1,
-                        &row.id(),
+                        row.id(),
                         thumbnail,
                     );
                 }
@@ -512,7 +524,7 @@ impl State {
         // Grid item 0 is the publish-new lead card; rows start at 1.
         let _ = self
             .grid
-            .update_item_thumbnail(index + 1, &row.id(), thumbnail);
+            .update_item_thumbnail(index + 1, row.id(), thumbnail);
         true
     }
 
@@ -550,22 +562,36 @@ impl State {
         };
     }
 
-    /// Pushes every row's current thumbnail into the grid in place. A
-    /// thumbnail never changes card geometry, so thumbnail-only changes
-    /// (delivery, offscreen release, hover play/pause) skip the full
-    /// `sync_grid_items` rebuild — re-allocating every card and re-measuring
-    /// every title per scroll event is what makes large libraries lag.
-    fn refresh_item_thumbnails(&mut self) {
+    /// Pushes one row's current thumbnail into the grid in place.
+    ///
+    /// A delivery names exactly one row, so it has no reason to touch the
+    /// others; the sweeping variant below exists for changes that really do
+    /// affect every row.
+    fn refresh_item_thumbnail(&mut self, index: usize) {
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
+        // Grid item 0 is the publish-new lead card; rows start at 1.
+        let _ = self
+            .grid
+            .update_item_thumbnail(index + 1, row.id(), thumbnail);
+    }
+
+    /// Rebuilds the id -> index map. Must follow every mutation of `rows`.
+    fn reindex_rows(&mut self) {
+        self.row_index.clear();
+        self.row_index.reserve(self.rows.len());
         for (index, row) in self.rows.iter().enumerate() {
-            let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
-            // Grid item 0 is the publish-new lead card; rows start at 1.
-            let _ = self
-                .grid
-                .update_item_thumbnail(index + 1, &row.id(), thumbnail);
+            let _ = self.row_index.insert(row.id().to_owned(), index);
         }
     }
 
     fn sync_grid_items(&mut self) {
+        // Every mutation of `rows` is already followed by a sync, so hanging
+        // the reindex here keeps the map correct without four separate call
+        // sites to keep in step.
+        self.reindex_rows();
         let _ = self.grid.set_items(model::grid_items(
             &self.rows,
             self.play_gifs_by_default,

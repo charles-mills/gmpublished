@@ -14,6 +14,10 @@ pub use model::Row;
 pub use model::{
     ContextMenuRequest, PreparePublishTarget, browse_page, refresh_subscription_counts,
 };
+/// Only the route's own view reads the load status in anger; the app-level
+/// reconnect test needs to name it too. Same shape as the `Row` export above.
+#[cfg(test)]
+pub use state::LoadStatus;
 pub use state::State;
 pub use update::update;
 pub use view::{GRID_KEY, view};

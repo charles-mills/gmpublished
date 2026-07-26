@@ -1,7 +1,10 @@
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub const THUMBNAIL_CACHE_FILE_EXTENSION: &str = "rgba";
+/// Extension for the source tier: the bytes as fetched, before any decode.
+pub const THUMBNAIL_SOURCE_FILE_EXTENSION: &str = "src";
 
 const CACHE_HASH_VERSION: &[u8] = b"gmpublished-thumbnail-v1";
 const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -15,34 +18,62 @@ pub enum ThumbnailMode {
 }
 
 /// Cache key identifying a thumbnail source and requested output size.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+///
+/// The hash is computed once at construction and stored, because this key is
+/// hashed far more often than it is built: the scheduler's candidate scan
+/// probes `active_jobs` once per entry per pump, and hashing a ~180 byte Steam
+/// CDN URL each time made that scan dominated by string traversal. Measured at
+/// 74% of the scan's cost.
+#[derive(Clone, Debug, Eq)]
 pub struct ThumbnailKey {
     /// Source identity component for the thumbnail.
     pub source: ThumbnailSourceKey,
     /// Requested maximum output width or height.
     pub max_edge: u32,
     pub mode: ThumbnailMode,
+    /// Precomputed [`stable_cache_hash`]. Derived purely from the other
+    /// fields, so it is an optimisation rather than part of the identity.
+    hash: u64,
+}
+
+impl std::hash::Hash for ThumbnailKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // O(1) regardless of URL length. Sound because `hash` is a pure
+        // function of the fields `PartialEq` compares.
+        state.write_u64(self.hash);
+    }
+}
+
+impl PartialEq for ThumbnailKey {
+    fn eq(&self, other: &Self) -> bool {
+        // The hash rejects non-equal keys without touching the URL; the field
+        // comparison then keeps equality exact under collision.
+        self.hash == other.hash
+            && self.max_edge == other.max_edge
+            && self.mode == other.mode
+            && self.source == other.source
+    }
 }
 
 impl ThumbnailKey {
     #[cfg(test)]
     #[must_use]
     pub fn for_bytes(id: impl Into<String>, max_edge: u32) -> Self {
-        Self {
-            source: ThumbnailSourceKey::Bytes { id: id.into() },
+        Self::build(
+            ThumbnailSourceKey::Bytes { id: id.into() },
             max_edge,
-            mode: ThumbnailMode::Animated,
-        }
+            ThumbnailMode::Animated,
+        )
     }
 
     #[cfg(test)]
     #[must_use]
     pub fn for_file(path: impl Into<PathBuf>, max_edge: u32) -> Self {
-        Self {
-            source: ThumbnailSourceKey::File { path: path.into() },
+        Self::build(
+            ThumbnailSourceKey::File { path: path.into() },
             max_edge,
-            mode: ThumbnailMode::Animated,
-        }
+            ThumbnailMode::Animated,
+        )
     }
 
     #[must_use]
@@ -52,22 +83,33 @@ impl ThumbnailKey {
 
     #[must_use]
     pub fn for_url_with_mode(url: impl Into<String>, max_edge: u32, mode: ThumbnailMode) -> Self {
-        Self {
-            source: ThumbnailSourceKey::Url {
-                url: normalize_url(url),
+        Self::build(
+            ThumbnailSourceKey::Url {
+                url: Arc::from(normalize_url(url).as_str()),
             },
             max_edge,
             mode,
-        }
+        )
+    }
+
+    /// The one place the cached hash is produced, so it cannot drift out of
+    /// step with the fields it summarises.
+    fn build(source: ThumbnailSourceKey, max_edge: u32, mode: ThumbnailMode) -> Self {
+        let mut key = Self {
+            source,
+            max_edge,
+            mode,
+            hash: 0,
+        };
+        key.hash = stable_cache_hash(&key);
+        key
     }
 
     #[must_use]
     pub(crate) fn with_max_edge_and_mode(&self, max_edge: u32, mode: ThumbnailMode) -> Self {
-        Self {
-            source: self.source.clone(),
-            max_edge,
-            mode,
-        }
+        // Cloning the source is an `Arc` bump for URLs, so this no longer
+        // copies the string.
+        Self::build(self.source.clone(), max_edge, mode)
     }
 
     #[must_use]
@@ -87,7 +129,7 @@ impl ThumbnailKey {
     #[must_use]
     pub fn source_url(&self) -> Option<&str> {
         match &self.source {
-            ThumbnailSourceKey::Url { url } => (!url.is_empty()).then_some(url.as_str()),
+            ThumbnailSourceKey::Url { url } => (!url.is_empty()).then(|| &**url),
             #[cfg(test)]
             ThumbnailSourceKey::Bytes { .. } | ThumbnailSourceKey::File { .. } => None,
         }
@@ -98,9 +140,7 @@ impl ThumbnailKey {
     pub fn disk_file_name(&self) -> String {
         format!(
             "{:016x}-{}.{}",
-            stable_cache_hash(self),
-            self.max_edge,
-            THUMBNAIL_CACHE_FILE_EXTENSION
+            self.hash, self.max_edge, THUMBNAIL_CACHE_FILE_EXTENSION
         )
     }
 }
@@ -115,7 +155,37 @@ pub enum ThumbnailSourceKey {
     #[cfg(test)]
     File { path: PathBuf },
     /// HTTP(S) source image URL.
-    Url { url: String },
+    ///
+    /// `Arc<str>` rather than `String`: keys are cloned constantly (into
+    /// deliveries, index entries, and interest keys) and never mutated, so a
+    /// clone should be a refcount bump rather than a copy of the URL.
+    Url { url: Arc<str> },
+}
+
+/// On-disk file name for a URL's fetched bytes.
+///
+/// Keyed by the URL alone — deliberately not by size or mode. The derived tier
+/// is size-specific, so moving a window between a 1x and a 2x display misses
+/// every entry and re-fetches the library; with the source kept, the same move
+/// re-derives from local bytes instead.
+///
+/// Sources are also smaller than the decoded output they produce, which is what
+/// lets a large library fit the disk budget — but by a margin that depends
+/// entirely on what was banked. Measured: a warm-banked 512px CDN variant is
+/// 32 KB against a 1024 KB derived entry (**31x**, so 20k addons is 0.63 GB and
+/// fits the 2 GB clamp comfortably), while an interactive fetch banks the bare
+/// original, which at 1024² is 127 KB (8x, 2.44 GB at 20k) and at 1920x1080 is
+/// 246 KB (2.3x, 4.69 GB). A warm-dominated tier fits easily; one filled by
+/// heavy scrolling on a huge library does not, and relies on eviction — which
+/// is ordered by use, not by bank date, precisely so the pressure falls on
+/// sources nobody opens.
+#[must_use]
+pub fn source_file_name(url: &str) -> String {
+    let mut hash = FNV1A64_OFFSET;
+    write_hash_bytes(&mut hash, CACHE_HASH_VERSION);
+    write_hash_byte(&mut hash, 2);
+    write_len_prefixed(&mut hash, url.trim().as_bytes());
+    format!("{hash:016x}.{THUMBNAIL_SOURCE_FILE_EXTENSION}")
 }
 
 /// Normalizes a URL string for thumbnail cache-key identity.

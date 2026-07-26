@@ -1,7 +1,7 @@
 // Only reachable through materials.rs's asset-studio-gated call paths (the
 // 3D model viewer); building with --no-default-features compiles this file
 // but never calls into it.
-#![allow(dead_code)]
+#![cfg_attr(not(feature = "asset-studio"), allow(dead_code))]
 
 use std::path::Path;
 

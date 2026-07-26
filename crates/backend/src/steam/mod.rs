@@ -26,7 +26,6 @@ use self::users::SteamUser;
 pub mod downloads;
 pub mod publishing;
 pub mod runtime;
-pub mod subscriptions;
 pub mod users;
 pub mod workshop;
 
@@ -52,23 +51,6 @@ const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// Generous default for [`Steam::client_wait`] call sites with no more
 /// specific deadline of their own.
 pub const CLIENT_WAIT_DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
-pub fn serialize_opt_steamid<S>(steamid: &Option<SteamId>, serialize: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match steamid {
-        Some(steamid) => serialize.serialize_some(&steamid.raw().to_string()),
-        None => serialize.serialize_none(),
-    }
-}
-
-pub fn serialize_steamid<S>(steamid: &SteamId, serialize: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serialize.serialize_str(&steamid.raw().to_string())
-}
 
 pub struct Interface {
     client: Client,
@@ -316,46 +298,6 @@ impl Steam {
         condvar_wait_bool(&self.connected_wait, timeout)
     }
 
-    pub fn callback_once_with_data<C, EqF>(&self, eq_f: EqF, timeout: Duration) -> Option<C>
-    where
-        C: Callback + Send + 'static,
-        EqF: Fn(&C) -> bool + 'static + Send,
-    {
-        let (tx, rx) = mpsc::channel();
-        let _cb = {
-            let mut tx = Some(tx);
-            self.register_callback(move |c: C| {
-                if eq_f(&c)
-                    && let Some(tx) = tx.take()
-                {
-                    let _ = tx.send(c);
-                }
-            })
-        };
-
-        recv_callback_data(&rx, timeout)
-    }
-
-    pub fn callback_once<C, EqF>(&self, eq_f: EqF, timeout: Duration) -> bool
-    where
-        C: Callback + Send,
-        EqF: Fn(&C) -> bool + 'static + Send,
-    {
-        let (tx, rx) = mpsc::channel();
-        let _cb = {
-            let mut tx = Some(tx);
-            self.register_callback(move |c: C| {
-                if eq_f(&c)
-                    && let Some(tx) = tx.take()
-                {
-                    let _ = tx.send(());
-                }
-            })
-        };
-
-        recv_callback_signal(&rx, timeout)
-    }
-
     pub fn register_callback<C, F>(&self, f: F) -> CallbackHandle
     where
         C: Callback,
@@ -420,14 +362,6 @@ fn retry_until_shutdown(
         }
         delay = (delay * 2).min(max);
     }
-}
-
-fn recv_callback_data<C>(rx: &mpsc::Receiver<C>, timeout: Duration) -> Option<C> {
-    rx.recv_timeout(timeout).ok()
-}
-
-fn recv_callback_signal(rx: &mpsc::Receiver<()>, timeout: Duration) -> bool {
-    recv_callback_data(rx, timeout).is_some()
 }
 
 // Condvar pairing: the guard is handed to wait_while_for.

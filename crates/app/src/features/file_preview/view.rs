@@ -2,7 +2,7 @@ use iced::widget::{
     Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
     sensor, stack, svg, text,
 };
-use iced::{Border, Center, Color, ContentFit, Element, Font, Length, Shadow, border};
+use iced::{Border, Center, Color, ContentFit, Element, Font, Length, Padding, Shadow, border};
 
 use crate::{
     assets,
@@ -10,6 +10,7 @@ use crate::{
     theme::{self, Tokens, ViewCtx},
     widgets::{
         file_types::{SilkIcon, file_type_info},
+        select,
         spinner::spinner,
         split_pane, tooltip as tooltip_widget,
     },
@@ -677,11 +678,10 @@ fn model_selectors<'a>(
                 &[("arg0", index_text.as_str())],
             )
         });
-        let selected = options.get(state.selected_skin()).cloned();
         selectors = selectors.push(selector_row(
             i18n.tr("file-preview-model-skin"),
             options,
-            selected,
+            Some(state.selected_skin()),
             |choice| Message::SkinSelected(choice.index),
             &tokens,
         ));
@@ -693,10 +693,7 @@ fn model_selectors<'a>(
         }
         let group_text = count_text(group);
         let options = indexed_choices(choices, count_text);
-        let selected = state
-            .bodygroup_choices()
-            .get(group)
-            .and_then(|&choice| options.get(choice).cloned());
+        let selected = state.bodygroup_choices().get(group).copied();
         selectors = selectors.push(selector_row(
             i18n.trn(
                 "file-preview-model-bodygroup",
@@ -729,7 +726,7 @@ fn indexed_choices(count: usize, label: impl Fn(usize) -> String) -> Vec<Indexed
 fn selector_row<'a>(
     label: String,
     options: Vec<IndexedChoice>,
-    selected: Option<IndexedChoice>,
+    selected: Option<usize>,
     on_selected: impl Fn(IndexedChoice) -> Message + 'a,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
@@ -742,11 +739,28 @@ fn selector_row<'a>(
                 ..Font::default()
             })
             .width(Length::Fixed(INFO_LABEL_WIDTH)),
-        iced::widget::pick_list(options, selected, on_selected)
-            .width(Length::Fill)
-            .text_size(tokens.typography.body_sm)
-            .padding([tokens.spacing.pad_xs, tokens.spacing.pad_sm])
-            .style(move |_, status| theme::styles::pick_list(&tokens, status)),
+        select::field(
+            selected
+                .and_then(|index| options.get(index))
+                .map(|choice| choice.label.clone())
+                .unwrap_or_default(),
+            options
+                .into_iter()
+                .map(|choice| select::Row {
+                    selected: Some(choice.index) == selected,
+                    label: choice.label.clone(),
+                    on_select: on_selected(choice),
+                })
+                .collect(),
+            select::Metrics {
+                text_size: tokens.typography.body_sm,
+                padding: Padding::from([tokens.spacing.pad_xs, tokens.spacing.pad_sm]),
+                radius: tokens.radii.base,
+                max_rows: select::MAX_ROWS,
+            },
+            select::Chevron::Shown,
+            &tokens,
+        ),
     ]
     .align_y(Center)
     .spacing(tokens.spacing.gap_sm)
@@ -920,11 +934,10 @@ fn particle_selectors<'a>(
         let options = indexed_choices(preview.systems.len(), |index| {
             preview.systems[index].name.clone()
         });
-        let selected = options.get(state.particle_system()).cloned();
         selectors = selectors.push(selector_row(
             i18n.tr("file-preview-particle-system"),
             options,
-            selected,
+            Some(state.particle_system()),
             |choice| Message::ParticleSystemSelected(choice.index),
             &tokens,
         ));
@@ -933,8 +946,7 @@ fn particle_selectors<'a>(
     let speed_options = particle_speed_choices();
     let selected_speed = PARTICLE_SPEED_OPTIONS
         .iter()
-        .position(|speed| (speed - state.particle_speed()).abs() < 1e-3)
-        .and_then(|index| speed_options.get(index).cloned());
+        .position(|speed| (speed - state.particle_speed()).abs() < 1e-3);
     selectors = selectors.push(selector_row(
         i18n.tr("file-preview-particle-speed"),
         speed_options,

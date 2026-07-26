@@ -215,6 +215,25 @@ impl BackendServices {
         (self.settings_snapshot(), self.paths())
     }
 
+    /// The configured Garry's Mod path and the one that actually resolved.
+    /// The pair is what tells "never set up" apart from "set up and since
+    /// broken", so both halves travel together.
+    pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        (
+            self.settings.lock().gmod.clone(),
+            self.paths.lock().gmod_dir.clone(),
+        )
+    }
+
+    /// Full discovery — Steam library folders, then the Steamworks
+    /// install-dir query — republishing the cached path with whatever it
+    /// found. Blocking, and may wait several seconds on Steam.
+    pub(crate) fn rediscover_gmod_dir(&self) -> Option<PathBuf> {
+        let discovered = self.backend.app_data.discover_gmod_dir(&self.backend.steam);
+        self.paths.lock().gmod_dir.clone_from(&discovered);
+        discovered
+    }
+
     /// Mutates a copy of the current settings, persists it, and only then
     /// publishes it as live state. The settings lock is held for the whole
     /// mutate-persist-publish sequence, so a slower concurrent save can

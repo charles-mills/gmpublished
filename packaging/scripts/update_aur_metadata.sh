@@ -15,8 +15,7 @@ pkgver="$(awk -F= '/^pkgver=/ { print $2; exit }' PKGBUILD)"
 [ -n "$pkgver" ] || fail 'could not read pkgver from PKGBUILD'
 
 if [ -n "$expected_version" ] && [ "$pkgver" != "$expected_version" ]; then
-  printf 'pkgver is %s, not %s; leaving metadata untouched\n' "$pkgver" "$expected_version"
-  exit 0
+  fail "pkgver is $pkgver, not $expected_version; refusing to refresh stale metadata"
 fi
 
 attempt=1

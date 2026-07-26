@@ -88,6 +88,8 @@ pub mod icons {
     svg_icon!(circle_alert, "../ui/images/circle-alert.svg");
     svg_icon!(circle_plus, "../ui/images/circle-plus.svg");
     svg_icon!(cloud_download, "../ui/images/cloud-download.svg");
+    // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
+    svg_icon!(cloud_off, "../ui/images/cloud-off.svg");
     svg_icon!(cloud_upload, "../ui/images/cloud-upload.svg");
     svg_icon!(
         context_cloud_download,
@@ -110,6 +112,8 @@ pub mod icons {
     svg_icon!(download_count, "../ui/images/download-count.svg");
     svg_icon!(folder, "../ui/images/folder.svg");
     svg_icon!(folder_add, "../ui/images/folder-add.svg");
+    // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
+    svg_icon!(folder_x, "../ui/images/folder-x.svg");
     svg_icon!(gear, "../ui/images/gear.svg");
 
     /// Multicolor artwork: render WITHOUT a tint override so its natural
@@ -119,6 +123,8 @@ pub mod icons {
     }
 
     svg_icon!(link_chain, "../ui/images/link-chain.svg");
+    // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
+    svg_icon!(package_open, "../ui/images/package-open.svg");
 
     #[cfg(feature = "asset-studio")]
     svg_icon!(mode_fly, "../ui/images/mode-fly.svg");

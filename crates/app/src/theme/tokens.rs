@@ -115,6 +115,11 @@ pub struct Colors {
     pub(crate) download_count_icon: Rgba,
     pub(crate) error: Rgba,
     pub(crate) error_dark: Rgba,
+    /// Unmet-prerequisite status (Steam down, Garry's Mod absent). Deliberately
+    /// short of `error`: nothing has failed, something simply isn't there yet.
+    pub(crate) warn: Rgba,
+    /// Tinted disc behind a `warn` glyph, pre-composited over the route canvas.
+    pub(crate) warn_fill: Rgba,
     pub(crate) link: Rgba,
     pub(crate) text: Rgba,
     pub(crate) text_dim: Rgba,
@@ -149,6 +154,11 @@ pub struct Colors {
     pub(crate) row_stripe: Rgba,
     pub(crate) browser_empty_dim: Rgba,
     pub(crate) tooltip_bg: Rgba,
+    /// Tooltips are inverted slabs: the light theme paints a dark panel, so its
+    /// label and hairline cannot borrow the page-level `text` / `border_subtle`
+    /// tokens (near-black on near-black).
+    pub(crate) tooltip_text: Rgba,
+    pub(crate) tooltip_border: Rgba,
     pub(crate) menu_bg: Rgba,
     pub(crate) dropdown_bg: Rgba,
     pub(crate) modal_bg: Rgba,
@@ -576,6 +586,9 @@ fn dark_colors() -> Colors {
         download_count_icon: rgb(0x6BB64D),
         error: rgb(0xA80000),
         error_dark: rgb(0x7E0000),
+        warn: rgb(0xD9922E),
+        // warn_fill = warn@14% over the sunken route canvas #151515
+        warn_fill: rgb(0x322616),
         link: rgb(0x46B0FF),
         text: rgb(0xFFFFFF),
         text_dim: rgb(0x888888),
@@ -626,6 +639,8 @@ fn dark_colors() -> Colors {
         // browser_empty_dim = white@25% over surface_raised #292929
         browser_empty_dim: rgb(0x5F5F5F),
         tooltip_bg: rgb(0x0F0F0F),
+        tooltip_text: rgb(0xFFFFFF),
+        tooltip_border: rgba(0xFFFFFF, 18),
         menu_bg: rgb(0x4A4A4A),
         dropdown_bg: rgb(0x474747),
         modal_bg: rgb(0x1A1A1A),
@@ -698,6 +713,11 @@ fn light_colors() -> Colors {
         download_count_icon: rgb(0x258F52),
         error: rgb(0xB3261E),
         error_dark: rgb(0x982019),
+        // The dark amber fails contrast on a light canvas; a desaturated
+        // ochre keeps the status reading as status rather than decoration.
+        warn: rgb(0x9A6206),
+        // warn_fill = warn@10% over the sunken route canvas #E9ECEF
+        warn_fill: rgb(0xDFDEDA),
         link: rgb(0x006DC7),
         text: rgb(0x1D232A),
         text_dim: rgb(0x626E7A),
@@ -743,7 +763,11 @@ fn light_colors() -> Colors {
         row_stripe: rgb(0xE0E0E0),
         // browser_empty_dim = text@25% over surface_raised #FFFFFF
         browser_empty_dim: rgb(0xC7C8CA),
+        // The tooltip inverts against the light canvas (same trick as
+        // `menu_option_selected_*`), so it carries its own light-on-dark pair.
         tooltip_bg: rgb(0x242A30),
+        tooltip_text: rgb(0xEEF2F6),
+        tooltip_border: rgba(0xFFFFFF, 18),
         menu_bg: rgb(0xFFFFFF),
         dropdown_bg: rgb(0xFFFFFF),
         modal_bg: rgb(0xFFFFFF),
@@ -816,6 +840,11 @@ fn classic_source_colors() -> Colors {
         download_count_icon: rgb(0x879A57),
         error: rgb(0xB85E42),
         error_dark: rgb(0x9C5038),
+        // Pushed yellow-gold: the classic accent is already orange, so the
+        // usual amber would read as a second accent rather than a status.
+        warn: rgb(0xD6B23C),
+        // warn_fill = warn@14% over the sunken classic canvas #0F130D
+        warn_fill: rgb(0x2A2916),
         link: rgb(0xE08A2E),
         text: rgb(0xF2ECD8),
         text_dim: rgb(0xBBB696),
@@ -862,6 +891,8 @@ fn classic_source_colors() -> Colors {
         // browser_empty_dim = text@25% over surface_raised #293223
         browser_empty_dim: rgb(0x5B6150),
         tooltip_bg: rgb(0x0D100B),
+        tooltip_text: rgb(0xF2ECD8),
+        tooltip_border: rgba(0xF2ECD8, 22),
         menu_bg: rgb(0x394230),
         dropdown_bg: rgb(0x343D2B),
         modal_bg: rgb(0x141811),
@@ -1270,5 +1301,44 @@ mod tests {
         assert_eq!(tokens.variant, ThemeVariant::Light);
         assert_eq!(tokens.colors.bg, Rgba::rgb(0xF3F5F7));
         assert_eq!(tokens.colors.neutral, Rgba::rgb(0x006DC7));
+    }
+
+    /// WCAG relative luminance of an opaque token.
+    fn luminance(color: Rgba) -> f32 {
+        let channel = |value: u8| {
+            let value = value as f32 / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    }
+
+    fn contrast(a: Rgba, b: Rgba) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The light theme paints an inverted (dark) tooltip slab, so its label has
+    /// to come from `tooltip_text`; borrowing the page-level `text` token left
+    /// near-black glyphs on a near-black panel.
+    #[test]
+    fn tooltip_label_is_legible_in_every_theme() {
+        for variant in [
+            ThemeVariant::Dark,
+            ThemeVariant::Light,
+            ThemeVariant::ClassicSource,
+        ] {
+            let colors = Tokens::for_variant(variant).colors;
+            let ratio = contrast(colors.tooltip_bg, colors.tooltip_text);
+
+            assert!(
+                ratio >= 4.5,
+                "{}: tooltip text contrast {ratio:.2}:1 is below AA",
+                variant.name(),
+            );
+        }
     }
 }

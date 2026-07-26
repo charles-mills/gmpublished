@@ -35,4 +35,8 @@ pub enum Message {
     BulkExtractPathsSelected(Vec<PathBuf>),
     DestinationRequested,
     DestinationLabelChanged(String),
+    /// A button on the prerequisite panel this route renders in place of its
+    /// job columns. Forwarded straight up: the Downloader has no opinion on
+    /// Steam, it only hosts the panel.
+    Prerequisite(crate::features::prerequisites::Action),
 }

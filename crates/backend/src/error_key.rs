@@ -73,16 +73,6 @@ pub mod keys {
     pub const ICON_TOO_SMALL: ErrorKey = ErrorKey("ERR_ICON_TOO_SMALL");
     pub const ICON_INVALID_FORMAT: ErrorKey = ErrorKey("ERR_ICON_INVALID_FORMAT");
 
-    pub const VTF_DECODE_FAILED: ErrorKey = ErrorKey("ERR_VTF_DECODE_FAILED");
-    pub const BSP_DECODE_FAILED: ErrorKey = ErrorKey("ERR_BSP_DECODE_FAILED");
-    pub const BSP_UNSUPPORTED_VERSION: ErrorKey = ErrorKey("ERR_BSP_UNSUPPORTED_VERSION");
-    pub const BSP_TOO_LARGE: ErrorKey = ErrorKey("ERR_BSP_TOO_LARGE");
-    pub const MDL_DECODE_FAILED: ErrorKey = ErrorKey("ERR_MDL_DECODE_FAILED");
-    pub const MDL_VERTEX_INDEX_OUT_OF_RANGE: ErrorKey =
-        ErrorKey("ERR_MDL_VERTEX_INDEX_OUT_OF_RANGE");
-    pub const MDL_TOO_MANY_VERTICES: ErrorKey = ErrorKey("ERR_MDL_TOO_MANY_VERTICES");
-    pub const MDL_INVALID_MATERIAL_INDEX: ErrorKey = ErrorKey("ERR_MDL_INVALID_MATERIAL_INDEX");
-
     pub const NO_ADDONS_FOUND: ErrorKey = ErrorKey("ERR_NO_ADDONS_FOUND");
     pub const SEARCH_EVENT_SINK_UNAVAILABLE: ErrorKey =
         ErrorKey("ERR_SEARCH_EVENT_SINK_UNAVAILABLE");

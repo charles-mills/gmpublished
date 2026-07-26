@@ -1,7 +1,7 @@
 name = "gmpublished"
 product-name = "gmpublished"
 identifier = "dev.charlesmills.gmpublished"
-version = "0.2.1"
+version = "0.2.2"
 description = "Native Workshop publishing and addon inspection utility for Garry's Mod."
 long-description = "gmpublished is a native desktop application for publishing, updating, downloading, inspecting, and extracting Garry's Mod Workshop addons."
 homepage = "https://github.com/charles-mills/gmpublished"
@@ -30,22 +30,29 @@ icons = [
 package-name = "gmpublished"
 section = "utils"
 priority = "optional"
-desktop-template = "linux/gmpublished.desktop.hbs"
+desktop-template = "linux/gmpublished.desktop"
+# Keep in sync with the depends array in packaging/arch/PKGBUILD.
 depends = [
     "libc6",
     "libasound2",
     "libgcc-s1",
-    "libx11-6",
-    "libxcb1",
-    "libxkbcommon0",
+    "libdbus-1-3",
     "libfontconfig1",
     "libgl1",
+    "libvulkan1",
     "libwayland-client0",
+    "libx11-6",
+    "libxcb1",
+    "libxcursor1",
+    "libxi6",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
 ]
 
 [deb.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
 "steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
+"../THIRD-PARTY-NOTICES.md" = "usr/share/doc/gmpublished/THIRD-PARTY-NOTICES.md"
 
 [appimage]
 libs = []
@@ -54,17 +61,4 @@ bins = []
 [appimage.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
 "steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
-
-[pacman]
-depends = [
-    "hicolor-icon-theme",
-    "mesa",
-    "fontconfig",
-    "libxkbcommon",
-    "libx11",
-    "libxcb",
-    "wayland",
-]
-
-[pacman.files]
-"linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
+"../THIRD-PARTY-NOTICES.md" = "usr/share/doc/gmpublished/THIRD-PARTY-NOTICES.md"

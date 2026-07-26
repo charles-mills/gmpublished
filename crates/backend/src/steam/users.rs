@@ -1,5 +1,3 @@
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-
 use steamworks::{Friend, SteamId};
 
 use super::Steam;
@@ -116,15 +114,6 @@ impl Steam {
             self.users.write().insert(user.steamid, user);
         }
         on_user(user);
-    }
-
-    pub fn fetch_users(&self, steamids: Vec<SteamId>) -> Vec<SteamUser> {
-        let mut users = Vec::with_capacity(steamids.len());
-        steamids
-            .into_par_iter()
-            .map(|steamid| self.fetch_user(steamid))
-            .collect_into_vec(&mut users);
-        users
     }
 }
 

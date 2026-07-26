@@ -2,7 +2,7 @@
 //! sets, and this manager is the only path that starts decode work.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BinaryHeap, HashMap, HashSet},
     fmt,
     ops::Range,
     path::PathBuf,
@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use iced::{Task, widget::image};
-use quick_cache::{Weighter, unsync::Cache};
+use quick_cache::{DefaultHashBuilder, Weighter, unsync::Cache};
 
 use crate::{
     bridge::tasks::{BackendContext, RunBlockingError, ScheduleError},
@@ -43,7 +43,28 @@ const THUMBNAIL_SCALE_BUCKET: f32 = 0.5;
 const WORKSHOP_ICON_SOURCE_MAX_EDGE: u32 = 512;
 const WORKSHOP_ICON_SOURCE_MAX_SCALE: f32 = 2.0;
 
-type HandleCache = Cache<ThumbnailKey, ReadyThumbnail, ReadyThumbnailWeighter>;
+type HandleCache =
+    Cache<ThumbnailKey, ReadyThumbnail, ReadyThumbnailWeighter, DefaultHashBuilder, EvictionTrace>;
+
+/// Reports evictions to the measurement sink.
+///
+/// `quick_cache` also exposes `is_pinned` here, which is what a visible-window
+/// pin would use. It was built and measured, and does **not** ship: it removed
+/// every eviction of an on-screen key (20 → 0 under animation pressure) while
+/// saving exactly zero decode work, because rows hold `Arc`d handles and an
+/// evicted-but-visible entry costs nothing until it is re-demanded. See the
+/// plan's pin section — the hit-rate collapse it was meant to fix is a capacity
+/// problem, not an eviction-policy one.
+#[derive(Clone, Default)]
+pub struct EvictionTrace;
+
+impl quick_cache::Lifecycle<ThumbnailKey, ReadyThumbnail> for EvictionTrace {
+    type RequestState = ();
+
+    fn on_evict(&self, _state: &mut Self::RequestState, _key: ThumbnailKey, value: ReadyThumbnail) {
+        let _ = value;
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -134,10 +155,12 @@ pub struct Manager {
 
 impl Manager {
     pub(crate) fn new(config: Config) -> Self {
-        let cache = Cache::with_weighter(
+        let cache = Cache::with(
             config.estimated_items.max(1),
             config.memory_capacity_bytes.max(1),
             ReadyThumbnailWeighter,
+            DefaultHashBuilder::default(),
+            EvictionTrace,
         );
         let disk_cache = config
             .disk_cache_dir
@@ -231,19 +254,19 @@ impl Manager {
     }
 
     fn apply_demands(&mut self, set: DemandSet) -> Vec<Message> {
-        match set.replace {
-            ReplaceMode::Owner => self.index.remove_owner(&set.owner),
-        }
-        if set.owner == Owner::SizeAnalyzer {
-            let ids = set
-                .demands
-                .iter()
-                .map(|demand| demand.id.clone())
-                .collect::<HashSet<_>>();
-            self.index.remove_queued_warm(&ids);
-        }
-
-        let mut immediate = Vec::new();
+        // Diff rather than teardown-and-rebuild.
+        //
+        // A scroll tick re-demands the whole visible+prefetch window even
+        // though usually only a row or two entered or left it. Replacing the
+        // owner's set outright meant discarding ~72 identical interests and
+        // immediately recreating them, every tick — measured as 4,608 demand
+        // applications for 242 distinct thumbnails across one fling.
+        //
+        // Interests are keyed by (owner, generation, id, key), so an unchanged
+        // row produces an identical interest and is simply left alone: its
+        // queue position, in-flight job, and retry state all survive.
+        let mut retained = HashSet::with_capacity(set.demands.len());
+        let mut resolved = Vec::with_capacity(set.demands.len());
         for demand in set.demands {
             let physical_max_edge =
                 physical_thumbnail_edge(demand.logical_max_edge, self.scale_factor);
@@ -254,6 +277,49 @@ impl Manager {
             } else {
                 demand.input.cache_key(physical_max_edge)
             };
+            let interest = InterestKey {
+                owner: set.owner.clone(),
+                generation: set.generation,
+                id: demand.id.clone(),
+                key: key.clone(),
+            };
+            let _ = retained.insert(interest);
+            resolved.push((demand, key, physical_max_edge));
+        }
+
+        match set.replace {
+            ReplaceMode::Owner => self.index.retain_owner(&set.owner, &retained),
+        }
+        if set.owner == Owner::SizeAnalyzer {
+            let ids = resolved
+                .iter()
+                .map(|(demand, _, _)| demand.id.clone())
+                .collect::<HashSet<_>>();
+            self.index.remove_queued_warm(&ids);
+        }
+
+        let mut immediate = Vec::new();
+        for (demand, key, physical_max_edge) in resolved {
+            // Already demanded: leave the entry, its queue position, and any
+            // running job as they are — but pick up a priority promotion, since
+            // a row entering the visible window is the same interest served
+            // more urgently.
+            //
+            // The sequence is allocated up front rather than lazily: it is a
+            // free-running counter, so spending one on a demand that turns out
+            // to be new is cheaper than borrowing `self` twice to defer it.
+            let promoted_sequence = self.allocate_sequence();
+            if self.index.reprioritise_existing(
+                &set.owner,
+                set.generation,
+                &demand.id,
+                &key,
+                demand.priority,
+                promoted_sequence,
+            ) {
+                continue;
+            }
+
             if let Err(error) = validate_max_edge(physical_max_edge) {
                 immediate.push(Message::Delivered(Delivery::failed(
                     set.owner.clone(),
@@ -265,26 +331,30 @@ impl Manager {
                 continue;
             }
 
-            if let Some(ready) = self.cache.get(&key).cloned() {
-                immediate.push(Message::Delivered(Delivery::ready(
-                    set.owner.clone(),
-                    set.generation,
-                    demand.id,
-                    key,
-                    ready,
-                )));
-                continue;
-            }
-
+            // Warm is resolved *before* the memory cache is consulted, because
+            // the two ask different questions. Warm's product is bytes on disk;
+            // resident pixels do not imply a banked source (a legacy
+            // derived-tier hit has pixels and no source), and a memory hit here
+            // would both skip the banking warm exists to do and emit a
+            // `Delivered` to `Owner::WarmLibrary`, which nothing consumes. It
+            // would also drag the whole warm sweep through `quick_cache`'s
+            // recency window on the way past.
             if demand.priority == Priority::WarmLibrary {
-                // Warming only exists to fill the disk cache; a key already on
+                // Warming only exists to fill the disk cache; a URL already on
                 // disk needs no job, and nothing paints for the warm owner so
-                // no placeholder either. (A key cached between this check and
-                // job start just costs one redundant disk decode.)
-                if self
-                    .disk_cache
-                    .as_ref()
-                    .is_some_and(|cache| cache.contains(&key))
+                // no placeholder either. (A URL banked between this check and
+                // job start just costs one redundant `contains_source` probe in
+                // the worker.)
+                //
+                // The question is asked of the *source* tier, not the derived
+                // key. Warm no longer writes derived entries, so a derived-key
+                // check is absent by construction and would re-enqueue the
+                // entire library on every session after the first.
+                if let Some(url) = key.source_url()
+                    && self
+                        .disk_cache
+                        .as_ref()
+                        .is_some_and(|cache| cache.contains_source(url))
                 {
                     continue;
                 }
@@ -299,6 +369,17 @@ impl Manager {
                     physical_max_edge,
                     state,
                 ));
+                continue;
+            }
+
+            if let Some(ready) = self.cache.get(&key).cloned() {
+                immediate.push(Message::Delivered(Delivery::ready(
+                    set.owner.clone(),
+                    set.generation,
+                    demand.id,
+                    key,
+                    ready,
+                )));
                 continue;
             }
 
@@ -357,7 +438,8 @@ impl Manager {
                 }
                 Some(ready)
             }
-            Ok(ThumbnailWorkerOutcome::Cancelled) | Err(_) => None,
+            Ok(ThumbnailWorkerOutcome::SourceBanked | ThumbnailWorkerOutcome::Cancelled)
+            | Err(_) => None,
         };
         if !self.index.finish_job(key, job_id) {
             return CompletionEffects::default();
@@ -381,6 +463,10 @@ impl Manager {
                     })
                     .collect(),
             ),
+            Ok(ThumbnailWorkerOutcome::SourceBanked) => {
+                self.index.retire_warm_interests(key);
+                CompletionEffects::default()
+            }
             Ok(ThumbnailWorkerOutcome::Cancelled) => {
                 self.index.mark_interests_queued(key);
                 CompletionEffects::default()
@@ -459,6 +545,8 @@ impl Manager {
             };
             tasks.push(self.start_candidate(ctx, candidate));
         }
+        // `entries_total` is the scan width every `next_candidate` call above
+        // paid, which is the quantity Finding B is about.
         Task::batch(tasks)
     }
 
@@ -540,6 +628,12 @@ impl Manager {
 
     /// Scales the disk-cache eviction budget to the library so a full warm
     /// actually fits (the 256 MB default thrashes below library size).
+    /// A clone of the disk-cache handle, for work that belongs on a blocking
+    /// thread rather than in `update`. Clones share one index and one budget.
+    pub(crate) fn disk_cache_handle(&self) -> Option<WorkerDiskCache> {
+        self.disk_cache.clone()
+    }
+
     pub(crate) fn scale_disk_cache_to_library(&self, addon_count: usize) {
         const PER_ADDON_BYTES: u64 = 1_310_720; // ~1.25 MiB decoded at 512px
         const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -617,6 +711,8 @@ pub enum Owner {
     SizeAnalyzer,
     WarmLibrary,
 }
+
+impl Owner {}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DemandId(String);
@@ -917,6 +1013,54 @@ struct DemandIndex {
     active_jobs: HashMap<ThumbnailKey, ActiveJob>,
     delayed_retries: HashMap<ThumbnailKey, RetryId>,
     retry_attempts: HashMap<ThumbnailKey, RetryAttempt>,
+    /// Interests grouped by owner, so a demand-set replacement touches only
+    /// that owner's entries.
+    ///
+    /// Without it, tearing down a grid's ~72-entry window scanned every entry
+    /// in the index — including the whole-library warm set, which on a cold
+    /// disk cache is one entry per addon.
+    by_owner: HashMap<Owner, HashSet<InterestKey>>,
+    /// Queued interactive candidates, ordered by `(priority, sequence)`.
+    ///
+    /// Lazily deleted: entries are pushed on queue and simply skipped when
+    /// popped if they are no longer queued. Removing from the middle of a heap
+    /// is what an index of heap positions would buy, and the bookkeeping costs
+    /// more than the stale pops it avoids.
+    ready: BinaryHeap<Candidate>,
+    /// Queued whole-library warm candidates, kept in their own heap.
+    ///
+    /// Warm work is blocked outright whenever the interactive tiers hold more
+    /// than `WARM_MAX_IN_FLIGHT` slots. Sharing one heap meant every call in
+    /// that state popped the entire warm backlog just to discover none of it
+    /// was startable, then pushed it all back — reintroducing the O(library)
+    /// scan the heap exists to remove. Partitioning lets that case skip the
+    /// backlog entirely.
+    ready_warm: BinaryHeap<Candidate>,
+}
+
+/// Heap entry ordering candidates by scheduling preference.
+///
+/// `Reverse` on both fields because `BinaryHeap` is a max-heap and the most
+/// preferred candidate is the lowest priority value, then the lowest sequence.
+#[derive(Clone, Eq, PartialEq)]
+struct Candidate {
+    priority: std::cmp::Reverse<Priority>,
+    sequence: std::cmp::Reverse<u64>,
+    interest: InterestKey,
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| self.sequence.cmp(&other.sequence))
+    }
+}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl DemandIndex {
@@ -927,11 +1071,93 @@ impl DemandIndex {
             .entry(key)
             .or_default()
             .push(interest.clone());
+        let _ = self
+            .by_owner
+            .entry(entry.owner.clone())
+            .or_default()
+            .insert(interest.clone());
+        if entry.state == DemandState::Queued {
+            self.enqueue(&interest, entry.priority, entry.sequence);
+        }
         self.entries.insert(interest, entry);
     }
 
-    fn remove_owner(&mut self, owner: &Owner) {
-        self.remove_where(|entry| entry.owner == *owner);
+    fn enqueue(&mut self, interest: &InterestKey, priority: Priority, sequence: u64) {
+        let candidate = Candidate {
+            priority: std::cmp::Reverse(priority),
+            sequence: std::cmp::Reverse(sequence),
+            interest: interest.clone(),
+        };
+        if priority == Priority::WarmLibrary {
+            self.ready_warm.push(candidate);
+        } else {
+            self.ready.push(candidate);
+        }
+    }
+
+    /// Drops this owner's interests that are absent from `keep`, leaving the
+    /// rest untouched.
+    fn retain_owner(&mut self, owner: &Owner, keep: &HashSet<InterestKey>) {
+        let Some(interests) = self.by_owner.get(owner) else {
+            return;
+        };
+        let stale = interests.difference(keep).cloned().collect::<Vec<_>>();
+        if stale.is_empty() {
+            return;
+        }
+
+        if let Some(interests) = self.by_owner.get_mut(owner) {
+            for interest in &stale {
+                let _ = interests.remove(interest);
+            }
+            if interests.is_empty() {
+                let _ = self.by_owner.remove(owner);
+            }
+        }
+        for interest in &stale {
+            let _ = self.detach_interest(interest);
+        }
+    }
+
+    /// Whether this exact interest is already demanded, re-prioritising it if
+    /// the caller now wants it more urgently.
+    ///
+    /// Priority is deliberately *not* part of `InterestKey` — the same row at a
+    /// new priority is the same interest, not a second one. But that means a
+    /// row promoted from `Prefetch` to `VisibleRow` as the user scrolls toward
+    /// it looks unchanged to a plain existence check, and would keep serving at
+    /// prefetch priority for as long as it stayed on screen. Nothing in the
+    /// delivered results would look wrong; it would simply be slow.
+    fn reprioritise_existing(
+        &mut self,
+        owner: &Owner,
+        generation: u64,
+        id: &DemandId,
+        key: &ThumbnailKey,
+        priority: Priority,
+        promoted_sequence: u64,
+    ) -> bool {
+        let interest = InterestKey {
+            owner: owner.clone(),
+            generation,
+            id: id.clone(),
+            key: key.clone(),
+        };
+        let Some(entry) = self.entries.get_mut(&interest) else {
+            return false;
+        };
+
+        if entry.priority != priority {
+            entry.priority = priority;
+            entry.sequence = promoted_sequence;
+            let (state, sequence) = (entry.state, entry.sequence);
+            if state == DemandState::Queued {
+                // The old heap candidate still carries the old priority and
+                // sequence; it is skipped on pop by the sequence check.
+                self.enqueue(&interest, priority, sequence);
+            }
+        }
+        true
     }
 
     fn remove_queued_warm(&mut self, ids: &HashSet<DemandId>) {
@@ -954,6 +1180,22 @@ impl DemandIndex {
     }
 
     fn remove_interest(&mut self, interest: &InterestKey) -> Option<DemandEntry> {
+        let entry = self.detach_interest(interest)?;
+        // `retain_owner` prunes the bucket itself before detaching, so it uses
+        // `detach_interest` directly; every other caller removes one interest
+        // and must keep the owner bucket in step.
+        if let Some(interests) = self.by_owner.get_mut(&entry.owner) {
+            let _ = interests.remove(interest);
+            if interests.is_empty() {
+                let _ = self.by_owner.remove(&entry.owner);
+            }
+        }
+        Some(entry)
+    }
+
+    /// Removes an interest from `entries` and `key_to_interests` without
+    /// touching `by_owner`. Any stale heap candidate is skipped on pop.
+    fn detach_interest(&mut self, interest: &InterestKey) -> Option<DemandEntry> {
         let entry = self.entries.remove(interest)?;
         if let Some(interests) = self.key_to_interests.get_mut(&entry.key) {
             interests.retain(|candidate| candidate != interest);
@@ -964,6 +1206,14 @@ impl DemandIndex {
         Some(entry)
     }
 
+    /// Drops work nobody wants any more, releasing its media slot.
+    ///
+    /// Cancelling an in-flight job is not the waste the `JobCancel` count makes
+    /// it look like: cancellation is cooperative and only checked before I/O, so
+    /// a job already fetching runs to completion, and `complete_job` inserts the
+    /// result into the memory cache *before* it checks whether anyone still
+    /// wants it. The bytes are kept either way. What cancelling actually buys is
+    /// the slot, immediately, for rows the user has now scrolled to.
     fn cancel_uninterested_work(&mut self) {
         let keys = self
             .active_jobs
@@ -988,30 +1238,14 @@ impl DemandIndex {
     }
 
     fn next_candidate(&mut self, job_id: JobId, allow_warm: bool) -> Option<StartCandidate> {
+        // Pops in scheduling order, discarding candidates that are stale
+        // (their entry is gone, or no longer queued) and setting aside the ones
+        // that are merely blocked right now so they are not lost.
         let selected = self
-            .entries
-            .values()
-            .filter(|entry| {
-                entry.state == DemandState::Queued
-                    && !self.active_jobs.contains_key(&entry.key)
-                    && (allow_warm || entry.priority != Priority::WarmLibrary)
-                    && !(entry.key.mode() == ThumbnailMode::Static
-                        && self.active_jobs.keys().any(|active| {
-                            active.mode() == ThumbnailMode::Animated
-                                && active.source == entry.key.source
-                        }))
-            })
-            .min_by_key(|entry| (entry.priority, entry.sequence))
-            .map(|entry| {
-                (
-                    entry.key.clone(),
-                    entry.input.clone(),
-                    entry.physical_max_edge,
-                    entry.priority,
-                )
-            })?;
+            .take_startable(false)
+            .or_else(|| allow_warm.then(|| self.take_startable(true)).flatten());
 
-        let (key, input, physical_max_edge, priority) = selected;
+        let (key, input, physical_max_edge, priority) = selected?;
         if let Some(interests) = self.key_to_interests.get(&key) {
             for interest in interests {
                 if let Some(entry) = self.entries.get_mut(interest) {
@@ -1029,6 +1263,9 @@ impl DemandIndex {
             },
         );
 
+        // Emitted here rather than in `pump` so every caller that claims a job
+        // is counted, including the headless driver's simulated worker pool.
+
         Some(StartCandidate {
             key,
             input,
@@ -1038,6 +1275,62 @@ impl DemandIndex {
             attempt,
             cancellation,
         })
+    }
+
+    /// Pops the best startable candidate from one tier's heap.
+    ///
+    /// Candidates that are stale (entry gone, no longer queued, or superseded
+    /// by a newer sequence) are dropped. Candidates that are merely blocked
+    /// right now — their source already has a job running, or a static request
+    /// is waiting on the animated decode of the same source — are set aside and
+    /// returned to the heap, because they are still wanted.
+    fn take_startable(
+        &mut self,
+        warm: bool,
+    ) -> Option<(ThumbnailKey, ThumbnailInput, u32, Priority)> {
+        let mut deferred = Vec::new();
+        let selected = loop {
+            let heap = if warm {
+                &mut self.ready_warm
+            } else {
+                &mut self.ready
+            };
+            let Some(candidate) = heap.pop() else {
+                break None;
+            };
+
+            let Some(entry) = self.entries.get(&candidate.interest) else {
+                continue;
+            };
+            if entry.state != DemandState::Queued || entry.sequence != candidate.sequence.0 {
+                continue;
+            }
+
+            let blocked = self.active_jobs.contains_key(&entry.key)
+                || (entry.key.mode() == ThumbnailMode::Static
+                    && self.active_jobs.keys().any(|active| {
+                        active.mode() == ThumbnailMode::Animated
+                            && active.source == entry.key.source
+                    }));
+            if blocked {
+                deferred.push(candidate);
+                continue;
+            }
+
+            break Some((
+                entry.key.clone(),
+                entry.input.clone(),
+                entry.physical_max_edge,
+                entry.priority,
+            ));
+        };
+
+        if warm {
+            self.ready_warm.extend(deferred);
+        } else {
+            self.ready.extend(deferred);
+        }
+        selected
     }
 
     /// True when `key` has at least one interest and every one is warm-tier —
@@ -1063,13 +1356,49 @@ impl DemandIndex {
         self.mark_interests_queued(key);
     }
 
-    fn mark_interests_queued(&mut self, key: &ThumbnailKey) {
-        if let Some(interests) = self.key_to_interests.get(key) {
-            for interest in interests {
-                if let Some(entry) = self.entries.get_mut(interest) {
-                    entry.state = DemandState::Queued;
-                }
+    /// Retires the warm interests in `key` and re-queues everything else.
+    ///
+    /// A warm job hands back no pixels, so the two halves have to be handled
+    /// differently. Warm interests are *satisfied* — the bytes they wanted are
+    /// on disk — and must not be re-queued, or the pump would restart a job
+    /// that banks-and-completes immediately, forever. An interactive interest
+    /// that attached while the warm job was in flight is *not* satisfied, and
+    /// would otherwise sit `InFlight` waiting for a delivery that is never
+    /// coming; re-queuing it restarts it at its own priority, and that restart
+    /// is local, since the source it needs was just banked.
+    fn retire_warm_interests(&mut self, key: &ThumbnailKey) {
+        let Some(interests) = self.key_to_interests.get(key).cloned() else {
+            return;
+        };
+        // The warm fetch succeeded, so any backoff it accumulated is spent.
+        self.retry_attempts.remove(key);
+        for interest in interests {
+            let Some(entry) = self.entries.get_mut(&interest) else {
+                continue;
+            };
+            if entry.priority == Priority::WarmLibrary {
+                let _ = self.remove_interest(&interest);
+                continue;
             }
+            entry.state = DemandState::Queued;
+            let (priority, sequence) = (entry.priority, entry.sequence);
+            self.enqueue(&interest, priority, sequence);
+        }
+    }
+
+    fn mark_interests_queued(&mut self, key: &ThumbnailKey) {
+        let Some(interests) = self.key_to_interests.get(key).cloned() else {
+            return;
+        };
+        for interest in interests {
+            let Some(entry) = self.entries.get_mut(&interest) else {
+                continue;
+            };
+            entry.state = DemandState::Queued;
+            let (priority, sequence) = (entry.priority, entry.sequence);
+            // Re-offer: the entry's previous heap candidate was consumed when
+            // it left the queue, so becoming queued again needs a fresh one.
+            self.enqueue(&interest, priority, sequence);
         }
     }
 
@@ -1109,18 +1438,30 @@ impl DemandIndex {
 
     fn cancel_key(&mut self, key: &ThumbnailKey) {
         if let Some(job) = self.active_jobs.remove(key) {
+            // Only an actually-running job counts as cancelled work; clearing a
+            // queued entry costs nothing and would inflate the waste ratio.
             job.cancellation.cancel();
         }
         self.delayed_retries.remove(key);
         self.retry_attempts.remove(key);
     }
 
+    /// Retires every interest in `key`, returning them so the caller can
+    /// deliver to each.
+    ///
+    /// Removals go through `remove_interest` so the owner bucket is kept in
+    /// step. Dropping straight out of `entries` left the interest behind in
+    /// `by_owner` — harmless today, because `retain_owner` is that map's only
+    /// reader and it tolerates entries that no longer exist, but the ghosts
+    /// accumulated for a whole session under `Owner::WarmLibrary` (which
+    /// applies exactly one demand set and so never prunes again), and any
+    /// future reader of `by_owner` would have inherited a lie.
     fn complete_key(&mut self, key: &ThumbnailKey) -> Vec<DemandEntry> {
         self.cancel_key(key);
         let interests = self.key_to_interests.remove(key).unwrap_or_default();
         interests
             .into_iter()
-            .filter_map(|interest| self.entries.remove(&interest))
+            .filter_map(|interest| self.remove_interest(&interest))
             .collect()
     }
 
@@ -1267,6 +1608,8 @@ fn ready_thumbnail(key: ThumbnailKey, thumbnail: &PreparedThumbnail) -> ReadyThu
         metadata.height,
         Bytes::from_owner(thumbnail.thumbnail().rgba_arc()),
     );
+    // The one place an `image::Id` and a cache key meet. Without this binding a
+    // painted image is anonymous and cannot be attributed to an addon.
     ReadyThumbnail {
         key,
         handle,
@@ -1573,9 +1916,7 @@ mod tests {
             &animated_key,
             warm.job_id,
             warm.attempt,
-            Ok(ThumbnailWorkerOutcome::Completed(prepared_thumbnail(
-                solid_thumbnail(16, 12, 3),
-            ))),
+            Ok(ThumbnailWorkerOutcome::SourceBanked),
         );
         let candidate = manager
             .next_candidate_for_test()
@@ -1583,8 +1924,10 @@ mod tests {
         assert_eq!(candidate.key.mode(), ThumbnailMode::Static);
     }
 
+    /// A warm job's product is bytes on disk. It paints nothing, delivers
+    /// nothing, and must not churn the memory cache's recency window.
     #[test]
-    fn warm_only_completion_skips_the_memory_cache() {
+    fn a_warm_completion_delivers_nothing_and_enters_no_cache() {
         let mut manager = Manager::new(Config::default());
         let input = ThumbnailInput::from_url("https://example.invalid/warm.jpg");
         let key = input.cache_key(physical_thumbnail_edge(256, 1.0));
@@ -1602,20 +1945,303 @@ mod tests {
             &key,
             candidate.job_id,
             candidate.attempt,
-            Ok(ThumbnailWorkerOutcome::Completed(prepared_thumbnail(
-                solid_thumbnail(16, 12, 3),
-            ))),
+            Ok(ThumbnailWorkerOutcome::SourceBanked),
         );
 
         assert_eq!(manager.cache_len(), 0, "warm fills disk, not memory");
-        assert!(effects.messages.iter().any(|message| matches!(
-            message,
-            Message::Delivered(Delivery {
-                owner: Owner::WarmLibrary,
-                result: DeliveryResult::Ready(_),
-                ..
-            })
-        )));
+        assert!(
+            effects.messages.is_empty(),
+            "nothing paints for the warm owner, so nothing is delivered"
+        );
+    }
+
+    /// The warm interest is *satisfied* by the banked bytes, so it must be
+    /// retired rather than re-queued. Re-queuing it would have the pump restart
+    /// a job that banks-and-completes immediately, forever.
+    #[test]
+    fn a_warm_completion_does_not_re_offer_its_own_interest() {
+        let mut manager = Manager::new(Config::default());
+        let input = ThumbnailInput::from_url("https://example.invalid/warm-once.jpg");
+        let key = input.cache_key(physical_thumbnail_edge(256, 1.0));
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
+        });
+        let candidate = manager.next_candidate_for_test().expect("warm job queued");
+        let _ = manager.complete_job(
+            &key,
+            candidate.job_id,
+            candidate.attempt,
+            Ok(ThumbnailWorkerOutcome::SourceBanked),
+        );
+
+        assert!(
+            manager.next_candidate_for_test().is_none(),
+            "a banked source is finished work, not work to start again"
+        );
+    }
+
+    /// A visible row can attach to a key while its warm job is already in
+    /// flight. That job hands back no pixels, so without a re-queue the row
+    /// would sit `InFlight` waiting for a delivery that is never coming — a
+    /// card stuck on its placeholder for the rest of the session.
+    #[test]
+    fn an_interactive_interest_joining_a_running_warm_job_is_requeued() {
+        let mut manager = Manager::new(Config::default());
+        let input = ThumbnailInput::from_url("https://example.invalid/joined.jpg");
+        let key = input.cache_key(physical_thumbnail_edge(256, 1.0));
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
+        });
+        let warm = manager.next_candidate_for_test().expect("warm job queued");
+
+        // The row arrives mid-flight, so it joins the running job rather than
+        // starting one of its own.
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::AddonGrid("Installed Addons"),
+            generation: 1,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row-1", input, 256, Priority::VisibleRow)],
+        });
+        assert!(
+            manager.next_candidate_for_test().is_none(),
+            "the row joins the in-flight job instead of duplicating it"
+        );
+
+        let effects = manager.complete_job(
+            &key,
+            warm.job_id,
+            warm.attempt,
+            Ok(ThumbnailWorkerOutcome::SourceBanked),
+        );
+        assert!(effects.messages.is_empty(), "warm still delivers nothing");
+
+        let restarted = manager
+            .next_candidate_for_test()
+            .expect("the visible row must be re-offered");
+        assert_eq!(restarted.key, key);
+        assert_eq!(
+            restarted.priority,
+            Priority::VisibleRow,
+            "and at its own priority, not the warm tier's"
+        );
+    }
+
+    /// `InterestKey` deliberately excludes priority — the same row at a new
+    /// priority is the same interest, not a second one. That makes a plain
+    /// existence check silently wrong for a row the user scrolls *toward*: it
+    /// looks unchanged, so it keeps serving at prefetch priority for as long as
+    /// it stays on screen. Nothing in the delivered results looks wrong; the
+    /// card is just slow.
+    ///
+    /// Covered directly here: this behaviour was once guarded only by a
+    /// benchmark harness's count-determinism, which no longer exists.
+    #[test]
+    fn a_row_promoted_to_visible_is_re_offered_at_its_new_priority() {
+        let mut manager = Manager::new(Config::default());
+        let ahead = ThumbnailInput::from_url("https://example.invalid/ahead.jpg");
+        let promoted = ThumbnailInput::from_url("https://example.invalid/promoted.jpg");
+
+        // `promoted` is demanded first, so it wins any tie on sequence — the
+        // test would pass for the wrong reason if priority were ignored.
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::AddonGrid("My Workshop"),
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![
+                demand("row-1", promoted.clone(), 256, Priority::Prefetch),
+                demand("row-2", ahead.clone(), 256, Priority::Prefetch),
+            ],
+        });
+
+        // The user scrolls toward row-1: same owner, same id, same key, higher
+        // priority. Re-demanded alongside row-2 exactly as a real grid tick does.
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::AddonGrid("My Workshop"),
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![
+                demand("row-1", promoted.clone(), 256, Priority::VisibleRow),
+                demand("row-2", ahead, 256, Priority::Prefetch),
+            ],
+        });
+
+        let first = manager
+            .next_candidate_for_test()
+            .expect("promoted row is startable");
+        assert_eq!(
+            first.priority,
+            Priority::VisibleRow,
+            "the promotion must reach the entry, not just the demand"
+        );
+        assert_eq!(
+            first.key,
+            promoted.cache_key(physical_thumbnail_edge(256, 1.0)),
+            "and the promoted row must be scheduled ahead of the prefetch work"
+        );
+    }
+
+    /// The same mechanism in reverse: a row that scrolls off the visible window
+    /// into the prefetch band must stop holding a visible-tier slot, or a long
+    /// scroll would accumulate stale high-priority entries.
+    #[test]
+    fn a_row_demoted_to_prefetch_gives_up_its_visible_priority() {
+        let mut manager = Manager::new(Config::default());
+        let settling = ThumbnailInput::from_url("https://example.invalid/settling.jpg");
+        let arriving = ThumbnailInput::from_url("https://example.invalid/arriving.jpg");
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::AddonGrid("My Workshop"),
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row-1", settling.clone(), 256, Priority::VisibleRow)],
+        });
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::AddonGrid("My Workshop"),
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![
+                demand("row-1", settling, 256, Priority::Prefetch),
+                demand("row-2", arriving.clone(), 256, Priority::VisibleRow),
+            ],
+        });
+
+        let first = manager
+            .next_candidate_for_test()
+            .expect("the newly visible row is startable");
+        assert_eq!(
+            first.key,
+            arriving.cache_key(physical_thumbnail_edge(256, 1.0)),
+            "the demoted row must not keep the visible slot it no longer deserves"
+        );
+    }
+
+    /// Promotion of an entry whose job is already running must reach the entry
+    /// without re-offering it: the work is in flight, and a second candidate
+    /// for a running key is the duplicate-job class the scheduler exists to
+    /// prevent — but the new priority still has to stick, or a row that was
+    /// promoted mid-flight would be re-queued at prefetch tier if its job is
+    /// ever cancelled or retried.
+    #[test]
+    fn promoting_an_in_flight_row_keeps_the_priority_without_queueing_twice() {
+        let mut manager = Manager::new(Config::default());
+        let input = ThumbnailInput::from_url("https://example.invalid/in-flight.jpg");
+        let key = input.cache_key(physical_thumbnail_edge(256, 1.0));
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::AddonGrid("My Workshop"),
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row-1", input.clone(), 256, Priority::Prefetch)],
+        });
+        let started = manager.next_candidate_for_test().expect("job starts");
+        assert_eq!(started.priority, Priority::Prefetch);
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::AddonGrid("My Workshop"),
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row-1", input, 256, Priority::VisibleRow)],
+        });
+
+        assert!(
+            manager.next_candidate_for_test().is_none(),
+            "the running job covers the promoted interest"
+        );
+
+        // Cancel the in-flight job so the entry is re-offered. Its priority on
+        // the way back out is the only observable proof the promotion reached
+        // the entry rather than being swallowed — without it, this test passes
+        // even if `reprioritise_existing` did nothing, because `take_startable`
+        // discards a duplicate candidate on state alone.
+        let _ = manager.complete_job(
+            &key,
+            started.job_id,
+            started.attempt,
+            Ok(ThumbnailWorkerOutcome::Cancelled),
+        );
+        let requeued = manager
+            .next_candidate_for_test()
+            .expect("a cancelled job re-offers its interest");
+        assert_eq!(
+            requeued.priority,
+            Priority::VisibleRow,
+            "the mid-flight promotion must survive the job it was applied to"
+        );
+    }
+
+    /// Warm's skip has to ask the *source* tier. It once asked the derived key,
+    /// which warm no longer writes — so every session after the first
+    /// re-enqueued the entire library.
+    #[test]
+    fn warm_skips_a_url_whose_source_is_already_banked() {
+        let root = crate::test_support::TestDir::new("warm-skip-source-tier");
+        let url = "https://example.invalid/already-banked.jpg";
+        let cache = crate::media::thumbnail_worker::WorkerDiskCache::new(
+            root.path().to_path_buf(),
+            1024 * 1024,
+        );
+        crate::media::thumbnail_worker::write_source_bytes(&cache, url, &[1, 2, 3, 4]);
+
+        let mut manager = Manager::new(Config {
+            disk_cache_dir: Some(root.path().to_path_buf()),
+            ..Config::default()
+        });
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand(
+                "101",
+                ThumbnailInput::from_url(url),
+                256,
+                Priority::WarmLibrary,
+            )],
+        });
+
+        assert!(
+            manager.next_candidate_for_test().is_none(),
+            "a URL already in the source tier needs no warm job"
+        );
+    }
+
+    /// The counterpart: a derived entry is not a source, so it must not satisfy
+    /// the skip. Otherwise nothing the user scrolled past would ever have its
+    /// source banked.
+    #[test]
+    fn warm_still_runs_when_only_a_derived_entry_exists() {
+        let root = crate::test_support::TestDir::new("warm-skip-derived-only");
+        let url = "https://example.invalid/derived-only.jpg";
+        let input = ThumbnailInput::from_url(url);
+        let key = input.cache_key(physical_thumbnail_edge(256, 1.0));
+        let cache = crate::media::thumbnail_worker::WorkerDiskCache::new(
+            root.path().to_path_buf(),
+            1024 * 1024,
+        );
+        crate::media::thumbnail_worker::write_disk_cache(&cache, &key, &solid_thumbnail(16, 12, 3));
+
+        let mut manager = Manager::new(Config {
+            disk_cache_dir: Some(root.path().to_path_buf()),
+            ..Config::default()
+        });
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: 0,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
+        });
+
+        assert!(
+            manager.next_candidate_for_test().is_some(),
+            "a derived entry does not mean the source is local"
+        );
     }
 
     #[test]

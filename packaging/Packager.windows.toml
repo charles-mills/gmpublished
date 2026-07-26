@@ -1,7 +1,7 @@
 name = "gmpublished"
 product-name = "gmpublished"
 identifier = "dev.charlesmills.gmpublished"
-version = "0.2.1"
+version = "0.2.2"
 description = "Native Workshop publishing and addon inspection utility for Garry's Mod."
 long-description = "gmpublished is a native desktop application for publishing, updating, downloading, inspecting, and extracting Garry's Mod Workshop addons."
 homepage = "https://github.com/charles-mills/gmpublished"
@@ -28,6 +28,7 @@ icons = [
 
 resources = [
     { src = "steam/generated/steam_api64.dll", target = "steam_api64.dll" },
+    { src = "../THIRD-PARTY-NOTICES.md", target = "THIRD-PARTY-NOTICES.md" },
 ]
 
 [wix]
@@ -55,7 +56,7 @@ fragments = ['''
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities" Name="ApplicationIcon" Value="&quot;[INSTALLDIR]gmpublished.exe&quot;,0" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities" Name="ApplicationName" Value="gmpublished" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\FileAssociations" Name=".gma" Value="gmpublished.gma.Document" Type="string" />
-        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\MIMEAssociations" Name="application/gma" Value="gmpublished.gma.Document" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\MIMEAssociations" Name="application/x-garrys-mod-addon" Value="gmpublished.gma.Document" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\gmpublished\Capabilities\shell\Open\command" Value="&quot;[INSTALLDIR]gmpublished.exe&quot; -e &quot;%1&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\RegisteredApplications" Name="gmpublished" Value="SOFTWARE\gmpublished\Capabilities" Type="string" KeyPath="yes" />
 
@@ -63,7 +64,7 @@ fragments = ['''
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\gmpublished.gma.Document\DefaultIcon" Value="&quot;[INSTALLDIR]gmpublished.exe&quot;,0" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\gmpublished.gma.Document\shell\open\command" Value="&quot;[INSTALLDIR]gmpublished.exe&quot; -e &quot;%1&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Value="gmpublished.gma.Document" Type="string" />
-        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Name="Content Type" Value="application/gma" Type="string" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma" Name="Content Type" Value="application/x-garrys-mod-addon" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma\OpenWithList\gmpublished.exe" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gma\OpenWithProgids" Name="gmpublished.gma.Document" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Applications\gmpublished.exe\SupportedTypes" Name=".gma" Value="" Type="string" />

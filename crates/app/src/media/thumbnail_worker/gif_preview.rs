@@ -21,7 +21,19 @@ pub const MIN_FRAME_DELAY: Duration = Duration::from_millis(10);
 #[cfg(test)]
 pub const GIF_PREVIEW_MAX_EDGE: u32 = 256;
 /// Maximum frame count retained in a baked display atlas before decimation.
-pub const BAKED_ANIMATION_MAX_FRAMES: usize = 64;
+/// Frames retained in a baked display atlas.
+///
+/// 32, not 64. Combined with the 256 px tile ceiling this halves the worst-case
+/// atlas — and therefore an animation's weight in the memory cache — from 16 MB
+/// to 8 MB, roughly 3% of the 256 MB budget per animated card instead of 6%.
+///
+/// Halving the *byte* budget instead would have hit the same total by shrinking
+/// tiles to ~181 px, which is visible softening on a ~200 pt card. Dropping
+/// frames costs nothing on the observed content: Workshop previews are short
+/// loops, well under this ceiling, so decimation rarely engages at all. Total
+/// playback time is preserved either way — dropped frames hand their delay to
+/// the frame that replaces them.
+pub const BAKED_ANIMATION_MAX_FRAMES: usize = 32;
 /// Maximum transient display-atlas byte weight.
 pub const BAKED_ANIMATION_MAX_ATLAS_BYTES: usize = 16 * 1024 * 1024;
 
@@ -431,11 +443,26 @@ pub fn bake_gif_animation(bytes: &[u8], display_max_edge: u32) -> GifPreviewResu
     let mut frame_stream = gif_preview_frame_stream(Cursor::new(bytes))?;
     frame_stream.seed_canvas(primed_canvas);
     let mut frame_decoder = GifFrameDecoder::new(tile_max_edge);
-    let mut frames = Vec::new();
+
+    // Decimation is decided up front rather than after the fact.
+    //
+    // Every frame still has to be *composited* — GIF frames are deltas over a
+    // running canvas, so skipping one corrupts every frame after it. But only
+    // the frames that survive decimation need resizing into a tile, and those
+    // are the expensive part in both CPU and peak memory. Decoding all of a
+    // long animation's tiles and then discarding most of them meant a 200-frame
+    // GIF built 200 tiles to keep 64.
+    let mut kept = Decimation::new(frame_count);
+    let mut frames = Vec::with_capacity(kept.kept_count());
     let mut frame_index = 0_usize;
 
     while let Some(frame) = frame_stream.decode_next_frame(frame_index)? {
-        frames.push(frame_decoder.decode_frame(frame_index, frame)?);
+        let delay = frame.delay;
+        kept.advance_to(frame_index);
+        if kept.keeps(frame_index) {
+            frames.push(frame_decoder.decode_frame(frame_index, frame)?);
+        }
+        kept.absorb_delay(frame_index, delay, &mut frames);
         frame_index += 1;
     }
 
@@ -465,6 +492,73 @@ fn atlas_budget_edge_cap(frame_count: usize, budget_bytes: usize) -> GifPreviewR
     let tile_pixel_budget =
         u64::try_from(budget_bytes).unwrap_or(u64::MAX) / grid_bytes_per_square_pixel;
     Ok(u32::try_from(tile_pixel_budget.isqrt()).unwrap_or(u32::MAX))
+}
+
+/// Which frame indices survive decimation, and where each dropped frame's time
+/// goes.
+///
+/// Mirrors `decimate_baked_frames` exactly — same bucket boundaries, same
+/// "first frame of the bucket wins" rule, same delay accumulation — so
+/// pre-filtering here and decimating afterwards produce identical output. That
+/// function stays as the safety net for callers that build frame sets by other
+/// routes.
+///
+/// The bucket starts are materialised rather than inverted on the fly. The
+/// inverse of `floor(bucket * frame_count / MAX)` is a ceiling division that is
+/// easy to get subtly wrong — an earlier version of this kept 2 frames out of
+/// 70 — and the table is at most `MAX` entries.
+struct Decimation {
+    /// First frame index of each bucket, ascending. Empty when no decimation
+    /// applies.
+    starts: Vec<usize>,
+    bucket: usize,
+}
+
+impl Decimation {
+    fn new(frame_count: usize) -> Self {
+        let starts = if frame_count <= BAKED_ANIMATION_MAX_FRAMES {
+            Vec::new()
+        } else {
+            (0..BAKED_ANIMATION_MAX_FRAMES)
+                .map(|bucket| bucket * frame_count / BAKED_ANIMATION_MAX_FRAMES)
+                .collect()
+        };
+        Self { starts, bucket: 0 }
+    }
+
+    fn kept_count(&self) -> usize {
+        if self.starts.is_empty() {
+            BAKED_ANIMATION_MAX_FRAMES
+        } else {
+            self.starts.len()
+        }
+    }
+
+    /// Advances to the bucket owning `index`. Indices arrive in order, so this
+    /// is a walk rather than a search.
+    fn advance_to(&mut self, index: usize) {
+        while self.bucket + 1 < self.starts.len() && self.starts[self.bucket + 1] <= index {
+            self.bucket += 1;
+        }
+    }
+
+    fn keeps(&self, index: usize) -> bool {
+        self.starts
+            .get(self.bucket)
+            .is_none_or(|start| *start == index)
+    }
+
+    /// Adds a dropped frame's delay to the kept frame that owns it, so the
+    /// animation runs at its original speed rather than shortening.
+    fn absorb_delay(&self, index: usize, delay: Duration, frames: &mut [GifPreviewFrame]) {
+        if self.starts.is_empty() || self.keeps(index) {
+            // Kept frames already carry their own delay from the decoder.
+            return;
+        }
+        if let Some(frame) = frames.get_mut(self.bucket) {
+            frame.delay = normalize_duration_delay(frame.delay.saturating_add(delay));
+        }
+    }
 }
 
 /// Composites one full loop and returns the steady-state canvas and frame count.

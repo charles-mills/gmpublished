@@ -33,8 +33,8 @@ use crate::bridge::{
 };
 use crate::features::{
     context_menu, destination_select, downloader, file_preview, installed_addons, modal_stack,
-    my_workshop, prepare_publish, preview_gma, search, settings, shell, size_analyzer,
-    steam_session, tasks_overlay,
+    my_workshop, prepare_publish, prerequisites, preview_gma, search, settings, shell,
+    size_analyzer, steam_session, tasks_overlay,
 };
 use crate::format::DownloadCountFormatter;
 use crate::i18n::I18n;
@@ -58,6 +58,7 @@ mod side_effects_audio;
 mod side_effects_downloader;
 #[cfg(feature = "asset-studio")]
 mod side_effects_file_preview;
+mod side_effects_prerequisites;
 mod side_effects_preview_gma;
 mod side_effects_publish;
 mod side_effects_search;
@@ -118,7 +119,6 @@ impl Drop for App {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
-    title: &'static str,
     shell: shell::State,
     my_workshop: my_workshop::State,
     installed_addons: installed_addons::State,
@@ -132,6 +132,7 @@ pub struct State {
     settings: settings::State,
     context_menu: context_menu::State,
     steam_session: steam_session::State,
+    prerequisites: prerequisites::State,
     modal_stack: modal_stack::State,
     tasks_overlay: tasks_overlay::State,
     chrome_strategy: shell::ChromeStrategy,
@@ -158,7 +159,6 @@ impl Default for State {
         let system_scheme = SystemColorScheme::Dark;
         let accent_inputs = theme::AccentInputs::for_preset(theme_preset);
         let mut state = Self {
-            title: "app-title",
             shell: shell::State::default(),
             my_workshop: my_workshop::State::default(),
             installed_addons: installed_addons::State::default(),
@@ -172,6 +172,7 @@ impl Default for State {
             settings: settings::State::default(),
             context_menu: context_menu::State::default(),
             steam_session: steam_session::State::default(),
+            prerequisites: prerequisites::State::default(),
             modal_stack: modal_stack::State::default(),
             tasks_overlay: tasks_overlay::State::default(),
             chrome_strategy: shell::ChromeStrategy::resolve(Settings::default().titlebar),
@@ -275,6 +276,9 @@ impl State {
             || self.tasks_overlay.needs_ticks()
             || self.prepare_publish.browser_select_hover_needs_ticks()
             || self.downloader.needs_progress_ticks()
+            || self
+                .prerequisites
+                .animating(self.shell.route(), self.steam_session.status())
     }
 }
 
@@ -293,6 +297,10 @@ pub enum RootMessage {
     Settings(settings::Message),
     ContextMenu(context_menu::Message),
     SteamSession(steam_session::Message),
+    Prerequisites(prerequisites::Message),
+    /// Whether a Steam client exists on this machine at all, probed once at
+    /// startup so "isn't running" and "isn't installed" stay distinguishable.
+    SteamClientInstalledProbed(bool),
     ModalStack(modal_stack::Message),
     TasksOverlay(tasks_overlay::Message),
     SystemThemeObserved(Mode),
@@ -336,6 +344,8 @@ pub enum RootMessage {
     GmaDocumentsOpened(Vec<PathBuf>),
     AnimationTick(Instant),
 }
+
+impl RootMessage {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlobalShortcut {
@@ -533,8 +543,12 @@ impl App {
             })
             .discard();
 
+        self.sync_game_prerequisite();
+        let steam_installed_task = self.steam_installed_probe_task();
+
         Task::batch([
             system::theme().map(RootMessage::SystemThemeObserved),
+            steam_installed_task,
             startup_snapshot_task,
             startup_route_task,
             startup_library_started,
@@ -570,6 +584,11 @@ impl App {
             RootMessage::Settings(message) => self.apply_settings_message(message),
             RootMessage::ContextMenu(message) => self.apply_context_menu_message(message),
             RootMessage::SteamSession(message) => self.apply_steam_session_message(message),
+            RootMessage::Prerequisites(message) => self.apply_prerequisites_message(message),
+            RootMessage::SteamClientInstalledProbed(installed) => {
+                self.state.prerequisites.set_steam_installed(installed);
+                Task::none()
+            }
             RootMessage::ModalStack(message) => self.apply_modal_stack_message(&message),
             RootMessage::SystemThemeObserved(mode) => {
                 self.state.apply_system_theme(mode);
@@ -692,6 +711,7 @@ impl App {
             RootMessage::GmaDocumentsOpened(paths) => self.gma_documents_opened_task(paths),
             RootMessage::AnimationTick(now) => {
                 self.state.context_menu.tick(now);
+                self.state.prerequisites.tick(now);
                 self.state.shell.tick_motion(now);
                 let _changed = self.state.tasks_overlay.tick(now);
                 let palette_close_settled = self.state.search.tick_motion(now);
@@ -924,6 +944,9 @@ impl App {
             }
             downloader::Effect::ActiveJobCountChanged(count) => {
                 self.apply_shell_message(shell::Message::DownloaderJobCountChanged(count))
+            }
+            downloader::Effect::PrerequisiteActivated(action) => {
+                self.prerequisite_action_task(action)
             }
         }
     }
@@ -1363,16 +1386,53 @@ impl App {
 
     fn active_route_view(&self) -> Element<'_, RootMessage> {
         let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
-        match self.state.shell.route() {
+        let route = self.state.shell.route();
+        // Prerequisites are a shell concern, not a feature one: the routes
+        // stay ignorant of Steam and Garry's Mod availability, and the one
+        // place that knows decides what they get to render.
+        let blocker = prerequisites::blocker_for(
+            route,
+            self.state.steam_session.status(),
+            &self.state.prerequisites,
+        );
+        let panel = |blocker: &prerequisites::Blocker| {
+            prerequisites::view(
+                ctx,
+                route,
+                blocker,
+                self.state.prerequisites.spinner_elapsed(),
+                |action| RootMessage::Prerequisites(prerequisites::Message::Activated(action)),
+            )
+        };
+
+        match route {
+            // The Downloader keeps its input row live and blocks only the
+            // queue: pasting IDs while Steam boots is a reasonable thing to
+            // be doing, and the queue starts as soon as it connects.
+            shell::Route::Downloader => downloader::view(
+                &self.state.downloader,
+                ctx,
+                blocker
+                    .as_ref()
+                    .filter(|_| self.state.downloader.queue_is_empty())
+                    .map(|blocker| {
+                        prerequisites::view(
+                            ctx,
+                            route,
+                            blocker,
+                            self.state.prerequisites.spinner_elapsed(),
+                            downloader::Message::Prerequisite,
+                        )
+                    }),
+            )
+            .map(RootMessage::Downloader),
+            _ if blocker.is_some() => panel(blocker.as_ref().expect("just matched as present")),
             shell::Route::MyWorkshop => {
                 my_workshop::view(&self.state.my_workshop, ctx).map(RootMessage::MyWorkshop)
             }
             shell::Route::InstalledAddons => {
                 installed_addons::view(&self.state.installed_addons, ctx)
                     .map(RootMessage::InstalledAddons)
-            }
-            shell::Route::Downloader => {
-                downloader::view(&self.state.downloader, ctx).map(RootMessage::Downloader)
             }
             shell::Route::SizeAnalyzer => {
                 size_analyzer::view(&self.state.size_analyzer, ctx).map(RootMessage::SizeAnalyzer)
@@ -1538,6 +1598,13 @@ impl App {
                 .map(RootMessage::InstalledAddons),
         );
         streams.push(
+            prerequisites::subscription(
+                self.state.shell.route(),
+                self.state.steam_session.status(),
+            )
+            .map(RootMessage::Prerequisites),
+        );
+        streams.push(
             prepare_publish::subscription(&self.state.prepare_publish)
                 .map(RootMessage::PreparePublish),
         );
@@ -1588,7 +1655,7 @@ impl App {
     }
 
     pub(crate) fn title(&self) -> String {
-        self.state.i18n.tr(self.state.title)
+        crate::APP_NAME.to_owned()
     }
 }
 

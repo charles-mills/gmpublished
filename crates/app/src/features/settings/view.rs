@@ -1,7 +1,7 @@
 use iced::mouse;
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, pick_list, row, scrollable, slider,
-    stack, svg, text, text_input, toggler, tooltip,
+    Space, button, column, container, mouse_area, opaque, row, scrollable, slider, stack, svg,
+    text, text_input, toggler,
 };
 use iced::{
     Background, Border, Center, Color, Degrees, Element, Length, Padding, Shadow, Size, Vector,
@@ -13,6 +13,7 @@ use crate::{
     features::modal_stack::ResponsiveSize,
     i18n::{self, I18n},
     theme::{self, Tokens, ViewCtx},
+    widgets::{select, tooltip as tooltip_widget},
 };
 
 use super::state::{self, ColorChannel, ColorSetting, PathSetting, ResetAction, SelectOption, Tab};
@@ -23,11 +24,16 @@ const COMPACT_BREAKPOINT: f32 = 900.0;
 const COMPACT_TAB_BAR_HEIGHT: f32 = 48.0;
 const TAB_BUTTON_HEIGHT: f32 = 33.0;
 const FIELD_LABEL_HEIGHT: f32 = 18.0;
+/// Gap between a field's label and its control.
+const FIELD_LABEL_GAP: f32 = 12.0;
+/// Wrap width of the hint tooltip a select can carry.
+const SELECT_HINT_MAX_WIDTH: f32 = 320.0;
 const CONTROL_HEIGHT: f32 = 40.0;
-const SELECT_MENU_MAX_HEIGHT: f32 = 240.0;
-const SELECT_ITEM_HEIGHT: f32 = 36.0;
+/// Vertical padding of a select control, per edge; also the padding of every
+/// option row in its menu, so the two line up.
+const SELECT_PAD_Y: f32 = 11.0;
 const PATH_BROWSE_WIDTH: f32 = 112.0;
-const COLOR_FIELD_COLLAPSED_HEIGHT: f32 = FIELD_LABEL_HEIGHT + 12.0 + CONTROL_HEIGHT;
+const COLOR_FIELD_COLLAPSED_HEIGHT: f32 = FIELD_LABEL_HEIGHT + FIELD_LABEL_GAP + CONTROL_HEIGHT;
 const COLOR_FIELD_SPACING: f32 = 24.0;
 const COLOR_PICKER_POPOVER_GAP: f32 = 8.0;
 const COLOR_PICKER_POPOVER_MAX_WIDTH: f32 = 424.0;
@@ -251,6 +257,7 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
 
     content = content.push(select_field(
         i18n.tr("settings-general-language"),
+        None,
         language_options(i18n),
         &state.language_value(),
         Message::LanguageSelected,
@@ -258,6 +265,7 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     ));
     content = content.push(select_field(
         i18n.tr("settings-download-count-format-label"),
+        None,
         download_count_options(i18n),
         state.download_count_format_value(),
         Message::DownloadCountFormatSelected,
@@ -265,12 +273,20 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     ));
     content = content.push(select_field(
         i18n.tr("settings-theme-label"),
+        None,
         theme_options(i18n),
         state.theme_value(),
         Message::ThemeSelected,
         &tokens,
     ));
-    content = content.push(overwrite_field(state, ctx));
+    content = content.push(select_field(
+        i18n.tr("settings-overwrite-label"),
+        Some(i18n.tr("settings-overwrite-tooltip")),
+        overwrite_options(i18n),
+        state.overwrite_mode_value(),
+        Message::OverwriteModeSelected,
+        &tokens,
+    ));
 
     content
         .spacing(if compact { 12.0 } else { 24.0 })
@@ -300,78 +316,65 @@ fn switch_row<'a>(
     .into()
 }
 
+/// A labelled dropdown. `hint` is attached to the shut face only: with the menu
+/// down, a tooltip would hang across the options it is meant to explain.
 fn select_field<'a>(
     label: String,
-    options: Vec<SelectOption>,
-    selected_value: &str,
-    on_selected: impl Fn(SelectOption) -> Message + 'a,
-    tokens: &Tokens,
-) -> Element<'a, Message> {
-    column![
-        field_label(label, tokens),
-        select_control(options, selected_value, on_selected, tokens),
-    ]
-    .spacing(12.0)
-    .width(Length::Fill)
-    .into()
-}
-
-fn overwrite_field<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
-    let tokens = *ctx.tokens;
-    let i18n = ctx.i18n;
-    let field = column![
-        field_label(i18n.tr("settings-overwrite-label"), &tokens),
-        select_control(
-            overwrite_options(i18n),
-            state.overwrite_mode_value(),
-            Message::OverwriteModeSelected,
-            &tokens,
-        ),
-    ]
-    .spacing(8.0)
-    .width(Length::Fill);
-
-    tooltip(
-        field,
-        container(
-            text(i18n.tr("settings-overwrite-tooltip"))
-                .size(tokens.typography.body_sm)
-                .font(theme::styles::inter_font(font::Weight::Normal))
-                .color(Color::from(tokens.colors.text))
-                .width(Length::Fixed(320.0)),
-        )
-        .padding(8.0)
-        .style(move |_| theme::styles::tooltip(&tokens)),
-        tooltip::Position::Bottom,
-    )
-    .gap(8.0)
-    .into()
-}
-
-fn select_control<'a>(
+    hint: Option<String>,
     options: Vec<SelectOption>,
     selected_value: &str,
     on_selected: impl Fn(SelectOption) -> Message + 'a,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let selected = selected_option(&options, selected_value);
-    let label = selected
-        .as_ref()
-        .map(|option| option.label.clone())
+    let current = selected_option(&options, selected_value)
+        .map(|option| option.label)
         .unwrap_or_default();
-    let menu_height = SELECT_MENU_MAX_HEIGHT.min(options.len() as f32 * SELECT_ITEM_HEIGHT);
+    let metrics = select_metrics(&tokens);
+    let geometry = select::geometry(options.len(), metrics, &tokens);
 
-    let pick = pick_list(options, selected, on_selected)
-        .width(Length::Fill)
-        .padding([11.0, tokens.spacing.pad_sm])
-        .text_size(tokens.typography.body)
-        .font(theme::styles::inter_font(font::Weight::Normal))
-        .handle(iced::widget::pick_list::Handle::None)
-        .menu_height(Length::Fixed(menu_height))
-        .style(move |_, status| select_pick_style(&tokens, status))
-        .menu_style(move |_| select_menu_style(&tokens));
+    let rows = options
+        .into_iter()
+        .map(|option| select::Row {
+            selected: option.value == selected_value,
+            label: option.label.clone(),
+            on_select: on_selected(option),
+        })
+        .collect();
 
+    select::select(
+        select_field_face(label.clone(), current.clone(), false, hint, &tokens),
+        select_field_face(label, current, true, None, &tokens),
+        select::menu(rows, metrics, &tokens),
+        geometry,
+    )
+    .into()
+}
+
+fn select_field_face<'a>(
+    label: String,
+    current: String,
+    open: bool,
+    hint: Option<String>,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
+    let field = column![
+        field_label(label, tokens),
+        select_face(current, open, tokens),
+    ]
+    .spacing(FIELD_LABEL_GAP)
+    .width(Length::Fill);
+
+    match hint {
+        Some(hint) => tooltip_widget::below(field, hint, tokens, SELECT_HINT_MAX_WIDTH),
+        None => field.into(),
+    }
+}
+
+/// The control itself: centered label with a chevron parked on the right edge.
+/// `open` squares off the bottom corners so the menu joins it flush.
+fn select_face<'a>(label: String, open: bool, tokens: &Tokens) -> Element<'a, Message> {
+    let tokens = *tokens;
     let label_layer = container(
         text(label)
             .size(tokens.typography.body)
@@ -401,10 +404,11 @@ fn select_control<'a>(
     .height(Length::Fixed(CONTROL_HEIGHT))
     .center_y(Length::Fixed(CONTROL_HEIGHT));
 
-    container(stack![pick, label_layer, arrow])
+    container(stack![label_layer, arrow])
         .width(Length::Fill)
         .height(Length::Fixed(CONTROL_HEIGHT))
         .clip(true)
+        .style(move |_| theme::styles::select_face(&tokens, open))
         .into()
 }
 
@@ -1015,43 +1019,14 @@ fn switch_style(tokens: &Tokens, status: toggler::Status) -> toggler::Style {
     }
 }
 
-fn select_pick_style(
-    tokens: &Tokens,
-    status: iced::widget::pick_list::Status,
-) -> iced::widget::pick_list::Style {
-    let open = matches!(status, iced::widget::pick_list::Status::Opened { .. });
-    iced::widget::pick_list::Style {
-        text_color: Color::TRANSPARENT,
-        placeholder_color: Color::TRANSPARENT,
-        handle_color: Color::TRANSPARENT,
-        background: Color::from(tokens.colors.input_bg).into(),
-        border: Border {
-            color: tokens.colors.focus_ring.into(),
-            width: if open {
-                tokens.dims.focus_border_width
-            } else {
-                0.0
-            },
-            radius: tokens.radii.base.into(),
-        },
-    }
-}
-
-fn select_menu_style(tokens: &Tokens) -> iced::overlay::menu::Style {
-    iced::overlay::menu::Style {
-        background: Color::from(tokens.colors.menu_bg).into(),
-        border: Border {
-            radius: tokens.radii.md.into(),
-            ..Border::default()
-        },
-        text_color: tokens.colors.text.into(),
-        selected_text_color: tokens.colors.text.into(),
-        selected_background: Color::from(tokens.colors.selected_fill).into(),
-        shadow: Shadow {
-            color: tokens.colors.shadow_dropdown.into(),
-            offset: Vector::new(0.0, 2.0),
-            blur_radius: 12.0,
-        },
+/// Menu chrome for a settings select: option rows padded like the control they
+/// hang off, so a row and the closed control read at the same height.
+fn select_metrics(tokens: &Tokens) -> select::Metrics {
+    select::Metrics {
+        text_size: tokens.typography.body,
+        padding: Padding::from([SELECT_PAD_Y, tokens.spacing.pad_sm]),
+        radius: tokens.radii.md,
+        max_rows: select::MAX_ROWS,
     }
 }
 

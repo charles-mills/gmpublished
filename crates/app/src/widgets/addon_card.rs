@@ -69,6 +69,11 @@ pub struct Data {
     reveal_motion: motion::Presence<bool>,
     /// The visual the arriving thumbnail fades in over; dropped once settled.
     reveal_under: Option<Thumbnail>,
+    /// True once this card has displayed real pixels. The off-screen release
+    /// path drops Ready handles and the memory cache hands them straight back
+    /// on return, so without this a scroll-back would replay the reveal every
+    /// time; only genuinely first-seen pixels are an arrival.
+    has_shown_pixels: bool,
 }
 
 impl PartialEq for Data {
@@ -87,6 +92,8 @@ impl PartialEq for Data {
             && self.hover_motion == other.hover_motion
             && self.reveal_motion == other.reveal_motion
             && self.reveal_under == other.reveal_under
+        // `has_shown_pixels` is arrival bookkeeping, not a visual: two cards
+        // painting the same frame stay equal regardless of how they got there.
     }
 }
 
@@ -107,6 +114,7 @@ impl Data {
             hover_motion: hover_animation(false),
             reveal_motion: reveal_animation(true),
             reveal_under: None,
+            has_shown_pixels: false,
         }
     }
 
@@ -168,20 +176,34 @@ impl Data {
         self.hover_motion = previous.hover_motion.clone();
         self.reveal_motion = previous.reveal_motion.clone();
         self.reveal_under.clone_from(&previous.reveal_under);
-        self.reveal_on_arrival(&previous.thumbnail, Instant::now());
+        let had_pixels = previous.has_shown_pixels;
+        self.has_shown_pixels |= had_pixels;
+        self.reveal_on_arrival(&previous.thumbnail, had_pixels, Instant::now());
     }
 
     /// Starts the fade-in when real pixels replace a stand-in, keeping the
     /// stand-in underneath for the crossfade. Ready-to-Ready swaps (GIF
-    /// frames) never retrigger.
-    fn reveal_on_arrival(&mut self, previous: &Thumbnail, now: Instant) {
-        let arrived = matches!(self.thumbnail, Thumbnail::Ready(_))
-            && matches!(previous, Thumbnail::Loading | Thumbnail::Placeholder(_));
-        if arrived {
-            self.reveal_motion = reveal_animation(false);
-            self.reveal_motion.go(true, now);
-            self.reveal_under = Some(previous.clone());
+    /// frames) never retrigger, and neither does a re-hydrate — `had_pixels`
+    /// means the card already showed these pixels and only released them to
+    /// scrolling, so it snaps straight back instead of fading in again.
+    fn reveal_on_arrival(&mut self, previous: &Thumbnail, had_pixels: bool, now: Instant) {
+        if !matches!(self.thumbnail, Thumbnail::Ready(_))
+            || !matches!(previous, Thumbnail::Loading | Thumbnail::Placeholder(_))
+        {
+            return;
         }
+
+        if had_pixels {
+            // A reveal interrupted by the release still has to be retired, or
+            // the returning pixels would resume a fade nobody is watching.
+            self.reveal_motion = reveal_animation(true);
+            self.reveal_under = None;
+            return;
+        }
+
+        self.reveal_motion = reveal_animation(false);
+        self.reveal_motion.go(true, now);
+        self.reveal_under = Some(previous.clone());
     }
 
     fn reveal_progress(&self, now: Instant) -> f32 {
@@ -206,13 +228,18 @@ impl Data {
     }
 
     pub(crate) fn with_thumbnail(mut self, thumbnail: Thumbnail) -> Self {
+        // Construction, not a transition: a card built straight to Ready has
+        // shown pixels but never arrived at them.
+        self.has_shown_pixels = matches!(thumbnail, Thumbnail::Ready(_));
         self.thumbnail = thumbnail;
         self
     }
 
     pub(crate) fn set_thumbnail(&mut self, thumbnail: Thumbnail) {
+        let had_pixels = self.has_shown_pixels;
         let previous = std::mem::replace(&mut self.thumbnail, thumbnail);
-        self.reveal_on_arrival(&previous, Instant::now());
+        self.has_shown_pixels |= matches!(self.thumbnail, Thumbnail::Ready(_));
+        self.reveal_on_arrival(&previous, had_pixels, Instant::now());
     }
 
     pub(crate) const fn with_enabled(mut self, enabled: bool) -> Self {
@@ -529,16 +556,27 @@ fn thumb_image<'a>(handle: &image::Handle, size: f32, opacity: f32) -> Element<'
 
 /// The visual an arriving thumbnail fades in over: the blurred stand-in when
 /// there was one, otherwise the loading glyph.
+///
+/// Always sized to the full preview box. This is the crossfade stack's base
+/// layer, and `Stack` resolves its own size from the base and then clamps
+/// every other layer to it — a bare `loading_glyph` base would squeeze the
+/// arriving full-size image down to the glyph's 32x32 for the whole reveal.
 fn under_element<'a>(
     under: &Thumbnail,
     size: f32,
     tokens: &Tokens,
     opacity: f32,
 ) -> Element<'a, Message> {
-    match under {
+    let content: Element<'a, Message> = match under {
         Thumbnail::Placeholder(handle) => thumb_image(handle, size, opacity),
         _ => loading_glyph(tokens),
-    }
+    };
+
+    container(content)
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .center(Length::Fixed(size))
+        .into()
 }
 
 fn plus_glyph<'a>(data: &Data, tokens: &Tokens, hover_progress: f32) -> Element<'a, Message> {
@@ -944,6 +982,49 @@ mod tests {
         assert_eq!(card.reveal_under, None);
         card.set_thumbnail(Thumbnail::Ready(sharp));
         assert!(!card.needs_motion_ticks());
+    }
+
+    #[test]
+    fn rehydrated_pixels_snap_back_without_replaying_the_reveal() {
+        let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
+        let mut card = Data::addon("1", "Addon");
+        card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
+        card.tick_motion(std::time::Instant::now() + std::time::Duration::from_millis(300));
+        assert!(!card.needs_motion_ticks());
+
+        // Scrolling off-screen releases the handle; the memory cache hands the
+        // same pixels straight back on return.
+        card.set_thumbnail(Thumbnail::Loading);
+        card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
+
+        assert!(!card.needs_motion_ticks());
+        assert_eq!(card.reveal_under, None);
+        assert_eq!(card.reveal_progress(std::time::Instant::now()), 1.0);
+
+        // The same holds when the release and the return straddle a rebuild.
+        let mut released = Data::addon("1", "Addon").with_thumbnail(Thumbnail::Loading);
+        released.preserve_motion_from(&card);
+        let mut returned = Data::addon("1", "Addon").with_thumbnail(Thumbnail::Ready(sharp));
+        returned.preserve_motion_from(&released);
+
+        assert!(!returned.needs_motion_ticks());
+        assert_eq!(returned.reveal_under, None);
+    }
+
+    #[test]
+    fn a_reveal_cut_short_by_a_release_does_not_resume_on_return() {
+        let started = std::time::Instant::now();
+        let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
+        let mut card = Data::addon("1", "Addon");
+        card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
+
+        // Released mid-fade, before any tick retires the crossfade.
+        assert!(card.reveal_under.is_some());
+        card.set_thumbnail(Thumbnail::Loading);
+        card.set_thumbnail(Thumbnail::Ready(sharp));
+
+        assert_eq!(card.reveal_under, None);
+        assert_eq!(card.reveal_progress(started), 1.0);
     }
 
     #[test]

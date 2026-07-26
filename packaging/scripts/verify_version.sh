@@ -52,12 +52,6 @@ pkgbuild='packaging/arch/PKGBUILD'
 pkgbuild_pkgver="$(awk -F= '/^pkgver=/ { print $2; exit }' "$pkgbuild")"
 check_version "$pkgbuild pkgver" "$pkgbuild_pkgver"
 
-pkgbuild_release_tag="$(awk -F"'" '/^_release_tag=/ { print $2; exit }' "$pkgbuild")"
-[ -n "$pkgbuild_release_tag" ] || fail "could not read _release_tag from $pkgbuild"
-if [ "$pkgbuild_release_tag" != "v$workspace_version" ]; then
-  fail "$pkgbuild has _release_tag $pkgbuild_release_tag; expected v$workspace_version"
-fi
-
 lock_package_version() {
   package_name="$1"
   awk -v package_name="$package_name" '

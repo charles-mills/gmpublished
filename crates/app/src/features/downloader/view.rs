@@ -44,12 +44,22 @@ fn layout_mode(available_width: f32) -> LayoutMode {
     }
 }
 
-pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+/// `blocked` replaces the job columns when Steam can't take the queue. The
+/// input row above it stays live either way: what you paste is kept and
+/// starts as soon as the connection lands.
+pub fn view<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+    blocked: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
     let now = Instant::now();
     let tokens = *ctx.tokens;
-    let sections = responsive(move |size| match layout_mode(size.width) {
-        LayoutMode::Wide => wide_sections(state, ctx, now),
-        LayoutMode::Compact => compact_sections(state, ctx, now),
+    let sections: Element<'a, Message> = blocked.unwrap_or_else(|| {
+        responsive(move |size| match layout_mode(size.width) {
+            LayoutMode::Wide => wide_sections(state, ctx, now),
+            LayoutMode::Compact => compact_sections(state, ctx, now),
+        })
+        .into()
     });
 
     column![input_row(state, ctx), sections]
@@ -942,7 +952,7 @@ mod tests {
         let mut ui = iced_test::Simulator::with_size(
             Settings::default(),
             Size::new(800.0, 600.0),
-            view(&state, ctx),
+            view(&state, ctx, None),
         );
 
         ui.point_at(iced::Point::new(600.0, 80.0));
@@ -980,7 +990,7 @@ mod tests {
         let mut ui = iced_test::Simulator::with_size(
             Settings::default(),
             Size::new(1280.0, 720.0),
-            view(&state, ctx),
+            view(&state, ctx, None),
         );
 
         let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
@@ -1033,7 +1043,7 @@ mod tests {
         let tokens = Tokens::dark();
         let i18n = I18n::for_locale(Some("en"));
         let ctx = ViewCtx::new(&tokens, &i18n);
-        let mut ui = iced_test::Simulator::new(view(&state, ctx));
+        let mut ui = iced_test::Simulator::new(view(&state, ctx, None));
 
         let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
         let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));

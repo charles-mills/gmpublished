@@ -84,10 +84,12 @@ fn treemap_surface<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
         layers = layers.push(loading_overlay(ctx));
     }
 
-    if matches!(
-        state.load_status(),
-        LoadStatus::Error(_) | LoadStatus::Empty
-    ) {
+    // Empty and Error stopped sharing a surface: "there is nothing to chart"
+    // is not a failure, and reporting it with the same dead-face overlay was
+    // how this route ended up speaking a different dialect from the others.
+    if matches!(state.load_status(), LoadStatus::Empty) {
+        layers = layers.push(empty_overlay(ctx));
+    } else if matches!(state.load_status(), LoadStatus::Error(_)) {
         layers = layers.push(error_overlay(state, ctx));
     }
 
@@ -556,7 +558,7 @@ fn tooltip_title_value<'a>(
 ) -> Element<'a, Message> {
     text(title)
         .size(TOOLTIP_TEXT_SIZE)
-        .color(Color::from(tokens.colors.text))
+        .color(Color::from(tokens.colors.tooltip_text))
         .wrapping(text::Wrapping::WordOrGlyph)
         .width(Length::Fixed(value_width))
         .into()
@@ -565,7 +567,7 @@ fn tooltip_title_value<'a>(
 fn tooltip_plain_value<'a>(value: String, tokens: &Tokens) -> Element<'a, Message> {
     text(value)
         .size(TOOLTIP_TEXT_SIZE)
-        .color(Color::from(tokens.colors.text))
+        .color(Color::from(tokens.colors.tooltip_text))
         .into()
 }
 
@@ -661,6 +663,23 @@ fn loading_overlay(ctx: ViewCtx<'_>) -> Element<'_, Message> {
         .center(Length::Fill)
         .style(move |_| overlay_background_style(&tokens))
         .into()
+}
+
+fn empty_overlay(ctx: ViewCtx<'_>) -> Element<'_, Message> {
+    let tokens = *ctx.tokens;
+    container(crate::widgets::route_state::view(
+        crate::widgets::route_state::RouteState::new(
+            crate::widgets::route_state::Glyph::Icon(assets::icons::package_open()),
+            crate::widgets::route_state::Tone::Quiet,
+            ctx.i18n.tr("size-analyzer-empty-title"),
+            ctx.i18n.tr("size-analyzer-empty-body"),
+        ),
+        ctx,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(move |_| theme::styles::surface(&tokens))
+    .into()
 }
 
 fn error_overlay<'a>(state: &State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
