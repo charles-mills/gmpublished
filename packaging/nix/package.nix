@@ -4,17 +4,20 @@
   rustPlatform,
 
   alsa-lib,
-  dbus,
+  copyDesktopItems,
   fontconfig,
+  freetype,
   libGL,
   libx11,
   libxcb,
   libxcursor,
   libxi,
   libxkbcommon,
+  libxrandr,
+  makeDesktopItem,
   makeWrapper,
-  patchelf,
   pkg-config,
+  udev,
   vulkan-loader,
   wayland,
 }:
@@ -25,11 +28,24 @@ let
   pname = "gmpublished";
   version = cargoToml.workspace.package.version;
 
-  # Keep in step with flake.nix's devShell list.
-  runtimeLibs = [
-    alsa-lib
-    dbus
-    fontconfig
+  desktopItem = makeDesktopItem {
+    name = pname;
+    desktopName = pname;
+    comment = "Native Workshop Publishing Utility for Garry's Mod";
+    exec = "${pname} -e %f";
+    icon = pname;
+    terminal = false;
+    mimeTypes = [ "application/gma" ];
+    categories = [
+      "Utility"
+      "Game"
+      "Development"
+    ];
+  };
+
+  # iced/winit dlopen these, so they never reach DT_NEEDED and are dropped from
+  # the RPATH at link time.
+  dlopenedLibs = [
     libGL
     libx11
     libxcb
@@ -74,7 +90,7 @@ let
           UTTypeIdentifier = "dev.charlesmills.gmpublished.gma";
           UTTypeTagSpecification = {
             "public.filename-extension" = [ "gma" ];
-            "public.mime-type" = "application/x-garrys-mod-addon";
+            "public.mime-type" = "application/gma";
           };
         }
       ];
@@ -86,13 +102,9 @@ rustPlatform.buildRustPackage {
 
   src = lib.fileset.toSource {
     root = ../..;
-    # Excludes ../../.cargo on purpose: its -Ctarget-cpu=x86-64-v2 is for the
-    # release artifacts only.
     fileset = lib.fileset.unions [
       ../../Cargo.lock
       ../../Cargo.toml
-      ../../LICENSE
-      ../../THIRD-PARTY-NOTICES.md
       ../../crates
       ../../packaging/icons
       ../../packaging/linux
@@ -115,32 +127,37 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [
     makeWrapper
-    patchelf
     pkg-config
+  ]
+  ++ lib.optionals stdenv.hostPlatform.isLinux [ copyDesktopItems ];
+
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
+    alsa-lib
+    fontconfig
+    freetype
+    libGL
+    libx11
+    libxcb
+    libxcursor
+    libxi
+    libxkbcommon
+    libxrandr
+    stdenv.cc.cc.lib
+    udev
+    vulkan-loader
+    wayland
   ];
 
-  buildInputs = lib.optionals stdenv.hostPlatform.isLinux (
-    runtimeLibs ++ [ stdenv.cc.cc.lib ]
-  );
+  desktopItems = lib.optionals stdenv.hostPlatform.isLinux [ desktopItem ];
 
   postInstall =
     lib.optionalString stdenv.hostPlatform.isLinux ''
       install -Dm0644 packaging/steam/redistributable/linux/libsteam_api.so \
         "$out/lib/libsteam_api.so"
-      install -Dm0644 packaging/icons/32x32.png \
-        "$out/share/icons/hicolor/32x32/apps/${pname}.png"
       install -Dm0644 packaging/icons/128x128.png \
         "$out/share/icons/hicolor/128x128/apps/${pname}.png"
-      install -Dm0644 packaging/icons/128x128@2x.png \
-        "$out/share/icons/hicolor/256x256/apps/${pname}.png"
       install -Dm0644 packaging/linux/application-gma.xml \
         "$out/share/mime/packages/application-gma.xml"
-      install -Dm0644 packaging/linux/${pname}.desktop \
-        "$out/share/applications/${pname}.desktop"
-      install -Dm0644 LICENSE \
-        "$out/share/doc/${pname}/LICENSE"
-      install -Dm0644 THIRD-PARTY-NOTICES.md \
-        "$out/share/doc/${pname}/THIRD-PARTY-NOTICES.md"
     ''
     + lib.optionalString stdenv.hostPlatform.isDarwin ''
       app="$out/Applications/${pname}.app"
@@ -154,24 +171,18 @@ rustPlatform.buildRustPackage {
         "$contents/Resources/icon.icns"
       install -Dm0644 packaging/macos/Credits.rtf \
         "$contents/Resources/Credits.rtf"
-      install -Dm0644 LICENSE \
-        "$contents/Resources/LICENSE"
-      install -Dm0644 THIRD-PARTY-NOTICES.md \
-        "$contents/Resources/THIRD-PARTY-NOTICES.md"
       install -Dm0644 ${infoPlist} "$contents/Info.plist"
 
       makeWrapper "$contents/MacOS/${pname}" "$out/bin/${pname}"
     '';
 
-  # fixupPhase's `patchelf --shrink-rpath` drops runtimeLibs and build.rs's
-  # $ORIGIN, since nothing DT_NEEDED resolves against them. Re-add after.
   postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
-    patchelf --add-rpath "$out/lib:${lib.makeLibraryPath runtimeLibs}" \
-      "$out/bin/${pname}"
+    patchelf "$out/bin/${pname}" \
+      --add-rpath ${lib.makeLibraryPath dlopenedLibs}
   '';
 
   meta = {
-    description = "Native Workshop publishing and addon inspection utility for Garry's Mod";
+    description = "Native Workshop Publishing Utility for Garry's Mod";
     homepage = "https://github.com/charles-mills/gmpublished";
     license = lib.licenses.gpl3Only;
     mainProgram = pname;
