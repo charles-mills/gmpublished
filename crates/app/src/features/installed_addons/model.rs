@@ -389,6 +389,8 @@ enum RowThumbnail {
     },
 }
 
+impl RowThumbnail {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewTarget {
     pub(crate) row_id: String,
@@ -521,7 +523,7 @@ pub fn thumbnail_demands(
 pub fn release_offscreen_thumbnails(
     rows: &mut [Row],
     visible_range: std::ops::Range<usize>,
-) -> bool {
+) -> Vec<usize> {
     grid_rows::release_offscreen_thumbnails(rows, visible_range)
 }
 

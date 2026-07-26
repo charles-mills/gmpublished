@@ -56,18 +56,22 @@ fn thumbnail_demands_for_range<R: GridRow>(
 
 /// Releases Ready thumbnails outside visible+prefetch so scrolled-away rows
 /// stop pinning decoded RGBA; the demand/cache path re-delivers on return.
+///
+/// Returns the indices actually changed. Callers previously got a bare `bool`
+/// and responded by refreshing every card, which made a release that touched
+/// two rows cost a full sweep of the library.
 pub fn release_offscreen_thumbnails<R: GridRow>(
     rows: &mut [R],
     visible_range: Range<usize>,
-) -> bool {
+) -> Vec<usize> {
     let Some(retained) = thumbnail_demand::retained_rows(visible_range, rows.len()) else {
-        return false;
+        return Vec::new();
     };
 
-    let mut changed = false;
+    let mut changed = Vec::new();
     for (index, row) in rows.iter_mut().enumerate() {
-        if !retained.contains(&index) {
-            changed |= row.invalidate_ready_thumbnail();
+        if !retained.contains(&index) && row.invalidate_ready_thumbnail() {
+            changed.push(index);
         }
     }
     changed

@@ -29,6 +29,13 @@ const THUMBNAIL_PLAY_POLICY: thumbnail_animation::PlayPolicy =
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     workshop_id: PublishedFileId,
+    /// Cached `workshop_id.to_string()`.
+    ///
+    /// Delivery matching compares this once per row per delivery, so deriving
+    /// it on demand meant an allocation per row per delivery — paid even by the
+    /// rows that do not match, because the comparison happens before the early
+    /// return.
+    id: String,
     title: String,
     tags: Vec<String>,
     preview_url: Option<String>,
@@ -54,6 +61,7 @@ impl Row {
 
         Self {
             workshop_id,
+            id: workshop_id.to_string(),
             title: item.title.clone(),
             tags: item.tags.clone(),
             preview_url,
@@ -68,8 +76,8 @@ impl Row {
         }
     }
 
-    pub(crate) fn id(&self) -> String {
-        self.workshop_id.to_string()
+    pub(crate) fn id(&self) -> &str {
+        &self.id
     }
 
     pub(crate) const fn workshop_id(&self) -> PublishedFileId {
@@ -118,7 +126,7 @@ impl Row {
             progress: duration_progress(roll.elapsed, COUNT_ROLL_DURATION),
             up: roll.to >= roll.from,
         });
-        let card = addon_card::Data::addon(self.id(), self.title.clone())
+        let card = addon_card::Data::addon(self.id().to_owned(), self.title.clone())
             .with_subscriptions(
                 formatter.format_count(self.displayed_count),
                 self.displayed_count,
@@ -178,7 +186,7 @@ impl Row {
 
         Some(ContextMenuRequest {
             position: iced::Point::ORIGIN,
-            row_id: self.id(),
+            row_id: self.id().to_owned(),
             workshop_id: self.workshop_id,
             workshop_url: workshop_item_url(self.workshop_id),
             preview_url: self.preview_url.clone(),
@@ -318,6 +326,7 @@ impl Row {
     pub(crate) fn for_test(id: u64, title: &str, subscriptions: u64) -> Self {
         Self {
             workshop_id: PublishedFileId::new(id).expect("test fixture ids are always nonzero"),
+            id: id.to_string(),
             title: title.to_owned(),
             tags: Vec::new(),
             preview_url: Some(format!("https://example.test/{id}.jpg")),
@@ -415,6 +424,8 @@ enum RowThumbnail {
     },
 }
 
+impl RowThumbnail {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreparePublishTarget {
     New,
@@ -508,7 +519,7 @@ pub fn thumbnail_demands(
 pub fn release_offscreen_thumbnails(
     rows: &mut [Row],
     visible_range: std::ops::Range<usize>,
-) -> bool {
+) -> Vec<usize> {
     grid_rows::release_offscreen_thumbnails(rows, visible_range)
 }
 

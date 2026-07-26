@@ -33,6 +33,12 @@ pub struct State {
     watch_arm_epoch: u64,
     discovered_rows: Option<Vec<Row>>,
     loaded_rows: Vec<Row>,
+    /// Row id -> index into `loaded_rows`.
+    ///
+    /// A delivery names exactly one row; scanning for it and then refreshing
+    /// every card made each delivery O(rows) twice, which is what dominated
+    /// per-tick tail latency on large libraries.
+    row_index: HashMap<String, usize>,
     /// workshop_id -> indices into `discovered_rows` sharing that id.
     /// Rebuilt any time `discovered_rows` is structurally replaced.
     discovered_index: HashMap<PublishedFileId, Vec<usize>>,
@@ -66,6 +72,7 @@ impl Default for State {
             watch_arm_epoch: 0,
             discovered_rows: None,
             loaded_rows: Vec::new(),
+            row_index: HashMap::new(),
             discovered_index: HashMap::new(),
             loaded_index: HashMap::new(),
             next_offset: 0,
@@ -194,14 +201,18 @@ impl State {
             return false;
         }
 
-        let mut changed = false;
-        for row in &mut self.loaded_rows {
-            changed |= row.apply_thumbnail_delivery(delivery.generation, delivery, self.generation);
+        let Some(&index) = self.row_index.get(delivery.id.as_str()) else {
+            return false;
+        };
+        let Some(row) = self.loaded_rows.get_mut(index) else {
+            return false;
+        };
+        if !row.apply_thumbnail_delivery(delivery.generation, delivery, self.generation) {
+            return false;
         }
-        if changed {
-            self.refresh_item_thumbnails();
-        }
-        changed
+
+        self.refresh_item_thumbnail(index);
+        true
     }
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
@@ -222,10 +233,10 @@ impl State {
             &mut self.loaded_rows,
             self.grid.visible_item_range(),
         );
-        if changed {
-            self.refresh_item_thumbnails();
+        for index in &changed {
+            self.refresh_item_thumbnail(*index);
         }
-        changed
+        !changed.is_empty()
     }
 
     pub(crate) fn has_active_animations(&self) -> bool {
@@ -743,10 +754,25 @@ impl State {
     /// (delivery, offscreen release, hover play/pause) skip the full
     /// `sync_grid_items` rebuild — re-allocating every card and re-measuring
     /// every title per scroll event is what makes large libraries lag.
-    fn refresh_item_thumbnails(&mut self) {
+    /// Pushes one row's current thumbnail into the grid in place.
+    ///
+    /// Installed-addon grids have no lead card, so the row index is the item
+    /// index — unlike My Workshop, where item 0 is "publish new".
+    fn refresh_item_thumbnail(&mut self, index: usize) {
+        let Some(row) = self.loaded_rows.get(index) else {
+            return;
+        };
+        let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
+        let _ = self.grid.update_item_thumbnail(index, row.id(), thumbnail);
+    }
+
+    /// Rebuilds the id -> index map. Must follow every mutation of
+    /// `loaded_rows`, which is why it hangs off the grid sync below.
+    fn reindex_rows(&mut self) {
+        self.row_index.clear();
+        self.row_index.reserve(self.loaded_rows.len());
         for (index, row) in self.loaded_rows.iter().enumerate() {
-            let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
-            let _ = self.grid.update_item_thumbnail(index, row.id(), thumbnail);
+            let _ = self.row_index.insert(row.id().to_owned(), index);
         }
     }
 
@@ -760,6 +786,9 @@ impl State {
     /// pages. Every other follow-up message (hover, visible-range) is
     /// already re-derived by the caller from state, not from these echoes.
     fn sync_grid_items(&mut self) {
+        // Every mutation of `loaded_rows` is already followed by a sync, so the
+        // reindex rides along rather than needing its own call sites.
+        self.reindex_rows();
         loop {
             let items = self
                 .loaded_rows

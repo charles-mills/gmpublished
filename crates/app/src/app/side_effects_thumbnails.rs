@@ -117,8 +117,27 @@ impl App {
         if ids.is_empty() {
             return Task::none();
         }
+        // "Which of these still need warming?" is a question about the disk, so
+        // it is answered here rather than on the main thread.
+        //
+        // `apply_demands` asks the same question per key, and asking it there
+        // meant two things landed inside one `update`: the first call built the
+        // whole disk index (`read_dir` plus one `stat` per cached file), and
+        // every subsequent one formatted a path and probed it. Measured at
+        // 20.5 ms and 5.8 ms respectively for a 20k library — a visible hitch.
+        //
+        // Filtering here removes both, and shrinks what is left: a warmed cache
+        // resolves to almost no demands, so the main thread stops building
+        // ~20k index entries it would immediately have discarded. The skip in
+        // `apply_demands` stays as the guard for the window between this check
+        // and the set being applied, and is now cheap because this primed the
+        // index.
+        let disk_cache = self.thumbnails.disk_cache_handle();
         self.ctx
             .run_blocking("warm-library-preview-urls", move |app| {
+                if let Some(cache) = &disk_cache {
+                    cache.prime_index();
+                }
                 let (cached, _stale) = app.resolve_workshop_metadata(&ids);
                 cached
                     .into_iter()
@@ -126,6 +145,11 @@ impl App {
                         metadata
                             .preview_url
                             .map(|preview_url| (metadata.id, preview_url))
+                    })
+                    .filter(|(_, preview_url)| {
+                        !disk_cache
+                            .as_ref()
+                            .is_some_and(|cache| cache.contains_source(preview_url))
                     })
                     .collect::<Vec<_>>()
             })
