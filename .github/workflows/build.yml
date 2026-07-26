@@ -158,7 +158,7 @@ jobs:
           desktop-file-validate "$root/share/applications/gmpublished.desktop"
           diff "$root/share/applications/gmpublished.desktop" \
             <(dpkg-deb --fsys-tarfile "$deb" \
-              | tar -xOf - ./usr/share/applications/gmpublished.desktop)
+              | tar -xOf - --wildcards '*usr/share/applications/gmpublished.desktop')
 
           (cd "$root" && zip -r "../gmpublished-${artifact_version}-x86_64-linux.zip" \
             gmpublished libsteam_api.so LICENSE THIRD-PARTY-NOTICES.md share)
