@@ -5045,6 +5045,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vformats"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5a108c3d427a518084e190407bc86bfa57fc5d148f5834a0b3f580b18a4eea9"
 dependencies = [
  "crc32fast",
  "flate2",

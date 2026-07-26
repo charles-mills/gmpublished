@@ -2,7 +2,6 @@
 members = [
     "crates/app",
     "crates/backend",
-    "crates/vformats",
 ]
 # Vendored crates that are consumed as external inputs rather than maintained
 # as workspace crates.
@@ -81,7 +80,7 @@ publish = false
 
 [workspace.dependencies]
 arc-swap = "1"
-vformats = { path = "crates/vformats" }
+vformats = "0.1.0"
 crc32fast = { version = "1.5", default-features = false }
 dirs = "6"
 fast_image_resize = { version = "6.0.0", default-features = false, features = ["std", "only_u8x4"] }
