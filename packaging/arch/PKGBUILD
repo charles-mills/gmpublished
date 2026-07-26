@@ -44,7 +44,7 @@ source=(
 ${url}/releases/download/${_release_tag}/${_pkgname}-${pkgver}-${CARCH}-linux.zip"
 )
 # Refreshed by update_aur_metadata.sh post-publish; never SKIP.
-sha256sums=('ae06952e62b493676c0683f3efb066e808970b075dd31e0406b030127722ca9b')
+sha256sums=('0fe7b9566f0768b34bf7127f9e527fb5d515b925504c0196b88441932402e8d5')
 
 check() {
   desktop-file-validate "${srcdir}/share/applications/${_pkgname}.desktop"
