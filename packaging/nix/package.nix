@@ -43,6 +43,19 @@ let
     ];
   };
 
+  # iced/winit dlopen these, so they never reach DT_NEEDED and are dropped from
+  # the RPATH at link time.
+  dlopenedLibs = [
+    libGL
+    libx11
+    libxcb
+    libxcursor
+    libxi
+    libxkbcommon
+    vulkan-loader
+    wayland
+  ];
+
   infoPlist = builtins.toFile "${pname}-Info.plist" (
     lib.generators.toPlist { escape = true; } {
       CFBundleDevelopmentRegion = "English";
@@ -145,10 +158,6 @@ rustPlatform.buildRustPackage {
         "$out/share/icons/hicolor/128x128/apps/${pname}.png"
       install -Dm0644 packaging/linux/application-gma.xml \
         "$out/share/mime/packages/application-gma.xml"
-
-      wrapProgram "$out/bin/${pname}" \
-        --prefix LD_LIBRARY_PATH : \
-          "$out/lib:${lib.makeLibraryPath [ vulkan-loader ]}"
     ''
     + lib.optionalString stdenv.hostPlatform.isDarwin ''
       app="$out/Applications/${pname}.app"
@@ -166,6 +175,11 @@ rustPlatform.buildRustPackage {
 
       makeWrapper "$contents/MacOS/${pname}" "$out/bin/${pname}"
     '';
+
+  postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+    patchelf "$out/bin/${pname}" \
+      --add-rpath ${lib.makeLibraryPath dlopenedLibs}
+  '';
 
   meta = {
     description = "Native Workshop Publishing Utility for Garry's Mod";
