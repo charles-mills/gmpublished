@@ -35,8 +35,6 @@ nix run github:charles-mills/gmpublished
 
 gmpublished is implemented in [Iced](https://iced.rs/), and so doesn't require a system or bundled web-view, instead rendering with [wgpu](https://github.com/gfx-rs/wgpu). This is mostly relevant to Linux users, since gmpublisher's Tauri dependency is not regularly updated to use a widely available version of webkitgtk.
 
-Whilst a little awkward, it's still perfectly possible to use gmpublisher on the vast majority of Linux distros, such as through the [Arch User Repository](https://aur.archlinux.org/packages/gmpublisher-bin), or by installing an archived libwebkit2gtk-4.0-37 package.
-
 ### In-app Previewer
 
 All addons can be previewed in the app, including their map files, models, textures, sounds, and code. When previewing maps, both walk and fly modes are supported, including jump and crouch; standard gmod controls are used (v to toggle fly, et cetera).
