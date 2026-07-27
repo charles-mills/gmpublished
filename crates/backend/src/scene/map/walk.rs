@@ -1421,6 +1421,7 @@ impl MapLeafLocator {
     pub(super) fn leaf_at(&self, point: [f32; 3]) -> Option<usize> {
         walk_to_leaf(
             point,
+            self.nodes.len(),
             |index| {
                 self.nodes
                     .get(index)

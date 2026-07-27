@@ -608,6 +608,25 @@ mod tests {
         assert_eq!(paragraphs[1][0].text, "Second");
     }
 
+    /// `render_nodes`/`render_block`/`collect_inline` recurse once per
+    /// nesting level, so before the parser capped nesting a description
+    /// carrying a few thousand nested tags overflowed the stack and aborted
+    /// the process — on the UI thread, on the first frame it was shown.
+    /// 5000 is well past the measured debug-build limit of roughly 900, so
+    /// this only passes while `MAX_NESTING_DEPTH` is enforced.
+    #[test]
+    fn deeply_nested_source_renders_without_overflowing_the_stack() {
+        let depth = 5_000;
+        let source = format!("{}deep{}", "[b]".repeat(depth), "[/b]".repeat(depth));
+        let document = gmpublished_backend::bbcode::Document::parse(&source);
+        let revealed = HashSet::new();
+        let tokens = crate::theme::Tokens::dark();
+
+        let element = view(&document, &revealed, &tokens);
+
+        drop(element);
+    }
+
     #[test]
     fn single_newlines_inside_an_inline_run_are_preserved() {
         let mut spans = vec![span("First\nSecond")];

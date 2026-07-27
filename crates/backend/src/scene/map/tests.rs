@@ -2742,3 +2742,62 @@ fn test_ambient_lighting(samples: Vec<MapAmbientSample>) -> MapAmbientLighting {
         samples,
     }
 }
+
+/// A BSP whose node children point back up the tree used to spin
+/// `walk_to_leaf` forever. The walk is reached per frame from the map
+/// previewer's camera, so this wedged the render thread rather than a
+/// worker. Run on a spawned thread with a receive timeout: on a regression
+/// this test fails on the timeout instead of hanging the suite.
+#[test]
+fn a_cyclic_node_graph_terminates_instead_of_spinning() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // 0 -> 1 -> 0, both children non-negative so the walk never reaches
+        // the `next < 0` leaf exit.
+        let result = super::walk_to_leaf(
+            [1.0, 0.0, 0.0],
+            2,
+            |index| match index {
+                0 => Some((0, [1, 1])),
+                1 => Some((0, [0, 0])),
+                _ => None,
+            },
+            |_| Some(([1.0, 0.0, 0.0], 0.0)),
+        );
+        let _ = tx.send(result);
+    });
+
+    let result = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a cyclic node graph must not loop forever");
+    assert_eq!(result, None, "a cycle has no reachable leaf");
+}
+
+#[test]
+fn an_acyclic_walk_still_reaches_its_leaf_at_full_depth() {
+    // A degenerate maximally deep tree: every node's front child is the next
+    // node, and the last one points at leaf 0 (encoded as !0 == -1). The
+    // iteration bound must not cut this short.
+    const DEPTH: usize = 64;
+
+    let leaf = super::walk_to_leaf(
+        [1.0, 0.0, 0.0],
+        DEPTH,
+        |index| {
+            (index < DEPTH).then(|| {
+                let front = if index + 1 < DEPTH {
+                    (index + 1) as i32
+                } else {
+                    -1
+                };
+                (0, [front, front])
+            })
+        },
+        |_| Some(([1.0, 0.0, 0.0], 0.0)),
+    );
+
+    assert_eq!(leaf, Some(0));
+}

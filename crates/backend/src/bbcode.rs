@@ -3,6 +3,24 @@
 //! The document tree is UI-independent so display surfaces and a future
 //! description editor can share exactly the same interpretation of markup.
 
+/// Element nesting the parser will build before it stops opening frames and
+/// emits further opening tags as literal text.
+///
+/// Descriptions are attacker-controlled — a Workshop description, or a
+/// `.gma`'s own embedded metadata, which no length limit applies to (see
+/// `GmaView::parse`, which lifts `vformats`' input caps). The tree this
+/// produces is walked recursively by every consumer: the Iced renderer's
+/// `render_nodes`/`render_block`/`collect_inline`, [`Document::plain_text`],
+/// [`Document::is_empty`], and `Vec<Node>`'s own `Drop`. Measured against a
+/// release build on an 8 MiB main-thread stack, the renderer overflowed at
+/// roughly 7000 levels — about 50 KB of `[b]…[/b]` — and at roughly 900 in a
+/// debug build. Bounding the tree here fixes all of those at once, since
+/// `nodes` is private and [`Document::parse`] is the only way to build one.
+///
+/// 64 matches `vformats::Limits::max_kv_depth`, and is far past any markup a
+/// person writes; genuine Steam BBCode nests a handful of levels.
+const MAX_NESTING_DEPTH: usize = 64;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Document {
     nodes: Vec<Node>,
@@ -269,14 +287,13 @@ impl<'a> Parser<'a> {
         if lowercase_token == "table" || lowercase_token.starts_with("table ") {
             let bordered = !table_option_enabled(&lowercase_token, "noborder");
             let equal_cells = table_option_enabled(&lowercase_token, "equalcells");
-            self.open_frame(
+            return self.open_frame(
                 raw,
                 PendingKind::Table {
                     bordered,
                     equal_cells,
                 },
             );
-            return true;
         }
 
         let (name, value) = token
@@ -337,8 +354,7 @@ impl<'a> Parser<'a> {
             }
             _ => return false,
         };
-        self.open_frame(raw, kind);
-        true
+        self.open_frame(raw, kind)
     }
 
     fn consume_raw_block(&mut self, opener: &str, name: &str) -> bool {
@@ -404,6 +420,12 @@ impl<'a> Parser<'a> {
             .iter()
             .rev()
             .any(|frame| matches!(frame.kind, Some(PendingKind::List { .. })));
+        // An item outside a list opens the implicit wrapper too, so both
+        // frames have to fit or neither is pushed — a lone implicit list
+        // would never be closed.
+        if !self.has_room_for(if in_list { 1 } else { 2 }) {
+            return false;
+        }
         if !in_list {
             self.stack.push(Frame {
                 kind: Some(PendingKind::List {
@@ -435,8 +457,7 @@ impl<'a> Parser<'a> {
         {
             return false;
         }
-        self.open_frame(raw, PendingKind::TableRow);
-        true
+        self.open_frame(raw, PendingKind::TableRow)
     }
 
     fn open_table_cell(&mut self, raw: &str, header: bool) -> bool {
@@ -456,8 +477,7 @@ impl<'a> Parser<'a> {
             } else {
                 PendingKind::TableCell
             },
-        );
-        true
+        )
     }
 
     fn close_open_table_cell(&mut self) {
@@ -502,12 +522,25 @@ impl<'a> Parser<'a> {
         self.current_nodes().push(Node::Element(element));
     }
 
-    fn open_frame(&mut self, raw: &str, kind: PendingKind) {
+    /// Opens a nested frame, or reports `false` at [`MAX_NESTING_DEPTH`] so
+    /// the caller falls back to emitting the tag as literal text.
+    fn open_frame(&mut self, raw: &str, kind: PendingKind) -> bool {
+        if !self.has_room_for(1) {
+            return false;
+        }
         self.stack.push(Frame {
             kind: Some(kind),
             opener: raw.to_owned(),
             nodes: Vec::new(),
         });
+        true
+    }
+
+    /// Whether `frames` more frames fit under [`MAX_NESTING_DEPTH`]. The
+    /// stack always holds the root frame, so it is one deeper than the
+    /// element nesting it represents.
+    fn has_room_for(&self, frames: usize) -> bool {
+        self.stack.len() + frames <= MAX_NESTING_DEPTH + 1
     }
 
     fn push_text(&mut self, text: &str) {
@@ -660,6 +693,60 @@ fn push_text_node(nodes: &mut Vec<Node>, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deepest element nesting in `nodes`, measured iteratively so a
+    /// regression overflows the code under test rather than the assertion.
+    fn max_depth(nodes: &[Node]) -> usize {
+        let mut pending = vec![(nodes, 1_usize)];
+        let mut deepest = 0;
+        while let Some((level, depth)) = pending.pop() {
+            for node in level {
+                if let Node::Element(element) = node {
+                    deepest = deepest.max(depth);
+                    pending.push((element.children(), depth + 1));
+                }
+            }
+        }
+        deepest
+    }
+
+    #[test]
+    fn nesting_is_capped_so_recursive_consumers_cannot_overflow() {
+        let depth = 5_000;
+        let source = format!("{}deep{}", "[b]".repeat(depth), "[/b]".repeat(depth));
+
+        let document = Document::parse(&source);
+
+        assert!(
+            max_depth(document.nodes()) <= MAX_NESTING_DEPTH,
+            "nesting past the cap must not build more elements"
+        );
+        // Overflow tags degrade to literal text, the same way an unknown tag
+        // does, so nothing in the description is silently dropped.
+        assert!(document.plain_text().contains("[b]"));
+        assert!(document.plain_text().contains("deep"));
+    }
+
+    #[test]
+    fn list_items_past_the_cap_do_not_leave_an_unclosed_implicit_list() {
+        let source = format!("{}[*]item", "[quote]".repeat(MAX_NESTING_DEPTH));
+
+        let document = Document::parse(&source);
+
+        assert!(max_depth(document.nodes()) <= MAX_NESTING_DEPTH);
+        assert!(document.plain_text().contains("item"));
+    }
+
+    #[test]
+    fn nesting_within_the_cap_is_untouched() {
+        let depth = MAX_NESTING_DEPTH;
+        let source = format!("{}deep{}", "[b]".repeat(depth), "[/b]".repeat(depth));
+
+        let document = Document::parse(&source);
+
+        assert_eq!(max_depth(document.nodes()), depth);
+        assert_eq!(document.plain_text(), "deep");
+    }
 
     #[test]
     fn parses_nested_inline_tags_and_links() {

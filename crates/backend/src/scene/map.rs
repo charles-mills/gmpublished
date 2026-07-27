@@ -475,6 +475,7 @@ impl MapBsp {
     fn leaf_at(&self, point: [f32; 3]) -> Option<usize> {
         walk_to_leaf(
             point,
+            self.nodes.len(),
             |index| {
                 self.nodes
                     .get(index)
@@ -493,13 +494,24 @@ impl MapBsp {
 /// plane lookup are closures because the two callers store the tree
 /// differently: [`MapBsp`] as the decoded lumps, [`MapLeafLocator`] as
 /// a retained projection of them.
+///
+/// `node_count` bounds the descent. Node children are read verbatim from
+/// the file — `vformats` validates nothing about them — so wild content can
+/// point a child back up the tree, and an unbounded walk spins forever. That
+/// is not merely a stalled worker: `leaf_at` is reached per frame from the
+/// map previewer's camera (`MapVisibility::cluster_at`), so a cycle wedges
+/// the render thread. An acyclic walk descends into a distinct node each
+/// step and so cannot visit more nodes than exist; needing more than that
+/// means a node repeated, and `None` (leaf unknown) is the same answer
+/// callers already handle for an out-of-range index.
 fn walk_to_leaf(
     point: [f32; 3],
+    node_count: usize,
     node: impl Fn(usize) -> Option<(i32, [i32; 2])>,
     plane: impl Fn(i32) -> Option<([f32; 3], f32)>,
 ) -> Option<usize> {
     let mut current_index = 0usize;
-    loop {
+    for _ in 0..node_count {
         let (plane_index, children) = node(current_index)?;
         let (normal, dist) = plane(plane_index)?;
         let distance = point[0] * normal[0] + point[1] * normal[1] + point[2] * normal[2];
@@ -510,6 +522,7 @@ fn walk_to_leaf(
         }
         current_index = usize::try_from(next).ok()?;
     }
+    None
 }
 
 /// `(2^power + 1)^2`: a displacement's vertex grid side squared.

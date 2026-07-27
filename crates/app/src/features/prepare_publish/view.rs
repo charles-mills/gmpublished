@@ -66,7 +66,7 @@ pub fn view<'a>(
     let preview_open = preview.is_some();
     let body: Element<'a, Message> = preview.unwrap_or_else(|| {
         row![
-            left_column(state, ctx).width(Length::Fixed(tokens.dims.publish_left_column_width)),
+            left_pane(state, ctx),
             middle_column(state, ctx, now).width(Length::Fill),
             right_column(state, ctx).width(Length::Fixed(tokens.dims.publish_right_column_width)),
         ]
@@ -115,11 +115,7 @@ fn embedded_preview_body<'a>(
         } else {
             Some(
                 row![
-                    container(
-                        left_column(state, ctx)
-                            .width(Length::Fixed(tokens.dims.publish_left_column_width)),
-                    )
-                    .padding(tokens.spacing.pad),
+                    container(left_pane(state, ctx)).padding(tokens.spacing.pad),
                     pane,
                 ]
                 .spacing(0.0)
@@ -133,6 +129,38 @@ fn embedded_preview_body<'a>(
         let _ = (state, file_preview_state, ctx, expanded, modal_width);
         None
     }
+}
+
+/// The left column in its own scroll viewport.
+///
+/// [`Tokens::publish_modal_height`] sizes the modal to fit this column
+/// exactly, but the modal is also capped at `modal_viewport_ratio` of the
+/// window ([`modal_stack::ResponsiveSize::resolve`]), so on a window shorter
+/// than ~800px the cap wins and the tail of the column — title, type, tags
+/// and the submit button — falls outside the panel's `clip(true)` bounds.
+/// Scrolling keeps every control reachable at any window size, and makes the
+/// fitted height a preference rather than a correctness requirement (the
+/// icon-instruction line estimate in `publish_modal_height` is a fixed three
+/// lines, which some locales exceed). The middle and right columns already
+/// scroll for the same reason.
+fn left_pane<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+    let tokens = *ctx.tokens;
+    // iced draws the scrollbar over the content, so the rail width has to be
+    // held back by padding or the thumb sits on top of the inputs.
+    let rail = theme::styles::vertical_scrollbar_reserved_width(&tokens);
+
+    scrollable(
+        left_column(state, ctx)
+            .width(Length::Fill)
+            .padding(Padding::ZERO.right(rail)),
+    )
+    .width(Length::Fixed(tokens.dims.publish_left_column_width))
+    .height(Length::Fill)
+    .direction(scrollable::Direction::Vertical(
+        theme::styles::vertical_scrollbar(&tokens),
+    ))
+    .style(move |_, status| theme::styles::scrollbar(&tokens, status))
+    .into()
 }
 
 fn left_column<'a>(state: &'a State, ctx: ViewCtx<'a>) -> iced::widget::Column<'a, Message> {
