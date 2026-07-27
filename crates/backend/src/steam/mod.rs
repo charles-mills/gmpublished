@@ -6,7 +6,7 @@ use std::{
         mpsc,
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -44,8 +44,11 @@ const CONNECT_RETRY_MAX: Duration = Duration::from_secs(1);
 /// wakeups through steamclient.dylib at idle for no benefit.
 const CALLBACK_PUMP_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Per-thread bound on [`Steam::shutdown`]'s join. A thread still running
-/// past this is logged and left detached rather than blocking process exit.
+/// Bound on [`Steam::shutdown`]'s join, shared across every thread rather
+/// than applied per-thread: the joins run concurrently, so one thread that
+/// refuses to stop costs this much in total, not this much each. Anything
+/// still running past it is logged and left detached rather than blocking
+/// process exit.
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Generous default for [`Steam::client_wait`] call sites with no more
@@ -92,6 +95,12 @@ pub struct Steam {
     /// Handles for every thread spawned from this `Steam`, joined by
     /// [`Self::shutdown`].
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Nudges for threads that park on something other than the `shutdown`
+    /// condvar (a channel, a queue-specific condvar). Setting the flag alone
+    /// never reaches those threads, so they would sit blocked until the join
+    /// bound expired and they were detached. See
+    /// [`Self::register_shutdown_waker`].
+    shutdown_wakers: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 
     users: RwLock<HashMap<SteamId, SteamUser>>,
     /// steamworks keeps a single callback slot per event type — a later
@@ -116,6 +125,7 @@ impl Steam {
             interface: OnceLock::new(),
             shutdown: (Mutex::new(false), Condvar::new()),
             threads: Mutex::new(Vec::new()),
+            shutdown_wakers: Mutex::new(Vec::new()),
             users: RwLock::new(HashMap::new()),
             persona_fetch: Mutex::new(()),
 
@@ -199,6 +209,13 @@ impl Steam {
             let steam = Arc::clone(steam);
             std::thread::spawn(move || Self::workshop_fetcher(&steam, &search))
         };
+        // The downloads watchdog parks on its own condvar with no timeout
+        // while nothing is downloading — the idle case — so the shutdown
+        // flag alone never reaches it.
+        steam.register_shutdown_waker({
+            let downloads = Arc::clone(&downloads);
+            move || downloads.wake_watchdog()
+        });
         let downloads_watchdog_handle = {
             let steam = Arc::clone(steam);
             std::thread::spawn(move || Downloads::watchdog(&downloads, &steam))
@@ -311,36 +328,85 @@ impl Steam {
             .register_callback(f)
     }
 
+    /// Whether [`Self::shutdown`] has been signaled. Background threads that
+    /// block on something other than the shutdown condvar check this after
+    /// every wake-up.
+    pub(crate) fn shutting_down(&self) -> bool {
+        *self.shutdown.0.lock()
+    }
+
+    /// Registers a nudge run by [`Self::shutdown`] after the flag is set.
+    ///
+    /// A thread parked on the `shutdown` condvar needs nothing here — the
+    /// `notify_all` reaches it. This is for threads parked elsewhere, whose
+    /// wait has no idle timeout by design: without a nudge they never
+    /// observe the flag at all, and shutdown pays the full join bound
+    /// waiting for a thread that was never going to wake.
+    pub(crate) fn register_shutdown_waker(&self, wake: impl Fn() + Send + Sync + 'static) {
+        self.shutdown_wakers.lock().push(Box::new(wake));
+    }
+
     /// Signals every background thread spawned from this `Steam` to stop and
-    /// joins each with a bounded wait. A thread still running past the bound
-    /// is logged and left detached rather than blocking process exit.
-    /// Idempotent: safe to call more than once (e.g. from both an explicit
-    /// app-exit path and a `Backend` drop).
+    /// joins them, concurrently, within a single bounded wait. Threads still
+    /// running past the bound are logged and left detached rather than
+    /// blocking process exit. Idempotent: safe to call more than once (e.g.
+    /// from both an explicit app-exit path and a `Backend` drop).
     pub fn shutdown(&self) {
         *self.shutdown.0.lock() = true;
         self.shutdown.1.notify_all();
 
-        for handle in std::mem::take(&mut *self.threads.lock()) {
-            join_with_timeout(handle, SHUTDOWN_JOIN_TIMEOUT);
+        // The workshop fetcher parks in a blocking `recv` on this queue, and
+        // the sender it waits on lives on the `Steam` its own `Arc` clone
+        // keeps alive — so the channel never disconnects on its own. An
+        // empty batch unblocks it; it re-checks the flag before draining.
+        let _ = self.workshop_queue_tx.send(Vec::new());
+        for wake in self.shutdown_wakers.lock().iter() {
+            wake();
         }
+
+        // Bind before iterating: holding the `threads` guard across the join
+        // would block anything still trying to register a thread.
+        let handles = std::mem::take(&mut *self.threads.lock());
+        join_all_within(handles, SHUTDOWN_JOIN_TIMEOUT);
     }
 }
 
-/// Joins `handle`, giving up (and logging) after `timeout`. The join itself
-/// still completes eventually on a detached helper thread; giving up here
-/// just stops it from blocking whoever called us (process exit).
-fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) {
+/// Joins every handle concurrently, giving up (and logging) once `timeout`
+/// has elapsed overall. The joins themselves still complete eventually on
+/// detached helper threads; giving up here just stops a thread that ignored
+/// the shutdown signal from blocking whoever called us (process exit).
+fn join_all_within(handles: Vec<JoinHandle<()>>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let expected = handles.len();
+
     let (done_tx, done_rx) = mpsc::channel();
-    let joiner = std::thread::spawn(move || {
-        let _ = handle.join();
-        let _ = done_tx.send(());
-    });
-    if done_rx.recv_timeout(timeout).is_err() {
+    for handle in handles {
+        let done_tx = done_tx.clone();
+        std::thread::spawn(move || {
+            let _ = handle.join();
+            let _ = done_tx.send(());
+        });
+    }
+    // Otherwise the receiver below never sees a disconnect.
+    drop(done_tx);
+
+    let mut exited = 0;
+    while exited < expected {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        if done_rx.recv_timeout(remaining).is_err() {
+            break;
+        }
+        exited += 1;
+    }
+
+    if exited < expected {
         log::warn!(
-            "[Steam] a background thread did not exit within {timeout:?} of shutdown; detaching it"
+            "[Steam] {} background thread(s) did not exit within {timeout:?} of shutdown; detaching them",
+            expected - exited
         );
     }
-    drop(joiner);
 }
 
 /// Retries `attempt` with exponential backoff (`initial`, doubling to `max`)
@@ -380,11 +446,21 @@ fn condvar_wait_bool(pair: &(Mutex<bool>, Condvar), timeout: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         time::{Duration, Instant},
     };
 
     use parking_lot::{Condvar, Mutex};
+
+    fn test_steam() -> Arc<super::Steam> {
+        Arc::new(super::Steam::new(crate::transactions::Transactions::new(
+            Arc::new(crate::events::NullEventSink),
+            false,
+        )))
+    }
 
     #[test]
     fn condvar_wait_bool_returns_immediately_when_already_true() {
@@ -491,5 +567,111 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(steam.threads.lock().is_empty());
+    }
+
+    #[test]
+    fn shutdown_wakes_a_thread_blocked_on_the_workshop_queue() {
+        let steam = test_steam();
+        let exited = Arc::new(AtomicBool::new(false));
+
+        // The workshop fetcher's shape: parked in a blocking `recv` whose
+        // sender lives on the `Steam` this thread's own clone keeps alive, so
+        // the channel can never disconnect by itself.
+        let handle = {
+            let steam = Arc::clone(&steam);
+            let exited = Arc::clone(&exited);
+            std::thread::spawn(move || {
+                loop {
+                    let rx = steam.workshop_queue_rx.lock();
+                    if rx.recv().is_err() {
+                        return;
+                    }
+                    drop(rx);
+                    if steam.shutting_down() {
+                        exited.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            })
+        };
+        steam.threads.lock().push(handle);
+
+        steam.shutdown();
+
+        // `shutdown` joins, so a set flag means the thread genuinely woke and
+        // returned rather than being detached at the bound.
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "shutdown must unblock the workshop queue receiver"
+        );
+    }
+
+    #[test]
+    fn shutdown_wakes_a_thread_parked_on_a_registered_waker() {
+        let steam = test_steam();
+        let park = Arc::new((Mutex::new(false), Condvar::new()));
+        let exited = Arc::new(AtomicBool::new(false));
+
+        // Only the waker sets the predicate, so the thread below cannot
+        // escape its park by any other route — including by racing ahead of
+        // `shutdown` and observing the flag before it ever waits.
+        steam.register_shutdown_waker({
+            let park = Arc::clone(&park);
+            move || {
+                *park.0.lock() = true;
+                park.1.notify_all();
+            }
+        });
+
+        // The downloads watchdog's shape: an untimed park on a condvar that
+        // `shutdown` does not itself notify. Looping on the predicate is what
+        // makes an early nudge safe rather than a lost wake-up.
+        let handle = {
+            let park = Arc::clone(&park);
+            let exited = Arc::clone(&exited);
+            std::thread::spawn(move || {
+                let mut guard = park.0.lock();
+                while !*guard {
+                    park.1.wait(&mut guard);
+                }
+                exited.store(true, Ordering::SeqCst);
+            })
+        };
+        steam.threads.lock().push(handle);
+
+        steam.shutdown();
+
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "shutdown must run registered wakers"
+        );
+    }
+
+    #[test]
+    fn shutdown_bounds_every_join_together_rather_than_one_bound_each() {
+        let steam = test_steam();
+
+        // Threads that deliberately never observe the signal. Joined
+        // sequentially at one bound each, this would take six times the
+        // bound; joined concurrently against a shared deadline, one.
+        for _ in 0..6 {
+            let handle = std::thread::spawn(move || {
+                let never = (Mutex::new(false), Condvar::new());
+                let mut guard = never.0.lock();
+                while !*guard {
+                    never.1.wait(&mut guard);
+                }
+            });
+            steam.threads.lock().push(handle);
+        }
+
+        let started = Instant::now();
+        steam.shutdown();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < super::SHUTDOWN_JOIN_TIMEOUT * 3,
+            "six stuck threads took {elapsed:?}, which is more than one shared bound"
+        );
     }
 }

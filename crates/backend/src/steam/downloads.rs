@@ -160,6 +160,9 @@ fn append_pending_batch<T>(downloading: &mut Vec<T>, pending: &mut Vec<T>) -> us
 pub struct Downloads {
     pending: Mutex<Vec<Download>>,
     downloading: Mutex<Vec<Download>>,
+    /// Signals the watchdog that `downloading` changed. It parks here with
+    /// no timeout while the queue is empty, so shutdown has to wake it
+    /// explicitly — see [`Self::wake_watchdog`].
     watchdog: Condvar,
     /// Bumped by [`Self::cancel_all`]. Submission batches capture the epoch
     /// on entry and stop queueing new downloads once it moves, so a
@@ -825,6 +828,13 @@ impl Downloads {
         self.watchdog.notify_one();
     }
 
+    /// Wakes [`Self::watchdog`] out of its idle park so it can re-check
+    /// [`Steam::shutting_down`]. Registered as a shutdown waker when the
+    /// watchdog is spawned.
+    pub(super) fn wake_watchdog(&self) {
+        self.watchdog.notify_all();
+    }
+
     // Condvar pairing in the drain loop: the guard is handed to wait_for.
     #[expect(clippy::significant_drop_tightening)]
     pub(super) fn watchdog(downloads: &Arc<Self>, steam: &Arc<Steam>) {
@@ -884,6 +894,13 @@ impl Downloads {
         // our own queue.
         let mut queue: VecDeque<Download> = VecDeque::new();
         loop {
+            // Checked here rather than only at the idle park: a shutdown
+            // landing mid-batch should stop feeding new items to the Steam
+            // client, not finish the queue first.
+            if steam.shutting_down() {
+                return;
+            }
+
             queue.extend(std::mem::take(&mut *downloads.downloading.lock()));
 
             let mut in_progress = in_progress_state.0.lock();

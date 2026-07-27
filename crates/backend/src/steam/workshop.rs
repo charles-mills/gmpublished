@@ -161,6 +161,15 @@ impl Steam {
             }
             drop(rx);
 
+            // `Steam::shutdown` pushes an empty batch purely to unblock the
+            // `recv` above — this thread parks there with no timeout, and the
+            // sender lives on the `Steam` its own `Arc` clone keeps alive, so
+            // the channel never disconnects on its own. Anything still queued
+            // at this point is abandoned.
+            if steam.shutting_down() {
+                return;
+            }
+
             while !queue.is_empty() {
                 let chunk_len = super::RESULTS_PER_PAGE.min(queue.len());
                 let chunk = queue.drain(..chunk_len).collect::<Vec<_>>();
