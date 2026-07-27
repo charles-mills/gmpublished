@@ -500,14 +500,11 @@ impl Search {
     }
 
     pub fn sync_installed_addon_files(&self, items: Vec<SearchItem>) {
-        let file_items = items.into_iter().map(Arc::new).collect::<Vec<_>>();
-
-        {
-            let mut store = self.items.write();
-            store
-                .retain(|item| !matches!(item.source, SearchItemSource::InstalledAddonFile { .. }));
-            store.extend(file_items);
-        }
+        let mut store = self.items.write();
+        store.retain(|item| !matches!(item.source, SearchItemSource::InstalledAddonFile { .. }));
+        store.reserve(items.len());
+        store.extend(items.into_iter().map(Arc::new));
+        drop(store);
 
         self.dirty.store(true, std::sync::atomic::Ordering::Release);
     }

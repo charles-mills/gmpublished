@@ -130,7 +130,7 @@ pub fn menu<'a, Message: Clone + 'a>(
             .direction(scrollable::Direction::Vertical(
                 theme::styles::vertical_scrollbar(&tokens),
             ))
-            .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
+            .style(move |_, status| theme::styles::select_menu_scrollbar(&tokens, status)),
     )
     .width(Length::Fill)
     // A row's fill runs the full width it is given, and iced paints children

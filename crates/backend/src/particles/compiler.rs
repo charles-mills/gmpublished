@@ -531,7 +531,7 @@ pub(super) fn compile_system(
         .fold(0.0_f32, f32::max);
     CompiledSystem {
         name: definition.name.clone(),
-        material: definition.material().unwrap_or("").to_owned(),
+        material: super::normalize_material_name(definition.material().unwrap_or("")),
         max_particles: definition.max_particles() as usize,
         initial_particles: attrs.get_int("initial_particles").unwrap_or(0).max(0) as u32,
         constant_color: color_to_rgb(color),

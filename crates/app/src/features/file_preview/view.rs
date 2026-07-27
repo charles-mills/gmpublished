@@ -81,10 +81,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let display_name = display_name(state);
     let size_bytes = size_bytes(state);
     let info = file_type_info(display_name);
-    let type_label = i18n.trn(
-        &format!("file-type-{}", info.type_key),
-        &[("arg0", info.extension.as_str())],
-    );
+    let type_label = i18n.trn(info.translation_key, &[("arg0", info.extension.as_ref())]);
 
     let back = tooltip_widget::below(
         button(icon(

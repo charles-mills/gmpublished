@@ -4,9 +4,9 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, Metadata},
+    fs::{self, DirEntry, Metadata},
     hash::Hash,
-    io,
+    io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::SystemTime,
@@ -312,17 +312,24 @@ fn collect_addons_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
     let Ok(read_dir) = addons_dir.read_dir() else {
         return;
     };
+    let canonical_dir = gmpublished_backend::path::canonicalize(addons_dir);
 
     for entry in read_dir.flatten() {
-        let path = entry.path();
-        if !path.is_file() || !is_gma_path(&path) {
+        let Some((path, canonical_path)) = discovered_file_paths(&entry, &canonical_dir) else {
+            continue;
+        };
+        if !is_gma_path(&path) {
             continue;
         }
         let workshop_id = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .and_then(workshop_id_from_name);
-        candidates.push(DiscoveredCandidate { path, workshop_id });
+        candidates.push(DiscoveredCandidate {
+            path,
+            canonical_path,
+            workshop_id,
+        });
     }
 }
 
@@ -331,17 +338,24 @@ fn collect_cache_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
     let Ok(read_dir) = cache_dir.read_dir() else {
         return;
     };
+    let canonical_dir = gmpublished_backend::path::canonicalize(cache_dir);
 
     for entry in read_dir.flatten() {
-        let path = entry.path();
-        if !path.is_file() || !is_gma_path(&path) {
+        let Some((path, canonical_path)) = discovered_file_paths(&entry, &canonical_dir) else {
+            continue;
+        };
+        if !is_gma_path(&path) {
             continue;
         }
         let workshop_id = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .and_then(workshop_id_from_name);
-        candidates.push(DiscoveredCandidate { path, workshop_id });
+        candidates.push(DiscoveredCandidate {
+            path,
+            canonical_path,
+            workshop_id,
+        });
     }
 }
 
@@ -363,6 +377,7 @@ fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCand
             return;
         }
     };
+    let canonical_content_dir = gmpublished_backend::path::canonicalize(content_dir);
 
     for entry in read_dir.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -376,17 +391,45 @@ fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCand
             .to_str()
             .and_then(|name| name.parse::<u64>().ok())
             .and_then(PublishedFileId::new);
-        let Ok(addon_dir) = entry.path().read_dir() else {
+        let addon_path = entry.path();
+        let Ok(addon_dir) = addon_path.read_dir() else {
             continue;
         };
-        let Some(path) = addon_dir
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| path.is_file() && is_gma_path(path))
-        else {
+        let canonical_addon_dir = canonical_content_dir.join(entry.file_name());
+        let Some((path, canonical_path)) = addon_dir.flatten().find_map(|entry| {
+            let (path, canonical_path) = discovered_file_paths(&entry, &canonical_addon_dir)?;
+            is_gma_path(&path).then_some((path, canonical_path))
+        }) else {
             continue;
         };
-        candidates.push(DiscoveredCandidate { path, workshop_id });
+        candidates.push(DiscoveredCandidate {
+            path,
+            canonical_path,
+            workshop_id,
+        });
+    }
+}
+
+/// Returns the display path and canonical search identity for a file entry.
+/// A regular child inherits its already-canonical parent without another
+/// filesystem round trip. Symlinks and unknown file types retain the original
+/// follow-and-canonicalize behavior.
+fn discovered_file_paths(entry: &DirEntry, canonical_parent: &Path) -> Option<(PathBuf, PathBuf)> {
+    let path = entry.path();
+    match entry.file_type() {
+        Ok(file_type) if file_type.is_file() => {
+            let canonical_path = canonical_parent.join(entry.file_name());
+            Some((path, canonical_path))
+        }
+        Ok(file_type) if file_type.is_symlink() && path.is_file() => {
+            let canonical_path = gmpublished_backend::path::canonicalize(path.clone());
+            Some((path, canonical_path))
+        }
+        Err(_) if path.is_file() => {
+            let canonical_path = gmpublished_backend::path::canonicalize(path.clone());
+            Some((path, canonical_path))
+        }
+        Ok(_) | Err(_) => None,
     }
 }
 
@@ -410,11 +453,10 @@ fn read_candidate(
             return None;
         }
     };
-    let canonical_path = gmpublished_backend::path::canonicalize(candidate.path.clone());
     Some((
         InstalledAddon {
             path: candidate.path,
-            canonical_path,
+            canonical_path: candidate.canonical_path,
             workshop_id: candidate.workshop_id,
             file_size_bytes,
             modified_epoch_seconds,
@@ -550,18 +592,11 @@ fn persist_header_cache_inner(
             (
                 path,
                 revision,
-                serialize_header_cache_snapshot(&cache.entries),
+                prepare_header_cache_snapshot(&cache.entries),
             )
         };
-        let (path, revision, result) = prepared;
-        let result = result.and_then(|bytes| {
-            crate::util::fs::atomic_write(&path, &bytes).map_err(|source| {
-                HeaderSnapshotWriteError::Write {
-                    path: path.clone(),
-                    source,
-                }
-            })
-        });
+        let (path, revision, snapshot) = prepared;
+        let result = write_header_cache_snapshot(&path, &snapshot);
 
         let mut cache = header_cache.lock();
         match result {
@@ -598,6 +633,27 @@ fn persist_header_cache_inner(
             return;
         }
     }
+}
+
+fn write_header_cache_snapshot(
+    path: &Path,
+    snapshot: &HeaderSnapshotFile,
+) -> Result<(), HeaderSnapshotWriteError> {
+    let write_error = |source| HeaderSnapshotWriteError::Write {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut temp = crate::util::fs::atomic_tempfile(path).map_err(write_error)?;
+    {
+        let mut writer = BufWriter::with_capacity(
+            crate::util::fs::ATOMIC_WRITE_BUFFER_SIZE,
+            temp.as_file_mut(),
+        );
+        serde_json::to_writer(&mut writer, snapshot)
+            .map_err(HeaderSnapshotWriteError::Serialize)?;
+        writer.flush().map_err(write_error)?;
+    }
+    crate::util::fs::persist_atomic(temp, path).map_err(write_error)
 }
 
 fn modified_epoch_seconds(metadata: &Metadata) -> u64 {
@@ -690,7 +746,12 @@ impl HeaderSnapshotEntry {
         let meta = GmaMeta {
             path,
             header,
-            entries: self.entries.into_iter().map(GmaMetaEntry::from).collect(),
+            entries: self
+                .entries
+                .into_iter()
+                .map(GmaMetaEntry::from)
+                .collect::<Vec<_>>()
+                .into(),
         };
         Some((key, meta))
     }
@@ -873,9 +934,7 @@ enum HeaderSnapshotWriteError {
     },
 }
 
-fn serialize_header_cache_snapshot(
-    entries: &HeaderCache,
-) -> Result<Vec<u8>, HeaderSnapshotWriteError> {
+fn prepare_header_cache_snapshot(entries: &HeaderCache) -> HeaderSnapshotFile {
     let mut snapshot_entries = entries
         .iter()
         .filter_map(|(key, meta)| HeaderSnapshotEntry::from_cache(key, meta))
@@ -886,17 +945,23 @@ fn serialize_header_cache_snapshot(
             .then_with(|| left.file_len.cmp(&right.file_len))
             .then_with(|| left.modified_epoch_nanos.cmp(&right.modified_epoch_nanos))
     });
-    let snapshot = HeaderSnapshotFile {
+    HeaderSnapshotFile {
         version: HEADER_SNAPSHOT_VERSION,
         entries: snapshot_entries,
-    };
+    }
+}
 
+#[cfg(test)]
+fn serialize_header_cache_snapshot(
+    snapshot: &HeaderSnapshotFile,
+) -> Result<Vec<u8>, HeaderSnapshotWriteError> {
     serde_json::to_vec(&snapshot).map_err(HeaderSnapshotWriteError::Serialize)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DiscoveredCandidate {
     path: PathBuf,
+    canonical_path: PathBuf,
     workshop_id: Option<PublishedFileId>,
 }
 
@@ -930,7 +995,7 @@ mod tests {
                 author: String::new(),
                 addon_version: 1,
             },
-            entries: Vec::new(),
+            entries: Arc::from([]),
         }
     }
 
@@ -970,6 +1035,54 @@ mod tests {
                 .then_with(|| left.path.cmp(&right.path))
         });
         addons
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_collection_keeps_symlinked_gma_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new("gmpublished-library-symlink");
+        let addons = temp.join("GarrysMod/addons");
+        fs::create_dir_all(&addons).expect("fixture directory");
+        let target = temp.join("target.gma");
+        fs::File::create(&target).expect("target file");
+        let link = addons.join("linked.gma");
+        symlink(&target, &link).expect("fixture symlink");
+
+        let mut candidates = Vec::new();
+        collect_addons_dir(temp.path(), &mut candidates);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, link);
+        assert_eq!(
+            candidates[0].canonical_path,
+            gmpublished_backend::path::canonicalize(target)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_identity_canonicalizes_a_symlinked_gmod_root_once() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new("gmpublished-library-symlinked-root");
+        let real_gmod = temp.join("real-gmod");
+        let addons = real_gmod.join("GarrysMod/addons");
+        fs::create_dir_all(&addons).expect("fixture directory");
+        let addon = addons.join("regular.gma");
+        fs::File::create(&addon).expect("fixture file");
+        let linked_gmod = temp.join("linked-gmod");
+        symlink(&real_gmod, &linked_gmod).expect("fixture directory symlink");
+
+        let mut candidates = Vec::new();
+        collect_addons_dir(&linked_gmod, &mut candidates);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].canonical_path,
+            gmpublished_backend::path::canonicalize(addon)
+        );
     }
 
     #[test]
@@ -1040,11 +1153,12 @@ mod tests {
         let path = PathBuf::from("/tmp/addon.gma");
         let key = HeaderCacheKey::for_test(path.clone(), 10, 100);
         let mut meta = test_meta_at(path.clone(), "cached");
-        meta.entries.push(GmaMetaEntry {
+        meta.entries = vec![GmaMetaEntry {
             path: "maps/rp_riverden_v1a.bsp".to_owned(),
             size: 123,
             crc32: 456,
-        });
+        }]
+        .into();
 
         let cache = test_cache();
         {
@@ -1054,8 +1168,9 @@ mod tests {
             cache.dirty = true;
             cache.entries.insert(key.clone(), meta.clone());
         }
-        let bytes = serialize_header_cache_snapshot(&cache.lock().entries)
-            .expect("header snapshot should serialize");
+        let snapshot = prepare_header_cache_snapshot(&cache.lock().entries);
+        let bytes =
+            serialize_header_cache_snapshot(&snapshot).expect("header snapshot should serialize");
         crate::util::fs::atomic_write(&snapshot_file, &bytes)
             .expect("header snapshot should persist");
 

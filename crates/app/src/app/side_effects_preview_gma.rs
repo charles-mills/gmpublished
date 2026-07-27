@@ -153,7 +153,16 @@ impl App {
     }
 
     pub(super) fn preview_gma_nav_autoscroll_task(&self) -> Task<RootMessage> {
-        operation::snap_to_end(preview_gma::nav_path_scrollable_id())
+        // The model resets its scroll offset on navigation; snap the rows
+        // scrollable with it, or the widget keeps its old offset and the
+        // viewport lands on the virtualization spacer.
+        Task::batch([
+            operation::snap_to_end(preview_gma::nav_path_scrollable_id()),
+            operation::scroll_to(
+                preview_gma::browser_rows_scrollable_id(),
+                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+            ),
+        ])
     }
 
     pub(super) fn preview_gma_entry_extraction_task(

@@ -86,17 +86,16 @@ fn archive_entry_for_path(
         .entry(path)
         .ok()
         .map(|entry| RedirectedArchiveEntry {
-            path: entry.path.clone(),
+            path: entry.path.to_owned(),
             size: entry.size,
             crc32: entry.crc32,
         })
         .or_else(|| {
             archive
-                .entries()
-                .into_iter()
-                .find(|entry| entry.path.as_str().eq_ignore_ascii_case(path))
+                .entry_ignore_ascii_case(path)
+                .ok()
                 .map(|entry| RedirectedArchiveEntry {
-                    path: entry.path,
+                    path: entry.path.to_owned(),
                     size: entry.size,
                     crc32: entry.crc32,
                 })

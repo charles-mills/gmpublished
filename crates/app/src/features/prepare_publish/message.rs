@@ -50,9 +50,12 @@ pub enum Message {
     IgnorePatternMutationCompleted(Result<IgnorePatternMutationResult, UiError>),
     PathVerificationCompleted(u64, Result<Arc<VerifiedContentPath>, UiError>),
     BrowserSelectHoverChanged(bool),
-    DirectoryOpened(String),
+    BrowserScrolled {
+        offset: f32,
+    },
+    DirectoryOpened(Arc<String>),
     #[cfg(feature = "asset-studio")]
-    PreviewEntryRequested(String),
+    PreviewEntryRequested(Arc<String>),
     #[cfg(feature = "asset-studio")]
     FilePreview(file_preview::Message),
     UpRequested,

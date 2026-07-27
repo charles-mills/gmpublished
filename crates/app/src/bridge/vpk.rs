@@ -42,9 +42,9 @@ fn archive_entries_from_backend(
     entries: &std::collections::HashMap<String, VpkEntry>,
 ) -> Vec<VpkArchiveEntry> {
     let mut entries = entries
-        .values()
-        .map(|entry| VpkArchiveEntry {
-            path: entry.path.clone(),
+        .iter()
+        .map(|(path, entry)| VpkArchiveEntry {
+            path: path.clone(),
             size: entry.size,
             crc32: entry.crc,
         })

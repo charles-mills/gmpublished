@@ -128,9 +128,9 @@ impl Steam {
 
     /// Spawns the process-lifetime Steam connection loop plus, once
     /// connected, the callback watchdog, the workshop-metadata fetcher, and
-    /// the downloads watchdog. Called exactly once, by [`crate::Backend`]
-    /// construction — never lazily, so every background thread's
-    /// dependencies are explicit `Arc` clones rather than global lookups.
+    /// the downloads watchdog. Called exactly once through the backend's
+    /// start gate, either during construction or explicitly after frame one;
+    /// every dependency remains an explicit `Arc` clone.
     pub fn spawn_background_threads(
         steam: &Arc<Self>,
         app_data: &Arc<AppData>,

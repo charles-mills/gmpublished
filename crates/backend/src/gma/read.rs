@@ -196,20 +196,7 @@ impl GmaView {
             author: parsed.metadata.author.to_string(),
             addon_version: parsed.metadata.addon_version,
         };
-        let mut entries = Vec::with_capacity(parsed.entries().len());
-        for (index, entry) in parsed.entries().iter().enumerate() {
-            // Same tolerance as `entries()`: unsafe paths are skipped.
-            if is_unsafe_entry_path(&entry.path) {
-                log::warn!("Illegal GMA entry: {}", entry.path);
-                continue;
-            }
-            entries.push(GMAEntry {
-                path: entry.path.to_string(),
-                size: entry.size,
-                crc: entry.crc32,
-                index: index as u64,
-            });
-        }
+        let entries = indexed_entries_from_parsed(&parsed, self.bytes.as_slice())?;
         Ok(GmaMetaBundle {
             handle,
             header,
@@ -217,19 +204,19 @@ impl GmaView {
         })
     }
 
+    /// Header plus safe-path entry extents for library indexing, without
+    /// constructing the extraction handle that preview/extraction needs.
+    pub fn index_meta(&self) -> Result<GmaIndexBundle, GMAError> {
+        let parsed = self.parse()?;
+        Ok(GmaIndexBundle {
+            header: header_from_parsed(&parsed),
+            entries: indexed_entries_from_parsed(&parsed, self.bytes.as_slice())?,
+        })
+    }
+
     pub fn header(&self) -> Result<GMAHeader, GMAError> {
         let parsed = self.parse()?;
-        let meta = &parsed.metadata;
-        Ok(GMAHeader {
-            version: meta.version,
-            timestamp: meta.timestamp,
-            metadata: metadata_from_embedded_fields(
-                meta.name.to_string(),
-                meta.description.to_string(),
-            ),
-            author: meta.author.to_string(),
-            addon_version: meta.addon_version,
-        })
+        Ok(header_from_parsed(&parsed))
     }
 
     /// Safe-path-filtered entry projection, computed fresh on every call.
@@ -237,25 +224,7 @@ impl GmaView {
     /// populated field).
     pub fn entries(&self) -> Result<HashMap<String, GMAEntry>, GMAError> {
         let parsed = self.parse()?;
-        let mut entries = HashMap::with_capacity(parsed.entries().len());
-        for (index, entry) in parsed.entries().iter().enumerate() {
-            // An entry whose path could escape an extraction root is
-            // skipped, not fatal — real workshop archives contain them.
-            if is_unsafe_entry_path(&entry.path) {
-                log::warn!("Illegal GMA entry: {}", entry.path);
-                continue;
-            }
-            entries.insert(
-                entry.path.to_string(),
-                GMAEntry {
-                    path: entry.path.to_string(),
-                    size: entry.size,
-                    crc: entry.crc32,
-                    index: index as u64,
-                },
-            );
-        }
-        Ok(entries)
+        Ok(entries_from_parsed(&parsed))
     }
 
     /// Reads one entry's payload by path. Rejects unsafe paths the same
@@ -268,16 +237,120 @@ impl GmaView {
         let (_, payload) = parsed.get(entry_path).ok_or(GMAError::EntryNotFound)?;
         Ok(payload.to_vec())
     }
+
+    /// Copies a payload extent recorded by [`Self::meta`] without reparsing
+    /// the archive. Every access is checked against the backing bytes again.
+    pub fn read_payload_bytes(&self, offset: u64, len: u64) -> Result<Vec<u8>, GMAError> {
+        let start = usize::try_from(offset).map_err(|_| GMAError::FormatError)?;
+        let len = usize::try_from(len).map_err(|_| GMAError::FormatError)?;
+        let end = start.checked_add(len).ok_or(GMAError::FormatError)?;
+        self.bytes
+            .as_slice()
+            .get(start..end)
+            .map(<[u8]>::to_vec)
+            .ok_or(GMAError::FormatError)
+    }
+}
+
+pub(super) fn entries_from_parsed(parsed: &vformats::gma::Gma<'_>) -> HashMap<String, GMAEntry> {
+    let mut entries = HashMap::with_capacity(parsed.entries().len());
+    for (index, entry) in parsed.entries().iter().enumerate() {
+        // An entry whose path could escape an extraction root is skipped,
+        // not fatal — real workshop archives contain them.
+        if is_unsafe_entry_path(&entry.path) {
+            log::warn!("Illegal GMA entry: {}", entry.path);
+            continue;
+        }
+        entries.insert(
+            entry.path.to_string(),
+            GMAEntry {
+                path: entry.path.to_string(),
+                size: entry.size,
+                crc: entry.crc32,
+                index: index as u64,
+            },
+        );
+    }
+    entries
+}
+
+fn header_from_parsed(parsed: &vformats::gma::Gma<'_>) -> GMAHeader {
+    let meta = &parsed.metadata;
+    GMAHeader {
+        version: meta.version,
+        timestamp: meta.timestamp,
+        metadata: metadata_from_embedded_fields(
+            meta.name.to_string(),
+            meta.description.to_string(),
+        ),
+        author: meta.author.to_string(),
+        addon_version: meta.addon_version,
+    }
+}
+
+fn indexed_entries_from_parsed(
+    parsed: &vformats::gma::Gma<'_>,
+    bytes: &[u8],
+) -> Result<Vec<GmaIndexedEntry>, GMAError> {
+    let mut entries = Vec::with_capacity(parsed.entries().len());
+    let bytes_start = bytes.as_ptr() as usize;
+    for (index, entry) in parsed.entries().iter().enumerate() {
+        if is_unsafe_entry_path(&entry.path) {
+            log::warn!("Illegal GMA entry: {}", entry.path);
+            continue;
+        }
+        let payload = parsed
+            .entry_bytes(index)
+            .map_err(|_| GMAError::FormatError)?;
+        let data_offset = (payload.as_ptr() as usize)
+            .checked_sub(bytes_start)
+            .and_then(|offset| u64::try_from(offset).ok())
+            .ok_or(GMAError::FormatError)?;
+        entries.push(GmaIndexedEntry {
+            path: entry.path.to_string(),
+            size: entry.size,
+            crc: entry.crc32,
+            data_offset,
+        });
+    }
+    Ok(entries)
+}
+
+pub(super) fn safe_entry_indices_from_parsed(
+    parsed: &vformats::gma::Gma<'_>,
+) -> Vec<(String, usize)> {
+    let mut entries = Vec::with_capacity(parsed.entries().len());
+    for (index, entry) in parsed.entries().iter().enumerate() {
+        if is_unsafe_entry_path(&entry.path) {
+            log::warn!("Illegal GMA entry: {}", entry.path);
+            continue;
+        }
+        entries.push((entry.path.to_string(), index));
+    }
+    entries
 }
 
 /// Everything a single [`GmaView::meta`] parse yields: the identity
-/// handle, the header, and the safe-path entry list (in table order,
-/// `index` = table position).
+/// handle, the header, and the safe-path entry list in table order.
 #[derive(Debug, Clone)]
 pub struct GmaMetaBundle {
     pub handle: GMAFile,
     pub header: GMAHeader,
-    pub entries: Vec<GMAEntry>,
+    pub entries: Vec<GmaIndexedEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GmaIndexBundle {
+    pub header: GMAHeader,
+    pub entries: Vec<GmaIndexedEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GmaIndexedEntry {
+    pub path: String,
+    pub size: u64,
+    pub crc: u32,
+    pub data_offset: u64,
 }
 
 impl GMAFile {
@@ -295,6 +368,16 @@ impl GMAFile {
     /// One-mmap, one-parse open: handle + header + entry list together.
     pub fn open_meta<P: AsRef<Path>>(path: P) -> Result<GmaMetaBundle, GMAError> {
         GmaView::mmap(path.as_ref())?.meta(path)
+    }
+
+    /// One-mmap, one-parse library index without an unused extraction handle.
+    pub fn open_index<P: AsRef<Path>>(path: P) -> Result<GmaIndexBundle, GMAError> {
+        GmaView::mmap(path.as_ref())?.index_meta()
+    }
+
+    /// One-mmap, one-parse header read without projecting the entry table.
+    pub fn open_header<P: AsRef<Path>>(path: P) -> Result<GMAHeader, GMAError> {
+        GmaView::mmap(path.as_ref())?.header()
     }
 }
 
@@ -322,7 +405,25 @@ fn metadata_from_embedded_fields(
 
 #[cfg(test)]
 mod tests {
-    use crate::gma::is_unsafe_entry_path;
+    use crate::gma::{GMAError, is_unsafe_entry_path};
+
+    use super::GmaView;
+
+    #[test]
+    fn payload_extent_reads_are_bounds_checked() {
+        let view = GmaView::from_membuffer(vec![1, 2, 3, 4].into(), "fixture.gma");
+
+        assert_eq!(view.read_payload_bytes(1, 2).unwrap(), vec![2, 3]);
+        assert_eq!(view.read_payload_bytes(4, 0).unwrap(), Vec::<u8>::new());
+        assert!(matches!(
+            view.read_payload_bytes(4, 1),
+            Err(GMAError::FormatError)
+        ));
+        assert!(matches!(
+            view.read_payload_bytes(u64::MAX, 2),
+            Err(GMAError::FormatError)
+        ));
+    }
 
     #[test]
     fn rejects_absolute_unix() {

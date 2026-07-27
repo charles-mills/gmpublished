@@ -60,6 +60,7 @@ pub struct State {
     archive: Option<Arc<PreviewArchive>>,
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
+    browser_scroll_offset: f32,
     details: Details,
     revealed_description_spoilers: HashSet<SpoilerId>,
     workshop_metadata: Option<WorkshopMetadata>,
@@ -92,6 +93,7 @@ impl Default for State {
             archive: None,
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
+            browser_scroll_offset: 0.0,
             details: Details::default(),
             revealed_description_spoilers: HashSet::new(),
             workshop_metadata: None,
@@ -196,6 +198,28 @@ impl State {
 
     pub(crate) const fn browser_snapshot(&self) -> &BrowserSnapshot {
         &self.browser_snapshot
+    }
+
+    /// The viewport height comes from the view's `responsive` wrapper at
+    /// layout time, so initial renders and window resizes always window
+    /// against the real pane height.
+    pub(crate) fn browser_virtual_rows(
+        &self,
+        viewport_height: f32,
+    ) -> crate::widgets::file_browser::VirtualRows {
+        crate::widgets::file_browser::virtual_rows(
+            self.browser_snapshot.rows.len(),
+            self.browser_scroll_offset,
+            viewport_height,
+        )
+    }
+
+    pub(super) fn set_browser_scroll_offset(&mut self, offset: f32) {
+        self.browser_scroll_offset = if offset.is_finite() {
+            offset.max(0.0)
+        } else {
+            0.0
+        };
     }
 
     pub(crate) const fn details(&self) -> &Details {
@@ -668,6 +692,7 @@ impl State {
             entry_path: entry_path.to_owned(),
             display_name: entry
                 .path
+                .as_str()
                 .rsplit_once('/')
                 .map_or(entry.path.as_str(), |(_, name)| name)
                 .to_owned(),
@@ -719,6 +744,7 @@ impl State {
     }
 
     fn refresh_browser_snapshot(&mut self) {
+        self.browser_scroll_offset = 0.0;
         self.browser_snapshot =
             BrowserSnapshot::from_browser(self.browser.as_ref(), &self.archive_path_text());
     }

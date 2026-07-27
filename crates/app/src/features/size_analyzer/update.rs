@@ -399,7 +399,7 @@ mod tests {
                     author: String::new(),
                     addon_version: 1,
                 },
-                entries: Vec::new(),
+                entries: std::sync::Arc::from([]),
             },
         }
     }

@@ -14,7 +14,7 @@ use crate::steam::Steam;
 use crate::transactions::Transaction;
 
 use super::{
-    GMAError, GMAFile, GMAMetadata,
+    GMAError, GMAFile, GMAMetadata, is_unsafe_entry_path,
     read::GmaView,
     whitelist::{self, AddonWhitelist},
 };
@@ -501,11 +501,9 @@ impl GmaView {
             // symlinks; a freshly allocated one has nothing planted in it.
             let dest_existed = dest_path.exists();
 
-            let entries = self.entries()?;
-            let entries_len_f = entries.len() as f64;
-
-            // Fail before spinning up threads if the file no longer parses.
             let parsed = self.parse()?;
+            let entries = super::read::safe_entry_indices_from_parsed(&parsed);
+            let entries_len_f = entries.len() as f64;
 
             let i = AtomicUsize::new(0);
             let extracted = AtomicUsize::new(0);
@@ -519,9 +517,8 @@ impl GmaView {
                 let _ = first_error.set(message.into());
             };
 
-            entries
-                .par_iter()
-                .try_for_each(|(entry_path, entry)| -> Result<(), GMAError> {
+            entries.par_iter().try_for_each(
+                |(entry_path, entry_index)| -> Result<(), GMAError> {
                     if matches!(whitelist_mode, Whitelist::Ignore)
                         || whitelist::is_whitelisted_in(&whitelist_snapshot, entry_path)
                     {
@@ -548,7 +545,7 @@ impl GmaView {
                             ));
                             log::warn!("Refusing to extract {}: {err}", final_path.display());
                         } else {
-                            match parsed.entry_bytes(entry.index as usize) {
+                            match parsed.entry_bytes(*entry_index) {
                                 Ok(payload) => {
                                     match write_entry_bytes(payload, &final_path, None) {
                                         Ok(()) => {
@@ -589,7 +586,8 @@ impl GmaView {
                     transaction.progress((i as f64) / entries_len_f);
 
                     Ok(())
-                })?;
+                },
+            )?;
 
             let extracted = extracted.into_inner();
             let failed = failed.into_inner();
@@ -670,12 +668,21 @@ impl GmaView {
             return Err(GMAError::FormatError);
         }
 
-        let entries = self.entries()?;
-        let entry = entries.get(&entry_path).ok_or(GMAError::EntryNotFound)?;
-
         let parsed = self.parse()?;
+        // Unsafe entry paths must stay invisible here, exactly as `entries`
+        // filters them out of its projection; the `starts_with` check above
+        // does not resolve `..` components.
+        let entry_index = (!is_unsafe_entry_path(&entry_path))
+            .then(|| {
+                parsed
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.path == entry_path)
+            })
+            .flatten()
+            .ok_or(GMAError::EntryNotFound)?;
         let result = parsed
-            .entry_bytes(entry.index as usize)
+            .entry_bytes(entry_index)
             .map_err(|_| GMAError::FormatError)
             .and_then(|payload| write_entry_bytes(payload, &path, Some(transaction)))
             .map(|_| path.clone());

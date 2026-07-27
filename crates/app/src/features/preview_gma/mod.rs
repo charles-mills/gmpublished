@@ -16,7 +16,7 @@ pub use model::{
     query_workshop_metadata,
 };
 pub use state::State;
-pub use update::{nav_path_scrollable_id, update};
+pub use update::{browser_rows_scrollable_id, nav_path_scrollable_id, update};
 pub use view::view;
 
 /// Animation clock for an open Preview GMA modal: runs while the thumbnail

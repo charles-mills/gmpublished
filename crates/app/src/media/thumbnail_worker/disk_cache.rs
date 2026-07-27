@@ -3,6 +3,7 @@ use image::{
     codecs::png::{CompressionType as PngCompressionType, FilterType as PngFilterType, PngEncoder},
 };
 use std::{
+    borrow::Borrow,
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
@@ -89,7 +90,7 @@ impl WorkerDiskCache {
         if ensure_disk_cache_index(self, &mut index).is_err() {
             return false;
         }
-        index.by_path.contains_key(&path)
+        index.by_path.contains_key(path.as_path())
     }
 }
 
@@ -104,8 +105,27 @@ struct DiskCacheState {
 struct DiskCacheIndex {
     initialized: bool,
     total_bytes: u64,
-    by_path: HashMap<PathBuf, CacheFileMetadata>,
-    by_age: BTreeMap<(SystemTime, PathBuf), u64>,
+    by_path: HashMap<CachePath, CacheFileMetadata>,
+    by_age: BTreeMap<(SystemTime, CachePath), u64>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct CachePath(Arc<PathBuf>);
+
+impl CachePath {
+    fn new(path: PathBuf) -> Self {
+        Self(Arc::new(path))
+    }
+
+    fn as_path(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
+impl Borrow<Path> for CachePath {
+    fn borrow(&self) -> &Path {
+        self.as_path()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -408,17 +428,18 @@ fn is_source_file(path: &Path) -> bool {
 }
 
 fn insert_indexed_cache_file(index: &mut DiskCacheIndex, file: CacheFile) {
+    let path = CachePath::new(file.path);
     if let Some(previous) = index.by_path.insert(
-        file.path.clone(),
+        path.clone(),
         CacheFileMetadata {
             len: file.len,
             modified: file.modified,
         },
     ) {
-        index.by_age.remove(&(previous.modified, file.path.clone()));
+        index.by_age.remove(&(previous.modified, path.clone()));
         index.total_bytes = index.total_bytes.saturating_sub(previous.len);
     }
-    index.by_age.insert((file.modified, file.path), file.len);
+    index.by_age.insert((file.modified, path), file.len);
     index.total_bytes = index.total_bytes.saturating_add(file.len);
 }
 
@@ -427,8 +448,8 @@ fn remove_indexed_cache_file(cache: &WorkerDiskCache, path: &Path) {
     if !index.initialized {
         return;
     }
-    if let Some(previous) = index.by_path.remove(path) {
-        index.by_age.remove(&(previous.modified, path.to_owned()));
+    if let Some((path, previous)) = index.by_path.remove_entry(path) {
+        index.by_age.remove(&(previous.modified, path));
         index.total_bytes = index.total_bytes.saturating_sub(previous.len);
     }
 }
@@ -456,22 +477,22 @@ fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex)
             .by_age
             .iter()
             .take(EVICTION_PREFERENCE_SCAN)
-            .find(|((_, path), _)| !is_source_file(path))
+            .find(|((_, path), _)| !is_source_file(path.as_path()))
             .or_else(|| index.by_age.iter().next())
             .map(|((modified, path), len)| ((*modified, path.clone()), *len));
         let Some(((modified, path), len)) = victim else {
             break;
         };
         index.by_age.remove(&(modified, path.clone()));
-        index.by_path.remove(&path);
+        index.by_path.remove(path.as_path());
 
-        match fs::remove_file(&path) {
+        match fs::remove_file(path.as_path()) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 log::warn!(
                     "failed to remove thumbnail cache file {}: {error}",
-                    path.display()
+                    path.as_path().display()
                 );
             }
         }

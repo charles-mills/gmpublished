@@ -13,7 +13,7 @@ use super::{Message, State};
 /// Identifies this route's grid across route switches; see `addon_grid::view`.
 pub const GRID_KEY: &str = "installed-addons-grid";
 
-pub fn view<'a>(state: &State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     // A found-but-empty library is the same shape of surface as a missing
     // prerequisite, so it uses the same panel — the difference is the glyph
     // (no strike) and the tone (nothing is wrong, there is just nothing here).

@@ -812,7 +812,7 @@ pub fn verify_whitelist(
     #[cfg(not(target_os = "windows"))]
     let mut dedup: HashSet<String> = HashSet::new();
 
-    for (path, relative_path) in WalkDir::new(path)
+    for (entry, relative_path) in WalkDir::new(path)
         .follow_links(false)
         .contents_first(true)
         .into_iter()
@@ -823,18 +823,16 @@ pub fn verify_whitelist(
                 return None;
             }
 
-            let path = entry.into_path();
-
-            if path.is_dir() {
+            if entry.file_type().is_dir() {
                 return None;
             }
 
-            let relative_path = match path.strip_prefix(&content_root) {
+            let relative_path = match entry.path().strip_prefix(&content_root) {
                 Ok(rel_path) => rel_path.to_string_lossy().replace('\\', "/"),
                 Err(_) => return None,
             };
 
-            Some((path, relative_path))
+            Some((entry, relative_path))
         })
         .filter(|(_, relative_path)| !crate::gma::whitelist::is_default_ignored(relative_path))
         .filter(|(_, relative_path)| !crate::gma::whitelist::is_ignored(relative_path, &ignore))
@@ -853,7 +851,7 @@ pub fn verify_whitelist(
             }
             failed.push(relative_path);
         } else if failed.is_empty() {
-            let entry_size = path.metadata().map_or(0, |metadata| metadata.len());
+            let entry_size = entry.metadata().map_or(0, |metadata| metadata.len());
             size += entry_size;
             files.push(GMAEntry {
                 path: relative_path,

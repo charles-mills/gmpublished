@@ -40,13 +40,16 @@ pub struct SizeAnalyzerAddon {
     pub(crate) path: PathBuf,
     pub(crate) workshop_id: Option<PublishedFileId>,
     pub(crate) title: String,
-    pub(crate) addon_type: Option<String>,
-    pub(crate) tags: Vec<String>,
+    group_tag: String,
     pub(crate) file_size_bytes: u64,
 }
 
 impl SizeAnalyzerAddon {
     #[cfg(test)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test fixture helper mirrors the owned source record API"
+    )]
     pub(crate) fn new(
         path: impl Into<PathBuf>,
         workshop_id: Option<PublishedFileId>,
@@ -55,12 +58,12 @@ impl SizeAnalyzerAddon {
         tags: Vec<String>,
         file_size_bytes: u64,
     ) -> Self {
+        let group_tag = normalized_group_tag(addon_type.as_deref(), &tags);
         Self {
             path: path.into(),
             workshop_id,
             title: title.into(),
-            addon_type,
-            tags,
+            group_tag,
             file_size_bytes,
         }
     }
@@ -71,20 +74,47 @@ impl SizeAnalyzerAddon {
             path: addon.path.clone(),
             workshop_id: addon.workshop_id,
             title: addon.meta.title().to_owned(),
-            addon_type: metadata.addon_type().map(str::to_owned),
-            tags: metadata.tags().cloned().unwrap_or_default(),
+            group_tag: normalized_group_tag(
+                metadata.addon_type(),
+                metadata.tags().map_or(&[], Vec::as_slice),
+            ),
             file_size_bytes: addon.file_size_bytes,
         }
     }
 
-    fn tag(&self) -> String {
-        self.addon_type
-            .as_deref()
-            .filter(|addon_type| !addon_type.trim().is_empty())
-            .or_else(|| self.tags.get(1).map(String::as_str))
-            .filter(|tag| !tag.trim().is_empty())
-            .unwrap_or(DEFAULT_ADDON_TAG)
-            .to_lowercase()
+    fn into_tagged(self) -> (String, TreemapAddon) {
+        let tag = self.group_tag;
+        let addon = TreemapAddon {
+            path: self.path,
+            workshop_id: self.workshop_id,
+            title: self.title,
+            file_size_bytes: self.file_size_bytes,
+        };
+        (tag, addon)
+    }
+}
+
+fn normalized_group_tag(addon_type: Option<&str>, tags: &[String]) -> String {
+    addon_type
+        .filter(|addon_type| !addon_type.trim().is_empty())
+        .or_else(|| tags.get(1).map(String::as_str))
+        .filter(|tag| !tag.trim().is_empty())
+        .unwrap_or(DEFAULT_ADDON_TAG)
+        .to_lowercase()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreemapAddon {
+    pub(crate) path: PathBuf,
+    pub(crate) workshop_id: Option<PublishedFileId>,
+    pub(crate) title: String,
+    pub(crate) file_size_bytes: u64,
+}
+
+#[cfg(test)]
+impl From<SizeAnalyzerAddon> for TreemapAddon {
+    fn from(addon: SizeAnalyzerAddon) -> Self {
+        addon.into_tagged().1
     }
 }
 
@@ -93,17 +123,18 @@ pub struct TreemapLayout {
     pub(crate) bounds: TreemapBounds,
     pub(crate) total_size_bytes: u64,
     pub(crate) squares: Vec<TreemapSquare>,
+    leaf_count: usize,
 }
 
 impl TreemapLayout {
     pub(crate) fn leaf_rects(&self) -> Vec<TreemapLeaf<'_>> {
-        let mut leaves = Vec::new();
-        collect_leaf_rects(&self.squares, 0.0, 0.0, &mut leaves);
+        let mut leaves = Vec::with_capacity(self.leaf_count);
+        collect_leaf_rects(&self.squares, 0.0, 0.0, None, &mut leaves);
         leaves
     }
 
     pub(crate) fn hit_test_addon(&self, x: f64, y: f64) -> Option<TreemapHit<'_>> {
-        hit_test_squares(&self.squares, 0.0, 0.0, x, y)
+        hit_test_squares(&self.squares, 0.0, 0.0, None, x, y)
     }
 }
 
@@ -124,8 +155,7 @@ pub enum TreemapSquareData {
         children: Vec<TreemapSquare>,
     },
     Addon {
-        tag: String,
-        addon: SizeAnalyzerAddon,
+        addon: TreemapAddon,
     },
 }
 
@@ -146,14 +176,14 @@ impl Rect {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TreemapLeaf<'a> {
-    pub(crate) addon: &'a SizeAnalyzerAddon,
+    pub(crate) addon: &'a TreemapAddon,
     pub(crate) tag: &'a str,
     pub(crate) rect: Rect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TreemapHit<'a> {
-    pub(crate) addon: &'a SizeAnalyzerAddon,
+    pub(crate) addon: &'a TreemapAddon,
     pub(crate) tag: &'a str,
     pub(crate) rect: Rect,
 }
@@ -201,6 +231,7 @@ pub fn analyze_addons(
     if addons.is_empty() {
         return Err(SizeAnalyzerError::NoAddonsFound);
     }
+    let leaf_count = addons.len();
 
     addons.sort_by(compare_analyzer_addons);
     let total_size_bytes = addons.iter().fold(0_u64, |total, addon| {
@@ -212,6 +243,7 @@ pub fn analyze_addons(
         bounds,
         total_size_bytes,
         squares,
+        leaf_count,
     })
 }
 
@@ -235,7 +267,7 @@ fn taggify(
     let mut groups = Vec::<TagGroup>::new();
     let mut group_index = HashMap::<String, usize>::new();
     for addon in addons {
-        let tag = addon.tag();
+        let (tag, addon) = addon.into_tagged();
         if let Some(group) = group_index
             .get(&tag)
             .and_then(|index| groups.get_mut(*index))
@@ -292,7 +324,7 @@ fn taggify(
     master_treemap
         .squares
         .into_iter()
-        .filter_map(|square| square.into_public(None))
+        .filter_map(RawSquare::into_public)
         .collect()
 }
 
@@ -300,23 +332,25 @@ fn collect_leaf_rects<'a>(
     squares: &'a [TreemapSquare],
     offset_x: f64,
     offset_y: f64,
+    inherited_tag: Option<&'a str>,
     leaves: &mut Vec<TreemapLeaf<'a>>,
 ) {
     for square in squares {
         match &square.data {
-            TreemapSquareData::Tag { children, .. } => {
+            TreemapSquareData::Tag { tag, children, .. } => {
                 let padding = child_padding(square.width, square.height);
                 collect_leaf_rects(
                     children,
                     offset_x + square.x + padding,
                     offset_y + square.y + padding,
+                    Some(tag),
                     leaves,
                 );
             }
-            TreemapSquareData::Addon { tag, addon } => {
+            TreemapSquareData::Addon { addon } => {
                 leaves.push(TreemapLeaf {
                     addon,
-                    tag,
+                    tag: inherited_tag.unwrap_or(DEFAULT_ADDON_TAG),
                     rect: Rect {
                         x: offset_x + square.x,
                         y: offset_y + square.y,
@@ -329,16 +363,17 @@ fn collect_leaf_rects<'a>(
     }
 }
 
-fn hit_test_squares(
-    squares: &[TreemapSquare],
+fn hit_test_squares<'a>(
+    squares: &'a [TreemapSquare],
     offset_x: f64,
     offset_y: f64,
+    inherited_tag: Option<&'a str>,
     x: f64,
     y: f64,
-) -> Option<TreemapHit<'_>> {
+) -> Option<TreemapHit<'a>> {
     for square in squares {
         match &square.data {
-            TreemapSquareData::Tag { children, .. } => {
+            TreemapSquareData::Tag { tag, children, .. } => {
                 let rect = Rect {
                     x: offset_x + square.x,
                     y: offset_y + square.y,
@@ -347,14 +382,19 @@ fn hit_test_squares(
                 };
                 if rect.contains(x, y) {
                     let padding = child_padding(square.width, square.height);
-                    if let Some(hit) =
-                        hit_test_squares(children, rect.x + padding, rect.y + padding, x, y)
-                    {
+                    if let Some(hit) = hit_test_squares(
+                        children,
+                        rect.x + padding,
+                        rect.y + padding,
+                        Some(tag),
+                        x,
+                        y,
+                    ) {
                         return Some(hit);
                     }
                 }
             }
-            TreemapSquareData::Addon { tag, addon } => {
+            TreemapSquareData::Addon { addon } => {
                 let rect = Rect {
                     x: offset_x + square.x,
                     y: offset_y + square.y,
@@ -362,7 +402,11 @@ fn hit_test_squares(
                     height: square.height,
                 };
                 if rect.contains(x, y) {
-                    return Some(TreemapHit { addon, tag, rect });
+                    return Some(TreemapHit {
+                        addon,
+                        tag: inherited_tag.unwrap_or(DEFAULT_ADDON_TAG),
+                        rect,
+                    });
                 }
             }
         }
@@ -380,7 +424,7 @@ struct TagGroup {
     tag: String,
     total_size_bytes: u64,
     sizes: Vec<f64>,
-    addons: Vec<SizeAnalyzerAddon>,
+    addons: Vec<TreemapAddon>,
 }
 
 #[derive(Clone, Debug)]
@@ -391,7 +435,7 @@ enum RawTreeMapData {
         total_size_bytes: u64,
         children: Vec<RawSquare>,
     },
-    Addon(SizeAnalyzerAddon),
+    Addon(TreemapAddon),
 }
 
 #[derive(Clone, Debug)]
@@ -404,7 +448,7 @@ struct RawSquare {
 }
 
 impl RawSquare {
-    fn into_public(self, inherited_tag: Option<&str>) -> Option<TreemapSquare> {
+    fn into_public(self) -> Option<TreemapSquare> {
         let data = match self.data? {
             RawTreeMapData::Tag(_) => return None,
             RawTreeMapData::TagRegion {
@@ -412,20 +456,14 @@ impl RawSquare {
                 total_size_bytes,
                 children,
             } => {
-                let children = children
-                    .into_iter()
-                    .filter_map(|child| child.into_public(Some(&tag)))
-                    .collect();
+                let children = children.into_iter().filter_map(Self::into_public).collect();
                 TreemapSquareData::Tag {
                     tag,
                     total_size_bytes,
                     children,
                 }
             }
-            RawTreeMapData::Addon(addon) => TreemapSquareData::Addon {
-                tag: inherited_tag.unwrap_or(DEFAULT_ADDON_TAG).to_owned(),
-                addon,
-            },
+            RawTreeMapData::Addon(addon) => TreemapSquareData::Addon { addon },
         };
 
         Some(TreemapSquare {
@@ -473,29 +511,35 @@ impl TreeMap {
             .into_iter()
             .map(|size| (size * self.height * self.width) / total_size)
             .collect::<Vec<_>>();
-        self.squarify(&scaled, 0, &mut Vec::new(), self.min_width().0);
-    }
+        let mut next_index = 0;
+        let mut row = Vec::new();
+        let mut row_worst = None;
+        let mut width = self.min_width().0;
+        loop {
+            let Some(next_square) = scaled.get(next_index).copied() else {
+                self.layout_row(&mut row, width, self.min_width().1);
+                break;
+            };
+            if next_index + 1 == scaled.len() {
+                self.layout_last_square(next_square, &mut row, width);
+                break;
+            }
 
-    fn squarify(&mut self, squares: &[f64], next_index: usize, row: &mut Vec<f64>, width: f64) {
-        let Some(next_square) = squares.get(next_index).copied() else {
-            self.layout_row(row, width, self.min_width().1);
-            return;
-        };
-        if next_index + 1 == squares.len() {
-            self.layout_last_square(next_square, row, width);
-            return;
+            let previous_worst = row_worst;
+            row.push(next_square);
+            let next_worst = self.worst_ratio(&row, width);
+            if previous_worst.is_none_or(|worst| worst >= next_worst) {
+                row_worst = Some(next_worst);
+                next_index += 1;
+                continue;
+            }
+
+            row.pop();
+            self.layout_row(&mut row, width, self.min_width().1);
+            row.clear();
+            row_worst = None;
+            width = self.min_width().0;
         }
-
-        let previous_worst = (!row.is_empty()).then(|| self.worst_ratio(row, width));
-        row.push(next_square);
-        if previous_worst.is_none_or(|worst| worst >= self.worst_ratio(row, width)) {
-            self.squarify(squares, next_index + 1, row, width);
-            return;
-        }
-
-        row.pop();
-        self.layout_row(row, width, self.min_width().1);
-        self.squarify(squares, next_index, &mut Vec::new(), self.min_width().0);
     }
 
     fn worst_ratio(&self, row: &[f64], width: f64) -> f64 {
@@ -625,7 +669,7 @@ mod tests {
                     author: String::new(),
                     addon_version: 1,
                 },
-                entries: Vec::new(),
+                entries: std::sync::Arc::from([]),
             },
         }
     }

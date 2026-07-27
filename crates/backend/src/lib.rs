@@ -48,4 +48,4 @@ pub mod search;
 pub mod cli;
 
 pub mod backend;
-pub use backend::{Backend, BackendConfig, BackendInitError};
+pub use backend::{Backend, BackendConfig, BackendInitError, BackgroundServices};

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, time::Instant};
+use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
 use iced::advanced::graphics::text::Paragraph as IcedParagraph;
 use iced::advanced::text::Paragraph as _;
@@ -54,7 +54,7 @@ pub struct SubscriptionRoll {
 
 #[derive(Clone, Debug)]
 pub struct Data {
-    id: String,
+    id: Arc<str>,
     kind: Kind,
     title: String,
     subscriptions: String,
@@ -100,10 +100,10 @@ impl PartialEq for Data {
 impl Data {
     pub(crate) fn addon(id: impl Into<String>, title: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
+            id: Arc::from(id.into()),
             kind: Kind::Addon,
             title: title.into(),
-            subscriptions: String::new(),
+            subscriptions: "0".to_owned(),
             subscription_count: 0,
             subscription_roll: None,
             score_bucket: 0,
@@ -211,7 +211,12 @@ impl Data {
     }
 
     pub(crate) fn with_subscriptions(mut self, label: impl Into<String>, count: u64) -> Self {
-        self.subscriptions = label.into();
+        let label = label.into();
+        self.subscriptions = if label.is_empty() {
+            count.to_string()
+        } else {
+            label
+        };
         self.subscription_count = count;
         self
     }
@@ -248,7 +253,7 @@ impl Data {
     }
 
     #[cfg(test)]
-    pub(crate) fn subscriptions_label_for_test(&self) -> String {
+    pub(crate) fn subscriptions_label_for_test(&self) -> &str {
         self.subscriptions_label()
     }
 
@@ -257,20 +262,16 @@ impl Data {
         self.subscription_roll.as_ref()
     }
 
-    fn subscriptions_label(&self) -> String {
-        if self.subscriptions.is_empty() {
-            self.subscription_count.to_string()
-        } else {
-            self.subscriptions.clone()
-        }
+    fn subscriptions_label(&self) -> &str {
+        &self.subscriptions
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
-    Pressed(String),
-    Released(String),
-    ContextRequested(String, Point),
+    Pressed(Arc<str>),
+    Released(Arc<str>),
+    ContextRequested(Arc<str>, Point),
 }
 
 pub fn preferred_height(data: &Data, width: f32, tokens: &Tokens) -> f32 {
@@ -294,20 +295,21 @@ fn fixed_content_height(width: f32, tokens: &Tokens) -> f32 {
 }
 
 pub fn view<'a>(
-    data: &Data,
+    data: &'a Data,
     width: f32,
     cell_height: f32,
     content_height: f32,
     tokens: &Tokens,
+    now: Instant,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
     let content_width = content_width(width, &tokens);
     let preview_size = preview_size(width, &tokens);
     let title_height = title_height_from_content_height(content_height, width, &tokens);
-    let hover_progress = data.hover_progress(Instant::now());
+    let hover_progress = data.hover_progress(now);
 
     let stats = stats_row(data, content_width, &tokens);
-    let preview = preview(data, preview_size, &tokens, hover_progress);
+    let preview = preview(data, preview_size, &tokens, hover_progress, now);
     let title = title(data, title_height, &tokens);
 
     let body = column![stats, preview, title]
@@ -349,7 +351,7 @@ pub fn view<'a>(
         .into()
 }
 
-fn stats_row<'a>(data: &Data, width: f32, tokens: &Tokens) -> Element<'a, Message> {
+fn stats_row<'a>(data: &'a Data, width: f32, tokens: &Tokens) -> Element<'a, Message> {
     let opacity = enabled_opacity(data.enabled, tokens);
     let text_color = text_color(data.enabled, tokens);
 
@@ -375,7 +377,7 @@ fn stats_row<'a>(data: &Data, width: f32, tokens: &Tokens) -> Element<'a, Messag
 }
 
 fn subscription_count_label<'a>(
-    data: &Data,
+    data: &'a Data,
     color: Color,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
@@ -516,6 +518,7 @@ fn preview<'a>(
     size: f32,
     tokens: &Tokens,
     hover_progress: f32,
+    now: Instant,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
     let opacity = enabled_opacity(data.enabled, &tokens);
@@ -523,7 +526,7 @@ fn preview<'a>(
         (Kind::PublishNew, _) => plus_glyph(data, &tokens, hover_progress),
         (Kind::Addon, Thumbnail::Placeholder(handle)) => thumb_image(handle, size, opacity),
         (Kind::Addon, Thumbnail::Ready(handle)) => {
-            let reveal = data.reveal_progress(Instant::now());
+            let reveal = data.reveal_progress(now);
             let top = thumb_image(handle, size, opacity * reveal);
             match &data.reveal_under {
                 Some(under) if reveal < 1.0 => {

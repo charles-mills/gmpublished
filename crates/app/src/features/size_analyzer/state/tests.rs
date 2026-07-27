@@ -27,7 +27,10 @@ fn hover_title_prefers_the_installed_title() {
         Vec::new(),
         100,
     );
-    assert_eq!(resolve_hover_title(&addon), "Cool Map");
+    assert_eq!(
+        resolve_hover_title(&addon.title, addon.workshop_id),
+        "Cool Map"
+    );
 }
 
 #[test]
@@ -40,13 +43,13 @@ fn hover_title_falls_back_to_the_workshop_id_when_title_is_blank() {
         Vec::new(),
         100,
     );
-    assert_eq!(resolve_hover_title(&addon), "42");
+    assert_eq!(resolve_hover_title(&addon.title, addon.workshop_id), "42");
 }
 
 #[test]
 fn hover_title_is_empty_for_a_blank_local_addon() {
     let addon = SizeAnalyzerAddon::new("a.gma", None, "", Some("map".to_owned()), Vec::new(), 100);
-    assert_eq!(resolve_hover_title(&addon), "");
+    assert_eq!(resolve_hover_title(&addon.title, addon.workshop_id), "");
 }
 
 #[test]
@@ -909,7 +912,7 @@ fn installed_addon(
                 author: String::new(),
                 addon_version: 1,
             },
-            entries: Vec::new(),
+            entries: Arc::from([]),
         },
     }
 }

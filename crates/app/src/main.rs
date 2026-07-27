@@ -96,21 +96,19 @@ fn run() -> Result<(), RunError> {
         return Ok(());
     }
 
-    // A quiet, throwaway `AppData` read: just enough to resolve the window
-    // chrome strategy and the panic log path before the Iced event loop
-    // (and the real `Backend`, with its Steam/whitelist background
-    // threads) exists. `App::new` builds the one real `Backend` when the
-    // event loop actually starts.
-    let early_app_data = gmpublished_backend::appdata::AppData::load(
-        gmpublished_backend::appdata::AppDataPaths::production(),
-        gmpublished_backend::transactions::Transactions::new(
-            std::sync::Arc::new(gmpublished_backend::events::NullEventSink),
-            false,
-        ),
-    );
-    install_panic_log_hook(
-        early_app_data
-            .temp_dir()
+    // The hook must be live before backend construction so init panics reach
+    // the log; it starts on the fallback path and upgrades below.
+    install_panic_log_hook();
+
+    // Construct the one authoritative backend first. Its resolved snapshot is
+    // also sufficient for pre-window configuration, avoiding a throwaway
+    // second settings-file read on every GUI launch. Background Steam and
+    // whitelist work remains dormant until the first frame has been shown.
+    let ctx = bridge::tasks::BackendContext::new()?;
+    let (startup_settings, startup_paths) = ctx.settings_and_paths_snapshot();
+    let _ = PANIC_LOG_PATH.set(
+        startup_paths
+            .temp_dir
             .join("logs")
             .join(PANIC_LOG_FILE_NAME),
     );
@@ -119,10 +117,8 @@ fn run() -> Result<(), RunError> {
     #[cfg(target_os = "macos")]
     platform_open::install();
 
-    let chrome_strategy =
-        features::shell::ChromeStrategy::resolve(early_app_data.settings.load().titlebar);
+    let chrome_strategy = features::shell::ChromeStrategy::resolve(startup_settings.titlebar);
 
-    let ctx = bridge::tasks::BackendContext::new()?;
     let application = iced::application(move || App::new(ctx.clone()), App::update, App::view);
     let application = assets::fonts::bundled_fonts()
         .into_iter()
@@ -182,11 +178,14 @@ fn apply_platform_chrome(
 ) {
 }
 
-fn install_panic_log_hook(path: PathBuf) {
-    let _ = PANIC_LOG_PATH.set(path.clone());
+fn install_panic_log_hook() {
     PANIC_HOOK_INSTALLED.get_or_init(|| {
         let previous = panic::take_hook();
         panic::set_hook(Box::new(move |panic| {
+            let path = PANIC_LOG_PATH
+                .get()
+                .cloned()
+                .unwrap_or_else(fallback_panic_log_path);
             append_panic_log(&path, panic);
             previous(panic);
         }));

@@ -6,6 +6,8 @@ use std::{
     path::Path,
 };
 
+pub const ATOMIC_WRITE_BUFFER_SIZE: usize = 16 * 1024;
+
 /// Writes `bytes` to `path` atomically: create parent directories, write to a
 /// tempfile in the target's directory (so the final rename stays on one
 /// filesystem), then persist over `path`. A crash or error mid-write can
@@ -15,17 +17,26 @@ use std::{
 /// into a single `io::Error`; callers that need a typed error wrap it with
 /// their own context.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut tmp = atomic_tempfile(path)?;
+    tmp.write_all(bytes)?;
+    persist_atomic(tmp, path)
+}
+
+/// Creates a tempfile beside `path`, ensuring its parent exists. Callers can
+/// stream typed content into it, then finish with [`persist_atomic`].
+pub fn atomic_tempfile(path: &Path) -> io::Result<tempfile::NamedTempFile> {
     let parent = path.parent();
     if let Some(parent) = parent {
         fs::create_dir_all(parent)?;
     }
-
-    let mut tmp = parent.map_or_else(tempfile::NamedTempFile::new, |parent| {
+    parent.map_or_else(tempfile::NamedTempFile::new, |parent| {
         tempfile::NamedTempFile::new_in(parent)
-    })?;
-    tmp.write_all(bytes)?;
-    tmp.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    })
+}
+
+/// Atomically replaces `path` with a completed same-directory tempfile.
+pub fn persist_atomic(temp: tempfile::NamedTempFile, path: &Path) -> io::Result<()> {
+    temp.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 #[cfg(test)]

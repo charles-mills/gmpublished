@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "asset-studio"), allow(dead_code))]
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,9 +9,9 @@ use thiserror::Error;
 
 use crate::bridge::gma::{GmaError, PreviewArchive};
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ArchivePreviewEntry {
-    pub(crate) path: String,
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct ArchivePreviewEntry<'a> {
+    pub(crate) path: &'a str,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
 }
@@ -27,8 +28,33 @@ pub enum PreviewArchiveSource {
 /// case-sensitive filesystems.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FolderSource {
-    entries: Vec<ArchivePreviewEntry>,
-    disk_paths: HashMap<String, PathBuf>,
+    entries: HashMap<FolderPath, FolderEntry>,
+    paths: Vec<FolderPath>,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct FolderPath(Arc<String>);
+
+impl FolderPath {
+    fn new(path: String) -> Self {
+        Self(Arc::new(path))
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl Borrow<str> for FolderPath {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct FolderEntry {
+    size: u64,
+    disk_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -49,57 +75,88 @@ impl PreviewArchiveSource {
     pub(crate) fn from_folder(
         files: impl IntoIterator<Item = (String, u64, PathBuf)>,
     ) -> Arc<Self> {
-        let mut entries = Vec::new();
-        let mut disk_paths = HashMap::new();
+        let files = files.into_iter();
+        let (lower, _) = files.size_hint();
+        let mut entries = HashMap::with_capacity(lower);
+        let mut paths = Vec::with_capacity(lower);
         for (path, size, disk_path) in files {
-            entries.push(ArchivePreviewEntry {
-                path: path.clone(),
-                size,
-                crc32: 0,
-            });
-            disk_paths.insert(path, disk_path);
+            let path = FolderPath::new(path);
+            if entries
+                .insert(path.clone(), FolderEntry { size, disk_path })
+                .is_none()
+            {
+                paths.push(path);
+            }
         }
-        Arc::new(Self::Folder(FolderSource {
-            entries,
-            disk_paths,
-        }))
+        Arc::new(Self::Folder(FolderSource { entries, paths }))
     }
 
-    pub(crate) fn entries(&self) -> Vec<ArchivePreviewEntry> {
+    pub(crate) fn for_each_path(&self, mut visit: impl FnMut(&str)) {
         match self {
             Self::Gma(archive) => archive
                 .entries()
                 .iter()
-                .map(|entry| ArchivePreviewEntry {
-                    path: entry.path.as_str().to_owned(),
-                    size: entry.size,
-                    crc32: entry.crc32,
-                })
-                .collect(),
-            Self::Folder(folder) => folder.entries.clone(),
+                .for_each(|entry| visit(entry.path.as_str())),
+            Self::Folder(folder) => folder.paths.iter().for_each(|path| visit(path.as_str())),
         }
     }
 
     pub(crate) fn entry(
         &self,
         path: &str,
-    ) -> Result<ArchivePreviewEntry, PreviewArchiveSourceError> {
+    ) -> Result<ArchivePreviewEntry<'_>, PreviewArchiveSourceError> {
         match self {
             Self::Gma(archive) => {
                 let entry = archive
                     .entry(path)
                     .map_err(PreviewArchiveSourceError::Gma)?;
                 Ok(ArchivePreviewEntry {
-                    path: entry.path.clone(),
+                    path: entry.path.as_str(),
                     size: entry.size,
                     crc32: entry.crc32,
                 })
             }
             Self::Folder(folder) => folder
                 .entries
+                .get_key_value(path)
+                .map(|(entry_path, entry)| ArchivePreviewEntry {
+                    path: entry_path.as_str(),
+                    size: entry.size,
+                    crc32: 0,
+                })
+                .ok_or_else(|| PreviewArchiveSourceError::EntryNotFound(path.to_owned())),
+        }
+    }
+
+    pub(crate) fn entry_ignore_ascii_case(
+        &self,
+        path: &str,
+    ) -> Result<ArchivePreviewEntry<'_>, PreviewArchiveSourceError> {
+        match self {
+            Self::Gma(archive) => archive
+                .entries()
                 .iter()
-                .find(|entry| entry.path == path)
-                .cloned()
+                .find(|entry| entry.path.as_str().eq_ignore_ascii_case(path))
+                .map(|entry| ArchivePreviewEntry {
+                    path: entry.path.as_str(),
+                    size: entry.size,
+                    crc32: entry.crc32,
+                })
+                .ok_or_else(|| PreviewArchiveSourceError::EntryNotFound(path.to_owned())),
+            Self::Folder(folder) => folder
+                .paths
+                .iter()
+                .find(|entry_path| entry_path.as_str().eq_ignore_ascii_case(path))
+                .and_then(|entry_path| {
+                    folder
+                        .entries
+                        .get(entry_path)
+                        .map(|entry| ArchivePreviewEntry {
+                            path: entry_path.as_str(),
+                            size: entry.size,
+                            crc32: 0,
+                        })
+                })
                 .ok_or_else(|| PreviewArchiveSourceError::EntryNotFound(path.to_owned())),
         }
     }
@@ -115,13 +172,15 @@ impl PreviewArchiveSource {
                 .entry_bytes(path)
                 .map_err(PreviewArchiveSourceError::Gma),
             Self::Folder(folder) => {
-                let disk_path = folder
-                    .disk_paths
+                let entry = folder
+                    .entries
                     .get(path)
                     .ok_or_else(|| PreviewArchiveSourceError::EntryNotFound(path.to_owned()))?;
-                std::fs::read(disk_path).map_err(|error| PreviewArchiveSourceError::FolderRead {
-                    path: path.to_owned(),
-                    message: error.to_string(),
+                std::fs::read(&entry.disk_path).map_err(|error| {
+                    PreviewArchiveSourceError::FolderRead {
+                        path: path.to_owned(),
+                        message: error.to_string(),
+                    }
                 })
             }
         }
@@ -146,6 +205,12 @@ mod tests {
         assert!(!source.supports_entry_extraction());
         let entry = source.entry("lua/autorun/init.lua").expect("entry");
         assert_eq!((entry.size, entry.crc32), (8, 0));
+        assert_eq!(
+            source
+                .entry_ignore_ascii_case("LUA/AUTORUN/INIT.LUA")
+                .expect("case-insensitive entry"),
+            entry
+        );
         assert_eq!(
             source.entry_bytes("lua/autorun/init.lua").expect("bytes"),
             b"print(1)"

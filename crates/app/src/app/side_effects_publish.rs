@@ -46,6 +46,12 @@ impl App {
             prepare_publish::Effect::ModalOpenRequested => {
                 self.open_modal_stack_task(modal_stack::ActiveModal::PreparePublish)
             }
+            prepare_publish::Effect::BrowserScrollResetRequested => {
+                iced::widget::operation::scroll_to(
+                    prepare_publish::browser_rows_scrollable_id(),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+                )
+            }
             prepare_publish::Effect::ThumbnailDemandsChanged => {
                 self.prepare_publish_thumbnail_demands()
             }

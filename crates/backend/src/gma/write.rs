@@ -86,6 +86,20 @@ fn relative_entry_name(relative: &Path) -> Option<String> {
         .map(|path| path.replace('\\', "/").trim_matches('/').to_lowercase())
 }
 
+#[cfg(test)]
+mod entry_name_tests {
+    use super::relative_entry_name;
+    use std::path::Path;
+
+    #[test]
+    fn relative_entry_name_preserves_normalization_contract() {
+        assert_eq!(
+            relative_entry_name(Path::new("\\Materials\\Über\\FILE.VMT/")),
+            Some("materials/über/file.vmt".to_owned())
+        );
+    }
+}
+
 impl GMAFile {
     pub fn create<P: AsRef<Path>>(
         &self,

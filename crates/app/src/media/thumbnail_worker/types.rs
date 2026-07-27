@@ -21,28 +21,30 @@ pub type ThumbnailResult<T> = Result<T, ThumbnailError>;
 #[derive(Clone, Debug)]
 pub enum ThumbnailInput {
     /// Fetch and decode an image from an HTTP(S) URL.
-    Url { url: String },
+    Url { url: Arc<str> },
 }
 
 impl ThumbnailInput {
     #[must_use]
     pub fn from_url(url: impl Into<String>) -> Self {
         Self::Url {
-            url: normalize_url(url.into()),
+            url: Arc::from(normalize_url(url.into())),
         }
     }
 
     #[must_use]
     pub fn cache_key(&self, max_edge: u32) -> ThumbnailKey {
         match self {
-            Self::Url { url } => ThumbnailKey::for_url(url.clone(), max_edge),
+            Self::Url { url } => {
+                ThumbnailKey::for_normalized_url(url.clone(), max_edge, ThumbnailMode::Animated)
+            }
         }
     }
 
     #[must_use]
     pub fn cache_key_with_mode(&self, max_edge: u32, mode: ThumbnailMode) -> ThumbnailKey {
         match self {
-            Self::Url { url } => ThumbnailKey::for_url_with_mode(url.clone(), max_edge, mode),
+            Self::Url { url } => ThumbnailKey::for_normalized_url(url.clone(), max_edge, mode),
         }
     }
 

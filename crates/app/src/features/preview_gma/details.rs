@@ -95,7 +95,7 @@ pub fn details_for_archive(
     author_fetch_failed: bool,
     formatter: DownloadCountFormatter,
 ) -> Details {
-    let header = &archive.index().header;
+    let header = archive.header();
     let mut metadata_rows = Vec::new();
     let total_size = archive_total_bytes(archive);
     if total_size > 0 {

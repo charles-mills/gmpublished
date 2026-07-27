@@ -13,7 +13,7 @@ use super::{Message, State};
 /// Identifies this route's grid across route switches; see `addon_grid::view`.
 pub const GRID_KEY: &str = "my-workshop-grid";
 
-pub fn view<'a>(state: &State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     // Connected, and the account simply has nothing published: same panel as
     // every other blank surface, quiet glyph, no call to action.
     if matches!(state.load_status(), LoadStatus::Empty) {

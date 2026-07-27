@@ -1199,6 +1199,67 @@ fn discovers_download_plain_gmas_to_depth_three() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn sibling_gma_discovery_follows_file_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let gmod_dir = tempfile::TempDir::new().expect("temp gmod dir");
+    let addons = gmod_dir.path().join("garrysmod/addons");
+    fs::create_dir_all(&addons).expect("addons dir");
+    let target = gmod_dir.path().join("target.gma");
+    write_gma_fixture(&target, &GmaFixtureBuilder::new("Linked").build());
+    let linked = addons.join("linked.gma");
+    symlink(&target, &linked).expect("GMA symlink");
+
+    let paths = discover_sibling_gma_paths(gmod_dir.path());
+
+    assert!(paths.iter().any(|path| path.path == linked));
+}
+
+#[test]
+fn archive_path_normalization_is_single_pass_but_semantically_stable() {
+    for (input, expected) in [
+        (
+            " Materials\\Models//./Thing.VMT/ ",
+            Some("materials/models/thing.vmt"),
+        ),
+        ("//materials///test//", Some("materials/test")),
+        ("././", None),
+        ("materials/../secret", None),
+        ("materials/.../valid", Some("materials/.../valid")),
+        ("MÜNCHEN/CAFÉ.VMT", Some("mÜnchen/cafÉ.vmt")),
+    ] {
+        assert_eq!(normalize_archive_path(input).as_deref(), expected);
+    }
+}
+
+#[test]
+fn source_path_normalization_is_single_pass_but_semantically_stable() {
+    for (input, extension, expected) in [
+        (
+            " Materials\\Models///Props/./Crate_Color.VTF ",
+            Some(".vtf"),
+            Some("models/props/crate_color"),
+        ),
+        (
+            "/scripts//vehicles/./jeep.txt/",
+            None,
+            Some("scripts/vehicles/jeep.txt"),
+        ),
+        ("MÜNCHEN/CAFÉ.VMT", Some(".vmt"), Some("mÜnchen/cafÉ")),
+        (
+            "models/../shared/texture",
+            Some(".vtf"),
+            Some("models/../shared/texture"),
+        ),
+        ("././", Some(".vmt"), None),
+        ("././", None, Some("")),
+    ] {
+        assert_eq!(normalize_source_path(input, extension).as_deref(), expected);
+    }
+}
+
 fn archive_with_texture(
     vmt_path: &str,
     vmt_text: &str,
