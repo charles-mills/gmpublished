@@ -459,6 +459,27 @@ fn appdata_sanitize_context_retains_available_downloads_and_addons() {
     ));
 }
 
+/// The Steam client, not this process, reads the packed GMA and preview icon
+/// at the absolute path it is handed, and packaged Linux Steam commonly runs
+/// with a private tmpfs over `/tmp` while binding home through. A default
+/// scratch dir under the system temp dir therefore uploads as empty, so it
+/// has to stay under the app's own cache root.
+#[cfg(target_os = "linux")]
+#[test]
+fn appdata_production_temp_dir_stays_under_the_cache_root_on_linux() {
+    let Some(cache_root) = cache_dir() else {
+        return;
+    };
+    let default_temp_dir = AppDataPaths::production().default_temp_dir;
+
+    assert!(
+        default_temp_dir.starts_with(&cache_root),
+        "expected {} under {}",
+        default_temp_dir.display(),
+        cache_root.display()
+    );
+}
+
 #[test]
 fn appdata_validate_gmod_requires_absolute_garrysmod_addons_dir() {
     let dir = tempfile::tempdir().expect("tempdir");

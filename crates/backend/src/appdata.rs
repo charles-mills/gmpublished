@@ -49,7 +49,7 @@ impl AppDataPaths {
             settings_file: settings_root.join("gmpublished/settings.json"),
             legacy_settings_file: settings_root.join("gmpublisher/settings.json"),
             default_user_data_dir: user_data_dir,
-            default_temp_dir: std::env::temp_dir().join("gmpublisher"),
+            default_temp_dir: default_temp_dir(),
             default_downloads_dir: dirs::download_dir(),
         }
     }
@@ -67,6 +67,25 @@ impl AppDataPaths {
             default_downloads_dir: None,
         }
     }
+}
+
+/// Default scratch root: where a publish packs its GMA and materializes the
+/// preview icon it then hands Steam an absolute path to.
+///
+/// On Linux this must sit under the user's home rather than the system temp
+/// dir. The Steam *client* — not this process — reads the content at that
+/// path, and packaged Steam commonly runs sandboxed with a private `/tmp`
+/// (NixOS's FHS wrapper and Flatpak both mount a fresh tmpfs over it, while
+/// binding home through). A path under `/tmp` therefore reads back as empty
+/// and the upload fails with "Build for workshop item has no content". Every
+/// other platform runs Steam unsandboxed, so the system temp dir is fine.
+fn default_temp_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    if let Some(cache_dir) = cache_dir() {
+        return cache_dir.join("temp");
+    }
+
+    std::env::temp_dir().join("gmpublisher")
 }
 
 /// Returns the app-owned cache root (`<OS cache dir>/gmpublished`).

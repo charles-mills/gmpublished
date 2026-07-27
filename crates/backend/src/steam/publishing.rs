@@ -169,6 +169,22 @@ fn publish_temp_dir(app_data: &AppData) -> PathBuf {
     dir
 }
 
+/// The temp dir a preview icon is materialized into, created if it isn't
+/// there yet. [`Steam::update_icon`] resolves a preview without packing a
+/// GMA first, so nothing else has necessarily created the dir this run. A
+/// failure here needs no reporting of its own: the write that follows fails
+/// and each caller already handles that.
+fn ensure_temp_dir(app_data: &AppData) -> PathBuf {
+    let dir = app_data.temp_dir();
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        log::debug!(
+            "Failed to create temporary directory {}: {error}",
+            dir.display()
+        );
+    }
+    dir
+}
+
 /// Deletes the whole per-publish temp directory (the packed GMA, and any
 /// debris from an interrupted pack) once the flow ends, success or failure.
 struct PublishDirGuard(PathBuf);
@@ -316,7 +332,7 @@ impl WorkshopIcon {
                         _ => unreachable!(),
                     };
 
-                    let mut temp_img = app_data.temp_dir();
+                    let mut temp_img = ensure_temp_dir(app_data);
                     temp_img.push(format!(
                         "gmpublisher_upscaled_icon_{}.{format_extension}",
                         unique_temp_suffix()
@@ -333,7 +349,7 @@ impl WorkshopIcon {
                 }
             }
             Self::Default => {
-                let mut path = app_data.temp_dir();
+                let mut path = ensure_temp_dir(app_data);
                 path.push(format!(
                     "gmpublisher_default_icon_{}.png",
                     unique_temp_suffix()
