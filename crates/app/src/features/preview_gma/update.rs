@@ -27,7 +27,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             effects
         }
         Message::ArchiveOpened(request_id, result) => {
-            if !state.apply_archive_opened(request_id, result) {
+            if !state.apply_archive_opened(request_id, *result) {
                 return Vec::new();
             }
             let effects = vec![Effect::BrowserPathChanged, Effect::ThumbnailDemandsChanged];
@@ -40,7 +40,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             effects
         }
         Message::WorkshopMetadataCompleted(request_id, workshop_id, result) => {
-            if !state.apply_workshop_metadata(request_id, workshop_id, result) {
+            if !state.apply_workshop_metadata(request_id, workshop_id, *result) {
                 return Vec::new();
             }
             let mut effects = Vec::new();
@@ -249,7 +249,10 @@ mod tests {
             )),
         );
 
-        let effects = update(&mut state, Message::ArchiveOpened(1, Ok(loaded_archive())));
+        let effects = update(
+            &mut state,
+            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+        );
 
         assert!(matches!(
             effects.as_slice(),
@@ -273,7 +276,10 @@ mod tests {
             ),
         );
 
-        let effects = update(&mut state, Message::ArchiveOpened(1, Ok(loaded_archive())));
+        let effects = update(
+            &mut state,
+            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+        );
 
         assert!(effects.iter().any(|effect| {
             matches!(
@@ -305,7 +311,10 @@ mod tests {
             )),
         );
 
-        let effects = update(&mut state, Message::ArchiveOpened(1, Ok(loaded_archive())));
+        let effects = update(
+            &mut state,
+            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+        );
 
         assert!(effects.is_empty());
     }

@@ -1339,7 +1339,7 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
     );
     let _task = app.update(RootMessage::FilePreview(file_preview::Message::Loaded(
         request.request_id,
-        Ok(data),
+        Box::new(Ok(data)),
     )));
     let _task = app.update(RootMessage::FilePreview(
         file_preview::Message::AudioPlaybackStarted,
@@ -3019,5 +3019,24 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
     assert!(
         !app.state.installed_addons.has_failed_metadata(),
         "the reconnect that resolved the outage left the metadata parked"
+    );
+}
+
+/// `RootMessage` is moved and cloned for every interaction in the app,
+/// including the per-frame `AnimationTick`. Feature messages that carry a
+/// decoded payload (preview scenes, workshop metadata, ready thumbnails) box
+/// it so one cold path cannot set the size every message pays; see the
+/// `Boxed:` notes on those variants. This is an upper bound rather than an
+/// equality so field-level churn stays cheap, but a variant that reintroduces
+/// a large inline payload trips it.
+#[test]
+fn root_message_stays_small_enough_for_the_hot_path() {
+    const MAX_ROOT_MESSAGE_BYTES: usize = 160;
+
+    let actual = std::mem::size_of::<RootMessage>();
+    assert!(
+        actual <= MAX_ROOT_MESSAGE_BYTES,
+        "RootMessage grew to {actual} bytes (limit {MAX_ROOT_MESSAGE_BYTES}); \
+         box the payload of whichever variant grew rather than raising this bound"
     );
 }

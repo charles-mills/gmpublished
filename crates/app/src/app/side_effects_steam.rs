@@ -305,13 +305,11 @@ impl steam_session::PendingRetry {
             Self::InstalledMetadataRefresh {
                 generation,
                 item_ids,
-            } => RootMessage::InstalledAddons(
-                installed_addons::Message::MetadataRefreshCompleted(
-                    generation,
-                    item_ids,
-                    Err(error),
-                ),
-            ),
+            } => RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
+                generation,
+                item_ids,
+                Err(error),
+            )),
             Self::SearchMetadataRefresh {
                 generation,
                 item_ids,

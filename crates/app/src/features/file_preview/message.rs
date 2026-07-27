@@ -36,7 +36,11 @@ impl PartialEq for PreviewLoadError {
 pub enum Message {
     OpenRequested(PreviewRequest),
     LoadStageChanged(u64, PreviewLoadStage),
-    Loaded(u64, Result<PreviewData, PreviewLoadError>),
+    /// Boxed: the inline `PreviewData` (a `PreviewContent::Map` carries ~170
+    /// bytes of scene metadata) otherwise sets the size of this enum, and
+    /// through it `RootMessage` — which every message pays, including the
+    /// per-frame animation ticks.
+    Loaded(u64, Box<Result<PreviewData, PreviewLoadError>>),
     AnimationTick(Instant),
     #[cfg(feature = "asset-studio")]
     AudioToggleRequested,

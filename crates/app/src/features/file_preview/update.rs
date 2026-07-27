@@ -19,7 +19,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             Vec::new()
         }
         Message::Loaded(request_id, result) => {
-            let _changed = state.apply_loaded(request_id, result);
+            let _changed = state.apply_loaded(request_id, *result);
             Vec::new()
         }
         Message::AnimationTick(now) => {

@@ -465,7 +465,10 @@ fn prefix_len_is_refused_when_the_file_cannot_hold_it() {
         Err(VpkError::FormatError)
     );
     // An honest header is sized as claimed, trailing payload and all.
-    assert_eq!(validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 20), Ok(20));
+    assert_eq!(
+        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 20),
+        Ok(20)
+    );
     assert_eq!(
         validated_prefix_len(VPK_VERSION_2_HEADER_SIZE, 8, 4096),
         Ok(36)

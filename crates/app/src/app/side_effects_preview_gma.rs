@@ -38,7 +38,7 @@ impl App {
             .map(move |result| {
                 RootMessage::PreviewGma(preview_gma::Message::ArchiveOpened(
                     request_id,
-                    flatten_blocking_ui_result(result),
+                    Box::new(flatten_blocking_ui_result(result)),
                 ))
             })
     }
@@ -65,7 +65,7 @@ impl App {
                                 preview_gma::Message::WorkshopMetadataCompleted(
                                     request_id,
                                     workshop_id,
-                                    Ok(Some(cached)),
+                                    Box::new(Ok(Some(cached))),
                                 ),
                             ),
                         );
@@ -78,7 +78,7 @@ impl App {
                         RootMessage::PreviewGma(preview_gma::Message::WorkshopMetadataCompleted(
                             request_id,
                             workshop_id,
-                            result,
+                            Box::new(result),
                         )),
                     );
                     // Keep snapshot I/O behind delivery so a cold detail query
@@ -94,7 +94,7 @@ impl App {
                     RootMessage::PreviewGma(preview_gma::Message::WorkshopMetadataCompleted(
                         request_id,
                         workshop_id,
-                        Err(UiError::new(keys::STEAM_ERROR)),
+                        Box::new(Err(UiError::new(keys::STEAM_ERROR))),
                     )),
                 );
             }
