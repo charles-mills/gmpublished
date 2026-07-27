@@ -19,6 +19,7 @@ use crate::{GMAFile, transactions::Transaction, write_nt_string};
 use super::{GMAError, GMAMetadata, whitelist, whitelist::AddonWhitelist};
 
 use super::GMA_HEADER;
+use crate::util::thread_pool;
 
 static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
 

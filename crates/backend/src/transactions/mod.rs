@@ -143,9 +143,6 @@ impl Transactions {
         transaction.cancel()
     }
 
-    pub fn cancel(&self, id: u32) {
-        let _cancelled = self.cancel_by_id(id);
-    }
 }
 
 pub struct TransactionRef {

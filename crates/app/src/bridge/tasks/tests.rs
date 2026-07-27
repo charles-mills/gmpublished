@@ -16,7 +16,6 @@ fn appdata_snapshot_event_payload_for_test() -> gmpublished_backend::appdata::Ap
     gmpublished_backend::appdata::AppDataSnapshot {
         settings: gmpublished_backend::appdata::Settings::default(),
         version: "test",
-        open_count: 0,
         paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
             settings_file: root.join("settings.json"),
             default_user_data_dir: root.join("default-user-data"),
@@ -277,7 +276,6 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
     let (settings, paths) = services.apply_appdata_snapshot(BackendAppDataSnapshot {
         settings: backend_settings,
         version: "test",
-        open_count: 3,
         paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
             settings_file: temp.path().join("settings.json"),
             default_user_data_dir: temp.path().join("default-user-data"),

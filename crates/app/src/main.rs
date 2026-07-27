@@ -37,7 +37,7 @@ mod platform_menu;
 mod platform_open;
 #[cfg(test)]
 mod test_support;
-pub mod theme;
+mod theme;
 mod util;
 mod widgets;
 

@@ -4,6 +4,7 @@ use vformats::vtf::VtfFormat;
 
 use super::*;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
+use crate::theme::ThemeVariant;
 use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
 
 fn test_tokens() -> Tokens {
@@ -119,7 +120,7 @@ fn classification_table_matches_expected_extensions() {
 
 #[test]
 fn vmt_highlighting_tracks_shader_keys_values_groups_and_comments() {
-    let tokens = Tokens::classic_source();
+    let tokens = Tokens::for_variant(ThemeVariant::ClassicSource);
     let palette = VmtHighlightPalette::from_tokens(&tokens);
     assert_ne!(palette.shader, palette.key);
     let source_lines = vec![
@@ -220,7 +221,7 @@ fn vmt_highlighting_keeps_unterminated_quotes_line_local() {
 
 #[test]
 fn glua_highlighting_tracks_multiline_constructs_and_language_tokens() {
-    let tokens = Tokens::classic_source();
+    let tokens = Tokens::for_variant(ThemeVariant::ClassicSource);
     let palette = CodeHighlightPalette::from_tokens(&tokens);
     let source_lines = vec![
         "local answer = 0x2A + 1.5e2".to_owned(),
@@ -282,7 +283,7 @@ fn glua_highlighting_tracks_multiline_constructs_and_language_tokens() {
 
 #[test]
 fn json_highlighting_preserves_utf8_numbers_literals_and_line_local_strings() {
-    let tokens = Tokens::classic_source();
+    let tokens = Tokens::for_variant(ThemeVariant::ClassicSource);
     let palette = CodeHighlightPalette::from_tokens(&tokens);
     let source_lines = vec![
         "{\"title\":\"café\",\"count\":-12.5e+2,\"enabled\":true,\"missing\":null}".to_owned(),

@@ -25,6 +25,7 @@ use rayon::{
     iter::{IntoParallelRefIterator, ParallelIterator},
 };
 use serde::{Deserialize, Serialize};
+use crate::util::{main_thread_forbidden, thread_pool};
 
 static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
 
@@ -361,7 +362,7 @@ impl GMAFile {
                 // truncated-but-valid stream leaves spare capacity behind.
                 output.shrink_to_fit();
 
-                let view = GmaView::from_membuffer(output.into(), path.as_ref());
+                let view = GmaView::from_membuffer(output.into());
                 let handle = view.handle(path)?;
                 Ok((handle, view))
             }
@@ -375,7 +376,7 @@ impl GMAFile {
                 writer.flush()?;
                 drop(writer);
 
-                let view = GmaView::from_temp_backing(temp_path, path.as_ref())?;
+                let view = GmaView::from_temp_backing(temp_path)?;
                 let handle = view.handle(path)?;
                 Ok((handle, view))
             }

@@ -25,6 +25,7 @@ use crate::{
     steam::Steam,
     transactions::Transactions,
 };
+use crate::util::thread_pool;
 
 static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
 

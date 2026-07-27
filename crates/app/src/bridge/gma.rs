@@ -631,7 +631,7 @@ fn preview_archive_from_fixture(gma: FixtureGmaFile) -> Result<PreviewArchive, G
     bytes.extend_from_slice(&gma.trailer_crc32.to_le_bytes());
 
     let path = gma.path.unwrap_or_else(|| PathBuf::from("fixture.gma"));
-    let view = GmaView::from_membuffer(bytes.into(), &path);
+    let view = GmaView::from_membuffer(bytes.into());
     let bundle = view.meta(&path).map_err(|_| GmaError::FormatError)?;
     let backend = bundle.handle;
     let entries = preview_entries_from_backend(bundle.entries);

@@ -509,14 +509,6 @@ impl Search {
         self.dirty.store(true, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn quick(&self, query: String) -> (Vec<Arc<SearchItem>>, bool) {
-        let result = self.quick_search(query);
-        (
-            result.hits.into_iter().map(|hit| hit.item).collect(),
-            result.has_more,
-        )
-    }
-
     pub fn quick_search(&self, query: String) -> QuickSearchResult {
         self.quick_search_with_scope(query, SearchScope::Addons)
     }

@@ -233,7 +233,6 @@ PUBLISH_COMMITTING_CHANGES = Confirmando cambios
 context-menu-debug-toast-success = Simular notificación: éxito
 context-menu-debug-toast-error = Simular notificación: error
 context-menu-debug-toast-notice = Aviso simulado
-ERR_CANCELLED = Cancelado
 err-cancelled = Cancelado
 err-whitelist = Algunos de los archivos seleccionados no están permitidos.
 err-whitelist-detail =

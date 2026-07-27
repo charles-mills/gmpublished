@@ -385,8 +385,6 @@ enum RowThumbnail {
     },
 }
 
-impl RowThumbnail {}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewTarget {
     pub(crate) row_id: String,

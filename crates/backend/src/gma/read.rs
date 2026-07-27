@@ -13,6 +13,7 @@ use tempfile::TempPath;
 use crate::ArcBytes;
 
 use super::{GMAEntry, GMAError, GMAFile, GMAHeader, GMAMetadata, is_unsafe_entry_path};
+use crate::util::main_thread_forbidden;
 
 /// Where a GMA's (decompressed) bytes live for parsing.
 enum GmaBytes {
@@ -66,8 +67,6 @@ impl GmaView {
     /// shipped memory-mapped GMAs the same way.
     pub(crate) fn mmap(path: &Path) -> Result<Self, GMAError> {
         main_thread_forbidden!();
-        #[cfg(test)]
-        super::parse_observation::record(path);
 
         let file = File::open(path)?;
         // SAFETY: see doc comment above.
@@ -80,10 +79,7 @@ impl GmaView {
     /// A GMA decompressed into memory (workshop download); `path` names
     /// the original compressed payload for identity purposes. Also the
     /// door in-memory test fixtures come through.
-    pub fn from_membuffer(bytes: ArcBytes, _path: impl AsRef<Path>) -> Self {
-        #[cfg(test)]
-        super::parse_observation::record(_path.as_ref());
-
+    pub fn from_membuffer(bytes: ArcBytes) -> Self {
         Self {
             bytes: GmaBytes::Mem(bytes),
         }
@@ -92,13 +88,7 @@ impl GmaView {
     /// A GMA decompressed to a spill file; `path` keeps naming the
     /// original payload so the addon's identity (extracted-name
     /// fallback, dedup by path) is unchanged.
-    pub(crate) fn from_temp_backing(
-        temp_path: TempPath,
-        _path: impl AsRef<Path>,
-    ) -> Result<Self, GMAError> {
-        #[cfg(test)]
-        super::parse_observation::record(_path.as_ref());
-
+    pub(crate) fn from_temp_backing(temp_path: TempPath) -> Result<Self, GMAError> {
         let file = File::open(&temp_path)?;
         // SAFETY: see `mmap`'s doc comment; this spill file is exclusively
         // owned by the decompression that produced it.
@@ -411,7 +401,7 @@ mod tests {
 
     #[test]
     fn payload_extent_reads_are_bounds_checked() {
-        let view = GmaView::from_membuffer(vec![1, 2, 3, 4].into(), "fixture.gma");
+        let view = GmaView::from_membuffer(vec![1, 2, 3, 4].into());
 
         assert_eq!(view.read_payload_bytes(1, 2).unwrap(), vec![2, 3]);
         assert_eq!(view.read_payload_bytes(4, 0).unwrap(), Vec::<u8>::new());

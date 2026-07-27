@@ -233,7 +233,6 @@ PUBLISH_COMMITTING_CHANGES = Veranderingen Vastleggen
 context-menu-debug-toast-success = Simuleer melding: succes
 context-menu-debug-toast-error = Simuleer melding: fout
 context-menu-debug-toast-notice = Gesimuleerde melding
-ERR_CANCELLED = Geannuleerd
 err-cancelled = Geannuleerd
 err-whitelist = Sommige geselecteerde bestanden zijn niet toegestaan.
 err-whitelist-detail =

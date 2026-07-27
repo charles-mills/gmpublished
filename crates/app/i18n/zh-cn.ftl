@@ -233,7 +233,6 @@ PUBLISH_COMMITTING_CHANGES = 正在应用更改...
 context-menu-debug-toast-success = 模拟提示：成功
 context-menu-debug-toast-error = 模拟提示：错误
 context-menu-debug-toast-notice = 模拟通知
-ERR_CANCELLED = 已取消
 err-cancelled = 已取消
 err-whitelist = 部分选中的文件不被允许。
 err-whitelist-detail =

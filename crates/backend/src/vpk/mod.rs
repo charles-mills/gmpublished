@@ -7,6 +7,7 @@ use std::{
 };
 
 use thiserror::Error;
+use crate::util::main_thread_forbidden;
 
 const VPK_VERSION_1_HEADER_SIZE: u64 = 12;
 const VPK_VERSION_2_HEADER_SIZE: u64 = 28;

@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
 };
 
 use crate::gma::{ExtractDestination, ExtractionOverwriteMode};
@@ -13,7 +12,6 @@ use crate::steam::Steam;
 use crate::transactions::Transactions;
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
-use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 pub use steamworks::PublishedFileId as SettingsPublishedFileId;
 use steamworks::PublishedFileId;
@@ -99,31 +97,6 @@ pub fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("gmpublished"))
 }
 
-#[derive(Debug)]
-pub struct OpenCount(AtomicU32);
-impl OpenCount {
-    fn new() -> Self {
-        Self(AtomicU32::new(0))
-    }
-
-    fn get(&self) -> u32 {
-        self.0.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    fn set(&self, value: u32) {
-        self.0.store(value, Ordering::Release);
-    }
-}
-impl serde::Serialize for OpenCount {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u32(self.get())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TitlebarPreference {
     #[default]
@@ -172,7 +145,6 @@ pub struct Settings {
 pub struct AppDataSnapshot {
     pub settings: Settings,
     pub version: &'static str,
-    pub open_count: u32,
     pub paths: AppDataPathsSnapshot,
 }
 
@@ -350,29 +322,12 @@ impl Settings {
 pub struct AppData {
     pub settings: ArcSwap<Settings>,
     pub version: &'static str,
-    pub open_count: OpenCount,
     /// Populated the first time [`Self::discover_gmod_dir`] finds a path via
     /// Steam, so the cheap [`Self::gmod_dir`] accessor (and therefore
     /// `Serialize`/`snapshot`) can report it without blocking.
     discovered_gmod_dir: Mutex<Option<PathBuf>>,
     paths: AppDataPaths,
     transactions: Transactions,
-}
-impl Serialize for AppData {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("AppData", 7)?;
-        state.serialize_field("settings", &**self.settings.load())?;
-        state.serialize_field("version", self.version)?;
-        state.serialize_field("open_count", &self.open_count)?;
-        state.serialize_field("temp_dir", &self.temp_dir())?;
-        state.serialize_field("gmod_dir", &self.gmod_dir())?;
-        state.serialize_field("user_data_dir", &self.user_data_dir())?;
-        state.serialize_field("downloads_dir", &self.downloads_dir())?;
-        state.end()
-    }
 }
 impl AppData {
     #[must_use]
@@ -381,7 +336,6 @@ impl AppData {
         Self {
             settings: ArcSwap::from_pointee(settings),
             version: env!("CARGO_PKG_VERSION"),
-            open_count: OpenCount::new(),
             discovered_gmod_dir: Mutex::new(None),
             paths,
             transactions,
@@ -403,7 +357,6 @@ impl AppData {
         AppDataSnapshot {
             settings,
             version: self.version,
-            open_count: self.open_count.get(),
             paths: AppDataPathsSnapshot {
                 settings_file: self.paths.settings_file.clone(),
                 default_user_data_dir: self.paths.default_user_data_dir.clone(),

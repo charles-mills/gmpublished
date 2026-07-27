@@ -118,25 +118,6 @@ impl crate::error_key::HasErrorKey for GMAError {
     }
 }
 
-/// Test-only ledger of GMA content reads (header opens and metadata parses),
-/// so discovery-snapshot tests can assert that hydrated files are never read.
-#[cfg(test)]
-pub(crate) mod parse_observation {
-    use std::{
-        path::{Path, PathBuf},
-        sync::Mutex,
-    };
-
-    static PARSED_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-
-    pub fn record(path: &Path) {
-        PARSED_PATHS
-            .lock()
-            .expect("parse observation lock")
-            .push(path.to_path_buf());
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum GMAMetadata {

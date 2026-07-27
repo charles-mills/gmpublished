@@ -2,7 +2,7 @@ use super::{
     Item, Message, RowLayout, State, TitleMeasure, VisibleRowRange, apply, columns_for_width,
     visible_rows_for_viewport,
 };
-use crate::theme::{self, Tokens};
+use crate::theme::{self, ThemeVariant, Tokens};
 use crate::widgets::addon_card;
 use iced::Point;
 
@@ -367,7 +367,7 @@ fn layout_cache_recomputes_only_for_items_width_and_columns() {
     let _ = apply(&mut state, Message::ColumnsChanged(2));
     assert_eq!(state.layout_cache_generation(), 3);
 
-    let _ = super::view(&state, &Tokens::light(), "test-grid");
+    let _ = super::view(&state, &Tokens::for_variant(ThemeVariant::Light), "test-grid");
     assert_eq!(state.layout_cache_generation(), 3);
 
     let _ = state.set_items(items(&[100.0, 120.0]));

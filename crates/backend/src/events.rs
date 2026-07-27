@@ -131,7 +131,6 @@ mod tests {
         AppDataSnapshot {
             settings: Settings::default(),
             version: "test",
-            open_count: 0,
             paths: AppDataPathsSnapshot {
                 settings_file: root.join("settings.json"),
                 default_user_data_dir: root.join("default-user-data"),

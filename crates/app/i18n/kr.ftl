@@ -233,7 +233,6 @@ PUBLISH_COMMITTING_CHANGES = 변경 사항 커밋
 context-menu-debug-toast-success = 알림 시뮬레이션: 성공
 context-menu-debug-toast-error = 알림 시뮬레이션: 에러
 context-menu-debug-toast-notice = 시뮬레이션된 알림
-ERR_CANCELLED = 취소됨
 err-cancelled = 취소됨
 err-whitelist = 선택한 파일 중 일부는 허용되지 않습니다.
 err-whitelist-detail =

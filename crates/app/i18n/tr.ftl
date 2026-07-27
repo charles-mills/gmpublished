@@ -233,7 +233,6 @@ PUBLISH_COMMITTING_CHANGES = Değişiklikler Yapılıyor
 context-menu-debug-toast-success = Bildirimi simüle et: başarılı
 context-menu-debug-toast-error = Bildirimi simüle et: hata
 context-menu-debug-toast-notice = Simüle edilmiş bildirim
-ERR_CANCELLED = İptal Edildi
 err-cancelled = İptal Edildi
 err-whitelist = Seçilen bazı dosyalara izin verilmiyor.
 err-whitelist-detail =

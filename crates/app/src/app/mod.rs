@@ -367,8 +367,6 @@ pub enum RootMessage {
     AnimationTick(Instant),
 }
 
-impl RootMessage {}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlobalShortcut {
     ToggleSearch,

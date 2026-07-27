@@ -5,6 +5,7 @@ use steamworks::{PublishedFileId, QueryResult, QueryResults, SteamError, SteamId
 use super::{Steam, users::SteamUser};
 
 use crate::{GMOD_APP_ID, search::Search};
+use crate::util::main_thread_forbidden;
 
 type WorkshopChunkQueryResult = Result<Vec<WorkshopItem>, WorkshopQueryError>;
 

@@ -1,7 +1,7 @@
 use iced::border;
 use iced::widget::{
     button as button_widget, checkbox as checkbox_widget, container,
-    progress_bar as progress_bar_widget, scrollable, svg, text_editor as text_editor_widget,
+    progress_bar as progress_bar_widget, scrollable, text_editor as text_editor_widget,
     text_input,
 };
 use iced::{Border, Color, Font, Shadow, Vector, font};
@@ -19,14 +19,6 @@ pub fn inter_font(weight: font::Weight) -> Font {
 
 pub fn surface(tokens: &Tokens) -> container::Style {
     container_style(tokens.colors.bg, tokens.colors.text, Border::default())
-}
-
-pub fn card(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.surface,
-        tokens.colors.text,
-        border(tokens, tokens.colors.border, tokens.radii.base),
-    )
 }
 
 pub fn modal(tokens: &Tokens) -> container::Style {
@@ -364,14 +356,6 @@ pub fn select_option(
     }
 }
 
-pub fn context_menu(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.menu_bg,
-        tokens.colors.text,
-        border(tokens, tokens.colors.border_subtle, tokens.radii.base),
-    )
-}
-
 /// Flat filled disc: no border, no shadow, radius half the edge.
 pub fn circle(fill: Rgba, radius: f32) -> container::Style {
     container::Style {
@@ -386,18 +370,6 @@ pub fn tag(tokens: &Tokens) -> container::Style {
         tokens.colors.surface_2,
         tokens.colors.text,
         border(tokens, tokens.colors.border_subtle, tokens.radii.xs),
-    )
-}
-
-pub fn avatar(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.surface_2,
-        tokens.colors.text,
-        border(
-            tokens,
-            tokens.colors.border_subtle,
-            tokens.dims.avatar_size / 2.0,
-        ),
     )
 }
 
@@ -457,14 +429,6 @@ pub fn job_badge(tokens: &Tokens, opacity: f32) -> container::Style {
             tokens.colors.neutral.with_alpha(alpha),
             tokens.radii.lg,
         ),
-    )
-}
-
-pub fn select(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.dropdown_bg,
-        tokens.colors.text,
-        border(tokens, tokens.colors.border, tokens.radii.base),
     )
 }
 
@@ -746,16 +710,6 @@ pub fn progress_bar(tokens: &Tokens) -> progress_bar_widget::Style {
     }
 }
 
-pub fn svg_icon(tokens: &Tokens, status: svg::Status) -> svg::Style {
-    let color = match status {
-        svg::Status::Idle => tokens.colors.icon_muted,
-        svg::Status::Hovered => tokens.colors.text,
-    };
-    svg::Style {
-        color: Some(color.into()),
-    }
-}
-
 fn container_style(background: Rgba, text: Rgba, border: Border) -> container::Style {
     container::Style {
         text_color: Some(text.into()),
@@ -971,8 +925,7 @@ mod tests {
             assert_ne!(
                 selected.background,
                 panel.background,
-                "{}: the chosen option is indistinguishable from the panel",
-                variant.name(),
+                "{variant:?}: the chosen option is indistinguishable from the panel",
             );
         }
     }

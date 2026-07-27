@@ -5,14 +5,12 @@ pub(crate) mod logging;
 
 pub const GMOD_APP_ID: steamworks::AppId = steamworks::AppId(4000);
 
-#[macro_use]
 pub(crate) mod util;
 pub use util::path;
 pub(crate) use util::{stream_bytes, write_nt_string};
 
 pub type ArcBytes = std::sync::Arc<[u8]>;
 
-#[macro_use]
 pub mod transactions;
 pub use transactions::Transaction;
 

@@ -1,7 +1,7 @@
 pub mod path;
 
-#[macro_use]
 mod macros;
+pub(crate) use macros::{main_thread_forbidden, thread_pool};
 pub use macros::NUM_THREADS;
 pub use macros::available_parallelism_count;
 

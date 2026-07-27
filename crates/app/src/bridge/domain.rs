@@ -802,10 +802,6 @@ pub mod workshop_url {
                 return Err(ParseWorkshopIdsError::InvalidToken(token.to_owned()));
             };
 
-            if id.get() == 0 {
-                return Err(ParseWorkshopIdsError::InvalidToken(token.to_owned()));
-            }
-
             if seen.insert(id) {
                 ids.push(id);
             }

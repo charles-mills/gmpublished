@@ -84,7 +84,6 @@ fn appdata_send_emits_typed_snapshot_without_window() {
         settings.gmod = Some(gmod_dir.clone());
         settings.language = Some("en-US".to_owned());
     });
-    app_data.open_count.set(7);
 
     app_data.send();
 
@@ -93,7 +92,6 @@ fn appdata_send_emits_typed_snapshot_without_window() {
     let BackendEvent::AppDataUpdated(snapshot) = &events[0] else {
         panic!("expected appdata event");
     };
-    assert_eq!(snapshot.open_count, 7);
     assert_eq!(snapshot.settings.language.as_deref(), Some("en-US"));
     assert_eq!(snapshot.paths.temp_dir, temp_dir);
     assert_eq!(snapshot.paths.user_data_dir, user_data_dir);

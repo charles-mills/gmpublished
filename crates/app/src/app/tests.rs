@@ -67,10 +67,6 @@ fn test_constructor_uses_default_root_state_without_running_startup() {
     assert_eq!(app.state.shell.route(), shell::Route::MyWorkshop);
     assert_eq!(app.state.shell.account_name(), None);
     assert!(!app.state.my_workshop.is_route_visible());
-    assert_eq!(
-        app.state.tokens.iced_theme().palette().background,
-        app.state.tokens.colors.bg.into()
-    );
     assert_eq!(app.theme(), None);
     assert_eq!(app.title(), "gmpublished");
 }
@@ -2036,7 +2032,6 @@ fn backend_appdata_snapshot_for_test(
     BackendAppDataSnapshot {
         settings,
         version: "test",
-        open_count: 0,
         paths: BackendAppDataPathsSnapshot {
             settings_file: root.join("settings.json"),
             default_user_data_dir: root.join("default-user-data"),

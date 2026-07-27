@@ -552,7 +552,6 @@ mod tests {
             BackendAppDataSnapshot {
                 settings: BackendSettings::default(),
                 version: "test",
-                open_count: 0,
                 paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
                     settings_file: temp.path().join("settings.json"),
                     default_user_data_dir: user_data_dir.clone(),
@@ -585,7 +584,6 @@ mod tests {
             BackendAppDataSnapshot {
                 settings: BackendSettings::default(),
                 version: "test",
-                open_count: 0,
                 paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
                     settings_file: temp.path().join("settings.json"),
                     default_user_data_dir: user_data_dir.clone(),

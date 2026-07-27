@@ -233,7 +233,6 @@ PUBLISH_COMMITTING_CHANGES = Änderungen werden übernommen
 context-menu-debug-toast-success = Toast simulieren: Erfolg
 context-menu-debug-toast-error = Toast simulieren: Fehler
 context-menu-debug-toast-notice = Simulierter Hinweis
-ERR_CANCELLED = Abgebrochen
 err-cancelled = Abgebrochen
 err-whitelist = Einige ausgewählte Dateien sind nicht erlaubt.
 err-whitelist-detail = Einige ausgewählte Dateien sind nicht erlaubt: {$arg0}

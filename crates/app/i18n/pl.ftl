@@ -257,7 +257,6 @@ PUBLISH_COMMITTING_CHANGES = Robienie zmian
 context-menu-debug-toast-success = Symuluj powiadomienie: sukces
 context-menu-debug-toast-error = Symuluj powiadomienie: błąd
 context-menu-debug-toast-notice = Symulowane powiadomienie
-ERR_CANCELLED = Anulowane
 err-cancelled = Anulowane
 err-whitelist = Niektóre wybrane pliki są niedozwolone.
 err-whitelist-detail = Niektóre wybrane pliki są niedozwolone: {$arg0}

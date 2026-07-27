@@ -1,6 +1,7 @@
 use steamworks::{Friend, SteamId};
 
 use super::Steam;
+use crate::util::main_thread_forbidden;
 
 #[derive(Clone, Debug)]
 pub struct SteamUser {

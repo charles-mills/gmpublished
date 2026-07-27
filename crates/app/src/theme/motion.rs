@@ -55,7 +55,7 @@ impl Motion {
 /// subscriptions between animation end and the next tick, such as after a
 /// cursor-move message, and tears down the clock before finalization runs.
 #[derive(Clone, Debug)]
-pub(crate) struct Presence<T>
+pub struct Presence<T>
 where
     T: Clone + Copy + PartialEq + Float,
 {
@@ -172,11 +172,11 @@ impl Presence<bool> {
     }
 }
 
-pub(crate) fn boolean(initial: bool, duration: Duration, easing: Easing) -> Presence<bool> {
+pub fn boolean(initial: bool, duration: Duration, easing: Easing) -> Presence<bool> {
     Presence::new(initial, duration, easing)
 }
 
-pub(crate) fn asymmetric(
+pub fn asymmetric(
     initial: bool,
     enter: Duration,
     exit: Duration,
@@ -186,11 +186,11 @@ pub(crate) fn asymmetric(
 }
 
 /// Resting scale for closed popovers and menus, paired with an opacity fade.
-pub(crate) const POPOVER_CLOSED_SCALE: f32 = 0.98;
+pub const POPOVER_CLOSED_SCALE: f32 = 0.98;
 
 /// The shared enter/exit curve, upstream's cubic-bezier(0.16, 1, 0.3, 1):
 /// heavily front-loaded, so entrances read as a snap that settles.
-pub(crate) fn expo_ease() -> Easing {
+pub fn expo_ease() -> Easing {
     Easing::Custom(expo_ease_curve)
 }
 
@@ -254,7 +254,7 @@ fn bezier_slope(t: f32, a1: f32, a2: f32) -> f32 {
     (3.0 * a * t + 2.0 * b) * t + c
 }
 
-pub(crate) fn redraw_subscription(active: bool) -> Subscription<Instant> {
+pub fn redraw_subscription(active: bool) -> Subscription<Instant> {
     if active {
         time::every(FRAME_INTERVAL)
     } else {
@@ -268,19 +268,19 @@ pub(crate) fn redraw_subscription(active: bool) -> Subscription<Instant> {
 /// route back to the full-rate tick.
 const GIF_FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
-pub(crate) fn gif_redraw_subscription() -> Subscription<Instant> {
+pub fn gif_redraw_subscription() -> Subscription<Instant> {
     time::every(GIF_FRAME_INTERVAL)
 }
 
-pub(crate) fn scaled_alpha(color: Rgba, opacity: f32) -> Rgba {
+pub fn scaled_alpha(color: Rgba, opacity: f32) -> Rgba {
     color.with_alpha(opacity_byte(f32::from(color.a) / 255.0 * opacity))
 }
 
-pub(crate) fn opacity_byte(opacity: f32) -> u8 {
+pub fn opacity_byte(opacity: f32) -> u8 {
     (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-pub(crate) fn mix_color(start: Color, end: Color, progress: f32) -> Color {
+pub fn mix_color(start: Color, end: Color, progress: f32) -> Color {
     let progress = progress.clamp(0.0, 1.0);
     Color {
         r: start.r + (end.r - start.r) * progress,

@@ -716,8 +716,6 @@ pub enum Owner {
     WarmLibrary,
 }
 
-impl Owner {}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DemandId(Arc<str>);
 
