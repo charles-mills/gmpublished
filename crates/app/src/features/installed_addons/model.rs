@@ -6,10 +6,7 @@ use crate::bridge::gma::is_gma_path;
 use crate::bridge::tasks::BackendServices;
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{
-    domain::{
-        InstalledAddon, PublishedFileId, RESULTS_PER_PAGE, WorkshopMetadata,
-        workshop_url::workshop_item_url,
-    },
+    domain::{InstalledAddon, PublishedFileId, WorkshopMetadata, workshop_url::workshop_item_url},
     library::LibrarySnapshot,
 };
 use crate::features::context_menu;
@@ -20,7 +17,6 @@ use crate::widgets::{
     grid_rows::{self, GridRow},
 };
 
-pub(super) const INSTALLED_ADDONS_PAGE_SIZE: usize = RESULTS_PER_PAGE;
 const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
 const OWNER_LABEL: &str = "Installed Addons";
 const THUMBNAIL_PLAY_POLICY: thumbnail_animation::PlayPolicy =

@@ -13,8 +13,7 @@ use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
 
 use super::model::{
-    self, ContextMenuRequest, INSTALLED_ADDONS_PAGE_SIZE, MetadataPatch, MetadataResolution,
-    PreviewTarget, Row,
+    self, ContextMenuRequest, MetadataPatch, MetadataResolution, PreviewTarget, Row,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,21 +30,20 @@ pub struct State {
     watch_degraded: bool,
     watch_retry_attempted: bool,
     watch_arm_epoch: u64,
-    discovered_rows: Option<Vec<Row>>,
-    loaded_rows: Vec<Row>,
-    /// Row id -> index into `loaded_rows`.
+    /// The full local library; `None` until the first scan lands. The grid
+    /// virtualizes rendering and windows hydration itself, so every row is
+    /// handed to it at once — paging a fully-known local list only made the
+    /// scrollable's content (and scrollbar) grow while scrolling.
+    rows: Option<Vec<Row>>,
+    /// Row id -> index into `rows`.
     ///
     /// A delivery names exactly one row; scanning for it and then refreshing
     /// every card made each delivery O(rows) twice, which is what dominated
     /// per-tick tail latency on large libraries.
     row_index: HashMap<String, usize>,
-    /// workshop_id -> indices into `discovered_rows` sharing that id.
-    /// Rebuilt any time `discovered_rows` is structurally replaced.
-    discovered_index: HashMap<PublishedFileId, Vec<usize>>,
-    /// workshop_id -> indices into `loaded_rows` sharing that id.
-    /// Rebuilt any time `loaded_rows` is structurally replaced/extended.
-    loaded_index: HashMap<PublishedFileId, Vec<usize>>,
-    next_offset: usize,
+    /// workshop_id -> indices into `rows` sharing that id. Rebuilt any time
+    /// `rows` is structurally replaced.
+    workshop_index: HashMap<PublishedFileId, Vec<usize>>,
     metadata_in_flight: HashSet<PublishedFileId>,
     metadata_finished: HashSet<PublishedFileId>,
     last_animation_tick: Option<Instant>,
@@ -54,6 +52,12 @@ pub struct State {
     download_count_formatter: DownloadCountFormatter,
     pending_preview: Option<PreviewTarget>,
     pending_context_menu: Option<ContextMenuRequest>,
+    /// Accumulated offset delta the grid anchored itself by after hydration
+    /// changed row heights; drained by `update` into an effect that drives a
+    /// relative `scroll_by` (the widget's real offset lives in Iced). An
+    /// anchor landing while the route is hidden still moves the mirror
+    /// offset only — route re-entry snaps Iced back to the mirror.
+    pending_scroll_anchor: Option<f32>,
 }
 
 impl Default for State {
@@ -70,12 +74,9 @@ impl Default for State {
             watch_degraded: false,
             watch_retry_attempted: false,
             watch_arm_epoch: 0,
-            discovered_rows: None,
-            loaded_rows: Vec::new(),
+            rows: None,
             row_index: HashMap::new(),
-            discovered_index: HashMap::new(),
-            loaded_index: HashMap::new(),
-            next_offset: 0,
+            workshop_index: HashMap::new(),
             metadata_in_flight: HashSet::new(),
             metadata_finished: HashSet::new(),
             last_animation_tick: None,
@@ -84,6 +85,7 @@ impl Default for State {
             download_count_formatter: DownloadCountFormatter::default(),
             pending_preview: None,
             pending_context_menu: None,
+            pending_scroll_anchor: None,
         }
     }
 }
@@ -98,8 +100,12 @@ impl State {
         &self.load_status
     }
 
-    pub(crate) fn loaded_count(&self) -> usize {
-        self.loaded_rows.len()
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows().len()
+    }
+
+    fn rows(&self) -> &[Row] {
+        self.rows.as_deref().unwrap_or_default()
     }
 
     #[cfg(feature = "debug")]
@@ -112,35 +118,19 @@ impl State {
             path.is_some_and(|path| row.id() == path.to_string_lossy())
                 || workshop_id.is_some_and(|id| row.workshop_id() == Some(id))
         };
-        let previous_loaded_len = self.loaded_rows.len();
-        let previous_offset = self.next_offset;
-        let removed_before_offset = self.discovered_rows.as_ref().map_or(0, |rows| {
-            rows.iter()
-                .take(previous_offset)
-                .filter(|row| matches(row))
-                .count()
-        });
-        if let Some(rows) = &mut self.discovered_rows {
-            rows.retain(|row| !matches(row));
-        }
-        self.loaded_rows.retain(|row| !matches(row));
-        if self.loaded_rows.len() == previous_loaded_len && removed_before_offset == 0 {
+        let Some(rows) = &mut self.rows else {
+            return false;
+        };
+        let previous_len = rows.len();
+        rows.retain(|row| !matches(row));
+        if rows.len() == previous_len {
             return false;
         }
-        self.next_offset = self.next_offset.saturating_sub(removed_before_offset);
-        self.discovered_index = self
-            .discovered_rows
-            .as_deref()
-            .map_or_else(HashMap::new, build_workshop_index);
-        self.loaded_index = build_workshop_index(&self.loaded_rows);
+        self.workshop_index = build_workshop_index(rows);
         self.pending_preview = None;
         self.pending_context_menu = None;
         self.sync_grid_items();
         true
-    }
-
-    pub(crate) fn total_count(&self) -> usize {
-        self.discovered_rows.as_ref().map_or(0, Vec::len)
     }
 
     pub(crate) const fn watch_arm_epoch(&self) -> u64 {
@@ -167,18 +157,18 @@ impl State {
         &self.grid
     }
 
+    /// `row_index` is rebuilt by `sync_grid_items` after every structural
+    /// mutation of `rows`, so id lookups here are O(1) instead of scanning.
+    fn row_by_id(&self, id: &str) -> Option<&Row> {
+        self.rows().get(*self.row_index.get(id)?)
+    }
+
     pub(crate) fn workshop_id_for_card(&self, id: &str) -> Option<PublishedFileId> {
-        self.loaded_rows
-            .iter()
-            .find(|row| row.id() == id)
-            .and_then(Row::workshop_id)
+        self.row_by_id(id).and_then(Row::workshop_id)
     }
 
     pub(crate) fn drag_thumbnail_for_card(&self, id: &str) -> Option<image::Handle> {
-        self.loaded_rows
-            .iter()
-            .find(|row| row.id() == id)
-            .and_then(Row::drag_thumbnail)
+        self.row_by_id(id).and_then(Row::drag_thumbnail)
     }
 
     pub(crate) fn thumbnail_demands(&self) -> thumbnail_demand::DemandSet {
@@ -186,11 +176,7 @@ impl State {
             return model::empty_thumbnail_demands();
         }
 
-        model::thumbnail_demands(
-            &self.loaded_rows,
-            self.grid.visible_item_range(),
-            self.generation,
-        )
+        model::thumbnail_demands(self.rows(), self.grid.visible_item_range(), self.generation)
     }
 
     pub(crate) fn apply_thumbnail_delivery(
@@ -204,7 +190,11 @@ impl State {
         let Some(&index) = self.row_index.get(delivery.id.as_str()) else {
             return false;
         };
-        let Some(row) = self.loaded_rows.get_mut(index) else {
+        let Some(row) = self
+            .rows
+            .as_deref_mut()
+            .and_then(|rows| rows.get_mut(index))
+        else {
             return false;
         };
         if !row.apply_thumbnail_delivery(delivery.generation, delivery, self.generation) {
@@ -216,7 +206,8 @@ impl State {
     }
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
-        let changed = model::invalidate_ready_thumbnails(&mut self.loaded_rows);
+        let changed =
+            model::invalidate_ready_thumbnails(self.rows.as_deref_mut().unwrap_or_default());
         if changed {
             self.sync_grid_items();
             self.last_animation_tick = None;
@@ -229,9 +220,10 @@ impl State {
     /// route is hidden so returning to it paints real pixels on the first
     /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
+        let visible = self.grid.visible_item_range();
         let changed = model::release_offscreen_thumbnails(
-            &mut self.loaded_rows,
-            self.grid.visible_item_range(),
+            self.rows.as_deref_mut().unwrap_or_default(),
+            visible,
         );
         for index in &changed {
             self.refresh_item_thumbnail(*index);
@@ -243,7 +235,7 @@ impl State {
         self.window_focused
             && self.route_visible
             && self
-                .loaded_rows
+                .rows()
                 .get(self.grid.visible_item_range())
                 .unwrap_or_default()
                 .iter()
@@ -303,7 +295,7 @@ impl State {
     pub(super) fn enter_route(&mut self) {
         self.route_visible = true;
         self.rearm_watch_on_route_entry();
-        if self.discovered_rows.is_none()
+        if self.rows.is_none()
             && matches!(self.load_status, LoadStatus::Idle | LoadStatus::Error(_))
         {
             self.load_status = LoadStatus::Loading;
@@ -329,11 +321,11 @@ impl State {
         log::info!(
             "installed addons refresh started: {reason:?}, route_visible {}, discovered {}",
             self.route_visible,
-            self.total_count(),
+            self.row_count(),
         );
         if reason.loud() {
             self.begin_loud_refresh();
-        } else if self.route_visible && self.discovered_rows.is_none() {
+        } else if self.route_visible && self.rows.is_none() {
             self.load_status = LoadStatus::Loading;
             // Same as enter_route: grid is empty while discovery is pending.
             let _ = self.grid.set_page_status(true, false);
@@ -346,11 +338,8 @@ impl State {
         } else {
             self.load_status = LoadStatus::Idle;
         }
-        self.discovered_rows = None;
-        self.discovered_index.clear();
-        self.loaded_rows.clear();
-        self.loaded_index.clear();
-        self.next_offset = 0;
+        self.rows = None;
+        self.workshop_index.clear();
         self.metadata_in_flight.clear();
         self.metadata_finished.clear();
         self.last_animation_tick = None;
@@ -375,7 +364,7 @@ impl State {
         self.generation = self.generation.wrapping_add(1).max(1);
 
         let incoming = result.as_ref().ok().map(Vec::len);
-        if reason.loud() || self.discovered_rows.is_none() {
+        if reason.loud() || self.rows.is_none() {
             self.apply_loud_discovery(result);
         } else {
             self.apply_quiet_discovery(result);
@@ -385,9 +374,8 @@ impl State {
         // discovery, or paging.
         log::info!(
             "installed addons snapshot applied: {reason:?} incoming {incoming:?} -> \
-             discovered {}, loaded {}, grid items {}, status {:?}, route_visible {}",
-            self.total_count(),
-            self.loaded_rows.len(),
+             rows {}, grid items {}, status {:?}, route_visible {}",
+            self.row_count(),
             self.grid.items_len(),
             self.load_status,
             self.route_visible,
@@ -419,33 +407,22 @@ impl State {
 
         match result {
             Ok(rows) if rows.is_empty() => {
-                self.discovered_rows = Some(Vec::new());
-                self.discovered_index.clear();
-                self.loaded_rows.clear();
-                self.loaded_index.clear();
-                self.next_offset = 0;
+                self.rows = Some(Vec::new());
+                self.workshop_index.clear();
                 self.load_status = LoadStatus::Empty;
-                self.sync_grid_items();
             }
             Ok(rows) => {
-                self.discovered_index = build_workshop_index(&rows);
-                self.discovered_rows = Some(rows);
-                self.loaded_rows.clear();
-                self.loaded_index.clear();
-                self.next_offset = 0;
+                self.workshop_index = build_workshop_index(&rows);
+                self.rows = Some(rows);
                 self.load_status = LoadStatus::Ready;
-                self.append_next_page();
             }
             Err(error) => {
-                self.discovered_rows = None;
-                self.discovered_index.clear();
-                self.loaded_rows.clear();
-                self.loaded_index.clear();
-                self.next_offset = 0;
+                self.rows = None;
+                self.workshop_index.clear();
                 self.load_status = LoadStatus::Error(error.to_string());
-                self.sync_grid_items();
             }
         }
+        self.sync_grid_items();
     }
 
     fn apply_quiet_discovery(&mut self, result: Result<Vec<Row>, UiError>) {
@@ -459,8 +436,8 @@ impl State {
             }
         };
 
-        let old_next_offset = self.next_offset;
-        let mut old_by_id = mem::take(&mut self.loaded_rows)
+        let mut old_by_id = mem::take(&mut self.rows)
+            .unwrap_or_default()
             .into_iter()
             .map(|row| (row.id().to_owned(), row))
             .collect::<HashMap<_, _>>();
@@ -478,86 +455,19 @@ impl State {
             })
             .collect::<Vec<_>>();
 
-        let new_len = merged_rows.len();
-        self.discovered_index = build_workshop_index(&merged_rows);
-        self.discovered_rows = Some(merged_rows);
-        self.loaded_index.clear();
-        self.next_offset = if new_len == 0 {
-            0
+        self.workshop_index = build_workshop_index(&merged_rows);
+        self.load_status = if merged_rows.is_empty() {
+            LoadStatus::Empty
         } else {
-            old_next_offset
-                .min(new_len)
-                .max(INSTALLED_ADDONS_PAGE_SIZE.min(new_len))
+            LoadStatus::Ready
         };
-
-        if let Some(discovered_rows) = &self.discovered_rows {
-            self.loaded_rows
-                .extend_from_slice(&discovered_rows[..self.next_offset]);
-        }
-        self.loaded_index = build_workshop_index(&self.loaded_rows);
+        self.rows = Some(merged_rows);
         self.metadata_in_flight.clear();
         self.metadata_finished
             .retain(|workshop_id| unchanged_workshop_ids.contains(workshop_id));
         self.pending_preview = None;
         self.pending_context_menu = None;
-        self.load_status = if self.loaded_rows.is_empty() {
-            LoadStatus::Empty
-        } else {
-            LoadStatus::Ready
-        };
         self.sync_grid_items();
-    }
-
-    pub(super) fn append_next_page(&mut self) -> bool {
-        let appended = self.extend_loaded_rows_by_one_page();
-        self.sync_grid_items();
-        log::info!(
-            "installed addons page appended: {appended}, loaded {} of {}, status {:?}",
-            self.loaded_rows.len(),
-            self.total_count(),
-            self.load_status,
-        );
-        appended
-    }
-
-    /// Extends `loaded_rows` by one page from `discovered_rows`, without
-    /// reconciling the grid; callers must follow up with `sync_grid_items`,
-    /// which itself calls back in here when a page still doesn't fill the
-    /// viewport.
-    fn extend_loaded_rows_by_one_page(&mut self) -> bool {
-        if matches!(self.load_status, LoadStatus::Loading) {
-            return false;
-        }
-        let Some(discovered_rows) = &self.discovered_rows else {
-            return false;
-        };
-
-        let start = self.next_offset.min(discovered_rows.len());
-        let end = start
-            .saturating_add(INSTALLED_ADDONS_PAGE_SIZE)
-            .min(discovered_rows.len());
-        if start == end {
-            return false;
-        }
-
-        let base_index = self.loaded_rows.len();
-        self.loaded_rows
-            .extend_from_slice(&discovered_rows[start..end]);
-        for (offset, row) in self.loaded_rows[base_index..].iter().enumerate() {
-            if let Some(workshop_id) = row.workshop_id() {
-                self.loaded_index
-                    .entry(workshop_id)
-                    .or_default()
-                    .push(base_index + offset);
-            }
-        }
-        self.next_offset = end;
-        self.load_status = if self.loaded_rows.is_empty() {
-            LoadStatus::Empty
-        } else {
-            LoadStatus::Ready
-        };
-        true
     }
 
     /// Returns metadata IDs for visible rows, then the thumbnail prefetch
@@ -569,17 +479,16 @@ impl State {
     /// `preview_url`; without metadata, no thumbnail demand can exist. Visible
     /// IDs stay first because Steam UGC queries are chunked at 50.
     pub(super) fn take_visible_metadata_request(&mut self) -> Option<(u64, Vec<PublishedFileId>)> {
-        if !self.route_visible || self.loaded_rows.is_empty() {
+        if !self.route_visible || self.rows().is_empty() {
             return None;
         }
 
         let mut seen = HashSet::new();
         let mut item_ids = Vec::new();
         let visible = self.grid.visible_item_range();
-        let (before, after) =
-            thumbnail_demand::prefetch_ranges(visible.clone(), self.loaded_rows.len());
+        let (before, after) = thumbnail_demand::prefetch_ranges(visible.clone(), self.rows().len());
         for range in [visible, after, before] {
-            for row in self.loaded_rows.get(range).unwrap_or_default() {
+            for row in self.rows().get(range).unwrap_or_default() {
                 let Some(item_id) = row_workshop_id(row) else {
                     continue;
                 };
@@ -647,7 +556,11 @@ impl State {
 
         let visible = self.grid.visible_item_range();
         let mut changed = false;
-        if let Some(rows) = self.loaded_rows.get_mut(visible.clone()) {
+        if let Some(rows) = self
+            .rows
+            .as_deref_mut()
+            .and_then(|rows| rows.get_mut(visible.clone()))
+        {
             for row in rows {
                 changed |= row.advance_animation(elapsed, self.play_gifs_by_default);
             }
@@ -655,7 +568,11 @@ impl State {
         if changed {
             // Swap advanced frames in place; a full sync_grid_items rebuild
             // (every card re-allocated + re-layout) per 16ms tick is churn.
-            if let Some(rows) = self.loaded_rows.get(visible.clone()) {
+            if let Some(rows) = self
+                .rows
+                .as_deref()
+                .and_then(|rows| rows.get(visible.clone()))
+            {
                 for (offset, row) in rows.iter().enumerate() {
                     let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
                     let _ = self.grid.update_item_thumbnail(
@@ -670,11 +587,7 @@ impl State {
     }
 
     pub(super) fn take_preview_target(&mut self, id: &str) -> Option<PreviewTarget> {
-        let target = self
-            .loaded_rows
-            .iter()
-            .find(|row| row.id() == id)?
-            .preview_target()?;
+        let target = self.row_by_id(id)?.preview_target()?;
         self.pending_preview = Some(target.clone());
         Some(target)
     }
@@ -684,22 +597,20 @@ impl State {
         id: &str,
         position: iced::Point,
     ) -> Option<ContextMenuRequest> {
-        let mut request = self
-            .loaded_rows
-            .iter()
-            .find(|row| row.id() == id)?
-            .context_menu()?;
+        let mut request = self.row_by_id(id)?.context_menu()?;
         request.position = position;
         self.pending_context_menu = Some(request.clone());
         Some(request)
     }
 
     pub(super) fn set_card_hovered(&mut self, id: &str, hovered: bool) -> bool {
-        let Some((index, row)) = self
-            .loaded_rows
-            .iter_mut()
-            .enumerate()
-            .find(|(_, row)| row.id() == id)
+        let Some(&index) = self.row_index.get(id) else {
+            return false;
+        };
+        let Some(row) = self
+            .rows
+            .as_deref_mut()
+            .and_then(|rows| rows.get_mut(index))
         else {
             return false;
         };
@@ -719,34 +630,58 @@ impl State {
             return;
         }
 
-        let mut changed = false;
-        if let Some(discovered_rows) = &mut self.discovered_rows {
-            for patch in patches {
-                for &index in self
-                    .discovered_index
-                    .get(&patch.workshop_id())
-                    .map_or(&[][..], Vec::as_slice)
-                {
-                    if let Some(row) = discovered_rows.get_mut(index) {
-                        changed |= row.apply_metadata_patch(patch);
-                    }
-                }
-            }
-        }
+        let mut changed_indices = Vec::new();
         for patch in patches {
             for &index in self
-                .loaded_index
+                .workshop_index
                 .get(&patch.workshop_id())
                 .map_or(&[][..], Vec::as_slice)
             {
-                if let Some(row) = self.loaded_rows.get_mut(index) {
-                    changed |= row.apply_metadata_patch(patch);
+                if let Some(row) = self
+                    .rows
+                    .as_deref_mut()
+                    .and_then(|rows| rows.get_mut(index))
+                    && row.apply_metadata_patch(patch)
+                {
+                    changed_indices.push(index);
                 }
             }
         }
-        if changed {
-            self.sync_grid_items();
+        if changed_indices.is_empty() {
+            return;
         }
+
+        // A patch names a few rows; swapping just those grid items in place
+        // keeps a metadata batch from re-allocating every card in the
+        // library. Row ids are untouched by patches, so `row_index` and the
+        // follow-up messages the callers re-derive stay valid.
+        let updates = changed_indices
+            .iter()
+            .filter_map(|&index| {
+                self.rows().get(index).map(|row| {
+                    (
+                        index,
+                        row.to_grid_item(self.play_gifs_by_default, self.download_count_formatter),
+                    )
+                })
+            })
+            .collect();
+        for message in self.grid.patch_items(updates) {
+            // Visible-range echoes are re-derived by the caller (it re-runs
+            // the metadata/thumbnail effects from state after this); hover
+            // echoes are dropped as on every sync path — a hover retargeted
+            // by rows shifting under a stationary cursor self-corrects on
+            // the next cursor move. The anchor delta is the one follow-up
+            // that must reach the runtime, and deltas from batches landing
+            // before a drain accumulate.
+            if let addon_grid::Message::ScrollAnchored(delta) = message {
+                *self.pending_scroll_anchor.get_or_insert(0.0) += delta;
+            }
+        }
+    }
+
+    pub(super) fn take_scroll_anchor(&mut self) -> Option<f32> {
+        self.pending_scroll_anchor.take()
     }
 
     /// Pushes every row's current thumbnail into the grid in place. A
@@ -759,7 +694,7 @@ impl State {
     /// Installed-addon grids have no lead card, so the row index is the item
     /// index — unlike My Workshop, where item 0 is "publish new".
     fn refresh_item_thumbnail(&mut self, index: usize) {
-        let Some(row) = self.loaded_rows.get(index) else {
+        let Some(row) = self.rows.as_deref().and_then(|rows| rows.get(index)) else {
             return;
         };
         let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
@@ -770,46 +705,34 @@ impl State {
     /// `loaded_rows`, which is why it hangs off the grid sync below.
     fn reindex_rows(&mut self) {
         self.row_index.clear();
-        self.row_index.reserve(self.loaded_rows.len());
-        for (index, row) in self.loaded_rows.iter().enumerate() {
-            let _ = self.row_index.insert(row.id().to_owned(), index);
+        self.row_index.reserve(self.rows().len());
+        if let Some(rows) = self.rows.as_deref() {
+            for (index, row) in rows.iter().enumerate() {
+                let _ = self.row_index.insert(row.id().to_owned(), index);
+            }
         }
     }
 
-    /// Rebuilds the grid's item list and page status from `loaded_rows`.
+    /// Rebuilds the grid's item list and page status from `rows`.
     ///
-    /// The grid's own reconciliation can ask for another page (e.g. a page
-    /// of appended rows still doesn't fill a tall viewport); normally that
-    /// travels as a `Message::Grid(NextPageRequested)` round trip, but this
-    /// method is called directly rather than through the message bus, so it
-    /// loops here instead until the viewport is full or there are no more
-    /// pages. Every other follow-up message (hover, visible-range) is
-    /// already re-derived by the caller from state, not from these echoes.
+    /// Visible-range follow-ups are dropped because every caller re-derives
+    /// metadata and thumbnail effects from state after the sync. Hover
+    /// follow-ups are dropped too — a hover retargeted by rows shifting
+    /// under a stationary cursor misses one GIF play/pause transition and
+    /// self-corrects on the next cursor move.
     fn sync_grid_items(&mut self) {
-        // Every mutation of `loaded_rows` is already followed by a sync, so the
+        // Every mutation of `rows` is already followed by a sync, so the
         // reindex rides along rather than needing its own call sites.
         self.reindex_rows();
-        loop {
-            let items = self
-                .loaded_rows
-                .iter()
-                .map(|row| {
-                    row.to_grid_item(self.play_gifs_by_default, self.download_count_formatter)
-                })
-                .collect();
-            let mut messages = self.grid.set_items(items);
-            messages.extend(self.grid.set_page_status(
-                matches!(self.load_status, LoadStatus::Loading),
-                self.next_offset < self.total_count(),
-            ));
-
-            let wants_next_page = messages
-                .iter()
-                .any(|message| matches!(message, addon_grid::Message::NextPageRequested));
-            if !wants_next_page || !self.extend_loaded_rows_by_one_page() {
-                break;
-            }
-        }
+        let items = self
+            .rows()
+            .iter()
+            .map(|row| row.to_grid_item(self.play_gifs_by_default, self.download_count_formatter))
+            .collect::<Vec<_>>();
+        let _ = self.grid.set_items(items);
+        let _ = self
+            .grid
+            .set_page_status(matches!(self.load_status, LoadStatus::Loading), false);
     }
 }
 

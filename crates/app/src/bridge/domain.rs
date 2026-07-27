@@ -2,7 +2,6 @@ use std::{collections::HashSet, fmt, num::NonZeroU64, path::PathBuf, sync::Arc};
 
 use super::{gma::GmaMeta, tasks::TaskId};
 
-pub const RESULTS_PER_PAGE: usize = 50;
 pub const WORKSHOP_LEGAL_URL: &str = "https://steamcommunity.com/workshop/workshoplegalagreement";
 
 /// Zero is never a valid Steam Workshop id (the backend already treats it

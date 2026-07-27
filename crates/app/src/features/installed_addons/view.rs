@@ -47,7 +47,7 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
 fn header_line<'a>(state: &State, ctx: ViewCtx<'a>) -> Option<Element<'a, Message>> {
     let tokens = ctx.tokens;
     let i18n = ctx.i18n;
-    if state.loaded_count() == 0 {
+    if state.row_count() == 0 {
         status_line(state, i18n).map(|status| {
             text(status)
                 .size(tokens.typography.body)
