@@ -101,10 +101,31 @@ pub struct App {
     thumbnails: thumbnail_demand::Manager,
     state: State,
     window_id: Option<window::Id>,
+    startup_phase: StartupPhase,
     /// One warm pass per session; set when the first library snapshot kicks it.
     library_warm_kicked: bool,
     #[cfg(feature = "asset-studio")]
     audio_playback: Option<AudioPlayback>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupPhase {
+    WaitingForFirstFrame,
+    Started,
+}
+
+impl StartupPhase {
+    fn activate_after_first_frame(&mut self) -> bool {
+        if *self == Self::Started {
+            return false;
+        }
+        *self = Self::Started;
+        true
+    }
+
+    const fn started(self) -> bool {
+        matches!(self, Self::Started)
+    }
 }
 
 impl Drop for App {
@@ -324,6 +345,7 @@ pub enum RootMessage {
     /// Cached preview URLs for the whole library, resolved once per session
     /// to warm the thumbnail disk cache in the background.
     WarmLibraryResolved(Vec<(PublishedFileId, String)>),
+    FirstFramePresented(window::Id),
     WindowEvent(window::Id, window::Event),
     WindowScaleFactorObserved(window::Id, f32),
     AddonDrag(AddonDragMessage),
@@ -366,6 +388,20 @@ fn sync_search_installed_addons(
     {
         let file_items = snapshot.map_or_else(Vec::new, search_file_items_from_library);
         search.sync_installed_addon_files(file_items);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // Required by iced's `listen_raw` callback signature.
+fn first_frame_presented_event(
+    event: Event,
+    _status: event::Status,
+    id: window::Id,
+) -> Option<RootMessage> {
+    match event {
+        Event::Window(window::Event::RedrawRequested(_)) => {
+            Some(RootMessage::FirstFramePresented(id))
+        }
+        _ => None,
     }
 }
 
@@ -428,19 +464,23 @@ fn search_file_items_from_library(
 impl App {
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
-        Self::from_context(BackendContext::new().expect("test backend context"))
+        Self::from_context(
+            BackendContext::new().expect("test backend context"),
+            StartupPhase::Started,
+        )
     }
 
     pub(crate) fn new(ctx: BackendContext) -> (Self, Task<RootMessage>) {
-        let mut app = Self::from_context(ctx);
-        let startup_tasks = app.startup_tasks();
-        (app, startup_tasks)
+        (
+            Self::from_context(ctx, StartupPhase::WaitingForFirstFrame),
+            Task::none(),
+        )
     }
 
     /// Deterministic construction shared by production and tests. External
     /// startup work is deliberately kept in `startup_tasks`, so ordinary
     /// state/effect tests never launch HTTP, discovery, or warm-up jobs.
-    fn from_context(ctx: BackendContext) -> Self {
+    fn from_context(ctx: BackendContext, startup_phase: StartupPhase) -> Self {
         let thumbnails = thumbnail_demand::Manager::new(thumbnail_demand::Config {
             disk_cache_dir: gmpublished_backend::appdata::cache_dir()
                 .map(|dir| dir.join("thumbnails")),
@@ -461,11 +501,12 @@ impl App {
                 paths,
             ));
         state.downloader.set_destination_label(label);
-        let mut app = Self {
+        let app = Self {
             ctx,
             thumbnails,
             state,
             window_id: None,
+            startup_phase,
             library_warm_kicked: false,
             #[cfg(feature = "asset-studio")]
             audio_playback: None,
@@ -473,11 +514,19 @@ impl App {
         #[cfg(target_os = "macos")]
         app.install_macos_menu();
 
-        // Seed placeholders from the persisted metadata snapshot so second-launch
-        // grids paint blurred-then-sharp instead of blank while decoding.
-        app.thumbnails.seed_thumbhashes(app.ctx.thumbhash_seed());
-
         app
+    }
+
+    fn activate_startup_after_first_frame(&mut self) -> Task<RootMessage> {
+        if !self.startup_phase.activate_after_first_frame() {
+            return Task::none();
+        }
+
+        let _started = self.ctx.activate_startup_services();
+        // Seed placeholders from the persisted metadata snapshot so grids
+        // paint blurred-then-sharp instead of blank while decoding.
+        self.thumbnails.seed_thumbhashes(self.ctx.thumbhash_seed());
+        self.startup_tasks()
     }
 
     fn startup_tasks(&mut self) -> Task<RootMessage> {
@@ -514,11 +563,9 @@ impl App {
                     RootMessage::LibraryRefreshed(LibraryRefreshReason::Startup, result)
                 })
             });
-        // Connectivity is a level, not an edge: the backend initializes before
-        // the Iced app is constructed, so on fast connects the SteamConnected
-        // event fires before our event sink exists and is lost. Seed the
-        // session from the current level; the session state machine dedups a
-        // repeated Connected if the live event also arrives.
+        // Connectivity is a level, not an edge. Seed the session from the
+        // current backend state as well as consuming its event stream; the
+        // session state machine dedups a repeated Connected.
         let steam_bootstrap_task = if self.ctx.steam_connected() {
             Task::done(RootMessage::SteamSession(
                 steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
@@ -662,6 +709,13 @@ impl App {
                 .thumbnails
                 .update(&self.ctx, message)
                 .map(RootMessage::ThumbnailDemand),
+            RootMessage::FirstFramePresented(id) => {
+                // iced_winit broadcasts the raw interaction while handling
+                // the redraw, then finishes compositor presentation before
+                // processing the subscription's resulting app message.
+                self.window_id = Some(id);
+                self.activate_startup_after_first_frame()
+            }
             RootMessage::WindowEvent(id, event) => self.window_event_task(id, &event),
             RootMessage::WindowScaleFactorObserved(id, scale_factor) => {
                 self.apply_window_scale_factor(id, scale_factor)
@@ -1583,16 +1637,18 @@ impl App {
         );
         streams
             .push(my_workshop::subscription(&self.state.my_workshop).map(RootMessage::MyWorkshop));
-        streams.push(
-            library_watch::subscription(
-                self.state
-                    .installed_addons
-                    .watch_gmod_dir()
-                    .map(PathBuf::as_path),
-                self.state.installed_addons.watch_arm_epoch(),
-            )
-            .map(RootMessage::LibraryWatch),
-        );
+        if self.startup_phase.started() {
+            streams.push(
+                library_watch::subscription(
+                    self.state
+                        .installed_addons
+                        .watch_gmod_dir()
+                        .map(PathBuf::as_path),
+                    self.state.installed_addons.watch_arm_epoch(),
+                )
+                .map(RootMessage::LibraryWatch),
+            );
+        }
         streams.push(
             installed_addons::subscription(&self.state.installed_addons)
                 .map(RootMessage::InstalledAddons),
@@ -1630,6 +1686,11 @@ impl App {
             );
         }
         streams.push(window::events().map(|(id, event)| RootMessage::WindowEvent(id, event)));
+        if !self.startup_phase.started() {
+            // `window::events` deliberately filters redraws. The raw listener
+            // exists for one frame only, avoiding an idle frame loop.
+            streams.push(event::listen_raw(first_frame_presented_event));
+        }
         if self.state.addon_drag.is_active() {
             streams.push(event::listen_with(addon_drag_event));
         }

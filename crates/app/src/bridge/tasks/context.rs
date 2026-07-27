@@ -196,6 +196,13 @@ impl BackendContext {
         self.services.steam_connected()
     }
 
+    pub(crate) fn activate_startup_services(&self) -> bool {
+        // Hydrate before starting Steam so a live metadata response cannot be
+        // overwritten by the persisted snapshot loaded a moment later.
+        self.services.hydrate_workshop_metadata_snapshot();
+        self.services.backend.start_background_services()
+    }
+
     #[cfg(test)]
     pub(crate) fn connect_steam(&self) -> Result<(), UiError> {
         self.services.connect_steam()

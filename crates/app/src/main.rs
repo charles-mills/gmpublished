@@ -97,10 +97,9 @@ fn run() -> Result<(), RunError> {
     }
 
     // A quiet, throwaway `AppData` read: just enough to resolve the window
-    // chrome strategy and the panic log path before the Iced event loop
-    // (and the real `Backend`, with its Steam/whitelist background
-    // threads) exists. `App::new` builds the one real `Backend` when the
-    // event loop actually starts.
+    // chrome strategy and the panic log path before the Iced event loop and
+    // the real `Backend` exist. Steam and whitelist work remain dormant until
+    // the first frame has been presented.
     let early_app_data = gmpublished_backend::appdata::AppData::load(
         gmpublished_backend::appdata::AppDataPaths::production(),
         gmpublished_backend::transactions::Transactions::new(

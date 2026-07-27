@@ -38,9 +38,10 @@ pub struct BackendServices {
 impl BackendServices {
     /// The default entry point every `App::new()` (production) or
     /// `BackendContext::new()` (tests) goes through. Builds one `Backend`
-    /// (real, with background threads, in production; a private-tempdir,
-    /// no-background-threads one in tests — [`build_default_backend`]) and
-    /// derives the initial settings/paths from its `AppData` snapshot.
+    /// (with explicitly-started background services in production; a
+    /// private-tempdir, no-background-services one in tests —
+    /// [`build_default_backend`]) and derives the initial settings/paths from
+    /// its `AppData` snapshot.
     pub(super) fn new(
         backend_event_sink: Option<BackendEventSinkRegistration>,
     ) -> Result<Self, gmpublished_backend::BackendInitError> {
@@ -87,7 +88,6 @@ impl BackendServices {
             if let Some(path) = library::header_snapshot_path() {
                 services.library.set_header_snapshot_file(path);
             }
-            services.hydrate_workshop_metadata_snapshot();
         }
         services
     }
@@ -123,7 +123,7 @@ impl BackendServices {
         }
     }
 
-    fn hydrate_workshop_metadata_snapshot(&self) {
+    pub(super) fn hydrate_workshop_metadata_snapshot(&self) {
         let Some(path) = self.metadata_snapshot_file.as_deref() else {
             return;
         };

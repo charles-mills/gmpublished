@@ -9,7 +9,10 @@ use std::{
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::{
@@ -31,15 +34,23 @@ pub struct BackendConfig {
     /// Production leaves this `None`; tests pass a private tempdir so
     /// parallel test processes never share a settings file.
     pub data_root: Option<PathBuf>,
-    /// Whether to spawn the Steam connect/watchdog/workshop-fetcher threads
-    /// and the whitelist network warm-up. Production always wants these;
-    /// tests that just need service handles (not a live Steam attempt or an
-    /// outbound HTTPS call per test process) set this `false`.
-    pub background_threads: bool,
+    /// Whether process-lifetime Steam and whitelist services may be started.
+    pub background_services: BackgroundServices,
     /// Whether process-global logging should write to this backend's app-data
     /// directory. Test backends disable it because many isolated roots coexist
     /// in one process and only the first can own the global sink.
     pub file_logging: bool,
+}
+
+/// Controls process-lifetime services independently from construction of the
+/// cheap service handles they use.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BackgroundServices {
+    /// Allow an explicit, one-shot start after backend construction.
+    #[default]
+    Enabled,
+    /// Never start them (CLI and isolated tests).
+    Disabled,
 }
 
 impl Default for BackendConfig {
@@ -48,7 +59,7 @@ impl Default for BackendConfig {
             cli_mode: false,
             event_sink: Arc::new(NullEventSink),
             data_root: None,
-            background_threads: true,
+            background_services: BackgroundServices::Enabled,
             file_logging: true,
         }
     }
@@ -64,7 +75,7 @@ impl BackendConfig {
             cli_mode: false,
             event_sink: Arc::new(NullEventSink),
             data_root: Some(data_root.to_path_buf()),
-            background_threads: false,
+            background_services: BackgroundServices::Disabled,
             file_logging: false,
         }
     }
@@ -77,6 +88,30 @@ pub struct Backend {
     pub search: Arc<Search>,
     pub downloads: Arc<Downloads>,
     pub whitelist: AddonWhitelist,
+    background_services: BackgroundServiceGate,
+}
+
+#[derive(Debug)]
+struct BackgroundServiceGate {
+    enabled: bool,
+    started: AtomicBool,
+}
+
+impl BackgroundServiceGate {
+    const fn new(mode: BackgroundServices) -> Self {
+        Self {
+            enabled: matches!(mode, BackgroundServices::Enabled),
+            started: AtomicBool::new(false),
+        }
+    }
+
+    fn try_start(&self) -> bool {
+        self.enabled
+            && self
+                .started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
 }
 
 impl fmt::Debug for Backend {
@@ -125,16 +160,15 @@ impl fmt::Display for BackendInitError {
 impl std::error::Error for BackendInitError {}
 
 impl Backend {
-    /// Constructs every service in dependency order and spawns the
-    /// background threads that need them, mirroring the process's
-    /// historical startup order (appdata, transactions, steamworks, search,
-    /// whitelist warm-up).
+    /// Constructs every service in dependency order. Process-lifetime work
+    /// remains dormant until the caller explicitly releases it with
+    /// [`Self::start_background_services`].
     pub fn init(config: BackendConfig) -> Result<Arc<Self>, BackendInitError> {
         let BackendConfig {
             cli_mode,
             event_sink,
             data_root,
-            background_threads,
+            background_services,
             file_logging,
         } = config;
 
@@ -183,25 +217,27 @@ impl Backend {
             search,
             downloads,
             whitelist,
+            background_services: BackgroundServiceGate::new(background_services),
         });
 
-        if background_threads {
-            Steam::spawn_background_threads(
-                &backend.steam,
-                &backend.app_data,
-                &backend.search,
-                &backend.downloads,
-            );
+        Ok(backend)
+    }
 
-            log::info!("warming GMA whitelist");
-            // A plain thread keeps the 12-thread rayon pool lazy; spawning
-            // here would build the whole pool at startup for a one-shot
-            // warm-up.
-            let whitelist = backend.whitelist.clone();
-            std::thread::spawn(move || whitelist.refresh_from_remote());
+    /// Starts process-lifetime services at most once. Returns whether this
+    /// call won the start gate; disabled backends always return `false`.
+    pub fn start_background_services(self: &Arc<Self>) -> bool {
+        if !self.background_services.try_start() {
+            return false;
         }
 
-        Ok(backend)
+        Steam::spawn_background_threads(&self.steam, &self.app_data, &self.search, &self.downloads);
+
+        log::info!("warming GMA whitelist");
+        // A plain thread keeps the 12-thread rayon pool lazy; spawning here
+        // would build the whole pool at startup for a one-shot warm-up.
+        let whitelist = self.whitelist.clone();
+        std::thread::spawn(move || whitelist.refresh_from_remote());
+        true
     }
 }
 
@@ -255,5 +291,21 @@ mod tests {
             Some("en-US")
         );
         assert_eq!(backend_b.app_data.settings.load().language, None);
+    }
+
+    #[test]
+    fn enabled_background_service_gate_opens_once() {
+        let gate = BackgroundServiceGate::new(BackgroundServices::Enabled);
+
+        assert!(gate.try_start());
+        assert!(!gate.try_start());
+    }
+
+    #[test]
+    fn disabled_background_service_gate_never_opens() {
+        let gate = BackgroundServiceGate::new(BackgroundServices::Disabled);
+
+        assert!(!gate.try_start());
+        assert!(!gate.try_start());
     }
 }

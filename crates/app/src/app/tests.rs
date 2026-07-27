@@ -34,10 +34,21 @@ use crate::{
     theme::AccentInputs,
 };
 
+#[test]
+fn staged_startup_activates_exactly_once_after_first_frame() {
+    let mut phase = StartupPhase::WaitingForFirstFrame;
+
+    assert!(!phase.started());
+    assert!(phase.activate_after_first_frame());
+    assert!(phase.started());
+    assert!(!phase.activate_after_first_frame());
+}
+
 use super::{
     AddonDragMessage, AddonDragOutcome, AddonDragSource, AddonDragState, App, ContextMenuTarget,
-    GlobalShortcut, LocalMenuTarget, RootMessage, State, backend_runtime_action_message,
-    map_global_shortcut, map_settings_toggle_shortcut, system_scheme_from_mode,
+    GlobalShortcut, LocalMenuTarget, RootMessage, StartupPhase, State,
+    backend_runtime_action_message, map_global_shortcut, map_settings_toggle_shortcut,
+    system_scheme_from_mode,
 };
 use crate::bridge::ui_error::UiError;
 

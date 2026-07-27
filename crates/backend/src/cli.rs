@@ -99,7 +99,7 @@ fn run_extraction(request: ExtractionRequest) {
     // list as the failure fallback.
     let backend = Backend::init(BackendConfig {
         cli_mode: true,
-        background_threads: false,
+        background_services: crate::BackgroundServices::Disabled,
         ..BackendConfig::default()
     });
     let backend = match backend {
