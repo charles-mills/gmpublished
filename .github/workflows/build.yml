@@ -6,7 +6,6 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
-  actions: read
   contents: read
 
 concurrency:
@@ -22,50 +21,11 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Verify release version
         run: packaging/scripts/verify_version.sh "$GITHUB_REF_NAME"
-
-      - name: Require successful main-branch CI
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          deadline=$((SECONDS + 2400))
-          while [ "$SECONDS" -lt "$deadline" ]; do
-            run="$(gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow check.yml \
-              --commit "$GITHUB_SHA" \
-              --event push \
-              --limit 1 \
-              --json databaseId,status,conclusion \
-              --jq '.[0] // empty | [.databaseId, .status, (.conclusion // "")] | @tsv')"
-
-            if [ -z "$run" ]; then
-              sleep 15
-              continue
-            fi
-
-            IFS="$(printf '\t')" read -r run_id status conclusion <<< "$run"
-            if [ "$status" != "completed" ]; then
-              sleep 15
-              continue
-            fi
-
-            if [ "$conclusion" = "success" ]; then
-              printf 'verified by check run %s\n' "$run_id"
-              exit 0
-            fi
-
-            printf 'check run %s completed with %s\n' "$run_id" "$conclusion" >&2
-            exit 1
-          done
-
-          printf 'timed out waiting for CI on %s\n' "$GITHUB_SHA" >&2
-          exit 1
 
   build_linux:
     needs: verify

@@ -1,0 +1,55 @@
+name: nix
+
+# `nix flake check` builds the package, so every Rust input counts, plus the
+# extra trees package.nix pulls into its source fileset.
+on:
+  pull_request:
+    paths:
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - flake.nix
+      - flake.lock
+      - packaging/nix/**
+      - packaging/icons/**
+      - packaging/linux/**
+      - packaging/macos/**
+      - packaging/steam/redistributable/**
+      - .github/workflows/nix.yml
+  push:
+    branches:
+      - main
+    paths:
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - flake.nix
+      - flake.lock
+      - packaging/nix/**
+      - packaging/icons/**
+      - packaging/linux/**
+      - packaging/macos/**
+      - packaging/steam/redistributable/**
+      - .github/workflows/nix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31.10.7
+
+      - name: Check Nix flake
+        run: nix flake check --all-systems

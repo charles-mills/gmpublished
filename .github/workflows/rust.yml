@@ -1,0 +1,91 @@
+name: rust
+
+on:
+  pull_request:
+    paths:
+      - crates/**
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - packaging/Packager.*.toml
+      - packaging/arch/PKGBUILD
+      - packaging/scripts/verify_version.sh
+      - .github/workflows/rust.yml
+  push:
+    branches:
+      - main
+    paths:
+      - crates/**
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - packaging/Packager.*.toml
+      - packaging/arch/PKGBUILD
+      - packaging/scripts/verify_version.sh
+      - .github/workflows/rust.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Packager manifests and the PKGBUILD are inputs here, not just to
+      # packaging: verify_version.sh cross-checks them against Cargo.toml.
+      - name: Verify version metadata
+        run: packaging/scripts/verify_version.sh
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Restore Cargo sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-sources-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-sources-${{ runner.os }}-
+
+      - name: Configure compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Lint all features
+        run: cargo clippy --workspace --all-targets --all-features --locked --no-deps -- -D warnings
+
+      - name: Check release configuration
+        run: cargo check --package gmpublished --release --locked

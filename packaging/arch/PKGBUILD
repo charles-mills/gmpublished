@@ -3,7 +3,7 @@
 pkgname=gmpublished-bin
 _pkgname=gmpublished
 _github_repo='charles-mills/gmpublished'
-pkgver=0.2.2
+pkgver=0.2.3
 _release_tag="v${pkgver}"
 pkgrel=1
 pkgdesc="Native Workshop publishing and addon inspection utility for Garry's Mod"

@@ -1,0 +1,54 @@
+name: arch
+
+on:
+  pull_request:
+    paths:
+      - packaging/arch/**
+      - .github/workflows/arch.yml
+  push:
+    branches:
+      - main
+    paths:
+      - packaging/arch/**
+      - .github/workflows/arch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  aur_metadata:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install packaging tools
+        run: pacman -Syu --noconfirm --needed git namcap
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify .SRCINFO matches PKGBUILD
+        working-directory: packaging/arch
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          sudo -u builder makepkg --printsrcinfo > /tmp/generated.SRCINFO
+          if ! diff -u .SRCINFO /tmp/generated.SRCINFO; then
+            echo ".SRCINFO is stale; regenerate with 'makepkg --printsrcinfo > .SRCINFO'" >&2
+            exit 1
+          fi
+
+      - name: Lint PKGBUILD
+        working-directory: packaging/arch
+        # Without pipefail, `namcap | tee` returns tee's status.
+        shell: bash -euo pipefail {0}
+        run: |
+          namcap PKGBUILD | tee /tmp/namcap.txt
+          if grep -q ' E: ' /tmp/namcap.txt; then
+            echo "namcap reported errors" >&2
+            exit 1
+          fi
