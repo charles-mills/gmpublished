@@ -31,6 +31,6 @@ pkgbase = gmpublished-bin
 	options = !strip
 	options = !debug
 	source = gmpublished-0.2.3-x86_64-linux.zip::https://github.com/charles-mills/gmpublished/releases/download/v0.2.3/gmpublished-0.2.3-x86_64-linux.zip
-	sha256sums = 0fe7b9566f0768b34bf7127f9e527fb5d515b925504c0196b88441932402e8d5
+	sha256sums = 477699c7188154d2c175c50951ab00b712c7a7a02a29a7190d2c06f2d2aa22f6
 
 pkgname = gmpublished-bin
