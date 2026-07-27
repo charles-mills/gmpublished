@@ -33,7 +33,7 @@ nix run github:charles-mills/gmpublished
 
 ### UI Framework
 
-gmpublished is implemented in [Iced](https://iced.rs/), and so doesn't require a system or bundled web-view, instead rendering with [wgpu](https://github.com/gfx-rs/wgpu). This is mostly relevant to Linux users, since gmpublisher's Tauri dependency is not regularly updated to use a widely available version of webkitgtk.
+gmpublished is implemented in [Iced](https://iced.rs/), and so doesn't require a system or bundled web-view. This is mostly relevant to Linux users; there are no additional dependencies to install, and a self-contained AppImage is available at ~8MB. Regardless, the app has first-class support for Windows, Linux and macOS.
 
 ### In-app Previewer
 
