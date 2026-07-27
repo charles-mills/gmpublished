@@ -211,7 +211,13 @@ pub struct GMAEntry {
     pub index: u64,
 }
 
-pub(crate) fn is_unsafe_entry_path(path: &str) -> bool {
+/// Whether a GMA entry path could escape an extraction root, or otherwise
+/// name something the archive has no business naming.
+///
+/// Exported because the app crate validates the same paths at its own
+/// boundary. It is deliberately the single definition: a second copy that
+/// drifted would leave one of the two boundaries accepting traversals.
+pub fn is_unsafe_entry_path(path: &str) -> bool {
     if path.is_empty() {
         return true;
     }

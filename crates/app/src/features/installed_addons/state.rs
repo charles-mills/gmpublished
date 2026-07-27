@@ -45,7 +45,15 @@ pub struct State {
     /// `rows` is structurally replaced.
     workshop_index: HashMap<PublishedFileId, Vec<usize>>,
     metadata_in_flight: HashSet<PublishedFileId>,
+    /// Steam answered for these ids; there is nothing left to ask.
     metadata_finished: HashSet<PublishedFileId>,
+    /// The lookup or the refresh behind it failed for these ids. Held
+    /// separately from `metadata_finished` because the failure is transient:
+    /// they are excluded from requests only until something that could change
+    /// the answer happens — route entry, or Steam reaching *connected* — at
+    /// which point [`Self::retry_failed_metadata`] releases them. Marking them
+    /// finished instead stranded the rows until the next loud refresh.
+    metadata_failed: HashSet<PublishedFileId>,
     last_animation_tick: Option<Instant>,
     play_gifs_by_default: bool,
     window_focused: bool,
@@ -79,6 +87,7 @@ impl Default for State {
             workshop_index: HashMap::new(),
             metadata_in_flight: HashSet::new(),
             metadata_finished: HashSet::new(),
+            metadata_failed: HashSet::new(),
             last_animation_tick: None,
             play_gifs_by_default: Settings::default().play_gifs_by_default,
             window_focused: true,
@@ -295,6 +304,9 @@ impl State {
     pub(super) fn enter_route(&mut self) {
         self.route_visible = true;
         self.rearm_watch_on_route_entry();
+        // Re-entering is the gesture people already use to re-ask a route that
+        // gave up, so it retries lookups that failed while Steam was down.
+        let _ = self.retry_failed_metadata();
         if self.rows.is_none()
             && matches!(self.load_status, LoadStatus::Idle | LoadStatus::Error(_))
         {
@@ -342,6 +354,7 @@ impl State {
         self.workshop_index.clear();
         self.metadata_in_flight.clear();
         self.metadata_finished.clear();
+        self.metadata_failed.clear();
         self.last_animation_tick = None;
         self.pending_preview = None;
         self.pending_context_menu = None;
@@ -402,6 +415,7 @@ impl State {
     fn apply_loud_discovery(&mut self, result: Result<Vec<Row>, UiError>) {
         self.metadata_in_flight.clear();
         self.metadata_finished.clear();
+        self.metadata_failed.clear();
         self.pending_preview = None;
         self.pending_context_menu = None;
 
@@ -465,6 +479,8 @@ impl State {
         self.metadata_in_flight.clear();
         self.metadata_finished
             .retain(|workshop_id| unchanged_workshop_ids.contains(workshop_id));
+        self.metadata_failed
+            .retain(|workshop_id| unchanged_workshop_ids.contains(workshop_id));
         self.pending_preview = None;
         self.pending_context_menu = None;
         self.sync_grid_items();
@@ -494,6 +510,7 @@ impl State {
                 };
                 if self.metadata_in_flight.contains(&item_id)
                     || self.metadata_finished.contains(&item_id)
+                    || self.metadata_failed.contains(&item_id)
                     || !seen.insert(item_id)
                 {
                     continue;
@@ -522,23 +539,62 @@ impl State {
 
         for item_id in item_ids {
             self.metadata_in_flight.remove(item_id);
-            self.metadata_finished.insert(*item_id);
         }
 
-        let Ok(resolution) = result else {
-            return None;
+        let resolution = match result {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                // A failed lookup says nothing about these ids, so they are
+                // not finished — only parked until a retry point. The rows
+                // keep the local title and dead thumbnail they were scanned
+                // with; what is missing is everything Steam adds on top.
+                log::debug!("installed addons metadata lookup failed: {error}");
+                self.metadata_failed.extend(item_ids.iter().copied());
+                return None;
+            }
         };
+
+        self.metadata_finished.extend(item_ids.iter().copied());
         self.apply_metadata_patches(generation, &resolution.patches);
         (!resolution.stale_ids.is_empty()).then_some((generation, resolution.stale_ids))
+    }
+
+    /// Releases ids parked by a failed lookup so the next poll asks again.
+    ///
+    /// Called on route entry and when Steam connects — the two points where
+    /// the answer can plausibly have changed. Returns whether anything was
+    /// actually released, so callers can skip a pointless request.
+    pub(super) fn retry_failed_metadata(&mut self) -> bool {
+        !std::mem::take(&mut self.metadata_failed).is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_failed_metadata(&self) -> bool {
+        !self.metadata_failed.is_empty()
     }
 
     pub(super) fn apply_metadata_refresh(
         &mut self,
         generation: u64,
+        item_ids: &[PublishedFileId],
         result: Result<Vec<MetadataPatch>, UiError>,
     ) {
-        if let Ok(patches) = result {
-            self.apply_metadata_patches(generation, &patches);
+        match result {
+            Ok(patches) => self.apply_metadata_patches(generation, &patches),
+            Err(error) => {
+                if generation != self.generation {
+                    return;
+                }
+                // The cache lookup that queued this refresh already marked
+                // these ids finished, so dropping the failure silently left
+                // them unaskable — the rows kept whatever the cache held (for
+                // an id never cached, nothing at all) until a loud refresh.
+                log::debug!("installed addons metadata refresh failed: {error}");
+                for item_id in item_ids {
+                    self.metadata_finished.remove(item_id);
+                    self.metadata_failed.insert(*item_id);
+                }
+            }
         }
     }
 

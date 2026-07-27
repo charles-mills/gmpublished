@@ -101,6 +101,101 @@ pub enum PendingRetry {
     },
 }
 
+impl PendingRetry {
+    /// Folds `other` into `self` when the two name the same operation,
+    /// reporting whether it was absorbed.
+    ///
+    /// Deferrals accumulate while a lazy connection is in flight — a grid
+    /// being scrolled emits one metadata request per visible-range change —
+    /// so same-kind requests coalesce instead of queueing without bound. An
+    /// id list from a newer generation replaces an older one outright: the
+    /// rows the older list named no longer exist.
+    fn absorb(&mut self, other: Self) -> bool {
+        match (self, other) {
+            (
+                Self::MyWorkshopPage { generation, page },
+                Self::MyWorkshopPage {
+                    generation: other_generation,
+                    page: other_page,
+                },
+            ) => *generation == other_generation && *page == other_page,
+            (
+                Self::MyWorkshopStats { generation, pages },
+                Self::MyWorkshopStats {
+                    generation: other_generation,
+                    pages: other_pages,
+                },
+            ) => {
+                if *generation > other_generation {
+                    return true;
+                }
+                if *generation < other_generation {
+                    *generation = other_generation;
+                    *pages = other_pages;
+                } else {
+                    *pages = (*pages).max(other_pages);
+                }
+                true
+            }
+            (
+                Self::InstalledMetadata {
+                    generation,
+                    item_ids,
+                },
+                Self::InstalledMetadata {
+                    generation: other_generation,
+                    item_ids: other_item_ids,
+                },
+            )
+            | (
+                Self::InstalledMetadataRefresh {
+                    generation,
+                    item_ids,
+                },
+                Self::InstalledMetadataRefresh {
+                    generation: other_generation,
+                    item_ids: other_item_ids,
+                },
+            )
+            | (
+                Self::SearchMetadataRefresh {
+                    generation,
+                    item_ids,
+                },
+                Self::SearchMetadataRefresh {
+                    generation: other_generation,
+                    item_ids: other_item_ids,
+                },
+            ) => {
+                merge_retry_item_ids(generation, item_ids, other_generation, other_item_ids);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn merge_retry_item_ids(
+    generation: &mut u64,
+    item_ids: &mut Vec<PublishedFileId>,
+    other_generation: u64,
+    other_item_ids: Vec<PublishedFileId>,
+) {
+    if *generation > other_generation {
+        return;
+    }
+    if *generation < other_generation {
+        *generation = other_generation;
+        *item_ids = other_item_ids;
+        return;
+    }
+    for item_id in other_item_ids {
+        if !item_ids.contains(&item_id) {
+            item_ids.push(item_id);
+        }
+    }
+}
+
 /// Persona information fetched after a Steam connection is established.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteamIdentity {
@@ -132,7 +227,12 @@ pub struct State {
     startup_policy: StartupConnectPolicy,
     identity: Option<SteamIdentity>,
     identity_generation: u64,
-    pending_retry: Option<PendingRetry>,
+    /// Operations deferred until a lazy connection lands, in the order they
+    /// were requested. A single slot used to hold these, which silently
+    /// dropped every deferral but the last: the dropped request's caller
+    /// never saw a completion, so the rows it named stayed marked in-flight
+    /// and were never asked for again.
+    pending_retries: Vec<PendingRetry>,
     warm_connect_attempted: bool,
 }
 
@@ -143,7 +243,7 @@ impl Default for State {
             startup_policy: StartupConnectPolicy::Lazy,
             identity: None,
             identity_generation: 0,
-            pending_retry: None,
+            pending_retries: Vec::new(),
             warm_connect_attempted: false,
         }
     }
@@ -164,8 +264,8 @@ impl State {
     }
 
     #[cfg(test)]
-    pub(crate) const fn pending_retry(&self) -> Option<&PendingRetry> {
-        self.pending_retry.as_ref()
+    pub(crate) fn pending_retries(&self) -> &[PendingRetry] {
+        &self.pending_retries
     }
 
     #[cfg(test)]
@@ -220,12 +320,21 @@ impl State {
         self.startup_policy.allows_lazy_requests()
     }
 
-    pub(super) fn set_pending_retry(&mut self, retry: PendingRetry) {
-        self.pending_retry = Some(retry);
+    /// Queues an operation to resume once Steam connects, coalescing it into
+    /// an equivalent deferral already waiting rather than displacing it.
+    pub(super) fn push_pending_retry(&mut self, retry: PendingRetry) {
+        for pending in &mut self.pending_retries {
+            if pending.absorb(retry.clone()) {
+                return;
+            }
+        }
+        self.pending_retries.push(retry);
     }
 
-    pub(crate) fn take_pending_retry(&mut self) -> Option<PendingRetry> {
-        self.pending_retry.take()
+    /// Drains every deferred operation; each one is resumed (or failed) in
+    /// turn, so none is left waiting on a connection attempt that is over.
+    pub(crate) fn take_pending_retries(&mut self) -> Vec<PendingRetry> {
+        std::mem::take(&mut self.pending_retries)
     }
 
     pub(super) fn start_identity_fetch(&mut self) -> u64 {
@@ -351,7 +460,7 @@ mod tests {
     use gmpublished_backend::error_key::keys;
     use std::{cell::Cell, sync::Arc};
 
-    use crate::bridge::domain::{AvatarRgba, SteamUser};
+    use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
 
     use super::{
         ConnectionChange, ConnectionEvent, ConnectionStatus, PendingRetry, StartupConnectPolicy,
@@ -506,18 +615,64 @@ mod tests {
     }
 
     #[test]
-    fn pending_retry_is_single_slot_and_take_clears_it() {
+    fn pending_retries_queue_in_order_and_take_clears_them() {
         let mut state = State::default();
-        let retry = PendingRetry::MyWorkshopPage {
+        let page = PendingRetry::MyWorkshopPage {
             generation: 7,
             page: 2,
         };
+        let metadata = PendingRetry::InstalledMetadata {
+            generation: 7,
+            item_ids: vec![PublishedFileId::new(1).expect("test fixture ids are always nonzero")],
+        };
 
-        state.set_pending_retry(retry.clone());
+        state.push_pending_retry(page.clone());
+        state.push_pending_retry(metadata.clone());
 
-        assert_eq!(state.pending_retry(), Some(&retry));
-        assert_eq!(state.take_pending_retry(), Some(retry));
-        assert_eq!(state.pending_retry(), None);
+        // A single slot used to drop the page load here, leaving My Workshop
+        // waiting on a request that would never be resumed or failed.
+        assert_eq!(state.pending_retries(), [page.clone(), metadata.clone()]);
+        assert_eq!(state.take_pending_retries(), vec![page, metadata]);
+        assert!(state.pending_retries().is_empty());
+    }
+
+    #[test]
+    fn same_kind_pending_retries_coalesce_instead_of_queueing() {
+        let mut state = State::default();
+        let id = |value| PublishedFileId::new(value).expect("test fixture ids are always nonzero");
+
+        state.push_pending_retry(PendingRetry::InstalledMetadata {
+            generation: 7,
+            item_ids: vec![id(1), id(2)],
+        });
+        // A scrolling grid defers one of these per visible-range change.
+        state.push_pending_retry(PendingRetry::InstalledMetadata {
+            generation: 7,
+            item_ids: vec![id(2), id(3)],
+        });
+
+        assert_eq!(
+            state.pending_retries(),
+            [PendingRetry::InstalledMetadata {
+                generation: 7,
+                item_ids: vec![id(1), id(2), id(3)],
+            }]
+        );
+
+        // A newer generation renames the rows outright, so it replaces rather
+        // than merges — the old ids no longer identify anything on screen.
+        state.push_pending_retry(PendingRetry::InstalledMetadata {
+            generation: 8,
+            item_ids: vec![id(9)],
+        });
+
+        assert_eq!(
+            state.pending_retries(),
+            [PendingRetry::InstalledMetadata {
+                generation: 8,
+                item_ids: vec![id(9)],
+            }]
+        );
     }
 
     #[test]

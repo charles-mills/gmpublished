@@ -19,7 +19,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             effects
         }
         Message::PendingRetrySet(retry) => {
-            state.set_pending_retry(retry);
+            state.push_pending_retry(retry);
             Vec::new()
         }
         Message::IdentityFetched(generation, result) => {
@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_retry_message_records_single_retry() {
+    fn pending_retry_message_queues_the_retry() {
         let mut state = State::default();
         let retry = PendingRetry::InstalledMetadata {
             generation: 3,
@@ -81,7 +81,7 @@ mod tests {
 
         let _effects = update(&mut state, Message::PendingRetrySet(retry.clone()));
 
-        assert_eq!(state.pending_retry(), Some(&retry));
+        assert_eq!(state.pending_retries(), [retry]);
     }
 
     #[test]

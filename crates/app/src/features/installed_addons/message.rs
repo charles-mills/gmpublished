@@ -27,7 +27,22 @@ pub enum Message {
         Result<MetadataResolution, UiError>,
     ),
     /// A stale Workshop metadata refresh completed.
-    MetadataRefreshCompleted(u64, Result<Vec<MetadataPatch>, UiError>),
+    ///
+    /// The id list is the set the refresh covered, carried so a failure can put
+    /// those ids back in line for another attempt — this is the leg that
+    /// actually talks to the network, so it is the one that realistically
+    /// fails. It is empty on the streaming success batches, which need no such
+    /// bookkeeping.
+    MetadataRefreshCompleted(
+        u64,
+        Vec<PublishedFileId>,
+        Result<Vec<MetadataPatch>, UiError>,
+    ),
+    /// Steam came up after being down. Unlike the Steam-gated routes, this one
+    /// only has its rows *enriched* by Steam, so it is not re-entered on
+    /// reconnect — but metadata lookups that failed while Steam was down are
+    /// now answerable and get another go.
+    SteamReconnected,
     /// The route-gated animation clock advanced.
     AnimationTick(Instant),
     Grid(addon_grid::Message),

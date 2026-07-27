@@ -445,3 +445,45 @@ fn discover_game_vpks_is_depth_limited_and_sorted() {
         ]
     );
 }
+
+/// The prefix buffer is sized from an unchecked u32 in the header, so a
+/// 12-byte file can claim a tree of nearly 4GiB. The read that follows fails
+/// either way — the point of the guard is to refuse *before* reserving the
+/// space, which is why this asserts on the sizing decision directly rather
+/// than on `open`'s error code.
+#[test]
+fn prefix_len_is_refused_when_the_file_cannot_hold_it() {
+    // A v1 header claiming the largest possible tree, in a file that is only
+    // the header.
+    assert_eq!(
+        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, u32::MAX, 12),
+        Err(VpkError::FormatError)
+    );
+    // One byte short is still short.
+    assert_eq!(
+        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 19),
+        Err(VpkError::FormatError)
+    );
+    // An honest header is sized as claimed, trailing payload and all.
+    assert_eq!(validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 20), Ok(20));
+    assert_eq!(
+        validated_prefix_len(VPK_VERSION_2_HEADER_SIZE, 8, 4096),
+        Ok(36)
+    );
+}
+
+/// End to end: a header whose tree overruns the file is a format error, not a
+/// 4GiB allocation.
+#[test]
+fn rejects_tree_size_larger_than_the_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("pak01_dir.vpk");
+
+    let mut bytes = Vec::new();
+    bytes.write_all(&VPK_SIGNATURE.to_le_bytes()).unwrap();
+    bytes.write_all(&1_u32.to_le_bytes()).unwrap();
+    bytes.write_all(&u32::MAX.to_le_bytes()).unwrap();
+    fs::write(&path, bytes).unwrap();
+
+    assert_eq!(VpkFile::open(&path), Err(VpkError::FormatError));
+}

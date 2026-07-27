@@ -4,7 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use gmpublished_backend::{GMAFile, Transaction, gma::read::GmaView};
+use gmpublished_backend::{
+    GMAFile, Transaction,
+    gma::{is_unsafe_entry_path, read::GmaView},
+};
 
 pub use gmpublished_backend::{
     GMAError as GmaError,
@@ -556,24 +559,6 @@ fn is_safe_archive_path_segment(segment: &str) -> bool {
         && !segment
             .bytes()
             .any(|byte| matches!(byte, 0 | b':' | b'/' | b'\\'))
-}
-
-fn is_unsafe_entry_path(path: &str) -> bool {
-    if path.is_empty() {
-        return true;
-    }
-    if path.bytes().any(|byte| matches!(byte, 0 | b':' | b'\\')) {
-        return true;
-    }
-    if path.starts_with('/') {
-        return true;
-    }
-    for segment in path.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." || segment != segment.trim() {
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]

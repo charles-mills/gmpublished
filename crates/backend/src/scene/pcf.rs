@@ -271,6 +271,19 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Initial capacity for a count-prefixed read.
+///
+/// [`Reader::check_count`] bounds a count by the bytes left to read, but an
+/// item costs far more in memory than the few bytes that encode it — a `String`
+/// header alone is 24 bytes per one-byte entry. Reserving the full claimed
+/// count therefore multiplies a hostile file's size by an order of magnitude
+/// before a single item is parsed. Growing from a cap costs a few reallocations
+/// on genuinely large files and nothing on real ones.
+fn initial_capacity(count: usize) -> usize {
+    const MAX_RESERVED_ITEMS: usize = 4096;
+    count.min(MAX_RESERVED_ITEMS)
+}
+
 struct StringDict {
     strings: Vec<String>,
     wide_index: bool,
@@ -287,7 +300,7 @@ impl StringDict {
             u32::from(reader.u16()?)
         };
         let count = reader.check_count(count, 1)?;
-        let mut strings = Vec::with_capacity(count);
+        let mut strings = Vec::with_capacity(initial_capacity(count));
         for _ in 0..count {
             strings.push(reader.cstr()?);
         }
@@ -334,7 +347,7 @@ impl DmxDocument {
         let element_count = reader.u32()?;
         // Type + name references plus a 16-byte GUID per element header.
         let element_count = reader.check_count(element_count, 18)?;
-        let mut elements = Vec::with_capacity(element_count);
+        let mut elements = Vec::with_capacity(initial_capacity(element_count));
         for _ in 0..element_count {
             let type_name = read_dict_string(&mut reader, dict.as_ref())?;
             let name = if encoding_version >= 4 {
@@ -353,7 +366,7 @@ impl DmxDocument {
         for element in &mut elements {
             let attribute_count = reader.u32()?;
             let attribute_count = reader.check_count(attribute_count, 3)?;
-            let mut attributes = Vec::with_capacity(attribute_count);
+            let mut attributes = Vec::with_capacity(initial_capacity(attribute_count));
             for _ in 0..attribute_count {
                 let name = read_dict_string(&mut reader, dict.as_ref())?;
                 let type_id = reader.u8()?;
@@ -424,13 +437,13 @@ fn read_value(
         let count = reader.u32()?;
         let count = reader.check_count(count, 1)?;
         if scalar_id == 1 {
-            let mut refs = Vec::with_capacity(count);
+            let mut refs = Vec::with_capacity(initial_capacity(count));
             for _ in 0..count {
                 refs.push(element_ref(reader)?);
             }
             return Ok(DmxValue::ElementArray(refs));
         }
-        let mut values = Vec::with_capacity(count);
+        let mut values = Vec::with_capacity(initial_capacity(count));
         for _ in 0..count {
             // Array string entries are always inline, independent of the
             // dictionary rules for scalar strings.

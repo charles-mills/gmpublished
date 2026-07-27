@@ -119,6 +119,8 @@ pub(super) fn run_installed_metadata_refresh(
             &mut output,
             RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
                 generation,
+                // A landed batch needs no re-queue bookkeeping.
+                Vec::new(),
                 Ok(patches),
             )),
         );
@@ -128,6 +130,7 @@ pub(super) fn run_installed_metadata_refresh(
             &mut output,
             RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
                 generation,
+                item_ids.to_vec(),
                 Err(error),
             )),
         );

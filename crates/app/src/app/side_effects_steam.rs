@@ -27,10 +27,17 @@ impl App {
             .observe_steam(self.state.steam_session.status());
         let session_task = self.run_steam_session_effects(effects);
         let shell_status_task = self.sync_shell_steam_status();
-        let reload_task = if reconnected {
-            self.reload_steam_route_after_reconnect()
+        let (reload_task, installed_retry_task) = if reconnected {
+            (
+                self.reload_steam_route_after_reconnect(),
+                // Installed Addons is not a Steam-gated route, so the reload
+                // above skips it — but its metadata lookups are the ones most
+                // likely to have failed against a Steam that was still coming
+                // up, and nothing else re-asks on their behalf.
+                self.apply_installed_addons_message(installed_addons::Message::SteamReconnected),
+            )
         } else {
-            Task::none()
+            (Task::none(), Task::none())
         };
         let retry_task = if self.state.steam_session.status().connected() {
             self.retry_pending_steam_operation()
@@ -43,11 +50,12 @@ impl App {
             Task::none()
         };
         let failure_task =
-            failure.map_or_else(Task::none, |error| self.fail_pending_steam_retry(error));
+            failure.map_or_else(Task::none, |error| self.fail_pending_steam_retry(&error));
         Task::batch([
             session_task,
             shell_status_task,
             reload_task,
+            installed_retry_task,
             retry_task,
             shell_identity_task,
             failure_task,
@@ -205,18 +213,22 @@ impl App {
             })
     }
 
-    pub(super) fn fail_pending_steam_retry(&mut self, error: UiError) -> Task<RootMessage> {
-        self.state
-            .steam_session
-            .take_pending_retry()
-            .map_or_else(Task::none, |retry| Task::done(retry.fail_message(error)))
+    pub(super) fn fail_pending_steam_retry(&mut self, error: &UiError) -> Task<RootMessage> {
+        let retries = self.state.steam_session.take_pending_retries();
+        Task::batch(
+            retries
+                .into_iter()
+                .map(|retry| Task::done(retry.fail_message(error.clone()))),
+        )
     }
 
     pub(super) fn retry_pending_steam_operation(&mut self) -> Task<RootMessage> {
-        let Some(retry) = self.state.steam_session.take_pending_retry() else {
-            return Task::none();
-        };
-        retry.retry_message(self)
+        let retries = self.state.steam_session.take_pending_retries();
+        let tasks = retries
+            .into_iter()
+            .map(|retry| retry.retry_message(self))
+            .collect::<Vec<_>>();
+        Task::batch(tasks)
     }
 
     pub(super) fn sync_shell_steam_status(&mut self) -> Task<RootMessage> {
@@ -290,8 +302,15 @@ impl steam_session::PendingRetry {
                 item_ids,
                 Err(error),
             )),
-            Self::InstalledMetadataRefresh { generation, .. } => RootMessage::InstalledAddons(
-                installed_addons::Message::MetadataRefreshCompleted(generation, Err(error)),
+            Self::InstalledMetadataRefresh {
+                generation,
+                item_ids,
+            } => RootMessage::InstalledAddons(
+                installed_addons::Message::MetadataRefreshCompleted(
+                    generation,
+                    item_ids,
+                    Err(error),
+                ),
             ),
             Self::SearchMetadataRefresh {
                 generation,
