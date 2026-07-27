@@ -42,13 +42,15 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                     item_ids,
                 });
             }
+            effects.extend(scroll_anchor_effects(state));
             effects.extend(metadata_request_effects(state));
             effects.push(Effect::ThumbnailDemandsChanged);
             effects
         }
         Message::MetadataRefreshCompleted(generation, result) => {
             state.apply_metadata_refresh(generation, result);
-            let mut effects = metadata_request_effects(state);
+            let mut effects = scroll_anchor_effects(state);
+            effects.extend(metadata_request_effects(state));
             effects.push(Effect::ThumbnailDemandsChanged);
             effects
         }
@@ -89,11 +91,6 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
                 effects.push(Effect::ContextMenuRequested(menu));
             }
         }
-        addon_grid::Message::NextPageRequested => {
-            state.append_next_page();
-            effects.extend(metadata_request_effects(state));
-            effects.push(Effect::ThumbnailDemandsChanged);
-        }
         addon_grid::Message::VisibleRangeChanged(_, _) => {
             effects.extend(metadata_request_effects(state));
             effects.push(Effect::ThumbnailDemandsChanged);
@@ -111,6 +108,12 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
             );
         }
     }
+}
+
+fn scroll_anchor_effects(state: &mut State) -> Vec<Effect> {
+    state
+        .take_scroll_anchor()
+        .map_or_else(Vec::new, |offset| vec![Effect::GridScrollAnchored(offset)])
 }
 
 fn metadata_request_effects(state: &mut State) -> Vec<Effect> {
@@ -168,81 +171,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_push_populates_first_page() {
+    fn snapshot_push_populates_every_row_at_once() {
         let mut state = State::default();
-        let rows = (1..=55)
-            .map(|index| {
-                Row::for_test(
-                    &format!("/tmp/{index}.gma"),
-                    &format!("Addon {index}"),
-                    Some(
-                        PublishedFileId::new(index as u64)
-                            .expect("test fixture ids are always nonzero"),
-                    ),
-                )
-            })
-            .collect();
-
-        let effects = update(
-            &mut state,
-            Message::SnapshotPushed(LibraryRefreshReason::Startup, Ok(rows)),
-        );
-
-        assert_eq!(
-            state.loaded_count(),
-            crate::bridge::domain::RESULTS_PER_PAGE
-        );
-        assert_eq!(state.total_count(), 55);
-        assert_eq!(effects, vec![Effect::ThumbnailDemandsChanged]);
-    }
-
-    #[test]
-    fn next_page_appends_discovered_rows() {
-        let mut state = State::default();
-        state.enter_route();
-        let _messages = addon_grid::apply(
-            state.grid_mut(),
-            addon_grid::Message::ViewportResized(500, 500),
-        );
-        let rows = (1..=55)
-            .map(|index| {
-                Row::for_test(
-                    &format!("/tmp/{index}.gma"),
-                    &format!("Addon {index}"),
-                    Some(
-                        PublishedFileId::new(index as u64)
-                            .expect("test fixture ids are always nonzero"),
-                    ),
-                )
-            })
-            .collect();
-        state.apply_snapshot(LibraryRefreshReason::Startup, Ok(rows));
-
-        let effects = update(
-            &mut state,
-            Message::Grid(addon_grid::Message::NextPageRequested),
-        );
-
-        assert_eq!(state.loaded_count(), 55);
-        assert_eq!(
-            effects,
-            vec![
-                Effect::MetadataRequested {
-                    generation: 1,
-                    item_ids: (1..=12)
-                        .map(|id| PublishedFileId::new(id)
-                            .expect("test fixture ids are always nonzero"))
-                        .collect(),
-                },
-                Effect::ThumbnailDemandsChanged,
-            ]
-        );
-    }
-
-    #[test]
-    fn first_scroll_recovers_paging_when_viewport_was_not_observed() {
-        let mut state = State::default();
-        state.enter_route();
         let rows = (1..=105)
             .map(|index| {
                 Row::for_test(
@@ -255,12 +185,16 @@ mod tests {
                 )
             })
             .collect();
-        state.apply_snapshot(LibraryRefreshReason::Startup, Ok(rows));
-        assert_eq!(state.loaded_count(), 50);
 
-        let effects = update(&mut state, Message::Grid(addon_grid::Message::Scrolled(1)));
+        // No viewport observed yet: the full list must still land in the
+        // grid so the content height (and scrollbar) is right from the
+        // first paint instead of growing while the user scrolls.
+        let effects = update(
+            &mut state,
+            Message::SnapshotPushed(LibraryRefreshReason::Startup, Ok(rows)),
+        );
 
-        assert_eq!(state.loaded_count(), 100);
+        assert_eq!(state.row_count(), 105);
         assert_eq!(effects, vec![Effect::ThumbnailDemandsChanged]);
     }
 

@@ -11,6 +11,12 @@ use crate::widgets::addon_card;
 pub const DEFAULT_CARD_WIDTH: f32 = 200.0;
 pub const MIN_CARD_WIDTH: f32 = 120.0;
 const DEFAULT_CARD_GAP: f32 = 16.0;
+/// Rows rendered beyond each edge of the viewport. A scroll event reaches the
+/// visible-range reconcile one frame after Iced paints the new offset, so
+/// edge rows would otherwise pop in a frame late; overscan keeps them already
+/// painted. Render-only: `visible_rows` (demands, metadata windows) is not
+/// widened.
+const RENDER_OVERSCAN_ROWS: usize = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
@@ -27,6 +33,11 @@ pub struct State {
     has_more_pages: bool,
     next_page_requested: bool,
     card_heights: Vec<f32>,
+    /// Measurement cache per title string. Titles are the only per-item
+    /// input to card height, so re-layouts (metadata patches, thumbnail
+    /// rebuilds, width changes) only shape titles whose answer is genuinely
+    /// unknown; see [`TitleMeasure`] for what survives a width change.
+    title_measures: HashMap<String, TitleMeasure>,
     card_width: f32,
     card_gap: f32,
     layout: RowLayout,
@@ -50,6 +61,7 @@ impl Default for State {
             has_more_pages: false,
             next_page_requested: false,
             card_heights: Vec::new(),
+            title_measures: HashMap::new(),
             card_width: 0.0,
             card_gap: DEFAULT_CARD_GAP,
             layout: RowLayout::default(),
@@ -70,6 +82,58 @@ impl State {
         self.next_page_requested = false;
         self.recompute_layout_cache();
         self.reconcile_layout_at(now)
+    }
+
+    /// Replaces items in place by id and re-reconciles the layout. The
+    /// hydration path for metadata patches: a patch names a handful of rows,
+    /// while `set_items` re-allocates every card in the grid. Motion/hover
+    /// state carries over per item exactly as `set_items` preserves it.
+    /// `index_hint` makes the common case O(1); like
+    /// `update_item_thumbnail`, a stale hint falls back to an id scan, so
+    /// the item is keyed by identity and a hint that drifts (e.g. a future
+    /// lead card offsetting the grid) degrades to a slower lookup instead of
+    /// a silently dropped patch. An id that is no longer in the grid at all
+    /// is skipped — that item was removed.
+    pub(crate) fn patch_items(&mut self, updates: Vec<(usize, Item)>) -> Vec<Message> {
+        self.patch_items_at(updates, Instant::now())
+    }
+
+    fn patch_items_at(&mut self, updates: Vec<(usize, Item)>, now: Instant) -> Vec<Message> {
+        let mut changed = false;
+        for (index_hint, mut item) in updates {
+            let slot = match self.items.get_mut(index_hint) {
+                Some(slot) if slot.id() == item.id() => Some(slot),
+                _ => self.items.iter_mut().find(|slot| slot.id() == item.id()),
+            };
+            let Some(slot) = slot else {
+                continue;
+            };
+            item.preserve_card_motion(slot.card());
+            *slot = item;
+            changed = true;
+        }
+        if !changed {
+            return Vec::new();
+        }
+
+        // Scroll anchoring: a patched title can re-wrap and change its row's
+        // height. When that happens to a row above the viewport the content
+        // would shift under the (pixel-anchored) scroll offset — visible as
+        // the grid jumping mid-hydration. Item indices are stable across a
+        // patch, so the first visible row is a valid anchor: shift the
+        // offset by however far that row moved.
+        let anchor_row = self.visible_rows.start;
+        let anchor_top = self.layout.top_offset(anchor_row);
+        self.recompute_layout_cache();
+        let anchor_delta = self.layout.top_offset(anchor_row) - anchor_top;
+
+        let mut messages = Vec::new();
+        if anchor_delta.abs() >= 0.5 && self.scroll_offset > 0.0 {
+            self.scroll_offset = finite_nonnegative(self.scroll_offset + anchor_delta);
+            messages.push(Message::ScrollAnchored(anchor_delta));
+        }
+        messages.extend(self.reconcile_layout_at(now));
+        messages
     }
 
     /// Swaps just one item's thumbnail in place. Animation frame advances go
@@ -155,6 +219,13 @@ impl State {
     #[cfg(test)]
     fn layout_cache_generation(&self) -> u64 {
         self.layout_cache_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn item_title_for_test(&self, index: usize) -> Option<&str> {
+        self.items
+            .get(index)
+            .map(|item| item.card().display_title())
     }
 
     fn set_columns_at(&mut self, columns: usize, now: Instant) -> Vec<Message> {
@@ -249,10 +320,23 @@ impl State {
         let card_width = self.resolved_card_width(&tokens);
         // Theme switches do not invalidate this cache: addon-card geometry
         // uses theme-invariant spacing, dimensions, and typography tokens.
+        // Width changes do not clear it either — entries carry their own
+        // width validity — so the map is bounded here instead, against a
+        // long session churning through title sets.
+        if !self.items.is_empty() && self.title_measures.len() > self.items.len() * 2 + 64 {
+            let current = self
+                .items
+                .iter()
+                .map(|item| item.card.display_title())
+                .collect::<std::collections::HashSet<&str>>();
+            self.title_measures
+                .retain(|title, _| current.contains(title.as_str()));
+        }
+        let title_measures = &mut self.title_measures;
         self.card_heights = self
             .items
             .iter()
-            .map(|item| item.preferred_height(card_width, &tokens))
+            .map(|item| item.preferred_height_cached(card_width, &tokens, title_measures))
             .collect();
         self.layout = RowLayout::for_items(&self.items, &self.card_heights, self.columns, &tokens);
         self.card_width = card_width;
@@ -302,11 +386,12 @@ impl State {
         let columns = self.columns.max(1);
         let x = finite_nonnegative(cursor.x);
         let y = finite_nonnegative(cursor.y) + finite_nonnegative(self.scroll_offset);
-        let row = self
-            .layout
-            .rows
-            .iter()
-            .find(|row| row.top() <= y && y < row.bottom())?;
+        // Rows are contiguous and sorted; bisect — this runs per mouse move.
+        let row_index = self.layout.rows.partition_point(|row| row.bottom() <= y);
+        let row = self.layout.rows.get(row_index)?;
+        if row.top() > y {
+            return None;
+        }
         let pitch = self.card_width + self.card_gap;
         if !pitch.is_finite() || pitch <= 0.0 {
             return None;
@@ -365,6 +450,13 @@ pub enum Message {
     CursorLeft,
     CardHoverChanged(String, bool),
     NextPageRequested,
+    /// The grid moved its own scroll offset by this delta to keep the first
+    /// visible row stationary after item heights changed above it. The owner
+    /// must relay it to the runtime as a *relative* `scroll_by` — the
+    /// widget's real offset lives in Iced's scrollable state, and this
+    /// mirror is `u32`-quantized by the `Scrolled` echo, so an absolute
+    /// `scroll_to` would inject up to 0.5px of drift per anchor.
+    ScrollAnchored(f32),
 }
 
 #[cfg(test)]
@@ -409,6 +501,7 @@ fn apply_at(state: &mut State, message: &Message, now: Instant) -> Vec<Message> 
             state.next_page_requested = true;
             Vec::new()
         }
+        Message::ScrollAnchored(_) => Vec::new(),
     }
 }
 
@@ -427,16 +520,18 @@ pub fn view<'a>(state: &'a State, tokens: &Tokens, key: &'static str) -> Element
     let layout = &state.layout;
     // A Sensor notification is an optimization prerequisite, not a
     // correctness prerequisite. If Iced misses the initial on_show during a
-    // route-tree swap, render the whole currently loaded page until a real
-    // viewport measurement arrives. Clamping an empty range to one row here
-    // would otherwise paint that row followed by a full-height blank spacer.
+    // route-tree swap, render enough rows around the scroll offset to cover
+    // any plausible viewport until a real measurement arrives. Clamping an
+    // empty range to one row here would otherwise paint that row followed
+    // by a full-height blank spacer — while rendering every row would build
+    // a card widget per library entry on the pre-sensor frame.
     let visible = if state.viewport_height > 0.0 {
-        state.visible_rows.clamped(layout.rows.len())
+        state
+            .visible_rows
+            .clamped(layout.rows.len())
+            .overscanned(layout.rows.len())
     } else {
-        VisibleRowRange {
-            start: 0,
-            end: layout.rows.len(),
-        }
+        fallback_rows(&layout.rows, state.scroll_offset)
     };
     let top_spacer = layout.top_offset(visible.start);
     let bottom_spacer = sub_clamped(layout.total_height(), layout.top_offset(visible.end));
@@ -578,13 +673,26 @@ impl Item {
         self.card.tick_motion(now);
     }
 
+    #[cfg(test)]
     fn preferred_height(&self, width: f32, tokens: &Tokens) -> f32 {
+        self.preferred_height_cached(width, tokens, &mut HashMap::new())
+    }
+
+    /// Like `addon_card::preferred_height`, but resolves the title
+    /// measurement through the grid's cache before shaping.
+    fn preferred_height_cached(
+        &self,
+        width: f32,
+        tokens: &Tokens,
+        measures: &mut HashMap<String, TitleMeasure>,
+    ) -> f32 {
         #[cfg(test)]
         if let Some(height) = self.preferred_height_override {
             return height;
         }
 
-        addon_card::preferred_height(&self.card, width, tokens)
+        let title_height = cached_title_height(self.card.display_title(), width, tokens, measures);
+        addon_card::preferred_height_for_title_height(width, title_height, tokens)
     }
 
     #[cfg(test)]
@@ -602,6 +710,62 @@ fn map_card_message(message: addon_card::Message) -> Message {
             Message::CardContextRequested(id.as_ref().to_owned(), position)
         }
     }
+}
+
+/// What the grid knows about one title's measured geometry. Both fields
+/// survive card-width changes: the memo carries the width it was shaped at,
+/// and the watermark exploits monotonicity — wrapping only ever *removes*
+/// line breaks as width grows, so a title that fit one line at some width
+/// fits one line at every width above it. Live window resizes then re-shape
+/// only titles that are genuinely multi-line at the new width, instead of
+/// every title per resize event.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct TitleMeasure {
+    /// Smallest card width observed to lay this title out as one line.
+    single_line_at: Option<f32>,
+    /// Exact measurement memo: (card width bits, clamped title height).
+    measured: Option<(u32, f32)>,
+}
+
+fn cached_title_height(
+    title: &str,
+    width: f32,
+    tokens: &Tokens,
+    measures: &mut HashMap<String, TitleMeasure>,
+) -> f32 {
+    let single_line = addon_card::single_line_title_height(tokens);
+    let is_single_line = |height: f32| height <= single_line + 0.5;
+
+    if let Some(measure) = measures.get_mut(title) {
+        if let Some((width_bits, height)) = measure.measured
+            && width_bits == width.to_bits()
+        {
+            return height;
+        }
+        if measure.single_line_at.is_some_and(|known| width >= known) {
+            return single_line;
+        }
+        let height = addon_card::measure_title_height(title, width, tokens);
+        measure.measured = Some((width.to_bits(), height));
+        if is_single_line(height) {
+            measure.single_line_at = Some(
+                measure
+                    .single_line_at
+                    .map_or(width, |known| known.min(width)),
+            );
+        }
+        return height;
+    }
+
+    let height = addon_card::measure_title_height(title, width, tokens);
+    let _ = measures.insert(
+        title.to_owned(),
+        TitleMeasure {
+            single_line_at: is_single_line(height).then_some(width),
+            measured: Some((width.to_bits(), height)),
+        },
+    );
+    height
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -623,6 +787,17 @@ impl VisibleRowRange {
         let start = self.start.min(row_count - 1);
         let end = self.end.max(start + 1).min(row_count);
         Self { start, end }
+    }
+
+    fn overscanned(self, row_count: usize) -> Self {
+        if row_count == 0 {
+            return Self::empty();
+        }
+
+        Self {
+            start: self.start.saturating_sub(RENDER_OVERSCAN_ROWS),
+            end: self.end.saturating_add(RENDER_OVERSCAN_ROWS).min(row_count),
+        }
     }
 
     fn flat_item_range(self, item_count: usize, columns: usize) -> Range<usize> {
@@ -739,6 +914,30 @@ impl RowModel {
     }
 }
 
+/// Rows to paint while no viewport measurement exists: everything straddling
+/// a window this tall — the tallest display we plausibly run on — starting
+/// at the current scroll offset. Unmeasured usually also means unscrolled,
+/// but a missed on_show does not reset an already-scrolled offset, so the
+/// window follows it rather than assuming the top of the list.
+const FALLBACK_RENDER_HEIGHT: f32 = 4096.0;
+
+fn fallback_rows(rows: &[RowModel], scroll_offset: f32) -> VisibleRowRange {
+    let top = finite_nonnegative(scroll_offset);
+    let bottom = top + FALLBACK_RENDER_HEIGHT;
+    let start = rows
+        .iter()
+        .position(|row| row.bottom() > top)
+        .unwrap_or(rows.len());
+    let end = rows
+        .iter()
+        .position(|row| row.top() >= bottom)
+        .unwrap_or(rows.len());
+    VisibleRowRange {
+        start,
+        end: end.max(start),
+    }
+}
+
 fn visible_rows_for_viewport(
     rows: &[RowModel],
     scroll_offset: f32,
@@ -750,27 +949,23 @@ fn visible_rows_for_viewport(
 
     let top = finite_nonnegative(scroll_offset);
     let bottom = top + finite_nonnegative(viewport_height);
-    let mut start = None;
-    let mut end = None;
-
-    for (index, row) in rows.iter().enumerate() {
-        let straddles = row.bottom() > top && row.top() < bottom;
-        let final_short_row = index == rows.len() - 1 && row.bottom() <= bottom;
-        if straddles || final_short_row {
-            start.get_or_insert(index);
-            end = Some(index + 1);
-        }
-    }
-
-    if let (Some(start), Some(end)) = (start, end) {
-        VisibleRowRange { start, end }
-    } else {
-        let last = rows.len() - 1;
-        VisibleRowRange {
-            start: last,
+    // Rows are contiguous and sorted by construction (each row's top is the
+    // previous row's bottom), so both viewport edges bisect instead of
+    // scanning — this runs on every scroll event.
+    let start = rows.partition_point(|row| row.bottom() <= top);
+    if start == rows.len() {
+        // Scrolled past the end (transient while content shrinks, before
+        // Iced clamps the offset): pin the last row.
+        return VisibleRowRange {
+            start: rows.len() - 1,
             end: rows.len(),
-        }
+        };
     }
+
+    let end = rows
+        .partition_point(|row| row.top() < bottom)
+        .max(start + 1);
+    VisibleRowRange { start, end }
 }
 
 pub fn columns_for_width(width: f32) -> usize {

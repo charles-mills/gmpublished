@@ -274,6 +274,7 @@ pub enum Message {
     ContextRequested(Arc<str>, Point),
 }
 
+#[cfg(test)]
 pub fn preferred_height(data: &Data, width: f32, tokens: &Tokens) -> f32 {
     let measured_title_height = measure_title_height(data.display_title(), width, tokens);
 
@@ -671,6 +672,13 @@ fn content_width(width: f32, tokens: &Tokens) -> f32 {
 
 fn preview_size(width: f32, tokens: &Tokens) -> f32 {
     content_width(width, tokens).max(1.0)
+}
+
+/// The exact measured height of any title that lays out as a single line,
+/// at any card width. Exposed so the grid's measurement cache can resolve
+/// known single-line titles without shaping them again.
+pub fn single_line_title_height(tokens: &Tokens) -> f32 {
+    title_line_height(tokens)
 }
 
 pub fn measure_title_height(title: &str, width: f32, tokens: &Tokens) -> f32 {

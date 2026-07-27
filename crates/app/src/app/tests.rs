@@ -2124,7 +2124,7 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
         Ok(refresh),
     ));
 
-    assert_eq!(app.state.installed_addons.total_count(), 1);
+    assert_eq!(app.state.installed_addons.row_count(), 1);
     let result = app
         .ctx
         .backend()

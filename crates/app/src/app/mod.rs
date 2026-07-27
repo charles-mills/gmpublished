@@ -1062,6 +1062,16 @@ impl App {
             installed_addons::Effect::ThumbnailDemandsChanged => {
                 self.installed_addons_thumbnail_demands()
             }
+            // Relative on purpose: the feature's mirrored offset is
+            // u32-quantized by the on_scroll echo, so anchoring via an
+            // absolute scroll_to would drift by up to 0.5px per anchor and
+            // discard any user scroll racing the hydration batch.
+            installed_addons::Effect::GridScrollAnchored(delta) => {
+                iced::widget::operation::scroll_by(
+                    addon_grid::scrollable_id(installed_addons::GRID_KEY),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: delta },
+                )
+            }
             installed_addons::Effect::AddonDragPressed {
                 card_id,
                 workshop_id,

@@ -15,6 +15,10 @@ pub enum Effect {
     PreviewRequested(PreviewTarget),
     ContextMenuRequested(ContextMenuRequest),
     ThumbnailDemandsChanged,
+    /// The grid re-anchored its scroll offset after hydration changed row
+    /// heights above the viewport; the app must move the Iced scrollable by
+    /// this relative delta so content does not jump under the user.
+    GridScrollAnchored(f32),
     AddonDragPressed {
         card_id: String,
         workshop_id: Option<PublishedFileId>,
