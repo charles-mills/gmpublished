@@ -234,7 +234,7 @@ impl Manager {
                 attempt,
                 result,
             } => {
-                let effects = self.complete_job(&key, job_id, attempt, result);
+                let effects = self.complete_job(&key, job_id, attempt, *result);
                 self.batch_effects_with_pump(ctx, effects)
             }
             Message::WorkerBackpressured {
@@ -321,13 +321,13 @@ impl Manager {
             }
 
             if let Err(error) = validate_max_edge(physical_max_edge) {
-                immediate.push(Message::Delivered(Delivery::failed(
+                immediate.push(Message::Delivered(Box::new(Delivery::failed(
                     set.owner.clone(),
                     set.generation,
                     demand.id,
                     key,
                     ThumbnailDeliveryError::Thumbnail(Arc::new(error)),
-                )));
+                ))));
                 continue;
             }
 
@@ -373,13 +373,13 @@ impl Manager {
             }
 
             if let Some(ready) = self.cache.get(&key).cloned() {
-                immediate.push(Message::Delivered(Delivery::ready(
+                immediate.push(Message::Delivered(Box::new(Delivery::ready(
                     set.owner.clone(),
                     set.generation,
                     demand.id,
                     key,
                     ready,
-                )));
+                ))));
                 continue;
             }
 
@@ -389,13 +389,13 @@ impl Manager {
             if set.owner != Owner::SizeAnalyzer
                 && let Some(placeholder) = self.placeholder_for(demand.input.source_url())
             {
-                immediate.push(Message::Delivered(Delivery::placeholder(
+                immediate.push(Message::Delivered(Box::new(Delivery::placeholder(
                     set.owner.clone(),
                     set.generation,
                     demand.id.clone(),
                     key.clone(),
                     placeholder,
-                )));
+                ))));
             }
 
             let state = self.index.state_for_key(&key);
@@ -451,7 +451,7 @@ impl Manager {
                     .complete_key(key)
                     .into_iter()
                     .map(|entry| {
-                        Message::Delivered(Delivery::ready(
+                        Message::Delivered(Box::new(Delivery::ready(
                             entry.owner,
                             entry.generation,
                             entry.id,
@@ -459,7 +459,7 @@ impl Manager {
                             ready
                                 .clone()
                                 .expect("completed thumbnail has a ready handle"),
-                        ))
+                        )))
                     })
                     .collect(),
             ),
@@ -491,13 +491,13 @@ impl Manager {
                     .complete_key(key)
                     .into_iter()
                     .map(|entry| {
-                        Message::Delivered(Delivery::failed(
+                        Message::Delivered(Box::new(Delivery::failed(
                             entry.owner,
                             entry.generation,
                             entry.id,
                             key.clone(),
                             error.clone(),
-                        ))
+                        )))
                     })
                     .collect(),
             ),
@@ -689,7 +689,9 @@ pub enum Message {
         key: ThumbnailKey,
         job_id: JobId,
         attempt: RetryAttempt,
-        result: Result<ThumbnailWorkerOutcome<PreparedThumbnail>, ThumbnailDeliveryError>,
+        /// Boxed to keep this variant from setting the size of `RootMessage`,
+        /// which every message in the app pays.
+        result: Box<Result<ThumbnailWorkerOutcome<PreparedThumbnail>, ThumbnailDeliveryError>>,
     },
     WorkerBackpressured {
         key: ThumbnailKey,
@@ -700,7 +702,9 @@ pub enum Message {
         key: ThumbnailKey,
         retry_id: RetryId,
     },
-    Delivered(Delivery),
+    /// Boxed: `Delivery` embeds a `ReadyThumbnail` (~184 bytes) inline, which
+    /// would otherwise set the size of `RootMessage`.
+    Delivered(Box<Delivery>),
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1666,19 +1670,19 @@ fn worker_result_message(
             key,
             job_id,
             attempt,
-            result: Err(ThumbnailDeliveryError::Schedule(Arc::new(error))),
+            result: Box::new(Err(ThumbnailDeliveryError::Schedule(Arc::new(error)))),
         },
         Ok(Err(error)) => Message::WorkerFinished {
             key,
             job_id,
             attempt,
-            result: Err(ThumbnailDeliveryError::Thumbnail(Arc::new(error))),
+            result: Box::new(Err(ThumbnailDeliveryError::Thumbnail(Arc::new(error)))),
         },
         Ok(Ok(outcome)) => Message::WorkerFinished {
             key,
             job_id,
             attempt,
-            result: Ok(outcome),
+            result: Box::new(Ok(outcome)),
         },
     }
 }
@@ -1837,10 +1841,8 @@ mod tests {
         );
         assert!(effects.messages.iter().any(|message| matches!(
             message,
-            Message::Delivered(Delivery {
-                result: DeliveryResult::Ready(_),
-                ..
-            })
+            Message::Delivered(delivery)
+                if matches!(delivery.result, DeliveryResult::Ready(_))
         )));
     }
 
@@ -2324,10 +2326,8 @@ mod tests {
 
         assert!(messages.iter().all(|message| !matches!(
             message,
-            Message::Delivered(Delivery {
-                result: DeliveryResult::Placeholder(_),
-                ..
-            })
+            Message::Delivered(delivery)
+                if matches!(delivery.result, DeliveryResult::Placeholder(_))
         )));
     }
 
@@ -2613,10 +2613,8 @@ mod tests {
             assert_eq!(effects.messages.len(), 1);
             assert!(matches!(
                 &effects.messages[0],
-                Message::Delivered(Delivery {
-                    result: DeliveryResult::Failed { .. },
-                    ..
-                })
+                Message::Delivered(delivery)
+                    if matches!(delivery.result, DeliveryResult::Failed { .. })
             ));
             assert_eq!(manager.pending_count(), 0);
         }

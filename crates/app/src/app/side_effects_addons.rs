@@ -154,6 +154,9 @@ impl App {
             return task;
         }
         let ctx = self.ctx.clone();
+        // The worker takes `item_ids`; a scheduling failure still has to name
+        // them so the ids go back in line rather than staying marked finished.
+        let schedule_error_item_ids = item_ids.clone();
         Task::stream(stream::channel(100, async move |output| {
             let mut schedule_error_output = output.clone();
             let scheduled = spawn_blocking_detached_or_warn(
@@ -170,6 +173,7 @@ impl App {
                     RootMessage::InstalledAddons(
                         installed_addons::Message::MetadataRefreshCompleted(
                             generation,
+                            schedule_error_item_ids,
                             Err(UiError::new(keys::STEAM_ERROR)),
                         ),
                     ),

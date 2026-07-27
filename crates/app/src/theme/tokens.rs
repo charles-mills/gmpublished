@@ -551,6 +551,7 @@ pub(crate) fn workshop_tag_colors(tag: &str) -> (Rgba, Rgba) {
         "npc" => (rgb(0xFDFA8E), black),
         "effects" => (rgb(0x27C500), black),
         "model" => (rgb(0x80007C), white),
+        "entity" => (rgb(0xD0D0D0), black),
         _ => (white, black),
     }
 }
@@ -1176,6 +1177,10 @@ mod tests {
         assert_eq!(
             super::workshop_tag_colors("npc"),
             (Rgba::rgb(0xFDFA8E), Rgba::rgb(0x000000))
+        );
+        assert_eq!(
+            super::workshop_tag_colors("entity"),
+            (Rgba::rgb(0xD0D0D0), Rgba::rgb(0x000000))
         );
         assert_eq!(
             super::workshop_tag_colors("mystery"),

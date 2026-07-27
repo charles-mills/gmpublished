@@ -13,11 +13,15 @@ use super::model::{AuthorInfo, LoadedArchive, OpenTarget, WorkshopMetadata};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     OpenRequested(OpenTarget),
-    ArchiveOpened(u64, Result<LoadedArchive, UiError>),
+    /// Boxed: `LoadedArchive` carries the full file-browser state inline,
+    /// which would otherwise set the size of `RootMessage`.
+    ArchiveOpened(u64, Box<Result<LoadedArchive, UiError>>),
+    /// Boxed: `WorkshopMetadata` is ~216 bytes inline, which would otherwise
+    /// set the size of `RootMessage`.
     WorkshopMetadataCompleted(
         u64,
         PublishedFileId,
-        Result<Option<WorkshopMetadata>, UiError>,
+        Box<Result<Option<WorkshopMetadata>, UiError>>,
     ),
     AuthorFetchCompleted(u64, u64, Result<AuthorInfo, UiError>),
     AuthorLinkRequested,

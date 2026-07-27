@@ -763,11 +763,11 @@ fn search_executor_metadata_refresh_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retry(),
-        Some(&steam_session::PendingRetry::SearchMetadataRefresh {
+        app.state.steam_session.pending_retries(),
+        [steam_session::PendingRetry::SearchMetadataRefresh {
             generation: 7,
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
-        })
+        }]
     );
 }
 
@@ -784,11 +784,11 @@ fn my_workshop_executor_page_request_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retry(),
-        Some(&steam_session::PendingRetry::MyWorkshopPage {
+        app.state.steam_session.pending_retries(),
+        [steam_session::PendingRetry::MyWorkshopPage {
             generation: 7,
             page: 2,
-        })
+        }]
     );
 }
 
@@ -805,11 +805,11 @@ fn my_workshop_executor_stats_refresh_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retry(),
-        Some(&steam_session::PendingRetry::MyWorkshopStats {
+        app.state.steam_session.pending_retries(),
+        [steam_session::PendingRetry::MyWorkshopStats {
             generation: 7,
             pages: 2,
-        })
+        }]
     );
 }
 
@@ -908,11 +908,11 @@ fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retry(),
-        Some(&steam_session::PendingRetry::InstalledMetadata {
+        app.state.steam_session.pending_retries(),
+        [steam_session::PendingRetry::InstalledMetadata {
             generation: 7,
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
-        })
+        }]
     );
 }
 
@@ -929,11 +929,11 @@ fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retry(),
-        Some(&steam_session::PendingRetry::InstalledMetadataRefresh {
+        app.state.steam_session.pending_retries(),
+        [steam_session::PendingRetry::InstalledMetadataRefresh {
             generation: 7,
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
-        })
+        }]
     );
 }
 
@@ -1339,7 +1339,7 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
     );
     let _task = app.update(RootMessage::FilePreview(file_preview::Message::Loaded(
         request.request_id,
-        Ok(data),
+        Box::new(Ok(data)),
     )));
     let _task = app.update(RootMessage::FilePreview(
         file_preview::Message::AudioPlaybackStarted,
@@ -2255,11 +2255,11 @@ fn steam_backed_page_request_defers_until_connection() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retry(),
-        Some(&steam_session::PendingRetry::MyWorkshopPage {
+        app.state.steam_session.pending_retries(),
+        [steam_session::PendingRetry::MyWorkshopPage {
             generation: 7,
             page: 2,
-        })
+        }]
     );
     assert_eq!(
         app.state.steam_session.status(),
@@ -2280,11 +2280,11 @@ fn steam_backed_stats_refresh_defers_until_connection() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retry(),
-        Some(&steam_session::PendingRetry::MyWorkshopStats {
+        app.state.steam_session.pending_retries(),
+        [steam_session::PendingRetry::MyWorkshopStats {
             generation: 7,
             pages: 2,
-        })
+        }]
     );
     assert_eq!(
         app.state.steam_session.status(),
@@ -2312,7 +2312,7 @@ fn failed_steam_connection_clears_pending_retry() {
         ),
     ));
 
-    assert_eq!(app.state.steam_session.pending_retry(), None);
+    assert!(app.state.steam_session.pending_retries().is_empty());
     assert_eq!(
         app.state.steam_session.status(),
         steam_session::ConnectionStatus::Unavailable
@@ -2336,7 +2336,7 @@ fn successful_steam_connection_retries_pending_operation_once() {
         ),
     ));
 
-    assert_eq!(app.state.steam_session.pending_retry(), None);
+    assert!(app.state.steam_session.pending_retries().is_empty());
     assert_eq!(
         app.state.steam_session.status(),
         steam_session::ConnectionStatus::Connected
@@ -2349,7 +2349,7 @@ fn successful_steam_connection_retries_pending_operation_once() {
         ),
     ));
 
-    assert_eq!(app.state.steam_session.pending_retry(), None);
+    assert!(app.state.steam_session.pending_retries().is_empty());
 }
 
 #[test]
@@ -2373,7 +2373,7 @@ fn connected_steam_attempt_retries_pending_operation_without_edge() {
         app.state.steam_session.status(),
         steam_session::ConnectionStatus::Connected
     );
-    assert_eq!(app.state.steam_session.pending_retry(), Some(&retry));
+    assert_eq!(app.state.steam_session.pending_retries(), [retry]);
 
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionAttemptCompleted(
@@ -2381,7 +2381,7 @@ fn connected_steam_attempt_retries_pending_operation_without_edge() {
         ),
     ));
 
-    assert_eq!(app.state.steam_session.pending_retry(), None);
+    assert!(app.state.steam_session.pending_retries().is_empty());
     assert_eq!(
         app.state.steam_session.status(),
         steam_session::ConnectionStatus::Connected
@@ -2969,5 +2969,74 @@ fn a_repeated_connected_message_does_not_re_enter_the_route() {
             .prerequisites
             .observe_steam(steam_session::ConnectionStatus::Connected),
         "a repeated Connected reported a fresh reconnect edge"
+    );
+}
+
+/// Installed Addons is a `Requirement::Game` route, so the reconnect reload
+/// that rescues the Steam-gated routes deliberately skips it — yet its metadata
+/// lookups are the ones most likely to have failed against a Steam that was
+/// still coming up. Without its own hook, ids parked by those failures would
+/// wait for a manual route re-entry.
+#[test]
+fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
+    let mut app = App::new_for_test();
+
+    let _task = app.update(RootMessage::SteamSession(
+        steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Unavailable),
+    ));
+    let _task = app.update(RootMessage::InstalledAddons(
+        installed_addons::Message::RouteEntered,
+    ));
+    let workshop_id = PublishedFileId::new(1).expect("test fixture ids are always nonzero");
+    // A snapshot only to advance the metadata generation the completion below
+    // is keyed on; the parking this asserts on is generation-scoped, not
+    // row-scoped, so the rows themselves are beside the point here.
+    let _task = app.update(RootMessage::InstalledAddons(
+        installed_addons::Message::SnapshotPushed(LibraryRefreshReason::Startup, Ok(Vec::new())),
+    ));
+
+    // Steam refuses the lookup, exactly as it does on a launch with the client
+    // still starting.
+    let _task = app.update(RootMessage::InstalledAddons(
+        installed_addons::Message::MetadataCompleted(
+            1,
+            vec![workshop_id],
+            Err(UiError::detailed(
+                gmpublished_backend::error_key::keys::STEAM_ERROR,
+                Some("STEAM_UNAVAILABLE".to_owned()),
+            )),
+        ),
+    ));
+    assert!(
+        app.state.installed_addons.has_failed_metadata(),
+        "the refused lookup should park its id for a retry"
+    );
+
+    let _task = app.update(RootMessage::SteamSession(
+        steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
+    ));
+
+    assert!(
+        !app.state.installed_addons.has_failed_metadata(),
+        "the reconnect that resolved the outage left the metadata parked"
+    );
+}
+
+/// `RootMessage` is moved and cloned for every interaction in the app,
+/// including the per-frame `AnimationTick`. Feature messages that carry a
+/// decoded payload (preview scenes, workshop metadata, ready thumbnails) box
+/// it so one cold path cannot set the size every message pays; see the
+/// `Boxed:` notes on those variants. This is an upper bound rather than an
+/// equality so field-level churn stays cheap, but a variant that reintroduces
+/// a large inline payload trips it.
+#[test]
+fn root_message_stays_small_enough_for_the_hot_path() {
+    const MAX_ROOT_MESSAGE_BYTES: usize = 160;
+
+    let actual = std::mem::size_of::<RootMessage>();
+    assert!(
+        actual <= MAX_ROOT_MESSAGE_BYTES,
+        "RootMessage grew to {actual} bytes (limit {MAX_ROOT_MESSAGE_BYTES}); \
+         box the payload of whichever variant grew rather than raising this bound"
     );
 }

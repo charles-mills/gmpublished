@@ -147,7 +147,7 @@ impl App {
                     &mut schedule_error_output,
                     RootMessage::FilePreview(file_preview::Message::Loaded(
                         request_id,
-                        Err(error.into()),
+                        Box::new(Err(error.into())),
                     )),
                 );
             }
@@ -167,7 +167,7 @@ fn run_file_preview_load(
     });
     let _ = send_root_message(
         &mut output,
-        RootMessage::FilePreview(file_preview::Message::Loaded(request_id, result)),
+        RootMessage::FilePreview(file_preview::Message::Loaded(request_id, Box::new(result))),
     );
 }
 

@@ -47,10 +47,18 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             effects.push(Effect::ThumbnailDemandsChanged);
             effects
         }
-        Message::MetadataRefreshCompleted(generation, result) => {
-            state.apply_metadata_refresh(generation, result);
+        Message::MetadataRefreshCompleted(generation, item_ids, result) => {
+            state.apply_metadata_refresh(generation, &item_ids, result);
             let mut effects = scroll_anchor_effects(state);
             effects.extend(metadata_request_effects(state));
+            effects.push(Effect::ThumbnailDemandsChanged);
+            effects
+        }
+        Message::SteamReconnected => {
+            if !state.retry_failed_metadata() {
+                return Vec::new();
+            }
+            let mut effects = metadata_request_effects(state);
             effects.push(Effect::ThumbnailDemandsChanged);
             effects
         }

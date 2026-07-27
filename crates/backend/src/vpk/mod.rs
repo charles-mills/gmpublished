@@ -78,6 +78,25 @@ pub struct VpkFile {
     entries: HashMap<String, VpkEntry>,
 }
 
+/// Length of the header+tree prefix to buffer, refusing one the file cannot
+/// hold.
+///
+/// `tree_size` is an unchecked u32 read straight out of the header, so a
+/// 12-byte file can claim a tree of nearly 4GiB. Trusting it sized the read
+/// buffer off a hostile number instead of the bytes that actually exist; the
+/// read then failed anyway, having already reserved the space.
+fn validated_prefix_len(
+    header_size: u64,
+    tree_size: u32,
+    file_len: u64,
+) -> Result<usize, VpkError> {
+    let prefix_len = header_size + u64::from(tree_size);
+    if prefix_len > file_len {
+        return Err(VpkError::FormatError);
+    }
+    usize::try_from(prefix_len).map_err(|_| VpkError::FormatError)
+}
+
 fn map_parse_error(error: &vformats::vpk::VpkError) -> VpkError {
     use vformats::vpk::VpkError as Parse;
     match error {
@@ -107,8 +126,7 @@ impl VpkFile {
             // here would mis-size the prefix read.
             _ => return Err(VpkError::InvalidHeader),
         };
-        let prefix_len = usize::try_from(header_size + u64::from(tree_size))
-            .map_err(|_| VpkError::FormatError)?;
+        let prefix_len = validated_prefix_len(header_size, tree_size, file.metadata()?.len())?;
         let mut prefix = vec![0_u8; prefix_len];
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut prefix)

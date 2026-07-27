@@ -591,12 +591,14 @@ impl Downloads {
             .get(url)
             .call()
             .map_err(std::io::Error::other)?;
-        let total = response
+        // Only the header is authoritative about *this* transfer; the Steam
+        // API's `file_size` is a fact about the item and drives progress only.
+        let content_length = response
             .headers()
             .get("content-length")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(expected_size);
+            .and_then(|value| value.parse::<u64>().ok());
+        let total = content_length.unwrap_or(expected_size);
         if total > 0 {
             transaction.data(crate::transactions::TransactionPayload::TotalBytes(total));
         }
@@ -625,6 +627,23 @@ impl Downloads {
             }
         }
         writer.flush()?;
+
+        // A short body must not read as a finished download: the truncated
+        // `.bin` would go straight to the extractor and surface as a GMA
+        // format error, blaming the addon for a transfer that was cut off.
+        //
+        // Comparable only because the workspace builds ureq without its
+        // compression features, so nothing between the header and this counter
+        // re-encodes the body. Enabling gzip/brotli would make `written` the
+        // decompressed length and this check wrong.
+        if let Some(content_length) = content_length
+            && written < content_length
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("download ended after {written} of {content_length} bytes"),
+            ));
+        }
 
         Ok(Some(temp_path))
     }

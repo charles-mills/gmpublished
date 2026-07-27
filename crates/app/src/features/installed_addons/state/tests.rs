@@ -417,3 +417,87 @@ fn degraded_watch_rearms_once_per_route_entry() {
     state.enter_route();
     assert_eq!(state.watch_arm_epoch(), 2);
 }
+
+/// A metadata lookup that fails says nothing about the ids it named, so they
+/// must stay askable. Marking them finished alongside successful ones stranded
+/// every visible row until the next loud refresh — a cold start against a Steam
+/// that was still coming up left the library permanently unhydrated.
+#[test]
+fn failed_metadata_lookup_is_retried_once_steam_returns() {
+    let mut state = visible_fixture_state(40);
+
+    let (generation, requested) = state
+        .take_visible_metadata_request()
+        .expect("visible rows must request metadata");
+    assert!(!requested.is_empty());
+
+    let follow_up = state.finish_metadata_request(
+        generation,
+        &requested,
+        Err(UiError::new(
+            gmpublished_backend::error_key::keys::STEAM_ERROR,
+        )),
+    );
+    assert!(follow_up.is_none());
+
+    // Parked, not finished: nothing is re-asked until a retry point, so the
+    // failure cannot spin into a request loop.
+    assert!(state.take_visible_metadata_request().is_none());
+
+    assert!(state.retry_failed_metadata());
+    let (_, retried) = state
+        .take_visible_metadata_request()
+        .expect("a released id must be requested again");
+    assert!(
+        requested.iter().all(|id| retried.contains(id)),
+        "every failed id is asked for again: requested {requested:?}, retried {retried:?}"
+    );
+}
+
+/// The metadata *refresh* is the leg that actually talks to Steam; the lookup
+/// before it is a local cache read that always succeeds and marks its ids
+/// finished. Dropping a refresh failure therefore stranded exactly the rows
+/// that had no cache entry to fall back on — the common flaky-network case,
+/// and the one a reconnect edge never sees because Steam stayed up.
+#[test]
+fn failed_metadata_refresh_requeues_its_ids() {
+    let mut state = visible_fixture_state(40);
+
+    let (generation, requested) = state
+        .take_visible_metadata_request()
+        .expect("visible rows must request metadata");
+
+    // The cache lookup succeeds and reports every id as stale, which is what
+    // queues the network refresh.
+    let refresh = state.finish_metadata_request(
+        generation,
+        &requested,
+        Ok(MetadataResolution {
+            patches: Vec::new(),
+            stale_ids: requested.clone(),
+        }),
+    );
+    let (refresh_generation, refresh_ids) = refresh.expect("stale ids queue a refresh");
+    assert_eq!(refresh_ids, requested);
+
+    // Nothing more to ask while the refresh is outstanding.
+    assert!(state.take_visible_metadata_request().is_none());
+
+    state.apply_metadata_refresh(
+        refresh_generation,
+        &refresh_ids,
+        Err(UiError::new(
+            gmpublished_backend::error_key::keys::STEAM_ERROR,
+        )),
+    );
+
+    assert!(state.retry_failed_metadata());
+    let (_, retried) = state
+        .take_visible_metadata_request()
+        .expect("a failed refresh must be asked for again");
+    assert!(
+        requested.iter().all(|id| retried.contains(id)),
+        "every id the refresh covered is asked for again: \
+         requested {requested:?}, retried {retried:?}"
+    );
+}

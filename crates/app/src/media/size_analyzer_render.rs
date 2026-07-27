@@ -17,6 +17,8 @@ use iced::widget::image;
 
 pub const BACKGROUND: RgbaColor = RgbaColor::rgb(0x1a, 0x1a, 0x1a);
 const FALLBACK_TAG: RgbaColor = RgbaColor::rgb(0x0c, 0x0c, 0x0c);
+/// Byte length of the longest key `tag_color` matches (`servercontent`).
+const LONGEST_TAG_KEY: usize = 13;
 pub const ADDON_PLACEHOLDER: RgbaColor = RgbaColor::rgb(0x0c, 0x0c, 0x0c);
 pub const DEAD_GLYPH: RgbaColor = RgbaColor::rgb(0x34, 0x34, 0x34);
 const DEAD_SIDE_RATIO: f32 = 0.42;
@@ -35,10 +37,24 @@ const VERTICAL_LABEL_ASPECT_RATIO: f64 = 0.33;
 const LABEL_RASTER_CACHE_MAX_ENTRIES: usize = 256;
 const RECORD_TEXT_STATS: bool = cfg!(test);
 
-/// Returns the exact Size Analyzer tag color, or the fallback color.
+/// Returns the exact Size Analyzer tag color, or the fallback color. Tags
+/// reach here in whatever case the workshop stored them (`AddonType::as_str`
+/// yields `ServerContent`), so the lookup folds case in a stack buffer rather
+/// than allocating — this runs per tag square per frame.
 #[must_use]
 pub fn tag_color(tag: &str) -> RgbaColor {
-    match tag {
+    let mut buffer = [0_u8; LONGEST_TAG_KEY];
+    // Anything longer than the longest key below cannot match.
+    let Some(bytes) = buffer.get_mut(..tag.len()) else {
+        return FALLBACK_TAG;
+    };
+    bytes.copy_from_slice(tag.as_bytes());
+    bytes.make_ascii_lowercase();
+    let Ok(key) = std::str::from_utf8(bytes) else {
+        return FALLBACK_TAG;
+    };
+
+    match key {
         "addon" => RgbaColor::rgb(0x00, 0x6c, 0xc7),
         "weapon" => RgbaColor::rgb(0x8c, 0x01, 0x01),
         "servercontent" => RgbaColor::rgb(0x00, 0x00, 0x00),
@@ -58,6 +74,7 @@ pub fn tag_color(tag: &str) -> RgbaColor {
         "npc" => RgbaColor::rgb(0xfd, 0xfa, 0x8e),
         "effects" => RgbaColor::rgb(0x27, 0xc5, 0x00),
         "model" => RgbaColor::rgb(0x80, 0x00, 0x7c),
+        "entity" => RgbaColor::rgb(0xd0, 0xd0, 0xd0),
         _ => FALLBACK_TAG,
     }
 }
@@ -896,7 +913,18 @@ mod tests {
         assert_eq!(tag_color("weapon"), RgbaColor::rgb(0x8c, 0x01, 0x01));
         assert_eq!(tag_color("servercontent"), RgbaColor::rgb(0x00, 0x00, 0x00));
         assert_eq!(tag_color("model"), RgbaColor::rgb(0x80, 0x00, 0x7c));
+        assert_eq!(tag_color("entity"), RgbaColor::rgb(0xd0, 0xd0, 0xd0));
         assert_eq!(tag_color("not-a-real-tag"), FALLBACK_TAG);
+    }
+
+    #[test]
+    fn tag_color_folds_case_and_rejects_oversized_tags() {
+        // `AddonType::as_str` hands back the mixed-case wire value.
+        assert_eq!(tag_color("ServerContent"), tag_color("servercontent"));
+        assert_eq!(tag_color("MAP"), tag_color("map"));
+        assert_eq!(tag_color("Entity"), tag_color("entity"));
+        assert_eq!(tag_color(&"x".repeat(LONGEST_TAG_KEY + 1)), FALLBACK_TAG);
+        assert_eq!(tag_color("héllo"), FALLBACK_TAG);
     }
 
     #[test]
