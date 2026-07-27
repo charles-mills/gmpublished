@@ -433,7 +433,7 @@ impl State {
             Err(error) => {
                 self.rows = None;
                 self.workshop_index.clear();
-                self.load_status = LoadStatus::Error(error.to_string());
+                self.load_status = LoadStatus::Error(error);
             }
         }
         self.sync_grid_items();
@@ -802,7 +802,7 @@ pub enum LoadStatus {
     Loading,
     Ready,
     Empty,
-    Error(String),
+    Error(UiError),
 }
 
 fn row_workshop_id(row: &Row) -> Option<PublishedFileId> {

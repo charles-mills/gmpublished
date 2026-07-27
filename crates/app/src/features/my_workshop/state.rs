@@ -7,6 +7,7 @@ use iced::widget::image;
 use crate::bridge::Settings;
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::ui_error::UiError;
+use gmpublished_backend::error_key::keys;
 use crate::format::DownloadCountFormatter;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
@@ -315,10 +316,13 @@ impl State {
                 self.apply_page_result(result);
             }
             Ok(_) => {
-                self.load_status = LoadStatus::Error("stale My Workshop page result".to_owned());
+                // A page result for a request we no longer want. Nothing
+                // actionable to tell the user, so the generic key.
+                log::debug!("discarding stale My Workshop page result for page {page}");
+                self.load_status = LoadStatus::Error(UiError::new(keys::UNKNOWN));
             }
             Err(error) => {
-                self.load_status = LoadStatus::Error(error.to_string());
+                self.load_status = LoadStatus::Error(error);
             }
         }
         self.sync_grid_items();
@@ -640,7 +644,7 @@ pub enum LoadStatus {
     Loading,
     Ready,
     Empty,
-    Error(String),
+    Error(UiError),
 }
 
 fn grid_range_to_row_range(range: Range<usize>, row_count: usize) -> Range<usize> {

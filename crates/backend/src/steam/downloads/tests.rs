@@ -1,7 +1,6 @@
 use super::*;
 use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};
 use std::{
-    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -9,32 +8,6 @@ use std::{
 
 fn id(id: u64) -> PublishedFileId {
     PublishedFileId(id)
-}
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: no other thread in this test process mutates this env var concurrently.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = &self.previous {
-            // SAFETY: no other thread in this test process mutates this env var concurrently.
-            unsafe { std::env::set_var(self.key, previous) };
-        } else {
-            // SAFETY: no other thread in this test process mutates this env var concurrently.
-            unsafe { std::env::remove_var(self.key) };
-        }
-    }
 }
 
 struct InstalledExtractFixture {
@@ -52,7 +25,7 @@ fn downloads_for_test(temp_root: &Path) -> (Arc<Downloads>, BackendEventCollecto
         transactions.clone(),
     ));
     let steam = Arc::new(Steam::new(transactions.clone()));
-    let whitelist = AddonWhitelist::new();
+    let whitelist = AddonWhitelist::builtin_only();
     (
         Arc::new(Downloads::new(app_data, steam, whitelist, transactions)),
         collector,
@@ -63,7 +36,6 @@ fn with_installed_extract_events<T>(
     build: impl FnOnce(&Path) -> InstalledExtractFixture,
     test: impl FnOnce(Arc<Downloads>, BackendEventCollector, InstalledExtractFixture) -> T,
 ) -> T {
-    let _offline_whitelist = EnvVarGuard::set("ADDON_WHITELIST_OFFLINE", "1");
     let temp = tempfile::tempdir().expect("tempdir");
     let fixture = build(temp.path());
     let (downloads, collector) = downloads_for_test(temp.path());
@@ -433,4 +405,101 @@ fn pending_batch_append_moves_all_items_in_one_scheduling_batch() {
     assert_eq!(batch_len, 30);
     assert!(pending.is_empty());
     assert_eq!(downloading, (0..=30).map(id).collect::<Vec<_>>());
+}
+
+/// The lost-wakeup regression.
+///
+/// `wake_watchdog` used to only `notify_all()`, while the predicate the
+/// watchdog exits on (`Steam::shutting_down`) lived under a different mutex on
+/// a different object. A shutdown landing between the watchdog's loop-top
+/// check and its `wait` therefore had no waiter to notify, the signal was
+/// dropped, and the thread slept until `join_all_within` gave up and detached
+/// it. The flag now lives under the mutex the condvar is paired with, so the
+/// park predicate observes it no matter which side wins the race.
+#[test]
+fn shutdown_landing_before_the_park_is_not_lost() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (downloads, _events) = downloads_for_test(temp.path());
+
+    // Shutdown wins: the latch is set while no thread is parked.
+    downloads.wake_watchdog();
+
+    let mut queue = downloads.downloading.lock();
+    assert!(
+        !queue.should_park(),
+        "a latched shutdown must leave the park predicate false"
+    );
+
+    // The real park. It must return without waiting out the timeout.
+    let result = downloads.watchdog.wait_while_for(
+        &mut queue,
+        |queue| queue.should_park(),
+        Duration::from_secs(5),
+    );
+    drop(queue);
+
+    assert!(
+        !result.timed_out(),
+        "the watchdog parked despite an already-latched shutdown"
+    );
+}
+
+/// The other ordering: the watchdog is already parked when shutdown arrives.
+/// This half worked before the fix and is kept so a future change to the park
+/// cannot regress it while satisfying the test above.
+#[test]
+fn a_parked_watchdog_wakes_on_shutdown() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (downloads, _events) = downloads_for_test(temp.path());
+
+    let parked = Arc::clone(&downloads);
+    let waiter = std::thread::spawn(move || {
+        let result = {
+            let mut queue = parked.downloading.lock();
+            parked.watchdog.wait_while_for(
+                &mut queue,
+                |queue| queue.should_park(),
+                Duration::from_secs(5),
+            )
+        };
+        !result.timed_out()
+    });
+
+    // Long enough that the waiter is parked rather than still starting up; the
+    // assertion holds either way, this just keeps the test honest about which
+    // ordering it exercises.
+    std::thread::sleep(Duration::from_millis(50));
+    downloads.wake_watchdog();
+
+    assert!(
+        waiter.join().expect("waiter thread"),
+        "a parked watchdog was not woken by shutdown"
+    );
+}
+
+/// `start()` must also release the park — the queue-activity path, distinct
+/// from shutdown.
+#[test]
+fn queued_work_releases_the_park() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (downloads, _events) = downloads_for_test(temp.path());
+
+    assert!(
+        downloads.downloading.lock().should_park(),
+        "an idle, running watchdog parks"
+    );
+
+    downloads.pending.lock().push(Arc::new(DownloadInner {
+        item: id(1),
+        transaction: downloads.transactions.begin(),
+        extract_destination: ExtractDestination::default(),
+        request_id: None,
+        sent_total: std::sync::atomic::AtomicBool::new(false),
+    }));
+    downloads.start();
+
+    assert!(
+        !downloads.downloading.lock().should_park(),
+        "queued work must leave the park predicate false"
+    );
 }

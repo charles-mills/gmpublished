@@ -193,7 +193,7 @@ impl std::error::Error for MacDocumentOpenError {}
 
 mod apple_event {
     use std::{
-        ffi::{c_char, c_int, c_long, c_short, c_uchar, c_uint, c_void},
+        ffi::{c_char, c_long, c_short, c_uchar, c_uint, c_void},
         fmt, panic,
         path::PathBuf,
         ptr::{self, NonNull},
@@ -522,7 +522,8 @@ mod apple_event {
     type Size = c_long;
     type CFIndex = c_long;
     type CFStringEncoding = c_uint;
-    type CFURLPathStyle = c_int;
+    // `CFURL.h`: `typedef CF_ENUM(CFIndex, CFURLPathStyle)` — 8 bytes, not 4.
+    type CFURLPathStyle = CFIndex;
     type CFAllocatorRef = *const c_void;
     type CFURLRef = *const c_void;
     type CFStringRef = *const c_void;

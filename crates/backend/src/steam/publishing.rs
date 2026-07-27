@@ -927,7 +927,7 @@ mod tests {
             Self {
                 app_data,
                 steam: Steam::new(transactions.clone()),
-                whitelist: AddonWhitelist::new(),
+                whitelist: AddonWhitelist::builtin_only(),
                 transactions,
                 collector,
                 _temp: temp,
@@ -935,8 +935,6 @@ mod tests {
         }
 
         fn with_publishing_settings(temp: &Path, ignore_globs: &[String]) -> Self {
-            // SAFETY: nextest runs one test per process; no concurrent mutator.
-            unsafe { std::env::set_var("ADDON_WHITELIST_OFFLINE", "1") };
             let fixture = Self::new();
             fixture.app_data.mutate_settings(|settings| {
                 settings.temp = Some(temp.to_path_buf());

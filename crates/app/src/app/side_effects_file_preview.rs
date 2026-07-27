@@ -66,8 +66,8 @@ use materials::{
 #[cfg(test)]
 use routing::model_companion_parent_path;
 use routing::{
-    CodeSyntax, EntryClass, ImageClass, classify_entry_path, model_companion_preview_request,
-    related_preview_target,
+    CodeSyntax, EntryClass, ImageClass, VTX_SUFFIXES, classify_entry_path,
+    model_companion_preview_request, related_preview_target,
 };
 #[cfg(test)]
 use syntax::{CodeHighlightPalette, VmtHighlightPalette};
@@ -728,21 +728,18 @@ fn load_model_companions(
     entry_bytes: impl Fn(&str) -> Option<Vec<u8>>,
 ) -> Option<(Vec<u8>, Vec<u8>)> {
     let vvd_path = format!("{stem}.vvd");
-    let vtx_dx90_path = format!("{stem}.dx90.vtx");
-    let vtx_dx80_path = format!("{stem}.dx80.vtx");
-    let vtx_path = format!("{stem}.vtx");
-
     let Some(vvd_bytes) = entry_bytes(&vvd_path) else {
         log::debug!("{log_context} missing companion {vvd_path}");
         return None;
     };
-    let Some(vtx_bytes) = entry_bytes(&vtx_dx90_path)
-        .or_else(|| entry_bytes(&vtx_dx80_path))
-        .or_else(|| entry_bytes(&vtx_path))
+
+    // Every flavour `model_companion_parent_path` redirects to the parent
+    // `.mdl` must be tried here, or that flavour previews as a decode failure.
+    let Some(vtx_bytes) = VTX_SUFFIXES
+        .iter()
+        .find_map(|suffix| entry_bytes(&format!("{stem}{suffix}")))
     else {
-        log::debug!(
-            "{log_context} missing companion {vtx_dx90_path}, {vtx_dx80_path}, or {vtx_path}"
-        );
+        log::debug!("{log_context} missing a .vtx companion for {stem} (tried {VTX_SUFFIXES:?})");
         return None;
     };
     Some((vvd_bytes, vtx_bytes))

@@ -21,7 +21,7 @@ use crate::widgets::context_area::context_area;
 use crate::widgets::tag_chip::{TAG_POINT_WIDTH, TAG_TEXT_SIZE, tag_chip};
 use crate::{
     assets,
-    i18n::I18n,
+    i18n::{I18n, translated_error},
     theme::{self, Tokens, ViewCtx},
 };
 
@@ -714,7 +714,10 @@ fn empty_surface_text(state: &State, i18n: &I18n) -> String {
         LoadStatus::Loading => i18n.tr("size-analyzer-loading"),
         LoadStatus::Ready => String::new(),
         LoadStatus::Empty => i18n.tr("size-analyzer-empty"),
-        LoadStatus::Error(error) => i18n.trn("size-analyzer-error", &[("arg0", error.as_str())]),
+        LoadStatus::Error(error) => i18n.trn(
+            "size-analyzer-error",
+            &[("arg0", translated_error(i18n, error).as_str())],
+        ),
     }
 }
 

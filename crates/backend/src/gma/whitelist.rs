@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 
-const ADDON_WHITELIST_OFFLINE: &[&str] = &[
+const BUILTIN_ADDON_WHITELIST: &[&str] = &[
     "lua/*.lua",
     "scenes/*.vcd",
     "particles/*.pcf",
@@ -125,10 +125,25 @@ pub const DEFAULT_IGNORE: &[&str] = &[
 ];
 
 fn builtin_whitelist() -> Vec<String> {
-    ADDON_WHITELIST_OFFLINE
+    BUILTIN_ADDON_WHITELIST
         .iter()
         .map(|glob| (*glob).to_owned())
         .collect()
+}
+
+/// Where [`AddonWhitelist::refresh_from_remote`] is allowed to look.
+///
+/// Carried on the instance rather than read from the environment so that
+/// keeping the network out of a test is a constructor choice, not a process-
+/// wide `set_var` — which is a data race against any concurrent `getenv` under
+/// the stock test harness, where all tests in a binary share one process.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WhitelistSource {
+    /// Refresh from the upstream gmad source when asked.
+    #[default]
+    Remote,
+    /// Never touch the network; the built-in list is authoritative.
+    BuiltinOnly,
 }
 
 /// The addon whitelist: the built-in list, optionally refreshed from the
@@ -136,13 +151,27 @@ fn builtin_whitelist() -> Vec<String> {
 #[derive(Clone, Debug)]
 pub struct AddonWhitelist {
     list: Arc<ArcSwap<Vec<String>>>,
+    source: WhitelistSource,
 }
 
 impl AddonWhitelist {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_source(WhitelistSource::Remote)
+    }
+
+    /// A whitelist that will never fetch. Use from tests and offline runs
+    /// instead of gating the network on an environment variable.
+    #[must_use]
+    pub fn builtin_only() -> Self {
+        Self::with_source(WhitelistSource::BuiltinOnly)
+    }
+
+    #[must_use]
+    pub fn with_source(source: WhitelistSource) -> Self {
         Self {
             list: Arc::new(ArcSwap::from_pointee(builtin_whitelist())),
+            source,
         }
     }
 
@@ -158,7 +187,7 @@ impl AddonWhitelist {
     /// blocking HTTPS I/O: call from a background thread, never from
     /// construction.
     pub fn refresh_from_remote(&self) {
-        if std::env::var_os("ADDON_WHITELIST_OFFLINE").is_some() {
+        if self.source == WhitelistSource::BuiltinOnly {
             return;
         }
 

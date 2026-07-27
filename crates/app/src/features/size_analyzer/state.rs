@@ -36,7 +36,7 @@ pub struct State {
     route_visible: bool,
     load_status: LoadStatus,
     snapshot: Option<LibrarySnapshot>,
-    snapshot_error: Option<String>,
+    snapshot_error: Option<UiError>,
     scale_factor: f32,
     pending_viewport: Option<RenderViewport>,
     last_completed_viewport: Option<RenderViewport>,
@@ -238,13 +238,12 @@ impl State {
             }
             Ok(None) => {
                 self.snapshot = None;
-                let error = UiError::new(keys::GMOD_PATH_MISSING).to_string();
+                let error = UiError::new(keys::GMOD_PATH_MISSING);
                 self.snapshot_error = Some(error.clone());
                 self.clear_projection(LoadStatus::Error(error));
             }
             Err(error) => {
                 self.snapshot = None;
-                let error = error.to_string();
                 self.snapshot_error = Some(error.clone());
                 self.clear_projection(LoadStatus::Error(error));
             }
@@ -601,7 +600,7 @@ impl State {
                 self.clear_projection(LoadStatus::Empty);
             }
             Err(error) => {
-                self.clear_projection(LoadStatus::Error(size_analyzer_error_key(&error)));
+                self.clear_projection(LoadStatus::Error(UiError::from(&error)));
             }
         }
     }
@@ -766,13 +765,6 @@ fn snapshots_content_identical(a: &LibrarySnapshot, b: &LibrarySnapshot) -> bool
 /// with no key prefix — a generic `UiError::from(&error).to_string()` would
 /// prepend `ERR_UNKNOWN:`, which the `size-analyzer-error` template has never
 /// interpolated.
-fn size_analyzer_error_key(error: &SizeAnalyzerError) -> String {
-    match error {
-        SizeAnalyzerError::NoAddonsFound => keys::NO_ADDONS_FOUND.as_str().to_owned(),
-        SizeAnalyzerError::InvalidBounds { .. } => error.to_string(),
-    }
-}
-
 /// A delivered thumbnail's shared texture handle plus its pixel dimensions.
 ///
 /// The handle is the same one the grids display, so the GPU uploads each
@@ -909,7 +901,7 @@ pub enum LoadStatus {
     Loading,
     Ready,
     Empty,
-    Error(String),
+    Error(UiError),
 }
 
 /// Resolves the tooltip/preview title for a hovered addon. The analyzer

@@ -157,11 +157,33 @@ fn append_pending_batch<T>(downloading: &mut Vec<T>, pending: &mut Vec<T>) -> us
     batch_len
 }
 
+/// Everything [`Downloads::watchdog`] parks on, under one mutex.
+///
+/// The shutdown latch lives here rather than being read from
+/// [`Steam::shutting_down`] at the park because a condvar predicate has to be
+/// guarded by the mutex the notifier holds. With the flag under a different
+/// lock, a shutdown landing between the watchdog's loop-top check and its
+/// `wait` was lost, and the thread slept until the join bound expired.
+#[derive(Default)]
+struct WatchdogQueue {
+    /// Items handed over by [`Downloads::start`], drained by the watchdog.
+    ready: Vec<Download>,
+    /// Set once by [`Downloads::wake_watchdog`]; never cleared.
+    shutting_down: bool,
+}
+
+impl WatchdogQueue {
+    /// The watchdog sleeps exactly while this holds.
+    const fn should_park(&self) -> bool {
+        self.ready.is_empty() && !self.shutting_down
+    }
+}
+
 pub struct Downloads {
     pending: Mutex<Vec<Download>>,
-    downloading: Mutex<Vec<Download>>,
-    /// Signals the watchdog that `downloading` changed. It parks here with
-    /// no timeout while the queue is empty, so shutdown has to wake it
+    downloading: Mutex<WatchdogQueue>,
+    /// Signals the watchdog that [`Self::downloading`] changed. It parks here
+    /// with no timeout while the queue is empty, so shutdown has to wake it
     /// explicitly — see [`Self::wake_watchdog`].
     watchdog: Condvar,
     /// Bumped by [`Self::cancel_all`]. Submission batches capture the epoch
@@ -184,7 +206,7 @@ impl Downloads {
     ) -> Self {
         Self {
             pending: Mutex::new(Vec::new()),
-            downloading: Mutex::new(Vec::new()),
+            downloading: Mutex::new(WatchdogQueue::default()),
             watchdog: Condvar::new(),
             cancel_epoch: AtomicU64::new(0),
             app_data,
@@ -822,20 +844,31 @@ impl Downloads {
     }
 
     pub fn start(&self) {
-        let mut downloading = self.downloading.lock();
-        append_pending_batch(&mut downloading, &mut self.pending.lock());
+        {
+            let mut downloading = self.downloading.lock();
+            append_pending_batch(&mut downloading.ready, &mut self.pending.lock());
+        }
 
+        // Notified outside the lock: the park predicate is already false by the
+        // time the guard drops, so a waiter that wakes here re-tests and
+        // proceeds rather than waking straight into a blocked acquire.
         self.watchdog.notify_one();
     }
 
-    /// Wakes [`Self::watchdog`] out of its idle park so it can re-check
-    /// [`Steam::shutting_down`]. Registered as a shutdown waker when the
-    /// watchdog is spawned.
+    /// Latches the shutdown flag and wakes [`Self::watchdog`] out of its idle
+    /// park. Registered as a shutdown waker when the watchdog is spawned.
+    ///
+    /// The flag is set under the same mutex the watchdog parks on, so a
+    /// shutdown that lands while the watchdog is between its loop-top
+    /// [`Steam::shutting_down`] check and its `wait` is observed by the park
+    /// predicate instead of being lost.
     pub(super) fn wake_watchdog(&self) {
+        self.downloading.lock().shutting_down = true;
         self.watchdog.notify_all();
     }
 
-    // Condvar pairing in the drain loop: the guard is handed to wait_for.
+    // Condvar pairings in the drain loop: the guards are handed to
+    // `wait_while` (the idle park) and `wait_for` (the in-flight poll).
     #[expect(clippy::significant_drop_tightening)]
     pub(super) fn watchdog(downloads: &Arc<Self>, steam: &Arc<Steam>) {
         let in_progress_state: Arc<(Mutex<BTreeMap<PublishedFileId, Download>>, Condvar)> =
@@ -901,17 +934,22 @@ impl Downloads {
                 return;
             }
 
-            queue.extend(std::mem::take(&mut *downloads.downloading.lock()));
+            queue.extend(std::mem::take(&mut downloads.downloading.lock().ready));
 
             let mut in_progress = in_progress_state.0.lock();
 
             if in_progress.is_empty() {
                 let Some(download) = queue.pop_front() else {
                     drop(in_progress);
+                    // `wait_while` re-tests the predicate on every wake, so a
+                    // notify that arrives before the park (or a spurious one)
+                    // cannot strand this thread. `shutting_down` is set under
+                    // this same mutex, so the loop-top check above and this
+                    // park cannot disagree.
                     let mut downloading = downloads.downloading.lock();
-                    if downloading.is_empty() {
-                        downloads.watchdog.wait(&mut downloading);
-                    }
+                    downloads
+                        .watchdog
+                        .wait_while(&mut downloading, |queue| queue.should_park());
                     continue;
                 };
 

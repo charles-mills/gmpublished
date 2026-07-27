@@ -145,19 +145,34 @@ fn material_texture_entry_path(texture_name: &str) -> String {
     }
 }
 
+/// The `.vtx` flavours Source ships, in the order a loader should try them.
+///
+/// Order is load-bearing twice over. [`model_companion_parent_path`] matches by
+/// suffix, so the bare `.vtx` must come last or `foo.dx90.vtx` would yield
+/// `foo.dx90.mdl`; and `load_model_companions` walks the same list as its
+/// fallback chain, so the most specific (and most commonly shipped) flavour
+/// must come first.
+///
+/// Both sides read this one list: classifying a flavour as a companion without
+/// the loader also trying it means the file redirects to its parent `.mdl` and
+/// then fails to load.
+pub(super) const VTX_SUFFIXES: &[&str] = &[
+    ".dx90.vtx",
+    ".dx80.vtx",
+    ".sw.vtx",
+    ".360.vtx",
+    ".xbox.vtx",
+    ".vtx",
+];
+
+/// Non-`.vtx` companions that redirect to the parent `.mdl`. Unlike
+/// [`VTX_SUFFIXES`] these are not alternatives to one another — `.vvd` is
+/// loaded unconditionally and `.phy`/`.ani` are not loaded at all.
+const OTHER_COMPANION_SUFFIXES: &[&str] = &[".vvd", ".phy", ".ani"];
+
 pub(super) fn model_companion_parent_path(path: &str) -> Option<String> {
     let lower = path.to_ascii_lowercase();
-    for suffix in [
-        ".dx90.vtx",
-        ".dx80.vtx",
-        ".sw.vtx",
-        ".360.vtx",
-        ".xbox.vtx",
-        ".vtx",
-        ".vvd",
-        ".phy",
-        ".ani",
-    ] {
+    for suffix in VTX_SUFFIXES.iter().chain(OTHER_COMPANION_SUFFIXES) {
         if lower.ends_with(suffix) {
             let stem_len = path.len().saturating_sub(suffix.len());
             return Some(format!("{}.mdl", &path[..stem_len]));

@@ -194,8 +194,11 @@ impl Eq for I18n {}
 
 /// Translates a backend [`UiError`](crate::bridge::ui_error::UiError)
 /// through the Fluent catalogs: `ERR_FOO_BAR` looks up `err-foo-bar` (and
-/// `err-foo-bar-detail` when the error carries detail text), falling back to
-/// the raw error string when no entry exists.
+/// `err-foo-bar-detail` when the error carries detail text).
+///
+/// An unmapped key falls back to `err-unknown`, never to the raw wire string —
+/// `UiError`'s `Display` is the `KEY:detail` composite, so returning it here
+/// put text like `ERR_GMOD_PATH_MISSING` in front of users.
 pub fn translated_error(i18n: &I18n, error: &crate::bridge::ui_error::UiError) -> String {
     let key = format!(
         "err-{}",
@@ -221,7 +224,10 @@ pub fn translated_error(i18n: &I18n, error: &crate::bridge::ui_error::UiError) -
     );
 
     if translated == key {
-        error.to_string()
+        // `tr` echoes the key back on a miss, so this is "no catalog entry".
+        // Log the key that needs one; show the user something readable.
+        log::debug!("no catalog entry for {key}; falling back to err-unknown");
+        i18n.tr("err-unknown")
     } else {
         translated
     }

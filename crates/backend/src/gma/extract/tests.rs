@@ -30,7 +30,7 @@ impl Fixture {
         Self {
             app_data,
             steam: Steam::new(transactions.clone()),
-            whitelist: AddonWhitelist::new(),
+            whitelist: AddonWhitelist::builtin_only(),
             transactions,
             collector,
             _temp: temp,
@@ -579,7 +579,7 @@ fn addon_json_exists_before_finished_event_fires() {
         transactions.clone(),
     );
     let steam = Steam::new(transactions.clone());
-    let whitelist = AddonWhitelist::new();
+    let whitelist = AddonWhitelist::builtin_only();
 
     let (handle, view) = &gma;
     let transaction = transactions.begin();
