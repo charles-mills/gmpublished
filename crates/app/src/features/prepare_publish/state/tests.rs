@@ -10,7 +10,7 @@ use crate::bridge::{
 use gmpublished_backend::error_key::ErrorKey;
 use iced::widget::image;
 
-use super::{AddonTag, AddonType, Mode, OpenTarget, State, UpdateTarget};
+use super::{AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget};
 use crate::features::prepare_publish::model::{
     ContentPathVerificationRequest, IgnorePatternMutationResult, IgnoredPattern,
     PublishSubmitContext, PublishSubmitResult, VerifiedContentPathState, VerifiedIcon,
@@ -837,4 +837,135 @@ fn submit_context() -> PublishSubmitContext {
         ignore_globs: vec!["*.tmp".to_owned()],
         temp_dir: PathBuf::from("/tmp/prepare-temp"),
     }
+}
+
+fn en() -> crate::i18n::I18n {
+    crate::i18n::I18n::for_locale(Some("en"))
+}
+
+fn workshop_update_target() -> UpdateTarget {
+    UpdateTarget {
+        workshop_id: PublishedFileId::new(77).expect("test fixture ids are always nonzero"),
+        title: "Workshop Addon".to_owned(),
+        tags: Vec::new(),
+        preview_url: None,
+        snapshot_request_id: 1,
+        snapshot_destination: PathBuf::from("/tmp/workshop-77"),
+    }
+}
+
+#[test]
+fn a_blank_new_addon_names_every_requirement_it_needs() {
+    let mut state = State::default();
+    let _request = open_new(&mut state);
+
+    let missing = state.blockers().missing().collect::<Vec<_>>();
+
+    assert_eq!(
+        missing,
+        vec![
+            Requirement::AddonPath,
+            Requirement::Title,
+            Requirement::AddonType,
+            Requirement::Tag,
+        ]
+    );
+    assert!(!state.can_submit());
+}
+
+#[test]
+fn an_update_owes_a_changelog_instead_of_a_title() {
+    let mut state = State::default();
+    let _request = open_update(&mut state, workshop_update_target());
+    set_verified_path(&mut state);
+    state.set_addon_type("map");
+    state.set_tag(0, "fun");
+
+    let blockers = state.blockers();
+
+    assert!(blockers.contains(Requirement::Changelog));
+    // The title is locked to the workshop page in update mode, so it is never
+    // something the user can be asked to supply here.
+    assert!(!blockers.contains(Requirement::Title));
+}
+
+#[test]
+fn verification_in_flight_holds_the_missing_list_back() {
+    let mut state = State::default();
+    let _request = open_new(&mut state);
+    state.path_pending = true;
+
+    let blockers = state.blockers();
+
+    assert!(blockers.pending());
+    assert_eq!(blockers.missing().count(), 0);
+    assert_eq!(
+        state.submit_tooltip(&en()).as_deref(),
+        Some("Verifying addon contents...")
+    );
+}
+
+#[test]
+fn the_submit_tooltip_lists_what_is_missing_beneath_the_update_warning() {
+    let mut state = State::default();
+    let _request = open_update(&mut state, workshop_update_target());
+    set_verified_path(&mut state);
+    state.set_addon_type("map");
+    state.set_tag(0, "fun");
+
+    let tooltip = state
+        .submit_tooltip(&en())
+        .expect("an update always carries its warning");
+
+    assert!(tooltip.contains("Workshop Addon"));
+    assert!(tooltip.contains("Still needed:"));
+    assert!(tooltip.contains("\u{2022} Changelog"));
+    assert!(!tooltip.contains("\u{2022} Title"));
+}
+
+#[test]
+fn an_unchosen_select_does_not_repeat_its_own_label() {
+    let i18n = en();
+    let mut state = State::default();
+    let _request = open_new(&mut state);
+
+    let face = state.selected_addon_type_option(&i18n).label;
+    let unchosen = state.addon_type_options(&i18n);
+    assert!(
+        !unchosen.iter().any(|option| option.label == face),
+        "the menu echoed the control's own face: {face:?}"
+    );
+
+    // Once something is chosen the row becomes a way back to nothing, so it
+    // earns its place — and no longer duplicates the face.
+    state.set_addon_type("map");
+    let chosen = state.addon_type_options(&i18n);
+    assert_eq!(chosen.len(), unchosen.len() + 1);
+    assert_ne!(state.selected_addon_type_option(&i18n).label, face);
+    assert!(chosen.iter().any(|option| option.label == face));
+}
+
+#[test]
+fn an_unchosen_tag_slot_does_not_repeat_its_own_label() {
+    let i18n = en();
+    let mut state = State::default();
+    let _request = open_new(&mut state);
+
+    let face = state.selected_tag_option(0, &i18n).label;
+    assert!(
+        !state
+            .tag_options(0, &i18n)
+            .iter()
+            .any(|option| option.label == face),
+        "the menu echoed the slot's own face: {face:?}"
+    );
+
+    state.set_tag(0, "fun");
+
+    assert!(
+        state
+            .tag_options(0, &i18n)
+            .iter()
+            .any(|option| option.label == face)
+    );
 }

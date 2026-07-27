@@ -238,6 +238,78 @@ impl PartialEq for ChangelogContent {
     }
 }
 
+/// A submit prerequisite the user supplies themselves, ordered as the modal
+/// lays them out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Requirement {
+    AddonPath,
+    Title,
+    AddonType,
+    Tag,
+    Changelog,
+}
+
+impl Requirement {
+    const ALL: [Self; 5] = [
+        Self::AddonPath,
+        Self::Title,
+        Self::AddonType,
+        Self::Tag,
+        Self::Changelog,
+    ];
+
+    const fn bit(self) -> u8 {
+        match self {
+            Self::AddonPath => 1 << 0,
+            Self::Title => 1 << 1,
+            Self::AddonType => 1 << 2,
+            Self::Tag => 1 << 3,
+            Self::Changelog => 1 << 4,
+        }
+    }
+
+    const fn label_key(self) -> &'static str {
+        match self {
+            Self::AddonPath => "prepare-publish-needs-addon-path",
+            Self::Title => "prepare-publish-needs-title",
+            Self::AddonType => "prepare-publish-needs-addon-type",
+            Self::Tag => "prepare-publish-needs-tag",
+            Self::Changelog => "prepare-publish-needs-changelog",
+        }
+    }
+}
+
+/// Everything standing between the modal's contents and a submit.
+///
+/// The two halves read differently, so they stay apart: `pending` work clears
+/// itself and only ever earns a "hold on" line, while `missing` requirements
+/// wait on the user and are the ones that redden a control.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Blockers {
+    pending: bool,
+    missing: u8,
+}
+
+impl Blockers {
+    pub(crate) const fn is_empty(self) -> bool {
+        !self.pending && self.missing == 0
+    }
+
+    pub(crate) const fn pending(self) -> bool {
+        self.pending
+    }
+
+    pub(crate) const fn contains(self, requirement: Requirement) -> bool {
+        self.missing & requirement.bit() != 0
+    }
+
+    pub(crate) fn missing(self) -> impl Iterator<Item = Requirement> {
+        Requirement::ALL
+            .into_iter()
+            .filter(move |requirement| self.contains(*requirement))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -570,10 +642,16 @@ impl State {
 
     pub(crate) fn addon_type_options(&self, i18n: &I18n) -> Vec<SelectOption> {
         let mut options = Vec::with_capacity(AddonType::ALL.len() + 1);
-        options.push(SelectOption::new(
-            i18n.tr("prepare-publish-addon-type"),
-            DEFAULT_VALUE,
-        ));
+        // The placeholder row is there to clear a choice. With nothing chosen it
+        // clears nothing and merely repeats the label already on the control's
+        // face — and, matching the empty selection, renders as the highlighted
+        // row. It earns its place only once there is something to undo.
+        if self.addon_type.is_some() {
+            options.push(SelectOption::new(
+                i18n.tr("prepare-publish-addon-type"),
+                DEFAULT_VALUE,
+            ));
+        }
         options.extend(
             AddonType::ALL
                 .into_iter()
@@ -591,10 +669,14 @@ impl State {
 
     pub(crate) fn tag_options(&self, current_index: usize, i18n: &I18n) -> Vec<SelectOption> {
         let mut options = Vec::with_capacity(AddonTag::ALL.len() + 1);
-        options.push(SelectOption::new(
-            tag_placeholder(i18n, current_index),
-            DEFAULT_VALUE,
-        ));
+        // Same as the type select: nothing chosen means nothing to clear, and
+        // the row would only echo the face.
+        if self.tags.get(current_index).copied().flatten().is_some() {
+            options.push(SelectOption::new(
+                tag_placeholder(i18n, current_index),
+                DEFAULT_VALUE,
+            ));
+        }
         options.extend(AddonTag::ALL.into_iter().filter_map(|tag| {
             let selected_elsewhere = self
                 .tags
@@ -639,24 +721,82 @@ impl State {
         self.submit_pending
     }
 
-    pub(crate) fn can_submit(&self) -> bool {
-        if !self.open
-            || self.path_pending
-            || self.path_error.is_some()
-            || self.verified_addon_path.is_none()
-            || self.icon_pending
-            || self.submit_pending
-            || self.addon_type.is_none()
-            || self.tags.iter().all(Option::is_none)
-        {
-            return false;
+    /// Why `Publish!` is unavailable, if it is.
+    ///
+    /// Verification in flight suppresses the missing list rather than adding to
+    /// it: until the running check reports back we cannot know what is actually
+    /// absent, and naming a field mid-verify would flag the very thing the user
+    /// is in the middle of supplying.
+    pub(crate) fn blockers(&self) -> Blockers {
+        if !self.open {
+            return Blockers::default();
         }
 
-        if self.update_mode() {
-            !self.changelog_trimmed().is_empty()
-        } else {
-            !self.title.trim().is_empty()
+        if self.path_pending || self.icon_pending || self.submit_pending {
+            return Blockers {
+                pending: true,
+                missing: 0,
+            };
         }
+
+        let mut missing = 0_u8;
+        let mut require = |requirement: Requirement, unmet: bool| {
+            if unmet {
+                missing |= requirement.bit();
+            }
+        };
+        require(
+            Requirement::AddonPath,
+            self.path_error.is_some() || self.verified_addon_path.is_none(),
+        );
+        require(
+            Requirement::Title,
+            !self.update_mode() && self.title.trim().is_empty(),
+        );
+        require(Requirement::AddonType, self.addon_type.is_none());
+        require(Requirement::Tag, self.tags.iter().all(Option::is_none));
+        require(
+            Requirement::Changelog,
+            self.update_mode() && self.changelog_trimmed().is_empty(),
+        );
+
+        Blockers {
+            pending: false,
+            missing,
+        }
+    }
+
+    pub(crate) fn can_submit(&self) -> bool {
+        self.open && self.blockers().is_empty()
+    }
+
+    /// The `Publish!` tooltip: the update warning, then whatever is still in
+    /// the way. `None` leaves the button bare, which is the ready state of a
+    /// brand-new addon.
+    pub(crate) fn submit_tooltip(&self, i18n: &I18n) -> Option<String> {
+        let mut blocks = Vec::new();
+        if let Some(warning) = self.update_warning(i18n) {
+            blocks.push(warning);
+        }
+
+        let blockers = self.blockers();
+        if blockers.pending() {
+            blocks.push(i18n.tr("prepare-publish-verifying-content"));
+        } else {
+            let missing = blockers
+                .missing()
+                .map(|requirement| format!("\u{2022} {}", i18n.tr(requirement.label_key())))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                blocks.push(format!(
+                    "{}\n{}",
+                    i18n.tr("prepare-publish-still-needed"),
+                    missing.join("\n")
+                ));
+            }
+        }
+
+        (!blocks.is_empty()).then(|| blocks.join("\n\n"))
     }
 
     pub(crate) fn can_publish_icon(&self) -> bool {

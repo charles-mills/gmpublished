@@ -498,15 +498,23 @@ pub fn action_button(tokens: &Tokens, status: button_widget::Status) -> button_w
         button_widget::Status::Disabled => (tokens.colors.button_bg, tokens.colors.text),
     };
 
+    // The glow is what marks this as *the* action to take. A disabled button
+    // has no action to offer, so it drops the glow along with the accent fill.
+    let shadow = if matches!(status, button_widget::Status::Disabled) {
+        Shadow::default()
+    } else {
+        Shadow {
+            color: tokens.colors.shadow_action.into(),
+            offset: Vector::ZERO,
+            blur_radius: 5.0,
+        }
+    };
+
     button_widget::Style {
         background: Some(Color::from(background).into()),
         text_color: text.into(),
         border: border::rounded(tokens.radii.base),
-        shadow: Shadow {
-            color: tokens.colors.shadow_action.into(),
-            offset: Vector::ZERO,
-            blur_radius: 5.0,
-        },
+        shadow,
         snap: true,
     }
 }
@@ -659,6 +667,53 @@ pub fn scrollbar(tokens: &Tokens, status: scrollable::Status) -> scrollable::Sty
             shadow: shadow(tokens.colors.shadow_soft),
             icon: tokens.colors.text.into(),
         },
+    }
+}
+
+/// Scrollbar for a select menu.
+///
+/// The shared grabber tokens are mixed against the app's surfaces, but a menu
+/// panel is `input_bg` — lighter than those on every preset, light and dark
+/// alike, which leaves the thumb at or below the panel's own value and so
+/// effectively invisible. Deriving the thumb from the panel's text colour keeps
+/// it legible by construction rather than by one preset's luck.
+pub fn select_menu_scrollbar(tokens: &Tokens, status: scrollable::Status) -> scrollable::Style {
+    let opacity = match status {
+        scrollable::Status::Dragged {
+            is_horizontal_scrollbar_dragged,
+            is_vertical_scrollbar_dragged,
+            ..
+        } if is_horizontal_scrollbar_dragged || is_vertical_scrollbar_dragged => 0.55,
+        scrollable::Status::Hovered {
+            is_horizontal_scrollbar_hovered,
+            is_vertical_scrollbar_hovered,
+            ..
+        } if is_horizontal_scrollbar_hovered || is_vertical_scrollbar_hovered => 0.40,
+        scrollable::Status::Active { .. } | scrollable::Status::Hovered { .. } => 0.25,
+        scrollable::Status::Dragged { .. } => 0.25,
+    };
+
+    let rail = scrollable::Rail {
+        // The panel already reads as the track; a second fill behind the thumb
+        // only stripes the menu.
+        background: None,
+        border: border::rounded(tokens.dims.scrollbar_thumb_width / 2.0),
+        scroller: scrollable::Scroller {
+            background: Color::from(
+                tokens
+                    .colors
+                    .text
+                    .with_alpha(super::motion::opacity_byte(opacity)),
+            )
+            .into(),
+            border: border::rounded(tokens.dims.scrollbar_thumb_width / 2.0),
+        },
+    };
+
+    scrollable::Style {
+        vertical_rail: rail,
+        horizontal_rail: rail,
+        ..scrollbar(tokens, status)
     }
 }
 
@@ -868,6 +923,17 @@ mod tests {
         assert_eq!(open.border.radius.top_left, tokens.radii.base);
         assert_eq!(closed.border.width, 0.0);
         assert_eq!(closed.border.radius.bottom_left, tokens.radii.base);
+    }
+
+    #[test]
+    fn a_disabled_action_button_drops_its_glow() {
+        let tokens = Tokens::dark();
+
+        let active = styles::action_button(&tokens, button::Status::Active);
+        let disabled = styles::action_button(&tokens, button::Status::Disabled);
+
+        assert_eq!(active.shadow.blur_radius, 5.0);
+        assert_eq!(disabled.shadow, super::Shadow::default());
     }
 
     #[test]

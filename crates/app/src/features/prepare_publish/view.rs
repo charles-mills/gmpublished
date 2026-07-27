@@ -478,14 +478,15 @@ fn submit_button<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message>
         .into()
     };
 
+    let can_submit = state.can_submit();
     let submit = button(container(content).center_x(Length::Fill))
-        .on_press_maybe(state.can_submit().then_some(Message::SubmitRequested))
+        .on_press_maybe(can_submit.then_some(Message::SubmitRequested))
         .padding(tokens.spacing.pad_control)
         .width(Length::Fill)
         .style(move |_, status| theme::styles::action_button(&tokens, status));
 
-    match state.update_warning(i18n) {
-        Some(warning) => tooltip_widget::below(submit, warning, &tokens, TOOLTIP_MAX_WIDTH),
+    match state.submit_tooltip(i18n) {
+        Some(label) => tooltip_widget::below(submit, label, &tokens, TOOLTIP_MAX_WIDTH),
         None => submit.into(),
     }
 }
