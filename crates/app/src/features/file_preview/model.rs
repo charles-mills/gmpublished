@@ -214,9 +214,7 @@ pub struct ParticleMaterialSlot {
 /// "particle/foo"); loader keys and renderer lookups share this form.
 #[cfg(feature = "asset-studio")]
 pub fn normalize_particle_material(name: &str) -> String {
-    let name = name.trim().to_ascii_lowercase().replace('\\', "/");
-    let name = name.strip_prefix("materials/").unwrap_or(&name);
-    name.strip_suffix(".vmt").unwrap_or(name).to_owned()
+    gmpublished_backend::particles::normalize_material_name(name)
 }
 
 #[cfg(all(test, feature = "asset-studio"))]

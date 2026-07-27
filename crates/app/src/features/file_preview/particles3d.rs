@@ -17,7 +17,7 @@ use iced::{Event, Point, Rectangle};
 use gmpublished_backend::particles::{MAX_CONTROL_POINTS, ParticleEngine, RendererKind};
 
 use super::Message;
-use super::model::{ParticlePreview, normalize_particle_material};
+use super::model::ParticlePreview;
 use super::state::OrbitPose;
 use super::viewer3d::{look_at, mat_mul, perspective};
 use crate::bridge::materials::ResolvedTexture;
@@ -393,19 +393,18 @@ impl shader::Program<Message> for ParticleViewer {
         if let Some(engine) = state.engine.as_ref() {
             let mut translucent: Vec<(Option<usize>, Vec<GpuInstance>)> = Vec::new();
             let mut additive: Vec<(Option<usize>, Vec<GpuInstance>)> = Vec::new();
-            for render in engine.render_instances() {
-                if render.particles.is_empty() {
-                    continue;
+            engine.visit_render_instances(|system, particles| {
+                if particles.is_empty() {
+                    return;
                 }
-                let material_key = normalize_particle_material(render.system.material());
                 let slot = self
                     .preview
                     .materials
                     .iter()
-                    .position(|slot| slot.name == material_key);
+                    .position(|slot| slot.name == system.material());
                 let is_additive = slot.is_some_and(|slot| self.preview.materials[slot].additive);
                 let sheet = slot.and_then(|slot| self.preview.materials[slot].sheet.as_deref());
-                let mut list = build_instances(&render, &frame, sheet);
+                let mut list = build_instances(system, particles, &frame, sheet);
                 if !is_additive {
                     // Painter's order: no depth buffer, so translucents sort
                     // back-to-front along the view direction.
@@ -418,7 +417,7 @@ impl shader::Program<Message> for ParticleViewer {
                 } else {
                     additive.push((slot, list));
                 }
-            }
+            });
             for (slot, list) in translucent {
                 push_batch(&mut instances, &mut batches, slot, false, list);
             }
@@ -480,23 +479,24 @@ impl shader::Program<Message> for ParticleViewer {
 }
 
 fn build_instances(
-    render: &gmpublished_backend::particles::InstanceRender<'_>,
+    system: &gmpublished_backend::particles::CompiledSystem,
+    particles: gmpublished_backend::particles::RenderParticles<'_>,
     frame: &CameraFrame,
     sheet: Option<&vformats::vtf::SpriteSheet>,
 ) -> Vec<GpuInstance> {
-    let renderer = render.system.renderer();
-    let mut list = Vec::with_capacity(render.particles.len());
+    let renderer = system.renderer();
+    let mut list = Vec::with_capacity(particles.len());
     match renderer.kind {
         RendererKind::AnimatedSprites => {
-            for particle in &render.particles {
+            for particle in particles {
                 list.push(GpuInstance::billboard(
-                    particle,
-                    sheet_uv_rect(sheet, renderer, particle),
+                    &particle,
+                    sheet_uv_rect(sheet, renderer, &particle),
                 ));
             }
         }
         RendererKind::SpriteTrail => {
-            for particle in &render.particles {
+            for particle in particles {
                 let speed = v_length(particle.velocity);
                 let length = (speed * particle.trail_length)
                     .clamp(renderer.trail_min_length, renderer.trail_max_length)
@@ -511,17 +511,17 @@ fn build_instances(
                 list.push(GpuInstance {
                     position_rotation: [center[0], center[1], center[2], 0.0],
                     axis_mode: [axis[0], axis[1], axis[2], 1.0],
-                    color: GpuInstance::linear_color(particle),
+                    color: GpuInstance::linear_color(&particle),
                     size: [particle.radius, half_length, 0.0, 0.0],
-                    uv_rect: sheet_uv_rect(sheet, renderer, particle),
+                    uv_rect: sheet_uv_rect(sheet, renderer, &particle),
                 });
             }
         }
         RendererKind::Rope => {
-            let mut ordered: Vec<_> = render.particles.iter().collect();
+            let mut ordered = particles.collect::<Vec<_>>();
             ordered.sort_by_key(|particle| particle.spawn_index);
             for pair in ordered.windows(2) {
-                let (a, b) = (pair[0], pair[1]);
+                let (a, b) = (&pair[0], &pair[1]);
                 let span = v_sub(b.position, a.position);
                 let length = v_length(span);
                 if length < 1e-3 {

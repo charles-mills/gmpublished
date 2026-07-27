@@ -19,6 +19,37 @@ mod compiler;
 pub use compiler::{CompiledSystem, RendererInfo, RendererKind};
 use compiler::{Emitter, Force, Initializer, Operator, ScalarField, VectorField, compile_system};
 
+/// Canonical material identity shared by particle loading, compilation, and
+/// per-frame rendering.
+pub fn normalize_material_name(name: &str) -> String {
+    let name = name.trim();
+    let bytes = name.as_bytes();
+    let start = if bytes.len() >= 10
+        && bytes[..9].eq_ignore_ascii_case(b"materials")
+        && matches!(bytes[9], b'/' | b'\\')
+    {
+        10
+    } else {
+        0
+    };
+    let end = if bytes.len().saturating_sub(start) >= 4
+        && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".vmt")
+    {
+        bytes.len() - 4
+    } else {
+        bytes.len()
+    };
+    let mut normalized = bytes[start..end].to_vec();
+    for byte in &mut normalized {
+        if *byte == b'\\' {
+            *byte = b'/';
+        } else {
+            byte.make_ascii_lowercase();
+        }
+    }
+    String::from_utf8(normalized).expect("normalizing valid UTF-8 preserves validity")
+}
+
 pub const MAX_CONTROL_POINTS: usize = 8;
 /// Hard ceiling across all instances so a hostile file cannot OOM the app.
 pub const MAX_TOTAL_PARTICLES: usize = 100_000;
@@ -337,6 +368,43 @@ pub struct RenderParticle {
 pub struct InstanceRender<'a> {
     pub system: &'a CompiledSystem,
     pub particles: Vec<RenderParticle>,
+}
+
+/// Allocation-free iterator over one simulation instance's live particles.
+pub struct RenderParticles<'a> {
+    particles: &'a ParticleSet,
+    local_time: f32,
+    index: usize,
+}
+
+impl RenderParticles<'_> {
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl ExactSizeIterator for RenderParticles<'_> {
+    fn len(&self) -> usize {
+        self.particles.len().saturating_sub(self.index)
+    }
+}
+
+impl Iterator for RenderParticles<'_> {
+    type Item = RenderParticle;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = self.index;
+        if index >= self.particles.len() {
+            return None;
+        }
+        self.index += 1;
+        Some(render_particle(self.particles, index, self.local_time))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
 }
 
 pub struct ParticleEngine {
@@ -1462,33 +1530,50 @@ impl ParticleEngine {
 
     /// Snapshot of everything a renderer needs, instance by instance.
     pub fn render_instances(&self) -> Vec<InstanceRender<'_>> {
-        self.instances
-            .iter()
-            .map(|instance| {
-                let local_time = self.time - instance.start_time;
-                let particles = &instance.particles;
-                let list = (0..particles.len())
-                    .map(|index| RenderParticle {
-                        position: particles.position[index],
-                        velocity: particles.velocity[index],
-                        radius: particles.radius[index],
-                        rotation: particles.rotation[index],
-                        color: particles.color[index],
-                        alpha: particles.alpha[index].clamp(0.0, 1.0),
-                        sequence: particles.sequence[index],
-                        trail_length: particles.trail_length[index],
-                        mirrored: particles.mirrored[index],
-                        spawn_index: particles.spawn_index[index],
-                        age: (local_time - particles.creation_time[index]).max(0.0),
-                        lifetime: particles.lifetime[index],
-                    })
-                    .collect();
-                InstanceRender {
-                    system: &self.systems[instance.system],
-                    particles: list,
-                }
-            })
-            .collect()
+        let mut renders = Vec::with_capacity(self.instances.len());
+        self.visit_render_instances(|system, particles| {
+            renders.push(InstanceRender {
+                system,
+                particles: particles.collect(),
+            });
+        });
+        renders
+    }
+
+    /// Visits renderer views without allocating an intermediate particle
+    /// snapshot. Consumers that immediately project into GPU records can write
+    /// those records directly.
+    pub fn visit_render_instances<'a>(
+        &'a self,
+        mut visit: impl FnMut(&'a CompiledSystem, RenderParticles<'a>),
+    ) {
+        for instance in &self.instances {
+            visit(
+                &self.systems[instance.system],
+                RenderParticles {
+                    particles: &instance.particles,
+                    local_time: self.time - instance.start_time,
+                    index: 0,
+                },
+            );
+        }
+    }
+}
+
+fn render_particle(particles: &ParticleSet, index: usize, local_time: f32) -> RenderParticle {
+    RenderParticle {
+        position: particles.position[index],
+        velocity: particles.velocity[index],
+        radius: particles.radius[index],
+        rotation: particles.rotation[index],
+        color: particles.color[index],
+        alpha: particles.alpha[index].clamp(0.0, 1.0),
+        sequence: particles.sequence[index],
+        trail_length: particles.trail_length[index],
+        mirrored: particles.mirrored[index],
+        spawn_index: particles.spawn_index[index],
+        age: (local_time - particles.creation_time[index]).max(0.0),
+        lifetime: particles.lifetime[index],
     }
 }
 

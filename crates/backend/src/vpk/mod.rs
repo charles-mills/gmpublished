@@ -63,7 +63,6 @@ impl crate::error_key::HasErrorKey for VpkError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpkEntry {
-    pub path: String,
     pub size: u64,
     pub crc: u32,
 
@@ -126,7 +125,6 @@ impl VpkFile {
                 (
                     entry.path.clone(),
                     VpkEntry {
-                        path: entry.path.clone(),
                         size: entry.size(),
                         crc: entry.crc32,
                         location: entry.location,
@@ -165,22 +163,18 @@ impl VpkFile {
             } => (self.open_sibling_archive(archive)?, offset, len),
         };
         let external_len = usize::try_from(len).map_err(|_| VpkError::FormatError)?;
-        let mut bytes = Vec::with_capacity(
-            entry
-                .preload
-                .len()
-                .checked_add(external_len)
-                .ok_or(VpkError::FormatError)?,
-        );
-        bytes.extend_from_slice(&entry.preload);
+        let preload_len = entry.preload.len();
+        let total_len = preload_len
+            .checked_add(external_len)
+            .ok_or(VpkError::FormatError)?;
+        let mut bytes = vec![0_u8; total_len];
+        bytes[..preload_len].copy_from_slice(&entry.preload);
         if external_len == 0 {
             return Ok(bytes);
         }
 
         archive.seek(SeekFrom::Start(offset))?;
-        let mut external = vec![0_u8; external_len];
-        archive.read_exact(&mut external)?;
-        bytes.extend_from_slice(&external);
+        archive.read_exact(&mut bytes[preload_len..])?;
 
         Ok(bytes)
     }
@@ -206,9 +200,7 @@ impl VpkFile {
 pub fn discover_game_vpks(gmod_dir: &Path) -> Vec<PathBuf> {
     let mut vpks = Vec::new();
     discover_game_vpks_inner(gmod_dir, 0, &mut vpks);
-    vpks.sort_unstable_by(|left, right| {
-        vpk_mount_sort_key(gmod_dir, left).cmp(&vpk_mount_sort_key(gmod_dir, right))
-    });
+    vpks.sort_by_cached_key(|path| vpk_mount_sort_key(gmod_dir, path));
     vpks
 }
 

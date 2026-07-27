@@ -76,20 +76,21 @@ impl ThumbnailKey {
         )
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn for_url(url: impl Into<String>, max_edge: u32) -> Self {
         Self::for_url_with_mode(url, max_edge, ThumbnailMode::Animated)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn for_url_with_mode(url: impl Into<String>, max_edge: u32, mode: ThumbnailMode) -> Self {
-        Self::build(
-            ThumbnailSourceKey::Url {
-                url: Arc::from(normalize_url(url).as_str()),
-            },
-            max_edge,
-            mode,
-        )
+        Self::for_normalized_url(Arc::from(normalize_url(url)), max_edge, mode)
+    }
+
+    #[must_use]
+    pub(crate) fn for_normalized_url(url: Arc<str>, max_edge: u32, mode: ThumbnailMode) -> Self {
+        Self::build(ThumbnailSourceKey::Url { url }, max_edge, mode)
     }
 
     /// The one place the cached hash is produced, so it cannot drift out of
@@ -194,7 +195,17 @@ pub fn source_file_name(url: &str) -> String {
 /// part of the fetch boundary, not cache identity.
 #[must_use]
 pub fn normalize_url(url: impl Into<String>) -> String {
-    url.into().trim().to_owned()
+    let mut url = url.into();
+    let (start, end) = {
+        let trimmed = url.trim();
+        let start = trimmed.as_ptr() as usize - url.as_ptr() as usize;
+        (start, start + trimmed.len())
+    };
+    url.truncate(end);
+    if start != 0 {
+        url.drain(..start);
+    }
+    url
 }
 
 fn stable_cache_hash(key: &ThumbnailKey) -> u64 {
@@ -304,8 +315,10 @@ mod tests {
         let trimmed = ThumbnailKey::for_url("https://example.invalid/preview.jpg", 128);
         let padded = ThumbnailKey::for_url(" https://example.invalid/preview.jpg \n", 128);
         let interior = normalize_url(" https://example.invalid/a path/preview.jpg ");
+        let unicode_padded = normalize_url("\u{2003}https://example.invalid/unicode.jpg\u{2002}");
 
         assert_eq!(trimmed, padded);
         assert_eq!(interior, "https://example.invalid/a path/preview.jpg");
+        assert_eq!(unicode_padded, "https://example.invalid/unicode.jpg");
     }
 }

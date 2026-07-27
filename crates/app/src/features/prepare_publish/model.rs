@@ -719,8 +719,8 @@ mod tests {
 
         let browser = file_browser::State::from_entries(verified.entries.iter().cloned());
         assert_eq!(verified.total_size, 14);
-        assert_eq!(browser.rows()[0].shortcut_prefix.as_deref(), Some("lua/"));
-        assert_eq!(browser.rows()[0].display_name, "autorun");
+        assert_eq!(browser.rows()[0].shortcut_prefix(), Some("lua/"));
+        assert_eq!(browser.rows()[0].display_name(), "autorun");
     }
 
     #[test]

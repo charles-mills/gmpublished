@@ -10,6 +10,9 @@ use super::model::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     ModalOpenRequested,
+    /// The browser snapshot was rebuilt and the model's scroll offset reset;
+    /// the rows scrollable widget must be snapped back to the top with it.
+    BrowserScrollResetRequested,
     ThumbnailDemandsChanged,
     ContentPickerRequested,
     IconPickerRequested,

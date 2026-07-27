@@ -333,6 +333,9 @@ pub struct State {
     path_error: Option<UiError>,
     announce_path_success: bool,
     browser: Option<FileBrowserState>,
+    browser_snapshot: BrowserSnapshot,
+    browser_scroll_offset: f32,
+    browser_scroll_reset_pending: bool,
     browser_select_hover: BrowserSelectHover,
     thumbnail_generation: u64,
     seeded_icon_still: Option<iced::widget::image::Handle>,
@@ -355,7 +358,7 @@ pub struct State {
     spinner_now: Option<Instant>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BrowserSnapshot {
     rows: Vec<FileBrowserRow>,
     header_path: String,
@@ -386,6 +389,9 @@ impl Default for State {
             path_error: None,
             announce_path_success: false,
             browser: None,
+            browser_snapshot: BrowserSnapshot::default(),
+            browser_scroll_offset: 0.0,
+            browser_scroll_reset_pending: false,
             browser_select_hover: BrowserSelectHover::default(),
             thumbnail_generation: 0,
             seeded_icon_still: None,
@@ -472,13 +478,36 @@ impl State {
         self.request_generation == generation
     }
 
-    pub(crate) fn browser_snapshot(&self) -> BrowserSnapshot {
-        BrowserSnapshot::from_browser(
-            self.browser.as_ref(),
-            self.verified_addon_path
-                .as_ref()
-                .map(|verified| verified.display_path.as_str()),
+    pub(crate) const fn browser_snapshot(&self) -> &BrowserSnapshot {
+        &self.browser_snapshot
+    }
+
+    /// The viewport height comes from the view's `responsive` wrapper at
+    /// layout time, so initial renders and window resizes always window
+    /// against the real pane height.
+    pub(crate) fn browser_virtual_rows(
+        &self,
+        viewport_height: f32,
+    ) -> crate::widgets::file_browser::VirtualRows {
+        crate::widgets::file_browser::virtual_rows(
+            self.browser_snapshot.rows.len(),
+            self.browser_scroll_offset,
+            viewport_height,
         )
+    }
+
+    pub(super) fn set_browser_scroll_offset(&mut self, offset: f32) {
+        self.browser_scroll_offset = if offset.is_finite() {
+            offset.max(0.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// True once per snapshot refresh: the widget's own scroll offset must be
+    /// snapped back to the top to match the model's reset.
+    pub(super) fn take_browser_scroll_reset(&mut self) -> bool {
+        std::mem::take(&mut self.browser_scroll_reset_pending)
     }
 
     pub(crate) fn icon_handle(&self) -> Option<&iced::widget::image::Handle> {
@@ -948,7 +977,7 @@ impl State {
             display_name: entry
                 .path
                 .rsplit_once('/')
-                .map_or(entry.path.as_str(), |(_, name)| name)
+                .map_or(entry.path, |(_, name)| name)
                 .to_owned(),
             size_bytes: entry.size,
             crc32: entry.crc32,
@@ -974,6 +1003,7 @@ impl State {
             self.path_pending = false;
             self.path_error = None;
             self.browser = None;
+            self.refresh_browser_snapshot();
             self.clear_preview_source();
         }
     }
@@ -1045,6 +1075,7 @@ impl State {
         self.path_error = None;
         self.announce_path_success = false;
         self.browser = None;
+        self.refresh_browser_snapshot();
         self.clear_preview_source();
 
         if addon_path.is_empty() {
@@ -1094,6 +1125,7 @@ impl State {
                 self.clear_preview_source();
             }
         }
+        self.refresh_browser_snapshot();
         true
     }
 
@@ -1128,6 +1160,7 @@ impl State {
                 }
             }
         }
+        self.refresh_browser_snapshot();
         true
     }
 
@@ -1195,13 +1228,33 @@ impl State {
     }
 
     pub(super) fn open_directory(&mut self, path: &str) -> bool {
-        self.browser
+        let changed = self
+            .browser
             .as_mut()
-            .is_some_and(|browser| browser.open_directory(path))
+            .is_some_and(|browser| browser.open_directory(path));
+        if changed {
+            self.refresh_browser_snapshot();
+        }
+        changed
     }
 
     pub(super) fn go_up(&mut self) -> bool {
-        self.browser.as_mut().is_some_and(FileBrowserState::go_up)
+        let changed = self.browser.as_mut().is_some_and(FileBrowserState::go_up);
+        if changed {
+            self.refresh_browser_snapshot();
+        }
+        changed
+    }
+
+    fn refresh_browser_snapshot(&mut self) {
+        self.browser_scroll_offset = 0.0;
+        self.browser_scroll_reset_pending = true;
+        self.browser_snapshot = BrowserSnapshot::from_browser(
+            self.browser.as_ref(),
+            self.verified_addon_path
+                .as_ref()
+                .map(|verified| verified.display_path.as_str()),
+        );
     }
 
     pub(super) fn edit_title(&mut self, value: String) {

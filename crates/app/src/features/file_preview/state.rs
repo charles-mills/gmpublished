@@ -241,11 +241,11 @@ impl State {
         Some(PreviewRequest {
             request_id: 0,
             archive: std::sync::Arc::clone(archive),
-            entry_path: entry.path.clone(),
+            entry_path: entry.path.to_owned(),
             display_name: entry
                 .path
                 .rsplit_once('/')
-                .map_or(entry.path.as_str(), |(_, name)| name)
+                .map_or(entry.path, |(_, name)| name)
                 .to_owned(),
             size_bytes: entry.size,
             crc32: entry.crc32,

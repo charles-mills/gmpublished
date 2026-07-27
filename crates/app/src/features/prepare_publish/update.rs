@@ -4,7 +4,22 @@ use crate::bridge::domain::WORKSHOP_LEGAL_URL;
 
 use super::{Effect, Message, State};
 
+pub fn browser_rows_scrollable_id() -> iced::widget::Id {
+    iced::widget::Id::new("prepare-publish-browser-rows")
+}
+
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    let mut effects = apply(state, message);
+    // Every snapshot refresh resets the model's scroll offset; the widget
+    // keeps its own offset, so it has to be snapped in the same update or the
+    // virtualized rows and the viewport drift apart.
+    if state.take_browser_scroll_reset() {
+        effects.push(Effect::BrowserScrollResetRequested);
+    }
+    effects
+}
+
+fn apply(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::OpenRequested {
             target,
@@ -136,6 +151,10 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::BrowserSelectHoverChanged(hovered) => {
             state.set_browser_select_hover(hovered, Instant::now());
+            Vec::new()
+        }
+        Message::BrowserScrolled { offset } => {
+            state.set_browser_scroll_offset(offset);
             Vec::new()
         }
         Message::DirectoryOpened(path) => {

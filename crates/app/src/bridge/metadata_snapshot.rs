@@ -9,6 +9,7 @@
 use std::{
     collections::HashMap,
     fs, io,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -161,10 +162,14 @@ pub enum MetadataSnapshotWriteError {
     },
 }
 
-pub fn write(
-    path: &Path,
+/// Detached, deterministically ordered snapshot. Building this while holding
+/// the live cache lock copies each metadata value exactly once; serialization
+/// and disk I/O then happen after the lock is released.
+pub struct PreparedMetadataSnapshot(SnapshotFile);
+
+pub fn prepare(
     entries: &HashMap<PublishedFileId, CachedWorkshopMetadata>,
-) -> Result<(), MetadataSnapshotWriteError> {
+) -> PreparedMetadataSnapshot {
     let mut snapshot_entries = entries
         .values()
         .map(|cached| SnapshotEntry {
@@ -189,14 +194,36 @@ pub fn write(
         version: SNAPSHOT_VERSION,
         entries: snapshot_entries,
     };
+    PreparedMetadataSnapshot(snapshot)
+}
 
-    let bytes = serde_json::to_vec(&snapshot).map_err(MetadataSnapshotWriteError::Serialize)?;
-    crate::util::fs::atomic_write(path, &bytes).map_err(|source| {
-        MetadataSnapshotWriteError::Write {
-            path: path.to_path_buf(),
-            source,
-        }
-    })
+pub fn write_prepared(
+    path: &Path,
+    snapshot: &PreparedMetadataSnapshot,
+) -> Result<(), MetadataSnapshotWriteError> {
+    let write_error = |source| MetadataSnapshotWriteError::Write {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut temp = crate::util::fs::atomic_tempfile(path).map_err(write_error)?;
+    {
+        let mut writer = BufWriter::with_capacity(
+            crate::util::fs::ATOMIC_WRITE_BUFFER_SIZE,
+            temp.as_file_mut(),
+        );
+        serde_json::to_writer(&mut writer, &snapshot.0)
+            .map_err(MetadataSnapshotWriteError::Serialize)?;
+        writer.flush().map_err(write_error)?;
+    }
+    crate::util::fs::persist_atomic(temp, path).map_err(write_error)
+}
+
+#[cfg(test)]
+fn write(
+    path: &Path,
+    entries: &HashMap<PublishedFileId, CachedWorkshopMetadata>,
+) -> Result<(), MetadataSnapshotWriteError> {
+    write_prepared(path, &prepare(entries))
 }
 
 #[cfg(test)]

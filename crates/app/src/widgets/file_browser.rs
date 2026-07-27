@@ -1,4 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Range,
+    sync::Arc,
+};
 
 use iced::widget::{button, container, image, row, text};
 use iced::{Center, Color, Element, Length};
@@ -14,6 +18,41 @@ const SILKICON_SIZE: f32 = 16.0;
 const TYPE_COLUMN_MAX_WIDTH: f32 = 170.0;
 const SIZE_COLUMN_WIDTH: f32 = 78.0;
 const TOOLTIP_MAX_WIDTH: f32 = 320.0;
+pub const ROW_HEIGHT: f32 = 32.0;
+const ROW_OVERSCAN: usize = 4;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VirtualRows {
+    pub(crate) range: Range<usize>,
+    pub(crate) top_padding: f32,
+    pub(crate) bottom_padding: f32,
+}
+
+pub fn virtual_rows(row_count: usize, offset: f32, viewport_height: f32) -> VirtualRows {
+    let viewport_height = if viewport_height.is_finite() {
+        viewport_height.max(0.0)
+    } else {
+        0.0
+    };
+    // The scrollable clamps its own offset to the content extent (e.g. after
+    // the window grows); mirror that here so a stale stored offset can never
+    // hide the top rows behind the spacer.
+    let max_offset = (row_count as f32 * ROW_HEIGHT - viewport_height).max(0.0);
+    let offset = if offset.is_finite() {
+        offset.clamp(0.0, max_offset)
+    } else {
+        0.0
+    };
+    let visible_start = (offset / ROW_HEIGHT).floor() as usize;
+    let visible_end = ((offset + viewport_height) / ROW_HEIGHT).ceil() as usize;
+    let start = visible_start.saturating_sub(ROW_OVERSCAN).min(row_count);
+    let end = visible_end.saturating_add(ROW_OVERSCAN).min(row_count);
+    VirtualRows {
+        range: start..end,
+        top_padding: start as f32 * ROW_HEIGHT,
+        bottom_padding: row_count.saturating_sub(end) as f32 * ROW_HEIGHT,
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
@@ -35,14 +74,30 @@ pub enum RowKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Row {
-    pub(crate) id: String,
     pub(crate) kind: RowKind,
-    /// Dimmed collapsed-chain prefix (e.g. `materials/models/`), if any.
-    pub(crate) shortcut_prefix: Option<String>,
-    pub(crate) display_name: String,
-    pub(crate) archive_path: String,
-    pub(crate) current_path: String,
+    path: Arc<String>,
+    shortcut_prefix_end: Option<usize>,
+    display_name_start: usize,
     pub(crate) size_bytes: u64,
+}
+
+impl Row {
+    pub(crate) fn shortcut_prefix(&self) -> Option<&str> {
+        self.shortcut_prefix_end.map(|end| &self.path[..end])
+    }
+
+    pub(crate) fn display_name(&self) -> &str {
+        &self.path[self.display_name_start..]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &str {
+        self.path.as_str()
+    }
+
+    pub(crate) fn shared_path(&self) -> Arc<String> {
+        Arc::clone(&self.path)
+    }
 }
 
 /// Shared row renderer for archive/folder browsers: silkicon, name (with the
@@ -50,7 +105,7 @@ pub struct Row {
 /// column. The host modal supplies the activation message — directory
 /// navigation or file preview/extraction — and `None` renders the row inert.
 pub fn row_view<'a, Message: Clone + 'a>(
-    row_data: Row,
+    row_data: &'a Row,
     activation: Option<Message>,
     ctx: ViewCtx<'a>,
 ) -> Element<'a, Message> {
@@ -60,14 +115,14 @@ pub fn row_view<'a, Message: Clone + 'a>(
     let content: Element<'a, Message> = match row_data.kind {
         RowKind::Directory => {
             let mut name = row![].spacing(0.0);
-            if let Some(prefix) = row_data.shortcut_prefix {
+            if let Some(prefix) = row_data.shortcut_prefix() {
                 name = name.push(
                     text(prefix)
                         .size(tokens.typography.body_sm)
                         .color(Color::from(tokens.colors.browser_shortcut_dim)),
                 );
             }
-            name = name.push(text(row_data.display_name).size(tokens.typography.body_sm));
+            name = name.push(text(row_data.display_name()).size(tokens.typography.body_sm));
 
             row![
                 silk_image(SilkIcon::Folder, i18n.tr("file-type-folder"), &tokens),
@@ -78,15 +133,12 @@ pub fn row_view<'a, Message: Clone + 'a>(
             .into()
         }
         RowKind::File => {
-            let info = file_type_info(&row_data.display_name);
-            let type_label = i18n.trn(
-                &format!("file-type-{}", info.type_key),
-                &[("arg0", info.extension.as_str())],
-            );
+            let info = file_type_info(row_data.display_name());
+            let type_label = i18n.trn(info.translation_key, &[("arg0", info.extension.as_ref())]);
 
             row![
                 silk_image(info.icon, type_label.clone(), &tokens),
-                text(row_data.display_name)
+                text(row_data.display_name())
                     .size(tokens.typography.body_sm)
                     .width(Length::Fill),
                 text(type_label)
@@ -111,11 +163,13 @@ pub fn row_view<'a, Message: Clone + 'a>(
             .on_press(message)
             .padding(padding)
             .width(Length::Fill)
+            .height(Length::Fixed(ROW_HEIGHT))
             .style(move |_, status| theme::styles::browser_row(&tokens, status))
             .into(),
         None => container(content)
             .padding(padding)
             .width(Length::Fill)
+            .height(Length::Fixed(ROW_HEIGHT))
             .into(),
     }
 }
@@ -278,21 +332,30 @@ impl DirNode {
     }
 
     fn insert(&mut self, entry: Entry) {
-        let file_name = entry.path.file_name().to_owned();
         let mut dir = self;
-        for child_path in entry.path.directory_chain() {
-            let component = child_path
-                .file_name()
-                .expect("directory chains never include the archive root")
-                .to_owned();
-            dir = dir
-                .dirs
-                .entry(component)
-                .or_insert_with(|| Self::child(child_path));
+        if let Some((directory, _)) = entry.path.as_str().rsplit_once('/') {
+            let mut prefix_end = 0;
+            for component in directory.split('/') {
+                prefix_end += component.len();
+                let prefix = &directory[..prefix_end];
+                if !dir.dirs.contains_key(component) {
+                    dir.dirs.insert(
+                        component.to_owned(),
+                        Self::child(
+                            ArchiveDirectoryPath::from_validated(prefix.to_owned())
+                                .expect("validated entry prefixes remain valid directory paths"),
+                        ),
+                    );
+                }
+                dir = dir
+                    .dirs
+                    .get_mut(component)
+                    .expect("directory was present or inserted above");
+                prefix_end += 1; // separator before the next component
+            }
         }
 
-        dir.files
-            .push(FileNode::new(entry.path, file_name, entry.size_bytes));
+        dir.files.push(FileNode::new(entry.path, entry.size_bytes));
     }
 
     fn sort_files_recursive(&mut self) {
@@ -312,17 +375,15 @@ struct DirShortcut {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FileNode {
     path: ArchiveEntryPath,
-    name: String,
     sort_name: String,
     size_bytes: u64,
 }
 
 impl FileNode {
-    fn new(path: ArchiveEntryPath, name: String, size_bytes: u64) -> Self {
-        let sort_name = name.to_ascii_lowercase();
+    fn new(path: ArchiveEntryPath, size_bytes: u64) -> Self {
+        let sort_name = path.file_name().to_ascii_lowercase();
         Self {
             path,
-            name,
             sort_name,
             size_bytes,
         }
@@ -332,7 +393,7 @@ impl FileNode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DirIndexEntry {
     parent_path: Option<ArchiveDirectoryPath>,
-    route: Vec<String>,
+    route: Box<str>,
 }
 
 fn collapse_shortcuts(mut node: DirNode, path: &ArchiveDirectoryPath) -> DirNode {
@@ -375,42 +436,41 @@ fn rows_for_dir(dir: &DirNode) -> Vec<Row> {
 }
 
 fn directory_row((name, dir): (&String, &DirNode)) -> Row {
-    let (shortcut_prefix, display_name) = dir.shortcut.as_ref().map_or_else(
-        || (None, name.clone()),
+    let path = Arc::new(dir.path.to_string());
+    let (shortcut_prefix_end, display_name_start) = dir.shortcut.as_ref().map_or_else(
+        || (None, path.len().saturating_sub(name.len())),
         |shortcut| {
             (
-                Some(format!("{}/", shortcut.prefix.as_str())),
-                shortcut.leaf.clone(),
+                Some(shortcut.prefix.as_str().len().saturating_add(1)),
+                path.len().saturating_sub(shortcut.leaf.len()),
             )
         },
     );
 
     Row {
-        id: dir.path.to_string(),
         kind: RowKind::Directory,
-        shortcut_prefix,
-        display_name,
-        archive_path: dir.path.to_string(),
-        current_path: dir.path.to_string(),
+        path,
+        shortcut_prefix_end,
+        display_name_start,
         size_bytes: 0,
     }
 }
 
 fn file_row(file: &FileNode) -> Row {
+    let path = file.path.shared_string();
+    let display_name_start = path.len().saturating_sub(file.path.file_name().len());
     Row {
-        id: file.path.to_string(),
         kind: RowKind::File,
-        shortcut_prefix: None,
-        display_name: file.name.clone(),
-        archive_path: file.path.to_string(),
-        current_path: file.path.parent().into_string(),
+        path,
+        shortcut_prefix_end: None,
+        display_name_start,
         size_bytes: file.size_bytes,
     }
 }
 
 fn build_dir_index(root: &DirNode) -> HashMap<ArchiveDirectoryPath, DirIndexEntry> {
     let mut index = HashMap::new();
-    index_dir_recursive(&mut index, root, None, &[]);
+    index_dir_recursive(&mut index, root, None, &mut String::new());
     index
 }
 
@@ -418,26 +478,30 @@ fn index_dir_recursive(
     index: &mut HashMap<ArchiveDirectoryPath, DirIndexEntry>,
     dir: &DirNode,
     parent_path: Option<&ArchiveDirectoryPath>,
-    route: &[String],
+    route: &mut String,
 ) {
     index.insert(
         dir.path.clone(),
         DirIndexEntry {
             parent_path: parent_path.cloned(),
-            route: route.to_vec(),
+            route: route.clone().into_boxed_str(),
         },
     );
 
     for (name, child) in &dir.dirs {
-        let mut child_route = route.to_vec();
-        child_route.push(name.clone());
-        index_dir_recursive(index, child, Some(&dir.path), &child_route);
+        let parent_route_len = route.len();
+        if !route.is_empty() {
+            route.push('/');
+        }
+        route.push_str(name);
+        index_dir_recursive(index, child, Some(&dir.path), route);
+        route.truncate(parent_route_len);
     }
 }
 
-fn find_dir_by_route<'a>(root: &'a DirNode, route: &[String]) -> Option<&'a DirNode> {
+fn find_dir_by_route<'a>(root: &'a DirNode, route: &str) -> Option<&'a DirNode> {
     let mut dir = root;
-    for name in route {
+    for name in route.split('/').filter(|name| !name.is_empty()) {
         dir = dir.dirs.get(name)?;
     }
     Some(dir)
@@ -446,7 +510,7 @@ fn find_dir_by_route<'a>(root: &'a DirNode, route: &[String]) -> Option<&'a DirN
 fn compare_files(a: &FileNode, b: &FileNode) -> std::cmp::Ordering {
     a.sort_name
         .cmp(&b.sort_name)
-        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.path.file_name().cmp(b.path.file_name()))
         .then_with(|| a.path.cmp(&b.path))
 }
 
@@ -474,6 +538,33 @@ mod tests {
     }
 
     #[test]
+    fn virtual_rows_cover_viewport_with_overscan_and_exact_spacers() {
+        let window = virtual_rows(100, ROW_HEIGHT * 40.0, ROW_HEIGHT * 10.0);
+        assert_eq!(window.range, 36..54);
+        assert_eq!(window.top_padding, ROW_HEIGHT * 36.0);
+        assert_eq!(window.bottom_padding, ROW_HEIGHT * 46.0);
+        assert_eq!(
+            window.top_padding + window.range.len() as f32 * ROW_HEIGHT + window.bottom_padding,
+            ROW_HEIGHT * 100.0
+        );
+    }
+
+    #[test]
+    fn virtual_rows_clamp_a_stale_offset_to_the_content_extent() {
+        // A remembered offset can exceed the content extent after the window
+        // grows or the listing shrinks; the top rows must stay visible.
+        let window = virtual_rows(10, ROW_HEIGHT * 300.0, ROW_HEIGHT * 20.0);
+        assert_eq!(window.range, 0..10);
+        assert_eq!(window.top_padding, 0.0);
+        assert_eq!(window.bottom_padding, 0.0);
+
+        let window = virtual_rows(100, ROW_HEIGHT * 300.0, ROW_HEIGHT * 10.0);
+        assert_eq!(window.range, 86..100);
+        assert_eq!(window.top_padding, ROW_HEIGHT * 86.0);
+        assert_eq!(window.bottom_padding, 0.0);
+    }
+
+    #[test]
     fn builds_tree_from_flat_entries() {
         let browser = State::from_entries([
             entry("lua/autorun/init.lua", 100),
@@ -481,10 +572,10 @@ mod tests {
         ]);
 
         let rows = browser.rows();
-        assert_eq!(rows[0].shortcut_prefix.as_deref(), Some("lua/"));
-        assert_eq!(rows[0].display_name, "autorun");
-        assert_eq!(rows[1].shortcut_prefix, None);
-        assert_eq!(rows[1].display_name, "materials");
+        assert_eq!(rows[0].shortcut_prefix(), Some("lua/"));
+        assert_eq!(rows[0].display_name(), "autorun");
+        assert_eq!(rows[1].shortcut_prefix(), None);
+        assert_eq!(rows[1].display_name(), "materials");
         assert_eq!(browser.footer_total_files(), 2);
         assert_eq!(browser.footer_total_size_bytes(), 300);
     }
@@ -494,11 +585,11 @@ mod tests {
         let mut browser = State::from_entries([entry("lua/autorun/init.lua", 100)]);
 
         assert!(browser.open_directory("lua/autorun"));
-        assert_eq!(browser.rows()[0].display_name, "init.lua");
+        assert_eq!(browser.rows()[0].display_name(), "init.lua");
         assert!(browser.can_go_up());
 
         assert!(browser.go_up());
-        assert_eq!(browser.rows()[0].display_name, "autorun");
+        assert_eq!(browser.rows()[0].display_name(), "autorun");
     }
 
     #[test]
@@ -507,13 +598,10 @@ mod tests {
 
         let rows = browser.rows();
         assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].shortcut_prefix.as_deref(),
-            Some("materials/models/")
-        );
-        assert_eq!(rows[0].display_name, "props");
+        assert_eq!(rows[0].shortcut_prefix(), Some("materials/models/"));
+        assert_eq!(rows[0].display_name(), "props");
         // Clicking navigates to the END of the chain.
-        assert_eq!(rows[0].current_path, "materials/models/props");
+        assert_eq!(rows[0].path(), "materials/models/props");
     }
 
     #[test]
@@ -526,17 +614,14 @@ mod tests {
         // `materials` has a file, so it renders plain; the empty
         // `models` level collapses into `props`.
         let rows = browser.rows();
-        assert_eq!(rows[0].shortcut_prefix, None);
-        assert_eq!(rows[0].display_name, "materials");
+        assert_eq!(rows[0].shortcut_prefix(), None);
+        assert_eq!(rows[0].display_name(), "materials");
 
         let mut browser = browser;
         assert!(browser.open_directory("materials"));
         let rows = browser.rows();
-        assert_eq!(
-            rows[0].shortcut_prefix.as_deref(),
-            Some("materials/models/")
-        );
-        assert_eq!(rows[0].display_name, "props");
+        assert_eq!(rows[0].shortcut_prefix(), Some("materials/models/"));
+        assert_eq!(rows[0].display_name(), "props");
     }
 
     #[test]
@@ -544,7 +629,7 @@ mod tests {
         let browser = State::from_entries([entry("lua/init.lua", 5)]);
 
         let rows = browser.rows();
-        assert_eq!(rows[0].shortcut_prefix, None);
-        assert_eq!(rows[0].display_name, "lua");
+        assert_eq!(rows[0].shortcut_prefix(), None);
+        assert_eq!(rows[0].display_name(), "lua");
     }
 }

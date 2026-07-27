@@ -380,7 +380,7 @@ fn model_companion_request_redirects_to_parent_mdl_entry() {
     let redirected = model_companion_preview_request(&request).expect("companion should redirect");
 
     assert_eq!(redirected.request_id, request.request_id);
-    assert_eq!(redirected.entry_path, parent.path);
+    assert_eq!(redirected.entry_path, parent.path.as_str());
     assert_eq!(redirected.display_name, "Thing.MDL");
     assert_eq!(redirected.size_bytes, parent.size);
     assert_eq!(redirected.crc32, parent.crc32);

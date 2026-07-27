@@ -514,7 +514,7 @@ fn file_browser<'a>(state: &'a State, ctx: ViewCtx<'a>, now: Instant) -> Element
     let header: Element<'a, Message> = if browser.visible() {
         row![
             up_button(browser.can_go_up(), &tokens),
-            text(browser.header_path().to_owned())
+            text(browser.header_path())
                 .size(tokens.typography.caption_xs)
                 .width(Length::Fill),
         ]
@@ -549,7 +549,7 @@ fn file_browser<'a>(state: &'a State, ctx: ViewCtx<'a>, now: Instant) -> Element
             0.0,
         )
     } else if browser.visible() {
-        browser_rows(&browser, ctx)
+        browser_rows(state, browser, ctx)
     } else {
         mouse_area(browser_empty_state(
             assets::icons::folder_add(),
@@ -564,7 +564,7 @@ fn file_browser<'a>(state: &'a State, ctx: ViewCtx<'a>, now: Instant) -> Element
         .into()
     };
 
-    let footer = container(browser_footer(&browser, ctx))
+    let footer = container(browser_footer(browser, ctx))
         .padding([tokens.spacing.pad_xs, tokens.spacing.pad_sm])
         .width(Length::Fill)
         .style(move |_| theme::styles::browser_bar(&tokens));
@@ -607,33 +607,57 @@ fn browser_empty_state<'a>(
 }
 
 fn browser_rows<'a>(
-    browser: &super::state::BrowserSnapshot,
+    state: &'a State,
+    browser: &'a super::state::BrowserSnapshot,
     ctx: ViewCtx<'a>,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
-    let mut rows = column![].width(Length::Fill);
-    for row_data in browser.rows() {
-        rows = rows.push(file_row(row_data, ctx));
-    }
+    // `responsive` supplies the real pane height at layout time, so the
+    // virtual window is correct on first render and after resizes, not only
+    // once a scroll event has reported the viewport.
+    iced::widget::responsive(move |size| {
+        let virtual_rows = state.browser_virtual_rows(size.height);
+        let mut rows = column![].width(Length::Fill);
+        if virtual_rows.top_padding > 0.0 {
+            rows = rows.push(
+                Space::new()
+                    .height(Length::Fixed(virtual_rows.top_padding))
+                    .width(Length::Fill),
+            );
+        }
+        for row_data in &browser.rows()[virtual_rows.range.clone()] {
+            rows = rows.push(file_row(row_data, ctx));
+        }
+        if virtual_rows.bottom_padding > 0.0 {
+            rows = rows.push(
+                Space::new()
+                    .height(Length::Fixed(virtual_rows.bottom_padding))
+                    .width(Length::Fill),
+            );
+        }
 
-    scrollable(rows)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .direction(scrollable::Direction::Vertical(
-            theme::styles::vertical_scrollbar(&tokens),
-        ))
-        .style(move |_, status| theme::styles::scrollbar(&tokens, status))
-        .into()
+        scrollable(rows)
+            .id(super::update::browser_rows_scrollable_id())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .direction(scrollable::Direction::Vertical(
+                theme::styles::vertical_scrollbar(&tokens),
+            ))
+            .style(move |_, status| theme::styles::scrollbar(&tokens, status))
+            .on_scroll(|viewport| Message::BrowserScrolled {
+                offset: viewport.absolute_offset().y,
+            })
+            .into()
+    })
+    .into()
 }
 
-fn file_row<'a>(row_data: &FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+fn file_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let message = match row_data.kind {
-        FileBrowserEntryKind::Directory => {
-            Some(Message::DirectoryOpened(row_data.current_path.clone()))
-        }
-        FileBrowserEntryKind::File => file_activation_message(row_data.archive_path.clone()),
+        FileBrowserEntryKind::Directory => Some(Message::DirectoryOpened(row_data.shared_path())),
+        FileBrowserEntryKind::File => file_activation_message(row_data.shared_path()),
     };
-    file_browser::row_view(row_data.clone(), message, ctx)
+    file_browser::row_view(row_data, message, ctx)
 }
 
 #[cfg(feature = "asset-studio")]
@@ -641,12 +665,12 @@ fn file_row<'a>(row_data: &FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, 
     clippy::unnecessary_wraps,
     reason = "signature is shared with the non-asset-studio variant, which returns None"
 )]
-fn file_activation_message(path: String) -> Option<Message> {
+fn file_activation_message(path: std::sync::Arc<String>) -> Option<Message> {
     Some(Message::PreviewEntryRequested(path))
 }
 
 #[cfg(not(feature = "asset-studio"))]
-fn file_activation_message(_path: String) -> Option<Message> {
+fn file_activation_message(_path: std::sync::Arc<String>) -> Option<Message> {
     None
 }
 

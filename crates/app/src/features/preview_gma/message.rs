@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use gmpublished_backend::bbcode::SpoilerId;
 use iced::widget::pane_grid;
@@ -21,12 +21,15 @@ pub enum Message {
     ),
     AuthorFetchCompleted(u64, u64, Result<AuthorInfo, UiError>),
     AuthorLinkRequested,
-    DirectoryOpened(String),
+    BrowserScrolled {
+        offset: f32,
+    },
+    DirectoryOpened(Arc<String>),
     ExtractArchiveRequested,
     #[cfg(not(feature = "asset-studio"))]
-    ExtractEntryRequested(String),
+    ExtractEntryRequested(Arc<String>),
     #[cfg(feature = "asset-studio")]
-    PreviewEntryRequested(String),
+    PreviewEntryRequested(Arc<String>),
     #[cfg(feature = "asset-studio")]
     FilePreview(file_preview::Message),
     WorkshopLinkRequested,

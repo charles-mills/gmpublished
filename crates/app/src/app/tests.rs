@@ -2905,7 +2905,7 @@ fn installed_addon_for_library(
                 author: String::new(),
                 addon_version: 1,
             },
-            entries: Vec::new(),
+            entries: Arc::from([]),
         },
     }
 }

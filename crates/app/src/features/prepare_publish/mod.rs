@@ -17,7 +17,7 @@ pub use model::{
     run_publish_submit, verify_content_path, verify_icon_preview,
 };
 pub use state::{OpenTarget, State, UpdateTarget};
-pub use update::update;
+pub use update::{browser_rows_scrollable_id, update};
 pub use view::view;
 
 const SUBMIT_SPINNER_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);

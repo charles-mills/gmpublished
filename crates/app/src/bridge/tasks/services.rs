@@ -795,13 +795,7 @@ impl BackendServices {
     pub(crate) fn record_thumbhash(&self, url: &str, hash: &[u8]) {
         let url = url.trim();
         let mut cache = self.workshop_metadata.lock();
-        for cached in cache.values_mut() {
-            if cached.metadata.thumbhash.is_none()
-                && cached.metadata.preview_url.as_deref().map(str::trim) == Some(url)
-            {
-                cached.metadata.thumbhash = Some(Arc::from(hash));
-            }
-        }
+        record_thumbhash_in_cache(&mut cache, url, hash);
     }
 
     /// Preview-URL/ThumbHash pairs for every cached entry that has both, used to
@@ -821,8 +815,8 @@ impl BackendServices {
         let Some(path) = self.metadata_snapshot_file.as_deref() else {
             return;
         };
-        let entries = self.workshop_metadata.lock().clone();
-        if let Err(error) = metadata_snapshot::write(path, &entries) {
+        let snapshot = metadata_snapshot::prepare(&self.workshop_metadata.lock());
+        if let Err(error) = metadata_snapshot::write_prepared(path, &snapshot) {
             log::warn!(
                 "failed to write Workshop metadata snapshot {}: {error}",
                 path.display()
@@ -853,6 +847,66 @@ impl BackendServices {
         if let Some(cached) = self.workshop_metadata.lock().get_mut(&id) {
             cached.fetched_at = fetched_at;
         }
+    }
+}
+
+fn record_thumbhash_in_cache(
+    cache: &mut HashMap<PublishedFileId, CachedWorkshopMetadata>,
+    url: &str,
+    hash: &[u8],
+) {
+    if let Some(cached) = cache.values_mut().find(|cached| {
+        cached.metadata.thumbhash.is_none()
+            && cached.metadata.preview_url.as_deref().map(str::trim) == Some(url)
+    }) {
+        cached.metadata.thumbhash = Some(Arc::from(hash));
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "production/test backend constructors remain adjacent below the performance-only module"
+)]
+mod performance_tests {
+    use super::*;
+
+    #[test]
+    fn one_hash_per_shared_preview_url_is_sufficient() {
+        let mut cache = (1..=2)
+            .map(|raw_id| {
+                let id = PublishedFileId::new(raw_id).expect("nonzero fixture id");
+                (
+                    id,
+                    CachedWorkshopMetadata {
+                        metadata: WorkshopMetadata {
+                            id,
+                            title: String::new(),
+                            time_created: 0,
+                            time_updated: 0,
+                            score: 0.0,
+                            tags: Vec::new(),
+                            preview_url: Some("https://example.test/shared.jpg".to_owned()),
+                            subscriptions: 0,
+                            full_description: None,
+                            owner_steamid: None,
+                            thumbhash: None,
+                        },
+                        fetched_at: 0,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        record_thumbhash_in_cache(&mut cache, "https://example.test/shared.jpg", &[1, 2, 3]);
+
+        assert_eq!(
+            cache
+                .values()
+                .filter(|cached| cached.metadata.thumbhash.is_some())
+                .count(),
+            1
+        );
     }
 }
 

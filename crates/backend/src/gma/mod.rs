@@ -32,21 +32,17 @@ pub fn ws_id_from_file_name<S: AsRef<str>>(file_name: S) -> Option<PublishedFile
 // per step and so returns the id multiplied by 10 for `name_123`-style
 // suffixes (the pure-numeric fast path in ws_id_from_file_name hides this).
 fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<PublishedFileId> {
-    let mut id = 0u64;
-    for char in file_name
-        .as_ref()
-        .chars()
-        .rev() // Reverse iterator so we're looking at the suffix (the PublishedFileId)
-        .take_while(char::is_ascii_digit)
-        .collect::<Vec<char>>()
-        .into_iter()
-        .rev()
-    {
-        id = 10_u64
-            .checked_mul(id)?
-            .checked_add(char::to_digit(char, 10).unwrap() as u64)?;
-    }
-    nonzero_workshop_id(id)
+    let file_name = file_name.as_ref();
+    let start = file_name
+        .as_bytes()
+        .iter()
+        .rposition(|byte| !byte.is_ascii_digit())
+        .map_or(0, |index| index + 1);
+    let digits = file_name.get(start..)?;
+    (!digits.is_empty())
+        .then(|| digits.parse::<u64>().ok())
+        .flatten()
+        .and_then(nonzero_workshop_id)
 }
 
 #[derive(Debug, Clone, Error)]
@@ -325,7 +321,7 @@ impl GMAFile {
         if self.id.is_none()
             && let Some(stem) = self.path.file_stem()
         {
-            let stem = stem.to_string_lossy().to_lowercase();
+            let stem = stem.to_string_lossy();
             let found_id = ws_id_from_file_name(&stem);
             if found_id.is_some() {
                 self.id = found_id;

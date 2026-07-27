@@ -4,11 +4,6 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(test)]
-use std::collections::HashMap;
-
-#[cfg(test)]
-use gmpublished_backend::gma::GMAEntry;
 use gmpublished_backend::{GMAFile, Transaction, gma::read::GmaView};
 
 pub use gmpublished_backend::{
@@ -21,52 +16,30 @@ pub const GMA_VERSION: u8 = 3;
 
 /// Safe, already-validated path for one file entry inside a GMA archive.
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArchiveEntryPath(String);
+pub struct ArchiveEntryPath(Arc<String>);
 
 impl ArchiveEntryPath {
     pub(crate) fn from_validated(path: impl Into<String>) -> Option<Self> {
         let path = path.into();
-        (!is_unsafe_entry_path(&path)).then_some(Self(path))
+        (!is_unsafe_entry_path(&path)).then(|| Self(Arc::new(path)))
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
+    }
+
+    pub(crate) fn shared_string(&self) -> Arc<String> {
+        Arc::clone(&self.0)
     }
 
     pub(crate) fn into_string(self) -> String {
-        self.0
+        Arc::try_unwrap(self.0).unwrap_or_else(|path| path.as_ref().clone())
     }
 
     pub(crate) fn file_name(&self) -> &str {
         self.0
             .rsplit_once('/')
             .map_or(self.0.as_str(), |(_, file_name)| file_name)
-    }
-
-    pub(crate) fn parent(&self) -> ArchiveDirectoryPath {
-        self.0
-            .rsplit_once('/')
-            .map_or_else(ArchiveDirectoryPath::root, |(parent, _)| {
-                ArchiveDirectoryPath(parent.to_owned())
-            })
-    }
-
-    pub(crate) fn directory_chain(&self) -> Vec<ArchiveDirectoryPath> {
-        let mut directories = Vec::new();
-        let mut current = ArchiveDirectoryPath::root();
-        let mut components = self.0.split('/').peekable();
-
-        while let Some(component) = components.next() {
-            if components.peek().is_none() {
-                break;
-            }
-            current = current
-                .join_child(component)
-                .expect("validated archive entry paths contain only safe directory segments");
-            directories.push(current.clone());
-        }
-
-        directories
     }
 }
 
@@ -266,20 +239,6 @@ impl From<gmpublished_backend::GMAHeader> for GmaHeader {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct GmaIndex {
-    pub(crate) header: GmaHeader,
-    pub(crate) entries: Vec<GmaIndexEntry>,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct GmaIndexEntry {
-    pub(crate) path: String,
-    pub(crate) size: u64,
-    pub(crate) crc32: u32,
-    pub(crate) data_offset: u64,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct GmaMetaEntry {
     pub(crate) path: String,
     pub(crate) size: u64,
@@ -290,7 +249,10 @@ pub struct GmaMetaEntry {
 pub struct GmaMeta {
     pub(crate) path: PathBuf,
     pub(crate) header: GmaHeader,
-    pub(crate) entries: Vec<GmaMetaEntry>,
+    /// Immutable archive tables are shared between the persistent header
+    /// cache and each published library snapshot. Refreshes clone the `Arc`,
+    /// not every path string in the archive.
+    pub(crate) entries: Arc<[GmaMetaEntry]>,
 }
 
 impl GmaMeta {
@@ -301,10 +263,20 @@ impl GmaMeta {
     #[cfg(test)]
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let archive = PreviewArchive::open(path.as_ref())?;
-        Ok(Self::from_index(
-            path.as_ref().to_path_buf(),
-            archive.index().clone(),
-        ))
+        Ok(Self {
+            path: path.as_ref().to_path_buf(),
+            header: archive.header.clone(),
+            entries: archive
+                .entries
+                .iter()
+                .map(|entry| GmaMetaEntry {
+                    path: entry.path.as_str().to_owned(),
+                    size: entry.size,
+                    crc32: entry.crc32,
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        })
     }
 
     /// Opens only the archive header for library discovery. `PreviewArchive`
@@ -312,11 +284,10 @@ impl GmaMeta {
     #[cfg(any(test, not(feature = "asset-studio")))]
     pub(crate) fn open_header_only(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        let bundle = GMAFile::open_meta(path)?;
         Ok(Self {
             path: path.to_path_buf(),
-            header: bundle.header.into(),
-            entries: Vec::new(),
+            header: GMAFile::open_header(path)?.into(),
+            entries: Arc::from([]),
         })
     }
 
@@ -325,7 +296,7 @@ impl GmaMeta {
         let path = path.as_ref();
         // One mmap + one parse; the previous open/header/entries chain
         // re-parsed the whole entry table three times.
-        let bundle = GMAFile::open_meta(path)?;
+        let bundle = GMAFile::open_index(path)?;
         let mut entries: Vec<GmaMetaEntry> = bundle
             .entries
             .into_iter()
@@ -339,25 +310,8 @@ impl GmaMeta {
         Ok(Self {
             path: path.to_path_buf(),
             header: bundle.header.into(),
-            entries,
+            entries: entries.into(),
         })
-    }
-
-    #[cfg(test)]
-    fn from_index(path: PathBuf, index: GmaIndex) -> Self {
-        Self {
-            path,
-            header: index.header,
-            entries: index
-                .entries
-                .into_iter()
-                .map(|entry| GmaMetaEntry {
-                    path: entry.path,
-                    size: entry.size,
-                    crc32: entry.crc32,
-                })
-                .collect(),
-        }
     }
 }
 
@@ -366,8 +320,7 @@ pub struct PreviewEntry {
     pub(crate) path: ArchiveEntryPath,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
-    pub(crate) index: u32,
-    pub(crate) data_offset: u64,
+    data_offset: u64,
 }
 
 /// Bytes provider and parsed identity for one open preview archive. `view`
@@ -378,7 +331,7 @@ pub struct PreviewEntry {
 pub struct PreviewArchive {
     gma: GMAFile,
     view: Arc<GmaView>,
-    index: GmaIndex,
+    header: GmaHeader,
     entries: Vec<PreviewEntry>,
 }
 
@@ -386,14 +339,14 @@ impl fmt::Debug for PreviewArchive {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PreviewArchive")
             .field("gma", &self.gma)
-            .field("index", &self.index)
+            .field("header", &self.header)
             .field("entries", &self.entries)
             .finish()
     }
 }
 impl PartialEq for PreviewArchive {
     fn eq(&self, other: &Self) -> bool {
-        self.gma == other.gma && self.index == other.index && self.entries == other.entries
+        self.gma == other.gma && self.header == other.header && self.entries == other.entries
     }
 }
 impl Eq for PreviewArchive {}
@@ -420,27 +373,13 @@ impl PreviewArchive {
             // Recomputes extracted_name so it includes both title and id.
             gma.set_ws_id(gmpublished_backend::appdata::SettingsPublishedFileId(id));
         }
-        let mut index_entries: Vec<GmaIndexEntry> = bundle
-            .entries
-            .into_iter()
-            .map(|entry| GmaIndexEntry {
-                path: entry.path,
-                size: entry.size,
-                crc32: entry.crc,
-                data_offset: entry.index,
-            })
-            .collect();
-        index_entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-        let index = GmaIndex {
-            header: bundle.header.into(),
-            entries: index_entries,
-        };
-        let entries = preview_entries_from_index(&index);
+        let header = bundle.header.into();
+        let entries = preview_entries_from_backend(bundle.entries);
 
         Ok(Self {
             gma,
             view: Arc::new(view),
-            index,
+            header,
             entries,
         })
     }
@@ -450,8 +389,8 @@ impl PreviewArchive {
         preview_archive_from_fixture(gma)
     }
 
-    pub(crate) const fn index(&self) -> &GmaIndex {
-        &self.index
+    pub(crate) const fn header(&self) -> &GmaHeader {
+        &self.header
     }
 
     /// Sanitized folder name the archive extracts into (backend
@@ -471,21 +410,20 @@ impl PreviewArchive {
         self.entries.clone()
     }
 
-    pub(crate) fn entry(&self, path: &str) -> Result<&GmaIndexEntry, GmaError> {
+    pub(crate) fn entry(&self, path: &str) -> Result<&PreviewEntry, GmaError> {
         if is_unsafe_entry_path(path) {
             return Err(GmaError::FormatError);
         }
-        self.index
-            .entries
-            .iter()
-            .find(|entry| entry.path == path)
-            .ok_or(GmaError::EntryNotFound)
+        self.entries
+            .binary_search_by(|entry| entry.path.as_str().cmp(path))
+            .map(|index| &self.entries[index])
+            .map_err(|_| GmaError::EntryNotFound)
     }
 
     #[cfg(feature = "asset-studio")]
     pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
-        self.entry(entry_path)?;
-        self.view.read_entry_bytes(entry_path)
+        let entry = self.entry(entry_path)?;
+        self.view.read_payload_bytes(entry.data_offset, entry.size)
     }
 
     pub(crate) fn extract_entry_with_transaction(
@@ -584,15 +522,7 @@ fn workshop_id_from_path(path: &Path) -> Option<u64> {
 }
 
 pub fn workshop_id_from_filename(file_name: impl AsRef<str>) -> Option<u64> {
-    let file_name = file_name.as_ref();
-    let file_name = file_name.strip_prefix("ds_").unwrap_or(file_name);
-
-    if let Ok(id) = file_name.parse::<u64>() {
-        return Some(id);
-    }
-
-    let id = extract_suffix_workshop_id(file_name);
-    (id != 0).then_some(id)
+    gmpublished_backend::gma::ws_id_from_file_name(file_name).map(|id| id.0)
 }
 
 #[cfg(test)]
@@ -600,38 +530,22 @@ pub fn crc32(bytes: &[u8]) -> u32 {
     crc32fast::hash(bytes)
 }
 
-// Production reads go through the parse-once `GmaView::meta`; only the
-// fixture path (which parses through `GmaView::entries`) still needs this.
-#[cfg(test)]
-fn index_entries_from_backend(entries: &HashMap<String, GMAEntry>) -> Vec<GmaIndexEntry> {
-    let mut entries = entries
-        .values()
-        .map(|entry| GmaIndexEntry {
-            path: entry.path.clone(),
-            size: entry.size,
-            crc32: entry.crc,
-            data_offset: entry.index,
-        })
-        .collect::<Vec<_>>();
-    entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    entries
-}
-
-fn preview_entries_from_index(index: &GmaIndex) -> Vec<PreviewEntry> {
-    let mut entries = Vec::with_capacity(index.entries.len());
-    for (position, entry) in index.entries.iter().enumerate() {
-        if let Some(path) = ArchiveEntryPath::from_validated(entry.path.clone()) {
-            entries.push(PreviewEntry {
+fn preview_entries_from_backend(
+    entries: Vec<gmpublished_backend::gma::read::GmaIndexedEntry>,
+) -> Vec<PreviewEntry> {
+    let mut preview = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some(path) = ArchiveEntryPath::from_validated(entry.path) {
+            preview.push(PreviewEntry {
                 path,
                 size: entry.size,
-                crc32: entry.crc32,
-                index: u32::try_from(position + 1).unwrap_or(u32::MAX),
+                crc32: entry.crc,
                 data_offset: entry.data_offset,
             });
         }
     }
-    entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    entries
+    preview.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    preview
 }
 
 fn is_safe_archive_path_segment(segment: &str) -> bool {
@@ -660,30 +574,6 @@ fn is_unsafe_entry_path(path: &str) -> bool {
         }
     }
     false
-}
-
-// Deliberate divergence: upstream's extract_suffix_ws_id computes
-// `(id + digit) * 10` per step, returning the id multiplied by 10 for
-// `name_123`-style suffixes (its pure-numeric fast path hides this).
-fn extract_suffix_workshop_id(file_name: &str) -> u64 {
-    let mut id = 0_u64;
-    for digit in file_name
-        .chars()
-        .rev()
-        .take_while(char::is_ascii_digit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        match 10_u64.checked_mul(id) {
-            None => return 0,
-            Some(next) => match next.checked_add(u64::from(digit.to_digit(10).unwrap())) {
-                None => return 0,
-                Some(next) => id = next,
-            },
-        }
-    }
-    id
 }
 
 #[cfg(test)]
@@ -757,18 +647,14 @@ fn preview_archive_from_fixture(gma: FixtureGmaFile) -> Result<PreviewArchive, G
 
     let path = gma.path.unwrap_or_else(|| PathBuf::from("fixture.gma"));
     let view = GmaView::from_membuffer(bytes.into(), &path);
-    let backend = view.handle(&path).map_err(|_| GmaError::FormatError)?;
-    let view_entries = view.entries().map_err(|_| GmaError::FormatError)?;
-
-    let index = GmaIndex {
-        header: gma.header,
-        entries: index_entries_from_backend(&view_entries),
-    };
-    let entries = preview_entries_from_index(&index);
+    let bundle = view.meta(&path).map_err(|_| GmaError::FormatError)?;
+    let backend = bundle.handle;
+    let entries = preview_entries_from_backend(bundle.entries);
+    let header = gma.header;
     Ok(PreviewArchive {
         gma: backend,
         view: Arc::new(view),
-        index,
+        header,
         entries,
     })
 }

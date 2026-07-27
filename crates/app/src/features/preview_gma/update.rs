@@ -2,6 +2,14 @@ pub fn nav_path_scrollable_id() -> iced::widget::Id {
     iced::widget::Id::new("preview-gma-nav-path")
 }
 
+/// The virtualized rows scrollable. Navigation resets the model's scroll
+/// offset, so the widget must be snapped back to the top through this id at
+/// the same time — the two offsets otherwise drift apart and the viewport
+/// lands on a spacer.
+pub fn browser_rows_scrollable_id() -> iced::widget::Id {
+    iced::widget::Id::new("preview-gma-browser-rows")
+}
+
 use super::{Effect, Message, State};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
@@ -49,6 +57,10 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         Message::AuthorLinkRequested => state
             .author_profile_url()
             .map_or_else(Vec::new, |url| vec![Effect::OpenUrlRequested(url)]),
+        Message::BrowserScrolled { offset } => {
+            state.set_browser_scroll_offset(offset);
+            Vec::new()
+        }
         Message::DirectoryOpened(path) => {
             if state.open_directory(&path) {
                 vec![Effect::BrowserPathChanged]

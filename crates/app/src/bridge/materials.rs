@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs::{self, File},
-    io::{self, BufReader, Read},
+    io::{self, BufRead, BufReader, Read},
     panic,
     path::{Path, PathBuf},
     sync::{
@@ -972,7 +972,9 @@ impl MaterialResolver {
         let mut paths = Vec::new();
         let mut seen = BTreeSet::new();
         for source in self.sources() {
-            push_matching_paths(source.paths(), &matches, &mut seen, &mut paths);
+            source.for_each_path(&mut |path| {
+                push_matching_path(path, &matches, &mut seen, &mut paths);
+            });
         }
         paths
     }
@@ -1027,22 +1029,16 @@ impl SourceRef<'_> {
         }
     }
 
-    fn paths(&self) -> Vec<String> {
+    fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
         match self {
-            Self::Prepended(prepended) => prepended.keys().cloned().collect(),
-            Self::Pakfile(pakfile) => pakfile.paths(),
-            Self::Addon(addon) => addon
-                .entries()
-                .into_iter()
-                .map(|entry| entry.path)
-                .collect(),
-            Self::Loose(loose_dir) => loose_dir.paths(),
-            Self::SiblingGma(sibling_gmas) => sibling_gmas.paths(),
-            Self::GameVpk(vpk) => vpk
-                .entries()
-                .iter()
-                .map(|entry| entry.path.clone())
-                .collect(),
+            Self::Prepended(prepended) => prepended.keys().for_each(|path| visit(path)),
+            Self::Pakfile(pakfile) => pakfile.entries.keys().for_each(|path| visit(path)),
+            Self::Addon(addon) => addon.for_each_path(visit),
+            Self::Loose(loose_dir) => loose_dir.paths().iter().for_each(|path| visit(path)),
+            Self::SiblingGma(sibling_gmas) => {
+                sibling_gmas.entries.keys().for_each(|path| visit(path));
+            }
+            Self::GameVpk(vpk) => vpk.entries().iter().for_each(|entry| visit(&entry.path)),
         }
     }
 }
@@ -1087,22 +1083,17 @@ fn decode_vtf_rgba_max(
     Ok((image, source_width, source_height))
 }
 
-fn push_matching_paths<'a, I, P>(
-    paths: I,
+fn push_matching_path(
+    path: &str,
     matches: &impl Fn(&str) -> bool,
     seen: &mut BTreeSet<String>,
     out: &mut Vec<String>,
-) where
-    I: IntoIterator<Item = P>,
-    P: AsRef<str> + 'a,
-{
-    for path in paths {
-        let Some(path) = normalize_archive_path(path.as_ref()) else {
-            continue;
-        };
-        if matches(&path) && seen.insert(path.clone()) {
-            out.push(path);
-        }
+) {
+    let Some(path) = normalize_archive_path(path) else {
+        return;
+    };
+    if matches(&path) && seen.insert(path.clone()) {
+        out.push(path);
     }
 }
 
@@ -1564,10 +1555,6 @@ impl PakSource {
         }
     }
 
-    fn paths(&self) -> Vec<String> {
-        self.entries.keys().cloned().collect()
-    }
-
     fn checkout_reader(&self) -> MapPakFile {
         self.readers
             .lock()
@@ -1662,10 +1649,6 @@ impl SiblingGmaIndex {
             ) => self.legacy_bin_entry_bytes(entry.archive_index, path, *data_end, *offset, *len),
             _ => None,
         }
-    }
-
-    fn paths(&self) -> Vec<String> {
-        self.entries.keys().cloned().collect()
     }
 
     fn legacy_bin_entry_bytes(
@@ -1938,7 +1921,8 @@ fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaIndex {
 
 fn read_legacy_bin_index(path: &Path) -> io::Result<LegacyBinIndex> {
     let decoder = legacy_bin_decoder(path)?;
-    let mut reader = LimitedReader::new(decoder, MAX_LEGACY_BIN_ENTRY_TABLE_BYTES);
+    let limited = LimitedReader::new(decoder, MAX_LEGACY_BIN_ENTRY_TABLE_BYTES);
+    let mut reader = BufReader::with_capacity(64 * 1024, limited);
     let magic = read_array::<4, _>(&mut reader)?;
     if &magic != GMA_MAGIC {
         return Err(io::Error::new(
@@ -1982,7 +1966,12 @@ fn read_legacy_bin_index(path: &Path) -> io::Result<LegacyBinIndex> {
         }
     }
 
-    let data_start = reader.bytes_read();
+    // `BufReader` may have decompressed part of the payload while filling its
+    // buffer. Only bytes already handed to the parser belong to the table.
+    let data_start = reader
+        .get_ref()
+        .bytes_read()
+        .saturating_sub(reader.buffer().len() as u64);
     for entry in &mut entries {
         entry.offset = entry.offset.checked_add(data_start).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "GMA entry offset overflow")
@@ -2113,16 +2102,16 @@ fn read_i64_le(reader: &mut impl Read) -> io::Result<i64> {
     Ok(i64::from_le_bytes(read_array::<8, _>(reader)?))
 }
 
-fn read_nt_string(reader: &mut impl Read) -> io::Result<String> {
+fn read_nt_string(reader: &mut impl BufRead) -> io::Result<String> {
     let mut bytes = Vec::new();
-    let mut byte = [0_u8; 1];
-    loop {
-        reader.read_exact(&mut byte)?;
-        if byte[0] == 0 {
-            break;
-        }
-        bytes.push(byte[0]);
+    let read = reader.read_until(0, &mut bytes)?;
+    if read == 0 || bytes.last() != Some(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unterminated GMA string",
+        ));
     }
+    bytes.pop();
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
@@ -2132,9 +2121,9 @@ fn discover_loose_source_dirs(gmod_dir: &Path) -> Vec<LooseSourceDir> {
     push_loose_source_dir(&mut dirs, garrysmod.clone());
 
     let addons = garrysmod.join("addons");
-    for addon_path in sorted_child_paths(&addons) {
-        if addon_path.is_dir() {
-            push_loose_source_dir(&mut dirs, addon_path);
+    for addon in sorted_children(&addons) {
+        if addon.is_dir() {
+            push_loose_source_dir(&mut dirs, addon.path);
         }
     }
 
@@ -2151,20 +2140,20 @@ fn push_loose_source_dir(dirs: &mut Vec<LooseSourceDir>, path: PathBuf) {
 fn discover_sibling_gma_paths(gmod_dir: &Path) -> Vec<SiblingGmaPath> {
     let mut paths = Vec::new();
     if let Ok(workshop_dir) = fs::canonicalize(gmod_dir.join("../../workshop/content/4000")) {
-        for workshop_item in sorted_child_paths(&workshop_dir) {
+        for workshop_item in sorted_children(&workshop_dir) {
             if workshop_item.is_dir() {
-                let children = sorted_child_paths(&workshop_item);
+                let children = sorted_children(&workshop_item.path);
                 let plain_gmas = children
                     .iter()
-                    .filter(|path| path.is_file() && is_plain_gma_path(path))
-                    .cloned()
+                    .filter(|child| child.is_file() && is_plain_gma_path(&child.path))
+                    .map(|child| child.path.clone())
                     .collect::<Vec<_>>();
                 if plain_gmas.is_empty() {
                     paths.extend(
                         children
                             .into_iter()
-                            .filter(|path| path.is_file() && is_legacy_bin_path(path))
-                            .map(SiblingGmaPath::legacy_bin),
+                            .filter(|child| child.is_file() && is_legacy_bin_path(&child.path))
+                            .map(|child| SiblingGmaPath::legacy_bin(child.path)),
                     );
                 } else {
                     paths.extend(plain_gmas.into_iter().map(SiblingGmaPath::plain));
@@ -2173,9 +2162,9 @@ fn discover_sibling_gma_paths(gmod_dir: &Path) -> Vec<SiblingGmaPath> {
         }
     }
 
-    for path in sorted_child_paths(&gmod_dir.join("garrysmod/addons")) {
-        if path.is_file() && is_plain_gma_path(&path) {
-            paths.push(SiblingGmaPath::plain(path));
+    for child in sorted_children(&gmod_dir.join("garrysmod/addons")) {
+        if child.is_file() && is_plain_gma_path(&child.path) {
+            paths.push(SiblingGmaPath::plain(child.path));
         }
     }
 
@@ -2188,25 +2177,61 @@ fn collect_download_gma_paths(dir: &Path, depth: usize, paths: &mut Vec<SiblingG
     if depth > 3 {
         return;
     }
-    for path in sorted_child_paths(dir) {
-        if path.is_file() && is_plain_gma_path(&path) {
-            paths.push(SiblingGmaPath::plain(path));
-        } else if path.is_dir() {
-            collect_download_gma_paths(&path, depth + 1, paths);
+    for child in sorted_children(dir) {
+        if child.is_file() && is_plain_gma_path(&child.path) {
+            paths.push(SiblingGmaPath::plain(child.path));
+        } else if child.is_dir() {
+            collect_download_gma_paths(&child.path, depth + 1, paths);
         }
     }
 }
 
-fn sorted_child_paths(dir: &Path) -> Vec<PathBuf> {
+struct SortedChild {
+    path: PathBuf,
+    file_type: Option<fs::FileType>,
+}
+
+impl SortedChild {
+    fn is_file(&self) -> bool {
+        self.file_type.as_ref().map_or_else(
+            || self.path.is_file(),
+            |file_type| {
+                if file_type.is_symlink() {
+                    self.path.is_file()
+                } else {
+                    file_type.is_file()
+                }
+            },
+        )
+    }
+
+    fn is_dir(&self) -> bool {
+        self.file_type.as_ref().map_or_else(
+            || self.path.is_dir(),
+            |file_type| {
+                if file_type.is_symlink() {
+                    self.path.is_dir()
+                } else {
+                    file_type.is_dir()
+                }
+            },
+        )
+    }
+}
+
+fn sorted_children(dir: &Path) -> Vec<SortedChild> {
     let Ok(read_dir) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut paths = read_dir
+    let mut children = read_dir
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .map(|entry| SortedChild {
+            file_type: entry.file_type().ok(),
+            path: entry.path(),
+        })
         .collect::<Vec<_>>();
-    paths.sort_unstable();
-    paths
+    children.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    children
 }
 
 fn is_plain_gma_path(path: &Path) -> bool {
@@ -2296,43 +2321,65 @@ fn is_signed_integer(value: &str) -> bool {
 }
 
 fn normalize_source_path(path: &str, extension: Option<&str>) -> Option<String> {
-    let mut path = path.trim().replace('\\', "/");
-    path = path.trim_matches('/').to_owned();
-    if let Some(stripped) = strip_prefix_ascii_case(&path, "materials/") {
-        path = stripped.to_owned();
-    }
-    if let Some(extension) = extension
-        && path
-            .get(path.len().saturating_sub(extension.len())..)
-            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(extension))
+    let mut path = path
+        .trim()
+        .trim_matches(|character| matches!(character, '/' | '\\'));
+    if path
+        .get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("materials"))
+        && let Some(rest) = path.get(9..)
+        && let Some(stripped) = rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\'))
     {
-        path.truncate(path.len() - extension.len());
+        path = stripped;
+    }
+    if let Some(extension) = extension {
+        let suffix_start = path.len().saturating_sub(extension.len());
+        if let (Some(prefix), Some(suffix)) = (path.get(..suffix_start), path.get(suffix_start..))
+            && suffix.eq_ignore_ascii_case(extension)
+        {
+            path = prefix;
+        }
     }
 
-    let path = path
-        .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .collect::<Vec<_>>()
-        .join("/");
-
-    (!path.is_empty() || extension.is_none()).then_some(path.to_ascii_lowercase())
+    let mut normalized = String::with_capacity(path.len());
+    for segment in path.split(['/', '\\']) {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if !normalized.is_empty() {
+            normalized.push('/');
+        }
+        normalized.push_str(segment);
+    }
+    if normalized.is_empty() && extension.is_some() {
+        return None;
+    }
+    normalized.make_ascii_lowercase();
+    Some(normalized)
 }
 
 fn normalize_archive_path(path: &str) -> Option<String> {
-    let path = path.trim().replace('\\', "/");
-    let path = path.trim_matches('/');
-    let mut normalized = Vec::new();
-    for segment in path.split('/') {
+    let path = path
+        .trim()
+        .trim_matches(|character| matches!(character, '/' | '\\'));
+    let mut normalized = String::with_capacity(path.len());
+    for segment in path.split(['/', '\\']) {
         if segment.is_empty() || segment == "." {
             continue;
         }
         if segment == ".." {
             return None;
         }
-        normalized.push(segment);
+        if !normalized.is_empty() {
+            normalized.push('/');
+        }
+        normalized.push_str(segment);
     }
-    let path = normalized.join("/");
-    (!path.is_empty()).then_some(path.to_ascii_lowercase())
+    if normalized.is_empty() {
+        return None;
+    }
+    normalized.make_ascii_lowercase();
+    Some(normalized)
 }
 
 fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {

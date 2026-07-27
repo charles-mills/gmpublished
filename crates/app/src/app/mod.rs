@@ -436,29 +436,32 @@ fn search_items_from_library(
 fn search_file_items_from_library(
     snapshot: &LibrarySnapshot,
 ) -> Vec<gmpublished_backend::search::SearchItem> {
-    snapshot
+    let entry_count = snapshot
         .addons
         .iter()
-        .flat_map(|addon| {
-            // One shared identity per addon; every file item Arc-shares it
-            // instead of copying the path/title/id per file. Label and
-            // extension derive from the entry path inside the backend.
-            let shared = gmpublished_backend::search::FileSearchAddon::new(
-                addon.canonical_path.clone(),
-                addon.display_title(),
-                addon.workshop_id.map(PublishedFileId::get),
-            );
-            addon.meta.entries.iter().map(move |entry| {
-                gmpublished_backend::search::SearchItem::new_installed_addon_file(
-                    shared.clone(),
-                    entry.path.clone(),
-                    entry.size,
-                    entry.crc32,
-                    addon.modified_epoch_seconds,
-                )
-            })
-        })
-        .collect()
+        .map(|addon| addon.meta.entries.len())
+        .sum();
+    let mut items = Vec::with_capacity(entry_count);
+    for addon in snapshot.addons.iter() {
+        // One shared identity per addon; every file item Arc-shares it
+        // instead of copying the path/title/id per file. Label and
+        // extension derive from the entry path inside the backend.
+        let shared = gmpublished_backend::search::FileSearchAddon::new(
+            addon.canonical_path.clone(),
+            addon.display_title(),
+            addon.workshop_id.map(PublishedFileId::get),
+        );
+        items.extend(addon.meta.entries.iter().map(move |entry| {
+            gmpublished_backend::search::SearchItem::new_installed_addon_file(
+                shared.clone(),
+                entry.path.clone(),
+                entry.size,
+                entry.crc32,
+                addon.modified_epoch_seconds,
+            )
+        }));
+    }
+    items
 }
 
 impl App {

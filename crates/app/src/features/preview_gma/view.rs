@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::details::{AuthorDisplay, Details, MetadataRow, MetadataValue, RelativeTime};
-use super::update::nav_path_scrollable_id;
+use super::update::{browser_rows_scrollable_id, nav_path_scrollable_id};
 use super::{Message, State};
 
 const TOOLTIP_MAX_WIDTH: f32 = 280.0;
@@ -553,18 +553,43 @@ fn browser<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let body: Element<'a, Message> = if !snapshot.visible() || snapshot.total_files() == 0 {
         browser_empty_state(ctx)
     } else {
-        let mut rows = column![].width(Length::Fill);
-        for row_data in snapshot.rows() {
-            rows = rows.push(browser_row(row_data, ctx));
-        }
-        scrollable(rows)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .direction(scrollable::Direction::Vertical(
-                theme::styles::vertical_scrollbar(&tokens),
-            ))
-            .style(move |_, status| theme::styles::scrollbar(&tokens, status))
-            .into()
+        // `responsive` supplies the real pane height at layout time, so the
+        // virtual window is correct on first render and after resizes, not
+        // only once a scroll event has reported the viewport.
+        iced::widget::responsive(move |size| {
+            let mut rows = column![].width(Length::Fill);
+            let virtual_rows = state.browser_virtual_rows(size.height);
+            if virtual_rows.top_padding > 0.0 {
+                rows = rows.push(
+                    Space::new()
+                        .height(Length::Fixed(virtual_rows.top_padding))
+                        .width(Length::Fill),
+                );
+            }
+            for row_data in &snapshot.rows()[virtual_rows.range.clone()] {
+                rows = rows.push(browser_row(row_data, ctx));
+            }
+            if virtual_rows.bottom_padding > 0.0 {
+                rows = rows.push(
+                    Space::new()
+                        .height(Length::Fixed(virtual_rows.bottom_padding))
+                        .width(Length::Fill),
+                );
+            }
+            scrollable(rows)
+                .id(browser_rows_scrollable_id())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .direction(scrollable::Direction::Vertical(
+                    theme::styles::vertical_scrollbar(&tokens),
+                ))
+                .style(move |_, status| theme::styles::scrollbar(&tokens, status))
+                .on_scroll(|viewport| Message::BrowserScrolled {
+                    offset: viewport.absolute_offset().y,
+                })
+                .into()
+        })
+        .into()
     };
 
     column![
@@ -648,21 +673,21 @@ fn nav_control<'a>(
     tooltip_widget::below(control, tooltip, &tokens, TOOLTIP_MAX_WIDTH)
 }
 
-fn browser_row<'a>(row_data: &FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+fn browser_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let message = match row_data.kind {
-        FileBrowserEntryKind::Directory => Message::DirectoryOpened(row_data.current_path.clone()),
-        FileBrowserEntryKind::File => file_row_activation_message(row_data.archive_path.clone()),
+        FileBrowserEntryKind::Directory => Message::DirectoryOpened(row_data.shared_path()),
+        FileBrowserEntryKind::File => file_row_activation_message(row_data.shared_path()),
     };
-    file_browser::row_view(row_data.clone(), Some(message), ctx)
+    file_browser::row_view(row_data, Some(message), ctx)
 }
 
 #[cfg(feature = "asset-studio")]
-fn file_row_activation_message(path: String) -> Message {
+fn file_row_activation_message(path: std::sync::Arc<String>) -> Message {
     Message::PreviewEntryRequested(path)
 }
 
 #[cfg(not(feature = "asset-studio"))]
-fn file_row_activation_message(path: String) -> Message {
+fn file_row_activation_message(path: std::sync::Arc<String>) -> Message {
     Message::ExtractEntryRequested(path)
 }
 

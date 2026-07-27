@@ -56,7 +56,7 @@ fn loaded_archive_populates_browser_snapshot() {
             .browser_snapshot()
             .rows()
             .iter()
-            .map(|row| row.display_name.as_str())
+            .map(crate::widgets::file_browser::Row::display_name)
             .collect::<Vec<_>>(),
         vec!["autorun", "materials"]
     );
@@ -85,11 +85,14 @@ fn browser_navigation_refreshes_visible_rows() {
     state.apply_archive_opened(request.request_id, Ok(loaded_archive()));
 
     assert!(state.open_directory("lua/autorun"));
-    assert_eq!(state.browser_snapshot().rows()[0].display_name, "init.lua");
+    assert_eq!(
+        state.browser_snapshot().rows()[0].display_name(),
+        "init.lua"
+    );
     assert!(state.browser_snapshot().can_go_up());
 
     assert!(state.go_up());
-    assert_eq!(state.browser_snapshot().rows()[0].display_name, "autorun");
+    assert_eq!(state.browser_snapshot().rows()[0].display_name(), "autorun");
 }
 
 #[test]

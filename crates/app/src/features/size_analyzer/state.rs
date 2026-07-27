@@ -12,8 +12,7 @@ use iced::{Point, Size};
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::library::LibrarySnapshot;
 use crate::bridge::size_analyzer::{
-    Rect, SizeAnalyzerAddon, SizeAnalyzerError, TreemapBounds, TreemapLayout,
-    analyze_installed_addons,
+    Rect, SizeAnalyzerError, TreemapAddon, TreemapBounds, TreemapLayout, analyze_installed_addons,
 };
 use crate::bridge::ui_error::UiError;
 use crate::features::context_menu;
@@ -914,17 +913,15 @@ pub enum LoadStatus {
 }
 
 /// Resolves the tooltip/preview title for a hovered addon. The analyzer
-/// carries no live workshop metadata, so `SizeAnalyzerAddon.title` (the
+/// carries no live workshop metadata, so the retained installed GMA title
 /// installed GMA title) is always used when non-blank, falling back to the
 /// workshop id otherwise.
-fn resolve_hover_title(addon: &SizeAnalyzerAddon) -> String {
-    let title = addon.title.trim();
+fn resolve_hover_title(title: &str, workshop_id: Option<PublishedFileId>) -> String {
+    let title = title.trim();
     if !title.is_empty() {
         return title.to_owned();
     }
-    addon
-        .workshop_id
-        .map_or_else(String::new, |id| id.to_string())
+    workshop_id.map_or_else(String::new, |id| id.to_string())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -944,14 +941,14 @@ pub struct HoverProbe {
 
 impl HoverProbe {
     fn from_hit(
-        addon: &SizeAnalyzerAddon,
+        addon: &TreemapAddon,
         tag: &str,
         rect: Rect,
         viewport: RenderViewport,
         preview_url: Option<String>,
     ) -> Self {
         Self {
-            title: resolve_hover_title(addon),
+            title: resolve_hover_title(&addon.title, addon.workshop_id),
             tag: tag.to_owned(),
             path: addon.path.clone(),
             size_bytes: addon.file_size_bytes,

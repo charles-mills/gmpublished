@@ -715,11 +715,11 @@ pub enum Owner {
 impl Owner {}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DemandId(String);
+pub struct DemandId(Arc<str>);
 
 impl DemandId {
     pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(Arc::from(value.into()))
     }
 
     pub(crate) fn as_str(&self) -> &str {

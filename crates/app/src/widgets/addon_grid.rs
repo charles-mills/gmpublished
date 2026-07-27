@@ -421,8 +421,9 @@ pub fn scrollable_id(key: &'static str) -> iced::widget::Id {
 /// reuses this subtree's widget state in place: an unkeyed sensor would
 /// never re-fire `on_show`, leaving the newly shown grid with a stale (or
 /// never-observed) viewport.
-pub fn view<'a>(state: &State, tokens: &Tokens, key: &'static str) -> Element<'a, Message> {
+pub fn view<'a>(state: &'a State, tokens: &Tokens, key: &'static str) -> Element<'a, Message> {
     let tokens = *tokens;
+    let now = Instant::now();
     let layout = &state.layout;
     // A Sensor notification is an optimization prerequisite, not a
     // correctness prerequisite. If Iced misses the initial on_show during a
@@ -457,6 +458,7 @@ pub fn view<'a>(state: &State, tokens: &Tokens, key: &'static str) -> Element<'a
             state.card_width,
             state.card_gap,
             &tokens,
+            now,
         ));
     }
 
@@ -491,14 +493,19 @@ pub fn view<'a>(state: &State, tokens: &Tokens, key: &'static str) -> Element<'a
     .into()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "hot view helper receives already-computed row geometry without allocating a wrapper"
+)]
 fn row_view<'a>(
-    items: &[Item],
+    items: &'a [Item],
     item_heights: &[f32],
     content_height: f32,
     row_height: f32,
     card_width: f32,
     card_gap: f32,
     tokens: &Tokens,
+    now: Instant,
 ) -> Element<'a, Message> {
     let mut cards = row![]
         .width(Length::Fill)
@@ -512,6 +519,7 @@ fn row_view<'a>(
             content_height,
             item_height,
             tokens,
+            now,
         ));
     }
 
@@ -523,13 +531,15 @@ fn row_view<'a>(
 }
 
 fn card_view<'a>(
-    item: &Item,
+    item: &'a Item,
     width: f32,
     cell_height: f32,
     content_height: f32,
     tokens: &Tokens,
+    now: Instant,
 ) -> Element<'a, Message> {
-    addon_card::view(item.card(), width, cell_height, content_height, tokens).map(map_card_message)
+    addon_card::view(item.card(), width, cell_height, content_height, tokens, now)
+        .map(map_card_message)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -586,10 +596,10 @@ impl Item {
 
 fn map_card_message(message: addon_card::Message) -> Message {
     match message {
-        addon_card::Message::Pressed(id) => Message::CardPressed(id),
-        addon_card::Message::Released(id) => Message::CardReleased(id),
+        addon_card::Message::Pressed(id) => Message::CardPressed(id.as_ref().to_owned()),
+        addon_card::Message::Released(id) => Message::CardReleased(id.as_ref().to_owned()),
         addon_card::Message::ContextRequested(id, position) => {
-            Message::CardContextRequested(id, position)
+            Message::CardContextRequested(id.as_ref().to_owned(), position)
         }
     }
 }
