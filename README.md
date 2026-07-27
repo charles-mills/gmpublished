@@ -12,10 +12,18 @@ On top of the features offered by (and thanks to) gmpublisher, it includes full 
 | macOS        | Download and run the **.dmg** from the latest [release](https://github.com/charles-mills/gmpublished/releases). |
 | Linux        | Download a **.appimage**, **.deb**, or the binary from the latest [release](https://github.com/charles-mills/gmpublished/releases). |
 
-Alternatively, a Nix flake is available for macOS and Linux. For example, to build and run the app without installing:
+A Nix flake is available for macOS and Linux. For example, to build and run the app without installing:
 
-```bash
+```
 nix run github:charles-mills/gmpublished
+```
+
+Arch Linux users can install through the PKGBUILD:
+
+```
+git clone --depth 1 https://github.com/charles-mills/gmpublished/
+cd gmpublished/packaging/arch
+makepkg -si
 ```
 
 ## Media
