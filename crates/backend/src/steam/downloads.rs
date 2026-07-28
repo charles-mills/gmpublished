@@ -41,7 +41,7 @@ const CALLBACK_PUMP_INTERVAL: Duration = Duration::from_millis(50);
 const HTTP_PROGRESS_STEP: f64 = 0.01;
 
 #[derive(Debug)]
-pub struct DownloadInner {
+struct DownloadInner {
     item: PublishedFileId,
     transaction: crate::transactions::Transaction,
     sent_total: AtomicBool,
@@ -59,7 +59,7 @@ impl PartialEq for DownloadInner {
         self.item == other.item
     }
 }
-pub type Download = Arc<DownloadInner>;
+type Download = Arc<DownloadInner>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WorkshopDownloadQueryItem {
@@ -174,6 +174,43 @@ impl WatchdogQueue {
     }
 }
 
+/// Identifies one submission batch for cancellation purposes.
+///
+/// `request_id` carries two facts: which app request a download belongs to,
+/// and — by its absence — that the download is part of a bulk batch and so
+/// covered by `cancel_all`. An explicitly requested single download is exempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BatchToken {
+    epoch: u64,
+    request_id: Option<u64>,
+}
+
+impl BatchToken {
+    const fn is_exempt_from_cancel_all(self) -> bool {
+        self.request_id.is_some()
+    }
+}
+
+#[cfg(test)]
+mod batch_token_tests {
+    use super::BatchToken;
+
+    #[test]
+    fn only_bulk_batches_are_covered_by_cancel_all() {
+        let bulk = BatchToken {
+            epoch: 7,
+            request_id: None,
+        };
+        let targeted = BatchToken {
+            epoch: 7,
+            request_id: Some(42),
+        };
+
+        assert!(!bulk.is_exempt_from_cancel_all());
+        assert!(targeted.is_exempt_from_cancel_all());
+    }
+}
+
 pub struct Downloads {
     pending: Mutex<Vec<Download>>,
     downloading: Mutex<WatchdogQueue>,
@@ -222,6 +259,12 @@ impl Downloads {
         self.cancel_epoch.load(Ordering::SeqCst) != epoch
     }
 
+    /// Whether `cancel_all` has fired since `token`'s batch began *and*
+    /// covers it.
+    fn batch_cancelled(&self, token: BatchToken) -> bool {
+        !token.is_exempt_from_cancel_all() && self.cancelled_since(token.epoch)
+    }
+
     fn extract(
         self: &Arc<Self>,
         folder: PathBuf,
@@ -246,7 +289,7 @@ impl Downloads {
             let _temp_guard = temp_guard;
 
             let transaction = downloads.transactions.begin();
-            transaction.status("locating");
+            transaction.status(crate::transactions::status::LOCATING);
 
             // Installed workshop content keeps its .gma on disk after
             // extraction, so the started event advertises it as a
@@ -261,7 +304,7 @@ impl Downloads {
             downloads
                 .transactions
                 .emit(BackendEvent::ExtractionStarted(ExtractionStartedEvent {
-                    transaction_id: transaction.id,
+                    transaction_id: transaction.id(),
                     source_path: source_gma.clone(),
                     file_name: None,
                     workshop_id: Some(item),
@@ -287,7 +330,7 @@ impl Downloads {
                 if let Ok(gma) = open_on_disk(folder.clone()) {
                     gma
                 } else {
-                    transaction.status("decompressing");
+                    transaction.status(crate::transactions::status::DECOMPRESSING);
                     match GMAFile::decompress(
                         folder,
                         &transaction,
@@ -307,7 +350,7 @@ impl Downloads {
 
             gma.id = Some(item);
 
-            transaction.status("reading_metadata");
+            transaction.status(crate::transactions::status::READING_METADATA);
             transaction.data(crate::transactions::TransactionPayload::ByteSize {
                 source: Some(gma.metadata.title().to_owned()),
                 bytes: gma.size,
@@ -336,10 +379,9 @@ impl Downloads {
         pending: &mut MutexGuard<Vec<Arc<DownloadInner>>>,
         extract_destination: &Arc<ExtractDestination>,
         item: PublishedFileId,
-        epoch: u64,
-        request_id: Option<u64>,
+        token: BatchToken,
     ) {
-        if request_id.is_none() && self.cancelled_since(epoch) {
+        if self.batch_cancelled(token) {
             return;
         }
 
@@ -350,14 +392,14 @@ impl Downloads {
                     PathBuf::from(info.folder),
                     item,
                     (**extract_destination).clone(),
-                    request_id,
+                    token.request_id,
                 );
             } else {
                 let transaction = self.transactions.begin();
                 self.transactions
                     .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                        transaction_id: transaction.id,
-                        request_id,
+                        transaction_id: transaction.id(),
+                        request_id: token.request_id,
                     }));
                 transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
                 transaction.error(crate::error_key::keys::DOWNLOAD_MISSING);
@@ -368,13 +410,13 @@ impl Downloads {
                 sent_total: AtomicBool::new(false),
                 transaction: self.transactions.begin(),
                 extract_destination: (**extract_destination).clone(),
-                request_id,
+                request_id: token.request_id,
             });
 
             self.transactions
                 .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                    transaction_id: download.transaction.id,
-                    request_id,
+                    transaction_id: download.transaction.id(),
+                    request_id: token.request_id,
                 }));
             download
                 .transaction
@@ -385,16 +427,16 @@ impl Downloads {
     }
 
     /// Emits the failed-download row shown when Steam does not know an item.
-    fn missing_item(&self, item: PublishedFileId, epoch: u64, request_id: Option<u64>) {
-        if request_id.is_none() && self.cancelled_since(epoch) {
+    fn missing_item(&self, item: PublishedFileId, token: BatchToken) {
+        if self.batch_cancelled(token) {
             return;
         }
 
         let transaction = self.transactions.begin();
         self.transactions
             .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                transaction_id: transaction.id,
-                request_id,
+                transaction_id: transaction.id(),
+                request_id: token.request_id,
             }));
         transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
         transaction.error(crate::error_key::keys::ITEM_NOT_FOUND);
@@ -423,7 +465,10 @@ impl Downloads {
         if ids.is_empty() {
             return;
         }
-        let epoch = self.cancel_epoch.load(Ordering::SeqCst);
+        let token = BatchToken {
+            epoch: self.cancel_epoch.load(Ordering::SeqCst),
+            request_id,
+        };
         let extract_destination = Arc::new(extract_destination);
 
         // Web API preflight: resolves collections and legacy CDN URLs in a
@@ -442,7 +487,7 @@ impl Downloads {
         };
         match webapi::resolve_downloads(known_items, possible_collections) {
             Ok(details) => {
-                self.dispatch_preflighted(details, &extract_destination, epoch, request_id);
+                self.dispatch_preflighted(details, &extract_destination, token);
                 return;
             }
             Err(error) => log::warn!(
@@ -450,7 +495,7 @@ impl Downloads {
             ),
         }
 
-        self.download_via_steamworks(ids, &extract_destination, epoch, request_id);
+        self.download_via_steamworks(ids, &extract_destination, token);
     }
 
     /// Routes preflighted items to the cheapest lane: already-installed
@@ -460,8 +505,7 @@ impl Downloads {
         self: &Arc<Self>,
         details: Vec<webapi::PublishedFileDetail>,
         extract_destination: &Arc<ExtractDestination>,
-        epoch: u64,
-        request_id: Option<u64>,
+        token: BatchToken,
     ) {
         self.steam.fetch_workshop_items(
             details
@@ -475,6 +519,7 @@ impl Downloads {
             .steam
             .client()
             .expect("download() is only reached once the app-layer connected check has passed")
+            .client()
             .ugc();
         let mut queued_steam_downloads = false;
         // The keyless Web API cannot see private/friends-only items (e.g.
@@ -499,20 +544,12 @@ impl Downloads {
                         url,
                         detail.file_size,
                         extract_destination,
-                        epoch,
-                        request_id,
+                        token,
                     );
                 }
                 _ => {
                     let mut pending = self.pending.lock();
-                    self.push_download(
-                        &ugc,
-                        &mut pending,
-                        extract_destination,
-                        detail.id,
-                        epoch,
-                        request_id,
-                    );
+                    self.push_download(&ugc, &mut pending, extract_destination, detail.id, token);
                     queued_steam_downloads |= !pending.is_empty();
                 }
             }
@@ -523,7 +560,7 @@ impl Downloads {
         }
 
         if !unresolved.is_empty() {
-            self.download_via_steamworks(unresolved, extract_destination, epoch, request_id);
+            self.download_via_steamworks(unresolved, extract_destination, token);
         }
     }
 
@@ -533,18 +570,17 @@ impl Downloads {
         url: String,
         file_size: u64,
         extract_destination: &Arc<ExtractDestination>,
-        epoch: u64,
-        request_id: Option<u64>,
+        token: BatchToken,
     ) {
-        if request_id.is_none() && self.cancelled_since(epoch) {
+        if self.batch_cancelled(token) {
             return;
         }
 
         let transaction = self.transactions.begin();
         self.transactions
             .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                transaction_id: transaction.id,
-                request_id,
+                transaction_id: transaction.id(),
+                request_id: token.request_id,
             }));
         transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
 
@@ -559,7 +595,7 @@ impl Downloads {
                         temp_path.to_path_buf(),
                         item,
                         extract_destination,
-                        request_id,
+                        token.request_id,
                         Some(temp_path),
                     );
                 }
@@ -675,8 +711,7 @@ impl Downloads {
         self: &Arc<Self>,
         mut ids: Vec<PublishedFileId>,
         extract_destination: &Arc<ExtractDestination>,
-        epoch: u64,
-        request_id: Option<u64>,
+        token: BatchToken,
     ) {
         let possible_collections: Arc<Mutex<PossibleCollectionsState>> = Arc::new(Mutex::new({
             let workshop = self
@@ -705,6 +740,7 @@ impl Downloads {
                 .steam
                 .client()
                 .expect("this loop only reaches here when next_query() saw connected() true")
+                .client()
                 .ugc()
                 .query_items(possible_collections_query.clone())
             {
@@ -715,8 +751,8 @@ impl Downloads {
                     let transaction = self.transactions.begin();
                     self.transactions
                         .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                            transaction_id: transaction.id,
-                            request_id,
+                            transaction_id: transaction.id(),
+                            request_id: token.request_id,
                         }));
                     transaction.error(crate::transactions::TransactionError::detailed(
                         crate::error_key::keys::STEAM_ERROR,
@@ -733,12 +769,12 @@ impl Downloads {
                 .fetch(
                     move |results: Result<QueryResults<'_>, steamworks::SteamError>| {
                         if let Err(error) = &results
-                            && let Some(request_id) = request_id
+                            && let Some(request_id) = token.request_id
                         {
                             let transaction = downloads.transactions.begin();
                             downloads.transactions.emit(BackendEvent::DownloadStarted(
                                 DownloadStartedEvent {
-                                    transaction_id: transaction.id,
+                                    transaction_id: transaction.id(),
                                     request_id: Some(request_id),
                                 },
                             ));
@@ -783,7 +819,7 @@ impl Downloads {
                                 .steam
                                 .client()
                                 .expect("Steam UGC callbacks only fire from the connected callback pump")
-                                .ugc();
+                                .client().ugc();
                             for action in actions {
                                 match action {
                                     WorkshopDownloadAction::FetchWorkshopItems(items) => {
@@ -795,12 +831,11 @@ impl Downloads {
                                             &mut pending,
                                             &extract_destination,
                                             item,
-                                            epoch,
-                                            request_id,
+                                            token,
                                         );
                                     }
                                     WorkshopDownloadAction::MissingItem(item) => {
-                                        downloads.missing_item(item, epoch, request_id);
+                                        downloads.missing_item(item, token);
                                     }
                                 }
                             }
@@ -820,16 +855,10 @@ impl Downloads {
             .steam
             .client()
             .expect("download_via_steamworks is only reached once Steam has connected")
+            .client()
             .ugc();
         for item in ids {
-            self.push_download(
-                &ugc,
-                &mut pending,
-                extract_destination,
-                item,
-                epoch,
-                request_id,
-            );
+            self.push_download(&ugc, &mut pending, extract_destination, item, token);
         }
 
         if !pending.is_empty() {
@@ -858,12 +887,17 @@ impl Downloads {
     // `wait_while` (the idle park) and `wait_for` (the in-flight poll).
     #[expect(clippy::significant_drop_tightening)]
     pub(super) fn watchdog(downloads: &Arc<Self>, steam: &Arc<Steam>) {
+        // Spawned from `Steam::on_initialized`, which runs after the interface
+        // is set, so it is up for this thread's whole life.
+        let interface = steam
+            .client()
+            .expect("Downloads::watchdog only runs after Steam has connected");
         let in_progress_state: Arc<(Mutex<BTreeMap<PublishedFileId, Download>>, Condvar)> =
             Arc::new((Mutex::new(BTreeMap::new()), Condvar::new()));
         let in_progress_ref = in_progress_state.clone();
         let downloads_for_callback = Arc::clone(downloads);
         let steam_for_callback = Arc::clone(steam);
-        let _cb = steam.register_callback(move |result: steamworks::DownloadItemResult| {
+        let _cb = interface.register_callback(move |result: steamworks::DownloadItemResult| {
             if result.app_id == GMOD_APP_ID {
                 let mut in_progress = in_progress_ref.0.lock();
                 if let Some(download) = in_progress.remove(&result.published_file_id) {
@@ -878,6 +912,7 @@ impl Downloads {
                     } else if let Some(info) = steam_for_callback
                         .client()
                         .expect("Steam UGC callbacks only fire from the connected callback pump")
+                        .client()
                         .ugc()
                         .item_install_info(result.published_file_id)
                     {
@@ -939,11 +974,7 @@ impl Downloads {
                     continue;
                 }
 
-                let download_started = steam
-                    .client()
-                    .expect("Downloads::watchdog only runs after Steam has connected")
-                    .ugc()
-                    .download_item(download.item, true);
+                let download_started = interface.client().ugc().download_item(download.item, true);
                 if !download_started {
                     download
                         .transaction
@@ -955,10 +986,7 @@ impl Downloads {
                 in_progress.insert(download.item, download);
             }
 
-            let ugc = steam
-                .client()
-                .expect("Downloads::watchdog only runs after Steam has connected")
-                .ugc();
+            let ugc = interface.client().ugc();
             in_progress.retain(|_, download| {
                 // ISteamUGC has no per-item cancel: dropping our tracking is
                 // all a cancel can do here — the Steam client finishes the

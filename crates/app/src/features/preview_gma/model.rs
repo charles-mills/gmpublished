@@ -7,10 +7,12 @@ use crate::bridge::domain::{
     AvatarRgba, PublishedFileId, SteamUser, WorkshopItem, workshop_url::workshop_item_url,
 };
 
+use crate::bridge::domain::SteamId;
 use crate::bridge::gma::PreviewArchive;
 use crate::bridge::tasks::BackendServices;
 use crate::bridge::ui_error::UiError;
 use crate::features::steam_session;
+use crate::generation::Generation;
 use crate::widgets::file_browser::{Entry as FileBrowserEntry, State as FileBrowserState};
 use gmpublished_backend::error_key::keys;
 
@@ -60,7 +62,7 @@ impl OpenTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: Generation,
     pub(crate) path: PathBuf,
     /// Resolved workshop id (click source or path inference); stamps the
     /// archive so its `extracted_name` carries the `<title>_<id>` suffix.
@@ -69,15 +71,15 @@ pub struct OpenRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetadataRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: Generation,
     pub(crate) workshop_id: PublishedFileId,
 }
 
 /// Author lookup request emitted when metadata carries only a steamid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorRequest {
-    pub(crate) request_id: u64,
-    pub(crate) steamid64: u64,
+    pub(crate) request_id: Generation,
+    pub(crate) steamid64: SteamId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,15 +90,15 @@ pub struct AuthorInfo {
 
 /// Renders a steamid64 in the classic Steam2 form, shown as a placeholder
 /// while the author lookup is in flight.
-pub fn steam2_rendered_id(steamid64: u64) -> String {
+pub fn steam2_rendered_id(steamid64: SteamId) -> String {
     const ACCOUNT_OFFSET: u64 = 76_561_197_960_265_728;
-    let account = steamid64.saturating_sub(ACCOUNT_OFFSET);
+    let account = steamid64.get().saturating_sub(ACCOUNT_OFFSET);
     format!("STEAM_1:{}:{}", account & 1, account >> 1)
 }
 
 pub fn query_steam_user_streaming(
     ctx: &BackendServices,
-    steamid64: u64,
+    steamid64: SteamId,
     mut on_author: impl FnMut(Result<AuthorInfo, UiError>),
 ) -> Result<(), UiError> {
     ctx.steam_user_details_streaming(steamid64, |user| {
@@ -135,7 +137,7 @@ impl ExtractionIntent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtractionRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: Generation,
     pub(crate) archive: Arc<PreviewArchive>,
     pub(crate) intent: ExtractionIntent,
 }
@@ -145,7 +147,7 @@ pub struct WorkshopMetadata {
     pub(crate) id: PublishedFileId,
     pub(crate) title: String,
     pub(crate) author: Option<String>,
-    pub(crate) steamid64: Option<u64>,
+    pub(crate) steamid64: Option<SteamId>,
     pub(crate) avatar: Option<AvatarRgba>,
     pub(crate) time_created: u32,
     pub(crate) time_updated: u32,

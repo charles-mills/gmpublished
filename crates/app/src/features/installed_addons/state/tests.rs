@@ -2,6 +2,7 @@ use crate::bridge::library::LibraryRefreshReason;
 
 use super::model::MetadataPatch;
 use super::*;
+use crate::generation::Generation;
 
 /// Builds a `State` pre-populated with `count` rows (the full discovered
 /// addon library), each with a unique workshop id `1..=count`, mirroring
@@ -22,7 +23,7 @@ fn fixture_state(count: usize) -> State {
     let workshop_index = build_workshop_index(&rows);
 
     State {
-        generation: 1,
+        generation: Generation::from_raw(1),
         rows: Some(rows),
         workshop_index,
         ..State::default()
@@ -150,7 +151,7 @@ fn apply_metadata_patches_matches_expected_at_scale() {
 
     for batch in 0..BATCHES {
         let patches = patch_batch(batch * BATCH_SIZE, BATCH_SIZE);
-        state.apply_metadata_patches(1, &patches);
+        state.apply_metadata_patches(Generation::from_raw(1), &patches);
     }
 
     let patched_count = (BATCHES * BATCH_SIZE) as usize;
@@ -254,14 +255,14 @@ fn duplicate_workshop_ids_both_receive_patch() {
     ];
     let workshop_index = build_workshop_index(&rows);
     let mut state = State {
-        generation: 1,
+        generation: Generation::from_raw(1),
         rows: Some(rows),
         workshop_index,
         ..State::default()
     };
 
     state.apply_metadata_patches(
-        1,
+        Generation::from_raw(1),
         &[MetadataPatch::for_test(
             PublishedFileId::new(7).expect("test fixture ids are always nonzero"),
             "Patched",

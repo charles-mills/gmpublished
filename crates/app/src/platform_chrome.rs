@@ -137,19 +137,22 @@ fn install_resize_keepalive_on_window(
 
 fn ns_window_for(window: &dyn iced::window::Window) -> Result<Retained<NSWindow>, ApplyError> {
     let _main_thread = MainThreadMarker::new().ok_or(ApplyError::NotMainThread)?;
-    let handle = window
+    // Bound rather than chained: raw-window-handle guarantees `ns_view` only
+    // while this token is held, and `as_raw` yields an unlifetimed handle that
+    // would outlive a temporary.
+    let window_handle = window
         .window_handle()
-        .map_err(|_| ApplyError::WindowHandleUnavailable)?
-        .as_raw();
-    let RawWindowHandle::AppKit(handle) = handle else {
+        .map_err(|_| ApplyError::WindowHandleUnavailable)?;
+    let RawWindowHandle::AppKit(handle) = window_handle.as_raw() else {
         return Err(ApplyError::NotAppKitWindow);
     };
 
-    // SAFETY: `handle.ns_view` comes from raw-window-handle's
-    // `AppKitWindowHandle`, which guarantees it points to a live `NSView*`
-    // for as long as the window is open; this runs synchronously against the
-    // still-alive `window` passed in by the caller, so the pointer is valid,
-    // non-null, and properly aligned for the short-lived reference used below.
+    // SAFETY: `handle.ns_view` points to a live `NSView*` for as long as
+    // `window_handle` is held, which is the rest of this function.
+    // `NonNull::as_ref` mints an unbounded lifetime, so the reference must not
+    // escape; it is consumed by `window()` below and never returned.
+    // Constructing an `&NSView` at all requires the main thread, which
+    // `_main_thread` establishes above.
     let ns_view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
     ns_view.window().ok_or(ApplyError::MissingWindow)
 }

@@ -49,9 +49,9 @@ pub enum SteamRuntimeStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SteamRuntimeError {
-    #[error("ERR_STEAM_ERROR:STEAM_UNAVAILABLE")]
+    #[error("the Steam client is not running")]
     Unavailable,
-    #[error("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED")]
+    #[error("not connected to Steam")]
     NotConnected,
 }
 
@@ -153,7 +153,7 @@ impl SteamRuntime {
             return Err(SteamRuntimeError::NotConnected);
         }
 
-        let user = steam.current_user();
+        let user = steam.require_client()?.current_user();
         Ok(SteamRuntimeUser {
             steamid: user.steamid,
             name: user.name,

@@ -4,7 +4,10 @@ use iced::widget::pane_grid;
 
 use super::message::PreviewLoadError;
 use super::model::{PreviewContent, PreviewData, PreviewLoadStage, PreviewRequest};
+use crate::generation::Generation;
+use crate::spinner_clock::SpinnerClock;
 use crate::widgets::split_pane;
+use gmpublished_backend::particles::{ControlPointIndex, MAX_CONTROL_POINTS};
 
 const FLY_SPEED_READOUT_VISIBLE_FOR: Duration = Duration::from_millis(800);
 const DEFAULT_VIEWER_RATIO: f32 = (704.0 - 236.0) / 704.0;
@@ -73,11 +76,10 @@ pub struct State {
     loading: bool,
     loading_stage: Option<PreviewLoadStage>,
     error: Option<PreviewLoadError>,
-    request_id: u64,
+    request_id: Generation,
     request: Option<PreviewRequest>,
     current: Option<PreviewData>,
-    spinner_started_at: Option<Instant>,
-    spinner_now: Option<Instant>,
+    spinner: SpinnerClock,
     audio_playing: bool,
     audio_position_secs: f32,
     audio_duration_secs: Option<f32>,
@@ -96,18 +98,16 @@ pub struct State {
     particle_playing: bool,
     particle_speed: f32,
     particle_restart_epoch: u64,
-    particle_control_points: [[f32; 3]; PARTICLE_CONTROL_POINTS],
+    particle_control_points: [[f32; 3]; MAX_CONTROL_POINTS],
     inspector_panes: split_pane::State<Pane>,
 }
 
-pub(super) const PARTICLE_CONTROL_POINTS: usize = 8;
-
 /// CP0 is the effect origin, pinned at the viewport centre; the rest fan out
 /// along +X so two-point effects (beams, tracers) are visible immediately.
-const fn default_particle_control_points() -> [[f32; 3]; PARTICLE_CONTROL_POINTS] {
-    let mut points = [[0.0; 3]; PARTICLE_CONTROL_POINTS];
+const fn default_particle_control_points() -> [[f32; 3]; MAX_CONTROL_POINTS] {
+    let mut points = [[0.0; 3]; MAX_CONTROL_POINTS];
     let mut index = 1;
-    while index < PARTICLE_CONTROL_POINTS {
+    while index < MAX_CONTROL_POINTS {
         points[index] = [96.0 * index as f32, 0.0, 0.0];
         index += 1;
     }
@@ -129,11 +129,10 @@ impl Default for State {
             loading: false,
             loading_stage: None,
             error: None,
-            request_id: 0,
+            request_id: Generation::INITIAL,
             request: None,
             current: None,
-            spinner_started_at: None,
-            spinner_now: None,
+            spinner: SpinnerClock::Idle,
             audio_playing: false,
             audio_position_secs: 0.0,
             audio_duration_secs: None,
@@ -238,7 +237,7 @@ impl State {
         let archive = &self.request.as_ref()?.archive;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {
-            request_id: 0,
+            request_id: Generation::INITIAL,
             archive: std::sync::Arc::clone(archive),
             entry_path: entry.path.to_owned(),
             display_name: entry
@@ -261,7 +260,7 @@ impl State {
     }
 
     pub(crate) fn begin_open(&mut self, mut request: PreviewRequest) -> PreviewRequest {
-        self.request_id = self.request_id.saturating_add(1);
+        self.request_id.bump();
         request.request_id = self.request_id;
         self.open = true;
         self.expanded = false;
@@ -270,8 +269,7 @@ impl State {
         self.error = None;
         self.current = None;
         self.request = Some(request.clone());
-        self.spinner_started_at = None;
-        self.spinner_now = None;
+        self.spinner.stop();
         self.clear_audio();
         self.clear_model_selections();
         self.map_fog_enabled = true;
@@ -288,10 +286,7 @@ impl State {
     }
 
     pub(crate) fn spinner_elapsed(&self) -> f32 {
-        match (self.spinner_started_at, self.spinner_now) {
-            (Some(started), Some(now)) => now.saturating_duration_since(started).as_secs_f32(),
-            _ => 0.0,
-        }
+        self.spinner.elapsed()
     }
 
     pub(crate) fn fly_speed_readout(&self) -> Option<f32> {
@@ -320,10 +315,7 @@ impl State {
 
     pub(super) fn tick_animation(&mut self, now: Instant) {
         if self.spinner_visible() {
-            if self.spinner_started_at.is_none() {
-                self.spinner_started_at = Some(now);
-            }
-            self.spinner_now = Some(now);
+            self.spinner.advance_or_start(now);
         }
 
         let Some(readout) = self.fly_speed_readout.as_mut() else {
@@ -340,7 +332,11 @@ impl State {
         }
     }
 
-    pub(crate) fn apply_load_stage(&mut self, request_id: u64, stage: PreviewLoadStage) -> bool {
+    pub(crate) fn apply_load_stage(
+        &mut self,
+        request_id: Generation,
+        stage: PreviewLoadStage,
+    ) -> bool {
         if !self.open || !self.loading || self.request_id != request_id {
             return false;
         }
@@ -350,7 +346,7 @@ impl State {
 
     pub(crate) fn apply_loaded(
         &mut self,
-        request_id: u64,
+        request_id: Generation,
         result: Result<PreviewData, PreviewLoadError>,
     ) -> bool {
         if !self.open || self.request_id != request_id {
@@ -558,7 +554,7 @@ impl State {
         self.particle_restart_epoch
     }
 
-    pub(crate) const fn particle_control_points(&self) -> [[f32; 3]; PARTICLE_CONTROL_POINTS] {
+    pub(crate) const fn particle_control_points(&self) -> [[f32; 3]; MAX_CONTROL_POINTS] {
         self.particle_control_points
     }
 
@@ -588,10 +584,13 @@ impl State {
         }
     }
 
-    pub(super) fn set_particle_control_point(&mut self, index: usize, position: [f32; 3]) {
-        if index < PARTICLE_CONTROL_POINTS && position.iter().all(|component| component.is_finite())
-        {
-            self.particle_control_points[index] = position;
+    pub(super) fn set_particle_control_point(
+        &mut self,
+        index: ControlPointIndex,
+        position: [f32; 3],
+    ) {
+        if position.iter().all(|component| component.is_finite()) {
+            self.particle_control_points[index.get()] = position;
         }
     }
 
@@ -634,7 +633,7 @@ impl State {
         if !self.open && !self.loading && self.current.is_none() && self.request.is_none() {
             return;
         }
-        self.request_id = self.request_id.saturating_add(1);
+        self.request_id.bump();
         self.open = false;
         self.expanded = false;
         self.loading = false;
@@ -642,8 +641,7 @@ impl State {
         self.error = None;
         self.request = None;
         self.current = None;
-        self.spinner_started_at = None;
-        self.spinner_now = None;
+        self.spinner.stop();
         self.clear_audio();
         self.clear_model_selections();
         self.map_fog_enabled = true;

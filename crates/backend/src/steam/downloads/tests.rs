@@ -1,5 +1,6 @@
 use super::*;
 use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};
+use crate::transactions::TransactionId;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -92,7 +93,7 @@ fn write_installed_gma(
 fn wait_for_installed_extract_terminal(
     collector: &BackendEventCollector,
     item: PublishedFileId,
-) -> (u32, Vec<BackendEvent>) {
+) -> (TransactionId, Vec<BackendEvent>) {
     let started = Instant::now();
     loop {
         let events = collector.snapshot();
@@ -123,7 +124,7 @@ TransactionEvent::Error { id, .. })
 
 fn assert_extraction_started(
     events: &[BackendEvent],
-    transaction_id: u32,
+    transaction_id: TransactionId,
     item: PublishedFileId,
     source_path: Option<&std::path::Path>,
 ) {
@@ -137,7 +138,7 @@ fn assert_extraction_started(
     )));
 }
 
-fn statuses_for(events: &[BackendEvent], transaction_id: u32) -> Vec<&str> {
+fn statuses_for(events: &[BackendEvent], transaction_id: TransactionId) -> Vec<&str> {
     events
         .iter()
         .filter_map(|event| match event {
@@ -151,7 +152,7 @@ fn statuses_for(events: &[BackendEvent], transaction_id: u32) -> Vec<&str> {
         .collect()
 }
 
-fn assert_download_missing_error(events: &[BackendEvent], transaction_id: u32) {
+fn assert_download_missing_error(events: &[BackendEvent], transaction_id: TransactionId) {
     assert!(events.iter().any(|event| matches!(
         event,
         BackendEvent::Transaction(TransactionEvent::Error { id, error })

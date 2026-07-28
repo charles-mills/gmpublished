@@ -23,7 +23,7 @@ fn smoothed_ratio(initial: f32) -> motion::Presence<f32> {
     motion::Presence::new(initial, PROGRESS_SMOOTH_DURATION, Easing::EaseOut)
 }
 const MAX_PENDING_TASK_UPDATES: usize = 128;
-pub const EXTRACT_STATUS: &str = "extracting_progress";
+pub use crate::bridge::tasks::EXTRACT_STATUS;
 
 /// A downloader row's identity: positive for rows keyed off a real
 /// [`TaskId`], negative for synthetic rows (already-finished or errored

@@ -7,9 +7,9 @@ use super::{
     MODEL_VERTEX_ATTRIBUTES, MSAA_SAMPLE_COUNT, MapFog, MapSkyCamera, MaterialSlot, MeshData,
     ModelPreview, ModelVertex, OverlayDrawItem, OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME,
     PHY_DEBUG_RGBA, Rectangle, RenderMode, ResolvedBcMip, ResolvedTexture, SHADER_SOURCE,
-    SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, Skybox, SkyboxFace, TextureUploadLevel, Viewport,
-    WATER_SHADER_SOURCE, WorldVisibilityPlan, add, bc_mip_is_valid, bc_texture_format,
-    decode_bc_texture, half_extent, initial_door_open_sign, look_at, mat_mul, mid, perspective,
+    SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SOURCE_UP, Skybox, SkyboxFace, TextureUploadLevel,
+    Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan, add, bc_mip_is_valid, bc_texture_format,
+    decode_bc_texture, half_extent, initial_door_swing, look_at, mat_mul, mid, perspective,
     prepare_draw_plans, shader, skybox_eye, transform_door_vertices, wgpu, write_bc_texture_level,
     write_texture_level,
 };
@@ -57,10 +57,10 @@ impl Uniforms {
     ) -> Self {
         let frame = FlyCameraFrame::new(scene, camera, bounds);
         let target = add(frame.eye, frame.forward);
-        let view = look_at(frame.eye, target, [0.0, 0.0, 1.0]);
+        let view = look_at(frame.eye, target, SOURCE_UP);
         let (fog_color, fog_params) = if submerged {
             let color = scene_water_fog_color(scene);
-            ([color[0], color[1], color[2], 1.0], [0.0, 2048.0, 1.0, 1.0])
+            ([color[0], color[1], color[2], 0.0], [0.0, 2048.0, 1.0, 1.0])
         } else {
             (
                 fog.map_or([0.0; 4], |fog| {
@@ -91,7 +91,7 @@ impl Uniforms {
     pub(super) fn for_fly_sky(scene: &ModelPreview, camera: &FlyCamera, bounds: Rectangle) -> Self {
         let frame = FlyCameraFrame::new(scene, camera, bounds);
         let target = add(frame.eye, frame.forward);
-        let mut view = look_at(frame.eye, target, [0.0, 0.0, 1.0]);
+        let mut view = look_at(frame.eye, target, SOURCE_UP);
         view[3][0] = 0.0;
         view[3][1] = 0.0;
         view[3][2] = 0.0;
@@ -116,7 +116,7 @@ impl Uniforms {
     ) -> Self {
         let frame = FlyCameraFrame::new(scene, camera, bounds);
         let eye = skybox_eye(frame.eye, sky_camera.origin, sky_camera.scale);
-        let view = look_at(eye, add(eye, frame.forward), [0.0, 0.0, 1.0]);
+        let view = look_at(eye, add(eye, frame.forward), SOURCE_UP);
 
         Self {
             view_proj: mat_mul(frame.proj, view),
@@ -149,7 +149,7 @@ impl Uniforms {
             center[2] + distance * camera.pitch.sin(),
         ];
         // Source models are Z-up.
-        let view = look_at(eye, center, [0.0, 0.0, 1.0]);
+        let view = look_at(eye, center, SOURCE_UP);
         let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
         let proj = perspective(FOV_Y, aspect, radius * 0.01, radius * 20.0 + distance);
 
@@ -280,6 +280,10 @@ fn srgb_channel_to_linear(channel: u8) -> f32 {
 /// One frame's draw of a loaded model; heavy data is uploaded once per
 /// `content_id` and cached in the shared [`ModelPipeline`].
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "three independent render toggles plus the camera's water state"
+)]
 pub struct ModelPrimitive {
     pub(super) model: Arc<ModelPreview>,
     pub(super) content_id: u64,
@@ -289,6 +293,9 @@ pub struct ModelPrimitive {
     pub(super) visibility_culling: bool,
     pub(super) phy_debug_visible: bool,
     pub(super) uniforms: Uniforms,
+    /// Whether the camera eye is under water. Drives the clear colour and
+    /// which passes run; no shader reads it.
+    pub(super) submerged: bool,
     pub(super) map_skybox_uniforms: Option<Uniforms>,
     pub(super) sky_uniforms: Option<Uniforms>,
     pub(super) door_poses: Vec<DoorRenderPose>,
@@ -383,7 +390,7 @@ impl shader::Primitive for ModelPrimitive {
         let with_sky_tint = |mut uniforms: Uniforms| {
             uniforms.water_time_sky_tint[0] = self.uniforms.water_time_sky_tint[0];
             uniforms.water_time_sky_tint[1..].copy_from_slice(&sky_tint);
-            if self.uniforms.fog_color[3] > 0.5 {
+            if self.submerged {
                 uniforms.fog_color = self.uniforms.fog_color;
                 uniforms.fog_params = self.uniforms.fog_params;
             }
@@ -428,7 +435,7 @@ impl shader::Primitive for ModelPrimitive {
             .as_ref()
             .filter(|plans| plans.content_id == self.content_id);
         let has_skybox_composite = plans.and_then(|plans| plans.map_skybox.as_ref()).is_some();
-        let submerged = self.uniforms.fog_color[3] > 0.5;
+        let submerged = self.submerged;
         let background_color = if submerged {
             wgpu::Color {
                 r: f64::from(self.uniforms.fog_color[0]),
@@ -904,7 +911,7 @@ impl UploadedModel {
                 .copied()
                 .unwrap_or_else(|| DoorRenderPose {
                     progress: door.initial_progress.clamp(0.0, 1.0),
-                    open_sign: initial_door_open_sign(door.motion),
+                    swing: initial_door_swing(door.motion),
                 });
             if mesh.last_door_pose == Some(pose) {
                 continue;
@@ -1310,7 +1317,7 @@ impl shader::Pipeline for ModelPipeline {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
                 },
                 count: None,
             }],
@@ -2695,7 +2702,7 @@ pub(super) fn upload_door_meshes(
     for (door_index, door) in doors.iter().enumerate() {
         let pose = DoorRenderPose {
             progress: door.initial_progress.clamp(0.0, 1.0),
-            open_sign: initial_door_open_sign(door.motion),
+            swing: initial_door_swing(door.motion),
         };
         for mesh in &door.meshes {
             if mesh.vertices.is_empty() || mesh.indices.is_empty() {

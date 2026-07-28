@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use std::time::Instant;
 
 use iced::widget::{
@@ -606,7 +607,7 @@ fn update_row<'a>(
     let i18n = ctx.i18n;
     let caption = i18n.trn(
         "account-update-caption",
-        &[("arg0", state.update_version())],
+        &[("version", Arg::Text(state.update_version()))],
     );
     let content = row![
         menu_icon_slot(

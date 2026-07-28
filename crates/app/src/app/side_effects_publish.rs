@@ -395,9 +395,10 @@ impl App {
         request: prepare_publish::PublishIconSubmitRequestEnvelope,
     ) -> Task<RootMessage> {
         let generation = request.generation;
-        let task = self
-            .ctx
-            .create_task(TaskKind::Publish, "PUBLISH_PROCESSING_ICON");
+        let task = self.ctx.create_task(
+            TaskKind::Publish,
+            crate::bridge::tasks::PUBLISH_PROCESSING_ICON_STATUS,
+        );
         let ctx = self.ctx.clone();
         self.ctx
             .run_blocking("prepare-publish-icon-submit", move |app| {

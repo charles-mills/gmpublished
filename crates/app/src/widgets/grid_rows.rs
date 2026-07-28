@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::generation::Generation;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
 
@@ -15,7 +16,7 @@ pub trait GridRow {
 pub fn thumbnail_demands<R: GridRow>(
     rows: &[R],
     visible_range: Range<usize>,
-    generation: u64,
+    generation: Generation,
     owner: thumbnail_demand::Owner,
 ) -> thumbnail_demand::DemandSet {
     let visible_range = visible_range.start.min(rows.len())..visible_range.end.min(rows.len());
@@ -83,10 +84,6 @@ pub fn invalidate_ready_thumbnails<R: GridRow>(rows: &mut [R]) -> bool {
         changed |= row.invalidate_ready_thumbnail();
     }
     changed
-}
-
-pub fn thumbnail_owner(label: &'static str) -> thumbnail_demand::Owner {
-    thumbnail_demand::Owner::AddonGrid(label)
 }
 
 pub fn score_bucket(score: f32) -> i32 {

@@ -51,6 +51,39 @@ pub fn normalize_material_name(name: &str) -> String {
 }
 
 pub const MAX_CONTROL_POINTS: usize = 8;
+
+/// An index into a system's control points, guaranteed in range.
+///
+/// PCF files name control points freely, so the clamp happens once, here. Every
+/// path that reaches a control point — the compiler, reads, writes — therefore
+/// resolves an out-of-range number the same way.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ControlPointIndex(usize);
+
+impl ControlPointIndex {
+    /// Clamps into range: content naming control point 40 gets the last one
+    /// rather than being dropped, so a wild index degrades rather than
+    /// silently removing the effect that used it.
+    #[must_use]
+    pub const fn clamped(index: usize) -> Self {
+        if index >= MAX_CONTROL_POINTS {
+            Self(MAX_CONTROL_POINTS - 1)
+        } else {
+            Self(index)
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+
+    /// Every valid index, ascending. The only way to iterate control points
+    /// without a `usize` that has to be re-bounded at each use.
+    pub fn all() -> impl DoubleEndedIterator<Item = Self> + ExactSizeIterator {
+        (0..MAX_CONTROL_POINTS).map(Self)
+    }
+}
 /// Hard ceiling across all instances so a hostile file cannot OOM the app.
 pub const MAX_TOTAL_PARTICLES: usize = 100_000;
 
@@ -538,14 +571,13 @@ impl ParticleEngine {
             .unwrap_or(0)
     }
 
-    pub fn control_point(&self, index: usize) -> [f32; 3] {
-        self.control_points[index.min(MAX_CONTROL_POINTS - 1)]
+    #[must_use]
+    pub fn control_point(&self, index: ControlPointIndex) -> [f32; 3] {
+        self.control_points[index.get()]
     }
 
-    pub fn set_control_point(&mut self, index: usize, position: [f32; 3]) {
-        if index < MAX_CONTROL_POINTS {
-            self.control_points[index] = position;
-        }
+    pub fn set_control_point(&mut self, index: ControlPointIndex, position: [f32; 3]) {
+        self.control_points[index.get()] = position;
     }
 
     /// True once every emitter has finished and no particles remain; the
@@ -612,10 +644,13 @@ impl ParticleEngine {
 
     /// Reports control point motion since the last step so operators that
     /// track a moving control point respond to gizmo drags.
-    pub fn drag_control_point(&mut self, index: usize, position: [f32; 3], dt_hint: f32) {
-        if index >= MAX_CONTROL_POINTS {
-            return;
-        }
+    pub fn drag_control_point(
+        &mut self,
+        index: ControlPointIndex,
+        position: [f32; 3],
+        dt_hint: f32,
+    ) {
+        let index = index.get();
         let previous = self.control_points[index];
         self.control_points[index] = position;
         if dt_hint > 1e-4 {
@@ -667,14 +702,14 @@ impl ParticleEngine {
     fn run_control_point_operators(&mut self, instance_index: usize, _local_time: f32) {
         let system = self.instances[instance_index].system;
         let operators = &self.systems[system].operators;
-        let mut writes: Vec<(usize, [f32; 3])> = Vec::new();
+        let mut writes: Vec<(ControlPointIndex, [f32; 3])> = Vec::new();
         for operator in operators {
             match operator {
                 Operator::SetControlPointPositions {
                     base_control_point,
                     points,
                 } => {
-                    let base = self.control_points[*base_control_point];
+                    let base = self.control_points[base_control_point.get()];
                     for (index, location) in points {
                         writes.push((*index, add(base, *location)));
                     }
@@ -689,7 +724,7 @@ impl ParticleEngine {
                         let particle = first_particle + offset;
                         if particle < particles.len() {
                             writes.push((
-                                (*first_control_point + offset).min(MAX_CONTROL_POINTS - 1),
+                                ControlPointIndex::clamped(first_control_point.get() + offset),
                                 particles.position[particle],
                             ));
                         }
@@ -699,9 +734,7 @@ impl ParticleEngine {
             }
         }
         for (index, position) in writes {
-            if index < MAX_CONTROL_POINTS {
-                self.control_points[index] = position;
-            }
+            self.control_points[index.get()] = position;
         }
     }
 
@@ -873,7 +906,10 @@ impl ParticleEngine {
                 } => {
                     let direction = rng.biased_unit_vector(*bias);
                     let distance = rng.range(*distance_min, *distance_max);
-                    position = add(control_points[*control_point], scale(direction, distance));
+                    position = add(
+                        control_points[control_point.get()],
+                        scale(direction, distance),
+                    );
                     let speed = rng.range_exp(*speed_min, *speed_max, *speed_exponent);
                     velocity = add(velocity, scale(direction, speed));
                     velocity = add(velocity, rng.range_vec(*local_speed_min, *local_speed_max));
@@ -899,7 +935,7 @@ impl ParticleEngine {
                     warp_max,
                 } => {
                     let warp = rng.range_vec(*warp_min, *warp_max);
-                    let center = control_points[*control_point];
+                    let center = control_points[control_point.get()];
                     let offset = sub(position, center);
                     position = add(
                         center,
@@ -919,8 +955,8 @@ impl ParticleEngine {
                         .as_ref()
                         .map_or_else(|| rng.unit(), |count| (spawn_index as f32 % count) / count);
                     position = lerp3(
-                        control_points[*start_control_point],
-                        control_points[*end_control_point],
+                        control_points[start_control_point.get()],
+                        control_points[end_control_point.get()],
                         t,
                     );
                 }
@@ -947,7 +983,7 @@ impl ParticleEngine {
                     end_spread,
                 } => {
                     let start = position;
-                    let mut end = control_points[*end_control_point];
+                    let mut end = control_points[end_control_point.get()];
                     if *end_spread > 0.0 {
                         end = add(end, rng.range_vec([-*end_spread; 3], [*end_spread; 3]));
                     }
@@ -1106,7 +1142,7 @@ impl ParticleEngine {
                         amount,
                         falloff_power,
                     } => {
-                        let target = control_points[*control_point];
+                        let target = control_points[control_point.get()];
                         let delta = sub(target, particles.position[index]);
                         let distance = length(delta).max(1.0);
                         let strength = amount / distance.powf(*falloff_power - 1.0);
@@ -1117,7 +1153,7 @@ impl ParticleEngine {
                         amount,
                         control_point,
                     } => {
-                        let center = control_points[*control_point];
+                        let center = control_points[control_point.get()];
                         let offset = sub(particles.position[index], center);
                         // Tangent = axis x offset.
                         let tangent = [
@@ -1304,7 +1340,7 @@ impl ParticleEngine {
                     }
                 }
                 Operator::MovementLockToControlPoint { control_point } => {
-                    let delta = scale(control_point_velocity[*control_point], dt);
+                    let delta = scale(control_point_velocity[control_point.get()], dt);
                     if length(delta) > 0.0 {
                         for index in 0..particles.len() {
                             particles.position[index] = add(particles.position[index], delta);
@@ -1452,7 +1488,7 @@ impl ParticleEngine {
                     max_distance,
                     offset,
                 } => {
-                    let center = add(control_points[*control_point], *offset);
+                    let center = add(control_points[control_point.get()], *offset);
                     for index in 0..particles.len() {
                         let delta = sub(particles.position[index], center);
                         let distance = length(delta);
@@ -1472,8 +1508,8 @@ impl ParticleEngine {
                     end_control_point,
                     max_distance,
                 } => {
-                    let start = control_points[*start_control_point];
-                    let end = control_points[*end_control_point];
+                    let start = control_points[start_control_point.get()];
+                    let end = control_points[end_control_point.get()];
                     let axis = sub(end, start);
                     let axis_length_sq = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
                     for index in 0..particles.len() {
@@ -1858,7 +1894,7 @@ mod tests {
             &[("distance_max", PcfValue::Float(0.0))],
         ));
         let mut engine = engine_for(vec![system]);
-        engine.set_control_point(0, [100.0, 0.0, 0.0]);
+        engine.set_control_point(ControlPointIndex::clamped(0), [100.0, 0.0, 0.0]);
         engine.step(0.2);
         let particle = engine.render_instances()[0].particles[0];
         assert!((particle.position[0] - 100.0).abs() < 1.0);
@@ -1875,5 +1911,24 @@ mod tests {
         let mut engine = engine_for(vec![system]);
         engine.step(1.0);
         assert!(engine.live_particles() <= MAX_TOTAL_PARTICLES);
+    }
+    /// PCF files name control points freely, and the clamp is the only thing
+    /// keeping an out-of-range number from meaning something different on each
+    /// path that reaches it.
+    #[test]
+    fn an_out_of_range_control_point_clamps_once_at_construction() {
+        assert_eq!(ControlPointIndex::clamped(0).get(), 0);
+        assert_eq!(
+            ControlPointIndex::clamped(MAX_CONTROL_POINTS - 1).get(),
+            MAX_CONTROL_POINTS - 1
+        );
+        assert_eq!(
+            ControlPointIndex::clamped(MAX_CONTROL_POINTS).get(),
+            MAX_CONTROL_POINTS - 1
+        );
+        assert_eq!(
+            ControlPointIndex::clamped(usize::MAX).get(),
+            MAX_CONTROL_POINTS - 1
+        );
     }
 }

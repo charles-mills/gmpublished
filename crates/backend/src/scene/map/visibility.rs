@@ -53,12 +53,19 @@ impl MapVisibility {
     }
 }
 
+/// The 2D-skybox flood fill. `Active` carries both reachability rows, which
+/// `from_bsp` only produces together and only for a map that has a
+/// `sky_camera`; every other outcome is `Inactive`, which partitions nothing.
 #[derive(Debug, Clone)]
-pub(super) struct SkyboxPartition {
-    pub(super) sky_camera_present: bool,
-    pub(super) camera_reachable: Vec<bool>,
-    pub(super) sky_reachable: Vec<bool>,
-    pub(super) completion_bounds: Option<([f32; 3], [f32; 3])>,
+pub(super) enum SkyboxPartition {
+    Inactive {
+        sky_camera_present: bool,
+    },
+    Active {
+        camera_reachable: Vec<bool>,
+        sky_reachable: Vec<bool>,
+        completion_bounds: Option<MapBounds>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -69,13 +76,27 @@ pub(super) enum FaceAttribution {
 }
 
 impl SkyboxPartition {
-    pub(super) fn inactive(sky_camera_present: bool) -> Self {
-        Self {
-            sky_camera_present,
-            camera_reachable: Vec::new(),
-            sky_reachable: Vec::new(),
-            completion_bounds: None,
+    pub(super) const fn inactive(sky_camera_present: bool) -> Self {
+        Self::Inactive { sky_camera_present }
+    }
+
+    pub(super) const fn sky_camera_present(&self) -> bool {
+        match *self {
+            Self::Inactive { sky_camera_present } => sky_camera_present,
+            Self::Active { .. } => true,
         }
+    }
+
+    pub(super) fn cluster_partition(&self, cluster: i16) -> GeometryPartition {
+        let Self::Active {
+            camera_reachable,
+            sky_reachable,
+            ..
+        } = self
+        else {
+            return GeometryPartition::Visible;
+        };
+        cluster_partition(cluster, camera_reachable, sky_reachable)
     }
 
     pub(super) fn from_bsp(
@@ -114,8 +135,7 @@ impl SkyboxPartition {
             return None;
         }
 
-        Some(Self {
-            sky_camera_present: true,
+        Some(Self::Active {
             camera_reachable,
             sky_reachable,
             completion_bounds: None,
@@ -133,7 +153,7 @@ impl SkyboxPartition {
         let Some(cluster) = point_cluster(bsp, point) else {
             return GeometryPartition::Visible;
         };
-        cluster_partition(cluster, &self.camera_reachable, &self.sky_reachable)
+        self.cluster_partition(cluster)
     }
 
     pub(super) fn face_partition(
@@ -157,72 +177,30 @@ impl SkyboxPartition {
         face_attributions: &FaceAttributions,
         player_start: Option<&MapPlayerStart>,
     ) {
-        if !self.sky_camera_present {
-            return;
-        }
-        let Some(seed_bounds) = self.seed_completion_bounds(bsp, face_attributions) else {
-            return;
-        };
-        let completion_bounds = expand_bounds(seed_bounds, [SKYBOX_COMPLETION_AABB_EXPANSION; 3]);
-        if player_start.is_some_and(|start| bounds_contains_point(completion_bounds, start.origin))
-        {
-            log::debug!("bsp skybox completion disabled: completion AABB contains player spawn");
-            return;
-        }
-        let Some(world_bounds) = bsp_world_bounds(bsp) else {
-            log::debug!("bsp skybox completion disabled: unable to derive world bounds");
+        let Self::Active {
+            camera_reachable,
+            sky_reachable,
+            completion_bounds,
+        } = self
+        else {
             return;
         };
-        let completion_volume = bounds_volume(completion_bounds);
-        let world_volume = bounds_volume(world_bounds);
-        if !completion_volume.is_finite()
-            || !world_volume.is_finite()
-            || world_volume <= 0.0
-            || completion_volume > world_volume * SKYBOX_COMPLETION_MAX_WORLD_VOLUME_FRACTION
-        {
-            log::debug!(
-                "bsp skybox completion disabled: completion volume {completion_volume}, world volume {world_volume}"
-            );
-            return;
-        }
-        self.completion_bounds = Some(completion_bounds);
-    }
-
-    pub(super) fn seed_completion_bounds(
-        &self,
-        bsp: &MapBsp,
-        face_attributions: &FaceAttributions,
-    ) -> Option<([f32; 3], [f32; 3])> {
-        let mut bounds = BoundsBuilder::default();
-        for face_index in 0..bsp.faces.len() {
-            if face_attributions.partition(face_index) != GeometryPartition::Skybox {
-                continue;
-            }
-            let Some(face) = bsp.face(face_index) else {
-                continue;
-            };
-            for vertex in bsp.face_vertex_positions(face) {
-                bounds.push(vertex);
-            }
-        }
-        for prop in bsp.static_props_iter() {
-            let origin = prop.origin;
-            if normalize_static_prop_model_path(bsp.static_prop_model(prop)).is_some()
-                && self.flood_point_partition(bsp, origin) == GeometryPartition::Skybox
-            {
-                bounds.push(origin);
-            }
-        }
-        bounds.finish()
+        *completion_bounds = derive_completion_bounds(
+            bsp,
+            face_attributions,
+            player_start,
+            camera_reachable,
+            sky_reachable,
+        );
     }
 
     pub(super) fn completion_contains_point(&self, point: [f32; 3]) -> bool {
-        self.completion_bounds
+        self.completion_bounds()
             .is_some_and(|bounds| bounds_contains_point(bounds, point))
     }
 
     pub(super) fn face_inside_completion_bounds(&self, bsp: &MapBsp, face_index: usize) -> bool {
-        let Some(bounds) = self.completion_bounds else {
+        let Some(bounds) = self.completion_bounds() else {
             return false;
         };
         let Some(face) = bsp.face(face_index) else {
@@ -235,9 +213,13 @@ impl SkyboxPartition {
                 .all(|vertex| bounds_contains_point(bounds, *vertex))
     }
 
-    pub(super) fn completion_bounds(&self) -> Option<MapBounds> {
-        self.completion_bounds
-            .map(|(min, max)| MapBounds { min, max })
+    pub(super) const fn completion_bounds(&self) -> Option<MapBounds> {
+        match *self {
+            Self::Inactive { .. } => None,
+            Self::Active {
+                completion_bounds, ..
+            } => completion_bounds,
+        }
     }
 }
 
@@ -251,13 +233,11 @@ pub(super) struct FaceAttributions {
 impl FaceAttributions {
     pub(super) fn from_bsp(bsp: &MapBsp, skybox_partition: &SkyboxPartition) -> Self {
         let mut attributions = vec![FaceAttribution::Unknown; bsp.faces.len()];
-        let mut visibility = vec![MapFaceVisibility::unknown(); bsp.faces.len()];
+        let mut visibility = (0..bsp.faces.len())
+            .map(|_| MapFaceVisibilityBuilder::default())
+            .collect::<Vec<_>>();
         for leaf in &bsp.leaves {
-            let partition = cluster_partition(
-                leaf.cluster,
-                &skybox_partition.camera_reachable,
-                &skybox_partition.sky_reachable,
-            );
+            let partition = skybox_partition.cluster_partition(leaf.cluster);
             let bucket = visibility_bucket(leaf.cluster, bsp.cluster_count());
             let start = usize::from(leaf.first_leaf_face);
             let end = start.saturating_add(usize::from(leaf.leaf_face_count));
@@ -305,9 +285,10 @@ impl FaceAttributions {
                 partition
             })
             .collect();
-        for face_visibility in &mut visibility {
-            face_visibility.finish();
-        }
+        let visibility = visibility
+            .into_iter()
+            .map(MapFaceVisibilityBuilder::finish)
+            .collect();
 
         Self {
             partitions,
@@ -342,6 +323,11 @@ impl FaceAttributions {
     }
 }
 
+/// Which clusters a face is drawn for.
+///
+/// An empty `clusters` means the face is drawn unconditionally, so
+/// `always_visible` is always true in that case — [`MapFaceVisibilityBuilder`]
+/// is the only way to produce one, and it establishes that.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(super) struct MapFaceVisibility {
     pub(super) always_visible: bool,
@@ -349,13 +335,6 @@ pub(super) struct MapFaceVisibility {
 }
 
 impl MapFaceVisibility {
-    pub(super) fn unknown() -> Self {
-        Self {
-            always_visible: false,
-            clusters: Vec::new(),
-        }
-    }
-
     pub(super) fn always() -> Self {
         Self {
             always_visible: true,
@@ -364,12 +343,19 @@ impl MapFaceVisibility {
     }
 
     pub(super) fn from_bucket(bucket: MapVisibilityBucket) -> Self {
-        let mut visibility = Self::unknown();
-        visibility.push(bucket);
-        visibility.finish();
-        visibility
+        let mut builder = MapFaceVisibilityBuilder::default();
+        builder.push(bucket);
+        builder.finish()
     }
+}
 
+#[derive(Debug, Default)]
+pub(super) struct MapFaceVisibilityBuilder {
+    always_visible: bool,
+    clusters: Vec<u32>,
+}
+
+impl MapFaceVisibilityBuilder {
     pub(super) fn push(&mut self, bucket: MapVisibilityBucket) {
         match bucket {
             MapVisibilityBucket::Always => self.always_visible = true,
@@ -381,11 +367,15 @@ impl MapFaceVisibility {
         }
     }
 
-    pub(super) fn finish(&mut self) {
+    pub(super) fn finish(mut self) -> MapFaceVisibility {
         if self.clusters.is_empty() {
             self.always_visible = true;
         } else {
             self.clusters.sort_unstable();
+        }
+        MapFaceVisibility {
+            always_visible: self.always_visible,
+            clusters: self.clusters,
         }
     }
 }
@@ -396,6 +386,77 @@ pub(super) fn visibility_bucket(cluster: i16, cluster_count: u32) -> MapVisibili
     } else {
         MapVisibilityBucket::Always
     }
+}
+
+/// The skybox completion AABB for an active partition, or `None` when the
+/// candidate volume is unusable — it swallows the player spawn, or it is a
+/// large enough fraction of the world that reattributing everything inside it
+/// would hide real geometry.
+fn derive_completion_bounds(
+    bsp: &MapBsp,
+    face_attributions: &FaceAttributions,
+    player_start: Option<&MapPlayerStart>,
+    camera_reachable: &[bool],
+    sky_reachable: &[bool],
+) -> Option<MapBounds> {
+    let seed_bounds =
+        seed_completion_bounds(bsp, face_attributions, camera_reachable, sky_reachable)?;
+    let completion_bounds = expand_bounds(seed_bounds, [SKYBOX_COMPLETION_AABB_EXPANSION; 3]);
+    if player_start.is_some_and(|start| bounds_contains_point(completion_bounds, start.origin)) {
+        log::debug!("bsp skybox completion disabled: completion AABB contains player spawn");
+        return None;
+    }
+    let Some(world_bounds) = bsp_world_bounds(bsp) else {
+        log::debug!("bsp skybox completion disabled: unable to derive world bounds");
+        return None;
+    };
+    let completion_volume = bounds_volume(completion_bounds);
+    let world_volume = bounds_volume(world_bounds);
+    if !completion_volume.is_finite()
+        || !world_volume.is_finite()
+        || world_volume <= 0.0
+        || completion_volume > world_volume * SKYBOX_COMPLETION_MAX_WORLD_VOLUME_FRACTION
+    {
+        log::debug!(
+            "bsp skybox completion disabled: completion volume {completion_volume}, world volume {world_volume}"
+        );
+        return None;
+    }
+    Some(completion_bounds)
+}
+
+/// Bounds enclosing everything the flood fill already attributed to the
+/// skybox: its faces, and the origins of props standing in sky-only clusters.
+fn seed_completion_bounds(
+    bsp: &MapBsp,
+    face_attributions: &FaceAttributions,
+    camera_reachable: &[bool],
+    sky_reachable: &[bool],
+) -> Option<MapBounds> {
+    let mut bounds = BoundsBuilder::default();
+    for face_index in 0..bsp.faces.len() {
+        if face_attributions.partition(face_index) != GeometryPartition::Skybox {
+            continue;
+        }
+        let Some(face) = bsp.face(face_index) else {
+            continue;
+        };
+        for vertex in bsp.face_vertex_positions(face) {
+            bounds.push(vertex);
+        }
+    }
+    for prop in bsp.static_props_iter() {
+        let origin = prop.origin;
+        let partition = point_cluster(bsp, origin).map_or(GeometryPartition::Visible, |cluster| {
+            cluster_partition(cluster, camera_reachable, sky_reachable)
+        });
+        if normalize_static_prop_model_path(bsp.static_prop_model(prop)).is_some()
+            && partition == GeometryPartition::Skybox
+        {
+            bounds.push(origin);
+        }
+    }
+    bounds.finish()
 }
 
 pub(super) fn cluster_partition(

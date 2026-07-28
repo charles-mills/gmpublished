@@ -6,6 +6,7 @@ use crate::bridge::library::LibraryRefreshReason;
 use crate::bridge::ui_error::UiError;
 
 use super::model::{MetadataPatch, MetadataResolution, Row};
+use crate::generation::Generation;
 
 /// Facts emitted by the Installed Addons route.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,7 +23,7 @@ pub enum Message {
     SnapshotPushed(LibraryRefreshReason, Result<Vec<Row>, UiError>),
     /// A visible-row Workshop metadata query completed.
     MetadataCompleted(
-        u64,
+        Generation,
         Vec<PublishedFileId>,
         Result<MetadataResolution, UiError>,
     ),
@@ -34,7 +35,7 @@ pub enum Message {
     /// fails. It is empty on the streaming success batches, which need no such
     /// bookkeeping.
     MetadataRefreshCompleted(
-        u64,
+        Generation,
         Vec<PublishedFileId>,
         Result<Vec<MetadataPatch>, UiError>,
     ),

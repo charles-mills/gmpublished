@@ -42,19 +42,19 @@ gmod-broken-title = Папка Garry's Mod не найдена
 gmod-broken-body = Сохранённый путь больше не содержит GarrysMod/addons.
 gmod-broken-research = Искать снова
 account-update-title = Доступно обновление
-account-update-caption = {$arg0} · нажмите, чтобы скачать
+account-update-caption = {$version} · нажмите, чтобы скачать
 my-workshop = Моя мастерская
 publish-new = Опубликовать новое...
 my-workshop-loading = Загрузка...
 my-workshop-empty-title = Пока нет опубликованных дополнений
 my-workshop-empty-body = Всё, что вы опубликуете в мастерской, появится здесь.
-my-workshop-error = Не удалось загрузить «Мою мастерскую»: {$arg0}
-my-workshop-count = Показано {$arg0} из {$arg1} дополнений
+my-workshop-error = Не удалось загрузить «Мою мастерскую»: {$error}
+my-workshop-count = Показано {$loaded} из {$total} дополнений
 installed-addons = Установленные дополнения
 installed-addons-loading = Загрузка...
 installed-addons-empty-title = Нет установленных дополнений
 installed-addons-empty-body = Подпишитесь на что-нибудь в мастерской или перетащите сюда файл .gma.
-installed-addons-error = Не удалось обнаружить установленные дополнения: {$arg0}
+installed-addons-error = Не удалось обнаружить установленные дополнения: {$error}
 downloader = Загрузчик
 downloader-workshop-input = Вставьте ID предметов, ссылки, коллекции сюда...
 downloader-bulk-extract = Массовое извлечение GMA
@@ -68,8 +68,8 @@ downloader-open-all = Открыть все
 downloader-remove-all = Удалить все
 downloader-status-finished = Выполнено
 downloader-status-error = Ошибка
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = Мастерская {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-workshop-id = Мастерская {$id}
 destination-where-to = Куда?
 destination-overwrite-warning = Существующие файлы будут заменены.
 destination-browse = Обзор...
@@ -84,100 +84,102 @@ destination-invalid-path = Выберите существующую папку 
 relative-time-now = только что
 relative-time-past-year = 1 год назад
 relative-time-past-years =
-    { $arg0 ->
-        [one] {$arg0} год назад
-        [few] {$arg0} года назад
-       *[many] {$arg0} лет назад
+    { $count ->
+        [one] {$count} год назад
+        [few] {$count} года назад
+       *[many] {$count} лет назад
     }
 relative-time-past-month = 1 месяц назад
 relative-time-past-months =
-    { $arg0 ->
-        [one] {$arg0} месяц назад
-        [few] {$arg0} месяца назад
-       *[many] {$arg0} месяцев назад
+    { $count ->
+        [one] {$count} месяц назад
+        [few] {$count} месяца назад
+       *[many] {$count} месяцев назад
     }
 relative-time-past-day = 1 день назад
 relative-time-past-days =
-    { $arg0 ->
-        [one] {$arg0} день назад
-        [few] {$arg0} дня назад
-       *[many] {$arg0} дней назад
+    { $count ->
+        [one] {$count} день назад
+        [few] {$count} дня назад
+       *[many] {$count} дней назад
     }
 relative-time-past-hour = 1 час назад
 relative-time-past-hours =
-    { $arg0 ->
-        [one] {$arg0} час назад
-        [few] {$arg0} часа назад
-       *[many] {$arg0} часов назад
+    { $count ->
+        [one] {$count} час назад
+        [few] {$count} часа назад
+       *[many] {$count} часов назад
     }
 relative-time-past-minute = 1 минуту назад
 relative-time-past-minutes =
-    { $arg0 ->
-        [one] {$arg0} минуту назад
-        [few] {$arg0} минуты назад
-       *[many] {$arg0} минут назад
+    { $count ->
+        [one] {$count} минуту назад
+        [few] {$count} минуты назад
+       *[many] {$count} минут назад
     }
 relative-time-past-second = 1 секунду назад
 relative-time-past-seconds =
-    { $arg0 ->
-        [one] {$arg0} секунду назад
-        [few] {$arg0} секунды назад
-       *[many] {$arg0} секунд назад
+    { $count ->
+        [one] {$count} секунду назад
+        [few] {$count} секунды назад
+       *[many] {$count} секунд назад
     }
 relative-time-future-year = через 1 год
 relative-time-future-years =
-    { $arg0 ->
-        [one] через {$arg0} год
-        [few] через {$arg0} года
-       *[many] через {$arg0} лет
+    { $count ->
+        [one] через {$count} год
+        [few] через {$count} года
+       *[many] через {$count} лет
     }
 relative-time-future-month = через 1 месяц
 relative-time-future-months =
-    { $arg0 ->
-        [one] через {$arg0} месяц
-        [few] через {$arg0} месяца
-       *[many] через {$arg0} месяцев
+    { $count ->
+        [one] через {$count} месяц
+        [few] через {$count} месяца
+       *[many] через {$count} месяцев
     }
 relative-time-future-day = через 1 день
 relative-time-future-days =
-    { $arg0 ->
-        [one] через {$arg0} день
-        [few] через {$arg0} дня
-       *[many] через {$arg0} дней
+    { $count ->
+        [one] через {$count} день
+        [few] через {$count} дня
+       *[many] через {$count} дней
     }
 relative-time-future-hour = через 1 час
 relative-time-future-hours =
-    { $arg0 ->
-        [one] через {$arg0} час
-        [few] через {$arg0} часа
-       *[many] через {$arg0} часов
+    { $count ->
+        [one] через {$count} час
+        [few] через {$count} часа
+       *[many] через {$count} часов
     }
 relative-time-future-minute = через 1 минуту
 relative-time-future-minutes =
-    { $arg0 ->
-        [one] через {$arg0} минуту
-        [few] через {$arg0} минуты
-       *[many] через {$arg0} минут
+    { $count ->
+        [one] через {$count} минуту
+        [few] через {$count} минуты
+       *[many] через {$count} минут
     }
 relative-time-future-second = через 1 секунду
 relative-time-future-seconds =
-    { $arg0 ->
-        [one] через {$arg0} секунду
-        [few] через {$arg0} секунды
-       *[many] через {$arg0} секунд
+    { $count ->
+        [one] через {$count} секунду
+        [few] через {$count} секунды
+       *[many] через {$count} секунд
     }
 downloading = Скачивание
 locating = Ожидание
 decompressing = Извлечение
-extracting_progress = Извлечение {$arg0}% ({$arg1} / {$arg2})
+reading_metadata = Чтение метаданных
+searching = Поиск...
+extracting_progress = Извлечение {$percent}% ({$done} / {$total})
 size-analyzer = Анализатор размера дополнения
 size-analyzer-waiting = Ожидание области просмотра диаграммы...
 size-analyzer-loading = Вычисление...
 size-analyzer-empty = Дополнения с ненулевым размером не найдены.
 size-analyzer-empty-title = Нечего анализировать
 size-analyzer-empty-body = Все дополнения в вашей библиотеке пусты, поэтому строить диаграмму не из чего.
-size-analyzer-error = Ошибка анализатора размера: {$arg0}
-size-analyzer-summary-cells = {$arg0} элем.
+size-analyzer-error = Ошибка анализатора размера: {$error}
+size-analyzer-summary-cells = {$count} элем.
 size-analyzer-name = Название
 size-analyzer-type = Тип
 size-analyzer-size = Размер
@@ -247,7 +249,7 @@ context-menu-debug-simulate-minus = Симулировать -10
 context-menu-debug-simulate-plus-million = Симулировать +1 миллион
 context-menu-debug-simulate-minus-million = Симулировать -1 миллион
 publish-processing-icon = Обработка изображения мастерской...
-publish-packing = Упаковка {$arg0}% ({$arg1} / {$arg2})
+publish-packing = Упаковка {$percent}% ({$done} / {$total})
 PUBLISH_STARTING = Начало публикации
 PUBLISH_PREPARING_CONFIG = Подготовка конфигурации
 PUBLISH_PREPARING_CONTENT = Подготовка содержимого
@@ -264,10 +266,10 @@ err-whitelist-detail =
 
     Если вы хотите отфильтровать эти типы файлов из ваших GMA, добавьте их в список игнорируемых шаблонов файлов.
 
-    {$arg0}
+    {$detail}
 err-no-entries = В этом пути содержимого нет записей.
-err-duplicate-entries = В этом пути содержимого есть дублирующая запись ({$arg0}). Все пути должны быть уникальными и со строчной буквы. Кста, я использую arch
-err-duplicate-entries-detail = В этом пути содержимого есть дублирующая запись ({$arg0}). Все пути должны быть уникальными и со строчной буквы. Кста, я использую arch
+err-duplicate-entries = В этом пути содержимого есть дублирующая запись. Все пути должны быть уникальными и со строчной буквы. Кста, я использую arch
+err-duplicate-entries-detail = В этом пути содержимого есть дублирующая запись ({$detail}). Все пути должны быть уникальными и со строчной буквы. Кста, я использую arch
 err-invalid-content-path = Данный путь к содержимому не существует, не является каталогом или у gmpublished недостаточно прав для доступа к нему
 err-multiple-gmas = В этом пути к содержимому найдено несколько файлов GMA
 err-icon-too-large = Изображение слишком большое (> 1 МБ)
@@ -278,12 +280,12 @@ err-io-error = Ошибка ввода/вывода
 err-unknown = Что-то пошло не так
 err-gmod-path-missing = Папка Garry's Mod не настроена
 err-no-addons-found = Дополнения не найдены
-err-image-error = Ошибка изображения: {$arg0}
-err-image-error-detail = Ошибка изображения: {$arg0}
-err-steam-error = Ошибка Steam: {$arg0}
-err-steam-error-detail = Ошибка Steam: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/с
+err-image-error = Ошибка изображения
+err-image-error-detail = Ошибка изображения: {$detail}
+err-steam-error = Ошибка Steam
+err-steam-error-detail = Ошибка Steam: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/с
 byte-unit-b = Б
 byte-unit-kb = КБ
 byte-unit-mb = МБ
@@ -317,7 +319,7 @@ file-type-txt = Текст
 file-type-properties = Свойства
 file-type-audio = Звук
 file-type-image = Изображение
-file-type-unknown = Неизвестно ({$arg0})
+file-type-unknown = Неизвестно ({$extension})
 file-preview-loading = Загрузка предпросмотра...
 file-preview-stage-reading-archive = Чтение архива...
 file-preview-stage-reading-bsp = Чтение BSP...
@@ -329,7 +331,7 @@ file-preview-expand = Развернуть предпросмотр
 file-preview-collapse = Свернуть предпросмотр
 file-preview-open-material = Открыть материал
 file-preview-open-texture = Открыть текстуру
-file-preview-error = Не удалось открыть предпросмотр: {$arg0}
+file-preview-error = Не удалось открыть предпросмотр: {$error}
 file-preview-path = Путь
 file-preview-size = Размер
 file-preview-crc = CRC
@@ -351,7 +353,7 @@ file-preview-particle-level-approximate = Приближённо — вид мо
 file-preview-particle-level-inert = Требуется карта или сущность — не действует в этом предпросмотре
 file-preview-particle-level-unsupported = Не симулируется в этом предпросмотре
 file-preview-truncated = Предпросмотр сокращён — полный файл больше показанного.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Сетки
 file-preview-model-bones = Кости
 file-preview-model-sequences = Последовательности
@@ -359,8 +361,8 @@ file-preview-model-vertices = Вершины
 file-preview-model-triangles = Треугольники
 file-preview-model-materials = Материалы найдены
 file-preview-model-skin = Скин
-file-preview-model-skin-option = Скин {$arg0}
-file-preview-model-bodygroup = Группа тела {$arg0}
+file-preview-model-skin-option = Скин {$index}
+file-preview-model-bodygroup = Группа тела {$index}
 file-preview-model-bounds-min = Границы мин.
 file-preview-model-bounds-max = Границы макс.
 file-preview-map-controls = Перетаскивайте, чтобы осмотреться · WASD — полёт · Shift — скорость · колесо регулирует скорость
@@ -392,7 +394,7 @@ prepare-publish-tag-2 = Метка 2
 prepare-publish-tag-3 = Метка 3
 prepare-publish-update-exclamation = Обновить!
 prepare-publish-publish-exclamation = Опубликовать!
-prepare-publish-update-warning = Вы выпускаете ОБНОВЛЕНИЕ для {$arg0} ({$arg1})
+prepare-publish-update-warning = Вы выпускаете ОБНОВЛЕНИЕ для {$title} ({$id})
 prepare-publish-still-needed = Ещё требуется:
 prepare-publish-needs-addon-path = Путь к дополнению
 prepare-publish-needs-title = Заголовок
@@ -404,8 +406,8 @@ prepare-publish-file-browser = Просмотрщик файлов
 prepare-publish-browser-select = Перетащите файл сюда или нажмите для просмотра
 prepare-publish-no-files = Файлы не найдены
 prepare-publish-items-one = 1 элемент
-prepare-publish-items-num = {$arg0} элем.
-prepare-publish-items-shown = Показано: {$arg0}
+prepare-publish-items-num = {$count} элем.
+prepare-publish-items-shown = Показано: {$count}
 prepare-publish-ignored-patterns = Игнорируемые шаблоны файлов
 prepare-publish-ignore-placeholder = Добавить...
 prepare-publish-ignored-for-convenience = По умолчанию этот шаблон файла игнорируется для вашего удобства.

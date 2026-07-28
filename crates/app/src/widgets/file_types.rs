@@ -34,58 +34,57 @@ pub fn file_type_info(name: &str) -> FileTypeInfo<'_> {
     } else {
         Cow::Borrowed(extension)
     };
+    let (icon, translation_key) = icon_and_type_key(&extension);
     FileTypeInfo {
-        icon: file_icon(&extension),
-        translation_key: file_type_key(&extension),
+        icon,
+        translation_key,
         extension,
     }
 }
 
-fn file_icon(extension: &str) -> SilkIcon {
+/// One table so an extension cannot gain a label without an icon, or the
+/// reverse. Extensions sharing a label share this arm.
+fn icon_and_type_key(extension: &str) -> (SilkIcon, &'static str) {
     match extension {
-        "lua" => SilkIcon::ScriptCode,
-        "mp3" | "ogg" | "wav" => SilkIcon::Sound,
-        "png" | "jpg" | "jpeg" => SilkIcon::Photo,
-        "bsp" | "nav" | "ain" | "fgd" => SilkIcon::Map,
-        "pcf" => SilkIcon::Wand,
-        "vcd" => SilkIcon::Comments,
-        "ttf" => SilkIcon::Font,
-        "txt" => SilkIcon::PageWhiteText,
-        "properties" => SilkIcon::PageWhiteWrench,
-        "vmt" | "vtf" => SilkIcon::PictureLink,
-        "mdl" | "vtx" | "phy" | "ani" | "vvd" => SilkIcon::Bricks,
-        _ => SilkIcon::PageWhite,
-    }
-}
-
-fn file_type_key(extension: &str) -> &'static str {
-    match extension {
-        "mp3" | "ogg" | "wav" => "file-type-audio",
-        "png" | "jpg" | "jpeg" => "file-type-image",
-        "bsp" | "map" => "file-type-map",
-        "vtf" => "file-type-vtf",
-        "vmt" => "file-type-vmt",
-        "ain" => "file-type-ain",
-        "nav" => "file-type-nav",
-        "ttf" => "file-type-ttf",
-        "vcd" => "file-type-vcd",
-        "fgd" => "file-type-fgd",
-        "pcf" => "file-type-pcf",
-        "lua" => "file-type-lua",
-        "mdl" => "file-type-mdl",
-        "vtx" => "file-type-vtx",
-        "phy" => "file-type-phy",
-        "ani" => "file-type-ani",
-        "vvd" => "file-type-vvd",
-        "txt" => "file-type-txt",
-        "properties" => "file-type-properties",
-        _ => "file-type-unknown",
+        "lua" => (SilkIcon::ScriptCode, "file-type-lua"),
+        "mp3" | "ogg" | "wav" => (SilkIcon::Sound, "file-type-audio"),
+        "png" | "jpg" | "jpeg" => (SilkIcon::Photo, "file-type-image"),
+        "bsp" | "map" => (SilkIcon::Map, "file-type-map"),
+        "nav" => (SilkIcon::Map, "file-type-nav"),
+        "ain" => (SilkIcon::Map, "file-type-ain"),
+        "fgd" => (SilkIcon::Map, "file-type-fgd"),
+        "pcf" => (SilkIcon::Wand, "file-type-pcf"),
+        "vcd" => (SilkIcon::Comments, "file-type-vcd"),
+        "ttf" => (SilkIcon::Font, "file-type-ttf"),
+        "txt" => (SilkIcon::PageWhiteText, "file-type-txt"),
+        "properties" => (SilkIcon::PageWhiteWrench, "file-type-properties"),
+        "vmt" => (SilkIcon::PictureLink, "file-type-vmt"),
+        "vtf" => (SilkIcon::PictureLink, "file-type-vtf"),
+        "mdl" => (SilkIcon::Bricks, "file-type-mdl"),
+        "vtx" => (SilkIcon::Bricks, "file-type-vtx"),
+        "phy" => (SilkIcon::Bricks, "file-type-phy"),
+        "ani" => (SilkIcon::Bricks, "file-type-ani"),
+        "vvd" => (SilkIcon::Bricks, "file-type-vvd"),
+        _ => (SilkIcon::PageWhite, "file-type-unknown"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{SilkIcon, file_type_info};
+
+    /// `.map` and `.bsp` share a label, so they must share an icon. Two
+    /// separate tables let `.map` keep the label while falling through to the
+    /// generic page icon.
+    #[test]
+    fn extensions_sharing_a_label_share_an_icon() {
+        let bsp = file_type_info("de_dust2.bsp");
+        let map = file_type_info("de_dust2.map");
+
+        assert_eq!(bsp.translation_key, map.translation_key);
+        assert_eq!(bsp.icon, map.icon);
+        assert_eq!(map.icon, SilkIcon::Map);
+    }
 
     #[test]
     fn extensions_map_to_upstream_icons_and_types() {

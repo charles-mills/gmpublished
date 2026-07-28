@@ -1118,6 +1118,34 @@ fn parse_entity_prop_model_scale_defaults_invalid_values() {
     );
 }
 
+/// The three ways a door declines to close itself: the Toggle spawnflag, a
+/// negative `wait`, and being a `func_movelinear` at all. Each still carries a
+/// `wait` keyvalue, so none of them may be honoured.
+#[test]
+fn a_door_that_stays_open_ignores_its_wait_keyvalue() {
+    let doors = pending_doors_from_fixture(
+        r#"
+        { "classname" "func_door" "model" "*1" "origin" "32 0 0" "wait" "5" "spawnflags" "32" }
+        { "classname" "func_door_rotating" "model" "*1" "origin" "96 0 0" "distance" "45" "spawnflags" "32" }
+        { "classname" "func_door" "model" "*1" "origin" "64 0 0" "wait" "5" }
+        { "classname" "func_door" "model" "*1" "origin" "160 0 0" "wait" "-1" }
+        "#,
+    );
+
+    assert_eq!(doors.len(), 4);
+    assert_eq!(doors[0].auto_close_after, None);
+    assert_eq!(doors[1].auto_close_after, None);
+    assert_eq!(
+        doors[2].auto_close_after,
+        Some(5.0),
+        "the same keyvalue without the flag still auto-closes"
+    );
+    assert_eq!(
+        doors[3].auto_close_after, None,
+        "a negative wait is Source's usual way to pin a door open"
+    );
+}
+
 #[test]
 fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
     let doors = pending_doors_from_fixture(
@@ -1136,7 +1164,7 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
     let linear = &doors[0];
     assert_eq!(linear.class, MapDoorClass::FuncDoor);
     assert_eq!(linear.origin, [32.0, 0.0, 0.0]);
-    assert_eq!(linear.wait, 3.0);
+    assert_eq!(linear.auto_close_after, Some(3.0));
     assert_eq!(linear.initial_progress, 0.0);
     match linear.motion {
         MapDoorMotion::Linear {
@@ -1156,7 +1184,10 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
     let movelinear = &doors[1];
     assert_eq!(movelinear.class, MapDoorClass::FuncMoveLinear);
     assert_eq!(movelinear.initial_progress, 0.25);
-    assert_eq!(movelinear.wait, 3.0);
+    assert_eq!(
+        movelinear.auto_close_after, None,
+        "func_movelinear is a mover, not a door: Source never auto-returns it"
+    );
     match movelinear.motion {
         MapDoorMotion::Linear {
             direction,
@@ -1195,7 +1226,7 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
     assert_eq!(prop.class, MapDoorClass::PropDoorRotating);
     assert_eq!(prop.origin, [128.0, 0.0, 0.0]);
     assert_eq!(prop.angles, [0.0, 90.0, 0.0]);
-    assert_eq!(prop.wait, -1.0);
+    assert_eq!(prop.auto_close_after, None);
     match prop.motion {
         MapDoorMotion::Rotating {
             angle_delta,
@@ -1258,7 +1289,7 @@ fn door_extraction_removes_bmodel_faces_without_shifting_downstream_ranges() {
     else {
         panic!("expected brush door");
     };
-    assert_eq!(*model_index, 1);
+    assert_eq!(*model_index, ModelIndex::new(1));
     assert_eq!(
         meshes.iter().map(|mesh| mesh.indices.len()).sum::<usize>(),
         3
@@ -1517,10 +1548,10 @@ fn unsupported_versions_are_reported_before_decode() {
     bytes.extend_from_slice(b"VBSP");
     bytes.extend_from_slice(&21_u32.to_le_bytes());
 
-    assert_eq!(
+    assert!(matches!(
         load_map(&bytes),
         Err(BspError::UnsupportedVersion { version: 21 })
-    );
+    ));
 }
 
 fn block(width: usize, height: usize) -> PendingLightmapBlock {
@@ -2149,8 +2180,9 @@ fn merge_skybox_collections(mut map: MapData) -> MapData {
     map.static_props.append(&mut map.skybox_static_props);
     map.detail_sprites.append(&mut map.skybox_detail_sprites);
     map.overlays.append(&mut map.skybox_overlays);
-    map.bounds_min = bounds_from_meshes(&map.meshes).0;
-    map.bounds_max = bounds_from_meshes(&map.meshes).1;
+    let bounds = bounds_from_meshes(&map.meshes);
+    map.bounds_min = bounds.min;
+    map.bounds_max = bounds.max;
     map.stats.world_static_prop_count = map.stats.static_prop_count;
     map.stats.skybox_static_prop_count = 0;
     map.stats.world_entity_prop_count = map.stats.entity_prop_count;
@@ -2800,4 +2832,77 @@ fn an_acyclic_walk_still_reaches_its_leaf_at_full_depth() {
     );
 
     assert_eq!(leaf, Some(0));
+}
+
+#[test]
+fn a_straddling_aabb_visits_a_shared_child_once() {
+    use super::walk::PlaneSide;
+
+    let visit = |side: PlaneSide, children| side.children(children).collect::<Vec<_>>();
+
+    assert_eq!(visit(PlaneSide::Front, [7, 9]), vec![7]);
+    assert_eq!(visit(PlaneSide::Back, [7, 9]), vec![9]);
+    assert_eq!(visit(PlaneSide::Both, [7, 9]), vec![7, 9]);
+    // Both sides of a plane can name the same subtree; descending it twice
+    // doubles the work at every level below.
+    assert_eq!(visit(PlaneSide::Both, [7, 7]), vec![7]);
+}
+
+#[test]
+fn node_children_decode_by_sign() {
+    use super::NodeChild;
+
+    assert_eq!(NodeChild::decode(0), Some(NodeChild::Node(0)));
+    assert_eq!(NodeChild::decode(12), Some(NodeChild::Node(12)));
+    // Negative is the bitwise complement of a leaf index, so -1 is leaf 0.
+    assert_eq!(NodeChild::decode(-1), Some(NodeChild::Leaf(0)));
+    assert_eq!(
+        NodeChild::decode(i32::MIN),
+        Some(NodeChild::Leaf(i32::MAX as usize))
+    );
+}
+
+/// The camera reads `MapData::bounds_min`/`bounds_max` directly and derives a
+/// center and radius from them, so a NaN here becomes a NaN camera.
+#[test]
+fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
+    let vertex = |position| MapVertex {
+        position,
+        normal: [0.0, 0.0, 1.0],
+        tex_s: 0.0,
+        tex_t: 0.0,
+        lightmap_uv: [0.0; 2],
+        blend_alpha: 0.0,
+    };
+    let mesh = MapMesh {
+        vertices: vec![vertex([f32::NAN; 3]), vertex([f32::INFINITY; 3])],
+        indices: Vec::new(),
+        material_index: 0,
+        visibility: MapMeshVisibility::default(),
+    };
+
+    let bounds = bounds_from_meshes(std::slice::from_ref(&mesh));
+
+    assert_eq!(bounds.min, [0.0; 3]);
+    assert_eq!(bounds.max, [0.0; 3]);
+}
+
+/// `BuildMeshVisibility::push` trusts `always_visible` alone to decide whether a
+/// face is drawn unconditionally. A face that ends up in no cluster must
+/// therefore come out always-visible, or it is drawn nowhere.
+#[test]
+fn a_face_in_no_cluster_finishes_as_always_visible() {
+    use super::MapVisibilityBucket;
+    use super::visibility::MapFaceVisibilityBuilder;
+
+    let no_buckets = MapFaceVisibilityBuilder::default().finish();
+    assert!(no_buckets.always_visible);
+    assert!(no_buckets.clusters.is_empty());
+
+    let mut clustered = MapFaceVisibilityBuilder::default();
+    clustered.push(MapVisibilityBucket::Cluster(3));
+    clustered.push(MapVisibilityBucket::Cluster(1));
+    let clustered = clustered.finish();
+    assert!(!clustered.always_visible);
+    assert_eq!(clustered.clusters, vec![1, 3]);
 }

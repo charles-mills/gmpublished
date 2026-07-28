@@ -58,18 +58,23 @@ pub struct GmaView {
 impl GmaView {
     /// Memory-maps `path` read-only.
     ///
-    /// # Safety-adjacent note
-    /// The mapped file could in principle be replaced mid-read (Steam
-    /// updating content). Parsing validates every extent against the
-    /// mapped length up front and slices never exceed it; a concurrent
-    /// truncation can fault the process, the same failure the previous
-    /// seek-based reader surfaced as I/O errors. Upstream gmpublisher
-    /// shipped memory-mapped GMAs the same way.
+    /// # Accepted risk
+    /// `Mmap::map` requires that the file is not modified or truncated while
+    /// mapped. That cannot be guaranteed here: addons live in a user-writable
+    /// directory that Steam also updates, so another process truncating one
+    /// mid-read is undefined behaviour, not an I/O error the caller can
+    /// handle. Bounds-checking parse extents does not address it — the
+    /// mapping itself is what becomes invalid.
+    ///
+    /// This is accepted deliberately, for the same reason upstream
+    /// gmpublisher accepted it: the alternative is re-reading every addon
+    /// through a seeking reader on every preview. Every public constructor
+    /// below inherits the risk and repeats it.
     pub(crate) fn mmap(path: &Path) -> Result<Self, GMAError> {
         main_thread_forbidden!();
 
         let file = File::open(path)?;
-        // SAFETY: see doc comment above.
+        // SAFETY: see the accepted-risk note above.
         let map = unsafe { memmap2::Mmap::map(&file)? };
         Ok(Self {
             bytes: GmaBytes::Mapped(map),
@@ -138,6 +143,9 @@ impl GmaView {
     /// Memory-maps `path` read-only, like [`Self::mmap`], for callers
     /// outside the crate that keep the view alive across several reads
     /// (the preview modal holds it for entry fetches).
+    ///
+    /// Carries [`Self::mmap`]'s accepted risk: truncating the file while the
+    /// returned view is alive is undefined behaviour.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, GMAError> {
         Self::mmap(path.as_ref())
     }
@@ -186,7 +194,7 @@ impl GmaView {
             author: parsed.metadata.author.to_string(),
             addon_version: parsed.metadata.addon_version,
         };
-        let entries = indexed_entries_from_parsed(&parsed, self.bytes.as_slice())?;
+        let entries = self.indexed_entries_from_parsed(&parsed)?;
         Ok(GmaMetaBundle {
             handle,
             header,
@@ -200,7 +208,7 @@ impl GmaView {
         let parsed = self.parse()?;
         Ok(GmaIndexBundle {
             header: header_from_parsed(&parsed),
-            entries: indexed_entries_from_parsed(&parsed, self.bytes.as_slice())?,
+            entries: self.indexed_entries_from_parsed(&parsed)?,
         })
     }
 
@@ -278,32 +286,49 @@ fn header_from_parsed(parsed: &vformats::gma::Gma<'_>) -> GMAHeader {
     }
 }
 
-fn indexed_entries_from_parsed(
-    parsed: &vformats::gma::Gma<'_>,
-    bytes: &[u8],
-) -> Result<Vec<GmaIndexedEntry>, GMAError> {
-    let mut entries = Vec::with_capacity(parsed.entries().len());
-    let bytes_start = bytes.as_ptr() as usize;
-    for (index, entry) in parsed.entries().iter().enumerate() {
-        if is_unsafe_entry_path(&entry.path) {
-            log::warn!("Illegal GMA entry: {}", entry.path);
-            continue;
+impl GmaView {
+    /// Records each entry's payload as an offset into this view's bytes, so a
+    /// later [`Self::read_payload_bytes`] can re-slice it without re-parsing.
+    ///
+    /// A method rather than a free function taking the slice separately: the
+    /// offsets are only meaningful against the buffer `parsed` borrows from,
+    /// and reading `self.bytes` here is what ties the two together.
+    fn indexed_entries_from_parsed(
+        &self,
+        parsed: &vformats::gma::Gma<'_>,
+    ) -> Result<Vec<GmaIndexedEntry>, GMAError> {
+        let bytes = self.bytes.as_slice();
+        let mut entries = Vec::with_capacity(parsed.entries().len());
+        for (index, entry) in parsed.entries().iter().enumerate() {
+            if is_unsafe_entry_path(&entry.path) {
+                log::warn!("Illegal GMA entry: {}", entry.path);
+                continue;
+            }
+            let payload = parsed
+                .entry_bytes(index)
+                .map_err(|_| GMAError::FormatError)?;
+            let offset = payload
+                .as_ptr()
+                .addr()
+                .checked_sub(bytes.as_ptr().addr())
+                .ok_or(GMAError::FormatError)?;
+            // The payload must lie wholly inside this view, or the offset
+            // names bytes from some other buffer.
+            if offset
+                .checked_add(payload.len())
+                .is_none_or(|end| end > bytes.len())
+            {
+                return Err(GMAError::FormatError);
+            }
+            entries.push(GmaIndexedEntry {
+                path: entry.path.to_string(),
+                size: entry.size,
+                crc: entry.crc32,
+                data_offset: u64::try_from(offset).map_err(|_| GMAError::FormatError)?,
+            });
         }
-        let payload = parsed
-            .entry_bytes(index)
-            .map_err(|_| GMAError::FormatError)?;
-        let data_offset = (payload.as_ptr() as usize)
-            .checked_sub(bytes_start)
-            .and_then(|offset| u64::try_from(offset).ok())
-            .ok_or(GMAError::FormatError)?;
-        entries.push(GmaIndexedEntry {
-            path: entry.path.to_string(),
-            size: entry.size,
-            crc: entry.crc32,
-            data_offset,
-        });
+        Ok(entries)
     }
-    Ok(entries)
 }
 
 pub(super) fn safe_entry_indices_from_parsed(
@@ -347,6 +372,9 @@ impl GMAFile {
     /// Memory-maps this addon's bytes for one read/extract operation.
     /// Only valid for on-disk addons; membuffer/spill flows hold the view
     /// they constructed instead of re-viewing through a handle.
+    ///
+    /// Carries [`GmaView::mmap`]'s accepted risk: truncating the file while
+    /// the returned view is alive is undefined behaviour.
     pub fn view(&self) -> Result<GmaView, GMAError> {
         GmaView::mmap(&self.path)
     }
@@ -356,6 +384,8 @@ impl GMAFile {
     }
 
     /// One-mmap, one-parse open: handle + header + entry list together.
+    ///
+    /// Carries [`GmaView::mmap`]'s accepted risk for the duration of the call.
     pub fn open_meta<P: AsRef<Path>>(path: P) -> Result<GmaMetaBundle, GMAError> {
         GmaView::mmap(path.as_ref())?.meta(path)
     }

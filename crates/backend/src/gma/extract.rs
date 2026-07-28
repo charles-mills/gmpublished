@@ -29,13 +29,16 @@ use serde::{Deserialize, Serialize};
 
 static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
 
+/// What to do when a GMA's extraction directory already exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ExtractionOverwriteMode {
-    /// Removes the existing destination directory before extracting: a
-    /// full replace, not a merge with whatever was there before.
+    /// Extracts over the existing directory, replacing files the GMA
+    /// contains and leaving everything else in place.
     Overwrite,
+    /// Moves the existing directory to the trash first.
     #[default]
     Recycle,
+    /// Removes the existing directory permanently first.
     Delete,
 }
 
@@ -127,11 +130,14 @@ impl ExtractionAppDataContext {
     }
 }
 
+/// Clears an existing destination so extraction can use it. `false` means the
+/// path could not be made usable and a suffixed sibling should be used instead.
 fn cleanup_existing_destination(path: &Path, overwrite_mode: &ExtractionOverwriteMode) -> bool {
     match overwrite_mode {
-        ExtractionOverwriteMode::Overwrite | ExtractionOverwriteMode::Delete => {
-            fs::remove_dir_all(path).is_ok()
-        }
+        // Nothing to clear: the point of this mode is that files the GMA does
+        // not contain survive.
+        ExtractionOverwriteMode::Overwrite => true,
+        ExtractionOverwriteMode::Delete => fs::remove_dir_all(path).is_ok(),
         ExtractionOverwriteMode::Recycle => trash::delete(path).is_ok(),
     }
 }

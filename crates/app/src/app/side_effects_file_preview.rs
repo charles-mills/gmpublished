@@ -38,6 +38,7 @@ use crate::features::file_preview::{
     PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest, Skybox,
     SkyboxFace, normalize_particle_material,
 };
+use crate::generation::Generation;
 use crate::theme::Tokens;
 
 mod map_preview;
@@ -49,7 +50,7 @@ mod syntax;
 use crate::features::file_preview::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
 #[cfg(test)]
 use map_preview::{
-    LoadedPropModel, LoadedPropPhysics, PropBakeSkipStats, PropMaterialState, PropModelAsset,
+    LoadedPropModel, LoadedPropPhysics, MaterialTable, PropBakeSkipStats, PropModelAsset,
     PropPlacementLighting, PropSunLighting, StaticPropLightingInputs,
     bake_map_doors_with_prop_model_loader, bake_prop_placement, bake_static_props,
     bake_static_props_with_loaded_model_cache, bake_static_props_with_loader,
@@ -66,7 +67,7 @@ use materials::{
 #[cfg(test)]
 use routing::model_companion_parent_path;
 use routing::{
-    CodeSyntax, EntryClass, ImageClass, VTX_SUFFIXES, classify_entry_path,
+    CodeSyntax, EntryClass, ImageClass, PreviewClass, VTX_SUFFIXES, classify_entry_path,
     model_companion_preview_request, related_preview_target,
 };
 #[cfg(test)]
@@ -177,21 +178,20 @@ fn load_preview_data(
     gmod_dir: Option<std::path::PathBuf>,
     output: &mut iced_mpsc::Sender<RootMessage>,
 ) -> Result<PreviewData, PreviewLoadError> {
-    let classified = classify_entry_path(&request.entry_path);
-    let entry_class = if let EntryClass::ModelCompanion = classified {
-        if let Some(parent_request) = model_companion_preview_request(&request) {
+    let entry_class = match classify_entry_path(&request.entry_path) {
+        EntryClass::Previewable(class) => class,
+        EntryClass::ModelCompanion => {
+            let Some(parent_request) = model_companion_preview_request(&request) else {
+                send_load_stage(output, request.request_id, PreviewLoadStage::ReadingArchive);
+                log::debug!(
+                    "file preview model companion {} missing parent .mdl",
+                    request.entry_path
+                );
+                return Ok(info_preview_data(&request, InfoReason::DecodeFailed));
+            };
             request = parent_request;
-            EntryClass::Model
-        } else {
-            send_load_stage(output, request.request_id, PreviewLoadStage::ReadingArchive);
-            log::debug!(
-                "file preview model companion {} missing parent .mdl",
-                request.entry_path
-            );
-            return Ok(info_preview_data(&request, InfoReason::DecodeFailed));
+            PreviewClass::Model
         }
-    } else {
-        classified
     };
     send_load_stage(output, request.request_id, initial_load_stage(entry_class));
     let bytes = request.archive.entry_bytes(&request.entry_path)?;
@@ -214,7 +214,7 @@ fn load_preview_data(
 
 fn send_load_stage(
     output: &mut iced_mpsc::Sender<RootMessage>,
-    request_id: u64,
+    request_id: Generation,
     stage: PreviewLoadStage,
 ) {
     let _ = send_root_message(
@@ -223,17 +223,16 @@ fn send_load_stage(
     );
 }
 
-const fn initial_load_stage(entry_class: EntryClass) -> PreviewLoadStage {
+const fn initial_load_stage(entry_class: PreviewClass) -> PreviewLoadStage {
     match entry_class {
-        EntryClass::Map => PreviewLoadStage::ReadingBsp,
-        EntryClass::Code { .. }
-        | EntryClass::Image(_)
-        | EntryClass::Font
-        | EntryClass::Audio
-        | EntryClass::Model
-        | EntryClass::ModelCompanion
-        | EntryClass::Particle
-        | EntryClass::Info => PreviewLoadStage::ReadingArchive,
+        PreviewClass::Map => PreviewLoadStage::ReadingBsp,
+        PreviewClass::Code { .. }
+        | PreviewClass::Image(_)
+        | PreviewClass::Font
+        | PreviewClass::Audio
+        | PreviewClass::Model
+        | PreviewClass::Particle
+        | PreviewClass::Info => PreviewLoadStage::ReadingArchive,
     }
 }
 
@@ -284,7 +283,14 @@ pub fn preview_data_from_bytes(
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
 ) -> PreviewData {
-    let entry_class = classify_entry_path(&request.entry_path);
+    let entry_class = match classify_entry_path(&request.entry_path) {
+        EntryClass::Previewable(class) => class,
+        EntryClass::ModelCompanion => panic!(
+            "{} is a model companion: the supplied bytes are the companion's, not the parent \
+             model's, so only the archive-backed loader can preview it",
+            request.entry_path
+        ),
+    };
     catch_preview_build_data(request, || {
         preview_data_from_bytes_inner(request, bytes, tokens, gmod_dir, entry_class, &mut |_| {})
     })
@@ -295,7 +301,7 @@ fn preview_data_from_bytes_with_stages(
     bytes: &[u8],
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
-    entry_class: EntryClass,
+    entry_class: PreviewClass,
     emit_stage: &mut impl FnMut(PreviewLoadStage),
 ) -> PreviewData {
     catch_preview_build_data(request, || {
@@ -308,20 +314,19 @@ fn preview_data_from_bytes_inner(
     bytes: &[u8],
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
-    entry_class: EntryClass,
+    entry_class: PreviewClass,
     emit_stage: &mut impl FnMut(PreviewLoadStage),
 ) -> PreviewData {
     let mut data = match entry_class {
-        EntryClass::Code { syntax } => code_preview_data(request, bytes, syntax, tokens),
-        EntryClass::Image(ImageClass::Encoded) => encoded_image_preview_data(request, bytes),
-        EntryClass::Image(ImageClass::Vtf) => vtf_preview_data(request, bytes),
-        EntryClass::Font => font_preview_data(request, bytes, tokens),
-        EntryClass::Audio => audio_preview_data(request, bytes),
-        EntryClass::Model => model_preview_data(request, bytes, gmod_dir),
-        EntryClass::ModelCompanion => info_preview_data(request, InfoReason::DecodeFailed),
-        EntryClass::Map => map_preview_data(request, bytes, gmod_dir, emit_stage),
-        EntryClass::Particle => particle_preview_data(request, bytes, gmod_dir, emit_stage),
-        EntryClass::Info => info_preview_data(request, InfoReason::Binary),
+        PreviewClass::Code { syntax } => code_preview_data(request, bytes, syntax, tokens),
+        PreviewClass::Image(ImageClass::Encoded) => encoded_image_preview_data(request, bytes),
+        PreviewClass::Image(ImageClass::Vtf) => vtf_preview_data(request, bytes),
+        PreviewClass::Font => font_preview_data(request, bytes, tokens),
+        PreviewClass::Audio => audio_preview_data(request, bytes),
+        PreviewClass::Model => model_preview_data(request, bytes, gmod_dir),
+        PreviewClass::Map => map_preview_data(request, bytes, gmod_dir, emit_stage),
+        PreviewClass::Particle => particle_preview_data(request, bytes, gmod_dir, emit_stage),
+        PreviewClass::Info => info_preview_data(request, InfoReason::Binary),
     };
     data.related_preview = related_preview_target(request, bytes);
     data

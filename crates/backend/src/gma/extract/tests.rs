@@ -131,8 +131,11 @@ fn existing_destination(root: &Path) -> PathBuf {
     path
 }
 
+/// The settings UI offers Overwrite as an alternative to Delete, so it must
+/// not delete: files the GMA does not contain survive, files it does are
+/// replaced.
 #[test]
-fn overwrite_mode_removes_existing_destination_before_extracting() {
+fn overwrite_mode_replaces_gma_files_and_keeps_the_rest() {
     let fixture = with_overwrite_mode(&ExtractionOverwriteMode::Overwrite);
     let temp = tempfile::tempdir().expect("tempdir");
     let gma_path = write_fixture_gma(temp.path());
@@ -149,9 +152,39 @@ fn overwrite_mode_removes_existing_destination_before_extracting() {
         std::fs::read_to_string(existing.join("lua/autorun/overwrite.lua")).expect("fresh file"),
         "print('fresh')\n"
     );
-    // True overwrite: the whole prior destination is gone, not merged into.
-    assert!(!existing.join("stale.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(existing.join("stale.txt")).expect("unrelated file survives"),
+        "stale"
+    );
     assert_transaction_finished_with_full_progress(&fixture.collector, &existing);
+}
+
+/// Overwrite writes into the existing tree instead of clearing it, so a stale
+/// *file* where the GMA needs a *directory* is a collision the delete-first
+/// modes never see. It must fail the extraction rather than half-write it.
+#[test]
+fn overwrite_mode_fails_when_a_stale_file_blocks_a_gma_directory() {
+    let fixture = with_overwrite_mode(&ExtractionOverwriteMode::Overwrite);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let gma_path = write_fixture_gma(temp.path());
+    let gma = open_fixture_gma(&gma_path);
+    let extract_root = temp.path().join("extract");
+    let existing = extract_root.join(FIXTURE_EXTRACTED_NAME);
+    std::fs::create_dir_all(&existing).expect("existing destination");
+    // The GMA needs `lua/autorun/` to be a directory.
+    std::fs::write(existing.join("lua"), "not a directory").expect("blocking file");
+
+    let result = fixture.extract(&gma, ExtractDestination::NamedDirectory(extract_root));
+
+    assert!(
+        result.is_err(),
+        "a blocked path must surface, not extract partially"
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing.join("lua")).expect("the blocking file is left alone"),
+        "not a directory",
+        "a failed extraction must not clear what it could not write over"
+    );
 }
 
 #[test]

@@ -42,19 +42,19 @@ gmod-broken-title = A pasta do Garry's Mod está ausente
 gmod-broken-body = O local salvo não contém mais GarrysMod/addons.
 gmod-broken-research = Buscar novamente
 account-update-title = Atualização disponível
-account-update-caption = {$arg0} · clique para baixar
+account-update-caption = {$version} · clique para baixar
 my-workshop = Minha Oficina
 publish-new = Publicar novo...
 my-workshop-loading = Carregando...
 my-workshop-empty-title = Nenhum addon publicado ainda
 my-workshop-empty-body = Tudo que você publicar na Oficina aparece aqui.
-my-workshop-error = Falha ao carregar Minha Oficina: {$arg0}
-my-workshop-count = Exibindo {$arg0} de {$arg1} addons
+my-workshop-error = Falha ao carregar Minha Oficina: {$error}
+my-workshop-count = Exibindo {$loaded} de {$total} addons
 installed-addons = Addons instalados
 installed-addons-loading = Carregando...
 installed-addons-empty-title = Nenhum addon instalado
 installed-addons-empty-body = Inscreva-se em algo na Oficina ou solte um .gma aqui.
-installed-addons-error = Falha ao localizar addons instalados: {$arg0}
+installed-addons-error = Falha ao localizar addons instalados: {$error}
 downloader = Downloads
 downloader-workshop-input = Cole IDs da Oficina, links, coleções aqui dentro...
 downloader-bulk-extract = Extração em massa de GMAs
@@ -68,8 +68,8 @@ downloader-open-all = Abrir tudo
 downloader-remove-all = Remover tudo
 downloader-status-finished = Pronto
 downloader-status-error = Erro
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = Oficina {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-workshop-id = Oficina {$id}
 destination-where-to = Para onde?
 destination-overwrite-warning = Os arquivos existentes serão substituídos.
 destination-browse = Procurar...
@@ -84,76 +84,78 @@ destination-invalid-path = Escolha uma pasta absoluta existente.
 relative-time-now = agora mesmo
 relative-time-past-year = há 1 ano
 relative-time-past-years =
-    { $arg0 ->
-       *[other] há {$arg0} anos
+    { $count ->
+       *[other] há {$count} anos
     }
 relative-time-past-month = há 1 mês
 relative-time-past-months =
-    { $arg0 ->
-       *[other] há {$arg0} meses
+    { $count ->
+       *[other] há {$count} meses
     }
 relative-time-past-day = há 1 dia
 relative-time-past-days =
-    { $arg0 ->
-       *[other] há {$arg0} dias
+    { $count ->
+       *[other] há {$count} dias
     }
 relative-time-past-hour = há 1 hora
 relative-time-past-hours =
-    { $arg0 ->
-       *[other] há {$arg0} horas
+    { $count ->
+       *[other] há {$count} horas
     }
 relative-time-past-minute = há 1 minuto
 relative-time-past-minutes =
-    { $arg0 ->
-       *[other] há {$arg0} minutos
+    { $count ->
+       *[other] há {$count} minutos
     }
 relative-time-past-second = há 1 segundo
 relative-time-past-seconds =
-    { $arg0 ->
-       *[other] há {$arg0} segundos
+    { $count ->
+       *[other] há {$count} segundos
     }
 relative-time-future-year = em 1 ano
 relative-time-future-years =
-    { $arg0 ->
-       *[other] em {$arg0} anos
+    { $count ->
+       *[other] em {$count} anos
     }
 relative-time-future-month = em 1 mês
 relative-time-future-months =
-    { $arg0 ->
-       *[other] em {$arg0} meses
+    { $count ->
+       *[other] em {$count} meses
     }
 relative-time-future-day = em 1 dia
 relative-time-future-days =
-    { $arg0 ->
-       *[other] em {$arg0} dias
+    { $count ->
+       *[other] em {$count} dias
     }
 relative-time-future-hour = em 1 hora
 relative-time-future-hours =
-    { $arg0 ->
-       *[other] em {$arg0} horas
+    { $count ->
+       *[other] em {$count} horas
     }
 relative-time-future-minute = em 1 minuto
 relative-time-future-minutes =
-    { $arg0 ->
-       *[other] em {$arg0} minutos
+    { $count ->
+       *[other] em {$count} minutos
     }
 relative-time-future-second = em 1 segundo
 relative-time-future-seconds =
-    { $arg0 ->
-       *[other] em {$arg0} segundos
+    { $count ->
+       *[other] em {$count} segundos
     }
 downloading = Baixando
 locating = Esperando
 decompressing = Extraindo
-extracting_progress = Extraindo {$arg0}% ({$arg1} / {$arg2})
+reading_metadata = Lendo metadados
+searching = Pesquisando...
+extracting_progress = Extraindo {$percent}% ({$done} / {$total})
 size-analyzer = Analisador de tamanho de addon
 size-analyzer-waiting = Aguardando a área de visualização do treemap...
 size-analyzer-loading = Computando...
 size-analyzer-empty = Nenhum addon com tamanho positivo encontrado.
 size-analyzer-empty-title = Nada para medir
 size-analyzer-empty-body = Todo addon na sua biblioteca está vazio, então não há nada para exibir no gráfico.
-size-analyzer-error = Falha no Analisador de tamanho: {$arg0}
-size-analyzer-summary-cells = {$arg0} itens
+size-analyzer-error = Falha no Analisador de tamanho: {$error}
+size-analyzer-summary-cells = {$count} itens
 size-analyzer-name = Nome
 size-analyzer-type = Tipo
 size-analyzer-size = Tamanho
@@ -223,7 +225,7 @@ context-menu-debug-simulate-minus = Simular -10
 context-menu-debug-simulate-plus-million = Simular +1 milhão
 context-menu-debug-simulate-minus-million = Simular -1 milhão
 publish-processing-icon = Processando ícone da Oficina...
-publish-packing = Empacotando {$arg0}% ({$arg1} / {$arg2})
+publish-packing = Empacotando {$percent}% ({$done} / {$total})
 PUBLISH_STARTING = Iniciando publicação
 PUBLISH_PREPARING_CONFIG = Preparando configuração
 PUBLISH_PREPARING_CONTENT = Preparando conteúdo
@@ -240,10 +242,10 @@ err-whitelist-detail =
 
     Se você quiser filtrar esses tipos de arquivo dos seus GMAs, adicione-os aos Padrões de Arquivo Ignorados.
 
-    {$arg0}
+    {$detail}
 err-no-entries = Não há entradas neste caminho de conteúdo..
-err-duplicate-entries = Existe uma entrada duplicada ({$arg0}) neste caminho de conteúdo. Todos os caminhos devem ser únicos e em minúsculas. i use arch btw
-err-duplicate-entries-detail = Existe uma entrada duplicada ({$arg0}) neste caminho de conteúdo. Todos os caminhos devem ser únicos e em minúsculas. i use arch btw
+err-duplicate-entries = Existe uma entrada duplicada neste caminho de conteúdo. Todos os caminhos devem ser únicos e em minúsculas. i use arch btw
+err-duplicate-entries-detail = Existe uma entrada duplicada ({$detail}) neste caminho de conteúdo. Todos os caminhos devem ser únicos e em minúsculas. i use arch btw
 err-invalid-content-path = Este caminho de conteúdo não existe, não é um diretório ou o gmpublished não tem permissões suficientes para acessá-lo
 err-multiple-gmas = Vários arquivos GMA encontrados neste caminho de conteúdo
 err-icon-too-large = Ícone muito grande (> 1 MB)
@@ -254,12 +256,12 @@ err-io-error = Erro I/O
 err-unknown = Algo deu errado
 err-gmod-path-missing = A pasta do Garry's Mod não está configurada
 err-no-addons-found = Nenhum addon encontrado
-err-image-error = Erro de imagem: {$arg0}
-err-image-error-detail = Erro de imagem: {$arg0}
-err-steam-error = Erro Steam: {$arg0}
-err-steam-error-detail = Erro Steam: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/s
+err-image-error = Erro de imagem
+err-image-error-detail = Erro de imagem: {$detail}
+err-steam-error = Erro Steam
+err-steam-error-detail = Erro Steam: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/s
 byte-unit-b = B
 byte-unit-kb = KB
 byte-unit-mb = MB
@@ -293,7 +295,7 @@ file-type-txt = Texto
 file-type-properties = Propriedades
 file-type-audio = Áudio
 file-type-image = Imagem
-file-type-unknown = Desconhecido ({$arg0})
+file-type-unknown = Desconhecido ({$extension})
 file-preview-loading = Carregando prévia...
 file-preview-stage-reading-archive = Lendo arquivo...
 file-preview-stage-reading-bsp = Lendo BSP...
@@ -305,7 +307,7 @@ file-preview-expand = Expandir prévia
 file-preview-collapse = Recolher prévia
 file-preview-open-material = Abrir material
 file-preview-open-texture = Abrir textura
-file-preview-error = Falha na prévia: {$arg0}
+file-preview-error = Falha na prévia: {$error}
 file-preview-path = Caminho
 file-preview-size = Tamanho
 file-preview-crc = CRC
@@ -327,7 +329,7 @@ file-preview-particle-level-approximate = Aproximado — a aparência pode difer
 file-preview-particle-level-inert = Requer um mapa ou entidade — sem efeito nesta prévia
 file-preview-particle-level-unsupported = Não simulado nesta prévia
 file-preview-truncated = Prévia truncada — o arquivo completo é maior do que o exibido.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Malhas
 file-preview-model-bones = Ossos
 file-preview-model-sequences = Sequências
@@ -335,8 +337,8 @@ file-preview-model-vertices = Vértices
 file-preview-model-triangles = Triângulos
 file-preview-model-materials = Materiais resolvidos
 file-preview-model-skin = Skin
-file-preview-model-skin-option = Skin {$arg0}
-file-preview-model-bodygroup = Grupo de corpo {$arg0}
+file-preview-model-skin-option = Skin {$index}
+file-preview-model-bodygroup = Grupo de corpo {$index}
 file-preview-model-bounds-min = Limites mín.
 file-preview-model-bounds-max = Limites máx.
 file-preview-map-controls = Arraste para olhar · WASD para voar · Shift para velocidade · role para ajustar a velocidade
@@ -368,7 +370,7 @@ prepare-publish-tag-2 = Tag 2
 prepare-publish-tag-3 = Tag 3
 prepare-publish-update-exclamation = Atualizar!
 prepare-publish-publish-exclamation = Publicar!
-prepare-publish-update-warning = Você está enviando uma ATUALIZAÇÃO para {$arg0} ({$arg1})
+prepare-publish-update-warning = Você está enviando uma ATUALIZAÇÃO para {$title} ({$id})
 prepare-publish-still-needed = Ainda falta:
 prepare-publish-needs-addon-path = Caminho do addon
 prepare-publish-needs-title = Título
@@ -380,8 +382,8 @@ prepare-publish-file-browser = Procurar arquivo
 prepare-publish-browser-select = Solte um arquivo aqui ou clique para procurar
 prepare-publish-no-files = Nenhum arquivo encontrado
 prepare-publish-items-one = 1 item
-prepare-publish-items-num = {$arg0} itens
-prepare-publish-items-shown = {$arg0} exibidos
+prepare-publish-items-num = {$count} itens
+prepare-publish-items-shown = {$count} exibidos
 prepare-publish-ignored-patterns = Padrões de arquivo ignorados
 prepare-publish-ignore-placeholder = Adicionar...
 prepare-publish-ignored-for-convenience = Este padrão de arquivo é ignorado por padrão para sua conveniência.

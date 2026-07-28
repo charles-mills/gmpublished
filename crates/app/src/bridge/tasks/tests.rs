@@ -1,5 +1,7 @@
 use super::*;
+use crate::bridge::domain::SteamId;
 use crate::bridge::{DownloadCountFormat, ThemePreset};
+use gmpublished_backend::transactions::TransactionId;
 use std::{fs, path::PathBuf};
 
 static BACKEND_EVENT_SINK_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -186,9 +188,13 @@ fn backend_context_unit_tests_use_disconnected_steam_runtime() {
     let ctx = BackendContext::new().expect("test backend context");
 
     assert!(!ctx.steam_connected());
+    // Compared by key, not by rendered text: `Display` is a developer message
+    // and only `HasErrorKey` is the wire contract.
+    let error = ctx.connect_steam().expect_err("no Steam in tests");
     assert_eq!(
-        ctx.connect_steam().map_err(|error| error.to_string()),
-        Err(SteamRuntimeError::Unavailable.to_string())
+        error,
+        UiError::from(&SteamRuntimeError::Unavailable),
+        "{error}"
     );
     assert!(!ctx.steam_connected());
 }
@@ -361,14 +367,14 @@ fn backend_context_forwards_installed_backend_events() {
         .transactions
         .emit(gmpublished_backend::events::BackendEvent::DownloadStarted(
             gmpublished_backend::events::DownloadStartedEvent {
-                transaction_id: 40,
+                transaction_id: TransactionId::from_raw(40),
                 request_id: None,
             },
         ));
     ctx.backend().transactions.emit(
         gmpublished_backend::events::BackendEvent::ExtractionStarted(
             gmpublished_backend::events::ExtractionStartedEvent {
-                transaction_id: 41,
+                transaction_id: TransactionId::from_raw(41),
                 source_path: Some(PathBuf::from("/tmp/addon.gma")),
                 file_name: Some("addon.gma".to_owned()),
                 workshop_id: Some(gmpublished_backend::appdata::SettingsPublishedFileId(123)),
@@ -380,7 +386,7 @@ fn backend_context_forwards_installed_backend_events() {
         .transactions
         .emit(gmpublished_backend::events::BackendEvent::Transaction(
             gmpublished_backend::events::TransactionEvent::Status {
-                id: 42,
+                id: TransactionId::from_raw(42),
                 status: "packing".to_owned(),
             },
         ));
@@ -404,14 +410,14 @@ fn backend_context_forwards_installed_backend_events() {
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
         BackendRuntimeEvent::DownloadStarted {
-            transaction_id: 40,
+            transaction_id: TransactionId::from_raw(40),
             request_id: None,
         }
     );
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
         BackendRuntimeEvent::ExtractionStarted {
-            transaction_id: 41,
+            transaction_id: TransactionId::from_raw(41),
             source_path: Some(PathBuf::from("/tmp/addon.gma")),
             file_name: Some("addon.gma".to_owned()),
             workshop_id: Some(
@@ -423,7 +429,7 @@ fn backend_context_forwards_installed_backend_events() {
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
         BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Status {
-            id: 42,
+            id: TransactionId::from_raw(42),
             status: "packing".to_owned(),
         })
     );
@@ -446,13 +452,13 @@ fn backend_event_sink_fans_out_to_worker_subscriptions() {
         .transactions
         .emit(gmpublished_backend::events::BackendEvent::Transaction(
             gmpublished_backend::events::TransactionEvent::Progress {
-                id: 81,
+                id: TransactionId::from_raw(81),
                 progress: 5000,
             },
         ));
 
     let expected = BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Progress {
-        id: 81,
+        id: TransactionId::from_raw(81),
         progress: 5000,
     });
     assert_eq!(
@@ -480,7 +486,10 @@ fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
         ctx.backend()
             .transactions
             .emit(gmpublished_backend::events::BackendEvent::Transaction(
-                gmpublished_backend::events::TransactionEvent::Progress { id: 900, progress },
+                gmpublished_backend::events::TransactionEvent::Progress {
+                    id: TransactionId::from_raw(900),
+                    progress,
+                },
             ));
     }
 
@@ -493,7 +502,7 @@ fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
             .transactions
             .emit(gmpublished_backend::events::BackendEvent::Transaction(
                 gmpublished_backend::events::TransactionEvent::Finished {
-                    id: 900,
+                    id: TransactionId::from_raw(900),
                     payload: TransactionPayload::None,
                 },
             ));
@@ -503,7 +512,8 @@ fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
     while let Ok(event) = root_receiver.recv_timeout(Duration::from_secs(2)) {
         if matches!(
             event,
-            BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished { id: 900, .. })
+            BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished { id, .. })
+                if id == TransactionId::from_raw(900)
         ) {
             saw_finished = true;
             break;
@@ -526,7 +536,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
 
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-            transaction_id: 500,
+            transaction_id: TransactionId::from_raw(500),
             source_path: Some(PathBuf::from("/tmp/source.gma")),
             file_name: Some("source.gma".to_owned()),
             workshop_id: Some(
@@ -539,7 +549,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
-                id: 500,
+                id: TransactionId::from_raw(500),
                 status: "locating".to_owned(),
             },
         ))
@@ -548,7 +558,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Data {
-                id: 500,
+                id: TransactionId::from_raw(500),
                 payload: TransactionPayload::ByteSize {
                     source: None,
                     bytes: 2_048,
@@ -560,7 +570,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Progress {
-                id: 500,
+                id: TransactionId::from_raw(500),
                 progress: 2_500,
             },
         ))
@@ -569,7 +579,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::IncrProgress {
-                id: 500,
+                id: TransactionId::from_raw(500),
                 incr: 2_500,
             },
         ))
@@ -577,14 +587,16 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
     );
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-            TransactionRuntimeEvent::ResetProgress { id: 500 },
+            TransactionRuntimeEvent::ResetProgress {
+                id: TransactionId::from_raw(500)
+            },
         ))
         .handled_event()
     );
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Progress {
-                id: 500,
+                id: TransactionId::from_raw(500),
                 progress: 7_500,
             },
         ))
@@ -593,7 +605,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Finished {
-                id: 500,
+                id: TransactionId::from_raw(500),
                 payload: TransactionPayload::ExtractedPath(PathBuf::from("/tmp/extracted")),
             },
         ))
@@ -633,7 +645,7 @@ fn correlated_backend_transaction_error_finishes_task_with_error() {
 
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
-            transaction_id: 501,
+            transaction_id: TransactionId::from_raw(501),
             request_id: None,
         })
         .handled_event()
@@ -641,7 +653,7 @@ fn correlated_backend_transaction_error_finishes_task_with_error() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Error {
-                id: 501,
+                id: TransactionId::from_raw(501),
                 error: TransactionError::detailed(
                     gmpublished_backend::error_key::ErrorKey::new("ERR_TEST"),
                     Some("detail".to_owned()),
@@ -670,16 +682,16 @@ fn direct_correlated_backend_transaction_error_removes_task() {
         .take_receiver()
         .expect("task event receiver");
     let task = ctx.create_task(TaskKind::Extract, EXTRACT_STATUS);
-    ctx.correlate_backend_transaction(502, task);
+    ctx.correlate_backend_transaction(TransactionId::from_raw(502), task);
 
     assert!(ctx.error_backend_transaction_task(
-        502,
+        TransactionId::from_raw(502),
         UiError::new(gmpublished_backend::error_key::ErrorKey::new("ERR_DIRECT"))
     ));
     assert!(
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Finished {
-                id: 502,
+                id: TransactionId::from_raw(502),
                 payload: TransactionPayload::None,
             },
         ))
@@ -708,7 +720,7 @@ fn uncorrelated_backend_transaction_events_remain_noops() {
     assert!(
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
-                id: 999,
+                id: TransactionId::from_raw(999),
                 status: "packing".to_owned(),
             },
         ))
@@ -722,7 +734,7 @@ fn download_start_waits_for_item_payload_before_downloader_action() {
     let ctx = BackendContext::new().expect("test backend context");
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
-        transaction_id: 610,
+        transaction_id: TransactionId::from_raw(610),
         request_id: None,
     });
     assert!(effects.handled_event());
@@ -730,7 +742,7 @@ fn download_start_waits_for_item_payload_before_downloader_action() {
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Data {
-            id: 610,
+            id: TransactionId::from_raw(610),
             payload: TransactionPayload::WorkshopItem(
                 gmpublished_backend::appdata::SettingsPublishedFileId(123),
             ),
@@ -754,7 +766,7 @@ fn extraction_start_and_finish_emit_downloader_actions() {
     let ctx = BackendContext::new().expect("test backend context");
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-        transaction_id: 620,
+        transaction_id: TransactionId::from_raw(620),
         source_path: None,
         file_name: None,
         workshop_id: Some(PublishedFileId::new(456).expect("test fixture ids are always nonzero")),
@@ -774,7 +786,7 @@ fn extraction_start_and_finish_emit_downloader_actions() {
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Finished {
-            id: 620,
+            id: TransactionId::from_raw(620),
             payload: TransactionPayload::ExtractedPath(PathBuf::from("/tmp/extracted/456")),
         },
     ));
@@ -796,7 +808,7 @@ fn extraction_finish_carries_the_source_gma_from_the_started_event() {
     let source_gma = PathBuf::from("/tmp/workshop/content/4000/457/addon.gma");
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-        transaction_id: 621,
+        transaction_id: TransactionId::from_raw(621),
         source_path: Some(source_gma.clone()),
         file_name: None,
         workshop_id: Some(PublishedFileId::new(457).expect("test fixture ids are always nonzero")),
@@ -806,7 +818,7 @@ fn extraction_finish_carries_the_source_gma_from_the_started_event() {
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Finished {
-            id: 621,
+            id: TransactionId::from_raw(621),
             payload: TransactionPayload::ExtractedPath(PathBuf::from("/tmp/extracted/457")),
         },
     ));
@@ -828,7 +840,7 @@ fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
     let workshop_id = PublishedFileId::new(458).expect("test fixture ids are always nonzero");
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-        transaction_id: 622,
+        transaction_id: TransactionId::from_raw(622),
         source_path: None,
         file_name: None,
         workshop_id: Some(workshop_id),
@@ -839,7 +851,7 @@ fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Finished {
-            id: 622,
+            id: TransactionId::from_raw(622),
             payload: TransactionPayload::ExtractedPath(PathBuf::from("/tmp/extracted/458")),
         },
     ));
@@ -858,14 +870,14 @@ fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
 fn workshop_snapshot_error_is_request_scoped() {
     let ctx = BackendContext::new().expect("test backend context");
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
-        transaction_id: 623,
+        transaction_id: TransactionId::from_raw(623),
         request_id: Some(78),
     });
     assert!(effects.handled_event());
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Error {
-            id: 623,
+            id: TransactionId::from_raw(623),
             error: TransactionError::detailed(
                 gmpublished_backend::error_key::ErrorKey::new("ERR_TEST"),
                 Some("detail".to_owned()),
@@ -889,14 +901,14 @@ fn cancelling_correlated_backend_task_aborts_registered_transaction() {
 
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
-            transaction_id: transaction.id,
+            transaction_id: transaction.id(),
             request_id: None,
         })
         .handled_event()
     );
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Data {
-            id: transaction.id,
+            id: transaction.id(),
             payload: TransactionPayload::WorkshopItem(
                 gmpublished_backend::appdata::SettingsPublishedFileId(123),
             ),
@@ -913,7 +925,7 @@ fn cancelling_correlated_backend_task_aborts_registered_transaction() {
     assert!(
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
-                id: transaction.id,
+                id: transaction.id(),
                 status: "downloading".to_owned(),
             },
         ))
@@ -946,7 +958,7 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Status {
-            id: 630,
+            id: TransactionId::from_raw(630),
             status: DOWNLOAD_STATUS_LOCATING.to_owned(),
         },
     ));
@@ -954,7 +966,7 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
     assert!(effects.into_actions().is_empty());
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-        transaction_id: 630,
+        transaction_id: TransactionId::from_raw(630),
         source_path: None,
         file_name: None,
         workshop_id: Some(PublishedFileId::new(789).expect("test fixture ids are always nonzero")),
@@ -987,7 +999,9 @@ fn extraction_pre_start_buffer_is_globally_bounded() {
     for offset in 0..(MAX_PENDING_PRE_START_TRANSACTIONS + 4) {
         let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
-                id: 10_000 + u32::try_from(offset).expect("test offset fits u32"),
+                id: TransactionId::from_raw(
+                    10_000 + u32::try_from(offset).expect("test offset fits u32"),
+                ),
                 status: DOWNLOAD_STATUS_LOCATING.to_owned(),
             },
         ));
@@ -1040,7 +1054,7 @@ fn workshop_metadata_refresh_requires_connected_steam_runtime() {
     );
     assert_eq!(
         services
-            .steam_user_details(76561198000000000)
+            .steam_user_details(SteamId::new(76561198000000000))
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
@@ -1099,8 +1113,10 @@ fn publish_submit_request_maps_default_preview_to_backend_submission() {
     );
     assert_eq!(submission.icon_path, None);
     assert!(!submission.upscale);
-    assert_eq!(submission.update_id, None);
-    assert_eq!(submission.changes, None);
+    assert!(matches!(
+        submission.mode,
+        steam_publishing::PublishSubmissionMode::Create
+    ));
     assert_eq!(submission.title, "Boundary Proof");
     assert_eq!(submission.addon_type, "tool");
     assert_eq!(submission.tags, vec!["fun".to_owned()]);
@@ -1136,8 +1152,14 @@ fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
 
     assert_eq!(submission.icon_path, Some(PathBuf::from("/tmp/icon.png")));
     assert!(submission.upscale);
-    assert_eq!(submission.update_id, Some(987));
-    assert_eq!(submission.changes, Some("Updated icon".to_owned()));
+    let steam_publishing::PublishSubmissionMode::Update { id, changes } = &submission.mode else {
+        panic!("an update request must project to an update mode");
+    };
+    assert_eq!(
+        *id,
+        gmpublished_backend::appdata::SettingsPublishedFileId(987)
+    );
+    assert_eq!(changes.as_deref(), Some("Updated icon"));
 }
 
 #[test]
@@ -1145,7 +1167,7 @@ fn publish_submit_requires_connected_steam_runtime_and_errors_transaction() {
     let collector = gmpublished_backend::events::BackendEventCollector::default();
     let services = BackendServices::for_test_with_event_sink(Arc::new(collector.clone()));
     let transaction = services.begin_transaction();
-    let transaction_id = transaction.id;
+    let transaction_id = transaction.id();
 
     let result = services.submit_publish_request(
         PublishSubmitRequest {
@@ -1186,28 +1208,28 @@ fn publish_finished_transaction_retires_correlated_task() {
         .take_receiver()
         .expect("task event receiver");
     let task = ctx.create_task(TaskKind::Publish, "PUBLISH_STARTING");
-    let task_id = ctx.correlate_backend_transaction(909, task);
+    let task_id = ctx.correlate_backend_transaction(TransactionId::from_raw(909), task);
 
     ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Status {
-            id: 909,
+            id: TransactionId::from_raw(909),
             status: "PUBLISH_PACKING".to_owned(),
         },
     ));
     ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Progress {
-            id: 909,
+            id: TransactionId::from_raw(909),
             progress: 5_000,
         },
     ));
     ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Finished {
-            id: 909,
+            id: TransactionId::from_raw(909),
             payload: TransactionPayload::None,
         },
     ));
 
-    assert!(!ctx.is_backend_transaction_active(909));
+    assert!(!ctx.is_backend_transaction_active(TransactionId::from_raw(909)));
     let updates = drain_updates(&receiver);
     assert!(updates.iter().any(|(id, update)| {
         *id == task_id
@@ -1338,7 +1360,7 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
         id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
         title: "  Example Addon  ".to_owned(),
         owner: None,
-        steamid: Some(76561198000000000),
+        steamid: Some(SteamId::new(76561198000000000)),
         time_created: 10,
         time_updated: 20,
         description: Some("description".to_owned()),
@@ -1366,7 +1388,7 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
             preview_url: Some("https://example.test/preview.jpg".to_owned()),
             subscriptions: 42,
             full_description: None,
-            owner_steamid: Some(76561198000000000),
+            owner_steamid: Some(SteamId::new(76561198000000000)),
             thumbhash: None,
         }]
     );
@@ -1419,7 +1441,7 @@ fn live_workshop_item_for_metadata_tests(id: u64) -> WorkshopItem {
         id: PublishedFileId::new(id).expect("test fixture ids are always nonzero"),
         title: format!("Addon {id}"),
         owner: None,
-        steamid: Some(76561198000000000),
+        steamid: Some(SteamId::new(76561198000000000)),
         time_created: 10,
         time_updated: 20,
         description: Some("description".to_owned()),
@@ -1490,7 +1512,7 @@ fn my_workshop_subscription_counts_skip_dead_items() {
         id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
         title: "Example Addon".to_owned(),
         owner: None,
-        steamid: Some(76561198000000000),
+        steamid: Some(SteamId::new(76561198000000000)),
         time_created: 10,
         time_updated: 20,
         description: None,
@@ -1521,7 +1543,7 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
         .take_receiver()
         .expect("task event receiver");
     let task = ctx.create_task(TaskKind::Download, "queued");
-    ctx.correlate_backend_transaction(701, task);
+    ctx.correlate_backend_transaction(TransactionId::from_raw(701), task);
 
     for payload in [
         TransactionPayload::TotalBytes(4096),
@@ -1536,7 +1558,10 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
     ] {
         assert!(
             ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-                TransactionRuntimeEvent::Data { id: 701, payload },
+                TransactionRuntimeEvent::Data {
+                    id: TransactionId::from_raw(701),
+                    payload
+                },
             ))
             .handled_event()
         );
@@ -1545,7 +1570,7 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Data {
-                id: 701,
+                id: TransactionId::from_raw(701),
                 payload: TransactionPayload::WorkshopItem(
                     gmpublished_backend::appdata::SettingsPublishedFileId(76561198000000000)
                 ),
@@ -1590,7 +1615,7 @@ fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events(
     let view = gma.view().expect("fixture view");
     let transaction = ctx.begin_transaction();
     let task = ctx.create_task(TaskKind::Extract, EXTRACT_STATUS);
-    ctx.correlate_backend_transaction(transaction.id, task);
+    ctx.correlate_backend_transaction(transaction.id(), task);
 
     let extract_dir = temp.path().join("extract");
     let backend = ctx.backend();
@@ -1658,4 +1683,37 @@ fn write_raw_gma(path: &PathBuf, entries: &[(&str, &[u8])]) {
     bytes.extend_from_slice(&0_u32.to_le_bytes());
 
     std::fs::write(path, bytes).expect("write raw gma");
+}
+
+/// `status_text`'s fallback arm feeds the status key straight to Fluent, so a
+/// status without its own arm doubles as a message id. Missing an entry puts
+/// the raw wire string in front of the user.
+///
+/// Enumerated from the backend's list plus this crate's own constants rather
+/// than hand-listed. That only holds while every production `create_task`
+/// passes a constant — a bare string literal there is invisible here.
+#[test]
+fn statuses_used_as_translation_keys_have_catalog_entries() {
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    let dedicated_arms = [PUBLISH_PACKING_STATUS, PUBLISH_PROCESSING_ICON_STATUS];
+
+    for status in gmpublished_backend::transactions::status::ALL
+        .iter()
+        .copied()
+        .chain([
+            DOWNLOAD_STATUS_DOWNLOADING,
+            EXTRACT_STATUS,
+            SEARCH_STATUS,
+            NOTICE_STATUS,
+        ])
+    {
+        if dedicated_arms.contains(&status) {
+            continue;
+        }
+        assert_ne!(
+            i18n.tr(status),
+            status,
+            "{status} reaches Fluent as a message id and has no catalog entry"
+        );
+    }
 }

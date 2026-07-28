@@ -4,6 +4,7 @@ use crate::bridge::domain::{
     SearchQuickRequest, SearchRequestKey,
 };
 use crate::bridge::ui_error::UiError;
+use crate::generation::Generation;
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -17,12 +18,12 @@ pub enum Message {
     FullSearchBatchReceived(SearchFullBatch),
     FullSearchFinished(SearchFullRequest),
     MetadataCompleted(
-        u64,
+        Generation,
         Vec<PublishedFileId>,
         Result<MetadataResolution, UiError>,
     ),
     MetadataRefreshCompleted(
-        u64,
+        Generation,
         Vec<PublishedFileId>,
         Result<Vec<MetadataPatch>, UiError>,
     ),

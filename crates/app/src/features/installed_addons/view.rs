@@ -2,7 +2,7 @@ use iced::widget::{column, text};
 use iced::{Color, Element, Length};
 
 use crate::assets;
-use crate::i18n::{I18n, translated_error};
+use crate::i18n::{Arg, I18n, translated_error};
 use crate::theme::ViewCtx;
 use crate::widgets::addon_grid;
 use crate::widgets::route_state::{self, Glyph, RouteState, Tone};
@@ -67,7 +67,7 @@ fn status_line(state: &State, i18n: &I18n) -> Option<String> {
         LoadStatus::Empty => None,
         LoadStatus::Error(error) => Some(i18n.trn(
             "installed-addons-error",
-            &[("arg0", translated_error(i18n, error).as_str())],
+            &[("error", Arg::Text(translated_error(i18n, error).as_str()))],
         )),
     }
 }

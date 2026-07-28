@@ -367,7 +367,7 @@ fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
     };
 
     let transaction = fixture.transactions.begin();
-    let transaction_id = transaction.id;
+    let transaction_id = transaction.id();
     let result = gma.create(&source, &transaction, &fixture.whitelist);
     transaction.cancel();
 
@@ -645,4 +645,35 @@ fn gma_whitelist_and_default_ignore_match_expected_paths() {
         "lua/autorun/ignored.lua",
         &["lua/autorun/ignored.lua".to_string()]
     ));
+}
+
+/// `data_offset` is a byte offset into the mapped view, produced by pointer
+/// arithmetic against the parsed payload. Nothing else re-derives it, so if it
+/// is wrong the preview modal serves one entry's bytes for another.
+#[test]
+fn indexed_entry_offsets_address_their_own_payload() {
+    let fixture = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let gma_path = create_fixture_gma(&fixture, &dir, "Offset Round Trip");
+
+    let bundle = GMAFile::open_meta(&gma_path).unwrap();
+    let view = GmaView::open(&gma_path).unwrap();
+    let entries = view.entries().unwrap();
+
+    assert!(
+        !bundle.entries.is_empty(),
+        "fixture should contain at least one entry"
+    );
+    for indexed in &bundle.entries {
+        let by_offset = view
+            .read_payload_bytes(indexed.data_offset, indexed.size)
+            .unwrap();
+        let expected = entries
+            .get(&indexed.path)
+            .unwrap_or_else(|| panic!("entry {} missing from the map", indexed.path));
+
+        assert_eq!(by_offset.len() as u64, indexed.size);
+        assert_eq!(indexed.crc, expected.crc);
+        assert_eq!(crc32fast::hash(&by_offset), indexed.crc, "{}", indexed.path);
+    }
 }

@@ -42,6 +42,7 @@ mod tests {
     use super::{Message, State, update};
     use crate::bridge::domain::PublishedFileId;
     use crate::features::steam_session::{ConnectionEvent, ConnectionStatus, PendingRetry};
+    use crate::generation::Generation;
 
     #[test]
     fn connection_event_updates_status() {
@@ -65,14 +66,14 @@ mod tests {
         );
 
         assert_eq!(state.status(), ConnectionStatus::Connected);
-        assert_eq!(state.identity_generation(), 1);
+        assert_eq!(state.identity_generation(), Generation::from_raw(1));
     }
 
     #[test]
     fn pending_retry_message_queues_the_retry() {
         let mut state = State::default();
         let retry = PendingRetry::InstalledMetadata {
-            generation: 3,
+            generation: Generation::from_raw(3),
             item_ids: vec![
                 PublishedFileId::new(10).expect("test fixture ids are always nonzero"),
                 PublishedFileId::new(20).expect("test fixture ids are always nonzero"),

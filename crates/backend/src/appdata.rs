@@ -111,6 +111,19 @@ pub enum TitlebarPreference {
     reason = "each bool is an independent, orthogonal user setting, not a mode"
 )]
 pub struct Settings {
+    /// The shape the file being read was written in; see [`SETTINGS_SCHEMA`].
+    ///
+    /// A file with no `schema` predates versioning and is by definition the
+    /// original shape, so it reads as `1` rather than as whatever this build
+    /// writes — otherwise a future bump would mistake every pre-versioning
+    /// file for a current one and skip its migration. Serializing always
+    /// writes the schema this build produces, whatever was loaded.
+    #[serde(
+        default = "original_settings_schema",
+        serialize_with = "serialize_current_schema"
+    )]
+    pub schema: u32,
+
     pub temp: Option<PathBuf>,
     pub gmod: Option<PathBuf>,
     pub user_data: Option<PathBuf>,
@@ -160,9 +173,32 @@ pub struct AppDataPathsSnapshot {
     pub gmod_dir: Option<PathBuf>,
 }
 
+/// The shape [`Settings`] is written in today.
+///
+/// `#[serde(default)]` absorbs an added field, so adding one needs no bump.
+/// Bump this whenever an existing field changes in a way it cannot absorb — a
+/// renamed field, a changed type, a renamed or removed enum variant — and give
+/// [`Settings::migrate`] an arm that rewrites the older shape in the same
+/// change. Two of the persisted types live in `gma::extract`, so a variant
+/// rename there is such a change; `settings_json_shape_is_pinned_to_the_schema`
+/// fails when one lands without a bump.
+pub const SETTINGS_SCHEMA: u32 = 1;
+
+const fn original_settings_schema() -> u32 {
+    1
+}
+
+fn serialize_current_schema<S: serde::Serializer>(
+    _loaded: &u32,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u32(SETTINGS_SCHEMA)
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            schema: SETTINGS_SCHEMA,
             temp: None,
             gmod: None,
             user_data: None,
@@ -206,6 +242,8 @@ pub enum SettingsError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("settings schema {found} is newer than the supported {SETTINGS_SCHEMA}")]
+    UnsupportedSchema { found: u32 },
 }
 impl crate::error_key::HasErrorKey for SettingsError {
     fn error_key(&self) -> crate::error_key::ErrorKey {
@@ -245,14 +283,55 @@ impl Settings {
                         "settings file {} was not found; using defaults",
                         paths.settings_file.display()
                     );
+                } else if let SettingsError::UnsupportedSchema { found } = error {
+                    log::warn!(
+                        "settings file {} was written by a newer version (schema {found}); \
+                         keeping it aside and starting from defaults",
+                        paths.settings_file.display()
+                    );
+                    Self::back_up_unreadable(paths);
                 } else {
                     log::warn!(
                         "failed to load settings from {}: {error}; using defaults",
                         paths.settings_file.display()
                     );
+                    // Defaults are about to be written back over this file on
+                    // the next save, so keep the unreadable original: a parse
+                    // failure must not silently discard the user's settings.
+                    Self::back_up_unreadable(paths);
                 }
                 Self::default()
             }
+        }
+    }
+
+    /// Moves an unreadable settings file to `<name>.bak` so the defaults that
+    /// replace it do not destroy the only copy. Best-effort: a failure here
+    /// must not stop the app from starting.
+    fn back_up_unreadable(paths: &AppDataPaths) {
+        let source = if paths.settings_file.exists() {
+            &paths.settings_file
+        } else if paths.legacy_settings_file.exists() {
+            &paths.legacy_settings_file
+        } else {
+            return;
+        };
+
+        let backup = source.with_extension("json.bak");
+        // Never over an existing backup: the first unusable file is the one
+        // closest to what the user configured, and a later failure must not
+        // overwrite it with a file that is already a copy of defaults.
+        if backup.exists() {
+            log::warn!(
+                "leaving {} in place; {} is not preserved",
+                backup.display(),
+                source.display()
+            );
+            return;
+        }
+        match fs::rename(source, &backup) {
+            Ok(()) => log::warn!("kept the unusable settings at {}", backup.display()),
+            Err(error) => log::warn!("could not preserve {}: {error}", source.display()),
         }
     }
 
@@ -264,8 +343,25 @@ impl Settings {
             }
             Err(error) => return Err(error.into()),
         };
-        let settings: Self = serde_json::de::from_str(&contents)?;
+        let mut settings: Self = serde_json::de::from_str(&contents)?;
+        settings.migrate()?;
         Ok(settings)
+    }
+
+    /// Brings a parsed file up to [`SETTINGS_SCHEMA`], or refuses it.
+    ///
+    /// A file from a newer build is an error rather than a silent downgrade:
+    /// serde has already dropped the fields this build does not know, and
+    /// saving would write that truncated shape back over the user's config.
+    fn migrate(&mut self) -> Result<(), SettingsError> {
+        if self.schema > SETTINGS_SCHEMA {
+            return Err(SettingsError::UnsupportedSchema { found: self.schema });
+        }
+
+        // No older shape needs rewriting yet: everything added since schema 1
+        // is `#[serde(default)]`. A future arm goes here, before the stamp.
+        self.schema = SETTINGS_SCHEMA;
+        Ok(())
     }
 
     pub fn save(&self, paths: &AppDataPaths) -> Result<(), SettingsError> {
@@ -282,6 +378,9 @@ impl Settings {
             None => tempfile::NamedTempFile::new()?,
         };
         serde_json::ser::to_writer(&mut tmp, self)?;
+        // The rename is atomic, but without this the renamed file can still
+        // reference unwritten blocks after a power loss.
+        tmp.as_file().sync_all()?;
         tmp.persist(&paths.settings_file)
             .map_err(|error| SettingsError::Io(error.error))?;
 
@@ -320,7 +419,7 @@ impl Settings {
 
 #[derive(Debug)]
 pub struct AppData {
-    pub settings: ArcSwap<Settings>,
+    settings: ArcSwap<Settings>,
     pub version: &'static str,
     /// Populated the first time [`Self::discover_gmod_dir`] finds a path via
     /// Steam, so the cheap [`Self::gmod_dir`] accessor (and therefore
@@ -436,6 +535,7 @@ impl AppData {
         let gmod: PathBuf = steam
             .client()
             .ok()?
+            .client()
             .apps()
             .app_install_dir(GMOD_APP_ID)
             .into();
@@ -517,23 +617,17 @@ impl AppData {
         self.settings.load().ignore_globs.clone()
     }
 
-    pub(crate) fn apply_publish_settings_snapshot(
-        &self,
-        temp: Option<&Path>,
-        ignore_globs: &[String],
-    ) {
-        self.settings.rcu(|settings| {
-            let mut settings = Settings::clone(settings);
-            settings.temp = temp.map(Path::to_path_buf);
-            settings.ignore_globs = ignore_globs.to_vec();
-            settings
-        });
+    /// The live settings. Mutating them goes through [`Self::update_settings`],
+    /// which is the only path that sanitizes, persists and emits.
+    #[must_use]
+    pub fn settings(&self) -> arc_swap::Guard<std::sync::Arc<Settings>> {
+        self.settings.load()
     }
 
-    /// Clones the current settings, lets `mutate` edit the copy, and
-    /// publishes it atomically. Readers are never blocked; concurrent
-    /// mutations retry (rcu).
-    pub fn mutate_settings(&self, mut mutate: impl FnMut(&mut Settings)) {
+    /// Edits the settings in place without sanitizing, saving or emitting.
+    /// Test-only: production changes must go through [`Self::update_settings`].
+    #[cfg(test)]
+    pub(crate) fn mutate_settings(&self, mut mutate: impl FnMut(&mut Settings)) {
         self.settings.rcu(|settings| {
             let mut settings = Settings::clone(settings);
             mutate(&mut settings);

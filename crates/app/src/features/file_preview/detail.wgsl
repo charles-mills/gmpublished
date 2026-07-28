@@ -1,9 +1,15 @@
 struct Uniforms {
     view_proj: mat4x4<f32>,
+    // Directional light in world space (xyz) + ambient strength (w).
     light: vec4<f32>,
     camera_position: vec4<f32>,
     fog_color: vec4<f32>,
+    // start, end, max density, enabled flag.
     fog_params: vec4<f32>,
+    // x: animation time, yzw: sky tint.
+    water_time_sky_tint: vec4<f32>,
+    // xy: near and far clip distances.
+    water_depth_params: vec4<f32>,
 }
 
 struct Material {

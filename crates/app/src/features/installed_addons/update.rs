@@ -139,6 +139,7 @@ fn metadata_request_effects(state: &mut State) -> Vec<Effect> {
 mod tests {
     use crate::bridge::domain::PublishedFileId;
     use crate::bridge::library::LibraryRefreshReason;
+    use crate::generation::Generation;
     use crate::widgets::addon_grid;
 
     use super::super::model::{MetadataResolution, Row};
@@ -236,7 +237,7 @@ mod tests {
             effects,
             vec![
                 Effect::MetadataRequested {
-                    generation: 1,
+                    generation: Generation::from_raw(1),
                     item_ids: vec![
                         PublishedFileId::new(1).expect("test fixture ids are always nonzero"),
                         PublishedFileId::new(2).expect("test fixture ids are always nonzero")
@@ -264,7 +265,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::MetadataCompleted(
-                1,
+                Generation::from_raw(1),
                 vec![PublishedFileId::new(1).expect("test fixture ids are always nonzero")],
                 Ok(MetadataResolution {
                     patches: Vec::new(),
@@ -279,7 +280,7 @@ mod tests {
             effects,
             vec![
                 Effect::MetadataRefreshRequested {
-                    generation: 1,
+                    generation: Generation::from_raw(1),
                     item_ids: vec![
                         PublishedFileId::new(1).expect("test fixture ids are always nonzero")
                     ],

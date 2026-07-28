@@ -1,3 +1,5 @@
+use crate::scene::QAngle;
+
 use super::{
     BuildMesh, ColorRgbExp, Face, LeafAmbientIndex, LeafAmbientSample, MapBsp, MapEntity, MapLeaf,
     MapLeafLocator, TexInfo, distance_squared, mul, normalize, parse_entity_float,
@@ -335,14 +337,17 @@ pub(super) fn map_environment_lighting(entities: &[MapEntity]) -> Option<MapEnvi
 }
 
 pub(super) fn parse_light_environment_direction(entity: &MapEntity) -> Option<[f32; 3]> {
-    let angles = entity.prop("angles").and_then(parse_entity_vec3);
-    let yaw = angles.map_or(0.0, |angles| angles[1]);
+    let angles = entity
+        .prop("angles")
+        .and_then(parse_entity_vec3)
+        .map(QAngle::from_source_degrees);
+    let yaw = angles.map_or(0.0, |angles| angles.yaw);
+    // A separate `pitch` key overrides the one inside `angles`.
     let pitch = entity
         .prop("pitch")
         .and_then(parse_entity_float)
-        .or_else(|| angles.map(|angles| angles[0]))?;
-    let pitch = pitch.to_radians();
-    let yaw = yaw.to_radians();
+        .map(f32::to_radians)
+        .or_else(|| angles.map(|angles| angles.pitch))?;
     let travel_direction = normalize([
         pitch.cos() * yaw.cos(),
         pitch.cos() * yaw.sin(),

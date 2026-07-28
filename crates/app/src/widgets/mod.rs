@@ -10,7 +10,6 @@ pub mod grid_rows;
 pub mod route_state;
 pub mod scaled;
 pub mod select;
-pub mod select_option;
 pub mod shortcut_capture;
 pub mod spinner;
 pub mod split_pane;

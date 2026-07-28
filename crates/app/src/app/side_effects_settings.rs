@@ -95,28 +95,26 @@ impl App {
         self.chrome_strategy_apply_task(previous)
     }
 
+    #[cfg(target_os = "macos")]
     fn chrome_strategy_apply_task(&self, previous: shell::ChromeStrategy) -> Task<RootMessage> {
         if self.state.chrome_strategy == previous {
             return Task::none();
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let Some(window_id) = self.window_id else {
-                return Task::none();
-            };
-            let apply_task = window::run(
-                window_id,
-                crate::platform_chrome::apply(self.state.chrome_strategy.mac_native_inset()),
-            )
-            .discard();
-            apply_task.chain(self.traffic_light_position_task(window_id))
-        }
+        let Some(window_id) = self.window_id else {
+            return Task::none();
+        };
+        let apply_task = window::run(
+            window_id,
+            crate::platform_chrome::apply(self.state.chrome_strategy.mac_native_inset()),
+        )
+        .discard();
+        apply_task.chain(self.traffic_light_position_task(window_id))
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            Task::none()
-        }
+    #[cfg(not(target_os = "macos"))]
+    fn chrome_strategy_apply_task(&self, _previous: shell::ChromeStrategy) -> Task<RootMessage> {
+        Task::none()
     }
 
     pub(super) fn settings_snapshot(&self) -> Box<settings::SettingsSnapshot> {

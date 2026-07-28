@@ -17,6 +17,7 @@ use crate::bridge::{
 };
 use iced::{animation::Easing, widget::image};
 
+use crate::generation::Generation;
 use crate::media::{thumbnail_demand, thumbnail_worker::ThumbnailInput};
 use crate::theme::{Tokens, motion};
 
@@ -25,7 +26,6 @@ pub const RESULT_ROW_HEIGHT: f32 = 70.0;
 
 const VIRTUAL_ROW_OVERSCAN: usize = 4;
 const SEARCH_THUMBNAIL_MAX_EDGE: u32 = 256;
-const THUMBNAIL_OWNER_LABEL: &str = "Search";
 const PALETTE_CLOSED_SCALE: f32 = 0.98;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,8 +57,8 @@ pub struct State {
     visible: bool,
     presence: motion::Presence<bool>,
     pending_quick: Option<SearchQuickRequest>,
-    thumbnail_generation: u64,
-    metadata_generation: u64,
+    thumbnail_generation: Generation,
+    metadata_generation: Generation,
     metadata_in_flight: HashSet<PublishedFileId>,
     metadata_finished: HashSet<PublishedFileId>,
     scroll_offset: f32,
@@ -81,8 +81,8 @@ impl Default for State {
                 Easing::EaseOut,
             ),
             pending_quick: None,
-            thumbnail_generation: 0,
-            metadata_generation: 0,
+            thumbnail_generation: Generation::INITIAL,
+            metadata_generation: Generation::INITIAL,
             metadata_in_flight: HashSet::new(),
             metadata_finished: HashSet::new(),
             scroll_offset: 0.0,
@@ -375,7 +375,7 @@ impl State {
     pub(crate) fn take_thumbnail_metadata_request(
         &mut self,
         viewport_height: f32,
-    ) -> Option<(u64, Vec<PublishedFileId>)> {
+    ) -> Option<(Generation, Vec<PublishedFileId>)> {
         let ids = self.pending_thumbnail_metadata_ids(viewport_height);
         if ids.is_empty() {
             return None;
@@ -411,7 +411,7 @@ impl State {
 
     pub(crate) fn finish_metadata_request(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: &[PublishedFileId],
         result: Result<MetadataResolution, UiError>,
     ) -> MetadataCompletion {
@@ -441,7 +441,7 @@ impl State {
 
     pub(crate) fn apply_metadata_refresh(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: &[PublishedFileId],
         result: Result<Vec<MetadataPatch>, UiError>,
     ) -> bool {
@@ -585,12 +585,12 @@ impl State {
         self.metadata_finished.clear();
     }
 
-    fn next_thumbnail_generation(&self) -> u64 {
-        self.thumbnail_generation.wrapping_add(1).max(1)
+    fn next_thumbnail_generation(&self) -> Generation {
+        self.thumbnail_generation.next()
     }
 
-    fn next_metadata_generation(&self) -> u64 {
-        self.metadata_generation.wrapping_add(1).max(1)
+    fn next_metadata_generation(&self) -> Generation {
+        self.metadata_generation.next()
     }
 
     fn row_range(&self, viewport_height: f32, overscan: usize) -> Range<usize> {
@@ -920,7 +920,7 @@ fn thumbnail_for_workshop_id(workshop_id: Option<PublishedFileId>) -> RowThumbna
 }
 
 fn thumbnail_owner() -> thumbnail_demand::Owner {
-    thumbnail_demand::Owner::AddonGrid(THUMBNAIL_OWNER_LABEL)
+    thumbnail_demand::Owner::Search
 }
 
 fn finite_nonnegative(value: f32) -> f32 {

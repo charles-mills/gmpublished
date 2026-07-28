@@ -15,7 +15,7 @@ use crate::bridge::{
     publish::{PublishSubmitMode, PublishSubmitPreview, PublishSubmitRequest},
     ui_error::UiError,
 };
-use crate::i18n::I18n;
+use crate::i18n::{Arg, I18n};
 use crate::media::{
     thumbnail_demand::{self, DeliveryResult},
     thumbnail_worker::ThumbnailInput,
@@ -30,11 +30,12 @@ use super::model::{
     ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation,
     IgnorePatternMutationResult, IgnoredPattern, PublishIconSubmitRequestEnvelope,
     PublishIconSubmitResult, PublishSubmitContext, PublishSubmitRequestEnvelope,
-    PublishSubmitResult, SelectOption, VerifiedContentPath, VerifiedContentPathState,
-    VerifiedIconPreview, WorkshopContentRequest, default_icon_path, publish_selected_preview,
+    PublishSubmitResult, VerifiedContentPath, VerifiedContentPathState, VerifiedIconPreview,
+    WorkshopContentRequest, default_icon_path, publish_selected_preview,
 };
+use crate::generation::Generation;
+use crate::spinner_clock::SpinnerClock;
 
-const DEFAULT_VALUE: &str = "";
 const SEED_THUMBNAIL_MAX_EDGE: u32 = 512;
 
 /// Steam Workshop addon-type tag. The wire value (`as_str`) is the exact
@@ -80,12 +81,6 @@ impl AddonType {
             Self::Model => "model",
             Self::Entity => "entity",
         }
-    }
-
-    fn from_value(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str() == value)
     }
 
     fn from_workshop_tag(tag: &str) -> Option<Self> {
@@ -134,12 +129,6 @@ impl AddonTag {
             Self::Comic => "comic",
             Self::Build => "build",
         }
-    }
-
-    fn from_value(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str() == value)
     }
 
     fn from_workshop_tag(tag: &str) -> Option<Self> {
@@ -308,39 +297,78 @@ impl Blockers {
     }
 }
 
+/// Something the user chose that has to be checked before the app can use it.
+/// Exactly one of "nothing chosen", "check in flight", "usable" and "rejected"
+/// holds at a time, and the checked-out value lives on `Verified` so it cannot
+/// outlive the check that produced it.
+#[derive(Clone, Debug, Default)]
+enum Verification<T> {
+    #[default]
+    Empty,
+    Pending,
+    Verified(T),
+    Failed(UiError),
+}
+
+impl<T> Verification<T> {
+    const fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    const fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+
+    const fn error(&self) -> Option<&UiError> {
+        match self {
+            Self::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    const fn verified(&self) -> Option<&T> {
+        match self {
+            Self::Verified(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    const fn verified_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Self::Verified(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "each flag tracks an independent async-verification or UI-focus state, not mutually exclusive"
+    reason = "modal visibility, window focus, and the two one-shot UI latches are independent of each other"
 )]
 pub struct State {
     open: bool,
     mode: Mode,
-    request_generation: u64,
+    request_generation: Generation,
     workshop_loads: HashMap<u64, WorkshopContentLoad>,
     active_workshop_request: Option<u64>,
     workshop_snapshot_path: Option<PathBuf>,
     pending_cleanup: Vec<PathBuf>,
-    icon_generation: u64,
-    submit_generation: u64,
+    icon_generation: Generation,
+    submit_generation: Generation,
     addon_path: String,
-    verified_addon_path: Option<VerifiedContentPathState>,
+    content_path: Verification<VerifiedContentPathState>,
     preview_source: Option<Arc<PreviewArchiveSource>>,
-    path_pending: bool,
-    path_error: Option<UiError>,
     announce_path_success: bool,
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
     browser_scroll_offset: f32,
     browser_scroll_reset_pending: bool,
     browser_select_hover: BrowserSelectHover,
-    thumbnail_generation: u64,
+    thumbnail_generation: Generation,
     seeded_icon_still: Option<iced::widget::image::Handle>,
     seeded_icon_backdrop: Option<iced::widget::image::Handle>,
-    selected_icon: Option<VerifiedIconPreview>,
-    icon_pending: bool,
-    icon_error: Option<UiError>,
-    can_upscale_icon: bool,
+    icon: Verification<VerifiedIconPreview>,
     upscale_icon: bool,
     last_icon_animation_tick: Option<Instant>,
     window_focused: bool,
@@ -350,9 +378,7 @@ pub struct State {
     changelog: ChangelogContent,
     ignored_patterns: Vec<IgnoredPattern>,
     ignore_pattern_input: String,
-    submit_pending: bool,
-    submit_started_at: Option<Instant>,
-    spinner_now: Option<Instant>,
+    submit: SpinnerClock,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -371,31 +397,26 @@ impl Default for State {
         Self {
             open: false,
             mode: Mode::New,
-            request_generation: 0,
+            request_generation: Generation::INITIAL,
             workshop_loads: HashMap::new(),
             active_workshop_request: None,
             workshop_snapshot_path: None,
             pending_cleanup: Vec::new(),
-            icon_generation: 0,
-            submit_generation: 0,
+            icon_generation: Generation::INITIAL,
+            submit_generation: Generation::INITIAL,
             addon_path: String::new(),
-            verified_addon_path: None,
+            content_path: Verification::Empty,
             preview_source: None,
-            path_pending: false,
-            path_error: None,
             announce_path_success: false,
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
             browser_scroll_offset: 0.0,
             browser_scroll_reset_pending: false,
             browser_select_hover: BrowserSelectHover::default(),
-            thumbnail_generation: 0,
+            thumbnail_generation: Generation::INITIAL,
             seeded_icon_still: None,
             seeded_icon_backdrop: None,
-            selected_icon: None,
-            icon_pending: false,
-            icon_error: None,
-            can_upscale_icon: false,
+            icon: Verification::Empty,
             upscale_icon: false,
             last_icon_animation_tick: None,
             window_focused: true,
@@ -405,9 +426,7 @@ impl Default for State {
             changelog: ChangelogContent::default(),
             ignored_patterns: Vec::new(),
             ignore_pattern_input: String::new(),
-            submit_pending: false,
-            submit_started_at: None,
-            spinner_now: None,
+            submit: SpinnerClock::Idle,
         }
     }
 }
@@ -447,8 +466,8 @@ impl State {
             Mode::Update(target) => Some(i18n.trn(
                 "prepare-publish-update-warning",
                 &[
-                    ("arg0", target.title.as_str()),
-                    ("arg1", target.workshop_id.to_string().as_str()),
+                    ("title", Arg::Text(target.title.as_str())),
+                    ("id", Arg::Text(target.workshop_id.to_string().as_str())),
                 ],
             )),
         }
@@ -459,18 +478,25 @@ impl State {
     }
 
     pub(crate) const fn path_pending(&self) -> bool {
-        self.path_pending
+        self.content_path.is_pending()
     }
 
-    pub(crate) fn path_error(&self) -> Option<&UiError> {
-        self.path_error.as_ref()
+    pub(crate) const fn path_error(&self) -> Option<&UiError> {
+        self.content_path.error()
+    }
+
+    const fn verified_path(&self) -> Option<&VerifiedContentPathState> {
+        match &self.content_path {
+            Verification::Verified(verified) => Some(verified),
+            _ => None,
+        }
     }
 
     pub(crate) const fn announce_path_success(&self) -> bool {
         self.announce_path_success
     }
 
-    pub(crate) const fn is_current_path_generation(&self, generation: u64) -> bool {
+    pub(crate) fn is_current_path_generation(&self, generation: Generation) -> bool {
         self.request_generation == generation
     }
 
@@ -507,7 +533,7 @@ impl State {
     }
 
     pub(crate) fn icon_handle(&self) -> Option<&iced::widget::image::Handle> {
-        self.selected_icon.as_ref().map_or_else(
+        self.verified_icon().map_or_else(
             || self.seeded_icon_still.as_ref(),
             |selected| {
                 selected
@@ -547,8 +573,7 @@ impl State {
     }
 
     pub(crate) fn icon_backdrop_handle(&self) -> Option<&iced::widget::image::Handle> {
-        self.selected_icon
-            .as_ref()
+        self.verified_icon()
             .map(|selected| &selected.backdrop)
             .or(self.seeded_icon_backdrop.as_ref())
     }
@@ -607,27 +632,34 @@ impl State {
         true
     }
 
-    #[cfg(test)]
     pub(crate) const fn icon_pending(&self) -> bool {
-        self.icon_pending
+        self.icon.is_pending()
     }
 
-    pub(crate) fn icon_error(&self) -> Option<&UiError> {
-        self.icon_error.as_ref()
+    pub(crate) const fn icon_error(&self) -> Option<&UiError> {
+        self.icon.error()
+    }
+
+    const fn verified_icon(&self) -> Option<&VerifiedIconPreview> {
+        self.icon.verified()
+    }
+
+    const fn verified_icon_mut(&mut self) -> Option<&mut VerifiedIconPreview> {
+        self.icon.verified_mut()
     }
 
     pub(crate) fn icon_display_path(&self) -> Option<&str> {
-        self.selected_icon
-            .as_ref()
+        self.verified_icon()
             .map(|selected| selected.icon.display_path.as_str())
     }
 
-    pub(crate) fn icon_selected(&self) -> bool {
-        self.selected_icon.is_some()
+    pub(crate) const fn icon_selected(&self) -> bool {
+        self.verified_icon().is_some()
     }
 
-    pub(crate) const fn can_upscale_icon(&self) -> bool {
-        self.can_upscale_icon
+    pub(crate) fn can_upscale_icon(&self) -> bool {
+        self.verified_icon()
+            .is_some_and(|selected| selected.icon.can_upscale)
     }
 
     pub(crate) const fn upscale_icon(&self) -> bool {
@@ -635,9 +667,7 @@ impl State {
     }
 
     pub(crate) fn can_remove_icon(&self) -> bool {
-        self.open
-            && !self.update_mode()
-            && (self.selected_icon.is_some() || self.icon_pending || self.icon_error.is_some())
+        self.open && !self.update_mode() && !self.icon.is_empty()
     }
 
     /// GIF playback pauses on the current frame while the window is
@@ -656,8 +686,7 @@ impl State {
         self.window_focused
             && self.open
             && self
-                .selected_icon
-                .as_ref()
+                .verified_icon()
                 .is_some_and(|selected| selected.animation.is_some())
     }
 
@@ -665,42 +694,47 @@ impl State {
         &self.title
     }
 
-    pub(crate) fn addon_type_options(&self, i18n: &I18n) -> Vec<SelectOption> {
+    /// `None` is the row that clears the current choice.
+    pub(crate) fn addon_type_options(&self, i18n: &I18n) -> Vec<(Option<AddonType>, String)> {
         let mut options = Vec::with_capacity(AddonType::ALL.len() + 1);
         // The placeholder row is there to clear a choice. With nothing chosen it
         // clears nothing and merely repeats the label already on the control's
         // face — and, matching the empty selection, renders as the highlighted
         // row. It earns its place only once there is something to undo.
         if self.addon_type.is_some() {
-            options.push(SelectOption::new(
-                i18n.tr("prepare-publish-addon-type"),
-                DEFAULT_VALUE,
-            ));
+            options.push((None, i18n.tr("prepare-publish-addon-type")));
         }
         options.extend(
             AddonType::ALL
                 .into_iter()
-                .map(|value| SelectOption::new(addon_type_label(i18n, value), value.as_str())),
+                .map(|value| (Some(value), addon_type_label(i18n, value))),
         );
         options
     }
 
-    pub(crate) fn selected_addon_type_option(&self, i18n: &I18n) -> SelectOption {
+    pub(crate) const fn addon_type(&self) -> Option<AddonType> {
+        self.addon_type
+    }
+
+    /// What the control's face reads when the menu is closed.
+    pub(crate) fn addon_type_label(&self, i18n: &I18n) -> String {
         self.addon_type.map_or_else(
-            || SelectOption::new(i18n.tr("prepare-publish-addon-type"), DEFAULT_VALUE),
-            |value| SelectOption::new(addon_type_label(i18n, value), value.as_str()),
+            || i18n.tr("prepare-publish-addon-type"),
+            |value| addon_type_label(i18n, value),
         )
     }
 
-    pub(crate) fn tag_options(&self, current_index: usize, i18n: &I18n) -> Vec<SelectOption> {
+    /// `None` is the row that clears the current choice.
+    pub(crate) fn tag_options(
+        &self,
+        current_index: usize,
+        i18n: &I18n,
+    ) -> Vec<(Option<AddonTag>, String)> {
         let mut options = Vec::with_capacity(AddonTag::ALL.len() + 1);
         // Same as the type select: nothing chosen means nothing to clear, and
         // the row would only echo the face.
         if self.tags.get(current_index).copied().flatten().is_some() {
-            options.push(SelectOption::new(
-                tag_placeholder(i18n, current_index),
-                DEFAULT_VALUE,
-            ));
+            options.push((None, tag_placeholder(i18n, current_index)));
         }
         options.extend(AddonTag::ALL.into_iter().filter_map(|tag| {
             let selected_elsewhere = self
@@ -709,16 +743,21 @@ impl State {
                 .enumerate()
                 .any(|(index, other)| index != current_index && *other == Some(tag));
             (!selected_elsewhere || self.tags[current_index] == Some(tag))
-                .then(|| SelectOption::new(addon_tag_label(i18n, tag), tag.as_str()))
+                .then(|| (Some(tag), addon_tag_label(i18n, tag)))
         }));
         options
     }
 
-    pub(crate) fn selected_tag_option(&self, index: usize, i18n: &I18n) -> SelectOption {
+    /// What the control's face reads when the menu is closed.
+    pub(crate) fn tag_label(&self, index: usize, i18n: &I18n) -> String {
         self.tags.get(index).copied().flatten().map_or_else(
-            || SelectOption::new(tag_placeholder(i18n, index), DEFAULT_VALUE),
-            |tag| SelectOption::new(addon_tag_label(i18n, tag), tag.as_str()),
+            || tag_placeholder(i18n, index),
+            |tag| addon_tag_label(i18n, tag),
         )
+    }
+
+    pub(crate) fn selected_tag(&self, index: usize) -> Option<AddonTag> {
+        self.tags.get(index).copied().flatten()
     }
 
     pub(crate) const fn changelog_content(&self) -> &text_editor::Content {
@@ -743,7 +782,7 @@ impl State {
     }
 
     pub(crate) const fn submit_pending(&self) -> bool {
-        self.submit_pending
+        self.submit.is_running()
     }
 
     /// Why `Publish!` is unavailable, if it is.
@@ -757,7 +796,7 @@ impl State {
             return Blockers::default();
         }
 
-        if self.path_pending || self.icon_pending || self.submit_pending {
+        if self.path_pending() || self.icon_pending() || self.submit_pending() {
             return Blockers {
                 pending: true,
                 missing: 0,
@@ -770,10 +809,7 @@ impl State {
                 missing |= requirement.bit();
             }
         };
-        require(
-            Requirement::AddonPath,
-            self.path_error.is_some() || self.verified_addon_path.is_none(),
-        );
+        require(Requirement::AddonPath, self.verified_path().is_none());
         require(
             Requirement::Title,
             !self.update_mode() && self.title.trim().is_empty(),
@@ -827,17 +863,13 @@ impl State {
     pub(crate) fn can_publish_icon(&self) -> bool {
         self.open
             && self.update_mode()
-            && !self.submit_pending
-            && !self.icon_pending
-            && self.selected_icon.is_some()
+            && !self.submit_pending()
+            && matches!(self.icon, Verification::Verified(_))
     }
 
     /// Elapsed seconds of the running submit, for the spinner.
     pub(crate) fn spinner_elapsed(&self) -> f32 {
-        match (self.submit_started_at, self.spinner_now) {
-            (Some(started), Some(now)) => now.saturating_duration_since(started).as_secs_f32(),
-            _ => 0.0,
-        }
+        self.submit.elapsed()
     }
 
     pub(super) fn open_target(
@@ -848,7 +880,7 @@ impl State {
     ) -> Option<WorkshopContentRequest> {
         // Stays monotonic across reopens so a stale thumbnail delivery from a
         // previous target can never seed the new one.
-        let thumbnail_generation = self.thumbnail_generation.saturating_add(1);
+        let thumbnail_generation = self.thumbnail_generation.next();
         let workshop_loads = std::mem::take(&mut self.workshop_loads);
         let mut pending_cleanup = std::mem::take(&mut self.pending_cleanup);
         if let Some(path) = self.workshop_snapshot_path.take() {
@@ -871,7 +903,7 @@ impl State {
                     workshop_id: target.workshop_id,
                     destination: target.snapshot_destination.clone(),
                 };
-                self.path_pending = true;
+                self.content_path = Verification::Pending;
                 self.workshop_loads.insert(
                     request.request_id,
                     WorkshopContentLoad {
@@ -915,8 +947,7 @@ impl State {
         }
         if self.active_workshop_request == Some(request_id) {
             self.active_workshop_request = None;
-            self.path_pending = false;
-            self.path_error = Some(error);
+            self.content_path = Verification::Failed(error);
         }
     }
 
@@ -958,7 +989,7 @@ impl State {
         let source = self.preview_source.as_ref()?;
         let entry = source.entry(entry_path).ok()?;
         Some(PreviewRequest {
-            request_id: 0,
+            request_id: Generation::INITIAL,
             archive: Arc::clone(source),
             entry_path: entry_path.to_owned(),
             display_name: entry
@@ -975,8 +1006,7 @@ impl State {
     pub(super) fn edit_addon_path(&mut self, value: String) {
         if self.open {
             if self
-                .verified_addon_path
-                .as_ref()
+                .verified_path()
                 .is_some_and(|verified| verified.display_path == value)
             {
                 self.addon_path = value;
@@ -986,9 +1016,7 @@ impl State {
             self.detach_workshop_load();
             self.bump_request_generation();
             self.addon_path = value;
-            self.verified_addon_path = None;
-            self.path_pending = false;
-            self.path_error = None;
+            self.content_path = Verification::Empty;
             self.browser = None;
             self.refresh_browser_snapshot();
             self.clear_preview_source();
@@ -1007,10 +1035,7 @@ impl State {
 
         let generation = self.bump_icon_generation();
         let display_path = path_to_display(&path);
-        self.selected_icon = None;
-        self.icon_pending = true;
-        self.icon_error = None;
-        self.can_upscale_icon = false;
+        self.icon = Verification::Pending;
         self.last_icon_animation_tick = None;
 
         Some(IconVerificationRequest {
@@ -1057,9 +1082,7 @@ impl State {
         let addon_path = addon_path.trim().to_owned();
         let generation = self.bump_request_generation();
         self.addon_path.clone_from(&addon_path);
-        self.verified_addon_path = None;
-        self.path_pending = false;
-        self.path_error = None;
+        self.content_path = Verification::Empty;
         self.announce_path_success = false;
         self.browser = None;
         self.refresh_browser_snapshot();
@@ -1069,7 +1092,7 @@ impl State {
             return None;
         }
 
-        self.path_pending = true;
+        self.content_path = Verification::Pending;
         Some(ContentPathVerificationRequest {
             generation,
             display_path: addon_path.clone(),
@@ -1079,23 +1102,21 @@ impl State {
 
     pub(super) fn apply_verification_result(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<Arc<VerifiedContentPath>, UiError>,
     ) -> bool {
         if !self.open || self.request_generation != generation {
             return false;
         }
 
-        self.path_pending = false;
         match result {
             Ok(verified) => {
                 self.addon_path.clone_from(&verified.display_path);
-                self.verified_addon_path = Some(VerifiedContentPathState {
+                self.content_path = Verification::Verified(VerifiedContentPathState {
                     display_path: verified.display_path.clone(),
                     path: verified.path.clone(),
                     total_size: verified.total_size,
                 });
-                self.path_error = None;
                 self.browser = Some(FileBrowserState::from_entries(
                     verified.entries.iter().cloned(),
                 ));
@@ -1105,8 +1126,7 @@ impl State {
             }
             Err(error) => {
                 log::warn!("Prepare Publish content verification failed: {error}");
-                self.verified_addon_path = None;
-                self.path_error = Some(error);
+                self.content_path = Verification::Failed(error);
                 self.browser = None;
                 self.clear_preview_source();
             }
@@ -1117,17 +1137,16 @@ impl State {
 
     pub(super) fn apply_snapshot_inspection_result(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<Arc<VerifiedContentPath>, UiError>,
     ) -> bool {
         if !self.open || self.request_generation != generation {
             return false;
         }
 
-        self.path_pending = false;
         match result {
             Ok(snapshot) => {
-                self.path_error = None;
+                self.content_path = Verification::Empty;
                 self.browser = Some(FileBrowserState::from_entries(
                     snapshot.entries.iter().cloned(),
                 ));
@@ -1137,7 +1156,7 @@ impl State {
             }
             Err(error) => {
                 log::warn!("Prepare Publish Workshop snapshot inspection failed: {error}");
-                self.path_error = Some(error);
+                self.content_path = Verification::Failed(error);
                 self.browser = None;
                 self.clear_preview_source();
                 if let Some(path) = self.workshop_snapshot_path.take() {
@@ -1151,27 +1170,20 @@ impl State {
 
     pub(super) fn apply_icon_verification_result(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<Arc<VerifiedIconPreview>, UiError>,
     ) -> bool {
         if !self.open || self.icon_generation != generation {
             return false;
         }
 
-        self.icon_pending = false;
-        match result {
-            Ok(verified) => {
-                self.can_upscale_icon = verified.icon.can_upscale;
-                self.selected_icon = Some((*verified).clone());
-                self.icon_error = None;
-            }
+        self.icon = match result {
+            Ok(verified) => Verification::Verified((*verified).clone()),
             Err(error) => {
                 log::warn!("Prepare Publish icon verification failed: {error}");
-                self.selected_icon = None;
-                self.icon_error = Some(error);
-                self.can_upscale_icon = false;
+                Verification::Failed(error)
             }
-        }
+        };
         self.last_icon_animation_tick = None;
         true
     }
@@ -1181,18 +1193,15 @@ impl State {
             return false;
         }
 
-        let changed = self.can_remove_icon() || self.can_upscale_icon;
+        let changed = self.can_remove_icon() || self.can_upscale_icon();
         self.bump_icon_generation();
-        self.selected_icon = None;
-        self.icon_pending = false;
-        self.icon_error = None;
-        self.can_upscale_icon = false;
+        self.icon = Verification::Empty;
         self.last_icon_animation_tick = None;
         changed
     }
 
     pub(super) fn toggle_upscale_icon(&mut self, value: bool) {
-        if self.open && self.can_upscale_icon {
+        if self.open && self.can_upscale_icon() {
             self.upscale_icon = value;
         }
     }
@@ -1204,7 +1213,7 @@ impl State {
         let Some(VerifiedIconPreview {
             animation: Some(animation),
             ..
-        }) = self.selected_icon.as_mut()
+        }) = self.verified_icon_mut()
         else {
             return false;
         };
@@ -1236,8 +1245,7 @@ impl State {
         self.browser_scroll_reset_pending = true;
         self.browser_snapshot = BrowserSnapshot::from_browser(
             self.browser.as_ref(),
-            self.verified_addon_path
-                .as_ref()
+            self.verified_path()
                 .map(|verified| verified.display_path.as_str()),
         );
     }
@@ -1261,19 +1269,18 @@ impl State {
         }
     }
 
-    pub(super) fn set_addon_type(&mut self, value: &str) {
+    pub(super) fn set_addon_type(&mut self, value: Option<AddonType>) {
         if !self.open {
             return;
         }
-        self.addon_type = AddonType::from_value(value);
+        self.addon_type = value;
     }
 
-    pub(super) fn set_tag(&mut self, index: usize, value: &str) {
+    pub(super) fn set_tag(&mut self, index: usize, value: Option<AddonTag>) {
         if !self.open || index >= self.tags.len() {
             return;
         }
 
-        let value = AddonTag::from_value(value);
         let duplicate = value.is_some_and(|value| {
             self.tags
                 .iter()
@@ -1341,7 +1348,7 @@ impl State {
             return None;
         }
 
-        let verified = self.verified_addon_path.clone()?;
+        let verified = self.verified_path().cloned()?;
         let tags = selected_tags(&self.tags);
         if tags.is_empty() {
             return None;
@@ -1374,7 +1381,7 @@ impl State {
 
     pub(super) fn apply_submit_completion(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<PublishSubmitResult, UiError>,
     ) -> bool {
         self.apply_submit_outcome(generation, result.map(|_result| ()))
@@ -1389,7 +1396,7 @@ impl State {
         };
         let workshop_id = target.workshop_id;
         let (icon_source_path, upscale) = {
-            let selected = self.selected_icon.as_ref()?;
+            let selected = self.verified_icon()?;
             (
                 selected.icon.source_path.clone(),
                 self.upscale_icon && selected.icon.can_upscale,
@@ -1409,37 +1416,32 @@ impl State {
 
     pub(super) fn apply_publish_icon_completion(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<PublishIconSubmitResult, UiError>,
     ) -> bool {
         self.apply_submit_outcome(generation, result.map(|_result| ()))
     }
 
     pub(super) fn tick_submit_spinner(&mut self, now: Instant) -> bool {
-        if self.submit_pending {
-            self.spinner_now = Some(now);
-            true
-        } else {
-            false
-        }
+        self.submit.advance(now)
     }
 
     fn begin_submit_pending(&mut self) {
-        self.submit_pending = true;
-        self.submit_started_at = Some(Instant::now());
-        self.spinner_now = None;
+        self.submit.start(Instant::now());
     }
 
     /// Failures are surfaced by the tasks overlay toast (and logged here);
     /// the modal itself only stops its spinner.
-    fn apply_submit_outcome(&mut self, generation: u64, result: Result<(), UiError>) -> bool {
-        if !self.open || !self.submit_pending || self.submit_generation != generation {
+    fn apply_submit_outcome(
+        &mut self,
+        generation: Generation,
+        result: Result<(), UiError>,
+    ) -> bool {
+        if !self.open || !self.submit_pending() || self.submit_generation != generation {
             return false;
         }
 
-        self.submit_pending = false;
-        self.submit_started_at = None;
-        self.spinner_now = None;
+        self.submit.stop();
         if let Err(error) = result {
             log::warn!("Prepare Publish submit failed: {error}");
         }
@@ -1465,7 +1467,7 @@ impl State {
     }
 
     fn submit_preview(&self, temp_dir: &Path) -> Option<PublishSubmitPreview> {
-        if let Some(icon) = &self.selected_icon {
+        if let Some(icon) = self.verified_icon() {
             return Some(PublishSubmitPreview::Selected(publish_selected_preview(
                 &icon.icon,
                 self.upscale_icon,
@@ -1505,18 +1507,18 @@ impl State {
         }
     }
 
-    fn bump_request_generation(&mut self) -> u64 {
-        self.request_generation = self.request_generation.saturating_add(1);
+    fn bump_request_generation(&mut self) -> Generation {
+        self.request_generation.bump();
         self.request_generation
     }
 
-    fn bump_icon_generation(&mut self) -> u64 {
-        self.icon_generation = self.icon_generation.saturating_add(1);
+    fn bump_icon_generation(&mut self) -> Generation {
+        self.icon_generation.bump();
         self.icon_generation
     }
 
-    fn bump_submit_generation(&mut self) -> u64 {
-        self.submit_generation = self.submit_generation.saturating_add(1);
+    fn bump_submit_generation(&mut self) -> Generation {
+        self.submit_generation.bump();
         self.submit_generation
     }
 }

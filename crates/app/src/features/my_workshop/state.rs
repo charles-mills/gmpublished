@@ -16,6 +16,15 @@ use super::model::{
     self, COUNT_ROLL_TICK_INTERVAL, ContextMenuRequest, FIRST_WORKSHOP_PAGE, PUBLISH_NEW_ROW_ID,
     PageResult, PreparePublishTarget, Row,
 };
+use crate::generation::Generation;
+
+/// What a grid card id refers to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Card {
+    /// The synthetic first item, which has no backing row.
+    PublishNew,
+    Row(usize),
+}
 
 #[derive(Debug)]
 #[expect(
@@ -26,7 +35,7 @@ pub struct State {
     route_visible: bool,
     grid: addon_grid::State,
     load_status: LoadStatus,
-    generation: u64,
+    generation: Generation,
     rows: Vec<Row>,
     /// Row id -> index into `rows`.
     ///
@@ -67,7 +76,7 @@ impl Default for State {
             route_visible: false,
             grid,
             load_status: LoadStatus::Idle,
-            generation: 0,
+            generation: Generation::INITIAL,
             rows: Vec::new(),
             row_index: HashMap::new(),
             publish_new_title: String::new(),
@@ -114,21 +123,30 @@ impl State {
         &self.grid
     }
 
-    pub(crate) fn workshop_id_for_card(&self, id: &str) -> Option<PublishedFileId> {
+    /// Resolves a grid card id, which is either the synthetic publish-new row
+    /// or a row's index. The sentinel is compared here and nowhere else.
+    ///
+    /// `Card::Row` indexes `rows` as it stands right now, so it must be
+    /// consumed before the next mutation rather than stored.
+    fn card(&self, id: &str) -> Option<Card> {
         if id == PUBLISH_NEW_ROW_ID {
-            return None;
+            return Some(Card::PublishNew);
         }
-        self.rows
-            .iter()
-            .find(|row| row.id() == id)
-            .map(Row::workshop_id)
+        self.row_index.get(id).copied().map(Card::Row)
+    }
+
+    pub(crate) fn workshop_id_for_card(&self, id: &str) -> Option<PublishedFileId> {
+        match self.card(id)? {
+            Card::PublishNew => None,
+            Card::Row(index) => self.rows.get(index).map(Row::workshop_id),
+        }
     }
 
     pub(crate) fn drag_thumbnail_for_card(&self, id: &str) -> Option<image::Handle> {
-        self.rows
-            .iter()
-            .find(|row| row.id() == id)
-            .and_then(Row::drag_thumbnail)
+        match self.card(id)? {
+            Card::PublishNew => None,
+            Card::Row(index) => self.rows.get(index).and_then(Row::drag_thumbnail),
+        }
     }
 
     pub(crate) fn thumbnail_demands(&self) -> thumbnail_demand::DemandSet {
@@ -252,7 +270,7 @@ impl State {
         &mut self.grid
     }
 
-    pub(super) fn enter_route(&mut self) -> Option<(u64, u32)> {
+    pub(super) fn enter_route(&mut self) -> Option<(Generation, u32)> {
         self.route_visible = true;
         if matches!(self.load_status, LoadStatus::Idle | LoadStatus::Error(_))
             && self.rows.is_empty()
@@ -273,13 +291,13 @@ impl State {
         let _ = self.grid.set_page_status(false, false);
     }
 
-    pub(super) fn begin_next_page(&mut self) -> Option<(u64, u32)> {
+    pub(super) fn begin_next_page(&mut self) -> Option<(Generation, u32)> {
         if !self.route_visible || self.loading_page || self.complete {
             return None;
         }
 
         if self.next_page == FIRST_WORKSHOP_PAGE && self.rows.is_empty() {
-            self.generation = self.generation.wrapping_add(1).max(1);
+            self.generation.bump();
             self.loaded_pages = 0;
             self.total_count = 0;
             self.complete = false;
@@ -302,7 +320,7 @@ impl State {
 
     pub(super) fn apply_page(
         &mut self,
-        generation: u64,
+        generation: Generation,
         page: u32,
         result: Result<PageResult, UiError>,
     ) {
@@ -328,7 +346,7 @@ impl State {
         self.sync_grid_items();
     }
 
-    pub(super) fn request_stats_refresh(&mut self) -> Option<(u64, u32)> {
+    pub(super) fn request_stats_refresh(&mut self) -> Option<(Generation, u32)> {
         if !self.route_visible || self.stats_in_flight || self.loaded_pages == 0 {
             return None;
         }
@@ -339,7 +357,7 @@ impl State {
 
     pub(super) fn apply_stats_counts(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<HashMap<PublishedFileId, u64>, UiError>,
     ) -> bool {
         if generation != self.generation {
@@ -440,13 +458,9 @@ impl State {
     }
 
     pub(super) fn take_prepare_publish_target(&mut self, id: &str) -> Option<PreparePublishTarget> {
-        let target = if id == PUBLISH_NEW_ROW_ID {
-            Some(PreparePublishTarget::New)
-        } else {
-            self.rows
-                .iter()
-                .find(|row| row.id() == id)
-                .and_then(Row::prepare_publish_target)
+        let target = match self.card(id)? {
+            Card::PublishNew => Some(PreparePublishTarget::New),
+            Card::Row(index) => self.rows.get(index).and_then(Row::prepare_publish_target),
         }?;
         self.pending_prepare_publish = Some(target.clone());
         Some(target)
@@ -506,16 +520,10 @@ impl State {
     }
 
     pub(super) fn set_card_hovered(&mut self, id: &str, hovered: bool) -> bool {
-        if id == PUBLISH_NEW_ROW_ID {
+        let Some(Card::Row(index)) = self.card(id) else {
             return false;
-        }
-
-        let Some((index, row)) = self
-            .rows
-            .iter_mut()
-            .enumerate()
-            .find(|(_, row)| row.id() == id)
-        else {
+        };
+        let Some(row) = self.rows.get_mut(index) else {
             return false;
         };
         // The play flag is recorded either way (a GIF delivered mid-hover
@@ -611,7 +619,7 @@ impl State {
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_for_test(&mut self) -> (u64, u32) {
+    pub(crate) fn begin_for_test(&mut self) -> (Generation, u32) {
         self.route_visible = true;
         self.begin_next_page().expect("page request should start")
     }
@@ -627,12 +635,12 @@ impl State {
     #[cfg(test)]
     pub(crate) fn push_rows_for_test(&mut self, rows: Vec<Row>, total_count: u32) {
         self.route_visible = true;
-        self.generation = 1;
+        self.generation = Generation::INITIAL.next();
         self.rows = rows;
         self.total_count = total_count;
         self.loaded_pages = 1;
         self.next_page = 2;
-        self.complete = false;
+        self.complete = self.rows.len() as u32 >= total_count;
         self.load_status = LoadStatus::Ready;
         self.sync_grid_items();
     }
@@ -660,12 +668,16 @@ fn grid_range_to_row_range(range: Range<usize>, row_count: usize) -> Range<usize
 #[cfg(test)]
 mod tests {
     use crate::bridge::domain::PublishedFileId;
+    use crate::generation::Generation;
     use crate::widgets::addon_grid;
 
     use super::super::model::PageResult;
     use super::{LoadStatus, Row, State, grid_range_to_row_range};
 
-    fn ready_delivery(row_id: u64, generation: u64) -> crate::media::thumbnail_demand::Delivery {
+    fn ready_delivery(
+        row_id: u64,
+        generation: Generation,
+    ) -> crate::media::thumbnail_demand::Delivery {
         use crate::media::{thumbnail_demand, thumbnail_worker};
 
         let input = thumbnail_worker::ThumbnailInput::from_url(format!(
@@ -756,7 +768,7 @@ mod tests {
         let request = state.enter_route();
 
         assert!(state.is_route_visible());
-        assert_eq!(request, Some((1, 1)));
+        assert_eq!(request, Some((Generation::from_raw(1), 1)));
     }
 
     #[test]
@@ -806,7 +818,7 @@ mod tests {
         );
 
         let changed = state.apply_stats_counts(
-            1,
+            Generation::from_raw(1),
             Ok([(
                 PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
                 25,
@@ -831,6 +843,6 @@ mod tests {
         let stats_request = state.request_stats_refresh();
 
         assert_eq!(page_request, None);
-        assert_eq!(stats_request, Some((1, 1)));
+        assert_eq!(stats_request, Some((Generation::from_raw(1), 1)));
     }
 }

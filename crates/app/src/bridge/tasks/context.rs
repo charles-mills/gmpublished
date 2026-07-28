@@ -10,6 +10,7 @@ use super::{
     TaskHandle, TaskId, TaskKind, Tasks, UiError, WorkerPoolSpawner, fmt,
     install_backend_event_sink_by_default, mpsc, oneshot, show_native_open_error_dialog,
 };
+use gmpublished_backend::transactions::TransactionId;
 
 /// Root-owned backend boundary cloned into Iced workers and subscriptions.
 #[derive(Clone)]
@@ -231,7 +232,7 @@ impl BackendContext {
 
     pub(crate) fn correlate_backend_transaction(
         &self,
-        transaction_id: u32,
+        transaction_id: TransactionId,
         task: TaskHandle,
     ) -> TaskId {
         let task_id = task.id();
@@ -240,7 +241,7 @@ impl BackendContext {
         task_id
     }
 
-    pub(crate) fn is_backend_transaction_active(&self, transaction_id: u32) -> bool {
+    pub(crate) fn is_backend_transaction_active(&self, transaction_id: TransactionId) -> bool {
         self.transaction_tasks.is_active(transaction_id)
     }
 
@@ -318,7 +319,7 @@ impl BackendContext {
 
     pub(crate) fn error_backend_transaction_task(
         &self,
-        transaction_id: u32,
+        transaction_id: TransactionId,
         error: impl Into<UiError>,
     ) -> bool {
         self.transaction_tasks.error(transaction_id, error.into())

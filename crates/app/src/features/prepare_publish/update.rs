@@ -44,8 +44,8 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             effects.push(Effect::ThumbnailDemandsChanged);
             effects
         }
-        Message::WorkshopContentSubmissionCompleted(generation, result) => {
-            state.apply_workshop_submission_result(generation, result);
+        Message::WorkshopContentSubmissionCompleted(request_id, result) => {
+            state.apply_workshop_submission_result(request_id, result);
             cleanup_effects(state)
         }
         Message::WorkshopSnapshotFailed(request_id, error) => {
@@ -119,11 +119,11 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             Vec::new()
         }
         Message::AddonTypeSelected(option) => {
-            state.set_addon_type(&option.value);
+            state.set_addon_type(option);
             Vec::new()
         }
         Message::TagSelected(index, option) => {
-            state.set_tag(index, &option.value);
+            state.set_tag(index, option);
             Vec::new()
         }
         Message::IgnorePatternEdited(value) => {

@@ -30,6 +30,8 @@ use super::model::{
     AuthorInfo, AuthorRequest, ExtractionIntent, ExtractionRequest, LoadedArchive, MetadataRequest,
     OpenRequest, OpenSeed, OpenTarget, WorkshopMetadata, workshop_url,
 };
+use crate::bridge::domain::SteamId;
+use crate::generation::Generation;
 
 const PREVIEW_THUMBNAIL_MAX_EDGE: u32 = 256;
 const PREVIEW_THUMBNAIL_DEMAND_ID: &str = "preview-gma";
@@ -54,7 +56,7 @@ pub struct State {
     archive_path: Option<PathBuf>,
     workshop_id: Option<PublishedFileId>,
     seed: OpenSeed,
-    request_id: u64,
+    request_id: Generation,
     archive: Option<Arc<PreviewArchive>>,
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
@@ -87,7 +89,7 @@ impl Default for State {
             archive_path: None,
             workshop_id: None,
             seed: OpenSeed::default(),
-            request_id: 0,
+            request_id: Generation::INITIAL,
             archive: None,
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
@@ -313,7 +315,7 @@ impl State {
     }
 
     pub(super) fn begin_open(&mut self, target: OpenTarget) -> OpenRequest {
-        self.request_id = self.request_id.saturating_add(1);
+        self.request_id.bump();
         self.open = true;
         self.loading = true;
         self.error = None;
@@ -356,7 +358,7 @@ impl State {
 
     pub(super) fn apply_archive_opened(
         &mut self,
-        request_id: u64,
+        request_id: Generation,
         result: Result<LoadedArchive, UiError>,
     ) -> bool {
         if !self.open || self.request_id != request_id {
@@ -410,8 +412,8 @@ impl State {
 
     pub(super) fn apply_author_result(
         &mut self,
-        request_id: u64,
-        steamid64: u64,
+        request_id: Generation,
+        steamid64: SteamId,
         result: Result<AuthorInfo, UiError>,
     ) -> bool {
         if !self.open
@@ -489,7 +491,7 @@ impl State {
 
     pub(super) fn apply_workshop_metadata(
         &mut self,
-        request_id: u64,
+        request_id: Generation,
         workshop_id: PublishedFileId,
         result: Result<Option<WorkshopMetadata>, UiError>,
     ) -> bool {
@@ -626,7 +628,7 @@ impl State {
         if !self.open && !self.loading && self.archive.is_none() && self.browser.is_none() {
             return;
         }
-        self.request_id = self.request_id.saturating_add(1);
+        self.request_id.bump();
         self.open = false;
         self.loading = false;
         self.error = None;
@@ -683,7 +685,7 @@ impl State {
         let archive = self.ready_archive()?;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {
-            request_id: 0,
+            request_id: Generation::INITIAL,
             archive: PreviewArchiveSource::from_gma(Arc::clone(archive)),
             entry_path: entry_path.to_owned(),
             display_name: entry

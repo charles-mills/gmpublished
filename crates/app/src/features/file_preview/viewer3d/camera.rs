@@ -1,14 +1,15 @@
 use super::{
     Action, Arc, DOOR_PROGRESS_EPSILON, DOOR_USE_REACH, DoorAudioEvent, DoorAudioEventKind,
-    DoorInstance, DoorMoveLoopRuntime, DoorRenderPose, DoorRuntime, DoorTarget, Event, FlyPose,
-    MAX_PITCH, MIN_PITCH, MapFog, MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket,
-    MapWalkCollision, Message, ModelPreview, ModelPrimitive, MovementMode, ORBIT_SENSITIVITY,
-    OrbitPose, Point, Rectangle, Uniforms, ZOOM_STEP, add, bounds_intersect, choose_door_open_sign,
-    cross, door_audio_event, door_progress_step, door_sound_gain, door_uses_move_loop,
-    door_world_bounds, dot, endpoint_sound, expand_bounds, half_extent, initial_door_open_sign,
-    length_squared, mid, mouse, mul, normalize, normalize_or_zero, ray_aabb_distance, shader, sub,
+    DoorInstance, DoorMotion, DoorRenderPose, DoorRuntime, DoorTarget, Event, FlyPose, MAX_PITCH,
+    MIN_PITCH, MapFog, MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket, MapWalkCollision,
+    Message, ModelPreview, ModelPrimitive, MovementMode, ORBIT_SENSITIVITY, OrbitPose, Point,
+    Rectangle, SOURCE_UP, Uniforms, ZOOM_STEP, add, bounds_intersect, choose_door_swing, cross,
+    door_audio_event, door_progress_step, door_sound_gain, door_uses_move_loop, door_world_bounds,
+    dot, endpoint_sound, expand_bounds, half_extent, initial_door_swing, length_squared, mid,
+    mouse, mul, normalize, normalize_or_zero, ray_aabb_distance, shader, sub,
     trace_aabb_against_aabb,
 };
+use gmpublished_backend::scene::QAngle;
 
 /// Shader-widget program: owns nothing but a handle to the loaded model;
 /// camera state lives in the widget tree so it survives redraws.
@@ -122,6 +123,7 @@ impl shader::Program<Message> for Viewer3d {
             visibility_culling: false,
             phy_debug_visible: self.phy_debug_visible,
             uniforms: Uniforms::for_model(&self.model, camera, bounds),
+            submerged: false,
             map_skybox_uniforms: None,
             sky_uniforms: None,
             door_poses: Vec::new(),
@@ -202,10 +204,33 @@ pub(super) const LAND_BOB_MIN_FALL_SPEED: f32 = 120.0;
 pub(super) const WALK_DUCK_VIEW_DURATION: f32 = 0.2;
 pub(super) const WALK_VOID_EXIT_MARGIN: f32 = 512.0;
 
+/// How deep the walk hull is in water, sampled at feet, waist and eye.
+///
+/// Ordered: swimming starts at [`Self::Waist`], and [`Self::Eyes`] is also
+/// submerged.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum WaterLevel {
+    #[default]
+    Dry,
+    Feet,
+    Waist,
+    Eyes,
+}
+
+impl WaterLevel {
+    pub(super) fn is_swimming(self) -> bool {
+        self >= Self::Waist
+    }
+
+    pub(super) fn is_submerged(self) -> bool {
+        self == Self::Eyes
+    }
+}
+
 #[derive(Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "ground, jump, water, duck, and exit-assist states change independently"
+    reason = "ground, jump, duck-reconcile, and exit-assist states change independently"
 )]
 pub struct FlyCamera {
     pub(super) content_id: Option<u64>,
@@ -227,8 +252,7 @@ pub struct FlyCamera {
     pub(super) walk_bob_offset: f32,
     pub(super) land_bob_elapsed: f32,
     pub(super) land_bob_amplitude: f32,
-    pub(super) swimming: bool,
-    pub(super) submerged: bool,
+    pub(super) water: WaterLevel,
     pub(super) water_exit_assist: bool,
     pub(super) walk_hull: WalkHull,
     pub(super) duck_view_animation: Option<DuckViewAnimation>,
@@ -363,8 +387,7 @@ impl FlyCamera {
         self.walk_bob_offset = 0.0;
         self.land_bob_elapsed = LAND_BOB_DURATION;
         self.land_bob_amplitude = 0.0;
-        self.swimming = false;
-        self.submerged = false;
+        self.water = WaterLevel::Dry;
         self.water_exit_assist = false;
         self.reset_duck_state();
         self.doors = scene
@@ -372,8 +395,8 @@ impl FlyCamera {
             .iter()
             .map(|door| {
                 let progress = door.initial_progress.clamp(0.0, 1.0);
-                let open_sign = initial_door_open_sign(door.motion);
-                let (bounds_min, bounds_max) = door_world_bounds(door, progress, open_sign);
+                let swing = initial_door_swing(door.motion);
+                let (bounds_min, bounds_max) = door_world_bounds(door, progress, swing);
                 DoorRuntime {
                     progress,
                     target: if progress >= 1.0 - DOOR_PROGRESS_EPSILON {
@@ -381,10 +404,8 @@ impl FlyCamera {
                     } else {
                         DoorTarget::Closed
                     },
-                    moving: false,
-                    blocked_closing: false,
-                    move_loop: None,
-                    open_sign,
+                    motion: DoorMotion::Idle,
+                    swing,
                     bounds_min,
                     bounds_max,
                 }
@@ -427,8 +448,9 @@ impl FlyCamera {
             spawn.origin[1],
             spawn.origin[2] + PLAYER_START_EYE_NUDGE,
         ]);
-        self.yaw = spawn.angles[1].to_radians();
-        self.pitch = (-spawn.angles[0].to_radians()).clamp(MIN_PITCH, MAX_PITCH);
+        let angles = QAngle::from_source_degrees(spawn.angles);
+        self.yaw = angles.yaw;
+        self.pitch = (-angles.pitch).clamp(MIN_PITCH, MAX_PITCH);
     }
 
     pub(super) fn seed_from_bounds(&mut self, scene: &ModelPreview) {
@@ -457,8 +479,8 @@ impl FlyCamera {
         self.mode
     }
 
-    pub const fn submerged(&self) -> bool {
-        self.submerged
+    pub fn submerged(&self) -> bool {
+        self.water.is_submerged()
     }
 
     pub(super) fn camera_update_message(&self) -> Option<Message> {
@@ -522,7 +544,7 @@ impl FlyCamera {
             self.pitch.cos() * self.yaw.sin(),
             self.pitch.sin(),
         ];
-        let right = normalize(cross(forward, [0.0, 0.0, 1.0]));
+        let right = normalize(cross(forward, SOURCE_UP));
 
         let mut delta = [0.0_f32; 3];
         let mut add = |direction: [f32; 3], sign: f32| {
@@ -565,8 +587,7 @@ impl FlyCamera {
         self.walk_bob_offset = 0.0;
         self.land_bob_elapsed = LAND_BOB_DURATION;
         self.land_bob_amplitude = 0.0;
-        self.swimming = false;
-        self.submerged = false;
+        self.water = WaterLevel::Dry;
         self.water_exit_assist = false;
         self.reset_duck_state();
     }
@@ -627,8 +648,7 @@ impl FlyCamera {
         self.walk_bob_offset = 0.0;
         self.land_bob_elapsed = LAND_BOB_DURATION;
         self.land_bob_amplitude = 0.0;
-        self.swimming = false;
-        self.submerged = false;
+        self.water = WaterLevel::Dry;
         self.water_exit_assist = false;
         self.move_factor = 0.0;
         true
@@ -647,7 +667,7 @@ impl FlyCamera {
     }
 
     pub(super) fn needs_movement_tick(&self) -> bool {
-        let door_moving = self.doors.iter().any(|door| door.moving);
+        let door_moving = self.doors.iter().any(|door| door.motion.needs_tick());
         match self.mode {
             MovementMode::Fly => self.held.any_movement() || door_moving,
             MovementMode::Walk => {
@@ -660,12 +680,12 @@ impl FlyCamera {
                 // later input/movement checks, preserving idle-0%.
                 self.held.any_horizontal()
                     || self.jump_requested
-                    || (self.swimming
+                    || (self.water.is_swimming()
                         && (self.held.any_movement()
                             || self.held.duck
                             || length_squared(self.walk_velocity)
                                 > WALK_SWIM_STOP_SPEED * WALK_SWIM_STOP_SPEED))
-                    || (!self.swimming && !self.grounded)
+                    || (!self.water.is_swimming() && !self.grounded)
                     || self.land_bob_active()
                     || self.walk_bob_offset.abs() > 0.01
                     || self.duck_reconcile_requested
@@ -741,11 +761,10 @@ impl FlyCamera {
         if !self.held.forward {
             self.water_exit_assist = false;
         }
-        let was_swimming = self.swimming;
-        let (water_level, surface_z) = self.water_level(collision);
-        self.swimming = water_level >= 2;
-        self.submerged = water_level == 3;
-        if self.swimming {
+        let was_swimming = self.water.is_swimming();
+        let (water, surface_z) = self.water_level(collision);
+        self.water = water;
+        if self.water.is_swimming() {
             self.integrate_swim_step(collision, dt, was_swimming, surface_z);
             return;
         }
@@ -817,7 +836,7 @@ impl FlyCamera {
         let wish_velocity = mul(wish_direction, WALK_SWIM_SPEED);
         self.walk_velocity = add(self.walk_velocity, mul(wish_velocity, 1.0 - friction));
         if self.held.forward
-            && !self.submerged
+            && !self.water.is_submerged()
             && surface_z.is_some_and(|surface_z| self.water_exit_ahead(collision, surface_z))
         {
             self.walk_velocity[2] = self.walk_velocity[2].max(WALK_WATER_EXIT_BOOST);
@@ -840,16 +859,14 @@ impl FlyCamera {
         if self.grounded {
             self.water_exit_assist = false;
         }
-        let (water_level, _) = self.water_level(collision);
-        self.swimming = water_level >= 2;
-        self.submerged = water_level == 3;
+        (self.water, _) = self.water_level(collision);
         self.update_walk_bob(dt, false);
         self.update_duck_view_animation(dt);
     }
 
-    fn water_level(&self, collision: &MapWalkCollision) -> (u8, Option<f32>) {
+    fn water_level(&self, collision: &MapWalkCollision) -> (WaterLevel, Option<f32>) {
         let Some(eye) = self.position else {
-            return (0, None);
+            return (WaterLevel::Dry, None);
         };
         let center = add(eye, self.walk_hull.eye_to_hull_center());
         let feet = sub(center, [0.0, 0.0, self.walk_hull.half_extents()[2] - 2.0]);
@@ -857,13 +874,13 @@ impl FlyCamera {
         let waist_water = collision.water_at(center);
         let eye_water = collision.water_at(eye);
         let level = if eye_water.is_some() {
-            3
+            WaterLevel::Eyes
         } else if waist_water.is_some() {
-            2
+            WaterLevel::Waist
         } else if feet_water.is_some() {
-            1
+            WaterLevel::Feet
         } else {
-            0
+            WaterLevel::Dry
         };
         let surface_z = [feet_water, waist_water, eye_water]
             .into_iter()
@@ -875,7 +892,7 @@ impl FlyCamera {
 
     fn swim_wish_direction(&self) -> [f32; 3] {
         let forward = self.forward();
-        let right = normalize(cross(forward, [0.0, 0.0, 1.0]));
+        let right = normalize(cross(forward, SOURCE_UP));
         let mut direction = [0.0; 3];
         if self.held.forward {
             direction = add(direction, forward);
@@ -921,7 +938,7 @@ impl FlyCamera {
 
     pub(super) fn walk_wish_direction(&self) -> [f32; 3] {
         let forward = [self.yaw.cos(), self.yaw.sin(), 0.0];
-        let right = normalize(cross(forward, [0.0, 0.0, 1.0]));
+        let right = normalize(cross(forward, SOURCE_UP));
         let mut direction = [0.0; 3];
         if self.held.forward {
             direction = add(direction, forward);
@@ -1170,12 +1187,35 @@ impl FlyCamera {
         let listener = self.position;
         let mut audio_events = Vec::new();
         for (index, runtime) in self.doors.iter_mut().enumerate() {
-            if !runtime.moving {
+            if let DoorMotion::HoldingOpen { remaining } = runtime.motion {
+                if remaining > dt {
+                    runtime.motion = DoorMotion::HoldingOpen {
+                        remaining: remaining - dt,
+                    };
+                    continue;
+                }
+                // The hold elapsed: close on its own, exactly as a toggle would.
+                runtime.motion = DoorMotion::Moving;
+                runtime.target = DoorTarget::Closed;
+                if let Some(door) = scene.doors.get(index) {
+                    let gain = door_sound_gain(
+                        listener,
+                        (runtime.bounds_min, runtime.bounds_max),
+                        door.sounds.move_sound.as_ref(),
+                    );
+                    audio_events.push(door_audio_event(
+                        content_id,
+                        index,
+                        DoorAudioEventKind::MoveStarted,
+                        gain,
+                    ));
+                }
+            }
+            if runtime.motion != DoorMotion::Moving {
                 continue;
             }
             let Some(door) = scene.doors.get(index) else {
-                runtime.moving = false;
-                runtime.move_loop = None;
+                runtime.motion = DoorMotion::Idle;
                 continue;
             };
             let step = door_progress_step(door.motion, dt);
@@ -1185,13 +1225,11 @@ impl FlyCamera {
             };
             if runtime.target == DoorTarget::Closed
                 && player_hull.is_some_and(|hull| {
-                    let bounds = door_world_bounds(door, next_progress, runtime.open_sign);
+                    let bounds = door_world_bounds(door, next_progress, runtime.swing);
                     bounds_intersect(bounds, hull)
                 })
             {
-                runtime.moving = false;
-                runtime.blocked_closing = true;
-                runtime.move_loop = None;
+                runtime.motion = DoorMotion::BlockedClosing;
                 audio_events.push(door_audio_event(
                     content_id,
                     index,
@@ -1202,7 +1240,7 @@ impl FlyCamera {
             }
             runtime.progress = next_progress;
             (runtime.bounds_min, runtime.bounds_max) =
-                door_world_bounds(door, runtime.progress, runtime.open_sign);
+                door_world_bounds(door, runtime.progress, runtime.swing);
             if (runtime.target == DoorTarget::Open
                 && runtime.progress >= 1.0 - DOOR_PROGRESS_EPSILON)
                 || (runtime.target == DoorTarget::Closed
@@ -1213,11 +1251,14 @@ impl FlyCamera {
                     DoorTarget::Closed => 0.0,
                 };
                 (runtime.bounds_min, runtime.bounds_max) =
-                    door_world_bounds(door, runtime.progress, runtime.open_sign);
-                runtime.moving = false;
-                runtime.blocked_closing = false;
-                runtime.move_loop = None;
+                    door_world_bounds(door, runtime.progress, runtime.swing);
                 let open = runtime.target == DoorTarget::Open;
+                runtime.motion = door
+                    .auto_close_after
+                    .filter(|_| open)
+                    .map_or(DoorMotion::Idle, |remaining| DoorMotion::HoldingOpen {
+                        remaining,
+                    });
                 let sound = endpoint_sound(door, open);
                 let gain =
                     door_sound_gain(listener, (runtime.bounds_min, runtime.bounds_max), sound);
@@ -1253,19 +1294,17 @@ impl FlyCamera {
         let listener = self.position;
         let mut audio_events = Vec::new();
         for (index, runtime) in self.doors.iter_mut().enumerate() {
-            if !runtime.blocked_closing {
+            if runtime.motion != DoorMotion::BlockedClosing {
                 continue;
             }
             let Some(door) = scene.doors.get(index) else {
                 continue;
             };
             let next_progress = (runtime.progress - DOOR_PROGRESS_EPSILON).max(0.0);
-            let bounds = door_world_bounds(door, next_progress, runtime.open_sign);
+            let bounds = door_world_bounds(door, next_progress, runtime.swing);
             if player_hull.is_none_or(|hull| !bounds_intersect(bounds, hull)) {
-                runtime.blocked_closing = false;
-                runtime.moving = true;
+                runtime.motion = DoorMotion::Moving;
                 runtime.target = DoorTarget::Closed;
-                runtime.move_loop = door_uses_move_loop(door.class).then_some(DoorMoveLoopRuntime);
                 let gain = door_sound_gain(
                     listener,
                     (runtime.bounds_min, runtime.bounds_max),
@@ -1313,11 +1352,9 @@ impl FlyCamera {
             runtime.target = DoorTarget::Closed;
         } else {
             runtime.target = DoorTarget::Open;
-            runtime.open_sign = choose_door_open_sign(door, start, direction);
+            runtime.swing = choose_door_swing(door, start, direction);
         }
-        runtime.moving = true;
-        runtime.blocked_closing = false;
-        runtime.move_loop = door_uses_move_loop(door.class).then_some(DoorMoveLoopRuntime);
+        runtime.motion = DoorMotion::Moving;
         let gain = door_sound_gain(
             self.position,
             (runtime.bounds_min, runtime.bounds_max),
@@ -1443,9 +1480,7 @@ impl FlyCamera {
 }
 
 pub(super) fn rotate_source_vector(vector: [f32; 3], angles: [f32; 3]) -> [f32; 3] {
-    let pitch = angles[0].to_radians();
-    let yaw = angles[1].to_radians();
-    let roll = angles[2].to_radians();
+    let QAngle { pitch, yaw, roll } = QAngle::from_source_degrees(angles);
     rotate_z(rotate_y(rotate_x(vector, roll), pitch), yaw)
 }
 
@@ -1670,6 +1705,7 @@ impl shader::Program<Message> for FlyViewer {
                 camera.water_time,
                 camera.submerged(),
             ),
+            submerged: camera.submerged(),
             map_skybox_uniforms: self.sky_camera.map(|sky_camera| {
                 Uniforms::for_fly_skybox_composite(
                     &self.scene,
@@ -1689,7 +1725,7 @@ impl shader::Program<Message> for FlyViewer {
                 .iter()
                 .map(|door| DoorRenderPose {
                     progress: door.progress,
-                    open_sign: door.open_sign,
+                    swing: door.swing,
                 })
                 .collect(),
         }

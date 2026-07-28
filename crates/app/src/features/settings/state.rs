@@ -10,8 +10,6 @@ use crate::bridge::{
 use crate::theme::AccentInputs;
 use crate::util::paths::{fallback_current_dir, fallback_paths, path_to_display};
 
-const DEFAULT_LANGUAGE_VALUE: &str = "default";
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsSnapshot {
     pub(crate) settings: Settings,
@@ -59,8 +57,6 @@ impl Tab {
         }
     }
 }
-
-pub use crate::widgets::select_option::SelectOption;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathSetting {
@@ -324,10 +320,8 @@ pub struct State {
     settings: Settings,
     paths: AppPaths,
     system_scheme: SystemColorScheme,
-    path_texts: PathTexts,
-    path_errors: PathErrors,
-    color_texts: ColorTexts,
-    color_errors: ColorErrors,
+    path_fields: PathFields,
+    color_fields: ColorFields,
     active_color_picker: Option<ColorSetting>,
     color_picker_draft: Option<HsvColor>,
     status: SettingsStatus,
@@ -343,10 +337,8 @@ impl Default for State {
         Self {
             open: false,
             active_tab: Tab::default(),
-            path_texts: PathTexts::from_settings(&settings),
-            path_errors: PathErrors::default(),
-            color_texts: ColorTexts::from_settings(&settings),
-            color_errors: ColorErrors::default(),
+            path_fields: PathFields::from_settings(&settings),
+            color_fields: ColorFields::from_settings(&settings),
             active_color_picker: None,
             color_picker_draft: None,
             settings,
@@ -424,7 +416,7 @@ impl State {
     }
 
     pub(crate) fn path_text(&self, kind: PathSetting) -> &str {
-        self.path_texts.get(kind)
+        self.path_fields.text(kind)
     }
 
     pub(crate) fn path_placeholder(&self, kind: PathSetting) -> String {
@@ -432,7 +424,7 @@ impl State {
     }
 
     pub(crate) fn path_error_key(&self, kind: PathSetting) -> Option<&'static str> {
-        self.path_errors.get(kind).map(PathValidationError::key)
+        self.path_fields.error(kind).map(PathValidationError::key)
     }
 
     pub(crate) const fn blocks_scrim_close(&self) -> bool {
@@ -448,7 +440,7 @@ impl State {
     }
 
     pub(crate) fn color_text(&self, kind: ColorSetting) -> &str {
-        self.color_texts.get(kind)
+        self.color_fields.text(kind)
     }
 
     pub(crate) fn color_rgb(&self, kind: ColorSetting) -> u32 {
@@ -456,7 +448,7 @@ impl State {
     }
 
     pub(crate) fn color_invalid(&self, kind: ColorSetting) -> bool {
-        self.color_errors.get(kind)
+        self.color_fields.invalid(kind)
     }
 
     pub(crate) fn color_hsv(&self, kind: ColorSetting) -> HsvColor {
@@ -477,36 +469,33 @@ impl State {
         self.picker_expanded(kind) && self.color_preview_rgb(kind) != self.color_rgb(kind)
     }
 
-    pub(crate) fn language_value(&self) -> String {
-        self.settings
-            .language
-            .clone()
-            .unwrap_or_else(|| DEFAULT_LANGUAGE_VALUE.to_owned())
+    /// `None` is "follow the system language".
+    pub(crate) fn language(&self) -> Option<&str> {
+        self.settings.language.as_deref()
     }
 
-    pub(crate) fn theme_value(&self) -> &'static str {
-        theme_preset_value(self.settings.theme_preset)
+    pub(crate) const fn theme_preset(&self) -> ThemePreset {
+        self.settings.theme_preset
     }
 
-    pub(crate) fn download_count_format_value(&self) -> &'static str {
-        download_count_format_value(self.settings.download_count_format)
+    pub(crate) const fn download_count_format(&self) -> DownloadCountFormat {
+        self.settings.download_count_format
     }
 
-    pub(crate) fn overwrite_mode_value(&self) -> &'static str {
-        overwrite_mode_value(&self.settings.extract_overwrite_mode)
+    pub(crate) fn overwrite_mode(&self) -> ExtractionOverwriteMode {
+        self.settings.extract_overwrite_mode.clone()
     }
 
     pub(crate) fn set_path_text(&mut self, kind: PathSetting, value: String) {
-        self.path_texts.set(kind, value);
-        self.path_errors.clear(kind);
+        self.path_fields.set_text(kind, value);
         self.close_color_picker();
         self.status = SettingsStatus::None;
     }
 
     pub(crate) fn path_validation_request(&mut self, kind: PathSetting) -> PathValidationRequest {
         let request = path_validation_request(kind, self.path_text(kind));
-        self.path_texts.set(kind, request.requested_display.clone());
-        self.path_errors.clear(kind);
+        self.path_fields
+            .set_text(kind, request.requested_display.clone());
         self.status = SettingsStatus::None;
         request
     }
@@ -534,8 +523,8 @@ impl State {
                 self.apply_mutation(&mutation).then_some(mutation)
             }
             PathValidationOutcome::Rejected { error } => {
-                self.path_texts = PathTexts::from_settings(&self.settings);
-                self.path_errors.set(result.kind, error);
+                self.path_fields = PathFields::from_settings(&self.settings);
+                self.path_fields.set_error(result.kind, error);
                 self.status = SettingsStatus::None;
                 None
             }
@@ -552,8 +541,7 @@ impl State {
             let mutation = SettingsMutation::Color { kind, rgb };
             self.apply_mutation(&mutation).then_some(mutation)
         } else {
-            self.color_texts.set(kind, value);
-            self.color_errors.set(kind, true);
+            self.color_fields.set_invalid_text(kind, value);
             self.status = SettingsStatus::None;
             None
         }
@@ -699,22 +687,21 @@ impl State {
         self.apply_mutation(&mutation).then_some(mutation)
     }
 
-    pub(crate) fn language_mutation(&mut self, value: &str) -> Option<SettingsMutation> {
-        self.scalar_mutation(SettingsMutation::Language(language_setting_from_value(
-            value,
-        )))
+    pub(crate) fn language_mutation(
+        &mut self,
+        language: Option<String>,
+    ) -> Option<SettingsMutation> {
+        self.scalar_mutation(SettingsMutation::Language(language))
     }
 
     pub(crate) fn download_count_format_mutation(
         &mut self,
-        value: &str,
+        format: DownloadCountFormat,
     ) -> Option<SettingsMutation> {
-        let format = download_count_format_from_value(value)?;
         self.scalar_mutation(SettingsMutation::DownloadCountFormat(format))
     }
 
-    pub(crate) fn theme_mutation(&mut self, value: &str) -> Option<SettingsMutation> {
-        let preset = theme_preset_from_value(value)?;
+    pub(crate) fn theme_mutation(&mut self, preset: ThemePreset) -> Option<SettingsMutation> {
         let concrete_preset =
             concrete_preset_for_effective(effective_theme_preset(preset, self.system_scheme));
         let (neutral, success, error) = concrete_preset.accent_colors();
@@ -726,8 +713,10 @@ impl State {
         })
     }
 
-    pub(crate) fn overwrite_mode_mutation(&mut self, value: &str) -> Option<SettingsMutation> {
-        let mode = overwrite_mode_from_value(value)?;
+    pub(crate) fn overwrite_mode_mutation(
+        &mut self,
+        mode: ExtractionOverwriteMode,
+    ) -> Option<SettingsMutation> {
         self.scalar_mutation(SettingsMutation::OverwriteMode(mode))
     }
 
@@ -746,10 +735,8 @@ impl State {
             system_scheme,
         } = snapshot;
         settings.sanitize(&paths);
-        self.path_texts = PathTexts::from_settings(&settings);
-        self.path_errors = PathErrors::default();
-        self.color_texts = ColorTexts::from_settings(&settings);
-        self.color_errors = ColorErrors::default();
+        self.path_fields = PathFields::from_settings(&settings);
+        self.color_fields = ColorFields::from_settings(&settings);
         self.close_color_picker();
         self.settings = settings;
         self.paths = paths;
@@ -763,18 +750,18 @@ impl State {
         apply_settings_mutation(&mut self.settings, mutation.clone());
 
         match mutation {
-            SettingsMutation::Path { kind, .. } => {
-                self.path_texts = PathTexts::from_settings(&self.settings);
-                self.path_errors.clear(*kind);
+            SettingsMutation::Path { .. } => {
+                // Rebuilt from the accepted settings, so every field's text and
+                // error describe what is now stored — including siblings whose
+                // rejected text this mutation just superseded.
+                self.path_fields = PathFields::from_settings(&self.settings);
             }
             SettingsMutation::Theme { .. } => {
-                self.color_texts = ColorTexts::from_settings(&self.settings);
-                self.color_errors = ColorErrors::default();
+                self.color_fields = ColorFields::from_settings(&self.settings);
                 self.close_color_picker();
             }
-            SettingsMutation::Color { kind, .. } => {
-                self.color_texts = ColorTexts::from_settings(&self.settings);
-                self.color_errors.set(*kind, false);
+            SettingsMutation::Color { .. } => {
+                self.color_fields = ColorFields::from_settings(&self.settings);
                 self.close_color_picker();
             }
             SettingsMutation::Sounds(_)
@@ -800,74 +787,82 @@ enum SettingsStatus {
     ResetFailed,
 }
 
+/// One path setting's editable text and the validation error recorded against
+/// it. Paired so editing cannot leave an error describing the previous value.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct PathTexts([String; PathSetting::ALL.len()]);
+struct PathField {
+    text: String,
+    error: Option<PathValidationError>,
+}
 
-impl PathTexts {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PathFields([PathField; PathSetting::ALL.len()]);
+
+impl PathFields {
     fn from_settings(settings: &Settings) -> Self {
-        Self(PathSetting::ALL.map(|kind| {
-            option_path_to_display(match kind {
+        Self(PathSetting::ALL.map(|kind| PathField {
+            text: option_path_to_display(match kind {
                 PathSetting::Gmod => settings.gmod.as_ref(),
                 PathSetting::Downloads => settings.downloads.as_ref(),
                 PathSetting::UserData => settings.user_data.as_ref(),
                 PathSetting::Temp => settings.temp.as_ref(),
-            })
+            }),
+            error: None,
         }))
     }
 
-    fn get(&self, kind: PathSetting) -> &str {
-        &self.0[kind.index()]
+    fn text(&self, kind: PathSetting) -> &str {
+        &self.0[kind.index()].text
     }
 
-    fn set(&mut self, kind: PathSetting, value: String) {
-        self.0[kind.index()] = value;
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct PathErrors([Option<PathValidationError>; PathSetting::ALL.len()]);
-
-impl PathErrors {
-    fn get(&self, kind: PathSetting) -> Option<PathValidationError> {
-        self.0[kind.index()]
+    fn error(&self, kind: PathSetting) -> Option<PathValidationError> {
+        self.0[kind.index()].error
     }
 
-    fn set(&mut self, kind: PathSetting, error: PathValidationError) {
-        self.0[kind.index()] = Some(error);
+    /// Clears the error: it described the text being replaced.
+    fn set_text(&mut self, kind: PathSetting, value: String) {
+        self.0[kind.index()] = PathField {
+            text: value,
+            error: None,
+        };
     }
 
-    fn clear(&mut self, kind: PathSetting) {
-        self.0[kind.index()] = None;
+    fn set_error(&mut self, kind: PathSetting, error: PathValidationError) {
+        self.0[kind.index()].error = Some(error);
     }
 }
 
+/// One accent colour's editable hex text and whether it currently parses.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ColorTexts([String; ColorSetting::ALL.len()]);
+struct ColorField {
+    text: String,
+    invalid: bool,
+}
 
-impl ColorTexts {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ColorFields([ColorField; ColorSetting::ALL.len()]);
+
+impl ColorFields {
     fn from_settings(settings: &Settings) -> Self {
-        Self(ColorSetting::ALL.map(|kind| format_hex_color(get_color_setting(settings, kind))))
+        Self(ColorSetting::ALL.map(|kind| ColorField {
+            text: format_hex_color(get_color_setting(settings, kind)),
+            invalid: false,
+        }))
     }
 
-    fn get(&self, kind: ColorSetting) -> &str {
-        &self.0[kind.index()]
+    fn text(&self, kind: ColorSetting) -> &str {
+        &self.0[kind.index()].text
     }
 
-    fn set(&mut self, kind: ColorSetting, value: String) {
-        self.0[kind.index()] = value;
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ColorErrors([bool; ColorSetting::ALL.len()]);
-
-impl ColorErrors {
-    fn get(&self, kind: ColorSetting) -> bool {
-        self.0[kind.index()]
+    fn invalid(&self, kind: ColorSetting) -> bool {
+        self.0[kind.index()].invalid
     }
 
-    fn set(&mut self, kind: ColorSetting, invalid: bool) {
-        self.0[kind.index()] = invalid;
+    fn set_invalid_text(&mut self, kind: ColorSetting, value: String) {
+        self.0[kind.index()] = ColorField {
+            text: value,
+            invalid: true,
+        };
     }
 }
 
@@ -980,58 +975,12 @@ fn get_color_setting(settings: &Settings, kind: ColorSetting) -> u32 {
     }
 }
 
-fn theme_preset_value(preset: ThemePreset) -> &'static str {
-    preset.as_value()
-}
-
-fn theme_preset_from_value(value: &str) -> Option<ThemePreset> {
-    ThemePreset::from_value(value)
-}
-
 fn concrete_preset_for_effective(preset: EffectiveThemePreset) -> ThemePreset {
     match preset {
         EffectiveThemePreset::Dark => ThemePreset::Dark,
         EffectiveThemePreset::Light => ThemePreset::Light,
         EffectiveThemePreset::ClassicSource => ThemePreset::ClassicSource,
     }
-}
-
-fn download_count_format_value(format: DownloadCountFormat) -> &'static str {
-    format.as_value()
-}
-
-fn download_count_format_from_value(value: &str) -> Option<DownloadCountFormat> {
-    DownloadCountFormat::from_value(value)
-}
-
-fn overwrite_mode_value(mode: &ExtractionOverwriteMode) -> &'static str {
-    match mode {
-        ExtractionOverwriteMode::Recycle => "recycle",
-        ExtractionOverwriteMode::Delete => "delete",
-        ExtractionOverwriteMode::Overwrite => "overwrite",
-    }
-}
-
-fn overwrite_mode_from_value(value: &str) -> Option<ExtractionOverwriteMode> {
-    match value {
-        "recycle" => Some(ExtractionOverwriteMode::Recycle),
-        "delete" => Some(ExtractionOverwriteMode::Delete),
-        "overwrite" => Some(ExtractionOverwriteMode::Overwrite),
-        _ => None,
-    }
-}
-
-fn language_setting_from_value(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed == DEFAULT_LANGUAGE_VALUE {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-pub fn default_language_value() -> &'static str {
-    DEFAULT_LANGUAGE_VALUE
 }
 
 pub fn format_hex_color(rgb: u32) -> String {
@@ -1084,7 +1033,7 @@ mod tests {
         state.settings.theme_preset = ThemePreset::Dark;
 
         let mutation = state
-            .theme_mutation("auto")
+            .theme_mutation(ThemePreset::Auto)
             .expect("auto selection should produce a mutation");
 
         assert!(matches!(
@@ -1094,16 +1043,18 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(state.theme_value(), "auto");
+        assert_eq!(state.theme_preset(), ThemePreset::Auto);
     }
 
+    /// The "follow the system" row carries `None`, so choosing it clears an
+    /// explicit language rather than storing a sentinel string.
     #[test]
     fn language_default_maps_to_none() {
         let mut state = State::default();
         state.settings.language = Some("fr".to_owned());
 
         let mutation = state
-            .language_mutation(default_language_value())
+            .language_mutation(None)
             .expect("default should update explicit language");
 
         assert_eq!(mutation, SettingsMutation::Language(None));
@@ -1115,14 +1066,14 @@ mod tests {
         let mut state = State::default();
 
         let mutation = state
-            .download_count_format_mutation("period")
+            .download_count_format_mutation(DownloadCountFormat::Period)
             .expect("period should be valid");
 
         assert_eq!(
             mutation,
             SettingsMutation::DownloadCountFormat(DownloadCountFormat::Period)
         );
-        assert_eq!(state.download_count_format_value(), "period");
+        assert_eq!(state.download_count_format(), DownloadCountFormat::Period);
     }
 
     #[test]
@@ -1141,38 +1092,50 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_mode_values_round_trip_to_backend_extraction_settings() {
+    fn overwrite_mode_selection_reaches_backend_extraction_settings() {
         let mut state = State::default();
 
         let mutation = state
-            .overwrite_mode_mutation("delete")
-            .expect("delete should be valid");
+            .overwrite_mode_mutation(ExtractionOverwriteMode::Delete)
+            .expect("a change from the default should produce a mutation");
 
         assert_eq!(
             mutation,
             SettingsMutation::OverwriteMode(ExtractionOverwriteMode::Delete)
         );
-        assert_eq!(state.overwrite_mode_value(), "delete");
+        assert_eq!(state.overwrite_mode(), ExtractionOverwriteMode::Delete);
         assert_eq!(
-            state.overwrite_mode_mutation("overwrite"),
+            state.overwrite_mode_mutation(ExtractionOverwriteMode::Overwrite),
             Some(SettingsMutation::OverwriteMode(
                 ExtractionOverwriteMode::Overwrite
             ))
         );
         assert_eq!(
-            state.overwrite_mode_mutation("recycle"),
+            state.overwrite_mode_mutation(ExtractionOverwriteMode::Recycle),
             Some(SettingsMutation::OverwriteMode(
                 ExtractionOverwriteMode::Recycle
             ))
         );
-        assert_eq!(state.overwrite_mode_mutation("unknown"), None);
+    }
+
+    /// `index()` returns literals that address the per-setting arrays, which
+    /// are built by mapping over `ALL`. A literal that disagrees with `ALL`'s
+    /// order silently swaps two settings' values.
+    #[test]
+    fn setting_indices_match_their_all_order() {
+        for (position, kind) in PathSetting::ALL.into_iter().enumerate() {
+            assert_eq!(kind.index(), position, "{kind:?}");
+        }
+        for (position, kind) in ColorSetting::ALL.into_iter().enumerate() {
+            assert_eq!(kind.index(), position, "{kind:?}");
+        }
     }
 
     #[test]
     fn path_validation_accepts_blank_as_default_override() {
         let mut state = State::default();
         state.settings.downloads = Some(PathBuf::from("/tmp/downloads"));
-        state.path_texts = PathTexts::from_settings(&state.settings);
+        state.path_fields = PathFields::from_settings(&state.settings);
         state.set_path_text(PathSetting::Downloads, String::new());
 
         let request = state.path_validation_request(PathSetting::Downloads);

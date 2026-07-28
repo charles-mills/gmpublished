@@ -10,7 +10,6 @@
 
 use std::{
     backtrace::Backtrace,
-    fmt,
     fs::OpenOptions,
     io::Write,
     panic::{self, PanicHookInfo},
@@ -26,6 +25,7 @@ mod assets;
 mod bridge;
 mod features;
 mod format;
+mod generation;
 mod i18n;
 mod media;
 mod net;
@@ -35,6 +35,7 @@ mod platform_chrome;
 mod platform_menu;
 #[cfg(target_os = "macos")]
 mod platform_open;
+mod spinner_clock;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -64,31 +65,12 @@ fn main() -> ExitCode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum RunError {
-    BackendInit(gmpublished_backend::BackendInitError),
-    Iced(iced::Error),
-}
-
-impl fmt::Display for RunError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BackendInit(error) => write!(f, "backend initialization failed: {error}"),
-            Self::Iced(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl From<iced::Error> for RunError {
-    fn from(error: iced::Error) -> Self {
-        Self::Iced(error)
-    }
-}
-
-impl From<gmpublished_backend::BackendInitError> for RunError {
-    fn from(error: gmpublished_backend::BackendInitError) -> Self {
-        Self::BackendInit(error)
-    }
+    #[error("backend initialization failed: {0}")]
+    BackendInit(#[from] gmpublished_backend::BackendInitError),
+    #[error(transparent)]
+    Iced(#[from] iced::Error),
 }
 
 fn run() -> Result<(), RunError> {

@@ -9,6 +9,7 @@ use crate::bridge::{
 };
 use crate::features::context_menu;
 use crate::format::DownloadCountFormatter;
+use crate::generation::Generation;
 use crate::media::{thumbnail_animation, thumbnail_demand, thumbnail_worker::ThumbnailInput};
 use crate::widgets::{
     addon_card, addon_grid,
@@ -22,7 +23,6 @@ pub const COUNT_ROLL_TICK_INTERVAL: Duration = Duration::from_millis(16);
 pub const COUNT_ROLL_DURATION: Duration = Duration::from_millis(300);
 
 const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
-const OWNER_LABEL: &str = "My Workshop";
 const THUMBNAIL_PLAY_POLICY: thumbnail_animation::PlayPolicy =
     thumbnail_animation::PlayPolicy::OnHover;
 
@@ -509,7 +509,7 @@ pub fn grid_items(
 pub fn thumbnail_demands(
     rows: &[Row],
     visible_range: Range<usize>,
-    generation: u64,
+    generation: Generation,
 ) -> thumbnail_demand::DemandSet {
     grid_rows::thumbnail_demands(rows, visible_range, generation, thumbnail_owner())
 }
@@ -532,7 +532,7 @@ pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {
 }
 
 pub fn thumbnail_owner() -> thumbnail_demand::Owner {
-    grid_rows::thumbnail_owner(OWNER_LABEL)
+    thumbnail_demand::Owner::MyWorkshop
 }
 
 fn preview_url(item: &WorkshopItem) -> Option<String> {
@@ -641,10 +641,10 @@ mod tests {
         let mut dead = Row::for_test(2, "Dead", 2);
         dead.thumbnail = RowThumbnail::Dead;
 
-        let set = thumbnail_demands(&[loading, dead], 0..2, 3);
+        let set = thumbnail_demands(&[loading, dead], 0..2, Generation::from_raw(3));
 
         assert_eq!(set.owner, thumbnail_owner());
-        assert_eq!(set.generation, 3);
+        assert_eq!(set.generation, Generation::from_raw(3));
         assert_eq!(set.demands.len(), 1);
         assert_eq!(set.demands[0].id.as_str(), "1");
     }

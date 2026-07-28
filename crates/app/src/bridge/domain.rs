@@ -1,5 +1,7 @@
 use std::{collections::HashSet, fmt, num::NonZeroU64, path::PathBuf, sync::Arc};
 
+use serde::{Deserialize, Serialize};
+
 use super::{gma::GmaMeta, tasks::TaskId};
 
 pub const WORKSHOP_LEGAL_URL: &str = "https://steamcommunity.com/workshop/workshoplegalagreement";
@@ -20,6 +22,28 @@ impl PublishedFileId {
 }
 
 impl fmt::Display for PublishedFileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// A Steam account id. Mirrors `steamworks::SteamId` on this side of the
+/// bridge so the app does not depend on the steamworks crate.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SteamId(u64);
+
+impl SteamId {
+    pub(crate) const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for SteamId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
@@ -48,7 +72,7 @@ impl AvatarRgba {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteamUser {
-    pub(crate) steamid: u64,
+    pub(crate) steamid: SteamId,
     pub(crate) name: String,
     pub(crate) avatar: Option<AvatarRgba>,
     pub(crate) dead: bool,
@@ -59,7 +83,7 @@ pub struct WorkshopItem {
     pub(crate) id: PublishedFileId,
     pub(crate) title: String,
     pub(crate) owner: Option<SteamUser>,
-    pub(crate) steamid: Option<u64>,
+    pub(crate) steamid: Option<SteamId>,
     pub(crate) time_created: u32,
     pub(crate) time_updated: u32,
     pub(crate) description: Option<String>,
@@ -117,7 +141,7 @@ pub struct WorkshopMetadata {
     /// Present only after the single-item detail query requested the full
     /// Workshop description. `Some("")` is a known-empty description.
     pub(crate) full_description: Option<String>,
-    pub(crate) owner_steamid: Option<u64>,
+    pub(crate) owner_steamid: Option<SteamId>,
     /// ThumbHash of the preview image, computed locally the first time it is
     /// decoded (Steam never supplies it). Persisted so placeholders paint on
     /// the next launch.

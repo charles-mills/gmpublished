@@ -59,10 +59,19 @@ pub struct Interface {
     client: Client,
     pub steam_id: SteamId,
 }
-impl std::ops::Deref for Interface {
-    type Target = Client;
-    fn deref(&self) -> &Self::Target {
+impl Interface {
+    /// The underlying steamworks client. Explicit rather than a `Deref`, so
+    /// `Interface`'s own surface stays visible at its definition.
+    pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    pub fn register_callback<C, F>(&self, f: F) -> CallbackHandle
+    where
+        C: Callback,
+        F: FnMut(C) + 'static + Send,
+    {
+        self.client.register_callback(f)
     }
 }
 impl From<Client> for Interface {
@@ -161,7 +170,7 @@ impl Steam {
         #[cfg(debug_assertions)]
         let _connect_failure_callback = {
             let for_callback = Arc::clone(steam);
-            steam.register_callback(move |c: steamworks::SteamServerConnectFailure| {
+            pump.register_callback(move |c: steamworks::SteamServerConnectFailure| {
                 for_callback.set_connected(false);
                 log::warn!("[Steam] SteamServerConnectFailure {c:#?}");
             })
@@ -169,7 +178,7 @@ impl Steam {
 
         let _connected_callback = {
             let for_callback = Arc::clone(steam);
-            steam.register_callback(move |_: SteamServersConnected| {
+            pump.register_callback(move |_: SteamServersConnected| {
                 for_callback.set_connected(true);
                 log::info!("[Steam] Connected");
             })
@@ -177,7 +186,7 @@ impl Steam {
 
         let _disconnected_callback = {
             let for_callback = Arc::clone(steam);
-            steam.register_callback(move |c: SteamServersDisconnected| {
+            pump.register_callback(move |c: SteamServersDisconnected| {
                 for_callback.set_connected(false);
                 log::warn!("[Steam] SteamServersDisconnected {c:#?}");
             })
@@ -299,6 +308,21 @@ impl Steam {
             .ok_or(runtime::SteamRuntimeError::NotConnected)
     }
 
+    /// A handle to the operations that need a live connection.
+    ///
+    /// Stricter than [`Self::client`], which keeps returning the interface
+    /// after a disconnect: this also requires [`Self::connected`], so holding
+    /// one is the whole precondition those operations need.
+    pub fn require_client(&self) -> Result<ConnectedSteam<'_>, runtime::SteamRuntimeError> {
+        if !self.connected() {
+            return Err(runtime::SteamRuntimeError::NotConnected);
+        }
+        Ok(ConnectedSteam {
+            steam: self,
+            interface: self.client()?,
+        })
+    }
+
     /// Blocks until connected or `timeout` elapses, then returns the
     /// interface (or [`runtime::SteamRuntimeError::NotConnected`] if the
     /// deadline passed first).
@@ -313,19 +337,6 @@ impl Steam {
     /// Blocks until connected or `timeout` elapses, returning whether it connected.
     pub fn wait_for_connected(&self, timeout: Duration) -> bool {
         condvar_wait_bool(&self.connected_wait, timeout)
-    }
-
-    pub fn register_callback<C, F>(&self, f: F) -> CallbackHandle
-    where
-        C: Callback,
-        F: FnMut(C) + 'static + Send,
-    {
-        self.client()
-            .expect(
-                "register_callback is only ever invoked from contexts that already hold a \
-                 connected client",
-            )
-            .register_callback(f)
     }
 
     /// Whether [`Self::shutdown`] has been signaled. Background threads that
@@ -674,4 +685,16 @@ mod tests {
             "six stuck threads took {elapsed:?}, which is more than one shared bound"
         );
     }
+}
+
+/// Steam operations that require the interface, paired with the [`Steam`] state
+/// they read.
+///
+/// Only [`Steam::require_client`] constructs one, and it checks both that the
+/// interface exists and that the connection is live, so these operations never
+/// re-check either.
+#[derive(Clone, Copy)]
+pub struct ConnectedSteam<'a> {
+    pub(crate) steam: &'a Steam,
+    pub(crate) interface: &'a Interface,
 }

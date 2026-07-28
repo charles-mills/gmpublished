@@ -8,21 +8,23 @@ use crate::bridge::ui_error::UiError;
 use crate::features::file_preview;
 
 use super::model::{AuthorInfo, LoadedArchive, OpenTarget, WorkshopMetadata};
+use crate::bridge::domain::SteamId;
+use crate::generation::Generation;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     OpenRequested(OpenTarget),
     /// Boxed: `LoadedArchive` carries the full file-browser state inline,
     /// which would otherwise set the size of `RootMessage`.
-    ArchiveOpened(u64, Box<Result<LoadedArchive, UiError>>),
+    ArchiveOpened(Generation, Box<Result<LoadedArchive, UiError>>),
     /// Boxed: `WorkshopMetadata` is ~216 bytes inline, which would otherwise
     /// set the size of `RootMessage`.
     WorkshopMetadataCompleted(
-        u64,
+        Generation,
         PublishedFileId,
         Box<Result<Option<WorkshopMetadata>, UiError>>,
     ),
-    AuthorFetchCompleted(u64, u64, Result<AuthorInfo, UiError>),
+    AuthorFetchCompleted(Generation, SteamId, Result<AuthorInfo, UiError>),
     AuthorLinkRequested,
     BrowserScrolled {
         offset: f32,

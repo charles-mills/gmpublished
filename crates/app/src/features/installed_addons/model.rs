@@ -11,6 +11,7 @@ use crate::bridge::{
 };
 use crate::features::context_menu;
 use crate::format::DownloadCountFormatter;
+use crate::generation::Generation;
 use crate::media::{thumbnail_animation, thumbnail_demand, thumbnail_worker::ThumbnailInput};
 use crate::widgets::{
     addon_card, addon_grid,
@@ -18,7 +19,6 @@ use crate::widgets::{
 };
 
 const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
-const OWNER_LABEL: &str = "Installed Addons";
 const THUMBNAIL_PLAY_POLICY: thumbnail_animation::PlayPolicy =
     thumbnail_animation::PlayPolicy::OnHover;
 
@@ -207,9 +207,9 @@ impl Row {
 
     pub(super) fn apply_thumbnail_delivery(
         &mut self,
-        generation: u64,
+        generation: Generation,
         delivery: &thumbnail_demand::Delivery,
-        current_generation: u64,
+        current_generation: Generation,
     ) -> bool {
         if generation != current_generation || delivery.id.as_str() != self.id {
             return false;
@@ -507,7 +507,7 @@ pub fn refresh_metadata_streaming(
 pub fn thumbnail_demands(
     rows: &[Row],
     visible_range: Range<usize>,
-    generation: u64,
+    generation: Generation,
 ) -> thumbnail_demand::DemandSet {
     grid_rows::thumbnail_demands(rows, visible_range, generation, thumbnail_owner())
 }
@@ -530,13 +530,14 @@ pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {
 }
 
 pub fn thumbnail_owner() -> thumbnail_demand::Owner {
-    grid_rows::thumbnail_owner(OWNER_LABEL)
+    thumbnail_demand::Owner::InstalledAddons
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bridge::DownloadCountFormat;
+    use crate::generation::Generation;
 
     #[test]
     fn placeholder_paints_a_loading_row_and_real_pixels_replace_it() {
@@ -557,18 +558,18 @@ mod tests {
         let key = ThumbnailInput::from_url("https://example.test/a.jpg").cache_key(256);
         let delivery = |result| Delivery {
             owner: thumbnail_owner(),
-            generation: 0,
+            generation: Generation::INITIAL,
             id: DemandId::new("/tmp/addon.gma"),
             key: key.clone(),
             result,
         };
 
         assert!(row.apply_thumbnail_delivery(
-            0,
+            Generation::INITIAL,
             &delivery(DeliveryResult::Placeholder(PlaceholderImage::for_test(
                 6, 6
             ))),
-            0,
+            Generation::INITIAL,
         ));
         assert!(matches!(row.thumbnail, RowThumbnail::Placeholder(_)));
         // Still demanding the sharp image while the placeholder paints.
@@ -585,13 +586,13 @@ mod tests {
             max_edge: 256,
         };
         assert!(row.apply_thumbnail_delivery(
-            0,
+            Generation::INITIAL,
             &delivery(DeliveryResult::Ready(ReadyThumbnail::for_test(
                 key.clone(),
                 metadata,
                 vec![0; 8 * 8 * 4],
             ))),
-            0,
+            Generation::INITIAL,
         ));
         assert!(matches!(row.thumbnail, RowThumbnail::Ready { .. }));
     }
@@ -654,8 +655,10 @@ mod tests {
         let actions = menu
             .entries
             .iter()
-            .filter(|entry| !entry.separator_row())
-            .filter_map(context_menu::Entry::action)
+            .filter_map(|entry| match entry {
+                context_menu::Entry::Separator => None,
+                context_menu::Entry::Item { action, .. } => Some(*action),
+            })
             .collect::<Vec<_>>();
 
         let expected = vec![
@@ -698,10 +701,10 @@ mod tests {
             Some(PublishedFileId::new(2).expect("test fixture ids are always nonzero")),
         );
 
-        let set = thumbnail_demands(&[loading, dead], 0..2, 7);
+        let set = thumbnail_demands(&[loading, dead], 0..2, Generation::from_raw(7));
 
         assert_eq!(set.owner, thumbnail_owner());
-        assert_eq!(set.generation, 7);
+        assert_eq!(set.generation, Generation::from_raw(7));
         assert_eq!(set.demands.len(), 1);
         assert_eq!(set.demands[0].id.as_str(), "/tmp/loading.gma");
     }

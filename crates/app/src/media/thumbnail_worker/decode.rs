@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{
-    Thumbnail, ThumbnailCancellation, ThumbnailError, ThumbnailResult, ThumbnailWorkerOutcome,
-    thumbnail::ThumbnailDecoder as AppThumbnailDecoder,
+    FetchOutcome, Thumbnail, ThumbnailCancellation, ThumbnailError, ThumbnailResult,
+    ThumbnailWorkerOutcome, thumbnail::ThumbnailDecoder as AppThumbnailDecoder,
 };
 use crate::net::build_agent_with_max_idle_connections_per_host;
 
@@ -76,19 +76,19 @@ impl ThumbnailDecoder {
             url,
             max_edge,
             cancellation,
-            |fetch_url| fetch_url_bytes(agent, fetch_url, GifPolicy::Allow),
+            |fetch_url| fetch_url_bytes(agent, fetch_url),
         )?;
 
         // Interactive fetches bank their bytes too, so a URL the user scrolled
         // past is local for the next size that asks — the same product warming
         // produces, obtained for free.
         //
-        // Banked *after* a successful decode, not from inside the fetch. Banking
-        // on fetch meant undecodable bytes were written to the source tier, and
-        // the read path's poison-drop then removed them on the very next
-        // request — which fell through to a fetch that banked them again. A
-        // permanently-corrupt URL re-poisoned itself forever, paying a local
-        // decode, a disk write, and index churn every time.
+        // Banked *after* a successful decode, never from inside the fetch.
+        // Banking on fetch would write undecodable bytes to the source tier;
+        // the read path's poison-drop removes them on the next request, which
+        // falls through to a fetch that banks them again. A permanently corrupt
+        // URL would re-poison itself forever, paying a decode, a disk write and
+        // index churn every time.
         if let (Some(cache), Some((bytes, _))) = (disk_cache, banked.as_ref()) {
             super::write_source_bytes(cache, url, bytes);
         }
@@ -105,40 +105,19 @@ impl ThumbnailDecoder {
         url: &str,
         max_edge: u32,
         cancellation: &ThumbnailCancellation,
-        mut fetch: impl FnMut(&str) -> ThumbnailResult<FetchedBody>,
+        mut fetch: impl FnMut(&str) -> ThumbnailResult<Vec<u8>>,
     ) -> ThumbnailResult<Option<(Vec<u8>, Thumbnail)>> {
         if cancellation.is_cancelled() {
             return Ok(None);
         }
 
-        let bytes = match fetch(url)? {
-            FetchedBody::Bytes(bytes) => bytes,
-            FetchedBody::RejectedGif => {
-                unreachable!("the interactive path never rejects a GIF body")
-            }
-        };
+        let bytes = fetch(url)?;
 
         // The bytes are paid for — always decode so they reach the caches.
         let decoded = self.decode_and_resize_bytes(&bytes, max_edge);
 
         decoded.map(|thumbnail| Some((bytes, thumbnail)))
     }
-}
-
-/// Whether a fetch should refuse a GIF body. The CDN's GIF re-encodes are
-/// byte-unpredictable (0.6x-2.1x the original, measured) and never carry
-/// more pixels, so variant fetches reject them by Content-Type — without
-/// reading the body — and retry bare.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum GifPolicy {
-    Allow,
-    Reject,
-}
-
-#[derive(Debug)]
-pub(super) enum FetchedBody {
-    Bytes(Vec<u8>),
-    RejectedGif,
 }
 
 /// Fetches a URL's bytes for the source tier, without decoding them.
@@ -153,19 +132,27 @@ pub(super) fn fetch_source_bytes_with_agent(
     agent: &ureq::Agent,
     url: &str,
     cancellation: &ThumbnailCancellation,
-) -> ThumbnailResult<ThumbnailWorkerOutcome<Vec<u8>>> {
-    fetch_source_bytes_with_fetch(url, cancellation, |fetch_url, gif_policy| {
-        fetch_url_bytes(agent, fetch_url, gif_policy)
-    })
+) -> ThumbnailResult<FetchOutcome<Vec<u8>>> {
+    fetch_source_bytes_with_fetch(
+        url,
+        cancellation,
+        |fetch_url| fetch_url_bytes_rejecting_gif(agent, fetch_url),
+        |fetch_url| fetch_url_bytes(agent, fetch_url),
+    )
 }
 
+/// `fetch_variant` may decline a GIF body (`None`); `fetch_bare` takes whatever
+/// the URL serves. Separate parameters because the two calls have different
+/// contracts: one closure covering both would make a rejected body look
+/// possible on the path that cannot receive one.
 fn fetch_source_bytes_with_fetch(
     url: &str,
     cancellation: &ThumbnailCancellation,
-    mut fetch: impl FnMut(&str, GifPolicy) -> ThumbnailResult<FetchedBody>,
-) -> ThumbnailResult<ThumbnailWorkerOutcome<Vec<u8>>> {
+    mut fetch_variant: impl FnMut(&str) -> ThumbnailResult<Option<Vec<u8>>>,
+    mut fetch_bare: impl FnMut(&str) -> ThumbnailResult<Vec<u8>>,
+) -> ThumbnailResult<FetchOutcome<Vec<u8>>> {
     if cancellation.is_cancelled() {
-        return Ok(ThumbnailWorkerOutcome::Cancelled);
+        return Ok(FetchOutcome::Cancelled);
     }
 
     // Same variant-then-bare fallback the decoding path uses, and for the same
@@ -174,19 +161,16 @@ fn fetch_source_bytes_with_fetch(
     // is requested at `SOURCE_VARIANT_EDGE` rather than at any one request's
     // size, since these bytes become the source every later size derives from.
     if let Some(variant_url) = steam_cdn_variant_url(url, SOURCE_VARIANT_EDGE)
-        && let Ok(FetchedBody::Bytes(bytes)) = fetch(&variant_url, GifPolicy::Reject)
+        && let Ok(Some(bytes)) = fetch_variant(&variant_url)
     {
-        return Ok(ThumbnailWorkerOutcome::Completed(bytes));
+        return Ok(FetchOutcome::Fetched(bytes));
     }
 
     if cancellation.is_cancelled() {
-        return Ok(ThumbnailWorkerOutcome::Cancelled);
+        return Ok(FetchOutcome::Cancelled);
     }
 
-    match fetch(url, GifPolicy::Allow)? {
-        FetchedBody::Bytes(bytes) => Ok(ThumbnailWorkerOutcome::Completed(bytes)),
-        FetchedBody::RejectedGif => unreachable!("GifPolicy::Allow never rejects a body"),
-    }
+    Ok(FetchOutcome::Fetched(fetch_bare(url)?))
 }
 
 /// Edge requested for the warm path's CDN variant.
@@ -225,40 +209,61 @@ pub(super) fn http_agent() -> ureq::Agent {
     )
 }
 
-fn fetch_url_bytes(
+fn fetch_url_bytes(agent: &ureq::Agent, url: &str) -> ThumbnailResult<Vec<u8>> {
+    let (url, mut response) = start_fetch(agent, url)?;
+    read_body(url, &mut response)
+}
+
+/// `None` when the response is a GIF. The CDN's GIF re-encodes are
+/// byte-unpredictable (0.6x-2.1x the original, measured) and never carry more
+/// pixels, so a variant fetch declines them by Content-Type — without reading
+/// the body — and the caller retries bare.
+fn fetch_url_bytes_rejecting_gif(
     agent: &ureq::Agent,
     url: &str,
-    gif_policy: GifPolicy,
-) -> ThumbnailResult<FetchedBody> {
+) -> ThumbnailResult<Option<Vec<u8>>> {
+    let (url, mut response) = start_fetch(agent, url)?;
+
+    if response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim_start()
+                .get(..9)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/gif"))
+        })
+    {
+        return Ok(None);
+    }
+
+    read_body(url, &mut response).map(Some)
+}
+
+fn start_fetch(
+    agent: &ureq::Agent,
+    url: &str,
+) -> ThumbnailResult<(String, ureq::http::Response<ureq::Body>)> {
     let url = super::thumbnail_key::normalize_url(url.to_owned());
     validate_http_url(&url)?;
-    let mut response = agent
+    let response = agent
         .get(&url)
         .call()
         .map_err(|source| ThumbnailError::UrlFetch {
             url: url.clone(),
             source,
         })?;
+    Ok((url, response))
+}
 
-    if gif_policy == GifPolicy::Reject
-        && response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value
-                    .trim_start()
-                    .get(..9)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/gif"))
-            })
-    {
-        return Ok(FetchedBody::RejectedGif);
-    }
-
+fn read_body(
+    url: String,
+    response: &mut ureq::http::Response<ureq::Body>,
+) -> ThumbnailResult<Vec<u8>> {
     response
         .body_mut()
         .read_to_vec()
-        .map(FetchedBody::Bytes)
         .map_err(|source| ThumbnailError::UrlRead { url, source })
 }
 
@@ -302,22 +307,27 @@ mod tests {
         let url = "https://images.steamusercontent.com/ugc/123/ABC/";
 
         let payload = solid_png_bytes();
-        let mut fetched_urls = Vec::new();
+        let fetched_urls = std::cell::RefCell::new(Vec::new());
         let outcome = fetch_source_bytes_with_fetch(
             url,
             &ThumbnailCancellation::default(),
-            |fetch_url, _policy| {
-                fetched_urls.push(fetch_url.to_owned());
-                Ok(FetchedBody::Bytes(payload.clone()))
+            |fetch_url| {
+                fetched_urls.borrow_mut().push(fetch_url.to_owned());
+                Ok(Some(payload.clone()))
+            },
+            |fetch_url| {
+                fetched_urls.borrow_mut().push(fetch_url.to_owned());
+                Ok(payload.clone())
             },
         )
         .expect("warm fetch succeeds");
 
-        let ThumbnailWorkerOutcome::Completed(bytes) = outcome else {
+        let FetchOutcome::Fetched(bytes) = outcome else {
             panic!("expected banked bytes, got {outcome:?}");
         };
         super::super::write_source_bytes(&cache, url, &bytes);
 
+        let fetched_urls = fetched_urls.into_inner();
         assert!(
             fetched_urls
                 .first()
@@ -344,7 +354,7 @@ mod tests {
             "https://example.invalid/corrupt.png",
             256,
             &ThumbnailCancellation::default(),
-            |_| Ok(FetchedBody::Bytes(b"not an image".to_vec())),
+            |_| Ok(b"not an image".to_vec()),
         );
 
         // Banking is the caller's job and is driven entirely by this result, so
@@ -366,11 +376,12 @@ mod tests {
             &ThumbnailCancellation::default(),
             // Bytes that are not a decodable image at all. A path that decoded
             // would fail here; a path that only banks does not care.
-            |_url, _policy| Ok(FetchedBody::Bytes(b"not an image".to_vec())),
+            |_url| Ok(Some(b"not an image".to_vec())),
+            |_url| Ok(b"not an image".to_vec()),
         )
         .expect("warm does not decode, so undecodable bytes are not an error");
 
-        let ThumbnailWorkerOutcome::Completed(bytes) = outcome else {
+        let FetchOutcome::Fetched(bytes) = outcome else {
             panic!("expected banked bytes, got {outcome:?}");
         };
         assert_eq!(bytes, b"not an image");
@@ -385,14 +396,18 @@ mod tests {
         let result = fetch_source_bytes_with_fetch(
             "https://images.steamusercontent.com/ugc/preview.png",
             &cancellation,
-            |_, _| {
+            |_| {
                 fetches.fetch_add(1, Ordering::Relaxed);
-                Ok(FetchedBody::Bytes(Vec::new()))
+                Ok(Some(Vec::new()))
+            },
+            |_| {
+                fetches.fetch_add(1, Ordering::Relaxed);
+                Ok(Vec::new())
             },
         )
         .expect("cancelled request should not fail");
 
-        assert!(matches!(result, ThumbnailWorkerOutcome::Cancelled));
+        assert!(matches!(result, FetchOutcome::Cancelled));
         assert_eq!(fetches.load(Ordering::Relaxed), 0);
     }
 
@@ -415,15 +430,15 @@ mod tests {
     #[test]
     fn thumbnails_invalid_urls_fail_before_network_fetch() {
         let agent = http_agent();
-        let unsupported = fetch_url_bytes(&agent, "file:///tmp/preview.png", GifPolicy::Allow)
-            .expect_err("file URLs are rejected");
+        let unsupported =
+            fetch_url_bytes(&agent, "file:///tmp/preview.png").expect_err("file URLs are rejected");
         assert!(matches!(
             unsupported,
             ThumbnailError::UnsupportedUrlScheme { .. }
         ));
 
-        let invalid = fetch_url_bytes(&agent, "https:/example.invalid", GifPolicy::Allow)
-            .expect_err("malformed URL rejected");
+        let invalid =
+            fetch_url_bytes(&agent, "https:/example.invalid").expect_err("malformed URL rejected");
         assert!(matches!(invalid, ThumbnailError::InvalidUrl { .. }));
     }
 
@@ -499,21 +514,25 @@ mod tests {
             steam_cdn_variant_url(bare_url, SOURCE_VARIANT_EDGE).expect("Steam variant URL");
         let requested = std::cell::RefCell::new(Vec::new());
 
-        let result =
-            fetch_source_bytes_with_fetch(bare_url, &ThumbnailCancellation::default(), |url, _| {
+        let result = fetch_source_bytes_with_fetch(
+            bare_url,
+            &ThumbnailCancellation::default(),
+            |url| {
                 requested.borrow_mut().push(url.to_owned());
-                if url == variant_url {
-                    Err(ThumbnailError::UrlFetch {
-                        url: url.to_owned(),
-                        source: ureq::Error::StatusCode(503),
-                    })
-                } else {
-                    Ok(FetchedBody::Bytes(image.clone()))
-                }
-            })
-            .expect("bare URL fallback should fetch");
+                assert_eq!(url, variant_url);
+                Err(ThumbnailError::UrlFetch {
+                    url: url.to_owned(),
+                    source: ureq::Error::StatusCode(503),
+                })
+            },
+            |url| {
+                requested.borrow_mut().push(url.to_owned());
+                Ok(image.clone())
+            },
+        )
+        .expect("bare URL fallback should fetch");
 
-        assert!(matches!(result, ThumbnailWorkerOutcome::Completed(_)));
+        assert!(matches!(result, FetchOutcome::Fetched(_)));
         assert_eq!(
             requested.into_inner(),
             vec![variant_url, bare_url.to_owned()]
@@ -535,18 +554,18 @@ mod tests {
         let result = fetch_source_bytes_with_fetch(
             bare_url,
             &ThumbnailCancellation::default(),
-            |url, gif_policy| {
+            |url| {
                 requested.borrow_mut().push(url.to_owned());
-                if gif_policy == GifPolicy::Reject {
-                    Ok(FetchedBody::RejectedGif)
-                } else {
-                    Ok(FetchedBody::Bytes(image.clone()))
-                }
+                Ok(None)
+            },
+            |url| {
+                requested.borrow_mut().push(url.to_owned());
+                Ok(image.clone())
             },
         )
         .expect("bare URL fallback should fetch");
 
-        assert!(matches!(result, ThumbnailWorkerOutcome::Completed(_)));
+        assert!(matches!(result, FetchOutcome::Fetched(_)));
         assert_eq!(
             requested.into_inner(),
             vec![variant_url, bare_url.to_owned()]
@@ -569,7 +588,7 @@ mod tests {
                 &ThumbnailCancellation::default(),
                 |url| {
                     requested.borrow_mut().push(url.to_owned());
-                    Ok(FetchedBody::Bytes(image.clone()))
+                    Ok(image.clone())
                 },
             )
             .expect("bare URL should decode");
@@ -586,14 +605,21 @@ mod tests {
         let bare_url = "https://example.com/ugc/preview.png";
         let requested = std::cell::RefCell::new(Vec::new());
 
-        let result =
-            fetch_source_bytes_with_fetch(bare_url, &ThumbnailCancellation::default(), |url, _| {
+        let result = fetch_source_bytes_with_fetch(
+            bare_url,
+            &ThumbnailCancellation::default(),
+            |url| {
                 requested.borrow_mut().push(url.to_owned());
-                Ok(FetchedBody::Bytes(image.clone()))
-            })
-            .expect("bare URL should fetch");
+                Ok(Some(image.clone()))
+            },
+            |url| {
+                requested.borrow_mut().push(url.to_owned());
+                Ok(image.clone())
+            },
+        )
+        .expect("bare URL should fetch");
 
-        assert!(matches!(result, ThumbnailWorkerOutcome::Completed(_)));
+        assert!(matches!(result, FetchOutcome::Fetched(_)));
         assert_eq!(requested.into_inner(), vec![bare_url.to_owned()]);
     }
 
@@ -611,7 +637,7 @@ mod tests {
                 &cancellation,
                 |_| {
                     fetches.fetch_add(1, Ordering::Relaxed);
-                    Ok(FetchedBody::Bytes(Vec::new()))
+                    Ok(Vec::new())
                 },
             )
             .expect("cancelled request should not fail");

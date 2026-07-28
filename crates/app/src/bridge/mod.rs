@@ -7,6 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub mod archive;
+pub mod content_path;
 pub mod domain;
 pub mod gma;
 pub mod library;
@@ -230,6 +231,7 @@ impl Settings {
 
     pub(crate) fn to_backend(&self) -> BackendSettings {
         BackendSettings {
+            schema: gmpublished_backend::appdata::SETTINGS_SCHEMA,
             temp: self.temp.clone(),
             gmod: self.gmod.clone(),
             user_data: self.user_data.clone(),

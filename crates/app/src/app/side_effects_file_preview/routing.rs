@@ -1,14 +1,23 @@
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::features::file_preview::{PreviewRequest, RelatedPreviewKind, RelatedPreviewTarget};
 
+/// What an entry path says the entry is, before the archive is consulted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum EntryClass {
+    /// A `.mdl` sidecar, which has no preview of its own: the caller either
+    /// redirects to the parent model or reports the parent missing.
+    ModelCompanion,
+    Previewable(PreviewClass),
+}
+
+/// An entry the decoder can build a preview from directly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PreviewClass {
     Code { syntax: CodeSyntax },
     Image(ImageClass),
     Font,
     Audio,
     Model,
-    ModelCompanion,
     Map,
     Particle,
     Info,
@@ -33,28 +42,28 @@ pub(super) fn classify_entry_path(path: &str) -> EntryClass {
         return EntryClass::ModelCompanion;
     }
 
-    match lower_extension(path).as_deref() {
-        Some("lua") => EntryClass::Code {
+    EntryClass::Previewable(match lower_extension(path).as_deref() {
+        Some("lua") => PreviewClass::Code {
             syntax: CodeSyntax::Glua,
         },
-        Some("json") => EntryClass::Code {
+        Some("json") => PreviewClass::Code {
             syntax: CodeSyntax::Json,
         },
-        Some("vmt") => EntryClass::Code {
+        Some("vmt") => PreviewClass::Code {
             syntax: CodeSyntax::Vmt,
         },
-        Some("txt" | "cfg" | "vdf" | "res" | "ini" | "properties") => EntryClass::Code {
+        Some("txt" | "cfg" | "vdf" | "res" | "ini" | "properties") => PreviewClass::Code {
             syntax: CodeSyntax::Plain,
         },
-        Some("png" | "jpg" | "jpeg") => EntryClass::Image(ImageClass::Encoded),
-        Some("vtf") => EntryClass::Image(ImageClass::Vtf),
-        Some("ttf") => EntryClass::Font,
-        Some("wav" | "mp3" | "ogg") => EntryClass::Audio,
-        Some("mdl") => EntryClass::Model,
-        Some("bsp") => EntryClass::Map,
-        Some("pcf") => EntryClass::Particle,
-        Some(_) | None => EntryClass::Info,
-    }
+        Some("png" | "jpg" | "jpeg") => PreviewClass::Image(ImageClass::Encoded),
+        Some("vtf") => PreviewClass::Image(ImageClass::Vtf),
+        Some("ttf") => PreviewClass::Font,
+        Some("wav" | "mp3" | "ogg") => PreviewClass::Audio,
+        Some("mdl") => PreviewClass::Model,
+        Some("bsp") => PreviewClass::Map,
+        Some("pcf") => PreviewClass::Particle,
+        Some(_) | None => PreviewClass::Info,
+    })
 }
 
 pub(super) fn model_companion_preview_request(request: &PreviewRequest) -> Option<PreviewRequest> {

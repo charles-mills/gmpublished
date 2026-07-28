@@ -4,6 +4,7 @@ use vformats::vtf::VtfFormat;
 
 use super::*;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
+use crate::generation::Generation;
 use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
 use crate::theme::ThemeVariant;
 
@@ -20,7 +21,7 @@ fn request(path: &str, bytes: &[u8]) -> PreviewRequest {
     .expect("fixture archive should load");
 
     PreviewRequest {
-        request_id: 1,
+        request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: path.to_owned(),
         display_name: path.rsplit('/').next().unwrap_or(path).to_owned(),
@@ -38,7 +39,7 @@ fn request_from_archive(
 ) -> PreviewRequest {
     let display_name = path.rsplit('/').next().unwrap_or(&path).to_owned();
     PreviewRequest {
-        request_id: 1,
+        request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: path,
         display_name,
@@ -50,72 +51,70 @@ fn request_from_archive(
 
 #[test]
 fn classification_table_matches_expected_extensions() {
+    let previewable = |path: &str| match classify_entry_path(path) {
+        EntryClass::Previewable(class) => Some(class),
+        EntryClass::ModelCompanion => None,
+    };
+
     assert_eq!(
-        classify_entry_path("lua/autorun/init.lua"),
-        EntryClass::Code {
+        previewable("lua/autorun/init.lua"),
+        Some(PreviewClass::Code {
             syntax: CodeSyntax::Glua
-        }
+        })
     );
     assert_eq!(
-        classify_entry_path("data/config.JSON"),
-        EntryClass::Code {
+        previewable("data/config.JSON"),
+        Some(PreviewClass::Code {
             syntax: CodeSyntax::Json
-        }
+        })
     );
     assert_eq!(
-        classify_entry_path("materials/icon.vmt"),
-        EntryClass::Code {
+        previewable("materials/icon.vmt"),
+        Some(PreviewClass::Code {
             syntax: CodeSyntax::Vmt
-        }
+        })
     );
     assert_eq!(
-        classify_entry_path("materials/icon.vtf"),
-        EntryClass::Image(ImageClass::Vtf)
+        previewable("materials/icon.vtf"),
+        Some(PreviewClass::Image(ImageClass::Vtf))
     );
     assert_eq!(
-        classify_entry_path("models/props_c17/oildrum001.mdl"),
-        EntryClass::Model
+        previewable("models/props_c17/oildrum001.mdl"),
+        Some(PreviewClass::Model)
+    );
+    for companion in [
+        "models/props_c17/oildrum001.vvd",
+        "models/props_c17/oildrum001.dx90.vtx",
+        "models/props_c17/oildrum001.dx80.vtx",
+        "models/props_c17/oildrum001.phy",
+        "models/props_c17/oildrum001.ani",
+    ] {
+        assert_eq!(
+            classify_entry_path(companion),
+            EntryClass::ModelCompanion,
+            "{companion} must route through its parent .mdl"
+        );
+    }
+    assert_eq!(
+        previewable("maps/gm_construct.bsp"),
+        Some(PreviewClass::Map)
     );
     assert_eq!(
-        classify_entry_path("models/props_c17/oildrum001.vvd"),
-        EntryClass::ModelCompanion
+        previewable("materials/icon.png"),
+        Some(PreviewClass::Image(ImageClass::Encoded))
+    );
+    assert_eq!(previewable("sound/music.wav"), Some(PreviewClass::Audio));
+    assert_eq!(previewable("sound/music.MP3"), Some(PreviewClass::Audio));
+    assert_eq!(previewable("sound/music.ogg"), Some(PreviewClass::Audio));
+    assert_eq!(
+        previewable("resource/fonts/menu.TTF"),
+        Some(PreviewClass::Font)
     );
     assert_eq!(
-        classify_entry_path("models/props_c17/oildrum001.dx90.vtx"),
-        EntryClass::ModelCompanion
+        previewable("models/test/thing.dx90.ctx"),
+        Some(PreviewClass::Info)
     );
-    assert_eq!(
-        classify_entry_path("models/props_c17/oildrum001.dx80.vtx"),
-        EntryClass::ModelCompanion
-    );
-    assert_eq!(
-        classify_entry_path("models/props_c17/oildrum001.phy"),
-        EntryClass::ModelCompanion
-    );
-    assert_eq!(
-        classify_entry_path("models/props_c17/oildrum001.ani"),
-        EntryClass::ModelCompanion
-    );
-    assert_eq!(
-        classify_entry_path("maps/gm_construct.bsp"),
-        EntryClass::Map
-    );
-    assert_eq!(
-        classify_entry_path("materials/icon.png"),
-        EntryClass::Image(ImageClass::Encoded)
-    );
-    assert_eq!(classify_entry_path("sound/music.wav"), EntryClass::Audio);
-    assert_eq!(classify_entry_path("sound/music.MP3"), EntryClass::Audio);
-    assert_eq!(classify_entry_path("sound/music.ogg"), EntryClass::Audio);
-    assert_eq!(
-        classify_entry_path("resource/fonts/menu.TTF"),
-        EntryClass::Font
-    );
-    assert_eq!(
-        classify_entry_path("models/test/thing.dx90.ctx"),
-        EntryClass::Info
-    );
-    assert_eq!(classify_entry_path("bin/blob.dat"), EntryClass::Info);
+    assert_eq!(previewable("bin/blob.dat"), Some(PreviewClass::Info));
 }
 
 #[test]
@@ -385,6 +384,49 @@ fn model_companion_request_redirects_to_parent_mdl_entry() {
     assert_eq!(redirected.display_name, "Thing.MDL");
     assert_eq!(redirected.size_bytes, parent.size);
     assert_eq!(redirected.crc32, parent.crc32);
+}
+
+#[test]
+fn model_companion_load_previews_the_parent_entry() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Model Fixture")
+            .entry("Models/Test/Thing.MDL", b"mdl bytes".to_vec())
+            .entry("Models/Test/Thing.VVD", b"vvd bytes".to_vec())
+            .build(),
+    )
+    .expect("fixture archive should load");
+    let request = request_from_archive(archive, "Models/Test/Thing.VVD".to_owned(), 9, 123);
+    let (mut output, _receiver) = iced_mpsc::channel(16);
+
+    let data = load_preview_data(request, &test_tokens(), None, &mut output)
+        .expect("companion load should resolve through the parent");
+
+    assert_eq!(data.entry_path, "Models/Test/Thing.MDL");
+    assert_eq!(data.display_name, "Thing.MDL");
+}
+
+#[test]
+fn model_companion_load_without_parent_reports_the_companion_itself() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Model Fixture")
+            .entry("models/test/orphan.dx80.vtx", b"vtx bytes".to_vec())
+            .build(),
+    )
+    .expect("fixture archive should load");
+    let request = request_from_archive(archive, "models/test/orphan.dx80.vtx".to_owned(), 9, 123);
+    let (mut output, _receiver) = iced_mpsc::channel(16);
+
+    let data = load_preview_data(request, &test_tokens(), None, &mut output)
+        .expect("orphaned companion should still produce an info preview");
+
+    assert_eq!(data.entry_path, "models/test/orphan.dx80.vtx");
+    assert!(matches!(
+        data.content,
+        PreviewContent::Info {
+            reason: InfoReason::DecodeFailed,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -786,16 +828,13 @@ fn parallel_material_resolution_matches_serial_slots_in_order() {
     let parallel = resolve_map_material_slots_parallel(&names, &parallel_resolver);
 
     assert_eq!(
-        material_slot_signatures(&parallel.materials),
-        material_slot_signatures(&serial.materials)
+        material_slot_signatures(parallel.slots()),
+        material_slot_signatures(serial.slots())
     );
+    assert_eq!(parallel.resolved_count(), serial.resolved_count());
     assert_eq!(
-        parallel.resolved_material_count,
-        serial.resolved_material_count
-    );
-    assert_eq!(
-        parallel.water_fallback_material_count,
-        serial.water_fallback_material_count
+        parallel.water_fallback_count(),
+        serial.water_fallback_count()
     );
 }
 
@@ -826,7 +865,7 @@ fn parallel_material_resolution_respects_atomic_texture_budget() {
     assert!(budget.decoded_bytes() <= 40);
     assert_eq!(
         resolved
-            .materials
+            .slots()
             .iter()
             .filter(|slot| slot.texture.is_some())
             .count(),
@@ -1006,16 +1045,17 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     )
     .expect("fixture archive should load");
     let resolver = MaterialResolver::new(Arc::new(archive), None);
-    let mut materials = vec![MaterialSlot {
-        name: "door_skin".to_owned(),
-        texture: None,
-        texture2: None,
-        force_opaque: true,
-        render_mode: RenderMode::Opaque,
-    }];
-    let mut material_indexes = HashMap::from([("door_skin".to_owned(), 0_usize)]);
-    let mut resolved_material_count = 0;
-    let mut water_fallback_material_count = 0;
+    let mut materials = MaterialTable::default();
+    materials.push(
+        "door_skin",
+        MaterialSlot {
+            name: "door_skin".to_owned(),
+            texture: None,
+            texture2: None,
+            force_opaque: true,
+            render_mode: RenderMode::Opaque,
+        },
+    );
     let door = gmpublished_backend::scene::map::MapDoor {
         class: gmpublished_backend::scene::map::MapDoorClass::PropDoorRotating,
         origin: [0.0; 3],
@@ -1023,7 +1063,7 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
         local_bounds_min: [0.0; 3],
         local_bounds_max: [0.0; 3],
         visibility: MapVisibilityBucket::Always,
-        wait: 0.0,
+        auto_close_after: Some(0.0),
         initial_progress: 0.0,
         motion: gmpublished_backend::scene::map::MapDoorMotion::Rotating {
             angle_delta: [0.0, 90.0, 0.0],
@@ -1040,12 +1080,7 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     let result = bake_map_doors_with_prop_model_loader(
         &[door],
         &resolver,
-        PropMaterialState {
-            materials: &mut materials,
-            material_indexes: &mut material_indexes,
-            resolved_material_count: &mut resolved_material_count,
-            water_fallback_material_count: &mut water_fallback_material_count,
-        },
+        &mut materials,
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
             environment_lighting: None,
@@ -1062,9 +1097,12 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     );
 
     let mesh = &result.doors[0].meshes[0];
-    assert_eq!(materials[mesh.material_index].name, "door_skin");
+    let slot = materials
+        .get(mesh.material_index)
+        .expect("door mesh must reference a material slot");
+    assert_eq!(slot.name, "door_skin");
     assert!(
-        materials[mesh.material_index].texture.is_some(),
+        slot.texture.is_some(),
         "skin-remapped door material must not reuse the unresolved map slot"
     );
     let resolution = &result.prop_material_resolutions["models/test/door.mdl"];
@@ -1095,7 +1133,7 @@ fn prop_bake_counts_placement_cap_overflow_as_skipped() {
     );
 
     assert_eq!(result.placed_count, 2);
-    assert_eq!(result.skipped_count, 1);
+    assert_eq!(result.skipped_count(), 1);
     assert_eq!(
         result.skip_stats,
         PropBakeSkipStats {
@@ -1128,7 +1166,7 @@ fn prop_bake_counts_triangle_cap_remaining_as_skipped() {
     );
 
     assert_eq!(result.placed_count, 1);
-    assert_eq!(result.skipped_count, 2);
+    assert_eq!(result.skipped_count(), 2);
     assert_eq!(
         result.skip_stats,
         PropBakeSkipStats {
@@ -1208,11 +1246,19 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
     );
 
     assert_eq!(parallel.placed_count, serial.placed_count);
-    assert_eq!(parallel.skipped_count, serial.skipped_count);
+    assert_eq!(parallel.skipped_count(), serial.skipped_count());
     assert_eq!(parallel.meshes, serial.meshes);
     assert_eq!(parallel.mesh_visibility, serial.mesh_visibility);
     assert_eq!(parallel.skip_stats, serial.skip_stats);
-    assert_eq!(parallel.mesh_bytes, serial.mesh_bytes);
+    assert_eq!(
+        parallel.mesh_bytes(),
+        parallel
+            .meshes
+            .iter()
+            .map(|mesh| mesh.vertices.len() * size_of::<ModelVertex>()
+                + mesh.indices.len() * size_of::<u32>())
+            .sum::<usize>()
+    );
     assert_ne!(parallel.meshes[0].vertices[0].color, [1.0; 3]);
     assert!(parallel.mesh_visibility[0].clusters.iter().any(
         |cluster| cluster.cluster == 7 && cluster.ranges.iter().all(|range| range.start >= 24)
@@ -1245,11 +1291,11 @@ fn sprp_only_prop_bake_is_unchanged_when_entity_prop_list_is_empty() {
 
     assert_eq!(with_empty_entity_range.placed_count, sprp_only.placed_count);
     assert_eq!(
-        with_empty_entity_range.skipped_count,
-        sprp_only.skipped_count
+        with_empty_entity_range.skipped_count(),
+        sprp_only.skipped_count()
     );
     assert_eq!(with_empty_entity_range.skip_stats, sprp_only.skip_stats);
-    assert_eq!(with_empty_entity_range.mesh_bytes, sprp_only.mesh_bytes);
+    assert_eq!(with_empty_entity_range.mesh_bytes(), sprp_only.mesh_bytes());
     assert_eq!(with_empty_entity_range.meshes, sprp_only.meshes);
     assert_eq!(
         with_empty_entity_range.mesh_visibility,
@@ -1313,58 +1359,49 @@ fn pre_resolved_prop_materials_match_direct_prop_resolution() {
     ]);
 
     let direct_resolver = MaterialResolver::new(Arc::new(archive.clone()), None);
-    let mut direct_materials = Vec::new();
-    let mut direct_material_indexes = HashMap::new();
-    let mut direct_resolved_material_count = 0;
-    let mut direct_water_fallback_material_count = 0;
+    let mut direct_materials = MaterialTable::default();
     let direct = bake_static_props_with_loaded_model_cache(
         &placements,
         &direct_resolver,
-        PropMaterialState {
-            materials: &mut direct_materials,
-            material_indexes: &mut direct_material_indexes,
-            resolved_material_count: &mut direct_resolved_material_count,
-            water_fallback_material_count: &mut direct_water_fallback_material_count,
-        },
+        &mut direct_materials,
         &loaded_model_cache,
         false,
         &MapAmbientLighting::neutral(),
     );
 
     let pre_resolved_resolver = MaterialResolver::new(Arc::new(archive), None);
-    let mut pre_resolved_materials = Vec::new();
-    let mut pre_resolved_material_indexes = HashMap::new();
-    let mut pre_resolved_material_count = 0;
-    let mut pre_resolved_water_fallback_material_count = 0;
+    let mut pre_resolved_materials = MaterialTable::default();
     let pre_resolved = bake_static_props_with_loaded_model_cache(
         &placements,
         &pre_resolved_resolver,
-        PropMaterialState {
-            materials: &mut pre_resolved_materials,
-            material_indexes: &mut pre_resolved_material_indexes,
-            resolved_material_count: &mut pre_resolved_material_count,
-            water_fallback_material_count: &mut pre_resolved_water_fallback_material_count,
-        },
+        &mut pre_resolved_materials,
         &loaded_model_cache,
         true,
         &MapAmbientLighting::neutral(),
     );
 
     assert_eq!(pre_resolved.placed_count, direct.placed_count);
-    assert_eq!(pre_resolved.skipped_count, direct.skipped_count);
+    assert_eq!(pre_resolved.skipped_count(), direct.skipped_count());
     assert_eq!(pre_resolved.meshes, direct.meshes);
     assert_eq!(
-        material_slot_signatures(&pre_resolved_materials),
-        material_slot_signatures(&direct_materials)
+        material_slot_signatures(pre_resolved_materials.slots()),
+        material_slot_signatures(direct_materials.slots())
     );
-    assert_eq!(pre_resolved_material_indexes, direct_material_indexes);
-    assert_eq!(pre_resolved_material_count, direct_resolved_material_count);
     assert_eq!(
-        pre_resolved_water_fallback_material_count,
-        direct_water_fallback_material_count
+        pre_resolved_materials.name_indexes(),
+        direct_materials.name_indexes()
+    );
+    assert_eq!(
+        pre_resolved_materials.resolved_count(),
+        direct_materials.resolved_count()
+    );
+    assert_eq!(
+        pre_resolved_materials.water_fallback_count(),
+        direct_materials.water_fallback_count()
     );
     assert_eq!(
         direct_materials
+            .slots()
             .iter()
             .find(|material| material.name == "shared")
             .and_then(|material| material.texture.as_ref())
@@ -1376,14 +1413,92 @@ fn pre_resolved_prop_materials_match_direct_prop_resolution() {
 }
 
 #[test]
+fn prop_materials_share_one_slot_per_directory_qualified_name() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Shared Prop Material Fixture")
+            .entry(
+                "materials/props/a/shared.vmt",
+                br#""VertexLitGeneric" { "$basetexture" "props/a/shared" }"#.to_vec(),
+            )
+            .entry(
+                "materials/props/b/shared.vmt",
+                br#""VertexLitGeneric" { "$basetexture" "props/b/shared" }"#.to_vec(),
+            )
+            .entry("materials/props/a/shared.vtf", create_vtf_bytes(&[10; 16]))
+            .entry("materials/props/b/shared.vtf", create_vtf_bytes(&[90; 16]))
+            .build(),
+    )
+    .expect("fixture archive should load");
+    let placements = vec![
+        prop_placement("models/test/a.mdl", [0.0; 3], [0.0; 3], 0),
+        prop_placement("models/test/b.mdl", [2.0, 0.0, 0.0], [0.0; 3], 0),
+        prop_placement("models/test/c.mdl", [4.0, 0.0, 0.0], [0.0; 3], 0),
+    ];
+    let loaded_model_cache = HashMap::from([
+        (
+            "models/test/a.mdl".to_owned(),
+            Some(Arc::new(test_loaded_prop_model(
+                vec!["props/a"],
+                vec!["shared"],
+                0,
+            ))),
+        ),
+        (
+            "models/test/b.mdl".to_owned(),
+            Some(Arc::new(test_loaded_prop_model(
+                vec!["props/b"],
+                vec!["shared"],
+                0,
+            ))),
+        ),
+        (
+            "models/test/c.mdl".to_owned(),
+            Some(Arc::new(test_loaded_prop_model(
+                vec!["props/a"],
+                vec!["shared"],
+                0,
+            ))),
+        ),
+    ]);
+
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let mut materials = MaterialTable::default();
+    let result = bake_static_props_with_loaded_model_cache(
+        &placements,
+        &resolver,
+        &mut materials,
+        &loaded_model_cache,
+        false,
+        &MapAmbientLighting::neutral(),
+    );
+
+    assert_eq!(result.placed_count, 3);
+    let indices = result
+        .meshes
+        .iter()
+        .map(|mesh| mesh.material_index)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        indices.len(),
+        2,
+        "`a.mdl` and `c.mdl` must share the one `props/a/shared` slot, and `props/b/shared` \
+         must not collide with it despite the identical material name"
+    );
+    assert_eq!(materials.slots().len(), 2);
+    assert!(
+        indices.iter().all(|index| materials
+            .get(*index)
+            .is_some_and(|slot| slot.texture.is_some())),
+        "both shared materials resolve in the fixture archive"
+    );
+}
+
+#[test]
 fn missing_static_prop_model_is_skipped_and_counted() {
     let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Empty").build())
         .expect("empty fixture archive should load");
     let resolver = MaterialResolver::new(Arc::new(archive), None);
-    let mut materials = Vec::new();
-    let mut material_indexes = HashMap::new();
-    let mut resolved_material_count = 0;
-    let mut water_fallback_material_count = 0;
+    let mut materials = MaterialTable::default();
 
     let result = bake_static_props(
         &[prop_placement(
@@ -1394,14 +1509,11 @@ fn missing_static_prop_model_is_skipped_and_counted() {
         )],
         &resolver,
         &mut materials,
-        &mut material_indexes,
-        &mut resolved_material_count,
-        &mut water_fallback_material_count,
         &MapAmbientLighting::neutral(),
     );
 
     assert_eq!(result.placed_count, 0);
-    assert_eq!(result.skipped_count, 1);
+    assert_eq!(result.skipped_count(), 1);
     assert_eq!(
         result.skip_stats,
         PropBakeSkipStats {

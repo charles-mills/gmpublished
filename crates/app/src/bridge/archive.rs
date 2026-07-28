@@ -34,8 +34,10 @@ pub struct FolderSource {
 struct FolderPath(Arc<String>);
 
 impl FolderPath {
-    fn new(path: String) -> Self {
-        Self(Arc::new(path))
+    /// `None` for a path with no canonical form. The index must be keyed the
+    /// same way lookups arrive, or an entry is present but unreachable.
+    fn new(path: &str) -> Option<Self> {
+        crate::bridge::content_path::normalize_archive_path(path).map(|path| Self(Arc::new(path)))
     }
 
     fn as_str(&self) -> &str {
@@ -78,7 +80,9 @@ impl PreviewArchiveSource {
         let mut entries = HashMap::with_capacity(lower);
         let mut paths = Vec::with_capacity(lower);
         for (path, size, disk_path) in files {
-            let path = FolderPath::new(path);
+            let Some(path) = FolderPath::new(&path) else {
+                continue;
+            };
             if entries
                 .insert(path.clone(), FolderEntry { size, disk_path })
                 .is_none()
@@ -187,6 +191,28 @@ impl PreviewArchiveSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder index keyed by the entry path as authored is unreachable from
+    /// the normalized paths every content lookup arrives with.
+    #[test]
+    fn folder_entries_are_indexed_in_the_form_lookups_use() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let disk_path = dir.path().join("Thing.VMT");
+        std::fs::write(&disk_path, b"vmt").expect("write");
+
+        let source = PreviewArchiveSource::from_folder([(
+            r"Materials\Models\Thing.VMT".to_owned(),
+            3,
+            disk_path,
+        )]);
+
+        assert_eq!(
+            source
+                .entry_bytes("materials/models/thing.vmt")
+                .expect("a normalized lookup must reach the entry"),
+            b"vmt"
+        );
+    }
 
     #[test]
     fn folder_source_reads_entries_through_the_disk_path_map() {

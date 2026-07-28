@@ -13,6 +13,7 @@ use std::{
 use parking_lot::Mutex;
 use rayon::prelude::*;
 
+use crate::bridge::content_path::{ContentPath, normalize_archive_path};
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive, vpk::VpkArchive};
 use gmpublished_backend::gma::read::GmaView;
 use gmpublished_backend::scene::map::MapPakFile;
@@ -238,15 +239,28 @@ impl RenderMode {
 #[derive(Clone)]
 struct ResolverConfig {
     addon: Arc<PreviewArchiveSource>,
-    prepended: Option<Arc<HashMap<String, Vec<u8>>>>,
     pakfile: Option<Arc<PakSource>>,
     loose_source_dirs: Vec<LooseSourceDir>,
     sibling_gma_paths: Vec<SiblingGmaPath>,
     game_vpk_paths: Vec<PathBuf>,
     decoded_texture_max_dimension: Option<u32>,
     decoded_texture_budget: Option<Arc<DecodedTextureBudget>>,
-    bc_textures_allowed: bool,
-    bc_texture_support_override: Option<bool>,
+    bc_textures: BcTextures,
+}
+
+/// Whether this resolver may hand back BC-compressed textures.
+///
+/// A single value so the decision has exactly one stated precedence: a
+/// resolver that must decode to RGBA cannot be out-argued by a support probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BcTextures {
+    /// Ask the GPU once, process-wide, the first time it matters.
+    IfGpuSupports,
+    /// This resolver decodes to RGBA regardless — the skybox and PHY paths
+    /// upload through code paths that cannot take a compressed texture.
+    Never,
+    #[cfg(test)]
+    Forced(bool),
 }
 
 pub struct MaterialResolver {
@@ -276,7 +290,6 @@ impl IntoPreviewArchiveSource for Arc<PreviewArchive> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ContentSourceTier {
-    Prepended,
     Pakfile,
     Addon,
     Loose,
@@ -385,8 +398,13 @@ impl DecodedTextureBudget {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum DecodedTextureCacheKey {
-    Rgba { path: String, preserve_alpha: bool },
-    Bc { path: String },
+    Rgba {
+        path: ContentPath,
+        preserve_alpha: bool,
+    },
+    Bc {
+        path: ContentPath,
+    },
 }
 
 impl MaterialResolver {
@@ -420,32 +438,14 @@ impl MaterialResolver {
             .unwrap_or_default();
         Self::from_config(ResolverConfig {
             addon: addon.into_preview_archive_source(),
-            prepended: None,
             pakfile: None,
             loose_source_dirs,
             sibling_gma_paths,
             game_vpk_paths,
             decoded_texture_max_dimension: None,
             decoded_texture_budget: None,
-            bc_textures_allowed: true,
-            bc_texture_support_override: None,
+            bc_textures: BcTextures::IfGpuSupports,
         })
-    }
-
-    #[cfg(test)]
-    fn with_prepended_source(
-        addon: impl IntoPreviewArchiveSource,
-        gmod_dir: Option<PathBuf>,
-        entries: impl IntoIterator<Item = (String, Vec<u8>)>,
-    ) -> Self {
-        let mut resolver = Self::new(addon, gmod_dir);
-        resolver.config.prepended = Some(Arc::new(
-            entries
-                .into_iter()
-                .filter_map(|(path, bytes)| normalize_archive_path(&path).map(|path| (path, bytes)))
-                .collect(),
-        ));
-        resolver
     }
 
     pub(crate) fn with_pakfile_source(
@@ -474,15 +474,21 @@ impl MaterialResolver {
 
     pub(crate) fn with_bc_textures_disabled(&self) -> Self {
         Self::from_config(ResolverConfig {
-            bc_textures_allowed: false,
+            bc_textures: BcTextures::Never,
             ..self.config.clone()
         })
     }
 
+    /// Stands in for the GPU probe. `Never` still wins: those resolvers feed
+    /// upload paths that cannot take a compressed texture at all, so no probe
+    /// answer makes one usable.
     #[cfg(test)]
     fn with_bc_texture_support(&self, supported: bool) -> Self {
         Self::from_config(ResolverConfig {
-            bc_texture_support_override: Some(supported),
+            bc_textures: match self.config.bc_textures {
+                BcTextures::Never => BcTextures::Never,
+                BcTextures::IfGpuSupports | BcTextures::Forced(_) => BcTextures::Forced(supported),
+            },
             ..self.config.clone()
         })
     }
@@ -523,8 +529,7 @@ impl MaterialResolver {
     }
 
     pub(crate) fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
-        let path = normalize_archive_path(path)?;
-        self.entry_bytes_from_sources(&path)
+        self.entry_bytes_from_sources(&ContentPath::new(path)?)
     }
 
     pub(crate) fn resolve_sound_reference(
@@ -558,7 +563,7 @@ impl MaterialResolver {
         &self,
         material_path: &str,
     ) -> Option<Arc<ResolvedTexture>> {
-        let material_path = normalize_archive_path(material_path)?;
+        let material_path = ContentPath::new(material_path)?;
         self.find_entry_by_source(std::slice::from_ref(&material_path), |path, vmt_bytes| {
             self.resolve_base_texture_material_bytes(path, &vmt_bytes)
         })
@@ -566,11 +571,11 @@ impl MaterialResolver {
 
     fn resolve_material_bytes(
         &self,
-        material_path: &str,
+        material_path: &ContentPath,
         vmt_bytes: &[u8],
     ) -> Option<ResolvedMaterialTextures> {
         let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.to_ascii_lowercase()];
+        let mut visited_includes = vec![material_path.clone()];
         let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
         let render_mode = material.render_mode();
         let texture = material
@@ -594,11 +599,11 @@ impl MaterialResolver {
 
     fn resolve_primary_material_bytes(
         &self,
-        material_path: &str,
+        material_path: &ContentPath,
         vmt_bytes: &[u8],
     ) -> Option<ResolvedPrimaryMaterial> {
         let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.to_ascii_lowercase()];
+        let mut visited_includes = vec![material_path.clone()];
         let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
         let render_mode = material.render_mode();
         let texture = material
@@ -617,11 +622,11 @@ impl MaterialResolver {
 
     fn resolve_base_texture_material_bytes(
         &self,
-        material_path: &str,
+        material_path: &ContentPath,
         vmt_bytes: &[u8],
     ) -> Option<Arc<ResolvedTexture>> {
         let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.to_ascii_lowercase()];
+        let mut visited_includes = vec![material_path.clone()];
         let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
         let render_mode = material.render_mode();
         material.base_texture.as_deref().and_then(|base_texture| {
@@ -633,7 +638,7 @@ impl MaterialResolver {
         &self,
         vmt_text: &str,
         depth: usize,
-        visited_includes: &mut Vec<String>,
+        visited_includes: &mut Vec<ContentPath>,
     ) -> Option<EffectiveMaterial> {
         let document = vformats::vmt::parse(vmt_text, &Limits::default()).ok()?;
         if let Some(patch) = document.patch() {
@@ -651,20 +656,17 @@ impl MaterialResolver {
         &self,
         include: &str,
         depth: usize,
-        visited_includes: &mut Vec<String>,
+        visited_includes: &mut Vec<ContentPath>,
     ) -> Option<EffectiveMaterial> {
         if depth >= PATCH_INCLUDE_LIMIT {
             log::debug!("material patch include recursion limit reached at {include}");
             return None;
         }
-        let Some(include_path) = normalize_archive_path(include) else {
+        let Some(include_path) = ContentPath::new(include) else {
             log::debug!("material patch include path rejected: {include}");
             return None;
         };
-        if visited_includes
-            .iter()
-            .any(|visited| visited.eq_ignore_ascii_case(&include_path))
-        {
+        if visited_includes.contains(&include_path) {
             log::debug!("material patch include cycle rejected at {include_path}");
             return None;
         }
@@ -776,11 +778,12 @@ impl MaterialResolver {
     }
 
     fn bc_textures_enabled(&self) -> bool {
-        self.config.bc_textures_allowed
-            && self
-                .config
-                .bc_texture_support_override
-                .unwrap_or_else(bc_supported)
+        match self.config.bc_textures {
+            BcTextures::IfGpuSupports => bc_supported(),
+            BcTextures::Never => false,
+            #[cfg(test)]
+            BcTextures::Forced(supported) => supported,
+        }
     }
 
     fn game_vpks(&self) -> &[VpkArchive] {
@@ -848,7 +851,7 @@ impl MaterialResolver {
             log::debug!("sound wave {wave:?} treated as silent null.wav");
             return None;
         }
-        let resolved = self.find_content_bytes(std::slice::from_ref(&path))?;
+        let resolved = self.find_content_bytes(std::slice::from_ref(&ContentPath::new(&path)?))?;
         Some(ResolvedSoundWave {
             path: resolved.path,
             source_tier: resolved.tier,
@@ -914,8 +917,8 @@ impl MaterialResolver {
         }
     }
 
-    fn entry_bytes_from_sources(&self, path: &str) -> Option<Vec<u8>> {
-        self.find_entry_by_source(std::slice::from_ref(&path), |_, bytes| Some(bytes))
+    fn entry_bytes_from_sources(&self, path: &ContentPath) -> Option<Vec<u8>> {
+        self.find_entry_by_source(std::slice::from_ref(path), |_, bytes| Some(bytes))
     }
 
     /// Every content source this resolver can read from, in lookup-priority order.
@@ -925,11 +928,10 @@ impl MaterialResolver {
     /// self-contained addons it never happens at all.
     fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.config
-            .prepended
+            .pakfile
             .as_deref()
-            .map(SourceRef::Prepended)
+            .map(SourceRef::Pakfile)
             .into_iter()
-            .chain(self.config.pakfile.as_deref().map(SourceRef::Pakfile))
             .chain(std::iter::once(SourceRef::Addon(&self.config.addon)))
             .chain(self.config.loose_source_dirs.iter().map(SourceRef::Loose))
             .chain(std::iter::once_with(|| {
@@ -940,12 +942,11 @@ impl MaterialResolver {
             )
     }
 
-    fn find_content_bytes<P: AsRef<str>>(&self, paths: &[P]) -> Option<ResolvedContentBytes> {
+    fn find_content_bytes(&self, paths: &[ContentPath]) -> Option<ResolvedContentBytes> {
         self.sources().find_map(|source| {
             paths.iter().find_map(|path| {
-                let path = path.as_ref();
                 source.entry_bytes(path).map(|bytes| ResolvedContentBytes {
-                    path: path.to_owned(),
+                    path: path.as_str().to_owned(),
                     tier: source.tier(),
                     bytes,
                 })
@@ -954,13 +955,13 @@ impl MaterialResolver {
     }
 
     fn content_bytes_from_all_sources(&self, path: &str) -> Vec<ResolvedContentBytes> {
-        let Some(path) = normalize_archive_path(path) else {
+        let Some(path) = ContentPath::new(path) else {
             return Vec::new();
         };
         self.sources()
             .filter_map(|source| {
                 source.entry_bytes(&path).map(|bytes| ResolvedContentBytes {
-                    path: path.clone(),
+                    path: path.as_str().to_owned(),
                     tier: source.tier(),
                     bytes,
                 })
@@ -979,14 +980,13 @@ impl MaterialResolver {
         paths
     }
 
-    fn find_entry_by_source<T, P: AsRef<str>>(
+    fn find_entry_by_source<T>(
         &self,
-        paths: &[P],
-        mut consume: impl FnMut(&str, Vec<u8>) -> Option<T>,
+        paths: &[ContentPath],
+        mut consume: impl FnMut(&ContentPath, Vec<u8>) -> Option<T>,
     ) -> Option<T> {
         self.sources().find_map(|source| {
             paths.iter().find_map(|path| {
-                let path = path.as_ref();
                 source
                     .entry_bytes(path)
                     .and_then(|bytes| consume(path, bytes))
@@ -998,7 +998,6 @@ impl MaterialResolver {
 /// One content source a material/texture/sound lookup can be read from, in
 /// the tier order `sources()` yields them.
 enum SourceRef<'a> {
-    Prepended(&'a HashMap<String, Vec<u8>>),
     Pakfile(&'a PakSource),
     Addon(&'a PreviewArchiveSource),
     Loose(&'a LooseSourceDir),
@@ -1009,7 +1008,6 @@ enum SourceRef<'a> {
 impl SourceRef<'_> {
     fn tier(&self) -> ContentSourceTier {
         match self {
-            Self::Prepended(_) => ContentSourceTier::Prepended,
             Self::Pakfile(_) => ContentSourceTier::Pakfile,
             Self::Addon(_) => ContentSourceTier::Addon,
             Self::Loose(_) => ContentSourceTier::Loose,
@@ -1018,26 +1016,24 @@ impl SourceRef<'_> {
         }
     }
 
-    fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
+    /// `Addon` and `GameVpk` take `&str`: both are lower-level archive readers
+    /// with their own path space and callers outside this resolver.
+    fn entry_bytes(&self, path: &ContentPath) -> Option<Vec<u8>> {
         match self {
-            Self::Prepended(prepended) => prepended.get(path).cloned(),
             Self::Pakfile(pakfile) => pakfile.entry_bytes(path),
-            Self::Addon(addon) => addon.entry_bytes(path).ok(),
+            Self::Addon(addon) => addon.entry_bytes(path.as_str()).ok(),
             Self::Loose(loose_dir) => loose_dir.entry_bytes(path),
             Self::SiblingGma(sibling_gmas) => sibling_gmas.entry_bytes(path),
-            Self::GameVpk(vpk) => vpk.entry_bytes(path).ok(),
+            Self::GameVpk(vpk) => vpk.entry_bytes(path.as_str()).ok(),
         }
     }
 
     fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
         match self {
-            Self::Prepended(prepended) => prepended.keys().for_each(|path| visit(path)),
-            Self::Pakfile(pakfile) => pakfile.entries.keys().for_each(|path| visit(path)),
+            Self::Pakfile(pakfile) => pakfile.for_each_path(visit),
             Self::Addon(addon) => addon.for_each_path(visit),
             Self::Loose(loose_dir) => loose_dir.paths().iter().for_each(|path| visit(path)),
-            Self::SiblingGma(sibling_gmas) => {
-                sibling_gmas.entries.keys().for_each(|path| visit(path));
-            }
+            Self::SiblingGma(sibling_gmas) => sibling_gmas.for_each_path(visit),
             Self::GameVpk(vpk) => vpk.entries().iter().for_each(|entry| visit(&entry.path)),
         }
     }
@@ -1540,9 +1536,12 @@ impl PakSource {
         })
     }
 
-    fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
-        let path = normalize_archive_path(path)?;
-        let index = *self.entries.get(&path)?;
+    fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
+        self.entries.keys().for_each(|path| visit(path));
+    }
+
+    fn entry_bytes(&self, path: &ContentPath) -> Option<Vec<u8>> {
+        let index = *self.entries.get(path.as_str())?;
         let reader = self.checkout_reader();
         let result = reader.entry_bytes_by_index(index);
         self.checkin_reader(reader);
@@ -1577,10 +1576,12 @@ impl LooseSourceDir {
         Self { root }
     }
 
-    fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
-        let path = normalize_archive_path(path)?;
+    fn entry_bytes(&self, path: &ContentPath) -> Option<Vec<u8>> {
         let mut candidate = self.root.clone();
-        for segment in path.split('/') {
+        // `ContentPath` already rejects these, but this is the one tier that
+        // turns a content path into a filesystem path: kept deliberately so
+        // relaxing the constructor could never widen into a traversal read.
+        for segment in path.as_str().split('/') {
             if segment.is_empty() || segment == "." || segment == ".." {
                 return None;
             }
@@ -1634,9 +1635,12 @@ struct SiblingGmaIndex {
 }
 
 impl SiblingGmaIndex {
-    fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
-        let normalized = normalize_archive_path(path)?;
-        let entry = self.entries.get(&normalized)?;
+    fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
+        self.entries.keys().for_each(|path| visit(path));
+    }
+
+    fn entry_bytes(&self, path: &ContentPath) -> Option<Vec<u8>> {
+        let entry = self.entries.get(path.as_str())?;
         let archive = self.archives.get(entry.archive_index)?;
         match (&archive.kind, &entry.location) {
             (
@@ -2246,7 +2250,7 @@ fn is_legacy_bin_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
 }
 
-fn material_paths(material_dirs: &[String], material_name: &str) -> Vec<String> {
+fn material_paths(material_dirs: &[String], material_name: &str) -> Vec<ContentPath> {
     let Some(name) = normalize_material_name(material_name) else {
         return Vec::new();
     };
@@ -2258,16 +2262,21 @@ fn material_paths(material_dirs: &[String], material_name: &str) -> Vec<String> 
         } else {
             format!("materials/{dir}/{name}.vmt")
         };
-        push_unique(&mut paths, path);
+        if let Some(path) = ContentPath::new(&path) {
+            push_unique(&mut paths, path);
+        }
     }
-    if let Some(depatched) = cubemap_depatched_material_name(&name) {
-        push_unique(&mut paths, format!("materials/{depatched}.vmt"));
+    if let Some(depatched) = cubemap_depatched_material_name(&name)
+        && let Some(path) = ContentPath::new(&format!("materials/{depatched}.vmt"))
+    {
+        push_unique(&mut paths, path);
     }
     paths
 }
 
-fn texture_path(base_texture: &str) -> Option<String> {
-    normalize_texture_name(base_texture).map(|texture| format!("materials/{texture}.vtf"))
+fn texture_path(base_texture: &str) -> Option<ContentPath> {
+    let texture = normalize_texture_name(base_texture)?;
+    ContentPath::new(&format!("materials/{texture}.vtf"))
 }
 
 fn normalized_material_dirs(material_dirs: &[String]) -> Vec<String> {
@@ -2358,30 +2367,6 @@ fn normalize_source_path(path: &str, extension: Option<&str>) -> Option<String> 
     Some(normalized)
 }
 
-fn normalize_archive_path(path: &str) -> Option<String> {
-    let path = path
-        .trim()
-        .trim_matches(|character| matches!(character, '/' | '\\'));
-    let mut normalized = String::with_capacity(path.len());
-    for segment in path.split(['/', '\\']) {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return None;
-        }
-        if !normalized.is_empty() {
-            normalized.push('/');
-        }
-        normalized.push_str(segment);
-    }
-    if normalized.is_empty() {
-        return None;
-    }
-    normalized.make_ascii_lowercase();
-    Some(normalized)
-}
-
 fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     value
         .get(..prefix.len())
@@ -2389,8 +2374,8 @@ fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> 
         .then(|| &value[prefix.len()..])
 }
 
-fn push_unique(values: &mut Vec<String>, value: String) {
-    if !values.iter().any(|existing| existing == &value) {
+fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
+    if !values.contains(&value) {
         values.push(value);
     }
 }

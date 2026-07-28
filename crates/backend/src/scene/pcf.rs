@@ -13,15 +13,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PcfError {
-    #[error("ERR_PCF_NOT_DMX")]
+    #[error("not a DMX file")]
     NotDmx,
-    #[error("ERR_PCF_TEXT_ENCODING_UNSUPPORTED")]
+    #[error("text-encoded DMX is not supported")]
     TextEncodingUnsupported,
-    #[error("ERR_PCF_UNSUPPORTED_ENCODING_VERSION: {0}")]
+    #[error("unsupported DMX encoding version {0}")]
     UnsupportedEncodingVersion(u32),
-    #[error("ERR_PCF_TRUNCATED")]
+    #[error("the PCF ends mid-structure")]
     Truncated,
-    #[error("ERR_PCF_MALFORMED: {0}")]
+    #[error("malformed PCF: {0}")]
     Malformed(&'static str),
 }
 
@@ -422,21 +422,81 @@ fn element_ref(reader: &mut Reader<'_>) -> Result<Option<u32>, PcfError> {
     }
 }
 
+/// A DMX attribute's scalar type. The wire encodes an array of `T` as
+/// `T + ARRAY_OFFSET`, so a raw id carries both the element type and whether it
+/// is an array — [`DmxType::decode`] is the one place that arithmetic happens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DmxType {
+    Element = 1,
+    Int = 2,
+    Float = 3,
+    Bool = 4,
+    String = 5,
+    Binary = 6,
+    /// An object id in encoding v1/v2, a fixed-point time in v3+.
+    TimeOrObjectId = 7,
+    Color = 8,
+    Vector2 = 9,
+    Vector3 = 10,
+    Vector4 = 11,
+    Angle = 12,
+    Quaternion = 13,
+    Matrix = 14,
+}
+
+impl DmxType {
+    /// Ids above this are the array form of the type `ARRAY_OFFSET` below.
+    const ARRAY_OFFSET: u8 = Self::Matrix as u8;
+
+    const fn from_scalar_id(id: u8) -> Option<Self> {
+        Some(match id {
+            1 => Self::Element,
+            2 => Self::Int,
+            3 => Self::Float,
+            4 => Self::Bool,
+            5 => Self::String,
+            6 => Self::Binary,
+            7 => Self::TimeOrObjectId,
+            8 => Self::Color,
+            9 => Self::Vector2,
+            10 => Self::Vector3,
+            11 => Self::Vector4,
+            12 => Self::Angle,
+            13 => Self::Quaternion,
+            14 => Self::Matrix,
+            _ => return None,
+        })
+    }
+
+    /// `(element type, whether the attribute is an array of it)`.
+    const fn decode(type_id: u8) -> Option<(Self, bool)> {
+        if type_id > Self::ARRAY_OFFSET {
+            match Self::from_scalar_id(type_id - Self::ARRAY_OFFSET) {
+                Some(scalar) => Some((scalar, true)),
+                None => None,
+            }
+        } else {
+            match Self::from_scalar_id(type_id) {
+                Some(scalar) => Some((scalar, false)),
+                None => None,
+            }
+        }
+    }
+}
+
 fn read_value(
     reader: &mut Reader<'_>,
     dict: Option<&StringDict>,
     encoding_version: u32,
     type_id: u8,
 ) -> Result<DmxValue, PcfError> {
-    const ARRAY_BASE: u8 = 14;
-    if type_id == 0 || type_id > ARRAY_BASE * 2 {
+    let Some((scalar, is_array)) = DmxType::decode(type_id) else {
         return Err(PcfError::Malformed("unknown attribute type"));
-    }
-    if type_id > ARRAY_BASE {
-        let scalar_id = type_id - ARRAY_BASE;
+    };
+    if is_array {
         let count = reader.u32()?;
         let count = reader.check_count(count, 1)?;
-        if scalar_id == 1 {
+        if scalar == DmxType::Element {
             let mut refs = Vec::with_capacity(initial_capacity(count));
             for _ in 0..count {
                 refs.push(element_ref(reader)?);
@@ -447,24 +507,18 @@ fn read_value(
         for _ in 0..count {
             // Array string entries are always inline, independent of the
             // dictionary rules for scalar strings.
-            values.push(read_scalar(
-                reader,
-                dict,
-                encoding_version,
-                scalar_id,
-                true,
-            )?);
+            values.push(read_scalar(reader, dict, encoding_version, scalar, true)?);
         }
         return Ok(DmxValue::Value(PcfValue::Array(values)));
     }
-    if type_id == 1 {
+    if scalar == DmxType::Element {
         return Ok(DmxValue::Element(element_ref(reader)?));
     }
     Ok(DmxValue::Value(read_scalar(
         reader,
         dict,
         encoding_version,
-        type_id,
+        scalar,
         false,
     )?))
 }
@@ -473,56 +527,89 @@ fn read_scalar(
     reader: &mut Reader<'_>,
     dict: Option<&StringDict>,
     encoding_version: u32,
-    type_id: u8,
+    scalar: DmxType,
     in_array: bool,
 ) -> Result<PcfValue, PcfError> {
-    Ok(match type_id {
-        2 => PcfValue::Int(reader.i32()?),
-        3 => PcfValue::Float(reader.f32()?),
-        4 => PcfValue::Bool(reader.u8()? != 0),
-        5 => {
+    Ok(match scalar {
+        DmxType::Int => PcfValue::Int(reader.i32()?),
+        DmxType::Float => PcfValue::Float(reader.f32()?),
+        DmxType::Bool => PcfValue::Bool(reader.u8()? != 0),
+        DmxType::String => {
             let use_dict = encoding_version >= 4 && !in_array;
             match (use_dict, dict) {
                 (true, Some(dict)) => PcfValue::String(dict.get(reader)?),
                 _ => PcfValue::String(reader.cstr()?),
             }
         }
-        6 => {
+        DmxType::Binary => {
             let len = reader.u32()?;
             let len = reader.check_count(len, 1)?;
             PcfValue::Binary(reader.take(len)?.to_vec())
         }
         // Type 7 changed meaning across encoding versions: a 16-byte object
         // id in v1/v2 files, a fixed-point time in v3+.
-        7 if encoding_version < 3 => {
+        DmxType::TimeOrObjectId if encoding_version < 3 => {
             let guid = reader.take(16)?;
             PcfValue::Binary(guid.to_vec())
         }
-        7 => PcfValue::Time(reader.i32()? as f32 / 10_000.0),
-        8 => {
+        DmxType::TimeOrObjectId => PcfValue::Time(reader.i32()? as f32 / 10_000.0),
+        DmxType::Color => {
             let rgba = reader.take(4)?;
             PcfValue::Color([rgba[0], rgba[1], rgba[2], rgba[3]])
         }
-        9 => PcfValue::Vector2(reader.f32s()?),
-        10 => PcfValue::Vector3(reader.f32s()?),
-        11 => PcfValue::Vector4(reader.f32s()?),
-        12 => PcfValue::Angle(reader.f32s()?),
-        13 => PcfValue::Quaternion(reader.f32s()?),
-        14 => PcfValue::Matrix(Box::new(reader.f32s()?)),
-        _ => return Err(PcfError::Malformed("unknown attribute type")),
+        DmxType::Vector2 => PcfValue::Vector2(reader.f32s()?),
+        DmxType::Vector3 => PcfValue::Vector3(reader.f32s()?),
+        DmxType::Vector4 => PcfValue::Vector4(reader.f32s()?),
+        DmxType::Angle => PcfValue::Angle(reader.f32s()?),
+        DmxType::Quaternion => PcfValue::Quaternion(reader.f32s()?),
+        DmxType::Matrix => PcfValue::Matrix(Box::new(reader.f32s()?)),
+        // Handled by `read_value`: an element is a reference, not a scalar.
+        DmxType::Element => return Err(PcfError::Malformed("unknown attribute type")),
     })
 }
 
 // --- PCF layer -----------------------------------------------------------
 
-const OPERATOR_LISTS: [&str; 6] = [
-    "emitters",
-    "initializers",
-    "operators",
-    "renderers",
-    "forces",
-    "constraints",
-];
+/// One of a particle system's function lists, named by its DMX attribute.
+///
+/// An enum rather than a position in a name array, so the attribute name and
+/// the field it assigns are one fact: a positional pairing would be two
+/// orderings kept in step by hand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperatorList {
+    Emitters,
+    Initializers,
+    Operators,
+    Renderers,
+    Forces,
+    Constraints,
+}
+
+impl OperatorList {
+    fn from_attribute_name(name: &str) -> Option<Self> {
+        Some(match name {
+            _ if name.eq_ignore_ascii_case("emitters") => Self::Emitters,
+            _ if name.eq_ignore_ascii_case("initializers") => Self::Initializers,
+            _ if name.eq_ignore_ascii_case("operators") => Self::Operators,
+            _ if name.eq_ignore_ascii_case("renderers") => Self::Renderers,
+            _ if name.eq_ignore_ascii_case("forces") => Self::Forces,
+            _ if name.eq_ignore_ascii_case("constraints") => Self::Constraints,
+            _ => return None,
+        })
+    }
+
+    /// The field this list populates on the system being built.
+    const fn field(self, system: &mut PcfSystem) -> &mut Vec<PcfFunction> {
+        match self {
+            Self::Emitters => &mut system.emitters,
+            Self::Initializers => &mut system.initializers,
+            Self::Operators => &mut system.operators,
+            Self::Renderers => &mut system.renderers,
+            Self::Forces => &mut system.forces,
+            Self::Constraints => &mut system.constraints,
+        }
+    }
+}
 
 fn extract_particle_systems(document: &DmxDocument) -> PcfFile {
     // Prefer the root's authoritative definition list; fall back to a type
@@ -600,10 +687,7 @@ fn extract_system(
                             extract_child(document, child_ref, system_index_by_element)
                         })
                         .collect();
-                } else if let Some(list) = OPERATOR_LISTS
-                    .iter()
-                    .position(|list| name.eq_ignore_ascii_case(list))
-                {
+                } else if let Some(list) = OperatorList::from_attribute_name(name) {
                     let functions = refs
                         .iter()
                         .copied()
@@ -616,14 +700,7 @@ fn extract_system(
                             })
                         })
                         .collect();
-                    match list {
-                        0 => system.emitters = functions,
-                        1 => system.initializers = functions,
-                        2 => system.operators = functions,
-                        3 => system.renderers = functions,
-                        4 => system.forces = functions,
-                        _ => system.constraints = functions,
-                    }
+                    *list.field(&mut system) = functions;
                 }
             }
             DmxValue::Element(_) => {}

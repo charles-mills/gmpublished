@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use iced::widget::{
     Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
     sensor, stack, svg, text,
@@ -69,7 +70,10 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let display_name = display_name(state);
     let size_bytes = size_bytes(state);
     let info = file_type_info(display_name);
-    let type_label = i18n.trn(info.translation_key, &[("arg0", info.extension.as_ref())]);
+    let type_label = i18n.trn(
+        info.translation_key,
+        &[("extension", Arg::Text(info.extension.as_ref()))],
+    );
 
     let back = tooltip_widget::below(
         button(icon(
@@ -216,7 +220,7 @@ fn body<'a>(
                     tokens.colors.text_dim.into(),
                     SPINNER_SIZE,
                 ),
-                text(i18n.trn("file-preview-error", &[("arg0", &error)]))
+                text(i18n.trn("file-preview-error", &[("error", Arg::Text(&error))]))
                     .size(tokens.typography.body)
                     .color(Color::from(tokens.colors.text_dim))
                     .align_x(Center)
@@ -382,8 +386,8 @@ fn image_preview<'a>(
     let caption = i18n.trn(
         "file-preview-image-dimensions",
         &[
-            ("arg0", width_text.as_str()),
-            ("arg1", height_text.as_str()),
+            ("width", Arg::Number(width_text.as_str())),
+            ("height", Arg::Number(height_text.as_str())),
         ],
     );
 
@@ -649,7 +653,7 @@ fn model_selectors<'a>(
             let index_text = count_text(index);
             i18n.trn(
                 "file-preview-model-skin-option",
-                &[("arg0", index_text.as_str())],
+                &[("index", Arg::Number(index_text.as_str()))],
             )
         });
         selectors = selectors.push(selector_row(
@@ -671,7 +675,7 @@ fn model_selectors<'a>(
         selectors = selectors.push(selector_row(
             i18n.trn(
                 "file-preview-model-bodygroup",
-                &[("arg0", group_text.as_str())],
+                &[("index", Arg::Number(group_text.as_str()))],
             ),
             options,
             selected,

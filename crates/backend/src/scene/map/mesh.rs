@@ -75,7 +75,7 @@ pub(super) struct BuildMeshVisibility {
 
 impl BuildMeshVisibility {
     pub(super) fn push(&mut self, face_visibility: &MapFaceVisibility, range: MapMeshIndexRange) {
-        if face_visibility.always_visible || face_visibility.clusters.is_empty() {
+        if face_visibility.always_visible {
             self.always_visible.push(range);
         }
         for cluster in &face_visibility.clusters {
@@ -393,8 +393,8 @@ pub(super) fn displacement_corner_positions(
         vertices
             .as_slice()
             .try_into()
-            .map_err(|_| BspError::Decode {
-                message: "displacement face is not four-sided".to_owned(),
+            .map_err(|_| BspError::Malformed {
+                message: "displacement face is not four-sided",
             })?;
     let start = displacement.start_position;
     let start_index = corners

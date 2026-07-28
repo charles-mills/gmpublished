@@ -113,7 +113,7 @@ pub fn traffic_light_center_y(tokens: &Tokens) -> f32 {
 pub struct State {
     app_version: &'static str,
     route: Route,
-    update_nag: UpdateNag,
+    update_nag: Option<UpdateRelease>,
     steam: SteamStatus,
     account_name: Option<String>,
     downloader_jobs: u32,
@@ -131,7 +131,7 @@ impl Default for State {
         Self {
             app_version: app_version_text(),
             route: Route::MyWorkshop,
-            update_nag: UpdateNag::default(),
+            update_nag: None,
             steam: SteamStatus::default(),
             account_name: None,
             downloader_jobs: 0,
@@ -165,15 +165,19 @@ impl State {
     }
 
     pub(crate) const fn update_available(&self) -> bool {
-        self.update_nag.available
+        self.update_nag.is_some()
     }
 
     pub(crate) fn update_version(&self) -> &str {
-        &self.update_nag.version
+        self.update_nag
+            .as_ref()
+            .map_or("", |release| release.version.as_str())
     }
 
     pub(crate) fn update_release_url(&self) -> &str {
-        &self.update_nag.url
+        self.update_nag
+            .as_ref()
+            .map_or("", |release| release.url.as_str())
     }
 
     pub(crate) const fn steam_status(&self) -> ConnectionStatus {
@@ -270,9 +274,7 @@ impl State {
     }
 
     pub(super) fn apply_update_release(&mut self, release: UpdateRelease) {
-        self.update_nag.available = true;
-        self.update_nag.version = release.version;
-        self.update_nag.url = release.url;
+        self.update_nag = Some(release);
     }
 
     pub(super) fn apply_steam_status(&mut self, status: ConnectionStatus) {
@@ -357,13 +359,6 @@ impl BadgeMotion {
     fn needs_ticks(&self) -> bool {
         self.opacity.needs_ticks()
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct UpdateNag {
-    available: bool,
-    version: String,
-    url: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

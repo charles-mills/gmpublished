@@ -1,7 +1,34 @@
 mod payload;
 
+/// Status strings a transaction reports over the wire.
+///
+/// Shared between the crate that emits one and the crate that compares it, so
+/// the two spellings cannot drift apart. `crates/app` re-exports these
+/// alongside the statuses it produces itself.
+pub mod status {
+    pub const LOCATING: &str = "locating";
+    pub const DECOMPRESSING: &str = "decompressing";
+    pub const READING_METADATA: &str = "reading_metadata";
+    pub const PUBLISH_STARTING: &str = "PUBLISH_STARTING";
+    pub const PUBLISH_PROCESSING_ICON: &str = "PUBLISH_PROCESSING_ICON";
+    pub const PUBLISH_PACKING: &str = "PUBLISH_PACKING";
+
+    /// Every status above. The app renders a status by looking its string up
+    /// as a translation key, so it walks this to check each one has an entry —
+    /// a status added without one reaches the user as its raw wire string.
+    pub const ALL: &[&str] = &[
+        LOCATING,
+        DECOMPRESSING,
+        READING_METADATA,
+        PUBLISH_STARTING,
+        PUBLISH_PROCESSING_ICON,
+        PUBLISH_PACKING,
+    ];
+}
+
 use parking_lot::RwLock;
 use serde::Serialize;
+use std::fmt;
 use std::sync::{
     Arc, Weak,
     atomic::{AtomicU8, AtomicU32, Ordering},
@@ -99,10 +126,10 @@ impl Transactions {
 
     #[must_use]
     pub fn begin(&self) -> Transaction {
-        let id = self.shared.id.fetch_add(1, Ordering::SeqCst);
+        let id = TransactionId(self.shared.id.fetch_add(1, Ordering::SeqCst));
         let transaction = Arc::new(TransactionInner {
             id,
-            state: AtomicU8::new(STATE_RUNNING),
+            state: AtomicU8::new(State::Running as u8),
             shared: Arc::clone(&self.shared),
         });
 
@@ -114,28 +141,29 @@ impl Transactions {
             });
         }
 
-        transaction
+        Transaction(transaction)
     }
 
     #[must_use]
-    pub fn find(&self, transaction_id: u32) -> Option<Transaction> {
+    pub fn find(&self, transaction_id: TransactionId) -> Option<Transaction> {
         let registry = self.shared.registry.read();
         if let Ok(pos) =
             registry.binary_search_by_key(&transaction_id, |transaction| transaction.id)
         {
             let transaction = registry.get(pos).unwrap().upgrade();
             drop(registry);
-            if transaction.is_some() {
-                return transaction;
-            }
-            #[cfg(debug_assertions)]
-            panic!("Stale transaction found in transactions list");
+            // A failed upgrade is not a leak: the entry is removed by
+            // `try_finalize`, which `Drop` reaches only after the last strong
+            // reference is already gone. A concurrent lookup in that window
+            // sees a live entry it cannot upgrade, and "already finished" is
+            // the right answer for it.
+            return transaction;
         }
 
         None
     }
 
-    pub fn cancel_by_id(&self, id: u32) -> bool {
+    pub fn cancel_by_id(&self, id: TransactionId) -> bool {
         let Some(transaction) = self.find(id) else {
             return false;
         };
@@ -144,12 +172,12 @@ impl Transactions {
 }
 
 pub struct TransactionRef {
-    pub id: u32,
+    pub id: TransactionId,
     ptr: Weak<TransactionInner>,
 }
 impl TransactionRef {
     fn upgrade(&self) -> Option<Transaction> {
-        self.ptr.upgrade()
+        self.ptr.upgrade().map(Transaction)
     }
 }
 impl PartialOrd for TransactionRef {
@@ -174,24 +202,75 @@ fn progress_as_int(progress: f64) -> u16 {
     u16::min((progress * 10000.) as u16, 10000)
 }
 
-const STATE_RUNNING: u8 = 0;
-const STATE_FINISHED: u8 = 1;
-const STATE_ERRORED: u8 = 2;
-const STATE_CANCELLED: u8 = 3;
-
-pub type Transaction = Arc<TransactionInner>;
-pub struct TransactionInner {
-    pub id: u32,
-    state: AtomicU8,
-    shared: Arc<TransactionsShared>,
+/// The one-way `Running -> terminal` lifecycle, stored in an [`AtomicU8`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum State {
+    Running = 0,
+    Finished = 1,
+    Errored = 2,
+    Cancelled = 3,
 }
-impl std::fmt::Debug for TransactionInner {
+
+impl State {
+    /// Only ever fed a discriminant this module wrote — the initial
+    /// `State::Running` or a `try_finalize` `compare_exchange` — so the
+    /// catch-all arm is `Running` itself, not a fallback for unknown input.
+    const fn from_raw(raw: u8) -> Self {
+        debug_assert!(raw <= Self::Cancelled as u8, "state came from elsewhere");
+        match raw {
+            1 => Self::Finished,
+            2 => Self::Errored,
+            3 => Self::Cancelled,
+            _ => Self::Running,
+        }
+    }
+}
+
+/// Identifies one transaction for its whole lifetime. The correlation key the
+/// app matches backend progress events against its own tasks.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TransactionId(u32);
+
+impl TransactionId {
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Only [`Transactions::begin`] mints these in production; tests need to
+    /// name one that never existed.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_raw(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl fmt::Display for TransactionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A handle to one in-flight transaction. Cloning shares the same underlying
+/// state machine, so any clone can finalize it.
+#[derive(Clone)]
+pub struct Transaction(Arc<TransactionInner>);
+
+impl std::fmt::Debug for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TransactionInner")
-            .field("id", &self.id)
+        f.debug_struct("Transaction")
+            .field("id", &self.0.id)
             .field("aborted", &self.aborted())
             .finish_non_exhaustive()
     }
+}
+
+struct TransactionInner {
+    id: TransactionId,
+    state: AtomicU8,
+    shared: Arc<TransactionsShared>,
 }
 impl TransactionInner {
     fn emit(&self, event: TransactionEvent) {
@@ -210,9 +289,15 @@ impl TransactionInner {
     /// if this call won it (the caller may now emit its terminal message);
     /// `Err(existing)` if another call already finalized the transaction
     /// first, naming the state that won.
-    fn try_finalize(&self, target: u8) -> Result<(), u8> {
+    fn try_finalize(&self, target: State) -> Result<(), State> {
         self.state
-            .compare_exchange(STATE_RUNNING, target, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(
+                State::Running as u8,
+                target as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(State::from_raw)
             .map(|_| {
                 let mut registry = self.shared.registry.write();
                 if let Ok(pos) =
@@ -223,21 +308,21 @@ impl TransactionInner {
             })
     }
 
-    pub fn data(&self, payload: TransactionPayload) {
+    fn data(&self, payload: TransactionPayload) {
         self.emit(TransactionEvent::Data {
             id: self.id,
             payload,
         });
     }
 
-    pub fn status<S: Into<String>>(&self, status: S) {
+    fn status<S: Into<String>>(&self, status: S) {
         self.emit(TransactionEvent::Status {
             id: self.id,
             status: status.into(),
         });
     }
 
-    pub fn progress(&self, progress: f64) {
+    fn progress(&self, progress: f64) {
         if self.aborted() {
             log::warn!("Tried to progress an aborted transaction!");
         } else {
@@ -248,7 +333,7 @@ impl TransactionInner {
         }
     }
 
-    pub fn progress_incr(&self, progress: f64) {
+    fn progress_incr(&self, progress: f64) {
         if self.aborted() {
             log::warn!("Tried to progress an aborted transaction!");
         } else {
@@ -259,7 +344,7 @@ impl TransactionInner {
         }
     }
 
-    pub fn progress_reset(&self) {
+    fn progress_reset(&self) {
         if self.aborted() {
             log::warn!("Tried to reset the progress of an aborted transaction!");
         } else {
@@ -270,10 +355,11 @@ impl TransactionInner {
     /// Finalizes with an error. A no-op if the transaction is already
     /// terminal: only a concurrent [`Self::cancel`] is a legitimate reason
     /// for that (asserted below), everything else double-finalizing is a bug.
-    pub fn error(&self, error: impl Into<TransactionError>) {
-        if let Err(existing) = self.try_finalize(STATE_ERRORED) {
+    fn error(&self, error: impl Into<TransactionError>) {
+        if let Err(existing) = self.try_finalize(State::Errored) {
             debug_assert_eq!(
-                existing, STATE_CANCELLED,
+                existing,
+                State::Cancelled,
                 "Tried to error an already-finished transaction!"
             );
             return;
@@ -286,10 +372,11 @@ impl TransactionInner {
 
     /// Finalizes as finished. Same no-op-unless-cancelled contract as
     /// [`Self::error`].
-    pub fn finished(&self, payload: TransactionPayload) {
-        if let Err(existing) = self.try_finalize(STATE_FINISHED) {
+    fn finished(&self, payload: TransactionPayload) {
+        if let Err(existing) = self.try_finalize(State::Finished) {
             debug_assert_eq!(
-                existing, STATE_CANCELLED,
+                existing,
+                State::Cancelled,
                 "Tried to finish an already-finished transaction!"
             );
             return;
@@ -304,8 +391,8 @@ impl TransactionInner {
     /// the transaction: losing the race to a concurrent [`Self::finished`]
     /// or [`Self::error`] is expected (the work already completed) and not
     /// a bug, so callers get a plain `bool` rather than an assertion.
-    pub fn cancel(&self) -> bool {
-        let Ok(()) = self.try_finalize(STATE_CANCELLED) else {
+    fn cancel(&self) -> bool {
+        let Ok(()) = self.try_finalize(State::Cancelled) else {
             return false;
         };
         self.emit(TransactionEvent::Error {
@@ -315,10 +402,56 @@ impl TransactionInner {
         true
     }
 
-    pub fn aborted(&self) -> bool {
-        self.state.load(Ordering::Acquire) != STATE_RUNNING
+    fn aborted(&self) -> bool {
+        State::from_raw(self.state.load(Ordering::Acquire)) != State::Running
     }
 }
+impl Transaction {
+    #[must_use]
+    pub fn id(&self) -> TransactionId {
+        self.0.id
+    }
+
+    pub fn data(&self, payload: TransactionPayload) {
+        self.0.data(payload);
+    }
+
+    pub fn status<S: Into<String>>(&self, status: S) {
+        self.0.status(status);
+    }
+
+    pub fn progress(&self, progress: f64) {
+        self.0.progress(progress);
+    }
+
+    pub fn progress_incr(&self, progress: f64) {
+        self.0.progress_incr(progress);
+    }
+
+    pub fn progress_reset(&self) {
+        self.0.progress_reset();
+    }
+
+    pub fn error(&self, error: impl Into<TransactionError>) {
+        self.0.error(error);
+    }
+
+    pub fn finished(&self, payload: TransactionPayload) {
+        self.0.finished(payload);
+    }
+
+    /// Returns whether this call won the race to finalize; losing to a
+    /// concurrent completion is expected, not an error.
+    pub fn cancel(&self) -> bool {
+        self.0.cancel()
+    }
+
+    #[must_use]
+    pub fn aborted(&self) -> bool {
+        self.0.aborted()
+    }
+}
+
 impl Drop for TransactionInner {
     fn drop(&mut self) {
         if !self.aborted() {
@@ -329,15 +462,6 @@ impl Drop for TransactionInner {
         }
     }
 }
-impl serde::Serialize for TransactionInner {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u64(self.id as u64)
-    }
-}
-
 pub(crate) fn detail_from_serialize<D: Serialize>(data: D) -> Option<String> {
     let Ok(value) = serde_json::to_value(data) else {
         return None;
@@ -355,7 +479,10 @@ pub(crate) fn detail_from_serialize<D: Serialize>(data: D) -> Option<String> {
 mod tests {
     use std::sync::{Arc, atomic::AtomicU8};
 
-    use super::{STATE_RUNNING, TransactionInner, TransactionsShared, progress_as_int};
+    use super::{
+        State, TransactionId, TransactionInner, TransactionRef, Transactions, TransactionsShared,
+        progress_as_int,
+    };
 
     use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};
 
@@ -366,6 +493,21 @@ mod tests {
             sink: Arc::new(sink),
             cli_mode: false,
         })
+    }
+
+    /// `find` must not treat a registry entry it cannot upgrade as a bug:
+    /// `Drop` removes the entry strictly after the strong count reaches zero,
+    /// so a concurrent lookup can legitimately observe one.
+    #[test]
+    fn find_returns_none_for_an_entry_that_cannot_upgrade() {
+        let transactions = Transactions::new(Arc::new(crate::events::NullEventSink), false);
+        let id = TransactionId::from_raw(9);
+        transactions.shared.registry.write().push(TransactionRef {
+            id,
+            ptr: std::sync::Weak::new(),
+        });
+
+        assert!(transactions.find(id).is_none());
     }
 
     #[test]
@@ -382,8 +524,8 @@ mod tests {
         let collector = BackendEventCollector::default();
 
         let transaction = TransactionInner {
-            id: 42,
-            state: AtomicU8::new(STATE_RUNNING),
+            id: TransactionId(42),
+            state: AtomicU8::new(State::Running as u8),
             shared: shared_for_test(collector.clone()),
         };
         transaction.emit_desktop(TransactionEvent::Status {
@@ -406,10 +548,10 @@ mod tests {
             super::Transactions::new(Arc::new(BackendEventCollector::default()), false);
         let transaction = transactions.begin();
 
-        assert!(transactions.cancel_by_id(transaction.id));
+        assert!(transactions.cancel_by_id(transaction.id()));
         assert!(transaction.aborted());
-        assert!(!transactions.cancel_by_id(transaction.id));
-        assert!(!transactions.cancel_by_id(u32::MAX));
+        assert!(!transactions.cancel_by_id(transaction.id()));
+        assert!(!transactions.cancel_by_id(TransactionId(u32::MAX)));
     }
 
     #[test]
@@ -428,8 +570,8 @@ mod tests {
     #[test]
     fn cancel_loses_to_an_already_finished_transaction() {
         let transaction = TransactionInner {
-            id: 7,
-            state: AtomicU8::new(STATE_RUNNING),
+            id: TransactionId(7),
+            state: AtomicU8::new(State::Running as u8),
             shared: shared_for_test(BackendEventCollector::default()),
         };
 
@@ -443,8 +585,8 @@ mod tests {
     fn cancel_wins_against_a_later_finish_and_no_finished_follows() {
         let collector = BackendEventCollector::default();
         let transaction = TransactionInner {
-            id: 9,
-            state: AtomicU8::new(STATE_RUNNING),
+            id: TransactionId(9),
+            state: AtomicU8::new(State::Running as u8),
             shared: shared_for_test(collector.clone()),
         };
 

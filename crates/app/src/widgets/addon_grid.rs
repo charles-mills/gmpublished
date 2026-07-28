@@ -5,6 +5,8 @@ use iced::Task;
 use iced::widget::{Space, column, container, mouse_area, row, scrollable, sensor};
 use iced::{Element, Length, Point, Size};
 
+#[cfg(test)]
+use crate::generation::Generation;
 use crate::theme::{self, Tokens};
 use crate::widgets::addon_card;
 
@@ -42,7 +44,7 @@ pub struct State {
     card_gap: f32,
     layout: RowLayout,
     #[cfg(test)]
-    layout_cache_generation: u64,
+    layout_cache_generation: Generation,
 }
 
 impl Default for State {
@@ -66,7 +68,7 @@ impl Default for State {
             card_gap: DEFAULT_CARD_GAP,
             layout: RowLayout::default(),
             #[cfg(test)]
-            layout_cache_generation: 0,
+            layout_cache_generation: Generation::INITIAL,
         }
     }
 }
@@ -207,6 +209,31 @@ impl State {
         self.reconcile_layout_at(now)
     }
 
+    /// Whether the grid has reached the point of needing another page, and
+    /// claims the request if so.
+    ///
+    /// A pull rather than a message: the decision latches
+    /// `next_page_requested`, so a caller that could not act on a returned
+    /// message would leave the latch suppressing every later request. Re-armed
+    /// by [`Self::set_page_status`] once the fetch is no longer in flight.
+    #[must_use]
+    pub(crate) fn take_next_page_request(&mut self) -> bool {
+        let row_count = self.layout.rows.len();
+        if row_count == 0 || !self.has_more_pages || self.loading || self.next_page_requested {
+            return false;
+        }
+
+        // With no measured viewport the visible range is empty and can never
+        // reach the last row, so any scroll away from the top stands in for it.
+        let reached_last_row = self.visible_rows.end >= row_count.saturating_sub(1);
+        let scrolled_blind = self.viewport_height <= 0.0 && self.scroll_offset > 0.0;
+        if reached_last_row || scrolled_blind {
+            self.next_page_requested = true;
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn scroll_offset(&self) -> f32 {
         self.scroll_offset
     }
@@ -217,7 +244,7 @@ impl State {
     }
 
     #[cfg(test)]
-    fn layout_cache_generation(&self) -> u64 {
+    fn layout_cache_generation(&self) -> Generation {
         self.layout_cache_generation
     }
 
@@ -245,18 +272,7 @@ impl State {
 
     fn set_scroll_offset_at(&mut self, offset: f32, now: Instant) -> Vec<Message> {
         self.scroll_offset = finite_nonnegative(offset);
-        let mut messages = self.reconcile_layout_at(now);
-        if self.viewport_height <= 0.0
-            && self.scroll_offset > 0.0
-            && !self.layout.rows.is_empty()
-            && self.has_more_pages
-            && !self.loading
-            && !self.next_page_requested
-        {
-            self.next_page_requested = true;
-            messages.push(Message::NextPageRequested);
-        }
-        messages
+        self.reconcile_layout_at(now)
     }
 
     fn set_viewport_size_at(&mut self, size: Size, now: Instant) -> Vec<Message> {
@@ -280,15 +296,6 @@ impl State {
             visible_rows_for_viewport(&self.layout.rows, self.scroll_offset, self.viewport_height);
         let mut messages = Vec::new();
         if visible_rows == self.visible_rows {
-            if let Some(message) = maybe_request_next_page(
-                self.layout.rows.len(),
-                visible_rows,
-                self.has_more_pages,
-                self.loading,
-                &mut self.next_page_requested,
-            ) {
-                messages.push(message);
-            }
             messages.extend(self.reconcile_hover(now));
             return messages;
         }
@@ -302,15 +309,6 @@ impl State {
             ));
         }
 
-        if let Some(message) = maybe_request_next_page(
-            self.layout.rows.len(),
-            visible_rows,
-            self.has_more_pages,
-            self.loading,
-            &mut self.next_page_requested,
-        ) {
-            messages.push(message);
-        }
         messages.extend(self.reconcile_hover(now));
         messages
     }
@@ -343,7 +341,7 @@ impl State {
         self.card_gap = tokens.spacing.gap;
         #[cfg(test)]
         {
-            self.layout_cache_generation += 1;
+            self.layout_cache_generation.bump();
         }
     }
 
@@ -449,7 +447,6 @@ pub enum Message {
     CursorMoved(Point),
     CursorLeft,
     CardHoverChanged(String, bool),
-    NextPageRequested,
     /// The grid moved its own scroll offset by this delta to keep the first
     /// visible row stationary after item heights changed above it. The owner
     /// must relay it to the runtime as a *relative* `scroll_by` — the
@@ -497,10 +494,6 @@ fn apply_at(state: &mut State, message: &Message, now: Instant) -> Vec<Message> 
         Message::CardClicked(_) | Message::CardPressed(_) | Message::CardReleased(_) => Vec::new(),
         Message::CardContextRequested(_, _) => Vec::new(),
         Message::CardHoverChanged(_, _) => Vec::new(),
-        Message::NextPageRequested => {
-            state.next_page_requested = true;
-            Vec::new()
-        }
         Message::ScrollAnchored(_) => Vec::new(),
     }
 }
@@ -986,25 +979,6 @@ fn scrollable_content_width(width: f32, tokens: &Tokens) -> f32 {
         finite_nonnegative(width),
         theme::styles::vertical_scrollbar_reserved_width(tokens),
     )
-}
-
-fn maybe_request_next_page(
-    row_count: usize,
-    visible_rows: VisibleRowRange,
-    has_more_pages: bool,
-    loading: bool,
-    already_requested: &mut bool,
-) -> Option<Message> {
-    if row_count == 0 || !has_more_pages || loading || *already_requested {
-        return None;
-    }
-
-    if visible_rows.end >= row_count.saturating_sub(1) {
-        *already_requested = true;
-        Some(Message::NextPageRequested)
-    } else {
-        None
-    }
 }
 
 fn finite_nonnegative(value: f32) -> f32 {

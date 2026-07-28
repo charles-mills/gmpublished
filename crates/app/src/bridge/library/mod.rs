@@ -467,7 +467,7 @@ fn read_candidate(
 }
 
 fn library_meta(path: &Path) -> Result<GmaMeta, super::gma::GmaError> {
-    { GmaMeta::open_index(path) }
+    GmaMeta::open_index(path)
 }
 
 fn cached_meta<E>(

@@ -57,21 +57,23 @@ pub enum Icon {
     DebugMinus,
 }
 
+/// One row of a context menu: either a divider, or something pressable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Entry {
-    label_key: &'static str,
-    action: Option<ContextMenuAction>,
-    separator: bool,
-    icon: Option<Icon>,
+pub enum Entry {
+    Separator,
+    Item {
+        label_key: &'static str,
+        action: ContextMenuAction,
+        icon: Icon,
+    },
 }
 
 impl Entry {
     const fn actionable(label_key: &'static str, action: ContextMenuAction, icon: Icon) -> Self {
-        Self {
+        Self::Item {
             label_key,
-            action: Some(action),
-            separator: false,
-            icon: Some(icon),
+            action,
+            icon,
         }
     }
 
@@ -178,30 +180,11 @@ impl Entry {
     }
 
     pub(crate) const fn separator() -> Self {
-        Self {
-            label_key: "",
-            action: None,
-            separator: true,
-            icon: None,
-        }
-    }
-
-    pub(crate) const fn label_key(&self) -> &'static str {
-        self.label_key
-    }
-
-    /// The entry's dispatched action. Only `None` for separator rows, which
-    /// never render as pressable.
-    pub(crate) const fn action(&self) -> Option<ContextMenuAction> {
-        self.action
+        Self::Separator
     }
 
     pub(crate) const fn separator_row(&self) -> bool {
-        self.separator
-    }
-
-    pub(crate) const fn icon(&self) -> Option<Icon> {
-        self.icon
+        matches!(self, Self::Separator)
     }
 }
 

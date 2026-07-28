@@ -6,6 +6,7 @@ use super::{
     PublishedFileId, SyncSender, TaskId, TransactionError, TransactionPayload, TrySendError,
     UiError, WorkshopDownloadTaskKind, fmt, mpsc,
 };
+use gmpublished_backend::transactions::TransactionId;
 
 #[cfg(not(test))]
 pub(super) const fn install_backend_event_sink_by_default() -> bool {
@@ -144,11 +145,11 @@ pub enum BackendRuntimeEvent {
     AppDataUpdated(Box<BackendAppDataSnapshot>),
     InstalledAddonsRefreshed,
     DownloadStarted {
-        transaction_id: u32,
+        transaction_id: TransactionId,
         request_id: Option<u64>,
     },
     ExtractionStarted {
-        transaction_id: u32,
+        transaction_id: TransactionId,
         source_path: Option<PathBuf>,
         file_name: Option<String>,
         workshop_id: Option<PublishedFileId>,
@@ -247,31 +248,31 @@ pub enum BackendRuntimeAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransactionRuntimeEvent {
     Finished {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Error {
-        id: u32,
+        id: TransactionId,
         error: TransactionError,
     },
     Data {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Status {
-        id: u32,
+        id: TransactionId,
         status: String,
     },
     Progress {
-        id: u32,
+        id: TransactionId,
         progress: u16,
     },
     IncrProgress {
-        id: u32,
+        id: TransactionId,
         incr: u16,
     },
     ResetProgress {
-        id: u32,
+        id: TransactionId,
     },
 }
 
@@ -346,7 +347,7 @@ impl From<BackendTransactionEvent> for TransactionRuntimeEvent {
 }
 
 impl TransactionRuntimeEvent {
-    pub(super) const fn transaction_id(&self) -> u32 {
+    pub(super) const fn transaction_id(&self) -> TransactionId {
         match self {
             Self::Finished { id, .. }
             | Self::Error { id, .. }

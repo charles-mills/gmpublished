@@ -11,6 +11,7 @@ use super::{
     traffic_light_center_y, traffic_light_origin_x,
 };
 
+use crate::bridge::domain::SteamId;
 use crate::features::steam_session::{ConnectionStatus, SteamIdentity};
 use crate::theme::Tokens;
 
@@ -235,7 +236,7 @@ fn account_menu_open_close_transitions_are_state_local() {
 
 fn steam_identity(name: &str, avatar: Option<AvatarRgba>) -> SteamIdentity {
     SteamIdentity::from_user(SteamUser {
-        steamid: 76561198000000001,
+        steamid: SteamId::new(76561198000000001),
         name: name.to_owned(),
         avatar,
         dead: false,

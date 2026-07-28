@@ -5,6 +5,7 @@ use super::{
     workshop_url,
 };
 
+use crate::generation::Generation;
 use iced::widget::operation;
 
 impl App {
@@ -36,7 +37,7 @@ impl App {
 
     pub(super) fn search_metadata_task(
         &self,
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     ) -> Task<RootMessage> {
         let worker_item_ids = item_ids.clone();
@@ -56,7 +57,7 @@ impl App {
 
     pub(super) fn search_metadata_refresh_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     ) -> Task<RootMessage> {
         if let Some(task) =
@@ -84,7 +85,9 @@ impl App {
     }
 
     pub(super) fn search_full_task(&mut self) -> Task<RootMessage> {
-        let task = self.ctx.create_task(TaskKind::Search, "search");
+        let task = self
+            .ctx
+            .create_task(TaskKind::Search, crate::bridge::tasks::SEARCH_STATUS);
         let Some(start) = self.state.search.begin_full_search(task.id()) else {
             task.error(gmpublished_backend::error_key::keys::CANCELLED);
             return Task::none();

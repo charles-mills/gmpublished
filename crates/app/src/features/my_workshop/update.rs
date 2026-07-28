@@ -1,8 +1,21 @@
 use crate::widgets::{addon_grid, grid_rows};
 
 use super::{Effect, Message, State};
+use crate::generation::Generation;
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    let mut effects = update_message(state, message);
+    // Asked after every message rather than delivered as one: the grid latches
+    // the request when it decides, and a state sync that discarded the message
+    // would leave the latch suppressing every later page.
+    if state.grid_mut().take_next_page_request() {
+        append_page_request_effect(state.begin_next_page(), &mut effects);
+        effects.push(Effect::ThumbnailDemandsChanged);
+    }
+    effects
+}
+
+fn update_message(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::RouteEntered => {
             let mut effects = Vec::new();
@@ -70,10 +83,6 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
                 effects.push(Effect::ContextMenuRequested(menu));
             }
         }
-        addon_grid::Message::NextPageRequested => {
-            append_page_request_effect(state.begin_next_page(), effects);
-            effects.push(Effect::ThumbnailDemandsChanged);
-        }
         addon_grid::Message::VisibleRangeChanged(_, _) => {
             state.reconcile_visible_counts();
             effects.push(Effect::ThumbnailDemandsChanged);
@@ -93,13 +102,13 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
     }
 }
 
-fn append_page_request_effect(request: Option<(u64, u32)>, effects: &mut Vec<Effect>) {
+fn append_page_request_effect(request: Option<(Generation, u32)>, effects: &mut Vec<Effect>) {
     if let Some((generation, page)) = request {
         effects.push(Effect::PageRequested { generation, page });
     }
 }
 
-fn append_stats_refresh_effect(request: Option<(u64, u32)>, effects: &mut Vec<Effect>) {
+fn append_stats_refresh_effect(request: Option<(Generation, u32)>, effects: &mut Vec<Effect>) {
     if let Some((generation, pages)) = request {
         effects.push(Effect::StatsRefreshRequested { generation, pages });
     }
@@ -113,6 +122,7 @@ fn stats_refresh_effects(state: &mut State) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
+    use crate::generation::Generation;
     use std::collections::HashMap;
 
     use super::super::model::{PUBLISH_NEW_ROW_ID, PageResult, PreparePublishTarget, Row};
@@ -131,7 +141,7 @@ mod tests {
             effects,
             vec![
                 Effect::PageRequested {
-                    generation: 1,
+                    generation: Generation::from_raw(1),
                     page: 1,
                 },
                 Effect::ThumbnailDemandsChanged,
@@ -168,7 +178,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::PageCompleted(
-                1,
+                Generation::from_raw(1),
                 1,
                 Ok(PageResult {
                     page: 1,
@@ -193,7 +203,7 @@ mod tests {
         assert_eq!(
             effects,
             vec![Effect::StatsRefreshRequested {
-                generation: 1,
+                generation: Generation::from_raw(1),
                 pages: 1,
             }]
         );
@@ -212,7 +222,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::StatsRefreshCompleted(
-                1,
+                Generation::from_raw(1),
                 Ok(HashMap::from([(
                     PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
                     25,
@@ -338,25 +348,37 @@ mod tests {
         );
     }
 
+    /// A page that does not overflow the viewport never scrolls, so nothing
+    /// but this request advances it. The grid must not latch the request
+    /// inside `sync_grid_items`, whose messages are discarded — a latch set
+    /// there suppresses every later request and pagination stops for good.
     #[test]
-    fn next_page_request_emits_page_request_and_thumbnail_sync() {
+    fn a_page_that_fits_the_viewport_requests_the_next_one() {
         let mut state = State::default();
-        state.push_rows_for_test(vec![Row::for_test(42, "Addon", 10)], 2);
+        let _ = addon_grid::apply(
+            state.grid_mut(),
+            addon_grid::Message::ViewportResized(800, 600),
+        );
+        state.push_rows_for_test(vec![Row::for_test(42, "Addon", 10)], 50);
 
-        let effects = update(
-            &mut state,
-            Message::Grid(addon_grid::Message::NextPageRequested),
+        let effects = update(&mut state, Message::StatsRefreshTick);
+
+        assert!(
+            effects.contains(&Effect::PageRequested {
+                generation: Generation::from_raw(1),
+                page: 2,
+            }),
+            "the next page must be requested without waiting for a scroll: {effects:?}"
         );
 
-        assert_eq!(
-            effects,
-            vec![
-                Effect::PageRequested {
-                    generation: 1,
-                    page: 2,
-                },
-                Effect::ThumbnailDemandsChanged,
-            ]
+        // Claimed once: a second message must not re-request while the fetch
+        // is still in flight.
+        let again = update(&mut state, Message::StatsRefreshTick);
+        assert!(
+            !again
+                .iter()
+                .any(|effect| matches!(effect, Effect::PageRequested { .. })),
+            "{again:?}"
         );
     }
 
@@ -367,7 +389,7 @@ mod tests {
         let _effects = update(
             &mut state,
             Message::PageCompleted(
-                1,
+                Generation::from_raw(1),
                 1,
                 Ok(PageResult {
                     page: 1,

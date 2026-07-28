@@ -7,6 +7,8 @@ use super::model::{PreviewData, PreviewLoadStage, PreviewRequest};
 use super::state::{FlyPose, MovementMode, OrbitPose};
 use crate::bridge::archive::PreviewArchiveSourceError;
 use crate::bridge::tasks::ScheduleError;
+use crate::generation::Generation;
+use gmpublished_backend::particles::ControlPointIndex;
 
 /// Why loading a preview entry failed. Variants carry the actual producer
 /// error so its `Display` reaches the user verbatim; only the wire boundary
@@ -33,12 +35,12 @@ impl PartialEq for PreviewLoadError {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     OpenRequested(PreviewRequest),
-    LoadStageChanged(u64, PreviewLoadStage),
+    LoadStageChanged(Generation, PreviewLoadStage),
     /// Boxed: the inline `PreviewData` (a `PreviewContent::Map` carries ~170
     /// bytes of scene metadata) otherwise sets the size of this enum, and
     /// through it `RootMessage` — which every message pays, including the
     /// per-frame animation ticks.
-    Loaded(u64, Box<Result<PreviewData, PreviewLoadError>>),
+    Loaded(Generation, Box<Result<PreviewData, PreviewLoadError>>),
     AnimationTick(Instant),
     AudioToggleRequested,
     AudioPlaybackStarted,
@@ -75,7 +77,7 @@ pub enum Message {
     ParticleRestartRequested,
     ParticleSpeedSelected(f32),
     ParticleControlPointChanged {
-        index: usize,
+        index: ControlPointIndex,
         position: [f32; 3],
     },
     InspectorResized {

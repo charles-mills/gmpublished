@@ -22,6 +22,7 @@ use ::image::GenericImageView;
 use gmpublished_backend::error_key::keys;
 use iced::widget::image;
 
+use crate::generation::Generation;
 use crate::{
     bridge::gma::{ArchiveEntryPath, GmaMetaEntry, whitelist},
     media::{thumbnail_animation, thumbnail_worker::PreparedAnimation},
@@ -35,7 +36,7 @@ const MAX_WHITELIST_FAILURES: usize = 9;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentPathVerificationRequest {
-    pub(crate) generation: u64,
+    pub(crate) generation: Generation,
     pub(crate) display_path: String,
     pub(crate) path: PathBuf,
 }
@@ -66,7 +67,7 @@ pub struct VerifiedContentPathState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IconVerificationRequest {
-    pub(crate) generation: u64,
+    pub(crate) generation: Generation,
     pub(crate) display_path: String,
     pub(crate) path: PathBuf,
     pub(crate) temp_dir: PathBuf,
@@ -92,8 +93,6 @@ pub struct VerifiedIconPreview {
     pub(crate) backdrop: image::Handle,
     pub(crate) animation: Option<thumbnail_animation::Playback>,
 }
-
-pub use crate::widgets::select_option::SelectOption;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IgnoredPattern {
@@ -131,7 +130,7 @@ pub struct PublishSubmitContext {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishSubmitRequestEnvelope {
-    pub(crate) generation: u64,
+    pub(crate) generation: Generation,
     pub(crate) request: PublishSubmitRequest,
 }
 
@@ -149,7 +148,7 @@ pub struct PublishSubmitResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishIconSubmitRequestEnvelope {
-    pub(crate) generation: u64,
+    pub(crate) generation: Generation,
     pub(crate) icon_source_path: PathBuf,
     pub(crate) upscale: bool,
     pub(crate) workshop_id: PublishedFileId,
@@ -231,14 +230,14 @@ pub fn run_publish_submit(
     task: TaskHandle,
     request: PublishSubmitRequest,
 ) -> Result<PublishSubmitResult, UiError> {
-    task.status("PUBLISH_STARTING");
+    task.status(crate::bridge::tasks::PUBLISH_STARTING_STATUS);
     if let Err(error) = connect_steam(services) {
         task.error(error.clone());
         return Err(error);
     }
 
     let transaction = services.begin_transaction();
-    let transaction_id = transaction.id;
+    let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
     match services.submit_publish_request(request, &transaction) {
@@ -266,14 +265,14 @@ pub fn run_publish_icon_submit(
     task: TaskHandle,
     request: &PublishIconSubmitRequestEnvelope,
 ) -> Result<PublishIconSubmitResult, UiError> {
-    task.status("PUBLISH_PROCESSING_ICON");
+    task.status(crate::bridge::tasks::PUBLISH_PROCESSING_ICON_STATUS);
     if let Err(error) = connect_steam(services) {
         task.error(error.clone());
         return Err(error);
     }
 
     let transaction = services.begin_transaction();
-    let transaction_id = transaction.id;
+    let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
     match services.submit_publish_icon_request(
@@ -470,6 +469,12 @@ fn collect_content_entries(
     Ok(())
 }
 
+/// A path under `root` in the archive's canonical form.
+///
+/// ASCII lowercasing specifically, matching
+/// [`crate::bridge::content_path::normalize_archive_path`]: a Unicode
+/// lowercase would fold characters it does not, so `CAFÉ.vmt` would index one
+/// way here and be looked up another, and nothing would ever find it.
 fn relative_slash_path(root: &Path, path: &Path) -> Result<String, UiError> {
     let relative = path
         .strip_prefix(root)
@@ -479,7 +484,7 @@ fn relative_slash_path(root: &Path, path: &Path) -> Result<String, UiError> {
         let std::path::Component::Normal(component) = component else {
             continue;
         };
-        let component = component.to_string_lossy().to_lowercase();
+        let component = component.to_string_lossy().to_ascii_lowercase();
         if !component.is_empty() {
             if !output.is_empty() {
                 output.push('/');
@@ -669,6 +674,30 @@ mod tests {
     use crate::bridge::tasks::BackendServices;
     use crate::test_support::TestDir;
 
+    /// The verifier indexes an entry by this path; a material referencing the
+    /// same name is looked up through `ContentPath`. Both must reduce that one
+    /// name identically — two lowercasing rules agree on ASCII and diverge on
+    /// everything else, so the entry would exist and never be found.
+    #[test]
+    fn entry_paths_and_content_paths_reduce_a_name_identically() {
+        let root = PathBuf::from("/addon");
+
+        for name in [
+            "Materials/Models/THING.VMT",
+            "materials/CAFÉ.vmt",
+            "a/b/c.txt",
+        ] {
+            let indexed = relative_slash_path(&root, &root.join(name)).expect("under the root");
+            let looked_up = crate::bridge::content_path::ContentPath::new(name)
+                .expect("a verified entry path has a canonical form");
+            assert_eq!(
+                indexed,
+                looked_up.as_str(),
+                "{name} indexes in a form its own lookup cannot reproduce"
+            );
+        }
+    }
+
     #[test]
     fn ignored_patterns_keep_user_order_then_defaults_alphabetical() {
         let settings = Settings {
@@ -707,7 +736,7 @@ mod tests {
         let verified = verify_content_path(
             &BackendServices::for_test(),
             ContentPathVerificationRequest {
-                generation: 1,
+                generation: Generation::from_raw(1),
                 display_path: root.path_text(),
                 path: root.path().to_path_buf(),
             },
@@ -725,7 +754,7 @@ mod tests {
         let result = verify_content_path(
             &BackendServices::for_test(),
             ContentPathVerificationRequest {
-                generation: 1,
+                generation: Generation::from_raw(1),
                 display_path: "relative".to_owned(),
                 path: PathBuf::from("relative"),
             },
@@ -741,7 +770,7 @@ mod tests {
         root.file(".git/config", b"published historical file");
 
         let snapshot = inspect_workshop_snapshot(ContentPathVerificationRequest {
-            generation: 1,
+            generation: Generation::from_raw(1),
             display_path: root.path_text(),
             path: root.path().to_path_buf(),
         })
@@ -756,7 +785,7 @@ mod tests {
         let source = root.image("icon.png", ::image::ImageFormat::Png, 32, 48);
 
         let verified = verify_icon_preview(IconVerificationRequest {
-            generation: 1,
+            generation: Generation::from_raw(1),
             display_path: source.to_string_lossy().into_owned(),
             path: source.clone(),
             temp_dir: root.path().join("temp"),
@@ -775,7 +804,7 @@ mod tests {
         let source = root.image("icon.png", ::image::ImageFormat::Png, 1024, 1024);
 
         let verified = verify_icon_preview(IconVerificationRequest {
-            generation: 1,
+            generation: Generation::from_raw(1),
             display_path: source.to_string_lossy().into_owned(),
             path: source.clone(),
             temp_dir: root.path().join("temp"),

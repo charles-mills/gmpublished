@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::i18n::Arg;
 use iced::widget::{button, container, image, row, text};
 use iced::{Center, Color, Element, Length};
 
@@ -134,7 +135,10 @@ pub fn row_view<'a, Message: Clone + 'a>(
         }
         RowKind::File => {
             let info = file_type_info(row_data.display_name());
-            let type_label = i18n.trn(info.translation_key, &[("arg0", info.extension.as_ref())]);
+            let type_label = i18n.trn(
+                info.translation_key,
+                &[("extension", Arg::Text(info.extension.as_ref()))],
+            );
 
             row![
                 silk_image(info.icon, type_label.clone(), &tokens),

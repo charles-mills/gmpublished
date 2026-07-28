@@ -1,3 +1,4 @@
+use gmpublished_backend::transactions::TransactionId;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use super::{
     steam_user_from_workshop_backend, steam_users, steam_workshop, subscription_counts_from_items,
     transactions, ui_settings_file_for, workshop_item_from_backend,
 };
+use crate::bridge::domain::SteamId;
 
 #[derive(Debug)]
 pub struct BackendServices {
@@ -438,24 +440,21 @@ impl BackendServices {
             return Ok(());
         }
 
-        if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
-        }
+        let steam = self.require_steam_client()?;
 
         let mut cached_any = false;
         let raw_ids = item_ids.iter().map(|id| id.get()).collect();
-        let result =
-            steam_workshop::query_workshop_items_streaming(&self.backend.steam, raw_ids, |items| {
-                let items = items
-                    .into_iter()
-                    .map(workshop_item_from_backend)
-                    .collect::<Vec<_>>();
-                let metadata = self.cache_workshop_items(&items);
-                if !metadata.is_empty() {
-                    cached_any = true;
-                    on_batch(metadata);
-                }
-            });
+        let result = steam_workshop::query_workshop_items_streaming(steam, raw_ids, |items| {
+            let items = items
+                .into_iter()
+                .map(workshop_item_from_backend)
+                .collect::<Vec<_>>();
+            let metadata = self.cache_workshop_items(&items);
+            if !metadata.is_empty() {
+                cached_any = true;
+                on_batch(metadata);
+            }
+        });
 
         if cached_any {
             self.write_metadata_snapshot_best_effort();
@@ -467,11 +466,9 @@ impl BackendServices {
         &self,
         id: PublishedFileId,
     ) -> Result<crate::bridge::domain::WorkshopItem, UiError> {
-        if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
-        }
+        let steam = self.require_steam_client()?;
 
-        let item = steam_workshop::query_workshop_item_details(&self.backend.steam, id.get())
+        let item = steam_workshop::query_workshop_item_details(steam, id.get())
             .map(workshop_item_from_backend)
             .map_err(|error| UiError::from(&error))?;
         self.cache_workshop_item_details(&item);
@@ -490,29 +487,34 @@ impl BackendServices {
     }
 
     #[cfg(test)]
-    pub(crate) fn steam_user_details(&self, steamid: u64) -> Result<SteamUser, UiError> {
-        if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
-        }
-
+    pub(crate) fn steam_user_details(&self, steamid: SteamId) -> Result<SteamUser, UiError> {
         Ok(steam_user_from_workshop_backend(
-            steam_users::fetch_steam_user(&self.backend.steam, steamid),
+            steam_users::fetch_steam_user(self.require_steam_client()?, steamid.get()),
         ))
     }
 
     pub(crate) fn steam_user_details_streaming(
         &self,
-        steamid: u64,
+        steamid: SteamId,
         mut on_user: impl FnMut(SteamUser),
     ) -> Result<(), UiError> {
-        if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
-        }
-
-        steam_users::fetch_steam_user_streaming(&self.backend.steam, steamid, |user| {
-            on_user(steam_user_from_workshop_backend(user));
-        });
+        steam_users::fetch_steam_user_streaming(
+            self.require_steam_client()?,
+            steamid.get(),
+            |user| {
+                on_user(steam_user_from_workshop_backend(user));
+            },
+        );
         Ok(())
+    }
+
+    fn require_steam_client(
+        &self,
+    ) -> Result<gmpublished_backend::steam::ConnectedSteam<'_>, UiError> {
+        self.backend
+            .steam
+            .require_client()
+            .map_err(|error| UiError::from(&error))
     }
 
     pub(crate) fn steam_connected(&self) -> bool {
@@ -589,7 +591,7 @@ impl BackendServices {
         )
         .map_err(|error| UiError::from(&error))?;
         let outcome = PublishSubmitOutcome {
-            published_file_id: PublishedFileId::new(outcome.published_file_id)
+            published_file_id: PublishedFileId::new(outcome.published_file_id.0)
                 .expect("Steam never issues a zero published file id"),
             legal_agreement_required: outcome.legal_agreement_required,
         };
@@ -604,15 +606,12 @@ impl BackendServices {
         workshop_id: PublishedFileId,
         transaction: &transactions::Transaction,
     ) -> Result<bool, UiError> {
-        if !self.steam_connected() {
+        let steam = self.require_steam_client().inspect_err(|_| {
             transaction.error(&SteamRuntimeError::NotConnected);
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
-        }
-
+        })?;
         let icon = steam_publishing::WorkshopIcon::new(icon_source_path, upscale)
             .map_err(|error| UiError::from(&error))?;
-        self.backend
-            .steam
+        steam
             .update_icon(
                 gmpublished_backend::appdata::SettingsPublishedFileId(workshop_id.get()),
                 icon,
@@ -637,7 +636,7 @@ impl BackendServices {
         &self,
         request: &SearchFullRequest,
         transaction: transactions::Transaction,
-    ) -> u32 {
+    ) -> TransactionId {
         match request.mode() {
             SearchMode::Addons => self
                 .backend
@@ -680,7 +679,7 @@ impl BackendServices {
             .insert(id, content_source_path.clone());
         steam_publishing::record_published_local_path(
             &self.backend.app_data,
-            id.get(),
+            gmpublished_backend::appdata::SettingsPublishedFileId(id.get()),
             content_source_path,
         );
     }
@@ -693,12 +692,10 @@ impl BackendServices {
             return Ok(Vec::new());
         }
 
-        if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
-        }
+        let steam = self.require_steam_client()?;
 
         let raw_ids = item_ids.iter().map(|id| id.get()).collect();
-        steam_workshop::query_workshop_items(&self.backend.steam, raw_ids)
+        steam_workshop::query_workshop_items(steam, raw_ids)
             .map(|items| items.into_iter().map(workshop_item_from_backend).collect())
             .map_err(|error| UiError::from(&error))
     }

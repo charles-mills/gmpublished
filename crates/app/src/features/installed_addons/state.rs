@@ -15,6 +15,7 @@ use crate::widgets::addon_grid;
 use super::model::{
     self, ContextMenuRequest, MetadataPatch, MetadataResolution, PreviewTarget, Row,
 };
+use crate::generation::Generation;
 
 #[derive(Debug)]
 #[expect(
@@ -25,7 +26,7 @@ pub struct State {
     route_visible: bool,
     grid: addon_grid::State,
     load_status: LoadStatus,
-    generation: u64,
+    generation: Generation,
     watch_gmod_dir: Option<PathBuf>,
     watch_degraded: bool,
     watch_retry_attempted: bool,
@@ -77,7 +78,7 @@ impl Default for State {
             route_visible: false,
             grid,
             load_status: LoadStatus::Idle,
-            generation: 0,
+            generation: Generation::INITIAL,
             watch_gmod_dir: None,
             watch_degraded: false,
             watch_retry_attempted: false,
@@ -374,7 +375,7 @@ impl State {
         reason: crate::bridge::library::LibraryRefreshReason,
         result: Result<Vec<Row>, UiError>,
     ) {
-        self.generation = self.generation.wrapping_add(1).max(1);
+        self.generation.bump();
 
         let incoming = result.as_ref().ok().map(Vec::len);
         if reason.loud() || self.rows.is_none() {
@@ -494,7 +495,9 @@ impl State {
     /// rows retained or requested for thumbnail prefetch have a resolved
     /// `preview_url`; without metadata, no thumbnail demand can exist. Visible
     /// IDs stay first because Steam UGC queries are chunked at 50.
-    pub(super) fn take_visible_metadata_request(&mut self) -> Option<(u64, Vec<PublishedFileId>)> {
+    pub(super) fn take_visible_metadata_request(
+        &mut self,
+    ) -> Option<(Generation, Vec<PublishedFileId>)> {
         if !self.route_visible || self.rows().is_empty() {
             return None;
         }
@@ -529,10 +532,10 @@ impl State {
 
     pub(super) fn finish_metadata_request(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: &[PublishedFileId],
         result: Result<MetadataResolution, UiError>,
-    ) -> Option<(u64, Vec<PublishedFileId>)> {
+    ) -> Option<(Generation, Vec<PublishedFileId>)> {
         if generation != self.generation {
             return None;
         }
@@ -575,7 +578,7 @@ impl State {
 
     pub(super) fn apply_metadata_refresh(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: &[PublishedFileId],
         result: Result<Vec<MetadataPatch>, UiError>,
     ) {
@@ -681,7 +684,7 @@ impl State {
         true
     }
 
-    fn apply_metadata_patches(&mut self, generation: u64, patches: &[MetadataPatch]) {
+    fn apply_metadata_patches(&mut self, generation: Generation, patches: &[MetadataPatch]) {
         if generation != self.generation || patches.is_empty() {
             return;
         }

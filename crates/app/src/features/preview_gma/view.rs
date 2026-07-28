@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use iced::widget::{
     Space, button, column, container, image, mouse_area, opaque, pane_grid, row, scrollable,
     sensor, stack, svg, text,
@@ -536,7 +537,10 @@ fn relative_text(relative: &RelativeTime, i18n: &I18n) -> String {
     if relative.count.is_empty() {
         i18n.tr(relative.key)
     } else {
-        i18n.trn(relative.key, &[("arg0", relative.count.as_str())])
+        i18n.trn(
+            relative.key,
+            &[("count", Arg::Number(relative.count.as_str()))],
+        )
     }
 }
 
@@ -690,10 +694,16 @@ fn ribbon<'a>(
         i18n.tr("prepare-publish-items-one")
     } else {
         let total = total.to_string();
-        i18n.trn("prepare-publish-items-num", &[("arg0", total.as_str())])
+        i18n.trn(
+            "prepare-publish-items-num",
+            &[("count", Arg::Number(total.as_str()))],
+        )
     };
     let shown = snapshot.shown_count().to_string();
-    let shown = i18n.trn("prepare-publish-items-shown", &[("arg0", shown.as_str())]);
+    let shown = i18n.trn(
+        "prepare-publish-items-shown",
+        &[("count", Arg::Number(shown.as_str()))],
+    );
     let size = format_bytes(snapshot.total_size_bytes(), i18n);
 
     container(

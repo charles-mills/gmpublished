@@ -24,6 +24,8 @@ use vformats::{
     keyvalues::KvValue,
 };
 
+use crate::scene::QAngle;
+
 mod lighting;
 mod mesh;
 mod visibility;
@@ -282,7 +284,7 @@ impl MapBsp {
             surfedges,
             entities,
             visibility,
-            pakfile_bytes: pakfile_bytes.map_err(decode_error)?,
+            pakfile_bytes: pakfile_bytes.map_err(pakfile_error)?,
         })
     }
 
@@ -517,10 +519,10 @@ fn walk_to_leaf(
         let distance = point[0] * normal[0] + point[1] * normal[1] + point[2] * normal[2];
         let [front, back] = children;
         let next = if distance < dist { back } else { front };
-        if next < 0 {
-            return Some((!next) as usize);
+        match NodeChild::decode(next)? {
+            NodeChild::Leaf(leaf_index) => return Some(leaf_index),
+            NodeChild::Node(node_index) => current_index = node_index,
         }
-        current_index = usize::try_from(next).ok()?;
     }
     None
 }
@@ -721,7 +723,9 @@ pub struct MapDoor {
     pub local_bounds_min: [f32; 3],
     pub local_bounds_max: [f32; 3],
     pub visibility: MapVisibilityBucket,
-    pub wait: f32,
+    /// Seconds an opened door waits before closing itself, or `None` for a
+    /// door that stays open until triggered again.
+    pub auto_close_after: Option<f32>,
     pub initial_progress: f32,
     pub motion: MapDoorMotion,
     pub sounds: MapDoorSounds,
@@ -736,10 +740,76 @@ pub struct MapDoorSounds {
     pub close_sound: Option<String>,
 }
 
+/// Index into [`MapBsp::models`] — a brush model ("bmodel"), the geometry a
+/// brush entity like a door refers to as `*3`.
+///
+/// Distinct from [`BrushIndex`] and from a static prop's model index, which
+/// names an entry in the game lump's model table. All three are `usize`-shaped
+/// and none is interchangeable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ModelIndex(usize);
+
+impl ModelIndex {
+    #[must_use]
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl fmt::Display for ModelIndex {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// A BSP node's child link, decoded.
+///
+/// The file stores one `i32` per child: non-negative is an index into
+/// [`MapBsp::nodes`], negative is the bitwise complement of an index into
+/// [`MapBsp::leaves`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NodeChild {
+    Node(usize),
+    Leaf(usize),
+}
+
+impl NodeChild {
+    /// `None` when a node index does not fit `usize`. Leaf links always fit —
+    /// the complement of a negative `i32` is non-negative.
+    pub(super) fn decode(raw: i32) -> Option<Self> {
+        if raw < 0 {
+            usize::try_from(!raw).ok().map(Self::Leaf)
+        } else {
+            usize::try_from(raw).ok().map(Self::Node)
+        }
+    }
+}
+
+/// Index into [`MapBsp::brushes`].
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BrushIndex(usize);
+
+impl BrushIndex {
+    #[must_use]
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum MapDoorGeometry {
     Brush {
-        model_index: u32,
+        model_index: ModelIndex,
         meshes: Vec<MapMesh>,
     },
     Prop {
@@ -887,7 +957,7 @@ impl MapPakFile {
     }
 
     pub fn indexed_entries(&self) -> Result<Vec<MapPakFileEntry>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(decode_error)?;
+        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
         let mut entries = Vec::new();
         for (index, entry) in reader.entries().iter().enumerate() {
             let Some(path) = normalize_pakfile_path(&entry.path) else {
@@ -916,7 +986,7 @@ impl MapPakFile {
     }
 
     pub fn entry_bytes_by_index(&self, index: usize) -> Result<Option<Vec<u8>>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(decode_error)?;
+        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
         let Some(entry) = reader.entries().get(index) else {
             return Ok(None);
         };
@@ -927,20 +997,28 @@ impl MapPakFile {
         reader
             .entry_bytes(entry, &limits)
             .map(|bytes| Some(bytes.into_owned()))
-            .map_err(decode_error)
+            .map_err(pakfile_error)
     }
 }
 
 const DEFAULT_DETAIL_MATERIAL: &str = "detail/detailsprites";
 const DETAIL_PROP_TYPE_SPRITE: u8 = 1;
 
-#[derive(Debug, Clone, Eq, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum BspError {
-    #[error("ERR_BSP_DECODE_FAILED")]
-    Decode { message: String },
-    #[error("ERR_BSP_UNSUPPORTED_VERSION")]
+    /// The upstream decode error, kept whole: it distinguishes truncation,
+    /// limit violations and decompression failures, which a flattened message
+    /// throws away.
+    #[error("BSP decode failed: {0}")]
+    Decode(#[from] bsp::BspError),
+    /// A structural check this module makes itself, which upstream does not.
+    #[error("BSP decode failed: {message}")]
+    Malformed { message: &'static str },
+    #[error("BSP pakfile decode failed: {message}")]
+    Pakfile { message: String },
+    #[error("unsupported BSP version {version}")]
     UnsupportedVersion { version: u32 },
-    #[error("ERR_BSP_TOO_LARGE")]
+    #[error("BSP {item} exceeds the supported limit")]
     TooLarge { item: &'static str },
 }
 
@@ -1015,7 +1093,7 @@ fn load_map_with_skybox_partition(
             lightmap_blocks: &mut lightmap_blocks,
         };
         for (model_index, model) in bsp.models.iter().enumerate() {
-            if door_model_indices.contains(&model_index) {
+            if door_model_indices.contains(&ModelIndex::new(model_index)) {
                 continue;
             }
             let Some(face_range) = model_face_range(model, bsp.faces.len()) else {
@@ -1105,7 +1183,10 @@ fn load_map_with_skybox_partition(
             visibility: mesh.visibility.into_map_visibility(),
         })
         .collect::<Vec<_>>();
-    let (bounds_min, bounds_max) = bounds_from_meshes(&meshes);
+    let MapBounds {
+        min: bounds_min,
+        max: bounds_max,
+    } = bounds_from_meshes(&meshes);
     let visibility = MapVisibility::from_bsp(&bsp);
     let door_brush_indices = door_model_indices
         .iter()
@@ -1115,7 +1196,7 @@ fn load_map_with_skybox_partition(
     let pakfile = MapPakFile::from_pak_bytes(bsp.pakfile_bytes);
     let skybox_completion_bounds = skybox_partition.completion_bounds();
     let skybox_partition = MapSkyboxPartitionStats {
-        sky_camera_present: skybox_partition.sky_camera_present,
+        sky_camera_present: skybox_partition.sky_camera_present(),
         face_count: count_to_u32(face_attributions.skybox_face_count()),
         completion_reattributed_face_count: count_to_u32(
             face_attributions.completion_reattributed_face_count(),
@@ -1157,13 +1238,13 @@ fn load_map_with_skybox_partition(
 
 fn bsp_version(bytes: &[u8]) -> Result<u32, BspError> {
     let Some(header) = bytes.get(..8) else {
-        return Err(BspError::Decode {
-            message: "header too short".to_owned(),
+        return Err(BspError::Malformed {
+            message: "header too short",
         });
     };
     if &header[..4] != BSP_MAGIC {
-        return Err(BspError::Decode {
-            message: "missing VBSP magic".to_owned(),
+        return Err(BspError::Malformed {
+            message: "missing VBSP magic",
         });
     }
     Ok(u32::from_le_bytes(
@@ -1179,7 +1260,7 @@ struct PendingMapDoor {
     origin: [f32; 3],
     angles: [f32; 3],
     visibility: MapVisibilityBucket,
-    wait: f32,
+    auto_close_after: Option<f32>,
     initial_progress: f32,
     motion: MapDoorMotion,
     sounds: MapDoorSounds,
@@ -1188,12 +1269,12 @@ struct PendingMapDoor {
 
 #[derive(Debug)]
 enum PendingDoorGeometry {
-    Brush { model_index: usize },
+    Brush { model_index: ModelIndex },
     Prop { placement: StaticPropPlacement },
 }
 
 impl PendingMapDoor {
-    fn brush_model_index(&self) -> Option<usize> {
+    fn brush_model_index(&self) -> Option<ModelIndex> {
         match self.geometry {
             PendingDoorGeometry::Brush { model_index } => Some(model_index),
             PendingDoorGeometry::Prop { .. } => None,
@@ -1216,7 +1297,10 @@ impl PendingDoorBuild {
                     .into_iter()
                     .map(|mesh| build_mesh_to_map_mesh_local(mesh, self.door.origin))
                     .collect::<Vec<_>>();
-                let (local_bounds_min, local_bounds_max) = bounds_from_map_meshes(&meshes)?;
+                let MapBounds {
+                    min: local_bounds_min,
+                    max: local_bounds_max,
+                } = bounds_from_map_meshes(&meshes)?;
                 Some(MapDoor {
                     class: self.door.class,
                     origin: self.door.origin,
@@ -1224,12 +1308,12 @@ impl PendingDoorBuild {
                     local_bounds_min,
                     local_bounds_max,
                     visibility: self.door.visibility,
-                    wait: self.door.wait,
+                    auto_close_after: self.door.auto_close_after,
                     initial_progress: self.door.initial_progress,
                     motion: self.door.motion,
                     sounds: self.door.sounds,
                     geometry: MapDoorGeometry::Brush {
-                        model_index: u32::try_from(model_index).unwrap_or(u32::MAX),
+                        model_index,
                         meshes,
                     },
                 })
@@ -1241,7 +1325,7 @@ impl PendingDoorBuild {
                 local_bounds_min: [0.0; 3],
                 local_bounds_max: [0.0; 3],
                 visibility: self.door.visibility,
-                wait: self.door.wait,
+                auto_close_after: self.door.auto_close_after,
                 initial_progress: self.door.initial_progress,
                 motion: self.door.motion,
                 sounds: self.door.sounds,
@@ -1267,7 +1351,7 @@ fn build_mesh_to_map_mesh_local(mesh: BuildMesh, origin: [f32; 3]) -> MapMesh {
     }
 }
 
-fn bounds_from_map_meshes(meshes: &[MapMesh]) -> Option<([f32; 3], [f32; 3])> {
+fn bounds_from_map_meshes(meshes: &[MapMesh]) -> Option<MapBounds> {
     bounds_from_points_iter(
         meshes
             .iter()
@@ -1308,7 +1392,7 @@ fn pending_linear_brush_door(
     class: MapDoorClass,
 ) -> Option<PendingMapDoor> {
     let model_index = parse_bmodel_index(entity.prop("model")?)?;
-    let Some(model) = bsp.models.get(model_index) else {
+    let Some(model) = bsp.models.get(model_index.get()) else {
         log::debug!("bsp {class:?} skipped: invalid bmodel index {model_index}");
         return None;
     };
@@ -1348,7 +1432,7 @@ fn pending_linear_brush_door(
         origin,
         angles: [0.0; 3],
         visibility: point_visibility_bucket(bsp, origin, cluster_count),
-        wait: parse_entity_float_default(entity.prop("wait"), 3.0, class, "wait"),
+        auto_close_after: door_auto_close_after(entity, class),
         initial_progress,
         motion: MapDoorMotion::Linear {
             direction,
@@ -1367,7 +1451,7 @@ fn pending_rotating_brush_door(
 ) -> Option<PendingMapDoor> {
     let class = MapDoorClass::FuncDoorRotating;
     let model_index = parse_bmodel_index(entity.prop("model")?)?;
-    let Some(model) = bsp.models.get(model_index) else {
+    let Some(model) = bsp.models.get(model_index.get()) else {
         log::debug!("bsp {class:?} skipped: invalid bmodel index {model_index}");
         return None;
     };
@@ -1389,7 +1473,7 @@ fn pending_rotating_brush_door(
         origin,
         angles,
         visibility: point_visibility_bucket(bsp, origin, cluster_count),
-        wait: parse_entity_float_default(entity.prop("wait"), 3.0, class, "wait"),
+        auto_close_after: door_auto_close_after(entity, class),
         initial_progress: if door_spawn_starts_open(entity) {
             1.0
         } else {
@@ -1453,7 +1537,7 @@ fn pending_prop_door(
         origin,
         angles,
         visibility,
-        wait: parse_entity_float_default(entity.prop("returndelay"), -1.0, class, "returndelay"),
+        auto_close_after: prop_door_auto_close_after(entity, class),
         initial_progress: prop_door_initial_progress(entity),
         motion: MapDoorMotion::Rotating {
             angle_delta: [0.0, degrees, 0.0],
@@ -1516,7 +1600,7 @@ fn extract_pending_door_meshes(
         }
     };
     let mut meshes = BuildMeshes::default();
-    let Some(model) = bsp.models.get(model_index) else {
+    let Some(model) = bsp.models.get(model_index.get()) else {
         return Ok(PendingDoorBuild {
             door: pending,
             meshes: Vec::new(),
@@ -1553,12 +1637,15 @@ fn extract_pending_door_meshes(
 
 const SF_DOOR_START_OPEN_OBSOLETE: u32 = 1;
 const SF_DOOR_ROTATE_BACKWARDS: u32 = 2;
+/// Source's "Toggle" flag: the door waits to be triggered again rather than
+/// closing itself.
+const SF_DOOR_NO_AUTO_RETURN: u32 = 32;
 const SF_DOOR_ROTATE_ROLL: u32 = 64;
 const SF_DOOR_ROTATE_PITCH: u32 = 128;
 
-fn parse_bmodel_index(model: &str) -> Option<usize> {
+fn parse_bmodel_index(model: &str) -> Option<ModelIndex> {
     let index = model.strip_prefix('*')?.parse::<usize>().ok()?;
-    (index > 0).then_some(index)
+    (index > 0).then(|| ModelIndex::new(index))
 }
 
 fn entity_origin_or_model_origin(
@@ -1583,8 +1670,7 @@ fn linear_door_distance(model: &BspModel, direction: [f32; 3], lip: f32) -> f32 
 }
 
 fn angle_vectors_forward(angles: [f32; 3]) -> [f32; 3] {
-    let pitch = angles[0].to_radians();
-    let yaw = angles[1].to_radians();
+    let QAngle { pitch, yaw, .. } = QAngle::from_source_degrees(angles);
     let (sin_pitch, cos_pitch) = pitch.sin_cos();
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
     normalize([cos_pitch * cos_yaw, cos_pitch * sin_yaw, -sin_pitch])
@@ -1625,6 +1711,42 @@ fn rotation_axis_delta(spawnflags: u32, degrees: f32) -> [f32; 3] {
     }
 }
 
+/// Seconds an opened brush door waits before closing itself.
+///
+/// `func_movelinear` has no auto-return in Source — it is a mover, not a door
+/// — and the Toggle spawnflag turns auto-return off for the classes that do,
+/// so neither takes the `wait` default.
+fn door_auto_close_after(entity: &MapEntity, class: MapDoorClass) -> Option<f32> {
+    if class == MapDoorClass::FuncMoveLinear
+        || parse_entity_spawnflags(entity) & SF_DOOR_NO_AUTO_RETURN != 0
+    {
+        return None;
+    }
+    auto_close_after(entity.prop("wait"), 3.0, class, "wait")
+}
+
+/// `prop_door_rotating` spells the same delay `returndelay`, and defaults to
+/// staying open.
+fn prop_door_auto_close_after(entity: &MapEntity, class: MapDoorClass) -> Option<f32> {
+    auto_close_after(entity.prop("returndelay"), -1.0, class, "returndelay")
+}
+
+/// A door delay keyvalue as an absence-or-duration.
+///
+/// Source reads a negative delay as "never auto-return" — the usual way a
+/// mapper pins a door open, and far more common than the Toggle spawnflag. Both
+/// keyvalues spell it the same way, so both fold it into `None` here rather
+/// than passing a negative duration on for a consumer to re-interpret.
+fn auto_close_after(
+    value: Option<&str>,
+    default: f32,
+    class: MapDoorClass,
+    field: &'static str,
+) -> Option<f32> {
+    let delay = parse_entity_float_default(value, default, class, field);
+    (delay >= 0.0).then_some(delay)
+}
+
 fn door_spawn_starts_open(entity: &MapEntity) -> bool {
     parse_entity_spawnflags(entity) & SF_DOOR_START_OPEN_OBSOLETE != 0
         || entity.prop("spawnpos").and_then(parse_entity_i32) == Some(1)
@@ -1642,43 +1764,43 @@ fn prop_door_initial_progress(entity: &MapEntity) -> f32 {
     .unwrap_or(0.0)
 }
 
-fn brush_indices_for_model(bsp: &MapBsp, model_index: usize) -> BTreeSet<usize> {
+fn brush_indices_for_model(bsp: &MapBsp, model_index: ModelIndex) -> BTreeSet<BrushIndex> {
     let mut brushes = BTreeSet::new();
-    let Some(model) = bsp.models.get(model_index) else {
+    let Some(model) = bsp.models.get(model_index.get()) else {
         return brushes;
     };
     // Iterative with a visited set: wild content can encode a cycle in the
     // node children, and unbounded recursion aborts past catch_unwind.
     let mut visited_nodes = BTreeSet::new();
     let mut stack = vec![model.head_node];
-    while let Some(node_index) = stack.pop() {
-        if node_index < 0 {
-            let leaf_index = (!node_index) as usize;
-            let Some(leaf) = bsp.leaves.get(leaf_index) else {
-                continue;
-            };
-            let start = usize::from(leaf.first_leaf_brush);
-            let end = start.saturating_add(usize::from(leaf.leaf_brush_count));
-            let Some(leaf_brushes) = bsp.leaf_brushes.get(start..end) else {
-                continue;
-            };
-            brushes.extend(
-                leaf_brushes
-                    .iter()
-                    .map(|leaf_brush| usize::from(*leaf_brush)),
-            );
-            continue;
+    while let Some(child) = stack.pop() {
+        match NodeChild::decode(child) {
+            Some(NodeChild::Leaf(leaf_index)) => {
+                let Some(leaf) = bsp.leaves.get(leaf_index) else {
+                    continue;
+                };
+                let start = usize::from(leaf.first_leaf_brush);
+                let end = start.saturating_add(usize::from(leaf.leaf_brush_count));
+                let Some(leaf_brushes) = bsp.leaf_brushes.get(start..end) else {
+                    continue;
+                };
+                brushes.extend(
+                    leaf_brushes
+                        .iter()
+                        .map(|leaf_brush| BrushIndex::new(usize::from(*leaf_brush))),
+                );
+            }
+            Some(NodeChild::Node(node_index)) => {
+                if !visited_nodes.insert(node_index) {
+                    continue;
+                }
+                let Some(node) = bsp.nodes.get(node_index) else {
+                    continue;
+                };
+                stack.extend(node.children);
+            }
+            None => {}
         }
-        let Some(index) = usize::try_from(node_index).ok() else {
-            continue;
-        };
-        if !visited_nodes.insert(index) {
-            continue;
-        }
-        let Some(node) = bsp.nodes.get(index) else {
-            continue;
-        };
-        stack.extend(node.children);
     }
     brushes
 }
@@ -2378,33 +2500,35 @@ fn is_pakfile_entry_oversized(size_bytes: u64) -> bool {
     size_bytes > MAX_PAKFILE_ENTRY_BYTES
 }
 
-fn bounds_from_meshes(meshes: &[MapMesh]) -> ([f32; 3], [f32; 3]) {
-    let Some(first) = meshes
-        .iter()
-        .flat_map(|mesh| mesh.vertices.iter())
-        .map(|vertex| vertex.position)
-        .next()
-    else {
-        return ([0.0; 3], [0.0; 3]);
-    };
-
-    let mut min = first;
-    let mut max = first;
+/// Whole-map bounds, tolerating wild content: non-finite vertices are skipped,
+/// and a map with no usable vertex degrades to a zero box. The camera derives
+/// its center and radius from these directly, so NaN must not escape.
+///
+/// Distinct from [`bounds_from_map_meshes`], which is all-or-nothing: one
+/// non-finite vertex rejects the whole set, which is right for a single door's
+/// local bounds and wrong for the map.
+fn bounds_from_meshes(meshes: &[MapMesh]) -> MapBounds {
+    let mut bounds = BoundsBuilder::default();
     for position in meshes
         .iter()
-        .flat_map(|mesh| mesh.vertices.iter())
-        .map(|vertex| vertex.position)
+        .flat_map(|mesh| mesh.vertices.iter().map(|vertex| vertex.position))
     {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(position[axis]);
-            max[axis] = max[axis].max(position[axis]);
-        }
+        bounds.push(position);
     }
-    (min, max)
+    bounds.finish().unwrap_or(MapBounds {
+        min: [0.0; 3],
+        max: [0.0; 3],
+    })
 }
 
-fn decode_error(error: impl fmt::Display) -> BspError {
-    BspError::Decode {
+fn decode_error(error: bsp::BspError) -> BspError {
+    BspError::Decode(error)
+}
+
+/// The pakfile reader has its own error type; it carries no structure worth
+/// preserving beyond its message.
+fn pakfile_error(error: impl fmt::Display) -> BspError {
+    BspError::Pakfile {
         message: error.to_string(),
     }
 }

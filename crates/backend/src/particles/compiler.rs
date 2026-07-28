@@ -1,5 +1,5 @@
 use super::{
-    CoverageEntry, MAX_CONTROL_POINTS, PcfAttributes, PcfFunction, PcfSystem, SupportLevel,
+    ControlPointIndex, CoverageEntry, PcfAttributes, PcfFunction, PcfSystem, SupportLevel,
     color_to_rgb, length,
 };
 
@@ -109,7 +109,7 @@ pub(super) enum Initializer {
         percentage: f32,
     },
     PositionWithinSphere {
-        control_point: usize,
+        control_point: ControlPointIndex,
         distance_min: f32,
         distance_max: f32,
         bias: [f32; 3],
@@ -120,26 +120,26 @@ pub(super) enum Initializer {
         local_speed_max: [f32; 3],
     },
     PositionOffsetRandom {
-        control_point: usize,
+        control_point: ControlPointIndex,
         offset_min: [f32; 3],
         offset_max: [f32; 3],
         proportional_to_radius: bool,
     },
     PositionWarpRandom {
-        control_point: usize,
+        control_point: ControlPointIndex,
         warp_min: [f32; 3],
         warp_max: [f32; 3],
     },
     PositionAlongPath {
-        start_control_point: usize,
-        end_control_point: usize,
+        start_control_point: ControlPointIndex,
+        end_control_point: ControlPointIndex,
         sequential_count: Option<f32>,
     },
     PositionFromParentParticles {
         inherited_velocity_scale: f32,
     },
     MoveBetweenControlPoints {
-        end_control_point: usize,
+        end_control_point: ControlPointIndex,
         speed_min: f32,
         speed_max: f32,
         start_offset: f32,
@@ -232,7 +232,7 @@ pub(super) enum Operator {
         drag: f32,
     },
     MovementLockToControlPoint {
-        control_point: usize,
+        control_point: ControlPointIndex,
     },
     OscillateScalar {
         field: ScalarField,
@@ -268,22 +268,22 @@ pub(super) enum Operator {
         spatial_scale: f32,
     },
     ConstrainDistanceToControlPoint {
-        control_point: usize,
+        control_point: ControlPointIndex,
         min_distance: f32,
         max_distance: f32,
         offset: [f32; 3],
     },
     ConstrainDistanceToPath {
-        start_control_point: usize,
-        end_control_point: usize,
+        start_control_point: ControlPointIndex,
+        end_control_point: ControlPointIndex,
         max_distance: f32,
     },
     SetControlPointPositions {
-        base_control_point: usize,
-        points: Vec<(usize, [f32; 3])>,
+        base_control_point: ControlPointIndex,
+        points: Vec<(ControlPointIndex, [f32; 3])>,
     },
     SetChildControlPointsFromParticles {
-        first_control_point: usize,
+        first_control_point: ControlPointIndex,
         count: usize,
         first_particle: usize,
     },
@@ -296,14 +296,14 @@ pub(super) enum Force {
         max: [f32; 3],
     },
     PullTowardsControlPoint {
-        control_point: usize,
+        control_point: ControlPointIndex,
         amount: f32,
         falloff_power: f32,
     },
     TwistAroundAxis {
         axis: [f32; 3],
         amount: f32,
-        control_point: usize,
+        control_point: ControlPointIndex,
     },
 }
 
@@ -430,13 +430,16 @@ impl SystemCompiler {
         });
     }
 
-    fn control_point(&mut self, attrs: &PcfAttributes, names: &[&str]) -> usize {
-        let index = names
-            .iter()
-            .find_map(|name| attrs.get_int(name))
-            .unwrap_or(0)
-            .clamp(0, (MAX_CONTROL_POINTS - 1) as i32) as usize;
-        self.highest_control_point = self.highest_control_point.max(index);
+    /// The single place a PCF-supplied control point number becomes an index.
+    fn control_point(&mut self, attrs: &PcfAttributes, names: &[&str]) -> ControlPointIndex {
+        let index = ControlPointIndex::clamped(
+            names
+                .iter()
+                .find_map(|name| attrs.get_int(name))
+                .unwrap_or(0)
+                .max(0) as usize,
+        );
+        self.highest_control_point = self.highest_control_point.max(index.get());
         index
     }
 
@@ -1038,7 +1041,8 @@ pub(super) fn compile_operator(
                 count: attrs
                     .get_int("# of control points to set")
                     .unwrap_or(1)
-                    .clamp(0, MAX_CONTROL_POINTS as i32) as usize,
+                    .clamp(0, crate::particles::MAX_CONTROL_POINTS as i32)
+                    as usize,
                 first_particle: attrs.get_int("first particle to copy").unwrap_or(0).max(0)
                     as usize,
             },

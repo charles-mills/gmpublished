@@ -42,19 +42,19 @@ gmod-broken-title = Brak folderu Garry's Mod
 gmod-broken-body = Zapisana lokalizacja nie zawiera już GarrysMod/addons.
 gmod-broken-research = Szukaj ponownie
 account-update-title = Dostępna aktualizacja
-account-update-caption = {$arg0} · kliknij, aby pobrać
+account-update-caption = {$version} · kliknij, aby pobrać
 my-workshop = Mój Warsztat
 publish-new = Opublikuj nowe...
 my-workshop-loading = Ładowanie...
 my-workshop-empty-title = Brak opublikowanych dodatków
 my-workshop-empty-body = Wszystko, co opublikujesz w Warsztacie, pojawi się tutaj.
-my-workshop-error = Wczytywanie Mojego Warsztatu nie powiodło się: {$arg0}
-my-workshop-count = Pokazywanie {$arg0} z {$arg1} addonów
+my-workshop-error = Wczytywanie Mojego Warsztatu nie powiodło się: {$error}
+my-workshop-count = Pokazywanie {$loaded} z {$total} addonów
 installed-addons = Zainstalowane Dodatki
 installed-addons-loading = Ładowanie...
 installed-addons-empty-title = Brak zainstalowanych dodatków
 installed-addons-empty-body = Zasubskrybuj coś w Warsztacie albo upuść tutaj plik .gma.
-installed-addons-error = Wyszukiwanie zainstalowanych dodatków nie powiodło się: {$arg0}
+installed-addons-error = Wyszukiwanie zainstalowanych dodatków nie powiodło się: {$error}
 downloader = Kolejka
 downloader-workshop-input = Wklej ID Warsztatu, linki, kolekcje w tym miejscu...
 downloader-bulk-extract = Rozpakuj zbiorczo pliki GMA
@@ -68,8 +68,8 @@ downloader-open-all = Otwórz wszystko
 downloader-remove-all = Usuń wszystko
 downloader-status-finished = Gotowe
 downloader-status-error = Błąd
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = Warsztat {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-workshop-id = Warsztat {$id}
 destination-where-to = Gdzie?
 destination-overwrite-warning = Istniejące pliki zostaną nadpisane.
 destination-browse = Przeglądaj...
@@ -84,100 +84,102 @@ destination-invalid-path = Wybierz istniejący folder z pełną ścieżką.
 relative-time-now = przed chwilą
 relative-time-past-year = 1 rok temu
 relative-time-past-years =
-    { $arg0 ->
-        [one] {$arg0} rok temu
-        [few] {$arg0} lata temu
-       *[many] {$arg0} lat temu
+    { $count ->
+        [one] {$count} rok temu
+        [few] {$count} lata temu
+       *[many] {$count} lat temu
     }
 relative-time-past-month = 1 miesiąc temu
 relative-time-past-months =
-    { $arg0 ->
-        [one] {$arg0} miesiąc temu
-        [few] {$arg0} miesiące temu
-       *[many] {$arg0} miesięcy temu
+    { $count ->
+        [one] {$count} miesiąc temu
+        [few] {$count} miesiące temu
+       *[many] {$count} miesięcy temu
     }
 relative-time-past-day = 1 dzień temu
 relative-time-past-days =
-    { $arg0 ->
-        [one] {$arg0} dzień temu
-        [few] {$arg0} dni temu
-       *[many] {$arg0} dni temu
+    { $count ->
+        [one] {$count} dzień temu
+        [few] {$count} dni temu
+       *[many] {$count} dni temu
     }
 relative-time-past-hour = 1 godzinę temu
 relative-time-past-hours =
-    { $arg0 ->
-        [one] {$arg0} godzinę temu
-        [few] {$arg0} godziny temu
-       *[many] {$arg0} godzin temu
+    { $count ->
+        [one] {$count} godzinę temu
+        [few] {$count} godziny temu
+       *[many] {$count} godzin temu
     }
 relative-time-past-minute = 1 minutę temu
 relative-time-past-minutes =
-    { $arg0 ->
-        [one] {$arg0} minutę temu
-        [few] {$arg0} minuty temu
-       *[many] {$arg0} minut temu
+    { $count ->
+        [one] {$count} minutę temu
+        [few] {$count} minuty temu
+       *[many] {$count} minut temu
     }
 relative-time-past-second = 1 sekundę temu
 relative-time-past-seconds =
-    { $arg0 ->
-        [one] {$arg0} sekundę temu
-        [few] {$arg0} sekundy temu
-       *[many] {$arg0} sekund temu
+    { $count ->
+        [one] {$count} sekundę temu
+        [few] {$count} sekundy temu
+       *[many] {$count} sekund temu
     }
 relative-time-future-year = za 1 rok
 relative-time-future-years =
-    { $arg0 ->
-        [one] za {$arg0} rok
-        [few] za {$arg0} lata
-       *[many] za {$arg0} lat
+    { $count ->
+        [one] za {$count} rok
+        [few] za {$count} lata
+       *[many] za {$count} lat
     }
 relative-time-future-month = za 1 miesiąc
 relative-time-future-months =
-    { $arg0 ->
-        [one] za {$arg0} miesiąc
-        [few] za {$arg0} miesiące
-       *[many] za {$arg0} miesięcy
+    { $count ->
+        [one] za {$count} miesiąc
+        [few] za {$count} miesiące
+       *[many] za {$count} miesięcy
     }
 relative-time-future-day = za 1 dzień
 relative-time-future-days =
-    { $arg0 ->
-        [one] za {$arg0} dzień
-        [few] za {$arg0} dni
-       *[many] za {$arg0} dni
+    { $count ->
+        [one] za {$count} dzień
+        [few] za {$count} dni
+       *[many] za {$count} dni
     }
 relative-time-future-hour = za 1 godzinę
 relative-time-future-hours =
-    { $arg0 ->
-        [one] za {$arg0} godzinę
-        [few] za {$arg0} godziny
-       *[many] za {$arg0} godzin
+    { $count ->
+        [one] za {$count} godzinę
+        [few] za {$count} godziny
+       *[many] za {$count} godzin
     }
 relative-time-future-minute = za 1 minutę
 relative-time-future-minutes =
-    { $arg0 ->
-        [one] za {$arg0} minutę
-        [few] za {$arg0} minuty
-       *[many] za {$arg0} minut
+    { $count ->
+        [one] za {$count} minutę
+        [few] za {$count} minuty
+       *[many] za {$count} minut
     }
 relative-time-future-second = za 1 sekundę
 relative-time-future-seconds =
-    { $arg0 ->
-        [one] za {$arg0} sekundę
-        [few] za {$arg0} sekundy
-       *[many] za {$arg0} sekund
+    { $count ->
+        [one] za {$count} sekundę
+        [few] za {$count} sekundy
+       *[many] za {$count} sekund
     }
 downloading = Pobieranie
 locating = Czekam
 decompressing = Rozpakowywanie
-extracting_progress = Rozpakowywanie {$arg0}% ({$arg1} / {$arg2})
+reading_metadata = Odczytywanie metadanych
+searching = Wyszukiwanie...
+extracting_progress = Rozpakowywanie {$percent}% ({$done} / {$total})
 size-analyzer = Analiza Wielkości Dodatku
 size-analyzer-waiting = Oczekiwanie na widok mapy drzewa...
 size-analyzer-loading = Obliczanie...
 size-analyzer-empty = Nie znaleziono dodatków o dodatniej wielkości.
 size-analyzer-empty-title = Nie ma nic do zmierzenia
 size-analyzer-empty-body = Każdy dodatek w Twojej bibliotece jest pusty, więc nie ma nic do przedstawienia na wykresie.
-size-analyzer-error = Analiza Wielkości nie powiodła się: {$arg0}
-size-analyzer-summary-cells = {$arg0} rzeczy
+size-analyzer-error = Analiza Wielkości nie powiodła się: {$error}
+size-analyzer-summary-cells = {$count} rzeczy
 size-analyzer-name = Nazwa
 size-analyzer-type = Typ
 size-analyzer-size = Wielkość
@@ -247,7 +249,7 @@ context-menu-debug-simulate-minus = Symuluj -10
 context-menu-debug-simulate-plus-million = Symuluj +1 milion
 context-menu-debug-simulate-minus-million = Symuluj -1 milion
 publish-processing-icon = Przetwarzanie ikony Warsztatu...
-publish-packing = Pakowanie {$arg0}% ({$arg1} / {$arg2})
+publish-packing = Pakowanie {$percent}% ({$done} / {$total})
 PUBLISH_UPLOADING_PREVIEW_FILE = Przesyłanie pliku podglądu
 PUBLISH_STARTING = Startowanie publikacji
 PUBLISH_PREPARING_CONFIG = Przygotowywanie konfiguracji
@@ -259,10 +261,10 @@ context-menu-debug-toast-error = Symuluj powiadomienie: błąd
 context-menu-debug-toast-notice = Symulowane powiadomienie
 err-cancelled = Anulowane
 err-whitelist = Niektóre wybrane pliki są niedozwolone.
-err-whitelist-detail = Niektóre wybrane pliki są niedozwolone: {$arg0}
+err-whitelist-detail = Niektóre wybrane pliki są niedozwolone: {$detail}
 err-no-entries = W tej ścieżce nie znaleziono żadnych zapisów.
-err-duplicate-entries = W tej scieżce znajduje się duplikat zapisu ({$arg0}). Wszystkie ścieżki muszą być unikatowe, oraz napisane małymi literami. i use arch btw
-err-duplicate-entries-detail = W tej scieżce znajduje się duplikat zapisu ({$arg0}). Wszystkie ścieżki muszą być unikatowe, oraz napisane małymi literami. i use arch btw
+err-duplicate-entries = W tej scieżce znajduje się duplikat zapisu. Wszystkie ścieżki muszą być unikatowe, oraz napisane małymi literami. i use arch btw
+err-duplicate-entries-detail = W tej scieżce znajduje się duplikat zapisu ({$detail}). Wszystkie ścieżki muszą być unikatowe, oraz napisane małymi literami. i use arch btw
 err-invalid-content-path = Ścieżka nie istnieje, nie jest prawidłowa, albo po prostu gmpublished nie ma do niej dostępu
 err-multiple-gmas = Znaleziono kilka plików GMA w tej ścieżce
 err-icon-too-large = Ikona jest za duża (> 1 MB)
@@ -273,12 +275,12 @@ err-io-error = Błąd I/O
 err-unknown = Coś poszło nie tak
 err-gmod-path-missing = Folder Garry's Mod nie jest skonfigurowany
 err-no-addons-found = Nie znaleziono dodatków
-err-image-error = Błąd obrazu: {$arg0}
-err-image-error-detail = Błąd obrazu: {$arg0}
-err-steam-error = Błąd Steam: {$arg0}
-err-steam-error-detail = Błąd Steam: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/s
+err-image-error = Błąd obrazu
+err-image-error-detail = Błąd obrazu: {$detail}
+err-steam-error = Błąd Steam
+err-steam-error-detail = Błąd Steam: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/s
 byte-unit-b = B
 byte-unit-kb = KB
 byte-unit-mb = MB
@@ -312,7 +314,7 @@ file-type-txt = Tekst
 file-type-properties = Właściwości
 file-type-audio = Dźwięk
 file-type-image = Zdjęcie
-file-type-unknown = Nieznane rozszerzenie ({$arg0})
+file-type-unknown = Nieznane rozszerzenie ({$extension})
 file-preview-loading = Ładowanie podglądu...
 file-preview-stage-reading-archive = Odczytywanie archiwum...
 file-preview-stage-reading-bsp = Odczytywanie BSP...
@@ -324,7 +326,7 @@ file-preview-expand = Rozwiń podgląd
 file-preview-collapse = Zwiń podgląd
 file-preview-open-material = Otwórz materiał
 file-preview-open-texture = Otwórz teksturę
-file-preview-error = Podgląd nie powiódł się: {$arg0}
+file-preview-error = Podgląd nie powiódł się: {$error}
 file-preview-path = Ścieżka
 file-preview-size = Wielkość
 file-preview-crc = CRC
@@ -346,7 +348,7 @@ file-preview-particle-level-approximate = Przybliżone — wygląd może różni
 file-preview-particle-level-inert = Wymaga mapy lub encji — bez efektu w tym podglądzie
 file-preview-particle-level-unsupported = Niesymulowane w tym podglądzie
 file-preview-truncated = Podgląd skrócony — pełny plik jest większy niż pokazano.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Siatki
 file-preview-model-bones = Kości
 file-preview-model-sequences = Sekwencje
@@ -354,8 +356,8 @@ file-preview-model-vertices = Wierzchołki
 file-preview-model-triangles = Trójkąty
 file-preview-model-materials = Rozwiązane materiały
 file-preview-model-skin = Skórka
-file-preview-model-skin-option = Skórka {$arg0}
-file-preview-model-bodygroup = Grupa ciała {$arg0}
+file-preview-model-skin-option = Skórka {$index}
+file-preview-model-bodygroup = Grupa ciała {$index}
 file-preview-model-bounds-min = Granice min.
 file-preview-model-bounds-max = Granice maks.
 file-preview-map-controls = Przeciągnij, aby się rozejrzeć · WASD, aby latać · Shift dla prędkości · kółko reguluje prędkość
@@ -387,7 +389,7 @@ prepare-publish-tag-2 = Tag 2
 prepare-publish-tag-3 = Tag 3
 prepare-publish-update-exclamation = Zaaktualizuj!
 prepare-publish-publish-exclamation = Opublikuj!
-prepare-publish-update-warning = Wypuszczasz AKTUALIZACJĘ dla {$arg0} ({$arg1})
+prepare-publish-update-warning = Wypuszczasz AKTUALIZACJĘ dla {$title} ({$id})
 prepare-publish-still-needed = Nadal wymagane:
 prepare-publish-needs-addon-path = Ścieżka dodatku
 prepare-publish-needs-title = Tytuł
@@ -399,8 +401,8 @@ prepare-publish-file-browser = Eksplorator plików
 prepare-publish-browser-select = Upuść plik tutaj lub kliknij aby wybrać plik
 prepare-publish-no-files = Nie znaleziono plików
 prepare-publish-items-one = jedna rzecz
-prepare-publish-items-num = {$arg0} rzeczy
-prepare-publish-items-shown = {$arg0} pokazane
+prepare-publish-items-num = {$count} rzeczy
+prepare-publish-items-shown = {$count} pokazane
 prepare-publish-ignored-patterns = Ignorowane wzorce plików
 prepare-publish-ignore-placeholder = Dodaj...
 prepare-publish-ignored-for-convenience = Ten wzorzec plików jest domyślnie ignorowany dla Twojej wygody.

@@ -9,17 +9,18 @@ use super::{
     PublishedFileId, TRANSACTION_PROGRESS_SCALE, TaskHandle, TaskId, TransactionPayload,
     TransactionRuntimeEvent, UiError, WorkshopDownloadTaskKind, transactions,
 };
+use gmpublished_backend::transactions::TransactionId;
 
 #[derive(Debug, Default)]
 pub(super) struct BackendTransactionTasks {
-    active: Mutex<HashMap<u32, CorrelatedBackendTask>>,
-    pub(super) pending_pre_start: Mutex<HashMap<u32, VecDeque<TransactionRuntimeEvent>>>,
+    active: Mutex<HashMap<TransactionId, CorrelatedBackendTask>>,
+    pub(super) pending_pre_start: Mutex<HashMap<TransactionId, VecDeque<TransactionRuntimeEvent>>>,
 }
 
 impl BackendTransactionTasks {
     pub(super) fn correlate(
         &self,
-        transaction_id: u32,
+        transaction_id: TransactionId,
         task: TaskHandle,
         source: BackendTaskSource,
     ) -> Vec<BackendRuntimeAction> {
@@ -44,7 +45,7 @@ impl BackendTransactionTasks {
     pub(super) fn apply(&self, event: &TransactionRuntimeEvent) -> BackendRuntimeEventEffects {
         let transaction_id = event.transaction_id();
         let mut active = self.active.lock();
-        let (terminal, actions) = {
+        let AppliedEvent { terminal, actions } = {
             let Some(task) = active.get_mut(&transaction_id) else {
                 if event.is_bufferable_pre_start() {
                     drop(active);
@@ -81,14 +82,17 @@ impl BackendTransactionTasks {
         drop(pending);
     }
 
-    fn take_pending_pre_start(&self, transaction_id: u32) -> VecDeque<TransactionRuntimeEvent> {
+    fn take_pending_pre_start(
+        &self,
+        transaction_id: TransactionId,
+    ) -> VecDeque<TransactionRuntimeEvent> {
         self.pending_pre_start
             .lock()
             .remove(&transaction_id)
             .unwrap_or_default()
     }
 
-    pub(super) fn error(&self, transaction_id: u32, error: UiError) -> bool {
+    pub(super) fn error(&self, transaction_id: TransactionId, error: UiError) -> bool {
         let Some(task) = self.active.lock().remove(&transaction_id) else {
             return false;
         };
@@ -96,7 +100,7 @@ impl BackendTransactionTasks {
         true
     }
 
-    pub(super) fn is_active(&self, transaction_id: u32) -> bool {
+    pub(super) fn is_active(&self, transaction_id: TransactionId) -> bool {
         self.active.lock().contains_key(&transaction_id)
     }
 
@@ -321,15 +325,39 @@ pub(super) fn take_workshop_start_action(
     }]
 }
 
-pub(super) fn apply_transaction_event_to_task(
+/// What applying one transaction event to its task produced.
+struct AppliedEvent {
+    /// Whether the transaction reached a terminal state and its correlation
+    /// entry should be dropped.
+    pub(super) terminal: bool,
+    pub(super) actions: Vec<BackendRuntimeAction>,
+}
+
+impl AppliedEvent {
+    fn ongoing(actions: Vec<BackendRuntimeAction>) -> Self {
+        Self {
+            terminal: false,
+            actions,
+        }
+    }
+
+    fn terminal(actions: Vec<BackendRuntimeAction>) -> Self {
+        Self {
+            terminal: true,
+            actions,
+        }
+    }
+}
+
+fn apply_transaction_event_to_task(
     task: &mut CorrelatedBackendTask,
     event: &TransactionRuntimeEvent,
-) -> (bool, Vec<BackendRuntimeAction>) {
+) -> AppliedEvent {
     match event {
         TransactionRuntimeEvent::Finished { payload, .. } => {
             let actions = task.finished_actions(payload);
             task.handle.finished();
-            (true, actions)
+            AppliedEvent::terminal(actions)
         }
         TransactionRuntimeEvent::Error { error, .. } => {
             let actions = task
@@ -342,7 +370,7 @@ pub(super) fn apply_transaction_event_to_task(
                     }]
                 });
             task.handle.error(UiError::from(error.clone()));
-            (true, actions)
+            AppliedEvent::terminal(actions)
         }
         TransactionRuntimeEvent::Data { payload, .. } => {
             let mut actions = match payload {
@@ -362,25 +390,25 @@ pub(super) fn apply_transaction_event_to_task(
                 _ => {}
             }
             actions.extend(task.take_ready_actions());
-            (false, actions)
+            AppliedEvent::ongoing(actions)
         }
         TransactionRuntimeEvent::Status { status, .. } => {
             task.handle.status(status.clone());
-            (false, Vec::new())
+            AppliedEvent::ongoing(Vec::new())
         }
         TransactionRuntimeEvent::Progress { progress, .. } => {
             task.handle
                 .progress(f64::from(*progress) / TRANSACTION_PROGRESS_SCALE);
-            (false, Vec::new())
+            AppliedEvent::ongoing(Vec::new())
         }
         TransactionRuntimeEvent::IncrProgress { incr, .. } => {
             task.handle
                 .progress_incr(f64::from(*incr) / TRANSACTION_PROGRESS_SCALE);
-            (false, Vec::new())
+            AppliedEvent::ongoing(Vec::new())
         }
         TransactionRuntimeEvent::ResetProgress { .. } => {
             task.handle.progress_reset();
-            (false, Vec::new())
+            AppliedEvent::ongoing(Vec::new())
         }
     }
 }

@@ -190,7 +190,7 @@ pub struct TreemapHit<'a> {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum SizeAnalyzerError {
-    #[error("ERR_NO_ADDONS_FOUND")]
+    #[error("no installed addons to analyze")]
     NoAddonsFound,
     #[error("invalid size-analyzer bounds {width}x{height}")]
     InvalidBounds { width: f64, height: f64 },

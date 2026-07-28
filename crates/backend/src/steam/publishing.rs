@@ -22,32 +22,34 @@ use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PublishError {
-    #[error("ERR_WHITELIST:{}", .0.join("\n"))]
+    #[error("{} files are not whitelisted for upload", .0.len())]
     NotWhitelisted(Vec<String>),
-    #[error("ERR_NO_ENTRIES")]
+    #[error("the addon folder contains no uploadable files")]
     NoEntries,
-    #[error("ERR_DUPLICATE_ENTRIES:{0}")]
+    #[error("duplicate entry path: {0}")]
     DuplicateEntry(String),
-    #[error("ERR_INVALID_CONTENT_PATH")]
+    #[error("the content path is not an absolute directory")]
     InvalidContentPath,
-    #[error("ERR_MULTIPLE_GMAS")]
+    #[error("the addon folder contains more than one GMA")]
     MultipleGMAs,
-    #[error("ERR_ICON_TOO_LARGE")]
+    #[error("the icon exceeds the Workshop size limit")]
     IconTooLarge,
-    #[error("ERR_ICON_TOO_SMALL")]
+    #[error("the icon is below the Workshop size limit")]
     IconTooSmall,
-    #[error("ERR_ICON_INVALID_FORMAT")]
+    #[error("the icon is not a format the Workshop accepts")]
     IconInvalidFormat,
-    #[error("ERR_IO_ERROR")]
+    #[error("publish I/O failed")]
     IOError(#[source] Option<std::sync::Arc<std::io::Error>>),
-    #[error("ERR_STEAM_ERROR:{0}")]
+    #[error("Steam returned an error: {0}")]
     SteamError(SteamError),
-    #[error("ERR_IMAGE_ERROR:{0}")]
+    #[error("image processing failed: {0}")]
     ImageError(#[source] ImageError),
-    #[error("ERR_CANCELLED")]
+    #[error("cancelled")]
     Cancelled,
     #[error(transparent)]
     Gma(#[from] crate::gma::GMAError),
+    #[error(transparent)]
+    Runtime(#[from] crate::steam::runtime::SteamRuntimeError),
 }
 impl crate::error_key::HasErrorKey for PublishError {
     fn error_key(&self) -> crate::error_key::ErrorKey {
@@ -66,6 +68,7 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::ImageError(_) => keys::IMAGE_ERROR,
             Self::Cancelled => keys::CANCELLED,
             Self::Gma(error) => error.error_key(),
+            Self::Runtime(error) => error.error_key(),
         }
     }
 
@@ -77,6 +80,7 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::SteamError(error) => Some(error.to_string()),
             Self::ImageError(error) => Some(error.to_string()),
             Self::Gma(error) => error.error_detail(),
+            Self::Runtime(error) => error.error_detail(),
             _ => None,
         }
     }
@@ -105,7 +109,7 @@ impl From<std::io::Error> for PublishError {
     }
 }
 
-use super::Steam;
+use super::{ConnectedSteam, Steam};
 pub struct ContentPath(PathBuf);
 impl AsRef<Path> for ContentPath {
     fn as_ref(&self) -> &Path {
@@ -163,8 +167,15 @@ fn unique_temp_suffix() -> String {
 /// Directory this operation packs its GMA into, uniquely named and confined
 /// to the configured temp dir (never a parent of it) so a user-configured
 /// temp path is always respected.
-fn publish_temp_dir(app_data: &AppData) -> PathBuf {
-    let mut dir = app_data.temp_dir();
+///
+/// The submission's snapshot wins over the stored settings: it was captured
+/// when the user opened the publish flow, and a settings change since then
+/// must not move a submission already in progress.
+fn publish_temp_dir(app_data: &AppData, settings: Option<&PublishSettingsSnapshot>) -> PathBuf {
+    let mut dir = settings
+        .and_then(|settings| settings.temp.clone())
+        .filter(|temp| temp.is_dir())
+        .unwrap_or_else(|| app_data.temp_dir());
     dir.push(format!("gmpublisher_publishing_{}", unique_temp_suffix()));
     dir
 }
@@ -439,18 +450,32 @@ pub struct PublishSettingsSnapshot {
 pub struct PublishSubmission {
     pub content_path_src: PathBuf,
     pub icon_path: Option<PathBuf>,
+    /// Embedded in the packed GMA's metadata for both modes; the Workshop item
+    /// title is only set when creating.
     pub title: String,
     pub tags: Vec<String>,
     pub addon_type: String,
     pub upscale: bool,
-    pub update_id: Option<u64>,
-    pub changes: Option<String>,
+    pub mode: PublishSubmissionMode,
     pub settings: Option<PublishSettingsSnapshot>,
+}
+
+/// Whether a submission creates a Workshop item or updates one.
+///
+/// A changelog only exists for an update, which is why it lives here rather
+/// than beside an `Option<PublishedFileId>` that could disagree with it.
+#[derive(Debug, Clone)]
+pub enum PublishSubmissionMode {
+    Create,
+    Update {
+        id: PublishedFileId,
+        changes: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct PublishSubmissionOutcome {
-    pub published_file_id: u64,
+    pub published_file_id: PublishedFileId,
     pub legal_agreement_required: bool,
 }
 
@@ -463,7 +488,7 @@ pub struct PublishOutcome {
     pub legal_agreement_required: bool,
 }
 
-impl Steam {
+impl ConnectedSteam<'_> {
     pub fn update(
         &self,
         id: PublishedFileId,
@@ -491,8 +516,8 @@ impl Steam {
                 let preview_path = preview.resolve_preview_path(app_data, transaction)?;
 
                 let handle = self
+                    .interface
                     .client()
-                    .expect("reached only through app-layer entry points that already checked steam_connected()")
                     .ugc()
                     .start_item_update(GMOD_APP_ID, id)
                     .content_path(path.as_ref())
@@ -520,8 +545,8 @@ impl Steam {
                     .transpose()?;
 
                 let update = self
+                    .interface
                     .client()
-                    .expect("reached only through app-layer entry points that already checked steam_connected()")
                     .ugc()
                     .start_item_update(GMOD_APP_ID, id);
                 let handle = match preview_path.as_ref() {
@@ -560,16 +585,13 @@ impl Steam {
         debug_assert!(matches!(details, WorkshopUpdateType::Creation { .. }));
 
         let (published_tx, published_rx) = mpsc::channel();
-        self.client()
-            .expect("reached only through app-layer entry points that already checked steam_connected()")
-            .ugc()
-            .create_item(
-                GMOD_APP_ID,
-                steamworks::FileType::Community,
-                move |result| {
-                    let _ = published_tx.send(result);
-                },
-            );
+        self.interface.client().ugc().create_item(
+            GMOD_APP_ID,
+            steamworks::FileType::Community,
+            move |result| {
+                let _ = published_tx.send(result);
+            },
+        );
 
         let id = match published_rx.recv() {
             Ok(Ok((id, _))) => id,
@@ -583,10 +605,7 @@ impl Steam {
                 legal_agreement_required,
             }),
             Err(error) => {
-                self.client()
-                    .expect("reached only through app-layer entry points that already checked steam_connected()")
-                    .ugc()
-                    .delete_item(id, |_| {});
+                self.interface.client().ugc().delete_item(id, |_| {});
                 Err(error)
             }
         }
@@ -603,8 +622,8 @@ impl Steam {
 
         let (result_tx, result_rx) = mpsc::channel();
         let update_handle = self
+            .interface
             .client()
-            .expect("reached only through app-layer entry points that already checked steam_connected()")
             .ugc()
             .start_item_update(GMOD_APP_ID, addon_id)
             .preview_path(preview_path.as_ref())
@@ -638,14 +657,19 @@ pub fn submit_with_transaction(
         tags,
         addon_type,
         upscale,
-        update_id,
-        changes,
+        mode,
         settings,
     } = submission;
-    let update_id = update_id.map(PublishedFileId);
 
-    if let Some(settings) = settings
-        && let Err(error) = apply_publish_settings(&settings, app_data)
+    // The submission carries the globs this publish should honour; falling
+    // back to the stored ones keeps a submission without a snapshot working.
+    let ignore_globs = settings.as_ref().map_or_else(
+        || app_data.publish_ignore_globs_snapshot(),
+        |settings| settings.ignore_globs.clone(),
+    );
+
+    if let Some(settings) = settings.as_ref()
+        && let Err(error) = prepare_publish_temp_dir(settings)
     {
         return emit_publish_error(transaction, error);
     }
@@ -655,7 +679,7 @@ pub fn submit_with_transaction(
     // `WorkshopUpdateType` construction below, where each branch knows which).
     let custom_icon = match icon_path {
         Some(icon_path) => {
-            transaction.status("PUBLISH_PROCESSING_ICON");
+            transaction.status(crate::transactions::status::PUBLISH_PROCESSING_ICON);
 
             match WorkshopIcon::new(icon_path, upscale) {
                 Ok(icon) => Some(icon),
@@ -665,9 +689,9 @@ pub fn submit_with_transaction(
         None => None,
     };
 
-    transaction.status("PUBLISH_PACKING");
+    transaction.status(crate::transactions::status::PUBLISH_PACKING);
 
-    let publish_dir = publish_temp_dir(app_data);
+    let publish_dir = publish_temp_dir(app_data, settings.as_ref());
     if let Err(error) = std::fs::create_dir_all(&publish_dir) {
         return emit_publish_error(transaction, error.into());
     }
@@ -682,7 +706,7 @@ pub fn submit_with_transaction(
                 title: title.clone(),
                 addon_type: addon_type.clone(),
                 tags: tags.clone(),
-                ignore: app_data.publish_ignore_globs_snapshot(),
+                ignore: ignore_globs,
             },
             version: 3,
             extracted_name: String::new(),
@@ -702,9 +726,16 @@ pub fn submit_with_transaction(
         Err(error) => return emit_publish_error(transaction, error),
     };
 
-    transaction.status("PUBLISH_STARTING");
+    transaction.status(crate::transactions::status::PUBLISH_STARTING);
 
-    let outcome = if let Some(id) = update_id {
+    // Everything above runs without Steam; the client is required only from
+    // here, so validation failures stay reachable offline.
+    let steam = match steam.require_client() {
+        Ok(steam) => steam,
+        Err(error) => return emit_publish_error(transaction, PublishError::from(error)),
+    };
+
+    let outcome = if let PublishSubmissionMode::Update { id, changes } = mode {
         steam
             .update(
                 id,
@@ -743,7 +774,7 @@ pub fn submit_with_transaction(
         }) => {
             transaction.finished(crate::transactions::TransactionPayload::None);
             Ok(PublishSubmissionOutcome {
-                published_file_id: id.0,
+                published_file_id: id,
                 legal_agreement_required,
             })
         }
@@ -754,15 +785,11 @@ pub fn submit_with_transaction(
     }
 }
 
-fn apply_publish_settings(
-    settings: &PublishSettingsSnapshot,
-    app_data: &AppData,
-) -> Result<(), PublishError> {
+/// The submission's temp directory has to exist before packing writes into it.
+fn prepare_publish_temp_dir(settings: &PublishSettingsSnapshot) -> Result<(), PublishError> {
     if let Some(temp) = settings.temp.as_ref() {
         std::fs::create_dir_all(temp)?;
     }
-
-    app_data.apply_publish_settings_snapshot(settings.temp.as_deref(), &settings.ignore_globs);
     Ok(())
 }
 
@@ -800,15 +827,15 @@ fn fail_publish_callback_channel(transaction: &Transaction) -> PublishError {
 )]
 pub fn record_published_local_path(
     app_data: &AppData,
-    published_file_id: u64,
+    published_file_id: PublishedFileId,
     content_path_src: PathBuf,
 ) {
-    app_data.record_published_local_path(PublishedFileId(published_file_id), &content_path_src);
+    app_data.record_published_local_path(published_file_id, &content_path_src);
 }
 
 pub fn verify_whitelist(
     path: &Path,
-    app_data: &AppData,
+    ignore_globs: &[String],
     whitelist: &AddonWhitelist,
 ) -> Result<(Vec<GMAEntry>, u64), PublishError> {
     if !path.is_dir() || !path.is_absolute() {
@@ -817,7 +844,7 @@ pub fn verify_whitelist(
 
     let content_root = path.to_path_buf();
 
-    let ignore = app_data.publish_ignore_globs_snapshot();
+    let ignore = ignore_globs.to_vec();
     let whitelist_snapshot = whitelist.snapshot();
 
     let mut size = 0;
@@ -905,6 +932,28 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    /// "Steam is not running" and "not logged in" are different problems with
+    /// different fixes, and the app surfaces the detail verbatim.
+    #[test]
+    fn runtime_failures_keep_their_own_detail_through_publish_error() {
+        use crate::error_key::HasErrorKey as _;
+        use crate::steam::runtime::SteamRuntimeError;
+
+        let unavailable = PublishError::from(SteamRuntimeError::Unavailable);
+        let disconnected = PublishError::from(SteamRuntimeError::NotConnected);
+
+        assert_eq!(unavailable.error_key(), crate::error_key::keys::STEAM_ERROR);
+        assert_eq!(
+            disconnected.error_key(),
+            crate::error_key::keys::STEAM_ERROR
+        );
+        assert_ne!(unavailable.error_detail(), disconnected.error_detail());
+        assert_eq!(
+            unavailable.error_detail(),
+            SteamRuntimeError::Unavailable.error_detail()
+        );
+    }
+
     struct Fixture {
         app_data: AppData,
         steam: Steam,
@@ -955,44 +1004,64 @@ mod tests {
             .expect("write png");
     }
 
-    fn assert_content_path_error(path: &Path, expected: &str) {
+    fn assert_content_path_error(path: &Path, expected_key: &str) {
+        use crate::error_key::HasErrorKey;
         match ContentPath::new(path) {
             Ok(_) => panic!("expected content path error"),
-            Err(error) => assert_eq!(error.to_string(), expected),
+            Err(error) => assert_eq!(error.error_key().as_str(), expected_key, "{error}"),
         }
     }
 
     fn assert_verify_whitelist_error(fixture: &Fixture, path: &Path, expected: &str) {
-        match verify_whitelist(path, &fixture.app_data, &fixture.whitelist) {
+        match verify_whitelist(
+            path,
+            &fixture.app_data.settings().ignore_globs,
+            &fixture.whitelist,
+        ) {
             Ok(_) => panic!("expected verify whitelist error"),
-            Err(error) => assert_eq!(error.to_string(), expected),
+            Err(error) => {
+                use crate::error_key::HasErrorKey;
+                assert_eq!(error.error_key().as_str(), expected, "{error}");
+            }
         }
     }
 
     #[test]
+    /// The wire contract is `HasErrorKey`, not `Display`: the app builds every
+    /// `UiError` from the key and detail, and never parses the message.
     fn publishing_error_keys_match_upstream_strings() {
-        assert_eq!(
-            PublishError::NotWhitelisted(vec!["bad.exe".to_string(), "bad.dll".to_string()])
-                .to_string(),
-            "ERR_WHITELIST:bad.exe\nbad.dll"
+        use crate::error_key::HasErrorKey;
+
+        let assert_wire = |error: PublishError, key: &str, detail: Option<&str>| {
+            assert_eq!(error.error_key().as_str(), key, "{error}");
+            assert_eq!(error.error_detail().as_deref(), detail, "{error}");
+        };
+
+        assert_wire(
+            PublishError::NotWhitelisted(vec!["bad.exe".to_string(), "bad.dll".to_string()]),
+            "ERR_WHITELIST",
+            Some("bad.exe\nbad.dll"),
         );
-        assert_eq!(PublishError::NoEntries.to_string(), "ERR_NO_ENTRIES");
-        assert_eq!(
-            PublishError::DuplicateEntry("lua/init.lua".to_string()).to_string(),
-            "ERR_DUPLICATE_ENTRIES:lua/init.lua"
+        assert_wire(PublishError::NoEntries, "ERR_NO_ENTRIES", None);
+        assert_wire(
+            PublishError::DuplicateEntry("lua/init.lua".to_string()),
+            "ERR_DUPLICATE_ENTRIES",
+            Some("lua/init.lua"),
         );
-        assert_eq!(
-            PublishError::InvalidContentPath.to_string(),
-            "ERR_INVALID_CONTENT_PATH"
+        assert_wire(
+            PublishError::InvalidContentPath,
+            "ERR_INVALID_CONTENT_PATH",
+            None,
         );
-        assert_eq!(PublishError::MultipleGMAs.to_string(), "ERR_MULTIPLE_GMAS");
-        assert_eq!(PublishError::IconTooLarge.to_string(), "ERR_ICON_TOO_LARGE");
-        assert_eq!(PublishError::IconTooSmall.to_string(), "ERR_ICON_TOO_SMALL");
-        assert_eq!(
-            PublishError::IconInvalidFormat.to_string(),
-            "ERR_ICON_INVALID_FORMAT"
+        assert_wire(PublishError::MultipleGMAs, "ERR_MULTIPLE_GMAS", None);
+        assert_wire(PublishError::IconTooLarge, "ERR_ICON_TOO_LARGE", None);
+        assert_wire(PublishError::IconTooSmall, "ERR_ICON_TOO_SMALL", None);
+        assert_wire(
+            PublishError::IconInvalidFormat,
+            "ERR_ICON_INVALID_FORMAT",
+            None,
         );
-        assert_eq!(PublishError::IOError(None).to_string(), "ERR_IO_ERROR");
+        assert_wire(PublishError::IOError(None), "ERR_IO_ERROR", None);
     }
 
     #[test]
@@ -1035,11 +1104,14 @@ mod tests {
 
         let fixture =
             Fixture::with_publishing_settings(dir.path(), &["materials/*.png".to_string()]);
-        let (entries, size) =
-            match verify_whitelist(&content, &fixture.app_data, &fixture.whitelist) {
-                Ok(verified) => verified,
-                Err(error) => panic!("unexpected whitelist error: {error}"),
-            };
+        let (entries, size) = match verify_whitelist(
+            &content,
+            &fixture.app_data.settings().ignore_globs,
+            &fixture.whitelist,
+        ) {
+            Ok(verified) => verified,
+            Err(error) => panic!("unexpected whitelist error: {error}"),
+        };
 
         assert_eq!(size, "print('phase6')\n".len() as u64);
         assert_eq!(entries.len(), 1);
@@ -1066,7 +1138,7 @@ mod tests {
         let invalid = dir.path().join("invalid");
         fs::create_dir(&invalid).expect("invalid dir");
         fs::write(invalid.join("bad.exe"), "bad").expect("invalid file");
-        assert_verify_whitelist_error(&fixture, &invalid, "ERR_WHITELIST:bad.exe");
+        assert_verify_whitelist_error(&fixture, &invalid, "ERR_WHITELIST");
     }
 
     #[test]
@@ -1101,7 +1173,10 @@ mod tests {
         fs::write(dir.path().join("too-small.png"), [0_u8; 15]).expect("small icon");
         match WorkshopIcon::new(dir.path().join("too-small.png"), false) {
             Ok(_) => panic!("expected small icon error"),
-            Err(error) => assert_eq!(error.to_string(), "ERR_ICON_TOO_SMALL"),
+            Err(error) => {
+                use crate::error_key::HasErrorKey;
+                assert_eq!(error.error_key().as_str(), "ERR_ICON_TOO_SMALL", "{error}");
+            }
         }
 
         fs::write(
@@ -1111,7 +1186,10 @@ mod tests {
         .expect("large icon");
         match WorkshopIcon::new(dir.path().join("too-large.png"), false) {
             Ok(_) => panic!("expected large icon error"),
-            Err(error) => assert_eq!(error.to_string(), "ERR_ICON_TOO_LARGE"),
+            Err(error) => {
+                use crate::error_key::HasErrorKey;
+                assert_eq!(error.error_key().as_str(), "ERR_ICON_TOO_LARGE", "{error}");
+            }
         }
 
         fs::write(
@@ -1121,7 +1199,14 @@ mod tests {
         .expect("invalid format icon");
         match WorkshopIcon::new(dir.path().join("icon.bmp"), false) {
             Ok(_) => panic!("expected invalid format error"),
-            Err(error) => assert_eq!(error.to_string(), "ERR_ICON_INVALID_FORMAT"),
+            Err(error) => {
+                use crate::error_key::HasErrorKey;
+                assert_eq!(
+                    error.error_key().as_str(),
+                    "ERR_ICON_INVALID_FORMAT",
+                    "{error}"
+                );
+            }
         }
     }
 
@@ -1253,8 +1338,8 @@ mod tests {
         fs::create_dir_all(&configured_temp).expect("configured temp dir");
         let fixture = Fixture::with_publishing_settings(&configured_temp, &[]);
 
-        let first = publish_temp_dir(&fixture.app_data);
-        let second = publish_temp_dir(&fixture.app_data);
+        let first = publish_temp_dir(&fixture.app_data, None);
+        let second = publish_temp_dir(&fixture.app_data, None);
 
         assert_ne!(first, second, "each call must derive a fresh temp name");
         assert_eq!(
@@ -1263,6 +1348,34 @@ mod tests {
             "publish temps must live directly under the configured temp dir, never a parent of it"
         );
         assert_eq!(second.parent(), Some(configured_temp.as_path()));
+    }
+
+    /// The submission carries the temp dir the user had configured when the
+    /// publish flow opened. A settings change between then and submit must not
+    /// relocate a pack already in flight.
+    #[test]
+    fn a_submissions_own_temp_dir_wins_over_the_stored_setting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stored = dir.path().join("stored-temp");
+        let submitted = dir.path().join("submitted-temp");
+        for path in [&stored, &submitted] {
+            fs::create_dir_all(path).expect("temp dir");
+        }
+        let fixture = Fixture::with_publishing_settings(&stored, &[]);
+        let snapshot = PublishSettingsSnapshot {
+            temp: Some(submitted.clone()),
+            ignore_globs: Vec::new(),
+        };
+
+        assert_eq!(
+            publish_temp_dir(&fixture.app_data, Some(&snapshot)).parent(),
+            Some(submitted.as_path())
+        );
+        assert_eq!(
+            publish_temp_dir(&fixture.app_data, None).parent(),
+            Some(stored.as_path()),
+            "a submission without a snapshot still follows the stored setting"
+        );
     }
 
     #[test]
@@ -1275,7 +1388,7 @@ mod tests {
         let fixture = Fixture::with_publishing_settings(dir.path(), &[]);
 
         let transaction = fixture.transactions.begin();
-        let transaction_id = transaction.id;
+        let transaction_id = transaction.id();
 
         let result = submit_with_transaction(
             PublishSubmission {
@@ -1285,11 +1398,13 @@ mod tests {
                 tags: vec!["fun".to_string()],
                 addon_type: "tool".to_string(),
                 upscale: false,
-                update_id: Some(123),
-                changes: Some("icon check".to_string()),
+                mode: PublishSubmissionMode::Update {
+                    id: PublishedFileId(123),
+                    changes: Some("icon check".to_string()),
+                },
                 settings: Some(PublishSettingsSnapshot {
                     temp: Some(publish_temp.clone()),
-                    ignore_globs: ignore_globs.clone(),
+                    ignore_globs,
                 }),
             },
             &transaction,
@@ -1299,8 +1414,17 @@ mod tests {
         );
 
         assert!(matches!(result, Err(PublishError::IconInvalidFormat)));
-        assert_eq!(fixture.app_data.settings.load().temp, Some(publish_temp));
-        assert_eq!(fixture.app_data.settings.load().ignore_globs, ignore_globs);
+        // A submission's temp directory and ignore globs apply to that publish
+        // only; they must not be written back over the user's settings.
+        assert_eq!(
+            fixture.app_data.settings().temp,
+            Some(dir.path().to_owned())
+        );
+        assert!(fixture.app_data.settings().ignore_globs.is_empty());
+        assert!(
+            publish_temp.is_dir(),
+            "the submission's temp directory is still created"
+        );
 
         {
             let events = fixture.collector.drain();

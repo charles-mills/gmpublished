@@ -18,6 +18,7 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
 };
 
+use crate::transactions::TransactionId;
 use crate::{GMAFile, Transaction, WorkshopItem, transactions::TransactionPayload};
 
 const MAX_QUICK_RESULTS: u8 = 10;
@@ -599,7 +600,11 @@ impl Search {
         }
     }
 
-    pub fn full_with_transaction(self: &Arc<Self>, query: String, transaction: Transaction) -> u32 {
+    pub fn full_with_transaction(
+        self: &Arc<Self>,
+        query: String,
+        transaction: Transaction,
+    ) -> TransactionId {
         self.full_with_transaction_scope(query, SearchScope::Addons, transaction)
     }
 
@@ -608,10 +613,10 @@ impl Search {
         query: String,
         scope: SearchScope,
         transaction: Transaction,
-    ) -> u32 {
+    ) -> TransactionId {
         self.dirty();
 
-        let id = transaction.id;
+        let id = transaction.id();
         let search = Arc::clone(self);
 
         rayon::spawn(move || {

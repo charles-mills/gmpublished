@@ -409,3 +409,41 @@ mod tests {
         assert_eq!(prepared.thumbnail().rgba_bytes().len(), 2 * 2 * 4);
     }
 }
+
+/// One thumbnail job: what to fetch, at what size, and the cache key those two
+/// imply.
+///
+/// The key is derived here rather than passed alongside, so it cannot describe
+/// a different input or edge than the fetch actually uses.
+#[derive(Clone, Debug)]
+pub struct ThumbnailRequest {
+    key: ThumbnailKey,
+    input: ThumbnailInput,
+    physical_max_edge: u32,
+}
+
+impl ThumbnailRequest {
+    #[must_use]
+    pub fn new(input: ThumbnailInput, physical_max_edge: u32, mode: ThumbnailMode) -> Self {
+        Self {
+            key: input.cache_key_with_mode(physical_max_edge, mode),
+            input,
+            physical_max_edge,
+        }
+    }
+
+    #[must_use]
+    pub const fn key(&self) -> &ThumbnailKey {
+        &self.key
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ThumbnailInput {
+        &self.input
+    }
+
+    #[must_use]
+    pub const fn physical_max_edge(&self) -> u32 {
+        self.physical_max_edge
+    }
+}

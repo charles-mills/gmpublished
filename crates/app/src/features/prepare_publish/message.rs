@@ -9,10 +9,11 @@ use crate::features::file_preview;
 use super::{
     model::{
         IgnorePatternMutationResult, IgnoredPattern, PublishIconSubmitResult, PublishSubmitContext,
-        PublishSubmitResult, SelectOption, VerifiedContentPath, VerifiedIconPreview,
+        PublishSubmitResult, VerifiedContentPath, VerifiedIconPreview,
     },
-    state::OpenTarget,
+    state::{AddonTag, AddonType, OpenTarget},
 };
+use crate::generation::Generation;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
@@ -25,7 +26,7 @@ pub enum Message {
     WorkshopContentSubmissionCompleted(u64, Result<(), UiError>),
     WorkshopContentDownloaded(u64, WorkshopDownloadSuccess),
     WorkshopSnapshotFailed(u64, UiError),
-    WorkshopSnapshotInspected(u64, Result<Arc<VerifiedContentPath>, UiError>),
+    WorkshopSnapshotInspected(Generation, Result<Arc<VerifiedContentPath>, UiError>),
     AddonPathEdited(String),
     AddonPathAccepted,
     WorkshopLinkRequested,
@@ -37,17 +38,17 @@ pub enum Message {
         temp_dir: PathBuf,
         well_rgb: [u8; 3],
     },
-    IconVerificationCompleted(u64, Result<Arc<VerifiedIconPreview>, UiError>),
+    IconVerificationCompleted(Generation, Result<Arc<VerifiedIconPreview>, UiError>),
     IconRemoveRequested,
     IconUpscaleToggled(bool),
     IconAnimationTick(Instant),
-    AddonTypeSelected(SelectOption),
-    TagSelected(usize, SelectOption),
+    AddonTypeSelected(Option<AddonType>),
+    TagSelected(usize, Option<AddonTag>),
     IgnorePatternEdited(String),
     IgnorePatternAccepted,
     IgnorePatternRemoveRequested(String),
     IgnorePatternMutationCompleted(Result<IgnorePatternMutationResult, UiError>),
-    PathVerificationCompleted(u64, Result<Arc<VerifiedContentPath>, UiError>),
+    PathVerificationCompleted(Generation, Result<Arc<VerifiedContentPath>, UiError>),
     BrowserSelectHoverChanged(bool),
     BrowserScrolled {
         offset: f32,
@@ -60,8 +61,8 @@ pub enum Message {
     ChangelogActionPerformed(text_editor::Action),
     SubmitRequested,
     PublishIconRequested,
-    PublishIconSubmitCompleted(u64, Result<PublishIconSubmitResult, UiError>),
+    PublishIconSubmitCompleted(Generation, Result<PublishIconSubmitResult, UiError>),
     SubmitSpinnerTick(Instant),
     SubmitContextLoaded(Result<PublishSubmitContext, UiError>),
-    PublishSubmitCompleted(u64, Result<PublishSubmitResult, UiError>),
+    PublishSubmitCompleted(Generation, Result<PublishSubmitResult, UiError>),
 }

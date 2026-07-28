@@ -47,24 +47,24 @@ fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<PublishedFileId> 
 
 #[derive(Debug, Clone, Error)]
 pub enum GMAError {
-    #[error("ERR_IO_ERROR")]
+    #[error("GMA I/O failed")]
     IOError(#[source] Option<std::sync::Arc<std::io::Error>>),
-    #[error("ERR_GMA_FORMAT_ERROR")]
+    #[error("the GMA is malformed")]
     FormatError,
-    #[error("ERR_GMA_INVALID_HEADER")]
+    #[error("the GMA header is not recognisable")]
     InvalidHeader,
-    #[error("ERR_GMA_ENTRY_NOT_FOUND")]
+    #[error("no such entry in the GMA")]
     EntryNotFound,
-    #[error("ERR_LZMA")]
+    #[error("LZMA decompression failed")]
     LZMA,
-    #[error("ERR_CANCELLED")]
+    #[error("cancelled")]
     Cancelled,
     /// Extraction finished without writing everything it should have: at
     /// least one entry failed, or nothing was extracted at all (including a
     /// GMA whose every entry the whitelist rejected). Never raised for a
     /// partial success that's otherwise fine — only for outcomes that must
     /// not be reported as `Finished`.
-    #[error("ERR_GMA_EXTRACTION_FAILED")]
+    #[error("extraction failed")]
     ExtractionFailed {
         extracted: usize,
         failed: usize,
@@ -73,7 +73,7 @@ pub enum GMAError {
     },
     /// Every numbered fallback name (` (1)` through ` (255)`) at the
     /// destination was already taken.
-    #[error("ERR_GMA_DESTINATION_UNAVAILABLE")]
+    #[error("the extraction destination is unavailable")]
     DestinationUnavailable,
 }
 impl From<std::io::Error> for GMAError {
@@ -295,6 +295,8 @@ impl Ord for GMAFile {
 }
 
 impl GMAFile {
+    /// Carries [`read::GmaView::mmap`]'s accepted risk for the duration of the
+    /// call.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GMAError> {
         read::GmaView::mmap(path.as_ref())?.handle(path)
     }

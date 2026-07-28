@@ -17,6 +17,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use super::domain::SteamId;
 use super::domain::{PublishedFileId, WorkshopMetadata};
 
 /// Cached entries older than this are re-queued for the existing background
@@ -75,7 +76,7 @@ struct SnapshotEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     full_description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner_steamid: Option<u64>,
+    owner_steamid: Option<SteamId>,
     fetched_at: u64,
     // Added after v1 shipped; `default` keeps pre-ThumbHash snapshots loadable
     // without a version bump.
@@ -232,6 +233,21 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
+    /// `SteamId` is `#[serde(transparent)]`, so wrapping the field must not
+    /// change the on-disk shape — a change here silently discards every user's
+    /// cached metadata on upgrade.
+    #[test]
+    fn owner_steamid_serializes_as_a_bare_number() {
+        let json = serde_json::to_string(&SteamId::new(76_561_197_960_265_728))
+            .expect("SteamId should serialize");
+
+        assert_eq!(json, "76561197960265728");
+        assert_eq!(
+            serde_json::from_str::<SteamId>(&json).expect("and round-trip"),
+            SteamId::new(76_561_197_960_265_728)
+        );
+    }
+
     fn sample_cached(id: u64, fetched_at: u64) -> CachedWorkshopMetadata {
         CachedWorkshopMetadata {
             metadata: WorkshopMetadata {
@@ -244,7 +260,7 @@ mod tests {
                 preview_url: Some(format!("https://example.test/{id}.jpg")),
                 subscriptions: 42,
                 full_description: Some(format!("Full description {id}")),
-                owner_steamid: Some(76_561_197_960_265_728 + id),
+                owner_steamid: Some(SteamId::new(76_561_197_960_265_728 + id)),
                 thumbhash: Some(Arc::from(vec![id as u8, 7, 9].as_slice())),
             },
             fetched_at,

@@ -2,6 +2,7 @@ use super::{
     Item, Message, RowLayout, State, TitleMeasure, VisibleRowRange, apply, columns_for_width,
     visible_rows_for_viewport,
 };
+use crate::generation::Generation;
 use crate::theme::{self, ThemeVariant, Tokens};
 use crate::widgets::addon_card;
 use iced::Point;
@@ -148,12 +149,14 @@ fn next_page_request_is_emitted_near_the_end_once() {
 
     assert_eq!(
         apply(&mut state, Message::Scrolled(250)),
-        vec![
-            Message::VisibleRangeChanged(2, 4),
-            Message::NextPageRequested
-        ]
+        vec![Message::VisibleRangeChanged(2, 4)]
     );
+    assert!(state.take_next_page_request());
     assert_eq!(apply(&mut state, Message::Scrolled(260)), Vec::new());
+    assert!(
+        !state.take_next_page_request(),
+        "the request is claimed once per page"
+    );
     assert!(state.next_page_was_requested());
 }
 
@@ -165,11 +168,13 @@ fn unmeasured_viewport_requests_next_page_on_first_scroll() {
     };
     let _ = state.set_items(items(&[100.0, 100.0, 100.0, 100.0]));
 
-    assert_eq!(
-        apply(&mut state, Message::Scrolled(1)),
-        vec![Message::NextPageRequested]
-    );
+    assert_eq!(apply(&mut state, Message::Scrolled(1)), Vec::new());
+    assert!(state.take_next_page_request());
     assert_eq!(apply(&mut state, Message::Scrolled(2)), Vec::new());
+    assert!(
+        !state.take_next_page_request(),
+        "the request is claimed once per page"
+    );
     assert!(state.next_page_was_requested());
 }
 
@@ -353,29 +358,29 @@ fn hover_uses_each_cards_own_cached_height_inside_a_mixed_row() {
 #[test]
 fn layout_cache_recomputes_only_for_items_width_and_columns() {
     let mut state = State::default();
-    assert_eq!(state.layout_cache_generation(), 0);
+    assert_eq!(state.layout_cache_generation(), Generation::from_raw(0));
 
     let _ = state.set_items(items(&[100.0]));
-    assert_eq!(state.layout_cache_generation(), 1);
+    assert_eq!(state.layout_cache_generation(), Generation::from_raw(1));
 
     let _ = apply(&mut state, Message::ViewportResized(400, 200));
-    assert_eq!(state.layout_cache_generation(), 2);
+    assert_eq!(state.layout_cache_generation(), Generation::from_raw(2));
 
     let _ = apply(&mut state, Message::ViewportResized(400, 300));
-    assert_eq!(state.layout_cache_generation(), 2);
+    assert_eq!(state.layout_cache_generation(), Generation::from_raw(2));
 
     let _ = apply(&mut state, Message::ColumnsChanged(2));
-    assert_eq!(state.layout_cache_generation(), 3);
+    assert_eq!(state.layout_cache_generation(), Generation::from_raw(3));
 
     let _ = super::view(
         &state,
         &Tokens::for_variant(ThemeVariant::Light),
         "test-grid",
     );
-    assert_eq!(state.layout_cache_generation(), 3);
+    assert_eq!(state.layout_cache_generation(), Generation::from_raw(3));
 
     let _ = state.set_items(items(&[100.0, 120.0]));
-    assert_eq!(state.layout_cache_generation(), 4);
+    assert_eq!(state.layout_cache_generation(), Generation::from_raw(4));
 }
 
 #[test]

@@ -42,19 +42,19 @@ gmod-broken-title = 找不到 Garry's Mod 文件夹
 gmod-broken-body = 已保存的位置不再包含 GarrysMod/addons。
 gmod-broken-research = 重新搜索
 account-update-title = 有可用更新
-account-update-caption = {$arg0} · 点击下载
+account-update-caption = {$version} · 点击下载
 my-workshop = 我的创意工坊物品
 publish-new = 发布新模组...
 my-workshop-loading = 载入中...
 my-workshop-empty-title = 尚未发布任何模组
 my-workshop-empty-body = 您发布到创意工坊的内容都会显示在此处。
-my-workshop-error = 载入我的创意工坊物品失败：{$arg0}
-my-workshop-count = 显示了 {$arg0} 个物品，共 {$arg1} 个物品
+my-workshop-error = 载入我的创意工坊物品失败：{$error}
+my-workshop-count = 显示了 {$loaded} 个物品，共 {$total} 个物品
 installed-addons = 已安装的模组
 installed-addons-loading = 载入中...
 installed-addons-empty-title = 未安装任何模组
 installed-addons-empty-body = 在创意工坊订阅内容，或将 .gma 文件拖放至此。
-installed-addons-error = 检索已安装模组失败：{$arg0}
+installed-addons-error = 检索已安装模组失败：{$error}
 downloader = 模组下载器
 downloader-workshop-input = 粘贴创意工坊 ID, 链接或合集链接在此...
 downloader-bulk-extract = 手动选择 GMA 文件
@@ -68,8 +68,8 @@ downloader-open-all = 打开所有
 downloader-remove-all = 移除所有
 downloader-status-finished = 完成
 downloader-status-error = 错误
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = 创意工坊 {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-workshop-id = 创意工坊 {$id}
 destination-where-to = 解压到哪里？
 destination-overwrite-warning = 已存在的文件将会被覆写。
 destination-browse = 浏览...
@@ -84,76 +84,78 @@ destination-invalid-path = 请选择一个存在的绝对路径文件夹。
 relative-time-now = 刚刚
 relative-time-past-year = 1 年前
 relative-time-past-years =
-    { $arg0 ->
-       *[other] {$arg0} 年前
+    { $count ->
+       *[other] {$count} 年前
     }
 relative-time-past-month = 1 个月前
 relative-time-past-months =
-    { $arg0 ->
-       *[other] {$arg0} 个月前
+    { $count ->
+       *[other] {$count} 个月前
     }
 relative-time-past-day = 1 天前
 relative-time-past-days =
-    { $arg0 ->
-       *[other] {$arg0} 天前
+    { $count ->
+       *[other] {$count} 天前
     }
 relative-time-past-hour = 1 小时前
 relative-time-past-hours =
-    { $arg0 ->
-       *[other] {$arg0} 小时前
+    { $count ->
+       *[other] {$count} 小时前
     }
 relative-time-past-minute = 1 分钟前
 relative-time-past-minutes =
-    { $arg0 ->
-       *[other] {$arg0} 分钟前
+    { $count ->
+       *[other] {$count} 分钟前
     }
 relative-time-past-second = 1 秒前
 relative-time-past-seconds =
-    { $arg0 ->
-       *[other] {$arg0} 秒前
+    { $count ->
+       *[other] {$count} 秒前
     }
 relative-time-future-year = 1 年后
 relative-time-future-years =
-    { $arg0 ->
-       *[other] {$arg0} 年后
+    { $count ->
+       *[other] {$count} 年后
     }
 relative-time-future-month = 1 个月后
 relative-time-future-months =
-    { $arg0 ->
-       *[other] {$arg0} 个月后
+    { $count ->
+       *[other] {$count} 个月后
     }
 relative-time-future-day = 1 天后
 relative-time-future-days =
-    { $arg0 ->
-       *[other] {$arg0} 天后
+    { $count ->
+       *[other] {$count} 天后
     }
 relative-time-future-hour = 1 小时后
 relative-time-future-hours =
-    { $arg0 ->
-       *[other] {$arg0} 小时后
+    { $count ->
+       *[other] {$count} 小时后
     }
 relative-time-future-minute = 1 分钟后
 relative-time-future-minutes =
-    { $arg0 ->
-       *[other] {$arg0} 分钟后
+    { $count ->
+       *[other] {$count} 分钟后
     }
 relative-time-future-second = 1 秒后
 relative-time-future-seconds =
-    { $arg0 ->
-       *[other] {$arg0} 秒后
+    { $count ->
+       *[other] {$count} 秒后
     }
 downloading = 正在下载
 locating = 等待中
 decompressing = 正在解压
-extracting_progress = 已完成 {$arg0}%（{$arg1} / {$arg2}）
+reading_metadata = 正在读取元数据
+searching = 正在搜索...
+extracting_progress = 已完成 {$percent}%（{$done} / {$total}）
 size-analyzer = 模组大小分析
 size-analyzer-waiting = 等待树状图视口...
 size-analyzer-loading = 计算中...
 size-analyzer-empty = 未找到大小大于零的模组。
 size-analyzer-empty-title = 没有可分析的内容
 size-analyzer-empty-body = 您库中的所有模组均为空，因此无法生成图表。
-size-analyzer-error = 模组大小分析失败：{$arg0}
-size-analyzer-summary-cells = 共 {$arg0} 个文件（夹）
+size-analyzer-error = 模组大小分析失败：{$error}
+size-analyzer-summary-cells = 共 {$count} 个文件（夹）
 size-analyzer-name = 名称
 size-analyzer-type = 类型
 size-analyzer-size = 大小
@@ -223,7 +225,7 @@ context-menu-debug-simulate-minus = 模拟 -10
 context-menu-debug-simulate-plus-million = 模拟 +100 万
 context-menu-debug-simulate-minus-million = 模拟 -100 万
 publish-processing-icon = 正在处理创意工坊图标...
-publish-packing = 正在打包 {$arg0}%（{$arg1} / {$arg2}）
+publish-packing = 正在打包 {$percent}%（{$done} / {$total}）
 PUBLISH_STARTING = 开始发布
 PUBLISH_PREPARING_CONFIG = 准备配置文件...
 PUBLISH_PREPARING_CONTENT = 正在准备内容...
@@ -240,10 +242,10 @@ err-whitelist-detail =
 
     如果您想要从您的 GMA 里过滤这些文件类型, 把它们添加到忽略文件列表内。
 
-    {$arg0}
+    {$detail}
 err-no-entries = 此内容路径中没有任何条目。
-err-duplicate-entries = 在此内容路径内发现了重复的条目（{$arg0}）。所有路径都必须是独一无二并且全小写。
-err-duplicate-entries-detail = 在此内容路径内发现了重复的条目（{$arg0}）。所有路径都必须是独一无二并且全小写。
+err-duplicate-entries = 在此内容路径内发现了重复的条目。所有路径都必须是独一无二并且全小写。
+err-duplicate-entries-detail = 在此内容路径内发现了重复的条目（{$detail}）。所有路径都必须是独一无二并且全小写。
 err-invalid-content-path = 内容路径未找到, 可能为非文件夹或 gmpublished 没有权限来访问
 err-multiple-gmas = 在该内容路径里发现了多个 GMA 文件
 err-icon-too-large = 图标大小过大（> 1 MB）
@@ -254,12 +256,12 @@ err-io-error = I/O 错误
 err-unknown = 出现问题
 err-gmod-path-missing = 未配置 Garry's Mod 文件夹
 err-no-addons-found = 未找到模组
-err-image-error = 图像错误：{$arg0}
-err-image-error-detail = 图像错误：{$arg0}
-err-steam-error = Steam 错误：{$arg0}
-err-steam-error-detail = Steam 错误：{$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/s
+err-image-error = 图像错误
+err-image-error-detail = 图像错误：{$detail}
+err-steam-error = Steam 错误
+err-steam-error-detail = Steam 错误：{$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/s
 byte-unit-b = B
 byte-unit-kb = KB
 byte-unit-mb = MB
@@ -293,7 +295,7 @@ file-type-txt = 文本文档
 file-type-properties = 翻译文件
 file-type-audio = 音频
 file-type-image = 图像
-file-type-unknown = 未知文件（{$arg0}）
+file-type-unknown = 未知文件（{$extension}）
 file-preview-loading = 正在加载预览...
 file-preview-stage-reading-archive = 正在读取归档...
 file-preview-stage-reading-bsp = 正在读取 BSP...
@@ -305,7 +307,7 @@ file-preview-expand = 展开预览
 file-preview-collapse = 收起预览
 file-preview-open-material = 打开材质
 file-preview-open-texture = 打开贴图
-file-preview-error = 预览失败：{$arg0}
+file-preview-error = 预览失败：{$error}
 file-preview-path = 路径
 file-preview-size = 大小
 file-preview-crc = CRC
@@ -327,7 +329,7 @@ file-preview-particle-level-approximate = 近似模拟 — 效果可能与游戏
 file-preview-particle-level-inert = 需要地图或实体 — 在此预览中无效
 file-preview-particle-level-unsupported = 此预览中不模拟
 file-preview-truncated = 预览已截断 — 完整文件大于当前显示内容。
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = 网格
 file-preview-model-bones = 骨骼
 file-preview-model-sequences = 序列
@@ -335,8 +337,8 @@ file-preview-model-vertices = 顶点
 file-preview-model-triangles = 三角形
 file-preview-model-materials = 已解析材质
 file-preview-model-skin = 皮肤
-file-preview-model-skin-option = 皮肤 {$arg0}
-file-preview-model-bodygroup = 身体组 {$arg0}
+file-preview-model-skin-option = 皮肤 {$index}
+file-preview-model-bodygroup = 身体组 {$index}
 file-preview-model-bounds-min = 最小边界
 file-preview-model-bounds-max = 最大边界
 file-preview-map-controls = 拖动环视 · WASD 飞行 · Shift 加速 · 滚轮调节速度
@@ -368,7 +370,7 @@ prepare-publish-tag-2 = 标签 2
 prepare-publish-tag-3 = 标签 3
 prepare-publish-update-exclamation = 更新！
 prepare-publish-publish-exclamation = 发布！
-prepare-publish-update-warning = 您正准备推送升级至物品 {$arg0}（{$arg1}）
+prepare-publish-update-warning = 您正准备推送升级至物品 {$title}（{$id}）
 prepare-publish-still-needed = 仍需填写：
 prepare-publish-needs-addon-path = 模组路径
 prepare-publish-needs-title = 标题
@@ -380,8 +382,8 @@ prepare-publish-file-browser = 文件浏览器
 prepare-publish-browser-select = 将文件拖拽至此或浏览
 prepare-publish-no-files = 未找到任何文件
 prepare-publish-items-one = 1 个文件（夹）
-prepare-publish-items-num = 共 {$arg0} 个文件（夹）
-prepare-publish-items-shown = 显示了 {$arg0} 个文件（夹）
+prepare-publish-items-num = 共 {$count} 个文件（夹）
+prepare-publish-items-shown = 显示了 {$count} 个文件（夹）
 prepare-publish-ignored-patterns = 忽略文件
 prepare-publish-ignore-placeholder = 添加...
 prepare-publish-ignored-for-convenience = 为了便捷，这些文件将默认忽略。

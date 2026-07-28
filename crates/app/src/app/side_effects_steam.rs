@@ -5,6 +5,7 @@ use super::{
     backend_runtime_action_message, flatten_blocking_ui_result, installed_addons, my_workshop,
     prerequisites, search, settings, shell, steam_session,
 };
+use crate::generation::Generation;
 
 impl App {
     pub(super) fn apply_steam_session_message(
@@ -67,8 +68,8 @@ impl App {
     /// the moment it clears, the error underneath would be the first thing the
     /// user sees — reporting an outage that is already over.
     ///
-    /// Re-entering is exactly what leaving the route and coming back does, and
-    /// it is what people were doing by hand to clear this.
+    /// Re-entering is exactly what leaving the route and coming back does —
+    /// the manual workaround a user would otherwise have to find.
     fn reload_steam_route_after_reconnect(&mut self) -> Task<RootMessage> {
         let route = self.state.shell.route();
         if !prerequisites::requires_steam(route) {
@@ -199,7 +200,7 @@ impl App {
             })
     }
 
-    pub(super) fn steam_identity_task(&self, generation: u64) -> Task<RootMessage> {
+    pub(super) fn steam_identity_task(&self, generation: Generation) -> Task<RootMessage> {
         self.ctx
             .run_blocking("steam-current-user", |app| {
                 app.current_steam_user()

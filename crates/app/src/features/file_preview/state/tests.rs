@@ -8,6 +8,7 @@ use crate::features::file_preview::model::{InfoReason, PreviewContent};
 use crate::features::file_preview::model::{
     MapFog, MapStats, MaterialSlot, MeshData, ModelPreview, ModelStats,
 };
+use crate::generation::Generation;
 use crate::test_support::GmaFixtureBuilder;
 
 fn archive() -> Arc<PreviewArchiveSource> {
@@ -23,7 +24,7 @@ fn archive() -> Arc<PreviewArchiveSource> {
 
 fn request(path: &str) -> PreviewRequest {
     PreviewRequest {
-        request_id: 0,
+        request_id: Generation::from_raw(0),
         archive: archive(),
         entry_path: path.to_owned(),
         display_name: path.rsplit('/').next().unwrap_or(path).to_owned(),
@@ -50,8 +51,8 @@ fn begin_open_marks_modal_loading_and_stamps_request_id() {
 
     assert!(state.is_open());
     assert!(state.loading());
-    assert_eq!(request.request_id, 1);
-    assert_eq!(state.request().unwrap().request_id, 1);
+    assert_eq!(request.request_id, Generation::from_raw(1));
+    assert_eq!(state.request().unwrap().request_id, Generation::from_raw(1));
     assert!(state.current().is_none());
     assert!(!state.expanded());
 }

@@ -100,4 +100,49 @@ mod tests {
         assert_eq!(keys::WHITELIST.as_str(), "ERR_WHITELIST");
         assert_eq!(keys::GMOD_PATH_MISSING.as_str(), "ERR_GMOD_PATH_MISSING");
     }
+
+    /// `Display` is a developer message and `HasErrorKey` is the wire code.
+    /// A `#[error("ERR_…")]` attribute means an error type is carrying the code
+    /// twice, and the copy in `Display` is the one nothing checks.
+    #[test]
+    fn display_messages_do_not_restate_error_keys() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && let Ok(source) = std::fs::read_to_string(&path)
+                {
+                    for (number, line) in source.lines().enumerate() {
+                        if line.trim_start().starts_with("#[error(\"ERR_") {
+                            out.push(format!("{}:{}", path.display(), number + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Both crates: `HasErrorKey` impls live on either side of the bridge,
+        // and the app's are as able to restate a key as the backend's.
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the backend crate sits inside the workspace");
+        let mut offenders = Vec::new();
+        for crate_name in ["backend", "app"] {
+            walk(&workspace.join(crate_name).join("src"), &mut offenders);
+        }
+        assert!(
+            workspace.join("app/src").is_dir(),
+            "the app crate must be walked, not silently skipped"
+        );
+
+        assert!(
+            offenders.is_empty(),
+            "error keys restated in Display: {offenders:#?}"
+        );
+    }
 }

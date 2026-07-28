@@ -1,6 +1,6 @@
 use super::materials::{
-    MapMaterialResolution, resolve_detail_sprites, resolve_map_material_slots_parallel,
-    resolve_map_overlays, resolve_skybox, sky_log_status,
+    resolve_detail_sprites, resolve_map_material_slots_parallel, resolve_map_overlays,
+    resolve_skybox, sky_log_status,
 };
 use super::{
     AmbientCube, Arc, BTreeMap, BTreeSet, ContentSourceTier, ConvexHull, ConvexLedge,
@@ -92,44 +92,17 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .with_decoded_texture_budget(Arc::clone(&texture_budget));
     emit_stage(PreviewLoadStage::ResolvingMaterials);
     let materials_started = Instant::now();
-    let MapMaterialResolution {
-        mut materials,
-        mut material_indexes,
-        mut resolved_material_count,
-        mut water_fallback_material_count,
-    } = resolve_map_material_slots_parallel(&material_names, &material_resolver);
+    let mut table = resolve_map_material_slots_parallel(&material_names, &material_resolver);
     let (detail_sprites, map_skybox_detail_sprites) = resolve_detail_sprites(
         &map_detail_sprites,
         &map_skybox_detail_sprites,
         &detail_material_name,
         &material_resolver,
-        PropMaterialState {
-            materials: &mut materials,
-            material_indexes: &mut material_indexes,
-            resolved_material_count: &mut resolved_material_count,
-            water_fallback_material_count: &mut water_fallback_material_count,
-        },
+        &mut table,
     );
-    let overlay_bake = resolve_map_overlays(
-        &map_overlays,
-        &material_resolver,
-        PropMaterialState {
-            materials: &mut materials,
-            material_indexes: &mut material_indexes,
-            resolved_material_count: &mut resolved_material_count,
-            water_fallback_material_count: &mut water_fallback_material_count,
-        },
-    );
-    let skybox_overlay_bake = resolve_map_overlays(
-        &map_skybox_overlays,
-        &material_resolver,
-        PropMaterialState {
-            materials: &mut materials,
-            material_indexes: &mut material_indexes,
-            resolved_material_count: &mut resolved_material_count,
-            water_fallback_material_count: &mut water_fallback_material_count,
-        },
-    );
+    let overlay_bake = resolve_map_overlays(&map_overlays, &material_resolver, &mut table);
+    let skybox_overlay_bake =
+        resolve_map_overlays(&map_skybox_overlays, &material_resolver, &mut table);
     let materials_timing = materials_started.elapsed();
     let mut mesh_visibility = map_meshes
         .iter()
@@ -137,11 +110,11 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .collect::<Vec<_>>();
     let mut meshes = map_meshes
         .iter()
-        .map(|mesh| map_mesh_to_model_mesh(mesh, &materials))
+        .map(|mesh| map_mesh_to_model_mesh(mesh, table.slots()))
         .collect::<Vec<_>>();
     let mut map_skybox_meshes = map_skybox_meshes
         .iter()
-        .map(|mesh| map_mesh_to_model_mesh(mesh, &materials))
+        .map(|mesh| map_mesh_to_model_mesh(mesh, table.slots()))
         .collect::<Vec<_>>();
     emit_stage(PreviewLoadStage::PlacingProps);
     let props_started = Instant::now();
@@ -194,12 +167,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let prop_bake = bake_static_props_from_loaded_model_cache(
         &static_props,
         &material_resolver,
-        PropMaterialState {
-            materials: &mut materials,
-            material_indexes: &mut material_indexes,
-            resolved_material_count: &mut resolved_material_count,
-            water_fallback_material_count: &mut water_fallback_material_count,
-        },
+        &mut table,
         &loaded_model_cache,
         Some(&pre_resolved_prop_materials),
         prop_lighting,
@@ -208,29 +176,30 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let skybox_prop_bake = bake_static_props_with_prop_model_loader(
         &skybox_static_props,
         &material_resolver,
-        PropMaterialState {
-            materials: &mut materials,
-            material_indexes: &mut material_indexes,
-            resolved_material_count: &mut resolved_material_count,
-            water_fallback_material_count: &mut water_fallback_material_count,
-        },
+        &mut table,
         prop_lighting,
         load_model,
     );
     let door_bake = bake_map_doors_with_prop_model_loader(
         &map_doors,
         &material_resolver,
-        PropMaterialState {
-            materials: &mut materials,
-            material_indexes: &mut material_indexes,
-            resolved_material_count: &mut resolved_material_count,
-            water_fallback_material_count: &mut water_fallback_material_count,
-        },
+        &mut table,
         prop_lighting,
         load_model,
     );
     log_prop_door_material_resolution(&door_bake.prop_material_resolutions);
     let props_timing = props_started.elapsed();
+    let placed_prop_count = prop_bake
+        .placed_count
+        .saturating_add(skybox_prop_bake.placed_count);
+    let skipped_prop_count = prop_bake
+        .skipped_count()
+        .saturating_add(skybox_prop_bake.skipped_count());
+    let prop_skip_stats = prop_bake.skip_stats + skybox_prop_bake.skip_stats;
+    let prop_bake_timing = prop_bake.timing + skybox_prop_bake.timing;
+    let prop_mesh_bytes = prop_bake
+        .mesh_bytes()
+        .saturating_add(skybox_prop_bake.mesh_bytes());
     meshes.extend(prop_bake.meshes);
     mesh_visibility.extend(prop_bake.mesh_visibility);
     map_skybox_meshes.extend(skybox_prop_bake.meshes);
@@ -257,12 +226,15 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .chain(&map_skybox_meshes)
         .map(|mesh| mesh.indices.len() / 3)
         .sum::<usize>();
-    let material_slot_count = materials.len();
+    let material_slot_count = table.len();
+    // Read before the table is consumed into the preview's slot list.
+    let resolved_material_count = table.resolved_count();
+    let water_fallback_material_count = table.water_fallback_count();
     let material_count = u32::try_from(material_slot_count).unwrap_or(u32::MAX);
     let (bounds_min, bounds_max) =
         bounds_from_model_meshes(&meshes).unwrap_or((bounds_min, bounds_max));
     let phy_debug_meshes =
-        phy_debug_mesh_from_loaded_prop_models(&static_props, &loaded_model_cache, materials.len())
+        phy_debug_mesh_from_loaded_prop_models(&static_props, &loaded_model_cache, table.len())
             .into_iter()
             .collect::<Vec<_>>();
     let detail_sprite_count = u32::try_from(detail_sprites.len()).unwrap_or(u32::MAX);
@@ -281,13 +253,13 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             texture_budget.rejected_textures()
         );
     }
-    log_unresolved_materials(&materials);
+    log_unresolved_materials(table.slots());
     let water_status = water_fallback_log_suffix(water_fallback_material_count);
     let texture_mib = format_mib(texture_budget.decoded_bytes());
-    let texture_payloads = texture_payload_log_suffix(&materials);
-    let render_mode_status = render_mode_log_suffix(&materials);
+    let texture_payloads = texture_payload_log_suffix(table.slots());
+    let render_mode_status = render_mode_log_suffix(table.slots());
     if !phy_debug_meshes.is_empty() {
-        materials.push(MaterialSlot {
+        table.push_unindexed(MaterialSlot {
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,
@@ -295,7 +267,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             render_mode: RenderMode::Translucent,
         });
     }
-    let skin_table = identity_skin_table(materials.len());
+    let skin_table = identity_skin_table(table.len());
     let scene = Arc::new(ModelPreview {
         stats: ModelStats {
             bone_count: 0,
@@ -310,7 +282,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         meshes,
         mesh_visibility,
         map_skybox_meshes,
-        materials,
+        materials: table.into_slots(),
         lightmap,
         skybox,
         detail_sprites,
@@ -334,12 +306,8 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         resolved_material_count,
         static_prop_count: raw_stats.static_prop_count,
         cluster_count: raw_stats.cluster_count,
-        placed_prop_count: prop_bake
-            .placed_count
-            .saturating_add(skybox_prop_bake.placed_count),
-        skipped_prop_count: prop_bake
-            .skipped_count
-            .saturating_add(skybox_prop_bake.skipped_count),
+        placed_prop_count,
+        skipped_prop_count,
         detail_sprite_count,
         overlay_count,
         skybox_face_count: skybox_partition.face_count,
@@ -348,10 +316,6 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         skybox_overlay_count: map_skybox_overlay_count,
         version: raw_stats.version,
     };
-    let prop_skip_stats = prop_bake.skip_stats + skybox_prop_bake.skip_stats;
-    let prop_mesh_bytes = prop_bake
-        .mesh_bytes
-        .saturating_add(skybox_prop_bake.mesh_bytes);
     log::info!(
         "map {}: materials resolved {resolved_material_count}/{material_count}{water_status}{render_mode_status}, textures {texture_mib} MiB{texture_payloads}, {lightmap_status}, {sky_status}, clusters {}, skybox faces {}, props {}, props placed {} (skipped {}: cap {}, triangles {}, load {}, invalid {}, empty {}), prop mesh {} bytes ({} MiB), detail sprites {}, overlays {} (skipped {}), timings: bsp {}ms, materials {}ms, props {}ms, props load {}ms, bake {}ms, lightmap {}ms",
         request.entry_path,
@@ -373,8 +337,8 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         duration_ms(bsp_timing),
         duration_ms(materials_timing),
         duration_ms(props_timing),
-        duration_ms(prop_bake.load_timing + skybox_prop_bake.load_timing),
-        duration_ms(prop_bake.bake_timing + skybox_prop_bake.bake_timing),
+        duration_ms(prop_bake_timing.load),
+        duration_ms(prop_bake_timing.bake),
         duration_ms(lightmap_timing)
     );
 
@@ -474,11 +438,37 @@ pub(super) struct PropBakeResult {
     pub(super) meshes: Vec<MeshData>,
     pub(super) mesh_visibility: Vec<MapMeshVisibility>,
     pub(super) placed_count: u32,
-    pub(super) skipped_count: u32,
     pub(super) skip_stats: PropBakeSkipStats,
-    pub(super) mesh_bytes: usize,
-    pub(super) load_timing: Duration,
-    pub(super) bake_timing: Duration,
+    pub(super) timing: PropBakeTiming,
+}
+
+impl PropBakeResult {
+    pub(super) fn skipped_count(&self) -> u32 {
+        u32::try_from(self.skip_stats.total()).unwrap_or(u32::MAX)
+    }
+
+    pub(super) fn mesh_bytes(&self) -> usize {
+        prop_mesh_buffer_bytes(&self.meshes)
+    }
+}
+
+/// Wall-clock split of a prop bake: `load` covers model loading and placement
+/// selection, `bake` covers only the mesh transform.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct PropBakeTiming {
+    pub(super) load: Duration,
+    pub(super) bake: Duration,
+}
+
+impl std::ops::Add for PropBakeTiming {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            load: self.load.saturating_add(rhs.load),
+            bake: self.bake.saturating_add(rhs.bake),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -579,11 +569,83 @@ pub(super) struct PropMaterialResolveJob {
     pub(super) material_dirs: Vec<String>,
 }
 
-pub(super) struct PropMaterialState<'a> {
-    pub(super) materials: &'a mut Vec<MaterialSlot>,
-    pub(super) material_indexes: &'a mut HashMap<String, usize>,
-    pub(super) resolved_material_count: &'a mut u32,
-    pub(super) water_fallback_material_count: &'a mut u32,
+/// The map's material slots and the name index into them.
+///
+/// The material slots a baked map references by index, plus the name lookup
+/// used to share a slot between meshes. Telemetry counts are derived from the
+/// slots on demand so they cannot disagree with them.
+#[derive(Debug, Default)]
+pub(super) struct MaterialTable {
+    slots: Vec<MaterialSlot>,
+    indexes: HashMap<String, usize>,
+}
+
+impl MaterialTable {
+    pub(super) fn push(&mut self, name: &str, slot: MaterialSlot) -> usize {
+        let index = self.slots.len();
+        self.slots.push(slot);
+        self.indexes.insert(name.to_owned(), index);
+        index
+    }
+
+    /// Appends without indexing it by name. Used where a slot must not be
+    /// reachable by later lookups — the detail material is pushed with a
+    /// hard-coded render mode an overlay of the same name must not inherit.
+    pub(super) fn push_unindexed(&mut self, slot: MaterialSlot) -> usize {
+        let index = self.slots.len();
+        self.slots.push(slot);
+        index
+    }
+
+    pub(super) fn index_of(&self, name: &str) -> Option<usize> {
+        self.indexes.get(name).copied()
+    }
+
+    pub(super) fn contains(&self, name: &str) -> bool {
+        self.indexes.contains_key(name)
+    }
+
+    #[cfg(test)]
+    pub(super) fn name_indexes(&self) -> &HashMap<String, usize> {
+        &self.indexes
+    }
+
+    pub(super) fn get(&self, index: usize) -> Option<&MaterialSlot> {
+        self.slots.get(index)
+    }
+
+    pub(super) fn resolved_count(&self) -> u32 {
+        count_of(self.slots.iter().filter(|slot| slot.texture.is_some()))
+    }
+
+    pub(super) fn water_fallback_count(&self) -> u32 {
+        count_of(self.slots.iter().filter(|slot| {
+            slot.texture
+                .as_ref()
+                .is_some_and(|texture| texture.is_water_fallback())
+        }))
+    }
+
+    pub(super) fn into_slots(self) -> Vec<MaterialSlot> {
+        self.slots
+    }
+
+    /// Makes an already-pushed slot reachable by name.
+    pub(super) fn index_by_name(&mut self, name: &str, index: usize) {
+        self.indexes.insert(name.to_owned(), index);
+    }
+
+    pub(super) fn slots(&self) -> &[MaterialSlot] {
+        &self.slots
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+fn count_of<T>(items: impl Iterator<Item = T>) -> u32 {
+    u32::try_from(items.count()).unwrap_or(u32::MAX)
 }
 
 #[derive(Debug)]
@@ -819,21 +881,13 @@ pub(super) fn prop_model_world_bounds(
 pub(super) fn bake_static_props(
     placements: &[StaticPropPlacement],
     resolver: &MaterialResolver,
-    materials: &mut Vec<MaterialSlot>,
-    material_indexes: &mut HashMap<String, usize>,
-    resolved_material_count: &mut u32,
-    water_fallback_material_count: &mut u32,
+    table: &mut MaterialTable,
     ambient: &MapAmbientLighting,
 ) -> PropBakeResult {
     bake_static_props_with_prop_model_loader(
         placements,
         resolver,
-        PropMaterialState {
-            materials,
-            material_indexes,
-            resolved_material_count,
-            water_fallback_material_count,
-        },
+        table,
         StaticPropLightingInputs {
             ambient,
             environment_lighting: None,
@@ -846,7 +900,7 @@ pub(super) fn bake_static_props(
 pub(super) fn bake_static_props_with_prop_model_loader(
     placements: &[StaticPropPlacement],
     resolver: &MaterialResolver,
-    material_state: PropMaterialState<'_>,
+    table: &mut MaterialTable,
     lighting: StaticPropLightingInputs<'_>,
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
 ) -> PropBakeResult {
@@ -857,7 +911,7 @@ pub(super) fn bake_static_props_with_prop_model_loader(
     bake_static_props_from_loaded_model_cache(
         placements,
         resolver,
-        material_state,
+        table,
         &loaded_model_cache,
         Some(&pre_resolved_prop_materials),
         lighting,
@@ -865,14 +919,10 @@ pub(super) fn bake_static_props_with_prop_model_loader(
     )
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "material_state's &mut fields are moved out into a PropMaterialContext, which requires owning the bundle"
-)]
 pub(super) fn bake_map_doors_with_prop_model_loader(
     doors: &[MapDoor],
     resolver: &MaterialResolver,
-    material_state: PropMaterialState<'_>,
+    table: &mut MaterialTable,
     lighting: StaticPropLightingInputs<'_>,
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
 ) -> DoorBakeResult {
@@ -894,10 +944,7 @@ pub(super) fn bake_map_doors_with_prop_model_loader(
     let mut context = PropMaterialContext {
         resolver,
         pre_resolved_prop_materials: Some(&pre_resolved_prop_materials),
-        materials: material_state.materials,
-        material_indexes: material_state.material_indexes,
-        resolved_material_count: material_state.resolved_material_count,
-        water_fallback_material_count: material_state.water_fallback_material_count,
+        table,
     };
     let resolved_door_sounds = resolve_map_door_sounds(doors, resolver);
     let mut baked = DoorBakeResult::default();
@@ -910,7 +957,7 @@ pub(super) fn bake_map_doors_with_prop_model_loader(
             MapDoorGeometry::Brush { meshes, .. } => {
                 let meshes = meshes
                     .iter()
-                    .map(|mesh| map_mesh_to_model_mesh(mesh, context.materials))
+                    .map(|mesh| map_mesh_to_model_mesh(mesh, context.table.slots()))
                     .collect::<Vec<_>>();
                 baked.doors.push(DoorInstance {
                     class: door.class,
@@ -920,6 +967,7 @@ pub(super) fn bake_map_doors_with_prop_model_loader(
                     local_bounds_max: door.local_bounds_max,
                     visibility: door.visibility,
                     initial_progress: door.initial_progress,
+                    auto_close_after: door.auto_close_after,
                     motion: door.motion,
                     sounds,
                     meshes,
@@ -940,7 +988,7 @@ pub(super) fn bake_map_doors_with_prop_model_loader(
                     &mut baked.prop_material_resolutions,
                     placement,
                     &model,
-                    context.materials,
+                    context.table.slots(),
                 );
                 let lighting = prop_placement_lighting(placement, lighting);
                 let meshes = bake_prop_door_meshes(placement, &model, lighting);
@@ -957,6 +1005,7 @@ pub(super) fn bake_map_doors_with_prop_model_loader(
                     local_bounds_max,
                     visibility: door.visibility,
                     initial_progress: door.initial_progress,
+                    auto_close_after: door.auto_close_after,
                     motion: door.motion,
                     sounds,
                     meshes,
@@ -1043,18 +1092,13 @@ const fn door_sound_source_tier(tier: ContentSourceTier) -> DoorSoundSourceTier 
         ContentSourceTier::Loose => DoorSoundSourceTier::Loose,
         ContentSourceTier::SiblingGma => DoorSoundSourceTier::SiblingGma,
         ContentSourceTier::GameVpk => DoorSoundSourceTier::GameVpk,
-        ContentSourceTier::Prepended => DoorSoundSourceTier::Prepended,
     }
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "material_state's &mut fields are moved out into a PropMaterialContext, which requires owning the bundle"
-)]
 pub(super) fn bake_static_props_from_loaded_model_cache(
     placements: &[StaticPropPlacement],
     resolver: &MaterialResolver,
-    material_state: PropMaterialState<'_>,
+    table: &mut MaterialTable,
     loaded_model_cache: &HashMap<String, Option<Arc<LoadedPropModel>>>,
     pre_resolved_prop_materials: Option<&HashMap<String, Option<ResolvedPrimaryMaterial>>>,
     lighting: StaticPropLightingInputs<'_>,
@@ -1064,10 +1108,7 @@ pub(super) fn bake_static_props_from_loaded_model_cache(
     let mut context = PropMaterialContext {
         resolver,
         pre_resolved_prop_materials,
-        materials: material_state.materials,
-        material_indexes: material_state.material_indexes,
-        resolved_material_count: material_state.resolved_material_count,
-        water_fallback_material_count: material_state.water_fallback_material_count,
+        table,
     };
     let selected = select_static_prop_placements(
         placements,
@@ -1091,7 +1132,7 @@ pub(super) fn bake_static_props_from_loaded_model_cache(
 pub(super) fn bake_static_props_with_loaded_model_cache(
     placements: &[StaticPropPlacement],
     resolver: &MaterialResolver,
-    material_state: PropMaterialState<'_>,
+    table: &mut MaterialTable,
     loaded_model_cache: &HashMap<String, Option<Arc<LoadedPropModel>>>,
     pre_resolve: bool,
     ambient: &MapAmbientLighting,
@@ -1102,7 +1143,7 @@ pub(super) fn bake_static_props_with_loaded_model_cache(
     bake_static_props_from_loaded_model_cache(
         placements,
         resolver,
-        material_state,
+        table,
         loaded_model_cache,
         pre_resolved_prop_materials.as_ref(),
         StaticPropLightingInputs {
@@ -1134,29 +1175,40 @@ pub(super) fn bake_static_props_with_loader(
     bake_selected_static_props(selected, load_timing)
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "selected.skip_stats is moved out into the returned PropBakeResult, which requires owning it"
-)]
 pub(super) fn bake_selected_static_props(
     selected: SelectedPropPlacements<'_>,
     load_timing: Duration,
 ) -> PropBakeResult {
+    bake_selected_with(
+        selected,
+        load_timing,
+        bake_selected_prop_placements_parallel,
+    )
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "selected.skip_stats is moved out into the returned PropBakeResult, which requires owning it"
+)]
+fn bake_selected_with(
+    selected: SelectedPropPlacements<'_>,
+    load_timing: Duration,
+    bake: impl FnOnce(&[SelectedPropPlacement<'_>]) -> BTreeMap<usize, PropBuildMesh>,
+) -> PropBakeResult {
     let bake_started = Instant::now();
-    let prop_meshes = bake_selected_prop_placements_parallel(&selected.placements);
+    let prop_meshes = bake(&selected.placements);
     let bake_timing = bake_started.elapsed();
     let (meshes, mesh_visibility) = prop_meshes_to_mesh_data(prop_meshes);
-    let mesh_bytes = prop_mesh_buffer_bytes(&meshes);
 
     PropBakeResult {
         meshes,
         mesh_visibility,
         placed_count: u32::try_from(selected.placements.len()).unwrap_or(u32::MAX),
-        skipped_count: u32::try_from(selected.skip_stats.total()).unwrap_or(u32::MAX),
         skip_stats: selected.skip_stats,
-        mesh_bytes,
-        load_timing,
-        bake_timing,
+        timing: PropBakeTiming {
+            load: load_timing,
+            bake: bake_timing,
+        },
     }
 }
 
@@ -1168,6 +1220,7 @@ pub(super) fn bake_static_props_with_loader_serial(
     lighting: StaticPropLightingInputs<'_>,
     mut load_model: impl FnMut(&StaticPropPlacement) -> Option<Arc<PropModelAsset>>,
 ) -> PropBakeResult {
+    let load_started = Instant::now();
     let selected = select_static_prop_placements(
         placements,
         placement_cap,
@@ -1175,20 +1228,11 @@ pub(super) fn bake_static_props_with_loader_serial(
         &mut load_model,
         lighting,
     );
-    let prop_meshes = bake_selected_prop_placements_serial(&selected.placements);
-    let (meshes, mesh_visibility) = prop_meshes_to_mesh_data(prop_meshes);
-    let mesh_bytes = prop_mesh_buffer_bytes(&meshes);
-
-    PropBakeResult {
-        meshes,
-        mesh_visibility,
-        placed_count: u32::try_from(selected.placements.len()).unwrap_or(u32::MAX),
-        skipped_count: u32::try_from(selected.skip_stats.total()).unwrap_or(u32::MAX),
-        skip_stats: selected.skip_stats,
-        mesh_bytes,
-        load_timing: Duration::ZERO,
-        bake_timing: Duration::ZERO,
-    }
+    bake_selected_with(
+        selected,
+        load_started.elapsed(),
+        bake_selected_prop_placements_serial,
+    )
 }
 
 #[derive(Debug)]
@@ -1520,10 +1564,7 @@ pub(super) struct PropMaterialContext<'a> {
     pub(super) resolver: &'a MaterialResolver,
     pub(super) pre_resolved_prop_materials:
         Option<&'a HashMap<String, Option<ResolvedPrimaryMaterial>>>,
-    pub(super) materials: &'a mut Vec<MaterialSlot>,
-    pub(super) material_indexes: &'a mut HashMap<String, usize>,
-    pub(super) resolved_material_count: &'a mut u32,
-    pub(super) water_fallback_material_count: &'a mut u32,
+    pub(super) table: &'a mut MaterialTable,
 }
 
 pub(super) fn cached_prop_model(
@@ -1938,7 +1979,7 @@ pub(super) fn prop_material_index(
     context: &mut PropMaterialContext<'_>,
 ) -> usize {
     let key = prop_material_cache_key(material_dirs, name);
-    if let Some(index) = context.material_indexes.get(&key).copied() {
+    if let Some(index) = context.table.index_of(&key) {
         return index;
     }
 
@@ -1952,30 +1993,20 @@ pub(super) fn prop_material_index(
     let texture = resolved
         .as_ref()
         .map(|material| Arc::clone(&material.texture));
-    if texture.is_some() {
-        *context.resolved_material_count = context.resolved_material_count.saturating_add(1);
-    }
-    if texture
-        .as_ref()
-        .is_some_and(|texture| texture.is_water_fallback())
-    {
-        *context.water_fallback_material_count =
-            context.water_fallback_material_count.saturating_add(1);
-    }
-    let index = context.materials.len();
-    context.materials.push(MaterialSlot {
-        name: name.to_owned(),
-        texture,
-        texture2: None,
-        force_opaque: resolved
-            .as_ref()
-            .is_none_or(|material| material.force_opaque),
-        render_mode: resolved
-            .as_ref()
-            .map_or(RenderMode::Opaque, |material| material.render_mode),
-    });
-    context.material_indexes.insert(key, index);
-    index
+    context.table.push(
+        &key,
+        MaterialSlot {
+            name: name.to_owned(),
+            texture,
+            texture2: None,
+            force_opaque: resolved
+                .as_ref()
+                .is_none_or(|material| material.force_opaque),
+            render_mode: resolved
+                .as_ref()
+                .map_or(RenderMode::Opaque, |material| material.render_mode),
+        },
+    )
 }
 
 pub(super) fn prop_material_cache_key(material_dirs: &[String], name: &str) -> String {
@@ -2078,9 +2109,8 @@ pub(super) fn transform_prop_normal(normal: [f32; 3], placement: &StaticPropPlac
 }
 
 pub(super) fn rotate_prop_vector(vector: [f32; 3], angles: [f32; 3]) -> [f32; 3] {
-    let pitch = angles[0].to_radians();
-    let yaw = angles[1].to_radians();
-    let roll = angles[2].to_radians();
+    let gmpublished_backend::scene::QAngle { pitch, yaw, roll } =
+        gmpublished_backend::scene::QAngle::from_source_degrees(angles);
     // Source AngleMatrix is Rz(yaw)·Ry(pitch)·Rx(roll): roll reaches the
     // vector first, yaw last.
     rotate_z(rotate_y(rotate_x(vector, roll), pitch), yaw)

@@ -42,19 +42,19 @@ gmod-broken-title = Папку Garry's Mod не знайдено
 gmod-broken-body = Збережене розташування більше не містить GarrysMod/addons.
 gmod-broken-research = Пошукати знову
 account-update-title = Доступне оновлення
-account-update-caption = {$arg0} · натисніть, щоб завантажити
+account-update-caption = {$version} · натисніть, щоб завантажити
 my-workshop = Моя майстерня
 publish-new = Опублікувати новий...
 my-workshop-loading = Завантаження...
 my-workshop-empty-title = Ще немає опублікованих аддонів
 my-workshop-empty-body = Усе, що ви опублікуєте в майстерні, з'явиться тут.
-my-workshop-error = Не вдалося завантажити «Мою майстерню»: {$arg0}
-my-workshop-count = Показати {$arg0} кількість {$arg1} аддонів
+my-workshop-error = Не вдалося завантажити «Мою майстерню»: {$error}
+my-workshop-count = Показати {$loaded} кількість {$total} аддонів
 installed-addons = Встановленні аддони
 installed-addons-loading = Завантаження...
 installed-addons-empty-title = Немає встановлених аддонів
 installed-addons-empty-body = Підпишіться на щось у майстерні або перетягніть сюди файл .gma.
-installed-addons-error = Не вдалося знайти встановлені аддони: {$arg0}
+installed-addons-error = Не вдалося знайти встановлені аддони: {$error}
 downloader = Завантажувач
 downloader-workshop-input = Вставте тут ідентифікатори(ID) майстерні, посилання, колекції...
 downloader-bulk-extract = Розпакувати багато GMA архівів
@@ -68,8 +68,8 @@ downloader-open-all = Відкрити Усі
 downloader-remove-all = Видалити Усі
 downloader-status-finished = Готово
 downloader-status-error = Помилка
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = Майстерня {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-workshop-id = Майстерня {$id}
 destination-where-to = Куди розпакувати?
 destination-overwrite-warning = Існуючі файли буде перезаписано.
 destination-browse = Огляд...
@@ -84,100 +84,102 @@ destination-invalid-path = Виберіть наявну абсолютну па
 relative-time-now = щойно
 relative-time-past-year = 1 рік тому
 relative-time-past-years =
-    { $arg0 ->
-        [one] {$arg0} рік тому
-        [few] {$arg0} роки тому
-       *[many] {$arg0} років тому
+    { $count ->
+        [one] {$count} рік тому
+        [few] {$count} роки тому
+       *[many] {$count} років тому
     }
 relative-time-past-month = 1 місяць тому
 relative-time-past-months =
-    { $arg0 ->
-        [one] {$arg0} місяць тому
-        [few] {$arg0} місяці тому
-       *[many] {$arg0} місяців тому
+    { $count ->
+        [one] {$count} місяць тому
+        [few] {$count} місяці тому
+       *[many] {$count} місяців тому
     }
 relative-time-past-day = 1 день тому
 relative-time-past-days =
-    { $arg0 ->
-        [one] {$arg0} день тому
-        [few] {$arg0} дні тому
-       *[many] {$arg0} днів тому
+    { $count ->
+        [one] {$count} день тому
+        [few] {$count} дні тому
+       *[many] {$count} днів тому
     }
 relative-time-past-hour = 1 годину тому
 relative-time-past-hours =
-    { $arg0 ->
-        [one] {$arg0} годину тому
-        [few] {$arg0} години тому
-       *[many] {$arg0} годин тому
+    { $count ->
+        [one] {$count} годину тому
+        [few] {$count} години тому
+       *[many] {$count} годин тому
     }
 relative-time-past-minute = 1 хвилину тому
 relative-time-past-minutes =
-    { $arg0 ->
-        [one] {$arg0} хвилину тому
-        [few] {$arg0} хвилини тому
-       *[many] {$arg0} хвилин тому
+    { $count ->
+        [one] {$count} хвилину тому
+        [few] {$count} хвилини тому
+       *[many] {$count} хвилин тому
     }
 relative-time-past-second = 1 секунду тому
 relative-time-past-seconds =
-    { $arg0 ->
-        [one] {$arg0} секунду тому
-        [few] {$arg0} секунди тому
-       *[many] {$arg0} секунд тому
+    { $count ->
+        [one] {$count} секунду тому
+        [few] {$count} секунди тому
+       *[many] {$count} секунд тому
     }
 relative-time-future-year = через 1 рік
 relative-time-future-years =
-    { $arg0 ->
-        [one] через {$arg0} рік
-        [few] через {$arg0} роки
-       *[many] через {$arg0} років
+    { $count ->
+        [one] через {$count} рік
+        [few] через {$count} роки
+       *[many] через {$count} років
     }
 relative-time-future-month = через 1 місяць
 relative-time-future-months =
-    { $arg0 ->
-        [one] через {$arg0} місяць
-        [few] через {$arg0} місяці
-       *[many] через {$arg0} місяців
+    { $count ->
+        [one] через {$count} місяць
+        [few] через {$count} місяці
+       *[many] через {$count} місяців
     }
 relative-time-future-day = через 1 день
 relative-time-future-days =
-    { $arg0 ->
-        [one] через {$arg0} день
-        [few] через {$arg0} дні
-       *[many] через {$arg0} днів
+    { $count ->
+        [one] через {$count} день
+        [few] через {$count} дні
+       *[many] через {$count} днів
     }
 relative-time-future-hour = через 1 годину
 relative-time-future-hours =
-    { $arg0 ->
-        [one] через {$arg0} годину
-        [few] через {$arg0} години
-       *[many] через {$arg0} годин
+    { $count ->
+        [one] через {$count} годину
+        [few] через {$count} години
+       *[many] через {$count} годин
     }
 relative-time-future-minute = через 1 хвилину
 relative-time-future-minutes =
-    { $arg0 ->
-        [one] через {$arg0} хвилину
-        [few] через {$arg0} хвилини
-       *[many] через {$arg0} хвилин
+    { $count ->
+        [one] через {$count} хвилину
+        [few] через {$count} хвилини
+       *[many] через {$count} хвилин
     }
 relative-time-future-second = через 1 секунду
 relative-time-future-seconds =
-    { $arg0 ->
-        [one] через {$arg0} секунду
-        [few] через {$arg0} секунди
-       *[many] через {$arg0} секунд
+    { $count ->
+        [one] через {$count} секунду
+        [few] через {$count} секунди
+       *[many] через {$count} секунд
     }
 downloading = Завантажується
 locating = Чекайте
 decompressing = Розпакування
-extracting_progress = Розпакування {$arg0}% ({$arg1} / {$arg2})
+reading_metadata = Читання метаданих
+searching = Пошук...
+extracting_progress = Розпакування {$percent}% ({$done} / {$total})
 size-analyzer = Аналізатор розміру аддонів
 size-analyzer-waiting = Очікування області перегляду діаграми...
 size-analyzer-loading = Обчислюється...
 size-analyzer-empty = Не знайдено аддонів із додатнім розміром.
 size-analyzer-empty-title = Нічого вимірювати
 size-analyzer-empty-body = Усі аддони у вашій бібліотеці порожні, тож немає чого відображати на діаграмі.
-size-analyzer-error = Помилка аналізатора розміру: {$arg0}
-size-analyzer-summary-cells = {$arg0} предемтів
+size-analyzer-error = Помилка аналізатора розміру: {$error}
+size-analyzer-summary-cells = {$count} предемтів
 size-analyzer-name = Ім'я
 size-analyzer-type = Тип
 size-analyzer-size = Розмір
@@ -247,7 +249,7 @@ context-menu-debug-simulate-minus = Симулювати -10
 context-menu-debug-simulate-plus-million = Симулювати +1 мільйон
 context-menu-debug-simulate-minus-million = Симулювати -1 мільйон
 publish-processing-icon = Обробка значка майстерні...
-publish-packing = Запаковується {$arg0}% ({$arg1} / {$arg2})
+publish-packing = Запаковується {$percent}% ({$done} / {$total})
 PUBLISH_STARTING = Починається Публікува
 PUBLISH_PREPARING_CONFIG = Підготування Конфігу
 PUBLISH_PREPARING_CONTENT = Підготування Вмісту
@@ -264,10 +266,10 @@ err-whitelist-detail =
 
     Якщо ви хочете відфільтрувати ці типи файлів із своїх GMA, додайте їх до шаблонів ігнорованих файлів.
 
-    {$arg0}
+    {$detail}
 err-no-entries = У цьому шляху вмісту немає записів.
-err-duplicate-entries = У цьому шляху до вмісту є повторюваний запис ({$arg0}). Усі шляхи мають бути унікальними та малими буквами. я використовую арч, до речі(автор перекладу mint)
-err-duplicate-entries-detail = У цьому шляху до вмісту є повторюваний запис ({$arg0}). Усі шляхи мають бути унікальними та малими буквами. я використовую арч, до речі(автор перекладу mint)
+err-duplicate-entries = У цьому шляху до вмісту є повторюваний запис. Усі шляхи мають бути унікальними та малими буквами. я використовую арч, до речі(автор перекладу mint)
+err-duplicate-entries-detail = У цьому шляху до вмісту є повторюваний запис ({$detail}). Усі шляхи мають бути унікальними та малими буквами. я використовую арч, до речі(автор перекладу mint)
 err-invalid-content-path = Цей шлях вмісту не існує, не є каталогом або gmpublished не має достатніх дозволів для доступу до нього
 err-multiple-gmas = У цьому шляху вмісту знайдено декілька файлів GMA
 err-icon-too-large = Іконка надто велика (> 1 МБ)
@@ -278,12 +280,12 @@ err-io-error = I/O Помилка
 err-unknown = Щось пішло не так
 err-gmod-path-missing = Папку Garry's Mod не налаштовано
 err-no-addons-found = Аддонів не знайдено
-err-image-error = Помилка Зображення: {$arg0}
-err-image-error-detail = Помилка Зображення: {$arg0}
-err-steam-error = Помилка Steam: {$arg0}
-err-steam-error-detail = Помилка Steam: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/с
+err-image-error = Помилка Зображення
+err-image-error-detail = Помилка Зображення: {$detail}
+err-steam-error = Помилка Steam
+err-steam-error-detail = Помилка Steam: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/с
 byte-unit-b = Б
 byte-unit-kb = КБ
 byte-unit-mb = МБ
@@ -317,7 +319,7 @@ file-type-txt = Текст(txt)
 file-type-properties = Властивості
 file-type-audio = Аудіо
 file-type-image = Зображення
-file-type-unknown = Невідомо ({$arg0})
+file-type-unknown = Невідомо ({$extension})
 file-preview-loading = Завантаження попереднього перегляду...
 file-preview-stage-reading-archive = Читання архіву...
 file-preview-stage-reading-bsp = Читання BSP...
@@ -329,7 +331,7 @@ file-preview-expand = Розгорнути попередній перегляд
 file-preview-collapse = Згорнути попередній перегляд
 file-preview-open-material = Відкрити матеріал
 file-preview-open-texture = Відкрити текстуру
-file-preview-error = Не вдалося показати попередній перегляд: {$arg0}
+file-preview-error = Не вдалося показати попередній перегляд: {$error}
 file-preview-path = Шлях
 file-preview-size = Розмір
 file-preview-crc = CRC
@@ -351,7 +353,7 @@ file-preview-particle-level-approximate = Наближено — вигляд м
 file-preview-particle-level-inert = Потрібна мапа або сутність — не діє в цьому перегляді
 file-preview-particle-level-unsupported = Не симулюється в цьому перегляді
 file-preview-truncated = Попередній перегляд скорочено — повний файл більший за показаний.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Сітки
 file-preview-model-bones = Кістки
 file-preview-model-sequences = Послідовності
@@ -359,8 +361,8 @@ file-preview-model-vertices = Вершини
 file-preview-model-triangles = Трикутники
 file-preview-model-materials = Знайдені матеріали
 file-preview-model-skin = Скін
-file-preview-model-skin-option = Скін {$arg0}
-file-preview-model-bodygroup = Група тіла {$arg0}
+file-preview-model-skin-option = Скін {$index}
+file-preview-model-bodygroup = Група тіла {$index}
 file-preview-model-bounds-min = Межі мін.
 file-preview-model-bounds-max = Межі макс.
 file-preview-map-controls = Тягніть, щоб озирнутися · WASD — політ · Shift — швидкість · коліщатко регулює швидкість
@@ -392,7 +394,7 @@ prepare-publish-tag-2 = Тег 2
 prepare-publish-tag-3 = Тег 3
 prepare-publish-update-exclamation = Оновити!
 prepare-publish-publish-exclamation = Опублікувати!
-prepare-publish-update-warning = Ви надсилаєте ОНОВЛЕННЯ до {$arg0} ({$arg1})
+prepare-publish-update-warning = Ви надсилаєте ОНОВЛЕННЯ до {$title} ({$id})
 prepare-publish-still-needed = Ще потрібно:
 prepare-publish-needs-addon-path = Шлях аддону
 prepare-publish-needs-title = Назва
@@ -404,8 +406,8 @@ prepare-publish-file-browser = Оглянути Файл
 prepare-publish-browser-select = Перетягніть файл сюди або натисніть, щоб переглянути
 prepare-publish-no-files = Не знайдено файлів
 prepare-publish-items-one = 1 предмет
-prepare-publish-items-num = {$arg0} предемтів
-prepare-publish-items-shown = {$arg0} показано
+prepare-publish-items-num = {$count} предемтів
+prepare-publish-items-shown = {$count} показано
 prepare-publish-ignored-patterns = Проігнорвано файлові паттерни
 prepare-publish-ignore-placeholder = Додати...
 prepare-publish-ignored-for-convenience = Цей шаблон файлу ігнорується за умовчанням для вашої зручності.

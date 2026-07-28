@@ -255,7 +255,10 @@ mod tests {
                 event(1, started(TaskKind::Publish, "PUBLISH_PACKING")),
                 event(2, started(TaskKind::Download, "downloading")),
                 event(3, started(TaskKind::Extract, "extracting_progress")),
-                event(4, started(TaskKind::Search, "search")),
+                event(
+                    4,
+                    started(TaskKind::Search, crate::bridge::tasks::SEARCH_STATUS),
+                ),
                 event(5, started(TaskKind::OverlayExtract, "extracting_progress")),
                 event(6, started(TaskKind::Notice, "debug-simulated-notice")),
             ],

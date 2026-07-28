@@ -16,34 +16,71 @@ pub(super) enum DoorTarget {
     Open,
 }
 
+/// Where a door is in its open/close cycle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) enum DoorMotion {
+    #[default]
+    Idle,
+    Moving,
+    /// Stopped part-way while closing because the player is in the way; resumes
+    /// on its own once they step clear.
+    BlockedClosing,
+    /// Fully open and counting down to an automatic close. Source's `wait`
+    /// (`returndelay` on `prop_door_rotating`); a negative value means the door
+    /// stays open and never enters this state.
+    HoldingOpen {
+        remaining: f32,
+    },
+}
+
+impl DoorMotion {
+    /// Whether the door still needs frames: moving, or counting down to close.
+    pub(super) const fn needs_tick(self) -> bool {
+        matches!(self, Self::Moving | Self::HoldingOpen { .. })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct DoorRuntime {
     pub(super) progress: f32,
     pub(super) target: DoorTarget,
-    pub(super) moving: bool,
-    pub(super) blocked_closing: bool,
-    pub(super) move_loop: Option<DoorMoveLoopRuntime>,
-    pub(super) open_sign: f32,
+    pub(super) motion: DoorMotion,
+    pub(super) swing: DoorSwing,
     pub(super) bounds_min: [f32; 3],
     pub(super) bounds_max: [f32; 3],
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct DoorMoveLoopRuntime;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DoorRenderPose {
     pub(super) progress: f32,
-    pub(super) open_sign: f32,
+    pub(super) swing: DoorSwing,
 }
 
-pub(super) fn initial_door_open_sign(motion: MapDoorMotion) -> f32 {
+/// Which way a door actually swings, once [`MapDoorOpenDirection::Both`] has
+/// been resolved against the side the player opened it from.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum DoorSwing {
+    #[default]
+    Positive,
+    Negative,
+}
+
+impl DoorSwing {
+    pub(super) const fn sign(self) -> f32 {
+        match self {
+            Self::Positive => 1.0,
+            Self::Negative => -1.0,
+        }
+    }
+}
+
+pub(super) fn initial_door_swing(motion: MapDoorMotion) -> DoorSwing {
     match motion {
         MapDoorMotion::Rotating {
             open_direction: MapDoorOpenDirection::Forward,
             ..
-        } => -1.0,
-        _ => 1.0,
+        } => DoorSwing::Negative,
+        _ => DoorSwing::Positive,
     }
 }
 
@@ -129,26 +166,26 @@ pub(super) fn door_progress_step(motion: MapDoorMotion, dt: f32) -> f32 {
     (dt * speed / span).clamp(0.0, 1.0)
 }
 
-pub(super) fn choose_door_open_sign(
+pub(super) fn choose_door_swing(
     door: &DoorInstance,
     player_position: [f32; 3],
     _view_direction: [f32; 3],
-) -> f32 {
+) -> DoorSwing {
     let MapDoorMotion::Rotating { open_direction, .. } = door.motion else {
-        return 1.0;
+        return DoorSwing::Positive;
     };
     if door.class != MapDoorClass::PropDoorRotating {
-        return 1.0;
+        return DoorSwing::Positive;
     }
     match open_direction {
-        MapDoorOpenDirection::Forward => -1.0,
-        MapDoorOpenDirection::Backward => 1.0,
+        MapDoorOpenDirection::Forward => DoorSwing::Negative,
+        MapDoorOpenDirection::Backward => DoorSwing::Positive,
         MapDoorOpenDirection::Both => {
             let forward = rotate_source_vector([1.0, 0.0, 0.0], door.angles);
             if dot(sub(player_position, door.origin), forward) >= 0.0 {
-                1.0
+                DoorSwing::Positive
             } else {
-                -1.0
+                DoorSwing::Negative
             }
         }
     }
@@ -157,14 +194,14 @@ pub(super) fn choose_door_open_sign(
 pub(super) fn door_world_bounds(
     door: &DoorInstance,
     progress: f32,
-    open_sign: f32,
+    swing: DoorSwing,
 ) -> ([f32; 3], [f32; 3]) {
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for x in [door.local_bounds_min[0], door.local_bounds_max[0]] {
         for y in [door.local_bounds_min[1], door.local_bounds_max[1]] {
             for z in [door.local_bounds_min[2], door.local_bounds_max[2]] {
-                let point = transform_door_point(door, [x, y, z], progress, open_sign);
+                let point = transform_door_point(door, [x, y, z], progress, swing);
                 for axis in 0..3 {
                     min[axis] = min[axis].min(point[axis]);
                     max[axis] = max[axis].max(point[axis]);
@@ -189,9 +226,9 @@ pub(super) fn transform_door_vertices(
         .map(|vertex| {
             let mut transformed = *vertex;
             transformed.position =
-                transform_door_point(door, vertex.position, pose.progress, pose.open_sign);
+                transform_door_point(door, vertex.position, pose.progress, pose.swing);
             transformed.normal =
-                transform_door_normal(door, vertex.normal, pose.progress, pose.open_sign);
+                transform_door_normal(door, vertex.normal, pose.progress, pose.swing);
             transformed
         })
         .collect()
@@ -201,7 +238,7 @@ pub(super) fn transform_door_point(
     door: &DoorInstance,
     local: [f32; 3],
     progress: f32,
-    open_sign: f32,
+    swing: DoorSwing,
 ) -> [f32; 3] {
     let progress = progress.clamp(0.0, 1.0);
     match door.motion {
@@ -211,7 +248,7 @@ pub(super) fn transform_door_point(
             ..
         } => add(add(door.origin, local), mul(direction, distance * progress)),
         MapDoorMotion::Rotating { angle_delta, .. } => {
-            let delta = mul(angle_delta, progress * open_sign);
+            let delta = mul(angle_delta, progress * swing.sign());
             let angles = if door.class == MapDoorClass::PropDoorRotating {
                 add(door.angles, delta)
             } else {
@@ -226,7 +263,7 @@ pub(super) fn transform_door_normal(
     door: &DoorInstance,
     normal: [f32; 3],
     progress: f32,
-    open_sign: f32,
+    swing: DoorSwing,
 ) -> [f32; 3] {
     let progress = progress.clamp(0.0, 1.0);
     match door.motion {
@@ -238,7 +275,7 @@ pub(super) fn transform_door_normal(
             }
         }
         MapDoorMotion::Rotating { angle_delta, .. } => {
-            let delta = mul(angle_delta, progress * open_sign);
+            let delta = mul(angle_delta, progress * swing.sign());
             let angles = if door.class == MapDoorClass::PropDoorRotating {
                 add(door.angles, delta)
             } else {

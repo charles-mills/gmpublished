@@ -158,54 +158,48 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn traffic_light_position_task(&self, id: window::Id) -> Task<RootMessage> {
         if !self.state.chrome_strategy.mac_native_inset() {
             return Task::none();
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let tokens = self.state.tokens;
-            window::run(
-                id,
-                crate::platform_chrome::position_traffic_lights(
-                    shell::traffic_light_origin_x(&tokens) as f64,
-                    shell::traffic_light_center_y(&tokens) as f64,
-                ),
-            )
-            .discard()
-        }
+        let tokens = self.state.tokens;
+        window::run(
+            id,
+            crate::platform_chrome::position_traffic_lights(
+                shell::traffic_light_origin_x(&tokens) as f64,
+                shell::traffic_light_center_y(&tokens) as f64,
+            ),
+        )
+        .discard()
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = id;
-            Task::none()
-        }
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn traffic_light_position_task(&self, _id: window::Id) -> Task<RootMessage> {
+        Task::none()
     }
 
     /// Installs the native observer that keeps the traffic-light treatment
     /// applied through live resizes. Installed unconditionally (once, at
     /// window open) because the titlebar mode can be switched at runtime;
     /// the observer itself no-ops while the system titlebar is active.
+    #[cfg(target_os = "macos")]
     fn traffic_light_keepalive_task(&self, id: window::Id) -> Task<RootMessage> {
-        #[cfg(target_os = "macos")]
-        {
-            let tokens = self.state.tokens;
-            window::run(
-                id,
-                crate::platform_chrome::install_resize_keepalive(
-                    shell::traffic_light_origin_x(&tokens) as f64,
-                    shell::traffic_light_center_y(&tokens) as f64,
-                ),
-            )
-            .discard()
-        }
+        let tokens = self.state.tokens;
+        window::run(
+            id,
+            crate::platform_chrome::install_resize_keepalive(
+                shell::traffic_light_origin_x(&tokens) as f64,
+                shell::traffic_light_center_y(&tokens) as f64,
+            ),
+        )
+        .discard()
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = id;
-            Task::none()
-        }
+    #[cfg(not(target_os = "macos"))]
+    fn traffic_light_keepalive_task(&self, _id: window::Id) -> Task<RootMessage> {
+        Task::none()
     }
 
     pub(super) fn apply_window_scale_factor(
@@ -513,7 +507,7 @@ impl App {
         if matches!(kind, SimulatedToast::Notice) {
             let task = self
                 .ctx
-                .create_task(TaskKind::Notice, "context-menu-debug-toast-notice");
+                .create_task(TaskKind::Notice, crate::bridge::tasks::NOTICE_STATUS);
             task.finished();
             return Task::none();
         }
@@ -523,7 +517,7 @@ impl App {
             let transaction = ctx.begin_transaction();
             let task = ctx.create_task(TaskKind::OverlayExtract, downloader::EXTRACT_STATUS);
             task.total(SIMULATED_TOTAL_BYTES);
-            ctx.correlate_backend_transaction(transaction.id, task);
+            ctx.correlate_backend_transaction(transaction.id(), task);
 
             let last_step = match kind {
                 SimulatedToast::Error => 40,

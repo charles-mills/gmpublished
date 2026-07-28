@@ -2,7 +2,7 @@ use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, sync::mpsc};
 
 use steamworks::{PublishedFileId, QueryResult, QueryResults, SteamError, SteamId};
 
-use super::{Steam, users::SteamUser};
+use super::{ConnectedSteam, Steam, users::SteamUser};
 
 use crate::util::main_thread_forbidden;
 use crate::{GMOD_APP_ID, search::Search};
@@ -130,7 +130,7 @@ fn format_steam_query_error(error: &str, formatter: &mut fmt::Formatter<'_>) -> 
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorkshopQueryError {
-    #[error("ERR_STEAM_ERROR:QUERY_CREATE_FAILED")]
+    #[error("could not create a Workshop query")]
     QueryCreateFailed,
     #[error(fmt = format_steam_query_error)]
     Steam(String),
@@ -182,7 +182,7 @@ impl Steam {
                 let client = steam
                     .client()
                     .expect("workshop_fetcher only runs after Steam has connected");
-                if let Ok(query) = client.ugc().query_items(chunk) {
+                if let Ok(query) = client.client().ugc().query_items(chunk) {
                     let steam_for_callback = Arc::clone(steam);
                     let search_for_callback = Arc::clone(search);
                     query.allow_cached_response(600).fetch(
@@ -235,127 +235,6 @@ impl Steam {
         }
     }
 
-    pub fn query_workshop_items(
-        &self,
-        ids: &[PublishedFileId],
-    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
-        self.query_workshop_items_with_description(ids, DescriptionLength::Summary)
-    }
-
-    pub fn query_workshop_item_details(
-        &self,
-        id: PublishedFileId,
-    ) -> Result<WorkshopItem, WorkshopQueryError> {
-        self.query_workshop_items_with_description(&[id], DescriptionLength::Full)
-            .map(|mut items| items.pop().unwrap_or_else(|| WorkshopItem::from(id)))
-    }
-
-    fn query_workshop_items_with_description(
-        &self,
-        ids: &[PublishedFileId],
-        description_length: DescriptionLength,
-    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
-        main_thread_forbidden!();
-
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let chunks = workshop_item_id_chunks(ids);
-        let chunk_count = chunks.len();
-        let (result_tx, result_rx) = mpsc::channel();
-
-        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-            self.register_workshop_items_chunk_query(
-                chunk_index,
-                chunk,
-                description_length,
-                result_tx.clone(),
-            );
-        }
-        drop(result_tx);
-
-        let mut chunk_results: Vec<Option<WorkshopChunkQueryResult>> = vec![None; chunk_count];
-        for _ in 0..chunk_count {
-            let (chunk_index, result) = result_rx
-                .recv()
-                .expect("all workshop query chunks should be complete");
-            chunk_results[chunk_index] = Some(result);
-        }
-        let chunk_results = chunk_results
-            .into_iter()
-            .map(|result| result.expect("all workshop query chunks should be complete"))
-            .collect();
-
-        combine_workshop_chunk_results(chunk_results, ids.len())
-    }
-
-    /// Same concurrent chunk queries as [`Self::query_workshop_items`], but
-    /// hands each chunk to `on_chunk` the moment it lands instead of joining
-    /// all chunks first, so callers hydrate on-screen rows after a single
-    /// round trip. A failed chunk is logged and skipped (its ids stay stale);
-    /// the call only errors when every chunk failed.
-    pub fn query_workshop_items_streaming(
-        &self,
-        ids: &[PublishedFileId],
-        on_chunk: impl FnMut(Vec<WorkshopItem>),
-    ) -> Result<(), WorkshopQueryError> {
-        main_thread_forbidden!();
-
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let chunks = workshop_item_id_chunks(ids);
-        let chunk_count = chunks.len();
-        let (result_tx, result_rx) = mpsc::channel();
-
-        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-            self.register_workshop_items_chunk_query(
-                chunk_index,
-                chunk,
-                DescriptionLength::Summary,
-                result_tx.clone(),
-            );
-        }
-        drop(result_tx);
-
-        drain_workshop_chunk_results(&result_rx, chunk_count, on_chunk)
-    }
-
-    fn register_workshop_items_chunk_query(
-        &self,
-        chunk_index: usize,
-        ids: Vec<PublishedFileId>,
-        description_length: DescriptionLength,
-        result_tx: mpsc::Sender<(usize, WorkshopChunkQueryResult)>,
-    ) {
-        let query = self
-            .client()
-            .expect("reached only through app-layer entry points that already checked steam_connected()")
-            .ugc()
-            .query_items(ids.clone());
-
-        match query {
-            Ok(query) => {
-                let query = if description_length.returns_full_description() {
-                    query.set_return_long_description(true)
-                } else {
-                    query
-                };
-                query.allow_cached_response(600).fetch(
-                    move |results: Result<QueryResults<'_>, SteamError>| {
-                        let _ = result_tx
-                            .send((chunk_index, query_results_to_workshop_items(&ids, results)));
-                    },
-                );
-            }
-            Err(_) => {
-                let _ = result_tx.send((chunk_index, Err(WorkshopQueryError::QueryCreateFailed)));
-            }
-        }
-    }
-
     pub fn browse_my_workshop_page(&self, page: u32, search: &Arc<Search>) -> Option<WorkshopPage> {
         self.browse_user_workshop_page(
             steamworks::UserList::Published,
@@ -379,6 +258,7 @@ impl Steam {
 
         let client = self.client().ok()?;
         client
+            .client()
             .ugc()
             .query_user(
                 client.steam_id.account_id(),
@@ -517,8 +397,127 @@ fn drain_workshop_chunk_results(
     }
 }
 
+impl ConnectedSteam<'_> {
+    pub fn query_workshop_items(
+        &self,
+        ids: &[PublishedFileId],
+    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
+        self.query_workshop_items_with_description(ids, DescriptionLength::Summary)
+    }
+
+    pub fn query_workshop_item_details(
+        &self,
+        id: PublishedFileId,
+    ) -> Result<WorkshopItem, WorkshopQueryError> {
+        self.query_workshop_items_with_description(&[id], DescriptionLength::Full)
+            .map(|mut items| items.pop().unwrap_or_else(|| WorkshopItem::from(id)))
+    }
+
+    fn query_workshop_items_with_description(
+        &self,
+        ids: &[PublishedFileId],
+        description_length: DescriptionLength,
+    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
+        main_thread_forbidden!();
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let chunks = workshop_item_id_chunks(ids);
+        let chunk_count = chunks.len();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+            self.register_workshop_items_chunk_query(
+                chunk_index,
+                chunk,
+                description_length,
+                result_tx.clone(),
+            );
+        }
+        drop(result_tx);
+
+        let mut chunk_results: Vec<Option<WorkshopChunkQueryResult>> = vec![None; chunk_count];
+        for _ in 0..chunk_count {
+            let (chunk_index, result) = result_rx
+                .recv()
+                .expect("all workshop query chunks should be complete");
+            chunk_results[chunk_index] = Some(result);
+        }
+        let chunk_results = chunk_results
+            .into_iter()
+            .map(|result| result.expect("all workshop query chunks should be complete"))
+            .collect();
+
+        combine_workshop_chunk_results(chunk_results, ids.len())
+    }
+
+    /// Same concurrent chunk queries as [`Self::query_workshop_items`], but
+    /// hands each chunk to `on_chunk` the moment it lands instead of joining
+    /// all chunks first, so callers hydrate on-screen rows after a single
+    /// round trip. A failed chunk is logged and skipped (its ids stay stale);
+    /// the call only errors when every chunk failed.
+    pub fn query_workshop_items_streaming(
+        &self,
+        ids: &[PublishedFileId],
+        on_chunk: impl FnMut(Vec<WorkshopItem>),
+    ) -> Result<(), WorkshopQueryError> {
+        main_thread_forbidden!();
+
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let chunks = workshop_item_id_chunks(ids);
+        let chunk_count = chunks.len();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+            self.register_workshop_items_chunk_query(
+                chunk_index,
+                chunk,
+                DescriptionLength::Summary,
+                result_tx.clone(),
+            );
+        }
+        drop(result_tx);
+
+        drain_workshop_chunk_results(&result_rx, chunk_count, on_chunk)
+    }
+
+    fn register_workshop_items_chunk_query(
+        &self,
+        chunk_index: usize,
+        ids: Vec<PublishedFileId>,
+        description_length: DescriptionLength,
+        result_tx: mpsc::Sender<(usize, WorkshopChunkQueryResult)>,
+    ) {
+        let query = self.interface.client().ugc().query_items(ids.clone());
+
+        match query {
+            Ok(query) => {
+                let query = if description_length.returns_full_description() {
+                    query.set_return_long_description(true)
+                } else {
+                    query
+                };
+                query.allow_cached_response(600).fetch(
+                    move |results: Result<QueryResults<'_>, SteamError>| {
+                        let _ = result_tx
+                            .send((chunk_index, query_results_to_workshop_items(&ids, results)));
+                    },
+                );
+            }
+            Err(_) => {
+                let _ = result_tx.send((chunk_index, Err(WorkshopQueryError::QueryCreateFailed)));
+            }
+        }
+    }
+}
+
 pub fn query_workshop_items(
-    steam: &Steam,
+    steam: ConnectedSteam<'_>,
     ids: Vec<u64>,
 ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
     if ids.is_empty() {
@@ -530,14 +529,14 @@ pub fn query_workshop_items(
 }
 
 pub fn query_workshop_item_details(
-    steam: &Steam,
+    steam: ConnectedSteam<'_>,
     id: u64,
 ) -> Result<WorkshopItem, WorkshopQueryError> {
     steam.query_workshop_item_details(PublishedFileId(id))
 }
 
 pub fn query_workshop_items_streaming(
-    steam: &Steam,
+    steam: ConnectedSteam<'_>,
     ids: Vec<u64>,
     on_chunk: impl FnMut(Vec<WorkshopItem>),
 ) -> Result<(), WorkshopQueryError> {
@@ -566,8 +565,7 @@ mod tests {
 
     use super::{
         DescriptionLength, WorkshopItem, WorkshopQueryError, combine_workshop_chunk_results,
-        drain_workshop_chunk_results, filter_new_workshop_ids, query_workshop_items,
-        workshop_item_id_chunks,
+        drain_workshop_chunk_results, filter_new_workshop_ids, workshop_item_id_chunks,
     };
 
     #[test]
@@ -576,16 +574,14 @@ mod tests {
         assert!(!DescriptionLength::Summary.returns_full_description());
     }
 
+    /// An empty id list must reach steamworks zero times.
+    ///
+    /// `query_workshop_items_with_description` short-circuits before chunking,
+    /// so this pins the chunker itself: were that guard removed, an empty list
+    /// still yields no chunks and therefore no `query_items` call.
     #[test]
-    fn query_workshop_items_empty_is_noop_without_steam() {
-        let steam = super::Steam::new(crate::transactions::Transactions::new(
-            std::sync::Arc::new(crate::events::NullEventSink),
-            false,
-        ));
-        assert_eq!(
-            query_workshop_items(&steam, Vec::new()).unwrap(),
-            Vec::new()
-        );
+    fn empty_id_list_produces_no_query_chunks() {
+        assert!(workshop_item_id_chunks(&[]).is_empty());
     }
 
     #[test]

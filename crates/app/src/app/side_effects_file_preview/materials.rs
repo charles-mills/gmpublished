@@ -1,22 +1,14 @@
-use super::map_preview::{PropMaterialState, parallel_collect};
+use super::map_preview::{MaterialTable, parallel_collect};
 use super::{
     Arc, DetailSprite, HashMap, HashSet, MAP_DETAIL_SPRITE_PLACEMENT_CAP, MapDetailSprite,
     MapOverlay, MaterialResolver, MaterialSlot, OverlayPrimitive, OverlayVertex, RenderMode,
     ResolvedMaterialTextures, SKYBOX_FACE_DIMENSION_CAP, Skybox, SkyboxFace,
 };
 
-#[derive(Debug)]
-pub(super) struct MapMaterialResolution {
-    pub(super) materials: Vec<MaterialSlot>,
-    pub(super) material_indexes: HashMap<String, usize>,
-    pub(super) resolved_material_count: u32,
-    pub(super) water_fallback_material_count: u32,
-}
-
 pub(super) fn resolve_map_material_slots_parallel(
     material_names: &[String],
     resolver: &MaterialResolver,
-) -> MapMaterialResolution {
+) -> MaterialTable {
     let resolved = parallel_collect(material_names, |_, name| {
         resolver.resolve_with_base2(&[], name)
     });
@@ -27,7 +19,7 @@ pub(super) fn resolve_map_material_slots_parallel(
 pub(super) fn resolve_map_material_slots_serial(
     material_names: &[String],
     resolver: &MaterialResolver,
-) -> MapMaterialResolution {
+) -> MaterialTable {
     let resolved = material_names
         .iter()
         .map(|name| resolver.resolve_with_base2(&[], name))
@@ -38,11 +30,8 @@ pub(super) fn resolve_map_material_slots_serial(
 pub(super) fn map_material_resolution_from_results(
     material_names: &[String],
     resolved_materials: Vec<Option<ResolvedMaterialTextures>>,
-) -> MapMaterialResolution {
-    let mut resolved_material_count = 0_u32;
-    let mut water_fallback_material_count = 0_u32;
-    let mut material_indexes = HashMap::<String, usize>::new();
-    let mut materials = Vec::with_capacity(material_names.len());
+) -> MaterialTable {
+    let mut table = MaterialTable::default();
     for (name, resolved) in material_names.iter().zip(resolved_materials) {
         let texture = resolved
             .as_ref()
@@ -56,31 +45,19 @@ pub(super) fn map_material_resolution_from_results(
         let render_mode = resolved
             .as_ref()
             .map_or(RenderMode::Opaque, |material| material.render_mode);
-        if texture.is_some() {
-            resolved_material_count = resolved_material_count.saturating_add(1);
-        }
-        if texture
-            .as_ref()
-            .is_some_and(|texture| texture.is_water_fallback())
-        {
-            water_fallback_material_count = water_fallback_material_count.saturating_add(1);
-        }
-        material_indexes.insert(name.clone(), materials.len());
-        materials.push(MaterialSlot {
-            name: name.clone(),
-            texture,
-            texture2,
-            force_opaque,
-            render_mode,
-        });
+        table.push(
+            name,
+            MaterialSlot {
+                name: name.clone(),
+                texture,
+                texture2,
+                force_opaque,
+                render_mode,
+            },
+        );
     }
 
-    MapMaterialResolution {
-        materials,
-        material_indexes,
-        resolved_material_count,
-        water_fallback_material_count,
-    }
+    table
 }
 
 #[derive(Debug)]
@@ -94,7 +71,7 @@ pub(super) fn resolve_detail_sprites(
     map_skybox_sprites: &[MapDetailSprite],
     detail_material_name: &str,
     resolver: &MaterialResolver,
-    mut material_state: PropMaterialState<'_>,
+    table: &mut MaterialTable,
 ) -> (Vec<DetailSprite>, Vec<DetailSprite>) {
     if sprites.is_empty() && map_skybox_sprites.is_empty() {
         return (Vec::new(), Vec::new());
@@ -118,7 +95,7 @@ pub(super) fn resolve_detail_sprites(
         resolved.as_ref(),
         false,
         RenderMode::Cutout,
-        &mut material_state,
+        table,
     );
 
     let visible = sprites
@@ -152,14 +129,13 @@ pub(super) fn map_detail_sprite_to_preview(
 pub(super) fn resolve_map_overlays(
     overlays: &[MapOverlay],
     resolver: &MaterialResolver,
-    mut material_state: PropMaterialState<'_>,
+    table: &mut MaterialTable,
 ) -> OverlayBakeResult {
-    let pre_resolved = pre_resolve_overlay_materials(overlays, &material_state, resolver);
+    let pre_resolved = pre_resolve_overlay_materials(overlays, table, resolver);
     let mut resolved_overlays = Vec::new();
     let mut skipped_count = 0_u32;
     for overlay in overlays {
-        let Some(material_index) =
-            overlay_material_index(overlay, resolver, &pre_resolved, &mut material_state)
+        let Some(material_index) = overlay_material_index(overlay, resolver, &pre_resolved, table)
         else {
             skipped_count = skipped_count.saturating_add(1);
             continue;
@@ -181,16 +157,13 @@ pub(super) fn resolve_map_overlays(
 /// stays first-encounter and counters only move in the serial pass.
 pub(super) fn pre_resolve_overlay_materials(
     overlays: &[MapOverlay],
-    material_state: &PropMaterialState<'_>,
+    table: &MaterialTable,
     resolver: &MaterialResolver,
 ) -> HashMap<String, Option<ResolvedMaterialTextures>> {
     let mut names = Vec::new();
     let mut seen = HashSet::new();
     for overlay in overlays {
-        if material_state
-            .material_indexes
-            .contains_key(&overlay.material_name)
-        {
+        if table.contains(&overlay.material_name) {
             continue;
         }
         if seen.insert(overlay.material_name.clone()) {
@@ -208,18 +181,10 @@ pub(super) fn overlay_material_index(
     overlay: &MapOverlay,
     resolver: &MaterialResolver,
     pre_resolved: &HashMap<String, Option<ResolvedMaterialTextures>>,
-    material_state: &mut PropMaterialState<'_>,
+    table: &mut MaterialTable,
 ) -> Option<usize> {
-    if let Some(index) = material_state
-        .material_indexes
-        .get(&overlay.material_name)
-        .copied()
-    {
-        if material_state
-            .materials
-            .get(index)
-            .is_some_and(|slot| slot.texture.is_some())
-        {
+    if let Some(index) = table.index_of(&overlay.material_name) {
+        if table.get(index).is_some_and(|slot| slot.texture.is_some()) {
             return Some(index);
         }
         log::debug!(
@@ -255,11 +220,9 @@ pub(super) fn overlay_material_index(
         Some(&resolved),
         resolved.force_opaque,
         resolved.render_mode,
-        material_state,
+        table,
     );
-    material_state
-        .material_indexes
-        .insert(overlay.material_name.clone(), index);
+    table.index_by_name(&overlay.material_name, index);
     Some(index)
 }
 
@@ -268,31 +231,18 @@ pub(super) fn push_map_material_slot(
     resolved: Option<&ResolvedMaterialTextures>,
     force_opaque: bool,
     render_mode: RenderMode,
-    material_state: &mut PropMaterialState<'_>,
+    table: &mut MaterialTable,
 ) -> usize {
     let texture = resolved.and_then(|material| material.texture.as_ref().map(Arc::clone));
     let texture2 = resolved.and_then(|material| material.texture2.as_ref().map(Arc::clone));
-    if texture.is_some() {
-        *material_state.resolved_material_count =
-            material_state.resolved_material_count.saturating_add(1);
-    }
-    if texture
-        .as_ref()
-        .is_some_and(|texture| texture.is_water_fallback())
-    {
-        *material_state.water_fallback_material_count = material_state
-            .water_fallback_material_count
-            .saturating_add(1);
-    }
-    let index = material_state.materials.len();
-    material_state.materials.push(MaterialSlot {
+    // Unindexed: the caller decides whether this slot is reachable by name.
+    table.push_unindexed(MaterialSlot {
         name: name.to_owned(),
         texture,
         texture2,
         force_opaque,
         render_mode,
-    });
-    index
+    })
 }
 
 pub(super) fn overlay_primitive(overlay: &MapOverlay, material_index: usize) -> OverlayPrimitive {

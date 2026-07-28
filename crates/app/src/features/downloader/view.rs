@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use std::time::Instant;
 
 use iced::widget::{
@@ -428,7 +429,7 @@ fn progress_cell<'a>(
         JobProgress::Error(error) => container(
             text(i18n.trn(
                 "downloader-status-error",
-                &[("arg0", error.to_string().as_str())],
+                &[("error", Arg::Text(error.to_string().as_str()))],
             ))
             .size(tokens.typography.body_sm)
             .color(Color::from(tokens.colors.error)),
@@ -656,9 +657,9 @@ fn progress_label(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
             i18n.trn(
                 status_key,
                 &[
-                    ("arg0", &format!("{:.0}", ratio * 100.0)),
-                    ("arg1", done.as_str()),
-                    ("arg2", total.as_str()),
+                    ("percent", Arg::Number(&format!("{:.0}", ratio * 100.0))),
+                    ("done", Arg::Text(done.as_str())),
+                    ("total", Arg::Text(total.as_str())),
                 ],
             )
         }
@@ -667,15 +668,15 @@ fn progress_label(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
             i18n.trn(
                 "downloader-progress-percent",
                 &[
-                    ("arg0", &format!("{:.0}", ratio * 100.0)),
-                    ("arg1", speed.as_str()),
+                    ("percent", Arg::Number(&format!("{:.0}", ratio * 100.0))),
+                    ("speed", Arg::Text(speed.as_str())),
                 ],
             )
         }
         JobProgress::Finished => i18n.tr("downloader-status-finished"),
         JobProgress::Error(error) => i18n.trn(
             "downloader-status-error",
-            &[("arg0", error.to_string().as_str())],
+            &[("error", Arg::Text(error.to_string().as_str()))],
         ),
     }
 }
@@ -695,7 +696,10 @@ fn speed_text(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
         })
         .map(|bytes_per_second| {
             let formatted = format_bytes(bytes_per_second as u64, i18n);
-            i18n.trn("byte-rate-per-second", &[("arg0", formatted.as_str())])
+            i18n.trn(
+                "byte-rate-per-second",
+                &[("rate", Arg::Text(formatted.as_str()))],
+            )
         })
         .unwrap_or_default()
 }

@@ -137,32 +137,18 @@ impl Drop for Backend {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A failure during backend construction. Fatal: it aborts startup before any
+/// window exists, so it is printed rather than localized — no `HasErrorKey`.
+#[derive(Debug, thiserror::Error)]
 pub enum BackendInitError {
+    #[error("failed to install backend logger: {0}")]
     LoggerInstall(String),
+    #[error("backend initialization stage '{stage}' panicked: {message}")]
     StagePanic {
         stage: &'static str,
         message: String,
     },
 }
-
-impl fmt::Display for BackendInitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LoggerInstall(error) => {
-                write!(f, "failed to install backend logger: {error}")
-            }
-            Self::StagePanic { stage, message } => {
-                write!(
-                    f,
-                    "backend initialization stage '{stage}' panicked: {message}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for BackendInitError {}
 
 impl Backend {
     /// Constructs every service in dependency order. Process-lifetime work
@@ -292,10 +278,10 @@ mod tests {
         });
 
         assert_eq!(
-            backend_a.app_data.settings.load().language.as_deref(),
+            backend_a.app_data.settings().language.as_deref(),
             Some("en-US")
         );
-        assert_eq!(backend_b.app_data.settings.load().language, None);
+        assert_eq!(backend_b.app_data.settings().language, None);
     }
 
     #[test]

@@ -14,11 +14,14 @@ use iced::wgpu;
 use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
-use gmpublished_backend::particles::{MAX_CONTROL_POINTS, ParticleEngine, RendererKind};
+use gmpublished_backend::particles::{
+    ControlPointIndex, MAX_CONTROL_POINTS, ParticleEngine, RendererKind,
+};
 
 use super::Message;
 use super::model::ParticlePreview;
 use super::state::OrbitPose;
+use super::viewer3d::SOURCE_UP;
 use super::viewer3d::{look_at, mat_mul, perspective};
 use crate::bridge::materials::ResolvedTexture;
 
@@ -60,7 +63,7 @@ enum Drag {
     /// Dragging a control point gizmo in the camera-facing plane through
     /// its position at grab time.
     Gizmo {
-        index: usize,
+        index: ControlPointIndex,
     },
 }
 
@@ -110,8 +113,8 @@ impl SimState {
             self.last_frame = None;
             self.restart_epoch = viewer.restart_epoch;
             if let Some(engine) = self.engine.as_mut() {
-                for (index, position) in viewer.control_points.iter().enumerate() {
-                    engine.set_control_point(index, *position);
+                for (index, position) in ControlPointIndex::all().zip(viewer.control_points) {
+                    engine.set_control_point(index, position);
                 }
             }
             return;
@@ -131,7 +134,7 @@ impl SimState {
             _ => None,
         };
         if let Some(engine) = self.engine.as_mut() {
-            for (index, position) in viewer.control_points.iter().enumerate() {
+            for (index, position) in ControlPointIndex::all().zip(viewer.control_points) {
                 if Some(index) == dragging {
                     continue;
                 }
@@ -142,7 +145,7 @@ impl SimState {
                     position[2] - current[2],
                 ];
                 if delta.iter().any(|component| component.abs() > 1e-3) {
-                    engine.drag_control_point(index, *position, DRAG_DT_HINT);
+                    engine.drag_control_point(index, position, DRAG_DT_HINT);
                 }
             }
         }
@@ -223,9 +226,9 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
     ];
     // Source is Z-up.
     let forward = v_normalize(v_sub(center, eye));
-    let right = v_normalize(v_cross(forward, [0.0, 0.0, 1.0]));
+    let right = v_normalize(v_cross(forward, SOURCE_UP));
     let up = v_cross(right, forward);
-    let view = look_at(eye, center, [0.0, 0.0, 1.0]);
+    let view = look_at(eye, center, SOURCE_UP);
     let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
     let proj = perspective(FOV_Y, aspect, radius * 0.01, radius * 20.0 + distance);
     CameraFrame {
@@ -269,17 +272,24 @@ fn gizmo_pick_radius(frame: &CameraFrame, position: [f32; 3]) -> f32 {
 impl ParticleViewer {
     /// Draggable control points: 1..=highest referenced. CP0 stays pinned at
     /// the viewport centre so the effect cannot be dragged off-origin.
-    fn gizmo_indices(&self, state: &SimState) -> std::ops::RangeInclusive<usize> {
+    fn gizmo_indices(&self, state: &SimState) -> impl Iterator<Item = ControlPointIndex> {
         let highest = state
             .engine
             .as_ref()
             .map_or(0, ParticleEngine::highest_control_point);
-        1..=highest.min(MAX_CONTROL_POINTS - 1)
+        ControlPointIndex::all()
+            .skip(1)
+            .take(highest.min(MAX_CONTROL_POINTS - 1))
     }
 
-    fn pick_gizmo(&self, state: &SimState, frame: &CameraFrame, ray: [f32; 3]) -> Option<usize> {
+    fn pick_gizmo(
+        &self,
+        state: &SimState,
+        frame: &CameraFrame,
+        ray: [f32; 3],
+    ) -> Option<ControlPointIndex> {
         let engine = state.engine.as_ref()?;
-        let mut best: Option<(usize, f32)> = None;
+        let mut best: Option<(ControlPointIndex, f32)> = None;
         for index in self.gizmo_indices(state) {
             let position = engine.control_point(index);
             let to_point = v_sub(position, frame.eye);
@@ -429,7 +439,7 @@ impl shader::Program<Message> for ParticleViewer {
             let mut gizmos = Vec::new();
             for index in self.gizmo_indices(state) {
                 let position = engine.control_point(index);
-                let color = GIZMO_COLORS[(index - 1) % GIZMO_COLORS.len()];
+                let color = GIZMO_COLORS[(index.get() - 1) % GIZMO_COLORS.len()];
                 let size = gizmo_pick_radius(&frame, position) * 0.5;
                 gizmos.push(GpuInstance {
                     position_rotation: [

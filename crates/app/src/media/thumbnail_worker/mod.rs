@@ -22,7 +22,7 @@ pub use disk_cache::{
 pub use thumbnail_key::{
     THUMBNAIL_SOURCE_FILE_EXTENSION, ThumbnailKey, ThumbnailMode, normalize_url,
 };
-pub use types::{PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail};
+pub use types::{PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail, ThumbnailRequest};
 pub use types::{Thumbnail, ThumbnailError, ThumbnailInput, ThumbnailMetadata, ThumbnailResult};
 
 static THUMBNAIL_AGENT: LazyLock<ureq::Agent> = LazyLock::new(decode::http_agent);
@@ -53,6 +53,24 @@ pub enum ThumbnailWorkerOutcome<T> {
     Cancelled,
 }
 
+impl<T> ThumbnailWorkerOutcome<T> {
+    fn map<U>(self, transform: impl FnOnce(T) -> U) -> ThumbnailWorkerOutcome<U> {
+        match self {
+            Self::Completed(value) => ThumbnailWorkerOutcome::Completed(transform(value)),
+            Self::SourceBanked => ThumbnailWorkerOutcome::SourceBanked,
+            Self::Cancelled => ThumbnailWorkerOutcome::Cancelled,
+        }
+    }
+}
+
+/// What a byte fetch can end as. Narrower than [`ThumbnailWorkerOutcome`]:
+/// fetching cannot bank a source, that is what the caller does with the bytes.
+#[derive(Debug)]
+pub enum FetchOutcome<T> {
+    Fetched(T),
+    Cancelled,
+}
+
 /// How a thumbnail job sources bytes for a URL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FetchProfile {
@@ -75,9 +93,7 @@ pub enum FetchProfile {
 
 pub fn run_thumbnail_request(
     disk_cache: Option<&WorkerDiskCache>,
-    key: &ThumbnailKey,
-    input: ThumbnailInput,
-    max_edge: u32,
+    request: &ThumbnailRequest,
     profile: FetchProfile,
     cancellation: &ThumbnailCancellation,
 ) -> ThumbnailResult<ThumbnailWorkerOutcome<Thumbnail>> {
@@ -90,9 +106,11 @@ pub fn run_thumbnail_request(
     }
 
     if profile == FetchProfile::BackgroundWarm {
-        return run_warm_source_request(disk_cache, input, cancellation);
+        return run_warm_source_request(disk_cache, request.input().clone(), cancellation);
     }
 
+    let key = request.key();
+    let max_edge = request.physical_max_edge();
     let mut decoder = ThumbnailDecoder::new();
 
     if let Some(cache) = disk_cache
@@ -115,14 +133,14 @@ pub fn run_thumbnail_request(
         }
     }
 
-    let ThumbnailInput::Url { url } = input;
+    let ThumbnailInput::Url { url } = request.input();
 
     // Source tier: the bytes exactly as fetched, keyed by URL alone. A derived
     // entry is size-specific, so a DPI change misses every one of them; with the
     // source on disk the new size is re-derived locally instead of re-fetching
     // the whole library.
     if let Some(cache) = disk_cache
-        && let Some(bytes) = read_source_bytes(cache, &url)
+        && let Some(bytes) = read_source_bytes(cache, url.as_ref())
     {
         match decoder.decode_and_resize_bytes(&bytes, max_edge) {
             Ok(thumbnail) => {
@@ -140,14 +158,14 @@ pub fn run_thumbnail_request(
                 // unindexed delete would leave the warm filter believing this
                 // URL is banked and never repairing it.
                 log::debug!("cached thumbnail source for {url} failed to decode: {error}");
-                remove_source_bytes(cache, &url);
+                remove_source_bytes(cache, url.as_ref());
             }
         }
     }
 
     let mut result = decoder.fetch_decode_and_resize_url_with_agent(
         &THUMBNAIL_AGENT,
-        &url,
+        url.as_ref(),
         max_edge,
         cancellation,
         disk_cache,
@@ -204,31 +222,23 @@ fn run_warm_source_request(
     }
 
     match decode::fetch_source_bytes_with_agent(&THUMBNAIL_AGENT, &url, cancellation)? {
-        ThumbnailWorkerOutcome::Completed(bytes) => {
+        FetchOutcome::Fetched(bytes) => {
             write_source_bytes(cache, &url, &bytes);
             Ok(ThumbnailWorkerOutcome::SourceBanked)
         }
-        ThumbnailWorkerOutcome::Cancelled => Ok(ThumbnailWorkerOutcome::Cancelled),
-        ThumbnailWorkerOutcome::SourceBanked => Ok(ThumbnailWorkerOutcome::SourceBanked),
+        FetchOutcome::Cancelled => Ok(ThumbnailWorkerOutcome::Cancelled),
     }
 }
 
 pub fn run_prepared_thumbnail_request(
     disk_cache: Option<&WorkerDiskCache>,
-    key: &ThumbnailKey,
-    input: ThumbnailInput,
-    max_edge: u32,
+    request: &ThumbnailRequest,
     profile: FetchProfile,
     cancellation: &ThumbnailCancellation,
 ) -> ThumbnailResult<ThumbnailWorkerOutcome<PreparedThumbnail>> {
     Ok(
-        match run_thumbnail_request(disk_cache, key, input, max_edge, profile, cancellation)? {
-            ThumbnailWorkerOutcome::Completed(thumbnail) => {
-                ThumbnailWorkerOutcome::Completed(PreparedThumbnail::from_thumbnail(thumbnail))
-            }
-            ThumbnailWorkerOutcome::SourceBanked => ThumbnailWorkerOutcome::SourceBanked,
-            ThumbnailWorkerOutcome::Cancelled => ThumbnailWorkerOutcome::Cancelled,
-        },
+        run_thumbnail_request(disk_cache, request, profile, cancellation)?
+            .map(PreparedThumbnail::from_thumbnail),
     )
 }
 
@@ -284,9 +294,7 @@ mod tests {
         // bytes came from disk.
         let outcome = run_thumbnail_request(
             Some(&cache),
-            &key,
-            input,
-            32,
+            &ThumbnailRequest::new(input, 32, key.mode()),
             FetchProfile::Interactive,
             &ThumbnailCancellation::default(),
         )
@@ -324,9 +332,7 @@ mod tests {
         let key = input.cache_key(256);
         let outcome = run_thumbnail_request(
             Some(&cache),
-            &key,
-            input,
-            256,
+            &ThumbnailRequest::new(input, 256, key.mode()),
             FetchProfile::BackgroundWarm,
             &ThumbnailCancellation::default(),
         )
@@ -366,9 +372,7 @@ mod tests {
         let key = input.cache_key(32);
         let outcome = run_thumbnail_request(
             Some(&cache),
-            &key,
-            input,
-            32,
+            &ThumbnailRequest::new(input, 32, key.mode()),
             FetchProfile::Interactive,
             &ThumbnailCancellation::default(),
         )
@@ -397,9 +401,7 @@ mod tests {
         for attempt in 1..=2 {
             let outcome = run_thumbnail_request(
                 Some(&cache),
-                &key,
-                input.clone(),
-                256,
+                &ThumbnailRequest::new(input.clone(), 256, key.mode()),
                 FetchProfile::Interactive,
                 &ThumbnailCancellation::default(),
             )
@@ -440,9 +442,7 @@ mod tests {
         let key = input.cache_key(32);
         let _ = run_thumbnail_request(
             Some(&cache),
-            &key,
-            input,
-            32,
+            &ThumbnailRequest::new(input, 32, key.mode()),
             FetchProfile::Interactive,
             &ThumbnailCancellation::default(),
         );
@@ -483,9 +483,7 @@ mod tests {
 
         let outcome = run_thumbnail_request(
             Some(&cache),
-            &static_key,
-            input,
-            64,
+            &ThumbnailRequest::new(input, 64, static_key.mode()),
             FetchProfile::Interactive,
             &ThumbnailCancellation::default(),
         )

@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 
 use super::domain::PublishedFileId;
 
-pub const PUBLISH_PROCESSING_ICON: &str = "PUBLISH_PROCESSING_ICON";
-pub const PUBLISH_PACKING: &str = "PUBLISH_PACKING";
 pub const DEFAULT_WORKSHOP_ICON_FILE_NAME: &str = "gmpublished_default_icon.png";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,8 +68,8 @@ pub struct PublishSubmitRequest {
 impl PublishSubmitRequest {
     pub(crate) const fn initial_status(&self) -> &'static str {
         match &self.preview {
-            Some(PublishSubmitPreview::Selected(_)) => PUBLISH_PROCESSING_ICON,
-            Some(PublishSubmitPreview::Default(_)) | None => PUBLISH_PACKING,
+            Some(PublishSubmitPreview::Selected(_)) => super::tasks::PUBLISH_PROCESSING_ICON_STATUS,
+            Some(PublishSubmitPreview::Default(_)) | None => super::tasks::PUBLISH_PACKING_STATUS,
         }
     }
 }

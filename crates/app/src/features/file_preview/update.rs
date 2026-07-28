@@ -5,7 +5,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::OpenRequested(request) => {
             let request = state.begin_open(request);
-            { vec![Effect::AudioStopRequested, Effect::LoadRequested(request)] }
+            vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
         }
         Message::LoadStageChanged(request_id, stage) => {
             let _changed = state.apply_load_stage(request_id, stage);
@@ -158,13 +158,13 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::CloseFinished => {
             state.close();
-            { vec![Effect::AudioStopRequested, Effect::DoorAudioStopRequested] }
+            vec![Effect::AudioStopRequested, Effect::DoorAudioStopRequested]
         }
         Message::RelatedPreviewRequested(entry_path) => state
             .related_preview_request(&entry_path)
             .map_or_else(Vec::new, |request| {
                 let request = state.begin_open(request);
-                { vec![Effect::AudioStopRequested, Effect::LoadRequested(request)] }
+                vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
             }),
         Message::LoadAnywayRequested => {
             state

@@ -488,3 +488,214 @@ fn appdata_validate_gmod_requires_absolute_garrysmod_addons_dir() {
     assert!(!validate_gmod(dir.path().join("missing")));
     assert!(!validate_gmod(PathBuf::from("relative")));
 }
+
+/// `load_or_default` falls back to defaults, and the next `save` writes them
+/// over the file. The unparseable original must survive somewhere recoverable
+/// first, or a single bad byte costs the user every setting.
+#[test]
+fn unreadable_settings_are_preserved_before_defaults_replace_them() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = AppDataPaths::for_test_root(temp.path());
+    fs::create_dir_all(paths.settings_file.parent().expect("settings dir")).expect("dir");
+    let original = r#"{"gmod": "/games/gmod", this is not json"#;
+    fs::write(&paths.settings_file, original).expect("write corrupt settings");
+
+    let settings = Settings::load_or_default(&paths);
+
+    assert_eq!(settings.gmod, Settings::default().gmod);
+    let backup = paths.settings_file.with_extension("json.bak");
+    assert_eq!(
+        fs::read_to_string(&backup).expect("the unreadable file is kept"),
+        original
+    );
+    assert!(
+        !paths.settings_file.exists(),
+        "the unreadable file is moved, not copied"
+    );
+}
+
+/// The persisted field names and enum tags are the on-disk format. Two of the
+/// value types (`ExtractDestination`, `ExtractionOverwriteMode`) live in
+/// `gma::extract`, where a variant rename reads as an internal refactor while
+/// silently changing what every installed copy has written. Any change here
+/// needs a `SETTINGS_SCHEMA` bump and a `migrate` arm.
+#[test]
+fn settings_json_shape_is_pinned_to_the_schema() {
+    let json = serde_json::to_value(Settings::default()).expect("settings serialize");
+    let object = json.as_object().expect("settings serialize to an object");
+
+    assert_eq!(
+        object.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "color_error",
+            "color_neutral",
+            "color_success",
+            "create_folder_on_extract",
+            "destinations",
+            "downloads",
+            "extract_destination",
+            "extract_overwrite_mode",
+            "gmod",
+            "ignore_globs",
+            "language",
+            "my_workshop_local_paths",
+            "schema",
+            "sounds",
+            "temp",
+            "titlebar",
+            "upscale_addon_icon",
+            "user_data",
+            "window_maximized",
+            "window_size",
+        ]
+    );
+    assert_eq!(object["schema"], serde_json::json!(SETTINGS_SCHEMA));
+
+    // Every variant, not only the ones a default `Settings` happens to hold:
+    // renaming a non-default variant changes the on-disk format just as much,
+    // and would leave a defaults-only pin green.
+    for (destination, tag) in [
+        (ExtractDestination::Temp, serde_json::json!("Temp")),
+        (
+            ExtractDestination::Downloads,
+            serde_json::json!("Downloads"),
+        ),
+        (ExtractDestination::Addons, serde_json::json!("Addons")),
+        (
+            ExtractDestination::Directory(PathBuf::from("/d")),
+            serde_json::json!({ "Directory": "/d" }),
+        ),
+        (
+            ExtractDestination::NamedDirectory(PathBuf::from("/d")),
+            serde_json::json!({ "NamedDirectory": "/d" }),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&destination).expect("serialize"), tag);
+    }
+    for (mode, tag) in [
+        (ExtractionOverwriteMode::Overwrite, "Overwrite"),
+        (ExtractionOverwriteMode::Recycle, "Recycle"),
+        (ExtractionOverwriteMode::Delete, "Delete"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(&mode).expect("serialize"),
+            serde_json::json!(tag)
+        );
+    }
+    for (titlebar, tag) in [
+        (TitlebarPreference::Auto, "Auto"),
+        (TitlebarPreference::System, "System"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(titlebar).expect("serialize"),
+            serde_json::json!(tag)
+        );
+    }
+}
+
+/// Every producer of a `Settings` stamps the current schema, so what reaches
+/// disk says what wrote it even when the value was carried in from elsewhere.
+#[test]
+fn saving_settings_writes_the_current_schema() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = AppDataPaths::for_test_root(temp.path());
+    let stale = Settings {
+        schema: 0,
+        ..Settings::default()
+    };
+
+    stale.save(&paths).expect("settings save");
+
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&paths.settings_file).expect("written settings"))
+            .expect("written settings parse");
+    assert_eq!(written["schema"], serde_json::json!(SETTINGS_SCHEMA));
+}
+
+/// A file written before the schema field existed is the schema-1 shape, not a
+/// corrupt one: it must load with its values intact and leave no backup.
+#[test]
+fn settings_without_a_schema_load_as_the_original_shape() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = AppDataPaths::for_test_root(temp.path());
+    fs::create_dir_all(paths.settings_file.parent().expect("settings dir")).expect("dir");
+    fs::write(
+        &paths.settings_file,
+        r#"{"gmod": "/games/gmod", "sounds": false}"#,
+    )
+    .expect("write pre-versioning settings");
+
+    let settings = Settings::load_or_default(&paths);
+
+    assert_eq!(
+        serde_json::from_str::<Settings>("{}")
+            .expect("an empty object is a pre-versioning file")
+            .schema,
+        1,
+        "a missing schema is the original shape, not whatever this build writes"
+    );
+    assert_eq!(settings.schema, SETTINGS_SCHEMA);
+    assert_eq!(settings.gmod, Some(PathBuf::from("/games/gmod")));
+    assert!(!settings.sounds);
+    assert!(
+        !paths.settings_file.with_extension("json.bak").exists(),
+        "a pre-versioning file is readable, not corrupt"
+    );
+}
+
+/// Serde drops the fields a newer build wrote, so accepting the file would
+/// mean writing that truncated shape back over the user's config on the next
+/// save. Keep it aside instead.
+#[test]
+fn settings_from_a_newer_schema_are_kept_aside_rather_than_downgraded() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = AppDataPaths::for_test_root(temp.path());
+    fs::create_dir_all(paths.settings_file.parent().expect("settings dir")).expect("dir");
+    let original = format!(
+        r#"{{"schema": {}, "gmod": "/games/gmod"}}"#,
+        SETTINGS_SCHEMA + 1
+    );
+    fs::write(&paths.settings_file, &original).expect("write newer settings");
+
+    let settings = Settings::load_or_default(&paths);
+
+    assert_eq!(settings.gmod, None, "the newer file must not be adopted");
+    assert_eq!(
+        fs::read_to_string(paths.settings_file.with_extension("json.bak"))
+            .expect("the newer file is kept"),
+        original
+    );
+}
+
+/// The first unusable file is the one closest to what the user configured. A
+/// later failure — which by then is failing on a file the app itself wrote —
+/// must not overwrite that backup.
+#[test]
+fn a_second_unreadable_settings_file_does_not_replace_the_first_backup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = AppDataPaths::for_test_root(temp.path());
+    fs::create_dir_all(paths.settings_file.parent().expect("settings dir")).expect("dir");
+    let backup = paths.settings_file.with_extension("json.bak");
+
+    fs::write(&paths.settings_file, "the user's real settings, corrupted").expect("write");
+    let _ = Settings::load_or_default(&paths);
+    fs::write(&paths.settings_file, "a later, less valuable corruption").expect("write");
+    let _ = Settings::load_or_default(&paths);
+
+    assert_eq!(
+        fs::read_to_string(&backup).expect("the first backup survives"),
+        "the user's real settings, corrupted"
+    );
+}
+
+/// A settings file that is merely absent is not an error and must not leave a
+/// spurious backup behind.
+#[test]
+fn a_missing_settings_file_leaves_no_backup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = AppDataPaths::for_test_root(temp.path());
+
+    let _settings = Settings::load_or_default(&paths);
+
+    assert!(!paths.settings_file.with_extension("json.bak").exists());
+}

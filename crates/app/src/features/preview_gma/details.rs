@@ -376,6 +376,7 @@ fn avatar_handle_from_rgba(avatar: &AvatarRgba) -> Option<image::Handle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::domain::SteamId;
     use crate::bridge::gma::PreviewArchive;
     use crate::test_support::GmaFixtureBuilder;
 
@@ -424,7 +425,7 @@ mod tests {
             id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
             title: "Remote Title".to_owned(),
             author: Some("Ada".to_owned()),
-            steamid64: Some(76_561_197_990_735_296),
+            steamid64: Some(SteamId::new(76_561_197_990_735_296)),
             avatar: None,
             time_created: 1_717_171_717,
             time_updated: 1_717_181_717,
@@ -505,7 +506,7 @@ mod tests {
             id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
             title: "Remote".to_owned(),
             author: None,
-            steamid64: Some(76_561_197_990_735_296),
+            steamid64: Some(SteamId::new(76_561_197_990_735_296)),
             avatar: None,
             time_created: 0,
             time_updated: 0,

@@ -1,9 +1,10 @@
 use crate::bridge::ui_error::UiError;
+use crate::bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset};
 use std::path::PathBuf;
 
 use super::state::{
-    ColorChannel, ColorSetting, PathSetting, PathValidationResult, ResetAction, SelectOption,
-    SettingsSnapshot, Tab,
+    ColorChannel, ColorSetting, PathSetting, PathValidationResult, ResetAction, SettingsSnapshot,
+    Tab,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -16,10 +17,10 @@ pub enum Message {
     PlayGifsByDefaultToggled(bool),
     #[cfg(target_os = "macos")]
     SystemTitlebarToggled(bool),
-    LanguageSelected(SelectOption),
-    DownloadCountFormatSelected(SelectOption),
-    ThemeSelected(SelectOption),
-    OverwriteModeSelected(SelectOption),
+    LanguageSelected(Option<String>),
+    DownloadCountFormatSelected(DownloadCountFormat),
+    ThemeSelected(ThemePreset),
+    OverwriteModeSelected(ExtractionOverwriteMode),
     PathEdited(PathSetting, String),
     PathAccepted(PathSetting),
     PathBrowseRequested(PathSetting),

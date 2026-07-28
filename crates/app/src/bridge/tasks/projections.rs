@@ -1,5 +1,7 @@
 use gmpublished_backend::error_key::keys;
 
+use crate::bridge::domain::SteamId;
+
 use super::{
     HashMap, PathBuf, PublishSelectedPreview, PublishSubmitMode, PublishSubmitPreview,
     PublishSubmitRequest, PublishedFileId, SearchFullBatch, SearchFullRequest, SearchHit,
@@ -22,9 +24,15 @@ pub(super) fn publish_submission_from_app_request(
     request: PublishSubmitRequest,
 ) -> steam_publishing::PublishSubmission {
     let (icon_path, upscale) = publish_preview_from_app_request(request.preview);
-    let update_id = match request.mode {
-        PublishSubmitMode::New => None,
-        PublishSubmitMode::Update { workshop_id } => Some(workshop_id.get()),
+    // The changelog belongs to the update case, so it travels inside it.
+    let mode = match request.mode {
+        PublishSubmitMode::New => steam_publishing::PublishSubmissionMode::Create,
+        PublishSubmitMode::Update { workshop_id } => {
+            steam_publishing::PublishSubmissionMode::Update {
+                id: gmpublished_backend::appdata::SettingsPublishedFileId(workshop_id.get()),
+                changes: request.changelog,
+            }
+        }
     };
 
     steam_publishing::PublishSubmission {
@@ -34,8 +42,7 @@ pub(super) fn publish_submission_from_app_request(
         tags: request.tags,
         addon_type: request.addon_type,
         upscale,
-        update_id,
-        changes: request.changelog,
+        mode,
         settings: Some(steam_publishing::PublishSettingsSnapshot {
             temp: Some(request.temp_dir),
             ignore_globs: request.ignore_globs,
@@ -145,7 +152,7 @@ pub(super) fn search_item_source_from_backend(
 
 pub(super) fn steam_user_from_backend(user: SteamRuntimeUser) -> SteamUser {
     SteamUser {
-        steamid: user.steamid.raw(),
+        steamid: SteamId::new(user.steamid.raw()),
         name: user.name,
         avatar: user.avatar.and_then(avatar_from_backend),
         dead: user.dead,
@@ -154,7 +161,7 @@ pub(super) fn steam_user_from_backend(user: SteamRuntimeUser) -> SteamUser {
 
 pub(super) fn steam_user_from_workshop_backend(user: steam_users::SteamUser) -> SteamUser {
     SteamUser {
-        steamid: user.steamid.raw(),
+        steamid: SteamId::new(user.steamid.raw()),
         name: user.name,
         avatar: user
             .avatar
@@ -169,7 +176,7 @@ pub(super) fn workshop_item_from_backend(item: gmpublished_backend::WorkshopItem
         id: PublishedFileId::new(item.id.0).expect("Steam never issues a zero published file id"),
         title: item.title,
         owner: item.owner.map(steam_user_from_workshop_backend),
-        steamid: item.steamid.map(|steamid| steamid.raw()),
+        steamid: item.steamid.map(|steamid| SteamId::new(steamid.raw())),
         time_created: item.time_created,
         time_updated: item.time_updated,
         description: item.description,

@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use iced::font::Weight;
 use iced::mouse;
 use iced::widget::{
@@ -716,7 +717,7 @@ fn empty_surface_text(state: &State, i18n: &I18n) -> String {
         LoadStatus::Empty => i18n.tr("size-analyzer-empty"),
         LoadStatus::Error(error) => i18n.trn(
             "size-analyzer-error",
-            &[("arg0", translated_error(i18n, error).as_str())],
+            &[("error", Arg::Text(translated_error(i18n, error).as_str()))],
         ),
     }
 }

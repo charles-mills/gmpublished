@@ -1,14 +1,15 @@
 use super::model::{ContextMenuRequest, PreparePublishTarget};
 use crate::bridge::domain::PublishedFileId;
+use crate::generation::Generation;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     PageRequested {
-        generation: u64,
+        generation: Generation,
         page: u32,
     },
     StatsRefreshRequested {
-        generation: u64,
+        generation: Generation,
         pages: u32,
     },
     PreparePublishRequested(PreparePublishTarget),

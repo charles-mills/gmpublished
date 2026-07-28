@@ -11,12 +11,15 @@ use gmpublished_backend::error_key::ErrorKey;
 use iced::widget::image;
 
 use super::ChangelogContent;
-use super::{AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget};
+use super::{
+    AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget, Verification,
+};
 use crate::features::prepare_publish::model::{
     ContentPathVerificationRequest, IgnorePatternMutationResult, IgnoredPattern,
     PublishSubmitContext, PublishSubmitResult, VerifiedContentPathState, VerifiedIcon,
     VerifiedIconPreview, WorkshopContentRequest, inspect_workshop_snapshot,
 };
+use crate::generation::Generation;
 use crate::media::{
     thumbnail_demand,
     thumbnail_worker::{ThumbnailError, ThumbnailInput},
@@ -248,7 +251,7 @@ fn accepting_addon_path_starts_generation_tagged_verification() {
     assert!(state.path_pending());
     assert_eq!(state.addon_path(), "/tmp/addon");
     assert_eq!(request.display_path, "/tmp/addon");
-    assert_eq!(request.generation, 2);
+    assert_eq!(request.generation, Generation::from_raw(2));
 }
 
 #[test]
@@ -275,8 +278,8 @@ fn duplicate_tag_selection_clears_the_new_slot() {
     let mut state = State::default();
     let _request = open_new(&mut state);
 
-    state.set_tag(0, "fun");
-    state.set_tag(1, "fun");
+    state.set_tag(0, Some(AddonTag::Fun));
+    state.set_tag(1, Some(AddonTag::Fun));
 
     assert_eq!(state.tags[0], Some(AddonTag::Fun));
     assert_eq!(state.tags[1], None);
@@ -314,7 +317,7 @@ fn begin_new_submit_builds_core_request() {
         .expect("valid state should submit");
 
     assert!(state.submit_pending());
-    assert_eq!(envelope.generation, 1);
+    assert_eq!(envelope.generation, Generation::from_raw(1));
     assert_eq!(envelope.request.mode, PublishSubmitMode::New);
     assert_eq!(
         envelope.request.content_source_path,
@@ -379,7 +382,7 @@ fn stale_submit_completion_is_ignored() {
         .expect("valid state should submit");
 
     assert!(!state.apply_submit_completion(
-        envelope.generation + 1,
+        envelope.generation.next(),
         Err(UiError::new(ErrorKey::new("ERR_STALE"))),
     ));
     assert!(state.submit_pending());
@@ -448,7 +451,7 @@ fn window_unfocus_pauses_icon_animation() {
     let _request = open_new(&mut state);
     let mut preview = verified_icon_preview("/tmp/icon.gif", false);
     preview.animation = Some(crate::media::thumbnail_animation::Playback::for_test());
-    state.selected_icon = Some(preview);
+    state.icon = Verification::Verified(preview);
     assert!(state.has_active_icon_animation());
 
     assert!(state.set_window_focused(false));
@@ -551,7 +554,7 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
     assert!(state.begin_publish_icon().is_none());
 
     assert!(!state.apply_publish_icon_completion(
-        envelope.generation + 1,
+        envelope.generation.next(),
         Err(UiError::new(ErrorKey::new("ERR_STALE"))),
     ));
     assert!(state.submit_pending());
@@ -635,9 +638,9 @@ fn changelog_content_round_trips_through_editor_actions() {
 }
 
 /// `text_editor::Content` is not `Clone`, so [`ChangelogContent`] hand-rolls
-/// `Clone` (reconstruct from text) and `PartialEq` (compare text). This guards
-/// that round-trip directly; it used to ride along on a `State`-level
-/// `assert_eq!(state.clone(), state)`, which obscured what was being tested.
+/// `Clone` (reconstruct from text) and `PartialEq` (compare text). Guarded
+/// directly rather than through a `State`-level `assert_eq!(state.clone(),
+/// state)`, where a break in either impl reads as an unrelated state failure.
 #[test]
 fn changelog_content_clone_round_trips_its_text() {
     let content = ChangelogContent::from_text("Fixed things");
@@ -668,10 +671,10 @@ fn open_update_seeds_workshop_preview_display_only() {
     assert!(state.icon_handle().is_none());
 
     // Stale generation and failures never seed.
-    assert!(
-        !state
-            .apply_thumbnail_delivery(&seed_delivery(set.generation + 1, 99), [0x10, 0x10, 0x10],)
-    );
+    assert!(!state.apply_thumbnail_delivery(
+        &seed_delivery(set.generation.next(), 99),
+        [0x10, 0x10, 0x10],
+    ));
     assert!(!state.apply_thumbnail_delivery(
         &failed_seed_delivery(set.generation, 99),
         [0x10, 0x10, 0x10],
@@ -730,7 +733,7 @@ fn browsed_icon_replaces_the_seeded_preview() {
     assert_ne!(state.icon_handle().expect("picked icon").id(), seeded_id);
 }
 
-fn seed_delivery(generation: u64, workshop_id: u64) -> thumbnail_demand::Delivery {
+fn seed_delivery(generation: Generation, workshop_id: u64) -> thumbnail_demand::Delivery {
     let input = ThumbnailInput::from_url("https://example.invalid/preview.png");
     let key = input.cache_key(super::SEED_THUMBNAIL_MAX_EDGE);
     let metadata = crate::media::thumbnail_worker::ThumbnailMetadata {
@@ -751,7 +754,7 @@ fn seed_delivery(generation: u64, workshop_id: u64) -> thumbnail_demand::Deliver
     }
 }
 
-fn failed_seed_delivery(generation: u64, workshop_id: u64) -> thumbnail_demand::Delivery {
+fn failed_seed_delivery(generation: Generation, workshop_id: u64) -> thumbnail_demand::Delivery {
     let input = ThumbnailInput::from_url("https://example.invalid/preview.png");
     thumbnail_demand::Delivery {
         owner: thumbnail_demand::Owner::PreparePublish,
@@ -802,17 +805,16 @@ fn ready_new_submit_state() -> State {
     let _request = open_new(&mut state);
     set_verified_path(&mut state);
     state.edit_title("  New Addon  ".to_owned());
-    state.set_addon_type("map");
-    state.set_tag(0, "fun");
+    state.set_addon_type(Some(AddonType::Map));
+    state.set_tag(0, Some(AddonTag::Fun));
     state
 }
 
 fn set_verified_path(state: &mut State) {
-    state.path_pending = false;
     state.active_workshop_request = None;
     state.workshop_loads.clear();
     state.addon_path = "/tmp/addon".to_owned();
-    state.verified_addon_path = Some(VerifiedContentPathState {
+    state.content_path = Verification::Verified(VerifiedContentPathState {
         display_path: "/tmp/addon".to_owned(),
         path: PathBuf::from("/tmp/addon"),
         total_size: 42,
@@ -891,8 +893,8 @@ fn an_update_owes_a_changelog_instead_of_a_title() {
     let mut state = State::default();
     let _request = open_update(&mut state, workshop_update_target());
     set_verified_path(&mut state);
-    state.set_addon_type("map");
-    state.set_tag(0, "fun");
+    state.set_addon_type(Some(AddonType::Map));
+    state.set_tag(0, Some(AddonTag::Fun));
 
     let blockers = state.blockers();
 
@@ -906,7 +908,7 @@ fn an_update_owes_a_changelog_instead_of_a_title() {
 fn verification_in_flight_holds_the_missing_list_back() {
     let mut state = State::default();
     let _request = open_new(&mut state);
-    state.path_pending = true;
+    state.content_path = Verification::Pending;
 
     let blockers = state.blockers();
 
@@ -923,8 +925,8 @@ fn the_submit_tooltip_lists_what_is_missing_beneath_the_update_warning() {
     let mut state = State::default();
     let _request = open_update(&mut state, workshop_update_target());
     set_verified_path(&mut state);
-    state.set_addon_type("map");
-    state.set_tag(0, "fun");
+    state.set_addon_type(Some(AddonType::Map));
+    state.set_tag(0, Some(AddonTag::Fun));
 
     let tooltip = state
         .submit_tooltip(&en())
@@ -942,20 +944,20 @@ fn an_unchosen_select_does_not_repeat_its_own_label() {
     let mut state = State::default();
     let _request = open_new(&mut state);
 
-    let face = state.selected_addon_type_option(&i18n).label;
+    let face = state.addon_type_label(&i18n);
     let unchosen = state.addon_type_options(&i18n);
     assert!(
-        !unchosen.iter().any(|option| option.label == face),
+        !unchosen.iter().any(|(_, label)| *label == face),
         "the menu echoed the control's own face: {face:?}"
     );
 
     // Once something is chosen the row becomes a way back to nothing, so it
-    // earns its place — and no longer duplicates the face.
-    state.set_addon_type("map");
+    // earns its place rather than duplicating the face.
+    state.set_addon_type(Some(AddonType::Map));
     let chosen = state.addon_type_options(&i18n);
     assert_eq!(chosen.len(), unchosen.len() + 1);
-    assert_ne!(state.selected_addon_type_option(&i18n).label, face);
-    assert!(chosen.iter().any(|option| option.label == face));
+    assert_ne!(state.addon_type_label(&i18n), face);
+    assert!(chosen.iter().any(|(_, label)| *label == face));
 }
 
 #[test]
@@ -964,21 +966,21 @@ fn an_unchosen_tag_slot_does_not_repeat_its_own_label() {
     let mut state = State::default();
     let _request = open_new(&mut state);
 
-    let face = state.selected_tag_option(0, &i18n).label;
+    let face = state.tag_label(0, &i18n);
     assert!(
         !state
             .tag_options(0, &i18n)
             .iter()
-            .any(|option| option.label == face),
+            .any(|(_, label)| *label == face),
         "the menu echoed the slot's own face: {face:?}"
     );
 
-    state.set_tag(0, "fun");
+    state.set_tag(0, Some(AddonTag::Fun));
 
     assert!(
         state
             .tag_options(0, &i18n)
             .iter()
-            .any(|option| option.label == face)
+            .any(|(_, label)| *label == face)
     );
 }

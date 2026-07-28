@@ -16,6 +16,7 @@ use crate::media::{
 };
 
 use super::*;
+use crate::generation::Generation;
 
 #[test]
 fn hover_title_prefers_the_installed_title() {
@@ -182,26 +183,34 @@ fn context_menu_includes_download_for_workshop_cells() {
 
     let menu = state.request_context_menu(Point::ORIGIN).unwrap();
 
-    assert!(
-        menu.entries()
-            .iter()
-            .any(|entry| entry.action() == Some(context_menu::ContextMenuAction::Download))
-    );
-    assert!(
-        menu.entries()
-            .iter()
-            .any(|entry| entry.action() == Some(context_menu::ContextMenuAction::CopyImageLink))
-    );
+    assert!(menu.entries().iter().any(|entry| matches!(
+        entry,
+        context_menu::Entry::Item {
+            action: context_menu::ContextMenuAction::Download,
+            ..
+        }
+    )));
+    assert!(menu.entries().iter().any(|entry| matches!(
+        entry,
+        context_menu::Entry::Item {
+            action: context_menu::ContextMenuAction::CopyImageLink,
+            ..
+        }
+    )));
     assert_eq!(
         menu.target().workshop_id(),
         Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
     );
     #[cfg(feature = "debug")]
-    assert!(
-        menu.entries()
-            .iter()
-            .any(|entry| { entry.action() == Some(context_menu::ContextMenuAction::HideAddon) })
-    );
+    assert!(menu.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            context_menu::Entry::Item {
+                action: context_menu::ContextMenuAction::HideAddon,
+                ..
+            }
+        )
+    }));
 }
 
 #[test]
@@ -551,7 +560,7 @@ fn thumbnail_pending_tracks_deliverable_cells_only() {
 #[test]
 fn thumbnail_delivery_survives_stable_generation_echo() {
     let mut state = ready_state_with_workshop();
-    let delivery = ready_delivery(999, 123, [44, 180, 90, 255]);
+    let delivery = ready_delivery(Generation::from_raw(999), 123, [44, 180, 90, 255]);
 
     assert_eq!(
         state.apply_thumbnail_delivery(&delivery),
@@ -917,7 +926,7 @@ fn installed_addon(
     }
 }
 
-fn ready_delivery(generation: u64, workshop_id: u64, color: [u8; 4]) -> Delivery {
+fn ready_delivery(generation: Generation, workshop_id: u64, color: [u8; 4]) -> Delivery {
     let url = "https://example.invalid/preview.jpg";
     let input = ThumbnailInput::from_url(url);
     let key = input.cache_key(ADDON_THUMBNAIL_MAX_EDGE);
@@ -941,7 +950,7 @@ fn ready_delivery(generation: u64, workshop_id: u64, color: [u8; 4]) -> Delivery
     }
 }
 
-fn placeholder_delivery(generation: u64, workshop_id: u64) -> Delivery {
+fn placeholder_delivery(generation: Generation, workshop_id: u64) -> Delivery {
     let input = ThumbnailInput::from_url("https://example.invalid/preview.jpg");
     Delivery {
         owner: Owner::SizeAnalyzer,
@@ -952,7 +961,7 @@ fn placeholder_delivery(generation: u64, workshop_id: u64) -> Delivery {
     }
 }
 
-fn failed_delivery(generation: u64, workshop_id: u64) -> Delivery {
+fn failed_delivery(generation: Generation, workshop_id: u64) -> Delivery {
     let url = "https://example.invalid/preview.jpg";
     let input = ThumbnailInput::from_url(url);
     Delivery {

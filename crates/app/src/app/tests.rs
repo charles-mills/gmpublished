@@ -4,6 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::i18n::Arg;
+
 use crate::bridge::domain::{
     AvatarRgba, InstalledAddon, PublishedFileId, SearchHit, SearchItem, SearchItemSource,
     SearchQuickBatch, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess, workshop_url,
@@ -14,6 +16,7 @@ use gmpublished_backend::appdata::{
 };
 use iced::{Point, Size, Task, keyboard, theme::Mode, widget::image, window};
 
+use crate::bridge::domain::SteamId;
 use crate::{bridge::archive::PreviewArchiveSource, features::file_preview};
 use crate::{
     bridge::{
@@ -31,6 +34,7 @@ use crate::{
     test_support::GmaFixtureBuilder,
     theme::AccentInputs,
 };
+use gmpublished_backend::transactions::TransactionId;
 
 #[test]
 fn staged_startup_activates_exactly_once_after_first_frame() {
@@ -49,6 +53,7 @@ use super::{
     system_scheme_from_mode,
 };
 use crate::bridge::ui_error::UiError;
+use crate::generation::Generation;
 
 fn assert_task_scheduled(task: &Task<RootMessage>) {
     assert!(task.units() > 0, "expected a scheduled task");
@@ -284,7 +289,7 @@ fn downloader_executor_cancels_requested_tasks() {
     let task_id = handle.id();
     let transaction = app.ctx.begin_transaction();
     app.ctx
-        .correlate_backend_transaction(transaction.id, handle);
+        .correlate_backend_transaction(transaction.id(), handle);
 
     let task = app.batch_effects(
         vec![downloader::Effect::TaskCancellationRequested(vec![task_id])],
@@ -305,7 +310,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     let transaction = app.ctx.begin_transaction();
     let _task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::DownloadStarted {
-            transaction_id: transaction.id,
+            transaction_id: transaction.id(),
             request_id: None,
         },
     ));
@@ -316,7 +321,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
         .ctx
         .handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             crate::bridge::tasks::TransactionRuntimeEvent::Data {
-                id: transaction.id,
+                id: transaction.id(),
                 payload: gmpublished_backend::events::TransactionPayload::WorkshopItem(
                     gmpublished_backend::appdata::SettingsPublishedFileId(123),
                 ),
@@ -444,7 +449,8 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
         .ctx
         .create_task(TaskKind::Extract, "extracting_progress");
     let task_id = task.id();
-    app.ctx.correlate_backend_transaction(transaction.id, task);
+    app.ctx
+        .correlate_backend_transaction(transaction.id(), task);
 
     // Cancelling through the same path the UI's cancel button uses reaches
     // the transaction the extraction call below is about to use.
@@ -703,11 +709,13 @@ fn search_executor_full_search_starts_stream_task() {
 #[test]
 fn search_executor_cancels_requested_task() {
     let mut app = App::new_for_test();
-    let handle = app.ctx.create_task(TaskKind::Search, "search");
+    let handle = app
+        .ctx
+        .create_task(TaskKind::Search, crate::bridge::tasks::SEARCH_STATUS);
     let task_id = handle.id();
     let transaction = app.ctx.begin_transaction();
     app.ctx
-        .correlate_backend_transaction(transaction.id, handle);
+        .correlate_backend_transaction(transaction.id(), handle);
 
     let task = app.batch_effects(
         vec![search::Effect::TaskCancellationRequested(task_id)],
@@ -750,7 +758,7 @@ fn search_executor_metadata_refresh_defers_until_steam_connects() {
 
     let _task = app.batch_effects(
         vec![search::Effect::MetadataRefreshRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
         }],
         App::run_search_effect,
@@ -759,7 +767,7 @@ fn search_executor_metadata_refresh_defers_until_steam_connects() {
     assert_eq!(
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::SearchMetadataRefresh {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
         }]
     );
@@ -771,7 +779,7 @@ fn my_workshop_executor_page_request_defers_until_steam_connects() {
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             page: 2,
         }],
         App::run_my_workshop_effect,
@@ -780,7 +788,7 @@ fn my_workshop_executor_page_request_defers_until_steam_connects() {
     assert_eq!(
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopPage {
-            generation: 7,
+            generation: Generation::from_raw(7),
             page: 2,
         }]
     );
@@ -792,7 +800,7 @@ fn my_workshop_executor_stats_refresh_defers_until_steam_connects() {
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::StatsRefreshRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             pages: 2,
         }],
         App::run_my_workshop_effect,
@@ -801,7 +809,7 @@ fn my_workshop_executor_stats_refresh_defers_until_steam_connects() {
     assert_eq!(
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopStats {
-            generation: 7,
+            generation: Generation::from_raw(7),
             pages: 2,
         }]
     );
@@ -895,7 +903,7 @@ fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
 
     let _task = app.batch_effects(
         vec![installed_addons::Effect::MetadataRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
         }],
         App::run_installed_addons_effect,
@@ -904,7 +912,7 @@ fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
     assert_eq!(
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::InstalledMetadata {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
         }]
     );
@@ -916,7 +924,7 @@ fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
 
     let _task = app.batch_effects(
         vec![installed_addons::Effect::MetadataRefreshRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
         }],
         App::run_installed_addons_effect,
@@ -925,7 +933,7 @@ fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
     assert_eq!(
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::InstalledMetadataRefresh {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
         }]
     );
@@ -2207,7 +2215,7 @@ fn uncorrelated_backend_transaction_events_are_data_only() {
 
     let _task = app.update(RootMessage::BackendEvent(BackendRuntimeEvent::Transaction(
         crate::bridge::tasks::TransactionRuntimeEvent::Progress {
-            id: 42,
+            id: TransactionId::from_raw(42),
             progress: 5000,
         },
     )));
@@ -2221,7 +2229,7 @@ fn steam_backed_page_request_defers_until_connection() {
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             page: 2,
         }],
         App::run_my_workshop_effect,
@@ -2230,7 +2238,7 @@ fn steam_backed_page_request_defers_until_connection() {
     assert_eq!(
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopPage {
-            generation: 7,
+            generation: Generation::from_raw(7),
             page: 2,
         }]
     );
@@ -2246,7 +2254,7 @@ fn steam_backed_stats_refresh_defers_until_connection() {
 
     let _task = app.batch_effects(
         vec![my_workshop::Effect::StatsRefreshRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             pages: 2,
         }],
         App::run_my_workshop_effect,
@@ -2255,7 +2263,7 @@ fn steam_backed_stats_refresh_defers_until_connection() {
     assert_eq!(
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopStats {
-            generation: 7,
+            generation: Generation::from_raw(7),
             pages: 2,
         }]
     );
@@ -2270,7 +2278,7 @@ fn failed_steam_connection_clears_pending_retry() {
     let mut app = App::new_for_test();
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             page: 2,
         }],
         App::run_my_workshop_effect,
@@ -2297,7 +2305,7 @@ fn successful_steam_connection_retries_pending_operation_once() {
     let mut app = App::new_for_test();
     let _task = app.batch_effects(
         vec![my_workshop::Effect::PageRequested {
-            generation: 7,
+            generation: Generation::from_raw(7),
             page: 2,
         }],
         App::run_my_workshop_effect,
@@ -2329,7 +2337,7 @@ fn successful_steam_connection_retries_pending_operation_once() {
 fn connected_steam_attempt_retries_pending_operation_without_edge() {
     let mut app = App::new_for_test();
     let retry = steam_session::PendingRetry::MyWorkshopPage {
-        generation: 7,
+        generation: Generation::from_raw(7),
         page: 2,
     };
 
@@ -2369,7 +2377,7 @@ fn steam_identity_fetch_completion_updates_shell_identity() {
     ));
 
     let _task = app.update(RootMessage::SteamSession(
-        steam_session::Message::IdentityFetched(1, Ok(steam_identity("Ada"))),
+        steam_session::Message::IdentityFetched(Generation::from_raw(1), Ok(steam_identity("Ada"))),
     ));
 
     assert_eq!(app.state.shell.account_name(), Some("Ada"));
@@ -2383,12 +2391,12 @@ fn steam_identity_fetch_failure_restores_anonymous_shell_identity() {
         steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
     ));
     let _task = app.update(RootMessage::SteamSession(
-        steam_session::Message::IdentityFetched(1, Ok(steam_identity("Ada"))),
+        steam_session::Message::IdentityFetched(Generation::from_raw(1), Ok(steam_identity("Ada"))),
     ));
 
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::IdentityFetched(
-            1,
+            Generation::from_raw(1),
             Err(UiError::detailed(
                 gmpublished_backend::error_key::keys::STEAM_ERROR,
                 Some("steam unavailable".to_owned()),
@@ -2563,9 +2571,10 @@ fn language_switch_rebuilds_the_runtime_bundle() {
 
     assert_eq!(app.state.i18n.locale_id(), "fr");
     assert_eq!(
-        app.state
-            .i18n
-            .trn("my-workshop-count", &[("arg0", "2"), ("arg1", "8")]),
+        app.state.i18n.trn(
+            "my-workshop-count",
+            &[("loaded", Arg::Number("2")), ("total", Arg::Number("8"))]
+        ),
         "Affichage de 2 sur 8 addons"
     );
     assert_eq!(
@@ -2625,7 +2634,7 @@ fn concrete_theme_tracks_system_scheme_but_keeps_palette_fixed() {
 
 fn preview_open_request() -> preview_gma::OpenRequest {
     preview_gma::OpenRequest {
-        request_id: 1,
+        request_id: Generation::from_raw(1),
         path: PathBuf::from("/tmp/preview-open.gma"),
         workshop_id: Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
     }
@@ -2633,15 +2642,15 @@ fn preview_open_request() -> preview_gma::OpenRequest {
 
 fn preview_metadata_request() -> preview_gma::MetadataRequest {
     preview_gma::MetadataRequest {
-        request_id: 1,
+        request_id: Generation::from_raw(1),
         workshop_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
     }
 }
 
 fn preview_author_request() -> preview_gma::AuthorRequest {
     preview_gma::AuthorRequest {
-        request_id: 1,
-        steamid64: 76_561_197_990_735_296,
+        request_id: Generation::from_raw(1),
+        steamid64: SteamId::new(76_561_197_990_735_296),
     }
 }
 
@@ -2653,7 +2662,7 @@ fn file_preview_request() -> file_preview::PreviewRequest {
     )
     .expect("fixture archive should load");
     file_preview::PreviewRequest {
-        request_id: 1,
+        request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: "lua/autorun/init.lua".to_owned(),
         display_name: "init.lua".to_owned(),
@@ -2825,7 +2834,7 @@ fn search_hit(label: &str, workshop_id: u64) -> SearchHit {
 
 fn steam_identity(name: &str) -> steam_session::SteamIdentity {
     steam_session::SteamIdentity::from_user(SteamUser {
-        steamid: 76561198000000001,
+        steamid: SteamId::new(76561198000000001),
         name: name.to_owned(),
         avatar: Some(AvatarRgba::new(1, 1, vec![1, 2, 3, 4]).expect("test avatar should be valid")),
         dead: false,
@@ -2864,11 +2873,10 @@ fn installed_addon_for_library(
 }
 
 /// Launch with Steam closed, start Steam while the app is open, and stay on
-/// My Workshop the whole time. The route had already recorded the Steam
-/// failure, the panel hid it, and clearing the panel used to reveal a stale
-/// "load failed: ERR_STEAM_ERROR:STEAM_UNAVAILABLE" for an outage that was
-/// over. Navigating away and back fixed it by hand; the reconnect edge now
-/// does the same thing on its own.
+/// My Workshop the whole time. The route records the Steam failure while the
+/// panel hides it, so without a reload on the reconnect edge, clearing the
+/// panel reveals a stale "load failed" for an outage that is already over —
+/// recoverable only by navigating away and back.
 #[test]
 fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
     let mut app = App::new_for_test();
@@ -2882,7 +2890,7 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
     let _task = app.update(RootMessage::MyWorkshop(my_workshop::Message::RouteEntered));
     let _task = app.update(RootMessage::MyWorkshop(
         my_workshop::Message::PageCompleted(
-            1,
+            Generation::from_raw(1),
             1,
             Err(UiError::detailed(
                 gmpublished_backend::error_key::keys::STEAM_ERROR,
@@ -2952,7 +2960,7 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
     // still starting.
     let _task = app.update(RootMessage::InstalledAddons(
         installed_addons::Message::MetadataCompleted(
-            1,
+            Generation::from_raw(1),
             vec![workshop_id],
             Err(UiError::detailed(
                 gmpublished_backend::error_key::keys::STEAM_ERROR,

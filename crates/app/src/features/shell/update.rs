@@ -81,6 +81,7 @@ pub fn update(
 
 #[cfg(test)]
 mod tests {
+    use crate::bridge::domain::SteamId;
     use crate::bridge::domain::{AvatarRgba, SteamUser};
 
     use super::{Message, State, update};
@@ -308,7 +309,7 @@ mod tests {
 
     fn steam_identity(name: &str) -> SteamIdentity {
         SteamIdentity::from_user(SteamUser {
-            steamid: 76561198000000001,
+            steamid: SteamId::new(76561198000000001),
             name: name.to_owned(),
             avatar: Some(
                 AvatarRgba::new(1, 1, vec![1, 2, 3, 4]).expect("test avatar should be valid"),

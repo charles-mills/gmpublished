@@ -5,6 +5,7 @@ use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::features::file_preview::model::{
     InfoReason, PreviewContent, PreviewData, RelatedPreviewKind, RelatedPreviewTarget,
 };
+use crate::generation::Generation;
 use crate::test_support::GmaFixtureBuilder;
 
 fn request() -> crate::features::file_preview::PreviewRequest {
@@ -16,7 +17,7 @@ fn request() -> crate::features::file_preview::PreviewRequest {
     .expect("fixture archive should load");
 
     crate::features::file_preview::PreviewRequest {
-        request_id: 0,
+        request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: "data/blob.bin".to_owned(),
         display_name: "blob.bin".to_owned(),
@@ -33,7 +34,7 @@ fn request_from_archive(
     crc32: u32,
 ) -> crate::features::file_preview::PreviewRequest {
     crate::features::file_preview::PreviewRequest {
-        request_id: 0,
+        request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(archive),
         entry_path: entry_path.to_owned(),
         display_name: entry_path
@@ -59,7 +60,7 @@ fn open_requested_emits_load_effects_without_modal_stack_work() {
         [
             Effect::AudioStopRequested,
             Effect::LoadRequested(request)
-        ] if request.request_id == 1
+        ] if request.request_id == Generation::from_raw(1)
     ));
 }
 
@@ -79,7 +80,7 @@ fn load_anyway_reloads_the_current_entry_without_size_gates() {
         })
         .expect("load anyway should re-request the entry");
     assert!(load.bypass_size_limits);
-    assert_eq!(load.request_id, 2);
+    assert_eq!(load.request_id, Generation::from_raw(2));
 
     // Without a current request there is nothing to re-load.
     let mut state = State::default();
@@ -154,7 +155,7 @@ fn related_preview_requested_opens_related_entry() {
         [
             Effect::AudioStopRequested,
             Effect::LoadRequested(request)
-        ] if request.request_id == 2
+        ] if request.request_id == Generation::from_raw(2)
             && request.entry_path == "materials/test/thing.vtf"
             && request.size_bytes == 3
     ));

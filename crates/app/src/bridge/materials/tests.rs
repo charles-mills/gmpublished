@@ -113,42 +113,12 @@ fn addon_material_wins_over_game_vpk_material() {
     assert_eq!(texture_rgba(&texture), addon_rgba);
 }
 
-#[test]
-fn prepended_material_wins_over_addon_material() {
-    let addon_rgba = vec![
-        255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
-    ];
-    let prepended_rgba = vec![
-        0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
-    ];
-    let archive = archive_with_texture(
-        "materials/models/test/thing.vmt",
-        r#""VertexlitGeneric" { "$basetexture" "models/test/addon_color" }"#,
-        "materials/models/test/addon_color.vtf",
-        &addon_rgba,
-    );
-    let resolver = MaterialResolver::with_prepended_source(
-        Arc::new(archive),
-        None,
-        [
-            (
-                "materials/models/test/thing.vmt".to_owned(),
-                r#""VertexlitGeneric" { "$basetexture" "models/test/prepended_color" }"#
-                    .as_bytes()
-                    .to_vec(),
-            ),
-            (
-                "materials/models/test/prepended_color.vtf".to_owned(),
-                create_vtf_bytes(&prepended_rgba),
-            ),
-        ],
-    );
+fn content_path(path: &str) -> ContentPath {
+    ContentPath::new(path).expect("test path should have a canonical form")
+}
 
-    let texture = resolver
-        .resolve(&["models/test".to_owned()], "thing")
-        .expect("prepended material should resolve");
-
-    assert_eq!(texture_rgba(&texture), prepended_rgba);
+fn path_strs(paths: &[ContentPath]) -> Vec<&str> {
+    paths.iter().map(ContentPath::as_str).collect()
 }
 
 #[test]
@@ -163,17 +133,21 @@ fn pak_source_lookup_is_case_insensitive_and_decodes_lzma_entries() {
 
     assert_eq!(
         source
-            .entry_bytes("materials/test/thing.vmt")
+            .entry_bytes(&content_path("materials/test/thing.vmt"))
             .expect("stored vmt"),
         stored_bytes
     );
     assert_eq!(
         source
-            .entry_bytes("MATERIALS/TEST/THING.VTF")
+            .entry_bytes(&content_path("MATERIALS/TEST/THING.VTF"))
             .expect("lzma vtf"),
         lzma_bytes
     );
-    assert!(source.entry_bytes("materials/test/missing.vmt").is_none());
+    assert!(
+        source
+            .entry_bytes(&content_path("materials/test/missing.vmt"))
+            .is_none()
+    );
 }
 
 #[test]
@@ -184,7 +158,7 @@ fn malformed_pak_source_degrades_to_absent_source() {
 }
 
 #[test]
-fn resolves_patch_include_with_overrides_across_sources() {
+fn resolves_patch_include_with_overrides() {
     let rgba = vec![
         40, 80, 120, 255, 40, 80, 120, 255, 40, 80, 120, 255, 40, 80, 120, 255,
     ];
@@ -202,27 +176,57 @@ fn resolves_patch_include_with_overrides_across_sources() {
                 "#
                 .to_vec(),
             )
+            .entry(
+                "materials/models/test/base.vmt",
+                br#""VertexlitGeneric" { "$basetexture" "models/test/base_color" }"#.to_vec(),
+            )
+            .entry(
+                "materials/models/test/base_color.vtf",
+                create_vtf_bytes(&rgba),
+            )
             .build(),
     )
     .expect("fixture archive should load");
-    let resolver = MaterialResolver::with_prepended_source(
-        Arc::new(archive),
-        None,
-        [
-            (
-                "materials/models/test/base.vmt".to_owned(),
-                br#""VertexlitGeneric" { "$basetexture" "models/test/base_color" }"#.to_vec(),
-            ),
-            (
-                "materials/models/test/base_color.vtf".to_owned(),
-                create_vtf_bytes(&rgba),
-            ),
-        ],
-    );
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
 
     let texture = resolver
         .resolve(&["models/test".to_owned()], "thing")
         .expect("patch material should resolve through included base");
+
+    assert_eq!(texture_rgba(&texture), rgba);
+}
+
+/// A patch's `include` is resolved by the same tier fan-out as any other
+/// content path, so the base material can live in a different tier from the
+/// patch that includes it — a map's pakfile patching a material shipped by an
+/// addon is the ordinary case.
+#[test]
+fn resolves_a_patch_include_whose_base_lives_in_another_tier() {
+    let rgba = vec![
+        11, 22, 33, 255, 11, 22, 33, 255, 11, 22, 33, 255, 11, 22, 33, 255,
+    ];
+    let addon = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Base Fixture")
+            .entry(
+                "materials/models/test/base.vmt",
+                br#""VertexlitGeneric" { "$basetexture" "models/test/base_color" }"#.to_vec(),
+            )
+            .entry(
+                "materials/models/test/base_color.vtf",
+                create_vtf_bytes(&rgba),
+            )
+            .build(),
+    )
+    .expect("fixture archive should load");
+    let pakfile = MapPakFile::from_pak_bytes(zip_fixture([zip_stored_entry(
+        "materials/models/test/thing.vmt",
+        br#"patch { include "materials/models/test/base.vmt" }"#.to_vec(),
+    )]));
+    let resolver = MaterialResolver::with_pakfile_source(Arc::new(addon), None, pakfile);
+
+    let texture = resolver
+        .resolve(&["models/test".to_owned()], "thing")
+        .expect("a pakfile patch must resolve a base from the addon tier");
 
     assert_eq!(texture_rgba(&texture), rgba);
 }
@@ -891,19 +895,19 @@ fn cubemap_depatch_fallback_resolves_original_material() {
 #[test]
 fn material_paths_only_depatch_map_coord_suffixes() {
     assert_eq!(
-        material_paths(&[], "maps/gm_flatgrass/brick/wall_1_-2_3"),
+        path_strs(&material_paths(&[], "maps/gm_flatgrass/brick/wall_1_-2_3")),
         vec![
-            "materials/maps/gm_flatgrass/brick/wall_1_-2_3.vmt".to_owned(),
-            "materials/brick/wall.vmt".to_owned(),
+            "materials/maps/gm_flatgrass/brick/wall_1_-2_3.vmt",
+            "materials/brick/wall.vmt",
         ]
     );
     assert_eq!(
-        material_paths(&[], "maps/gm_flatgrass/brick/wall_2024"),
-        vec!["materials/maps/gm_flatgrass/brick/wall_2024.vmt".to_owned()]
+        path_strs(&material_paths(&[], "maps/gm_flatgrass/brick/wall_2024")),
+        vec!["materials/maps/gm_flatgrass/brick/wall_2024.vmt"]
     );
     assert_eq!(
-        material_paths(&[], "brick/wall_1_2_3"),
-        vec!["materials/brick/wall_1_2_3.vmt".to_owned()]
+        path_strs(&material_paths(&[], "brick/wall_1_2_3")),
+        vec!["materials/brick/wall_1_2_3.vmt"]
     );
 }
 
@@ -977,12 +981,10 @@ fn resolves_raw_sound_wave_prefixes_case_insensitively() {
 
 #[test]
 fn resolves_manifest_and_globbed_soundscripts_to_waves() {
-    let resolver = MaterialResolver::with_prepended_source(
-        Arc::new(empty_archive()),
-        None,
-        [
-            (
-                "scripts/game_sounds_manifest.txt".to_owned(),
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Soundscript Fixture")
+            .entry(
+                "scripts/game_sounds_manifest.txt",
                 br"
                 game_sounds_manifest
                 {
@@ -990,9 +992,9 @@ fn resolves_manifest_and_globbed_soundscripts_to_waves() {
                 }
                 "
                 .to_vec(),
-            ),
-            (
-                "scripts/game_sounds_doors.txt".to_owned(),
+            )
+            .entry(
+                "scripts/game_sounds_doors.txt",
                 br"
                 DoorSound.DefaultMove
                 {
@@ -1002,9 +1004,9 @@ fn resolves_manifest_and_globbed_soundscripts_to_waves() {
                 }
                 "
                 .to_vec(),
-            ),
-            (
-                "scripts/game_sounds_extra.txt".to_owned(),
+            )
+            .entry(
+                "scripts/game_sounds_extra.txt",
                 br"
                 DoorSound.DefaultOpen
                 {
@@ -1016,21 +1018,20 @@ fn resolves_manifest_and_globbed_soundscripts_to_waves() {
                 }
                 "
                 .to_vec(),
-            ),
-            (
-                "sound/doors/default_move.wav".to_owned(),
-                b"default move".to_vec(),
-            ),
-            (
-                "sound/doors/default_open1.wav".to_owned(),
+            )
+            .entry("sound/doors/default_move.wav", b"default move".to_vec())
+            .entry(
+                "sound/doors/default_open1.wav",
                 b"default open one".to_vec(),
-            ),
-            (
-                "sound/doors/default_open2.wav".to_owned(),
+            )
+            .entry(
+                "sound/doors/default_open2.wav",
                 b"default open two".to_vec(),
-            ),
-        ],
-    );
+            )
+            .build(),
+    )
+    .expect("fixture archive should load");
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
 
     let files = resolver.sound_script_files();
     assert!(
@@ -1050,10 +1051,7 @@ fn resolves_manifest_and_globbed_soundscripts_to_waves() {
     assert_eq!(move_sound.volume, 0.5);
     assert_eq!(move_sound.sound_level, 75.0);
     assert_eq!(move_sound.waves.len(), 1);
-    assert_eq!(
-        move_sound.waves[0].source_tier,
-        ContentSourceTier::Prepended
-    );
+    assert_eq!(move_sound.waves[0].source_tier, ContentSourceTier::Addon);
     assert_eq!(move_sound.waves[0].bytes.as_slice(), b"default move");
 
     let open_sound = resolver
@@ -1163,14 +1161,14 @@ fn sibling_legacy_bin_index_reads_lzma_gma_fixture() {
 
     assert_eq!(
         index
-            .entry_bytes("materials/models/test/thing.vmt")
+            .entry_bytes(&content_path("materials/models/test/thing.vmt"))
             .expect("indexed vmt"),
         br#""VertexlitGeneric" { "$basetexture" "models/test/bin_color" }"#
     );
     assert_eq!(
         decode_vtf_rgba(
             &index
-                .entry_bytes("materials/models/test/bin_color.vtf")
+                .entry_bytes(&content_path("materials/models/test/bin_color.vtf"))
                 .expect("indexed vtf")
         )
         .expect("decoded vtf")

@@ -5,11 +5,12 @@ use super::{
     my_workshop, prepare_publish, preview_gma, run_installed_metadata_refresh, send_root_message,
     spawn_blocking_detached_or_warn, steam_session, stream,
 };
+use crate::generation::Generation;
 
 impl App {
     pub(super) fn my_workshop_page_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         page: u32,
     ) -> Task<RootMessage> {
         if let Some(task) = self
@@ -22,7 +23,7 @@ impl App {
 
     pub(super) fn my_workshop_page_worker_task(
         &self,
-        generation: u64,
+        generation: Generation,
         page: u32,
     ) -> Task<RootMessage> {
         self.ctx
@@ -40,7 +41,7 @@ impl App {
 
     pub(super) fn my_workshop_stats_refresh_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         pages: u32,
     ) -> Task<RootMessage> {
         if let Some(task) =
@@ -56,7 +57,7 @@ impl App {
 
     pub(super) fn my_workshop_stats_refresh_worker_task(
         &self,
-        generation: u64,
+        generation: Generation,
         pages: u32,
     ) -> Task<RootMessage> {
         self.ctx
@@ -114,7 +115,7 @@ impl App {
 
     pub(super) fn installed_addons_metadata_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     ) -> Task<RootMessage> {
         if let Some(task) =
@@ -142,7 +143,7 @@ impl App {
 
     pub(super) fn installed_addons_metadata_refresh_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     ) -> Task<RootMessage> {
         if let Some(task) =

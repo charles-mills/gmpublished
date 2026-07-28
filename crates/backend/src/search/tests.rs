@@ -364,7 +364,7 @@ fn full_search_emits_progress_data_and_finished_transaction_events() {
     ]);
     search.dirty();
     let transaction = transactions.begin();
-    let transaction_id = transaction.id;
+    let transaction_id = transaction.id();
 
     search.full_scored("needle", SearchScope::Addons, &transaction);
 

@@ -159,19 +159,57 @@ impl I18n {
         self.format(key, None)
     }
 
-    pub(crate) fn trn(&self, key: &str, args: &[(&str, &str)]) -> String {
-        let mut fluent_args = FluentArgs::with_capacity(args.len());
-        for (name, value) in args {
-            fluent_args.set(*name, FluentValue::try_number(value));
-        }
-        self.format(key, Some(&fluent_args))
+    pub(crate) fn trn(&self, key: &str, args: &[(&str, Arg<'_>)]) -> String {
+        self.format(key, Some(&fluent_args(args)))
+    }
+
+    /// `None` when neither the active catalog nor the fallback has `key`.
+    ///
+    /// Callers that need to distinguish a miss from a translation should use
+    /// this; [`Self::tr`] and [`Self::trn`] echo the key back, which is only
+    /// safe when the key is known to exist.
+    fn try_format(&self, key: &str, args: Option<&FluentArgs<'_>>) -> Option<String> {
+        format_from_bundle(&self.bundles.bundle, key, args)
+            .or_else(|| format_from_bundle(&self.bundles.fallback, key, args))
     }
 
     fn format(&self, key: &str, args: Option<&FluentArgs<'_>>) -> String {
-        format_from_bundle(&self.bundles.bundle, key, args)
-            .or_else(|| format_from_bundle(&self.bundles.fallback, key, args))
-            .unwrap_or_else(|| key.to_owned())
+        self.try_format(key, args).unwrap_or_else(|| key.to_owned())
     }
+
+    fn try_trn(&self, key: &str, args: &[(&str, Arg<'_>)]) -> Option<String> {
+        self.try_format(key, Some(&fluent_args(args)))
+    }
+
+    fn try_tr(&self, key: &str) -> Option<String> {
+        self.try_format(key, None)
+    }
+}
+
+/// A `trn` argument.
+///
+/// The distinction is load-bearing: Fluent parses a numeric argument, so text
+/// that merely looks like a number is rewritten — an addon titled `007`
+/// renders as `7`, `1e3` as `1000`, `+5` as `5`. Only [`Self::Number`] is
+/// parsed, and only it can drive a plural selector.
+#[derive(Clone, Copy, Debug)]
+pub enum Arg<'a> {
+    Text(&'a str),
+    Number(&'a str),
+}
+
+fn fluent_args<'a>(args: &[(&'a str, Arg<'a>)]) -> FluentArgs<'a> {
+    let mut fluent_args = FluentArgs::with_capacity(args.len());
+    for (name, value) in args {
+        fluent_args.set(
+            *name,
+            match value {
+                Arg::Text(text) => FluentValue::from(*text),
+                Arg::Number(number) => FluentValue::try_number(number),
+            },
+        );
+    }
+    fluent_args
 }
 
 pub fn available_languages() -> &'static [LanguageInfo] {
@@ -233,27 +271,17 @@ pub fn translated_error(i18n: &I18n, error: &crate::bridge::ui_error::UiError) -
             .replace('_', "-")
     );
 
-    let translated = error.detail.as_ref().map_or_else(
-        || i18n.tr(&key),
-        |detail| {
-            let detail_key = format!("{key}-detail");
-            let detailed = i18n.trn(&detail_key, &[("arg0", detail.as_ref())]);
-            if detailed == detail_key {
-                i18n.tr(&key)
-            } else {
-                detailed
-            }
-        },
-    );
+    let detailed = error.detail.as_ref().and_then(|detail| {
+        i18n.try_trn(
+            &format!("{key}-detail"),
+            &[("detail", Arg::Text(detail.as_ref()))],
+        )
+    });
 
-    if translated == key {
-        // `tr` echoes the key back on a miss, so this is "no catalog entry".
-        // Log the key that needs one; show the user something readable.
+    detailed.or_else(|| i18n.try_tr(&key)).unwrap_or_else(|| {
         log::debug!("no catalog entry for {key}; falling back to err-unknown");
         i18n.tr("err-unknown")
-    } else {
-        translated
-    }
+    })
 }
 
 pub fn resolve_locale_id(locale_hint: Option<&str>) -> &'static str {
@@ -367,7 +395,7 @@ fn format_from_bundle(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{CATALOGS, I18n, catalog_source, resolve_locale_id};
+    use super::{Arg, CATALOGS, I18n, catalog_source, resolve_locale_id};
 
     /// `(locale, message id)` pairs where the target language genuinely renders
     /// the message as the English string, so an identical value is a correct
@@ -560,14 +588,20 @@ mod tests {
 
         assert_eq!(i18n.locale_id(), "fr");
         assert_eq!(
-            i18n.trn("my-workshop-count", &[("arg0", "3"), ("arg1", "12")]),
+            i18n.trn(
+                "my-workshop-count",
+                &[("loaded", Arg::Number("3")), ("total", Arg::Number("12"))]
+            ),
             "Affichage de 3 sur 12 addons"
         );
         assert_eq!(i18n.tr("publish-new"), "Publier un nouveau...");
         assert_eq!(
             i18n.trn(
                 "downloader-progress-percent",
-                &[("arg0", "75"), ("arg1", "Téléchargement")]
+                &[
+                    ("percent", Arg::Number("75")),
+                    ("speed", Arg::Text("Téléchargement"))
+                ]
             ),
             "75% Téléchargement"
         );
@@ -612,6 +646,27 @@ mod tests {
         }
     }
 
+    /// `translated_error` supplies `detail` only to the `-detail` variant, so a
+    /// base `err-*` message that references it renders the placeholder itself
+    /// to the user whenever the error carries no detail.
+    #[test]
+    fn detail_free_error_messages_reference_no_arguments() {
+        for catalog in CATALOGS {
+            for (key, value) in catalog_messages(catalog_source(catalog.id)) {
+                if !key.starts_with("err-") || key.ends_with("-detail") {
+                    continue;
+                }
+                assert!(
+                    message_placeholders(&value).is_empty(),
+                    "{}'s {key} references {:?}, which `translated_error` never supplies to a \
+                     base key — put it in {key}-detail instead",
+                    catalog.id,
+                    message_placeholders(&value)
+                );
+            }
+        }
+    }
+
     #[test]
     fn fluent_catalogs_have_matching_key_sets() {
         let english = catalog_message_ids(catalog_source("en"));
@@ -651,6 +706,67 @@ mod tests {
         }
     }
 
+    /// A translation that names a placeholder the caller does not supply
+    /// renders as the literal `{$name}`; one that drops a placeholder silently
+    /// loses the value. Both pass key parity, so the placeholder sets are
+    /// checked separately.
+    #[test]
+    fn fluent_catalogs_have_matching_placeholder_sets() {
+        let english = catalog_messages(catalog_source("en"));
+        for catalog in CATALOGS {
+            if catalog.id == "en" {
+                continue;
+            }
+            let translated = catalog_messages(catalog_source(catalog.id));
+            for (key, value) in &english {
+                let Some(translated_value) = translated.get(key) else {
+                    continue;
+                };
+                assert_eq!(
+                    message_placeholders(translated_value),
+                    message_placeholders(value),
+                    "{} placeholders for {key}",
+                    catalog.id
+                );
+            }
+        }
+    }
+
+    /// The `$name` of every `{$name}` reference in a message value, including
+    /// the ones inside selector arms.
+    ///
+    /// Only `$` inside a Fluent placeable counts, so a literal `$5` in prose
+    /// is not mistaken for an argument the caller must supply.
+    fn message_placeholders(value: &str) -> BTreeSet<&str> {
+        let mut names = BTreeSet::new();
+        let mut rest = value;
+        let mut depth = 0_usize;
+        while let Some(start) = rest.find(['{', '}', '$']) {
+            let marker = rest.as_bytes()[start];
+            rest = &rest[start + 1..];
+            match marker {
+                b'{' => {
+                    depth += 1;
+                    continue;
+                }
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    continue;
+                }
+                _ if depth == 0 => continue,
+                _ => {}
+            }
+            let end = rest
+                .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                names.insert(&rest[..end]);
+            }
+            rest = &rest[end..];
+        }
+        names
+    }
+
     #[test]
     fn packed_catalogs_match_the_source_ftl_files() {
         for catalog in CATALOGS {
@@ -674,18 +790,177 @@ mod tests {
         let i18n = I18n::for_locale(Some("pl"));
 
         assert_eq!(
-            i18n.trn("relative-time-past-years", &[("arg0", "2")]),
+            i18n.trn("relative-time-past-years", &[("count", Arg::Number("2"))]),
             "2 lata temu"
         );
         assert_eq!(
-            i18n.trn("relative-time-past-years", &[("arg0", "5")]),
+            i18n.trn("relative-time-past-years", &[("count", Arg::Number("5"))]),
             "5 lat temu"
         );
+    }
+
+    /// Fluent rewrites anything it parses as a number, which would render a
+    /// title like `007` as `7`. Text arguments must survive verbatim.
+    #[test]
+    fn text_arguments_are_not_rewritten_as_numbers() {
+        let i18n = I18n::for_locale(Some("en"));
+
+        for title in ["007", "1e3", "+5", "1.50"] {
+            assert_eq!(
+                i18n.trn(
+                    "prepare-publish-update-warning",
+                    &[("title", Arg::Text(title)), ("id", Arg::Text("7"))]
+                ),
+                format!("You are pushing an UPDATE to {title} (7)")
+            );
+        }
     }
 
     /// Message id -> value, with Fluent block values (a bare `=` followed by
     /// indented lines) folded into a single newline-joined string so they are
     /// compared as a whole rather than skipped.
+    /// A key that reaches `tr`/`trn` but has no catalog entry renders as the
+    /// literal key in the UI, and every catalog-parity test still passes
+    /// because the key is absent from all of them equally. This is the only
+    /// check that ties a call site to the catalogs.
+    #[test]
+    fn every_literal_translation_key_exists_in_the_catalog() {
+        let english = catalog_source("en");
+        let known = catalog_messages(english)
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+
+        let mut missing = BTreeSet::new();
+        for (path, source) in rust_sources() {
+            for key in literal_translation_keys(&source) {
+                if !known.contains(key.as_str()) {
+                    missing.insert(format!("{key} ({path})"));
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "translation keys with no catalog entry: {missing:#?}"
+        );
+    }
+
+    /// Fluent silently renders `{$name}` as itself when the caller supplies no
+    /// `name`, so a call site whose argument names drift from its message's
+    /// placeholders puts `{$total}` in front of users. Nothing else ties the
+    /// two together — the names are strings on both sides.
+    #[test]
+    fn literal_trn_call_sites_supply_exactly_their_messages_placeholders() {
+        let english = catalog_messages(catalog_source("en"));
+
+        let mut mismatched = BTreeSet::new();
+        for (path, source) in rust_sources() {
+            for (key, supplied) in literal_trn_arguments(&source) {
+                let Some(value) = english.get(key.as_str()) else {
+                    continue;
+                };
+                let expected = message_placeholders(value);
+                if supplied.iter().map(String::as_str).collect::<BTreeSet<_>>() != expected {
+                    mismatched.insert(format!(
+                        "{key} ({path}): supplies {supplied:?}, message wants {expected:?}"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            mismatched.is_empty(),
+            "trn call sites disagreeing with their message: {mismatched:#?}"
+        );
+    }
+
+    /// `("key", ["arg name", ..])` for every `trn("key", &[("name", ..), ..])`
+    /// whose key *and* argument names are literals. Call sites keyed on a
+    /// runtime value are invisible here by construction.
+    ///
+    /// The argument list is the first `&[..]` after the key, so a `trn` whose
+    /// arguments are not a literal slice would take the next unrelated one.
+    /// No call site is written that way; one that was would show up as a
+    /// mismatch here rather than passing silently.
+    fn literal_trn_arguments(source: &str) -> Vec<(String, Vec<String>)> {
+        let mut calls = Vec::new();
+        let mut rest = source;
+        while let Some(start) = rest.find(".trn(\"") {
+            rest = &rest[start + ".trn(\"".len()..];
+            let Some(key_end) = rest.find('"') else {
+                break;
+            };
+            let key = rest[..key_end].to_owned();
+            let Some(args_start) = rest.find("&[") else {
+                break;
+            };
+            let Some(args_end) = rest[args_start..].find(']') else {
+                break;
+            };
+            let args = &rest[args_start..args_start + args_end];
+            let mut names = Vec::new();
+            let mut arg_rest = args;
+            while let Some(open) = arg_rest.find("(\"") {
+                arg_rest = &arg_rest[open + 2..];
+                let Some(close) = arg_rest.find('"') else {
+                    break;
+                };
+                names.push(arg_rest[..close].to_owned());
+                arg_rest = &arg_rest[close..];
+            }
+            calls.push((key, names));
+        }
+        calls
+    }
+
+    /// Every `.rs` file in this crate, as `(display path, contents)`.
+    fn rust_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    // This module's own literals are fixtures for the
+                    // miss-handling tests, not real call sites.
+                    && !path.starts_with(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/i18n"),
+                    )
+                    && let Ok(source) = std::fs::read_to_string(&path)
+                {
+                    out.push((path.to_string_lossy().into_owned(), source));
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut out,
+        );
+        assert!(!out.is_empty(), "no sources found to scan");
+        out
+    }
+
+    /// Keys passed to `tr`/`trn` as string literals. Computed keys (error
+    /// codes, `label_key()` returns) are invisible here by construction.
+    fn literal_translation_keys(source: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        for call in [".tr(\"", ".trn(\""] {
+            let mut rest = source;
+            while let Some(start) = rest.find(call) {
+                rest = &rest[start + call.len()..];
+                if let Some(end) = rest.find('"') {
+                    keys.push(rest[..end].to_owned());
+                }
+            }
+        }
+        keys
+    }
+
     fn catalog_messages(source: &str) -> BTreeMap<&str, String> {
         let mut messages = BTreeMap::new();
         let mut current: Option<&str> = None;

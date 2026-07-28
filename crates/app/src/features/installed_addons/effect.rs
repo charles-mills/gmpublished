@@ -1,15 +1,16 @@
 use super::model::{ContextMenuRequest, PreviewTarget};
 use crate::bridge::domain::PublishedFileId;
+use crate::generation::Generation;
 
 /// Outward consequences of an Installed Addons state transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     MetadataRequested {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
     MetadataRefreshRequested {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
     PreviewRequested(PreviewTarget),

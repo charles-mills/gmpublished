@@ -149,6 +149,7 @@ fn normalize_description_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::generation::Generation;
     use std::path::PathBuf;
 
     use super::*;
@@ -191,14 +192,14 @@ mod tests {
             vec![
                 Effect::ModalOpenRequested,
                 Effect::ArchiveOpenRequested(OpenRequest {
-                    request_id: 1,
+                    request_id: Generation::from_raw(1),
                     path: PathBuf::from("/tmp/addon.gma"),
                     workshop_id: Some(
                         PublishedFileId::new(123).expect("test fixture ids are always nonzero")
                     ),
                 }),
                 Effect::WorkshopMetadataRequested(MetadataRequest {
-                    request_id: 1,
+                    request_id: Generation::from_raw(1),
                     workshop_id: PublishedFileId::new(123)
                         .expect("test fixture ids are always nonzero"),
                 }),
@@ -241,7 +242,7 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+            Message::ArchiveOpened(Generation::from_raw(1), Box::new(Ok(loaded_archive()))),
         );
 
         assert!(matches!(
@@ -267,7 +268,7 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+            Message::ArchiveOpened(Generation::from_raw(1), Box::new(Ok(loaded_archive()))),
         );
 
         assert!(effects.iter().any(|effect| {
@@ -302,7 +303,7 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+            Message::ArchiveOpened(Generation::from_raw(1), Box::new(Ok(loaded_archive()))),
         );
 
         assert!(effects.is_empty());

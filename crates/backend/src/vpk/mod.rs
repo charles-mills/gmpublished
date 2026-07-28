@@ -14,17 +14,17 @@ const VPK_VERSION_2_HEADER_SIZE: u64 = 28;
 
 #[derive(Debug, Clone, Error)]
 pub enum VpkError {
-    #[error("ERR_IO_ERROR")]
+    #[error("VPK I/O failed")]
     IOError(#[source] Option<Arc<std::io::Error>>),
-    #[error("ERR_VPK_FORMAT_ERROR")]
+    #[error("the VPK is malformed")]
     FormatError,
-    #[error("ERR_VPK_INVALID_HEADER")]
+    #[error("the VPK header is not recognisable")]
     InvalidHeader,
-    #[error("ERR_VPK_ENTRY_NOT_FOUND")]
+    #[error("no such entry in the VPK")]
     EntryNotFound,
-    #[error("ERR_VPK_UNSAFE_PATH")]
+    #[error("the VPK entry path escapes its root")]
     UnsafePath,
-    #[error("ERR_VPK_MISSING_ARCHIVE")]
+    #[error("a VPK split archive is missing")]
     MissingArchive,
 }
 

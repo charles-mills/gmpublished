@@ -1,5 +1,7 @@
 use super::*;
+use crate::bridge::domain::SteamId;
 use crate::bridge::gma::PreviewArchive;
+use crate::generation::Generation;
 use crate::test_support::GmaFixtureBuilder;
 
 fn target() -> OpenTarget {
@@ -34,7 +36,7 @@ fn begin_open_marks_modal_loading_and_emits_worker_request() {
         state.workshop_id(),
         Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero"))
     );
-    assert_eq!(request.request_id, 1);
+    assert_eq!(request.request_id, Generation::from_raw(1));
     assert_eq!(request.path, PathBuf::from("/tmp/local.gma"));
 }
 
@@ -164,7 +166,7 @@ fn seeded_target() -> OpenTarget {
     })
 }
 
-fn ready_delivery(generation: u64) -> thumbnail_demand::Delivery {
+fn ready_delivery(generation: Generation) -> thumbnail_demand::Delivery {
     let input = ThumbnailInput::from_url("https://example.invalid/preview.jpg");
     let key = input.cache_key(PREVIEW_THUMBNAIL_MAX_EDGE);
     let metadata = crate::media::thumbnail_worker::ThumbnailMetadata {
@@ -307,7 +309,7 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
         id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
         title: "Remote".to_owned(),
         author: None,
-        steamid64: Some(76_561_197_990_735_296),
+        steamid64: Some(SteamId::new(76_561_197_990_735_296)),
         avatar: None,
         time_created: 0,
         time_updated: 0,
@@ -327,11 +329,14 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     let author_request = state
         .take_author_request()
         .expect("missing owner should request a profile fetch");
-    assert_eq!(author_request.steamid64, 76_561_197_990_735_296);
+    assert_eq!(
+        author_request.steamid64,
+        SteamId::new(76_561_197_990_735_296)
+    );
     assert!(state.take_author_request().is_none(), "one-shot");
 
     assert!(!state.apply_author_result(
-        author_request.request_id + 1,
+        author_request.request_id.next(),
         author_request.steamid64,
         Ok(super::AuthorInfo {
             name: "Ada".to_owned(),
@@ -406,7 +411,7 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
         id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
         title: "Remote".to_owned(),
         author: None,
-        steamid64: Some(76_561_197_990_735_296),
+        steamid64: Some(SteamId::new(76_561_197_990_735_296)),
         avatar: None,
         time_created: 0,
         time_updated: 0,

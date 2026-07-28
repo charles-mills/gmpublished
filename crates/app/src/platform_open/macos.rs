@@ -137,16 +137,16 @@ unsafe extern "C-unwind" fn application_open_urls(
         // `application:openURLs:` contract guarantees this argument is a
         // valid `NSArray<NSURL> *` for the duration of the callback.
         let urls = unsafe { &*(urls.cast::<NSArray<NSURL>>()) };
-        let mut paths = Vec::new();
-        for index in 0..urls.count() {
-            // SAFETY: `index` ranges over `0..urls.count()`, always in bounds
-            // for `urls`, satisfying `objectAtIndex_unchecked`'s precondition.
-            let url = unsafe { urls.objectAtIndex_unchecked(index) };
-            match url.to_file_path() {
-                Some(path) => paths.push(path),
-                None => log::debug!("ignored macOS document-open URL without file path"),
-            }
-        }
+        let paths = urls
+            .iter()
+            .filter_map(|url| {
+                let path = url.to_file_path();
+                if path.is_none() {
+                    log::debug!("ignored macOS document-open URL without file path");
+                }
+                path
+            })
+            .collect();
 
         super::accept_paths(paths);
     }));
@@ -339,6 +339,10 @@ mod apple_event {
         NO_ERR
     }
 
+    /// # Safety
+    ///
+    /// `event` must point to a live `AppleEvent` that stays valid for the
+    /// duration of the call.
     unsafe fn document_paths_from_event(event: *const AppleEvent) -> Result<Vec<PathBuf>, OSErr> {
         let mut list = AEDesc::default();
         // SAFETY: `event` is this function's own precondition, upheld by its
@@ -361,6 +365,10 @@ mod apple_event {
         result
     }
 
+    /// # Safety
+    ///
+    /// `list` must point to an initialized `AEDescList` that stays valid for
+    /// the duration of the call.
     unsafe fn document_paths_from_list(list: *const AEDescList) -> Result<Vec<PathBuf>, OSErr> {
         let mut count = 0;
         // SAFETY: `list` is this function's own precondition, upheld by its
@@ -403,6 +411,10 @@ mod apple_event {
         Ok(paths)
     }
 
+    /// # Safety
+    ///
+    /// `desc` must point to an initialized `AEDesc` that stays valid for the
+    /// duration of the call.
     unsafe fn path_from_file_url_desc(desc: *const AEDesc) -> Option<PathBuf> {
         // SAFETY: `desc` is this function's own precondition, upheld by its
         // only caller, which passes a descriptor just filled by `AEGetNthDesc`.
@@ -425,10 +437,7 @@ mod apple_event {
     }
 
     fn file_url_bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
-        // SAFETY: `cf_file_url_bytes_to_path` only reads `bytes` through a
-        // safe `&[u8]` slice to build a CFURL; it carries no additional
-        // precondition beyond what the slice itself already guarantees.
-        let path = unsafe { cf_file_url_bytes_to_path(bytes) };
+        let path = cf_file_url_bytes_to_path(bytes);
         if path.is_some() {
             return path;
         }
@@ -437,7 +446,7 @@ mod apple_event {
         text.starts_with('/').then(|| PathBuf::from(text))
     }
 
-    unsafe fn cf_file_url_bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
+    fn cf_file_url_bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
         // SAFETY: `bytes.as_ptr()` paired with the `CFIndex`-converted
         // `bytes.len()` is exactly the pointer+length CoreFoundation needs to
         // read `length` bytes from the slice; `ptr::null()` for the
@@ -479,6 +488,10 @@ mod apple_event {
         result
     }
 
+    /// # Safety
+    ///
+    /// `string` must be a live `CFStringRef` that stays valid for the duration
+    /// of the call.
     unsafe fn cf_string_to_string(string: CFStringRef) -> Option<String> {
         // SAFETY: `string` is this function's own precondition, upheld by its
         // one caller, which passes a live `CFStringRef` it just got from

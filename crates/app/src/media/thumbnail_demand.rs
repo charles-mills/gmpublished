@@ -19,11 +19,12 @@ use crate::{
     media::thumbnail_worker::{
         FetchProfile, PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail,
         ThumbnailCancellation, ThumbnailError, ThumbnailInput, ThumbnailKey, ThumbnailMetadata,
-        ThumbnailMode, ThumbnailWorkerOutcome, WorkerDiskCache, normalize_url,
+        ThumbnailMode, ThumbnailRequest, ThumbnailWorkerOutcome, WorkerDiskCache, normalize_url,
         run_prepared_thumbnail_request, validate_max_edge,
     },
 };
 
+use crate::generation::Generation;
 #[cfg(test)]
 use crate::media::thumbnail_worker::Thumbnail;
 
@@ -256,7 +257,16 @@ impl Manager {
         // queue position, in-flight job, and retry state all survive.
         let mut retained = HashSet::with_capacity(set.demands.len());
         let mut resolved = Vec::with_capacity(set.demands.len());
-        for demand in set.demands {
+        for mut demand in set.demands {
+            // The owner decides warm-ness; the priority carried by a demand is
+            // only its position within a tier. Five downstream sites classify a
+            // demand as warm by its priority and one by its owner, so they can
+            // only agree if the two are reconciled here, at the single point
+            // demands enter the manager.
+            if set.owner.is_warm() {
+                demand.priority = Priority::WarmLibrary;
+            }
+
             let physical_max_edge =
                 physical_thumbnail_edge(demand.logical_max_edge, self.scale_factor);
             let key = if set.owner == Owner::SizeAnalyzer {
@@ -267,7 +277,7 @@ impl Manager {
                 demand.input.cache_key(physical_max_edge)
             };
             let interest = InterestKey {
-                owner: set.owner.clone(),
+                owner: set.owner,
                 generation: set.generation,
                 id: demand.id.clone(),
                 key: key.clone(),
@@ -311,7 +321,7 @@ impl Manager {
 
             if let Err(error) = validate_max_edge(physical_max_edge) {
                 immediate.push(Message::Delivered(Box::new(Delivery::failed(
-                    set.owner.clone(),
+                    set.owner,
                     set.generation,
                     demand.id,
                     key,
@@ -350,7 +360,7 @@ impl Manager {
                 let sequence = self.allocate_sequence();
                 let state = self.index.state_for_key(&key);
                 self.index.add(DemandEntry::new(
-                    set.owner.clone(),
+                    set.owner,
                     set.generation,
                     sequence,
                     demand,
@@ -363,7 +373,7 @@ impl Manager {
 
             if let Some(ready) = self.cache.get(&key).cloned() {
                 immediate.push(Message::Delivered(Box::new(Delivery::ready(
-                    set.owner.clone(),
+                    set.owner,
                     set.generation,
                     demand.id,
                     key,
@@ -379,7 +389,7 @@ impl Manager {
                 && let Some(placeholder) = self.placeholder_for(demand.input.source_url())
             {
                 immediate.push(Message::Delivered(Box::new(Delivery::placeholder(
-                    set.owner.clone(),
+                    set.owner,
                     set.generation,
                     demand.id.clone(),
                     key.clone(),
@@ -390,7 +400,7 @@ impl Manager {
             let state = self.index.state_for_key(&key);
             let sequence = self.allocate_sequence();
             self.index.add(DemandEntry::new(
-                set.owner.clone(),
+                set.owner,
                 set.generation,
                 sequence,
                 demand,
@@ -539,11 +549,9 @@ impl Manager {
 
     fn start_candidate(&self, ctx: &BackendContext, candidate: StartCandidate) -> Task<Message> {
         let disk_cache = self.disk_cache.clone();
-        let key = candidate.key;
-        let worker_key = key.clone();
+        let request = candidate.request;
+        let key = request.key().clone();
         let message_key = key.clone();
-        let input = candidate.input;
-        let physical_max_edge = candidate.physical_max_edge;
         let profile = if candidate.priority == Priority::WarmLibrary {
             FetchProfile::BackgroundWarm
         } else {
@@ -555,14 +563,7 @@ impl Manager {
         let job_name = format!("thumbnail-{}", key.disk_file_name());
 
         ctx.run_blocking_media(job_name, move |_app| {
-            run_prepared_thumbnail_request(
-                disk_cache.as_ref(),
-                &worker_key,
-                input,
-                physical_max_edge,
-                profile,
-                &cancellation,
-            )
+            run_prepared_thumbnail_request(disk_cache.as_ref(), &request, profile, &cancellation)
         })
         .map(move |result| worker_result_message(message_key.clone(), job_id, attempt, result))
     }
@@ -694,13 +695,23 @@ pub enum Message {
     Delivered(Box<Delivery>),
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Owner {
-    AddonGrid(&'static str),
+    InstalledAddons,
+    MyWorkshop,
     PreparePublish,
     PreviewGma,
+    Search,
     SizeAnalyzer,
     WarmLibrary,
+}
+
+impl Owner {
+    /// Whole-library disk-cache warming, as opposed to anything a user is
+    /// looking at. Nothing paints for this owner.
+    pub(crate) const fn is_warm(self) -> bool {
+        matches!(self, Self::WarmLibrary)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -743,7 +754,7 @@ pub struct Demand {
 #[derive(Clone, Debug)]
 pub struct DemandSet {
     pub(crate) owner: Owner,
-    pub(crate) generation: u64,
+    pub(crate) generation: Generation,
     pub(crate) replace: ReplaceMode,
     pub(crate) demands: Vec<Demand>,
 }
@@ -752,7 +763,7 @@ impl DemandSet {
     pub(crate) fn empty(owner: Owner) -> Self {
         Self {
             owner,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: Vec::new(),
         }
@@ -874,7 +885,7 @@ impl fmt::Debug for ReadyAnimationFrame {
 #[derive(Clone, Debug)]
 pub struct Delivery {
     pub(crate) owner: Owner,
-    pub(crate) generation: u64,
+    pub(crate) generation: Generation,
     pub(crate) id: DemandId,
     pub(crate) key: ThumbnailKey,
     pub(crate) result: DeliveryResult,
@@ -883,7 +894,7 @@ pub struct Delivery {
 impl Delivery {
     fn ready(
         owner: Owner,
-        generation: u64,
+        generation: Generation,
         id: DemandId,
         key: ThumbnailKey,
         ready: ReadyThumbnail,
@@ -899,7 +910,7 @@ impl Delivery {
 
     fn failed(
         owner: Owner,
-        generation: u64,
+        generation: Generation,
         id: DemandId,
         key: ThumbnailKey,
         error: ThumbnailDeliveryError,
@@ -915,7 +926,7 @@ impl Delivery {
 
     fn placeholder(
         owner: Owner,
-        generation: u64,
+        generation: Generation,
         id: DemandId,
         key: ThumbnailKey,
         placeholder: PlaceholderImage,
@@ -1062,7 +1073,7 @@ impl DemandIndex {
             .push(interest.clone());
         let _ = self
             .by_owner
-            .entry(entry.owner.clone())
+            .entry(entry.owner)
             .or_default()
             .insert(interest.clone());
         if entry.state == DemandState::Queued {
@@ -1120,14 +1131,14 @@ impl DemandIndex {
     fn reprioritise_existing(
         &mut self,
         owner: &Owner,
-        generation: u64,
+        generation: Generation,
         id: &DemandId,
         key: &ThumbnailKey,
         priority: Priority,
         promoted_sequence: u64,
     ) -> bool {
         let interest = InterestKey {
-            owner: owner.clone(),
+            owner: *owner,
             generation,
             id: id.clone(),
             key: key.clone(),
@@ -1151,9 +1162,7 @@ impl DemandIndex {
 
     fn remove_queued_warm(&mut self, ids: &HashSet<DemandId>) {
         self.remove_where(|entry| {
-            entry.owner == Owner::WarmLibrary
-                && entry.state != DemandState::InFlight
-                && ids.contains(&entry.id)
+            entry.owner.is_warm() && entry.state != DemandState::InFlight && ids.contains(&entry.id)
         });
     }
 
@@ -1256,9 +1265,7 @@ impl DemandIndex {
         // is counted, including the headless driver's simulated worker pool.
 
         Some(StartCandidate {
-            key,
-            input,
-            physical_max_edge,
+            request: ThumbnailRequest::new(input, physical_max_edge, key.mode()),
             priority,
             job_id,
             attempt,
@@ -1467,14 +1474,14 @@ struct ActiveJob {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct InterestKey {
     owner: Owner,
-    generation: u64,
+    generation: Generation,
     id: DemandId,
     key: ThumbnailKey,
 }
 
 struct DemandEntry {
     owner: Owner,
-    generation: u64,
+    generation: Generation,
     id: DemandId,
     input: ThumbnailInput,
     key: ThumbnailKey,
@@ -1487,7 +1494,7 @@ struct DemandEntry {
 impl DemandEntry {
     fn new(
         owner: Owner,
-        generation: u64,
+        generation: Generation,
         sequence: u64,
         demand: Demand,
         key: ThumbnailKey,
@@ -1509,7 +1516,7 @@ impl DemandEntry {
 
     fn interest_key(&self) -> InterestKey {
         InterestKey {
-            owner: self.owner.clone(),
+            owner: self.owner,
             generation: self.generation,
             id: self.id.clone(),
             key: self.key.clone(),
@@ -1525,9 +1532,10 @@ enum DemandState {
 }
 
 struct StartCandidate {
-    key: ThumbnailKey,
-    input: ThumbnailInput,
-    physical_max_edge: u32,
+    /// The whole request, not the parts to rebuild one from: the key it
+    /// caches under is derived here and cannot disagree with the input and
+    /// edge the job actually fetches.
+    request: ThumbnailRequest,
     priority: Priority,
     job_id: JobId,
     attempt: RetryAttempt,
@@ -1759,8 +1767,8 @@ mod tests {
         let cached = manager.cache_thumbnail(key.clone(), solid_thumbnail(8, 6, 12));
 
         let messages = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("Installed Addons"),
-            generation: 9,
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(9),
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", input, 64, Priority::VisibleRow)],
         });
@@ -1770,8 +1778,8 @@ mod tests {
         let Message::Delivered(delivery) = &messages[0] else {
             panic!("cached thumbnail should deliver immediately");
         };
-        assert_eq!(delivery.owner, Owner::AddonGrid("Installed Addons"));
-        assert_eq!(delivery.generation, 9);
+        assert_eq!(delivery.owner, Owner::InstalledAddons);
+        assert_eq!(delivery.generation, Generation::from_raw(9));
         assert_eq!(delivery.key, key);
         let DeliveryResult::Ready(ready) = &delivery.result else {
             panic!("cached thumbnail should be ready");
@@ -1791,8 +1799,8 @@ mod tests {
         manager.seed_thumbhashes([(url.to_owned(), Arc::from(hash))]);
 
         let messages = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("Installed Addons"),
-            generation: 3,
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(3),
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", input, 64, Priority::VisibleRow)],
         });
@@ -1839,7 +1847,7 @@ mod tests {
 
         let messages = manager.apply_demands(DemandSet {
             owner: Owner::SizeAnalyzer,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", input, 64, Priority::SizeAnalyzer)],
         });
@@ -1848,7 +1856,7 @@ mod tests {
         let candidate = manager
             .next_candidate_for_test()
             .expect("analyzer decode should be queued");
-        assert_eq!(candidate.key.mode(), ThumbnailMode::Static);
+        assert_eq!(candidate.request.key().mode(), ThumbnailMode::Static);
     }
 
     #[test]
@@ -1857,13 +1865,13 @@ mod tests {
         let input = ThumbnailInput::from_url("https://example.invalid/shared.jpg");
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
         });
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::SizeAnalyzer,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input, 64, Priority::SizeAnalyzer)],
         });
@@ -1872,7 +1880,7 @@ mod tests {
         let candidate = manager
             .next_candidate_for_test()
             .expect("static analyzer work remains");
-        assert_eq!(candidate.key.mode(), ThumbnailMode::Static);
+        assert_eq!(candidate.request.key().mode(), ThumbnailMode::Static);
     }
 
     #[test]
@@ -1882,7 +1890,7 @@ mod tests {
         let animated_key = input.cache_key(256);
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
         });
@@ -1891,7 +1899,7 @@ mod tests {
             .expect("warm source starts first");
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::SizeAnalyzer,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input, 64, Priority::SizeAnalyzer)],
         });
@@ -1906,7 +1914,7 @@ mod tests {
         let candidate = manager
             .next_candidate_for_test()
             .expect("static work follows the shared source");
-        assert_eq!(candidate.key.mode(), ThumbnailMode::Static);
+        assert_eq!(candidate.request.key().mode(), ThumbnailMode::Static);
     }
 
     /// A warm job's product is bytes on disk. It paints nothing, delivers
@@ -1919,7 +1927,7 @@ mod tests {
 
         let messages = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
         });
@@ -1951,7 +1959,7 @@ mod tests {
 
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
         });
@@ -1981,7 +1989,7 @@ mod tests {
 
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
         });
@@ -1990,8 +1998,8 @@ mod tests {
         // The row arrives mid-flight, so it joins the running job rather than
         // starting one of its own.
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("Installed Addons"),
-            generation: 1,
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", input, 256, Priority::VisibleRow)],
         });
@@ -2011,7 +2019,7 @@ mod tests {
         let restarted = manager
             .next_candidate_for_test()
             .expect("the visible row must be re-offered");
-        assert_eq!(restarted.key, key);
+        assert_eq!(*restarted.request.key(), key);
         assert_eq!(
             restarted.priority,
             Priority::VisibleRow,
@@ -2037,8 +2045,8 @@ mod tests {
         // `promoted` is demanded first, so it wins any tie on sequence — the
         // test would pass for the wrong reason if priority were ignored.
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("My Workshop"),
-            generation: 0,
+            owner: Owner::MyWorkshop,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![
                 demand("row-1", promoted.clone(), 256, Priority::Prefetch),
@@ -2049,8 +2057,8 @@ mod tests {
         // The user scrolls toward row-1: same owner, same id, same key, higher
         // priority. Re-demanded alongside row-2 exactly as a real grid tick does.
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("My Workshop"),
-            generation: 0,
+            owner: Owner::MyWorkshop,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![
                 demand("row-1", promoted.clone(), 256, Priority::VisibleRow),
@@ -2067,7 +2075,7 @@ mod tests {
             "the promotion must reach the entry, not just the demand"
         );
         assert_eq!(
-            first.key,
+            *first.request.key(),
             promoted.cache_key(physical_thumbnail_edge(256, 1.0)),
             "and the promoted row must be scheduled ahead of the prefetch work"
         );
@@ -2083,14 +2091,14 @@ mod tests {
         let arriving = ThumbnailInput::from_url("https://example.invalid/arriving.jpg");
 
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("My Workshop"),
-            generation: 0,
+            owner: Owner::MyWorkshop,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", settling.clone(), 256, Priority::VisibleRow)],
         });
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("My Workshop"),
-            generation: 0,
+            owner: Owner::MyWorkshop,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![
                 demand("row-1", settling, 256, Priority::Prefetch),
@@ -2102,7 +2110,7 @@ mod tests {
             .next_candidate_for_test()
             .expect("the newly visible row is startable");
         assert_eq!(
-            first.key,
+            *first.request.key(),
             arriving.cache_key(physical_thumbnail_edge(256, 1.0)),
             "the demoted row must not keep the visible slot it no longer deserves"
         );
@@ -2121,8 +2129,8 @@ mod tests {
         let key = input.cache_key(physical_thumbnail_edge(256, 1.0));
 
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("My Workshop"),
-            generation: 0,
+            owner: Owner::MyWorkshop,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", input.clone(), 256, Priority::Prefetch)],
         });
@@ -2130,8 +2138,8 @@ mod tests {
         assert_eq!(started.priority, Priority::Prefetch);
 
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("My Workshop"),
-            generation: 0,
+            owner: Owner::MyWorkshop,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", input, 256, Priority::VisibleRow)],
         });
@@ -2181,7 +2189,7 @@ mod tests {
         });
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand(
                 "101",
@@ -2218,7 +2226,7 @@ mod tests {
         });
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
         });
@@ -2237,13 +2245,13 @@ mod tests {
 
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
         });
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("Installed Addons"),
-            generation: 1,
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", input, 256, Priority::VisibleRow)],
         });
@@ -2270,7 +2278,7 @@ mod tests {
 
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
             demands: vec![demand("101", warm_input, 256, Priority::WarmLibrary)],
         });
@@ -2280,8 +2288,8 @@ mod tests {
         );
 
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("Installed Addons"),
-            generation: 1,
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand("row-1", visible_input, 256, Priority::VisibleRow)],
         });
@@ -2290,7 +2298,8 @@ mod tests {
             .next_candidate(JobId(901), true)
             .expect("a candidate is available");
         assert_eq!(
-            first.key, visible_key,
+            *first.request.key(),
+            visible_key,
             "interactive work outranks warm even in warm-allowed slots"
         );
     }
@@ -2301,8 +2310,8 @@ mod tests {
         let input = ThumbnailInput::from_url("https://example.invalid/unseeded.jpg");
 
         let messages = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("Installed Addons"),
-            generation: 1,
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand("row", input, 64, Priority::VisibleRow)],
         });
@@ -2323,8 +2332,8 @@ mod tests {
         assert!(
             manager
                 .apply_demands(DemandSet {
-                    owner: Owner::AddonGrid("Installed Addons"),
-                    generation: 1,
+                    owner: Owner::InstalledAddons,
+                    generation: Generation::from_raw(1),
                     replace: ReplaceMode::Owner,
                     demands: vec![
                         demand("row-a", input.clone(), 128, Priority::VisibleRow),
@@ -2337,7 +2346,7 @@ mod tests {
         let candidate = manager
             .next_candidate_for_test()
             .expect("deduped demand should start once");
-        assert_eq!(candidate.key, key);
+        assert_eq!(*candidate.request.key(), key);
         assert!(manager.next_candidate_for_test().is_none());
 
         let effects = manager.complete_job(
@@ -2385,12 +2394,12 @@ mod tests {
     #[test]
     fn owner_replacement_drops_offscreen_demand() {
         let mut manager = Manager::new(Config::default());
-        let owner = Owner::AddonGrid("Installed Addons");
+        let owner = Owner::InstalledAddons;
         let input = ThumbnailInput::from_url("https://example.invalid/old.jpg");
 
         let _ = manager.apply_demands(DemandSet {
-            owner: owner.clone(),
-            generation: 1,
+            owner,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand("old-row", input, 64, Priority::VisibleRow)],
         });
@@ -2406,12 +2415,12 @@ mod tests {
     #[test]
     fn owner_replacement_cancels_dequeued_job_and_releases_its_slot() {
         let mut manager = Manager::new(Config::default());
-        let owner = Owner::AddonGrid("Installed Addons");
+        let owner = Owner::InstalledAddons;
         let input = ThumbnailInput::from_url("https://example.invalid/old.jpg");
 
         let _ = manager.apply_demands(DemandSet {
-            owner: owner.clone(),
-            generation: 1,
+            owner,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand("old-row", input.clone(), 64, Priority::VisibleRow)],
         });
@@ -2429,8 +2438,8 @@ mod tests {
         assert_eq!(manager.pending_count(), 0);
 
         let _ = manager.apply_demands(DemandSet {
-            owner: Owner::AddonGrid("Installed Addons"),
-            generation: 2,
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(2),
             replace: ReplaceMode::Owner,
             demands: vec![demand("old-row", input, 64, Priority::VisibleRow)],
         });
@@ -2445,12 +2454,12 @@ mod tests {
     #[test]
     fn owner_replacement_keeps_job_alive_when_the_key_remains_demanded() {
         let mut manager = Manager::new(Config::default());
-        let owner = Owner::AddonGrid("Installed Addons");
+        let owner = Owner::InstalledAddons;
         let input = ThumbnailInput::from_url("https://example.invalid/visible.jpg");
 
         let _ = manager.apply_demands(DemandSet {
-            owner: owner.clone(),
-            generation: 1,
+            owner,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand(
                 "visible-row",
@@ -2465,7 +2474,7 @@ mod tests {
 
         let _ = manager.apply_demands(DemandSet {
             owner,
-            generation: 2,
+            generation: Generation::from_raw(2),
             replace: ReplaceMode::Owner,
             demands: vec![demand("visible-row", input, 64, Priority::VisibleRow)],
         });
@@ -2478,13 +2487,13 @@ mod tests {
     #[test]
     fn successful_stale_completion_still_enters_memory_cache() {
         let mut manager = Manager::new(Config::default());
-        let owner = Owner::AddonGrid("Installed Addons");
+        let owner = Owner::InstalledAddons;
         let input = ThumbnailInput::from_url("https://example.invalid/old.jpg");
         let key = input.cache_key(64);
 
         let _ = manager.apply_demands(DemandSet {
-            owner: owner.clone(),
-            generation: 1,
+            owner,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![demand("old-row", input, 64, Priority::VisibleRow)],
         });
@@ -2519,8 +2528,8 @@ mod tests {
             let input = ThumbnailInput::from_url("https://example.invalid/retry.jpg");
             let key = input.cache_key(64);
             let _ = manager.apply_demands(DemandSet {
-                owner: Owner::AddonGrid("Installed Addons"),
-                generation: 1,
+                owner: Owner::InstalledAddons,
+                generation: Generation::from_raw(1),
                 replace: ReplaceMode::Owner,
                 demands: vec![demand("row", input, 64, Priority::VisibleRow)],
             });
@@ -2580,8 +2589,8 @@ mod tests {
             let input = ThumbnailInput::from_url("https://example.invalid/permanent.jpg");
             let key = input.cache_key(64);
             let _ = manager.apply_demands(DemandSet {
-                owner: Owner::AddonGrid("Installed Addons"),
-                generation: 1,
+                owner: Owner::InstalledAddons,
+                generation: Generation::from_raw(1),
                 replace: ReplaceMode::Owner,
                 demands: vec![demand("row", input, 64, Priority::VisibleRow)],
             });
@@ -2612,7 +2621,7 @@ mod tests {
 
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::PreviewGma,
-            generation: 1,
+            generation: Generation::from_raw(1),
             replace: ReplaceMode::Owner,
             demands: vec![
                 demand("row", row, 256, Priority::VisibleRow),
@@ -2624,7 +2633,7 @@ mod tests {
             .next_candidate_for_test()
             .expect("highest-priority demand should start first");
 
-        assert_eq!(candidate.key, detail_key);
+        assert_eq!(*candidate.request.key(), detail_key);
     }
 
     #[test]
@@ -2646,8 +2655,8 @@ mod tests {
             };
 
             let _ = manager.apply_demands(DemandSet {
-                owner: Owner::AddonGrid("Installed Addons"),
-                generation: 1,
+                owner: Owner::InstalledAddons,
+                generation: Generation::from_raw(1),
                 replace: ReplaceMode::Owner,
                 demands,
             });
@@ -2656,7 +2665,7 @@ mod tests {
                 .next_candidate_for_test()
                 .expect("visible row should start first");
 
-            assert_eq!(candidate.key, visible_key);
+            assert_eq!(*candidate.request.key(), visible_key);
         }
     }
 
@@ -2716,5 +2725,30 @@ mod tests {
             url: String::from("https://example.invalid/thumbnail.jpg"),
             source,
         }))
+    }
+    /// Warm-ness is asked of the priority at five sites and of the owner at
+    /// one. A set whose owner is warm but whose demands carry an interactive
+    /// priority must not be classified both ways.
+    #[test]
+    fn a_warm_owner_overrides_an_interactive_demand_priority() {
+        let mut manager = Manager::new(Config::default());
+        let input = ThumbnailInput::from_url("https://example.com/warm.png");
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: Generation::INITIAL,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("1", input, 256, Priority::VisibleRow)],
+        });
+
+        assert_eq!(manager.pending_count(), 1, "the demand should be queued");
+        assert!(
+            manager
+                .index
+                .entries
+                .values()
+                .all(|entry| entry.priority == Priority::WarmLibrary),
+            "a warm owner's demands are warm regardless of the priority asked for"
+        );
     }
 }

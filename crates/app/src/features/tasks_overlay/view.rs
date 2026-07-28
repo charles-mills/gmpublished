@@ -4,9 +4,11 @@ use iced::widget::text::{Shaping as TextShaping, Wrapping};
 use iced::widget::{Space, button, column, container, row, stack, svg, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Size, Vector, alignment};
 
-use crate::bridge::tasks::TaskKind;
+use crate::bridge::tasks::{
+    EXTRACT_STATUS, PUBLISH_PACKING_STATUS, PUBLISH_PROCESSING_ICON_STATUS, TaskKind,
+};
 use crate::format::format_bytes;
-use crate::i18n::{I18n, translated_error};
+use crate::i18n::{Arg, I18n, translated_error};
 use crate::theme::{Rgba, Tokens, ViewCtx};
 use crate::{assets, widgets};
 
@@ -196,8 +198,8 @@ fn status_text(toast: &Toast, i18n: &I18n) -> String {
         // Byte-progress statuses share the downloader's formatting; the
         // publish keys keep their upstream wire names but map onto the
         // existing translated entries.
-        "PUBLISH_PACKING" | "extracting_progress" => {
-            let ftl_key = if key == "PUBLISH_PACKING" {
+        PUBLISH_PACKING_STATUS | EXTRACT_STATUS => {
+            let ftl_key = if key == PUBLISH_PACKING_STATUS {
                 "publish-packing"
             } else {
                 key
@@ -207,13 +209,16 @@ fn status_text(toast: &Toast, i18n: &I18n) -> String {
             i18n.trn(
                 ftl_key,
                 &[
-                    ("arg0", &format!("{:.0}", toast.progress() * 100.0)),
-                    ("arg1", done.as_str()),
-                    ("arg2", total.as_str()),
+                    (
+                        "percent",
+                        Arg::Number(&format!("{:.0}", toast.progress() * 100.0)),
+                    ),
+                    ("done", Arg::Text(done.as_str())),
+                    ("total", Arg::Text(total.as_str())),
                 ],
             )
         }
-        "PUBLISH_PROCESSING_ICON" => i18n.tr("publish-processing-icon"),
+        PUBLISH_PROCESSING_ICON_STATUS => i18n.tr("publish-processing-icon"),
         key => i18n.tr(key),
     }
 }

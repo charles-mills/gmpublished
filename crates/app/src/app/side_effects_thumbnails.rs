@@ -1,5 +1,6 @@
 use super::{App, RootMessage, Task, search, thumbnail_demand};
 use crate::bridge::library::LibrarySnapshot;
+use crate::generation::Generation;
 
 /// Must equal the grids' demand edge (installed addons, size analyzer, My
 /// Workshop all use 256) so a warm fill lands on the exact keys they read.
@@ -181,7 +182,7 @@ impl App {
             .collect();
         let set = thumbnail_demand::DemandSet {
             owner: thumbnail_demand::Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: thumbnail_demand::ReplaceMode::Owner,
             demands,
         };

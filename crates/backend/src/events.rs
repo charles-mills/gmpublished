@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use steamworks::PublishedFileId;
 
 use crate::appdata::AppDataSnapshot;
-pub use crate::transactions::{TransactionError, TransactionPayload};
+pub use crate::transactions::{TransactionError, TransactionId, TransactionPayload};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
@@ -25,13 +25,13 @@ pub enum BackendEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadStartedEvent {
-    pub transaction_id: u32,
+    pub transaction_id: TransactionId,
     pub request_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtractionStartedEvent {
-    pub transaction_id: u32,
+    pub transaction_id: TransactionId,
     pub source_path: Option<PathBuf>,
     pub file_name: Option<String>,
     pub workshop_id: Option<PublishedFileId>,
@@ -41,31 +41,31 @@ pub struct ExtractionStartedEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransactionEvent {
     Finished {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Error {
-        id: u32,
+        id: TransactionId,
         error: TransactionError,
     },
     Data {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Status {
-        id: u32,
+        id: TransactionId,
         status: String,
     },
     Progress {
-        id: u32,
+        id: TransactionId,
         progress: u16,
     },
     IncrProgress {
-        id: u32,
+        id: TransactionId,
         incr: u16,
     },
     ResetProgress {
-        id: u32,
+        id: TransactionId,
     },
 }
 

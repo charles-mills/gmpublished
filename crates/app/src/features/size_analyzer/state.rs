@@ -16,6 +16,7 @@ use crate::bridge::size_analyzer::{
 };
 use crate::bridge::ui_error::UiError;
 use crate::features::context_menu;
+use crate::generation::Generation;
 use crate::media::{
     size_analyzer_render::{RgbaColor, SizeAnalyzerLabelSprite, tag_color},
     thumbnail_demand::{self, DeliveryResult},
@@ -28,7 +29,9 @@ const SPATIAL_COLUMNS: usize = 16;
 const SPATIAL_ROWS: usize = 10;
 const LABEL_SCALE_BUCKET: f32 = 0.5;
 const MAX_LABEL_SCALE: f32 = 3.0;
-const ANALYZER_THUMBNAIL_GENERATION: u64 = 0;
+/// The Size Analyzer never re-requests thumbnails, so its demands all carry
+/// the one generation that `Generation::next` never issues.
+const ANALYZER_THUMBNAIL_GENERATION: Generation = Generation::INITIAL;
 
 /// State owned by the Size Analyzer route.
 #[derive(Debug)]
@@ -596,6 +599,7 @@ impl State {
                 self.load_status = LoadStatus::Ready;
                 let _invalidation = self.invalidate_layers(LayerInvalidation::ALL);
             }
+            // "No addons" is an empty library, not a failure to show the user.
             Err(SizeAnalyzerError::NoAddonsFound) => {
                 self.clear_projection(LoadStatus::Empty);
             }
@@ -759,12 +763,6 @@ fn snapshots_content_identical(a: &LibrarySnapshot, b: &LibrarySnapshot) -> bool
     a.addons == b.addons
 }
 
-/// Renders the same two outputs as before `SizeAnalyzerError` gained a
-/// `HasErrorKey` impl: `NoAddonsFound` is unreachable here (handled as
-/// `LoadStatus::Empty` above), and `InvalidBounds` renders its own Display
-/// with no key prefix — a generic `UiError::from(&error).to_string()` would
-/// prepend `ERR_UNKNOWN:`, which the `size-analyzer-error` template has never
-/// interpolated.
 /// A delivered thumbnail's shared texture handle plus its pixel dimensions.
 ///
 /// The handle is the same one the grids display, so the GPU uploads each

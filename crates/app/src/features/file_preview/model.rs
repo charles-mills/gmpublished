@@ -4,6 +4,7 @@ use iced::widget::image;
 
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
+use crate::generation::Generation;
 pub use gmpublished_backend::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
     MapVisibilityBucket, MapWalkCollision,
@@ -96,7 +97,7 @@ pub const PHY_DEBUG_MATERIAL_NAME: &str = "__debug/phy_collision";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: Generation,
     pub(crate) archive: Arc<PreviewArchiveSource>,
     pub(crate) entry_path: String,
     pub(crate) display_name: String,
@@ -256,6 +257,9 @@ pub struct DoorInstance {
     pub(crate) local_bounds_max: [f32; 3],
     pub(crate) visibility: MapVisibilityBucket,
     pub(crate) initial_progress: f32,
+    /// Seconds an opened door waits before closing itself, or `None` for a
+    /// door that stays open until triggered again.
+    pub(crate) auto_close_after: Option<f32>,
     pub(crate) motion: MapDoorMotion,
     pub(crate) sounds: DoorSounds,
     pub(crate) meshes: Vec<MeshData>,
@@ -291,7 +295,6 @@ pub enum DoorSoundSourceTier {
     Loose,
     SiblingGma,
     GameVpk,
-    Prepended,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

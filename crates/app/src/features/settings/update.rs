@@ -39,19 +39,19 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             mutation_effect(mutation, state)
         }
         Message::LanguageSelected(option) => {
-            let mutation = state.language_mutation(&option.value);
+            let mutation = state.language_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::DownloadCountFormatSelected(option) => {
-            let mutation = state.download_count_format_mutation(&option.value);
+            let mutation = state.download_count_format_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::ThemeSelected(option) => {
-            let mutation = state.theme_mutation(&option.value);
+            let mutation = state.theme_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::OverwriteModeSelected(option) => {
-            let mutation = state.overwrite_mode_mutation(&option.value);
+            let mutation = state.overwrite_mode_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::PathEdited(kind, value) => {

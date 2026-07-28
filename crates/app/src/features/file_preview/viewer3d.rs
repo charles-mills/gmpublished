@@ -37,14 +37,14 @@ use camera::{
     LAND_BOB_AMPLITUDE, PLAYER_START_EYE_NUDGE, WALK_DUCK_EYE_HEIGHT, WALK_HULL_HALF_EXTENTS,
     WalkHull,
 };
-#[cfg(test)]
-use doors::source_sound_gain;
 use doors::{
-    DOOR_PROGRESS_EPSILON, DOOR_USE_REACH, DoorMoveLoopRuntime, DoorRenderPose, DoorRuntime,
-    DoorTarget, bounds_intersect, choose_door_open_sign, door_audio_event, door_progress_step,
-    door_sound_gain, door_uses_move_loop, door_world_bounds, endpoint_sound, expand_bounds,
-    initial_door_open_sign, ray_aabb_distance, trace_aabb_against_aabb, transform_door_vertices,
+    DOOR_PROGRESS_EPSILON, DOOR_USE_REACH, DoorMotion, DoorRenderPose, DoorRuntime, DoorTarget,
+    bounds_intersect, choose_door_swing, door_audio_event, door_progress_step, door_sound_gain,
+    door_uses_move_loop, door_world_bounds, endpoint_sound, expand_bounds, initial_door_swing,
+    ray_aabb_distance, trace_aabb_against_aabb, transform_door_vertices,
 };
+#[cfg(test)]
+use doors::{DoorSwing, source_sound_gain};
 use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem, prepare_draw_plans};
 #[cfg(test)]
 use draw_plan::{
@@ -213,6 +213,10 @@ fn normalize_or_zero(v: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// Source's world up. The engine is Z-up, so this is +Z rather than the +Y
+/// most renderers default to.
+pub(super) const SOURCE_UP: [f32; 3] = [0.0, 0.0, 1.0];
+
 /// Right-handed look-at, column-major.
 pub(super) fn look_at(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
     let f = normalize(sub(center, eye));
@@ -374,7 +378,7 @@ mod tests {
             let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
         }
 
-        assert!(camera.swimming);
+        assert!(camera.water.is_swimming());
         assert!(!camera.grounded);
         assert!(camera.position.expect("swimmer position")[2] > 40.0);
         assert!(camera.walk_velocity[2].abs() < 0.1);
@@ -416,7 +420,7 @@ mod tests {
             }
         }
 
-        assert!(camera.swimming);
+        assert!(camera.water.is_swimming());
         assert_eq!(camera.walk_velocity, [0.0; 3]);
         assert!(!camera.needs_movement_tick());
     }
@@ -467,7 +471,7 @@ mod tests {
 
         let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
 
-        assert!(camera.swimming);
+        assert!(camera.water.is_swimming());
         assert_eq!(camera.land_bob_amplitude, 0.0);
         assert_eq!(camera.view_bob_offset(), 0.0);
     }
@@ -898,7 +902,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(camera.doors[0].move_loop.is_some());
+        assert_eq!(camera.doors[0].motion, DoorMotion::Moving);
         let events = camera.integrate_doors(&scene, 1, 0.25);
         assert!(events.iter().any(|event| {
             matches!(
@@ -921,8 +925,7 @@ mod tests {
         }
 
         assert_eq!(camera.doors[0].progress, 0.0);
-        assert!(!camera.doors[0].moving);
-        assert!(camera.doors[0].move_loop.is_none());
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
         assert!(
             !camera.needs_movement_tick(),
             "a settled door must not keep the redraw loop alive"
@@ -930,23 +933,72 @@ mod tests {
     }
 
     #[test]
-    fn door_endpoint_clears_move_loop_marker_and_emits_stop_event() {
+    fn an_opened_door_closes_itself_after_its_auto_close_delay() {
+        let mut door = test_linear_door([40.0, 0.0, 64.0], 100.0);
+        door.auto_close_after = Some(0.5);
+        let scene = door_scene(vec![door]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+
+        assert!(camera.toggle_nearest_door(&scene, 1).is_some());
+        let _ = camera.integrate_doors(&scene, 1, 2.0);
+        assert_eq!(camera.doors[0].progress, 1.0);
+        assert!(
+            matches!(camera.doors[0].motion, DoorMotion::HoldingOpen { .. }),
+            "an opened door with a wait holds before closing: {:?}",
+            camera.doors[0].motion
+        );
+        assert!(
+            camera.needs_movement_tick(),
+            "the hold needs frames or its timer never advances"
+        );
+
+        // Part-way through the hold nothing has moved yet.
+        let _ = camera.integrate_doors(&scene, 1, 0.3);
+        assert_eq!(camera.doors[0].progress, 1.0);
+
+        let events = camera.integrate_doors(&scene, 1, 0.3);
+        assert_eq!(camera.doors[0].target, DoorTarget::Closed);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == DoorAudioEventKind::MoveStarted),
+            "closing on its own sounds like any other close: {events:?}"
+        );
+
+        for _ in 0..120 {
+            let _ = camera.integrate_doors(&scene, 1, 1.0 / 60.0);
+        }
+        assert_eq!(camera.doors[0].progress, 0.0);
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
+    }
+
+    #[test]
+    fn a_door_with_no_auto_close_delay_stays_open() {
+        let scene = door_scene(vec![test_linear_door([40.0, 0.0, 64.0], 100.0)]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+
+        assert!(camera.toggle_nearest_door(&scene, 1).is_some());
+        let _ = camera.integrate_doors(&scene, 1, 2.0);
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
+
+        let _ = camera.integrate_doors(&scene, 1, 60.0);
+        assert_eq!(camera.doors[0].progress, 1.0);
+    }
+
+    #[test]
+    fn door_endpoint_goes_idle_and_emits_stop_event() {
         let mut door = test_linear_door([40.0, 0.0, 64.0], 100.0);
         door.sounds.stop_sound = Some(test_door_sound("doors/door1_stop.wav"));
         let scene = door_scene(vec![door]);
         let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
 
         assert!(camera.toggle_nearest_door(&scene, 1).is_some());
-        assert!(camera.doors[0].move_loop.is_some());
+        assert_eq!(camera.doors[0].motion, DoorMotion::Moving);
 
         let events = camera.integrate_doors(&scene, 1, 2.0);
 
         assert_eq!(camera.doors[0].progress, 1.0);
-        assert!(!camera.doors[0].moving);
-        assert!(
-            camera.doors[0].move_loop.is_none(),
-            "endpoint must drop its move-loop marker"
-        );
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
         assert!(events.iter().any(|event| {
             event.door_index == 0
                 && event.gain > 0.0
@@ -955,24 +1007,18 @@ mod tests {
     }
 
     #[test]
-    fn blocked_closing_door_parks_and_clears_move_loop_marker() {
+    fn blocked_closing_door_parks_and_emits_parked_event() {
         let scene = door_scene(vec![test_linear_door([40.0, 0.0, 64.0], 100.0)]);
         let mut camera = walk_camera_for_scene(&scene, [50.0, 0.0, 64.0], 0.0);
         camera.doors[0].progress = 0.2;
         camera.doors[0].target = DoorTarget::Closed;
-        camera.doors[0].moving = true;
-        camera.doors[0].move_loop = Some(DoorMoveLoopRuntime);
+        camera.doors[0].motion = DoorMotion::Moving;
         (camera.doors[0].bounds_min, camera.doors[0].bounds_max) =
-            door_world_bounds(&scene.doors[0], 0.2, 1.0);
+            door_world_bounds(&scene.doors[0], 0.2, DoorSwing::Positive);
 
         let events = camera.integrate_doors(&scene, 1, 1.0 / 60.0);
 
-        assert!(!camera.doors[0].moving);
-        assert!(camera.doors[0].blocked_closing);
-        assert!(
-            camera.doors[0].move_loop.is_none(),
-            "parked door must drop its move-loop marker"
-        );
+        assert_eq!(camera.doors[0].motion, DoorMotion::BlockedClosing);
         assert!(
             events
                 .iter()
@@ -991,7 +1037,7 @@ mod tests {
         assert!(camera.toggle_nearest_door(&scene, 1).is_some());
         assert_eq!(camera.doors[0].target, DoorTarget::Closed);
         assert_eq!(camera.doors[1].target, DoorTarget::Open);
-        assert!(camera.doors[1].moving);
+        assert_eq!(camera.doors[1].motion, DoorMotion::Moving);
 
         let far_scene = door_scene(vec![test_linear_door([90.0, 0.0, 64.0], 32.0)]);
         let mut far_camera = walk_camera_for_scene(&far_scene, [0.0, 0.0, 64.0], 0.0);
@@ -1008,7 +1054,7 @@ mod tests {
         let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
         camera.doors[0].progress = 0.5;
         (camera.doors[0].bounds_min, camera.doors[0].bounds_max) =
-            door_world_bounds(&scene.doors[0], 0.5, 1.0);
+            door_world_bounds(&scene.doors[0], 0.5, DoorSwing::Positive);
         let collision = scene.walk_collision.as_ref().expect("collision fixture");
 
         let hit = camera.trace_aabb(collision, [50.0, 0.0, 64.0], [80.0, 0.0, 64.0], [1.0; 3]);
@@ -1063,6 +1109,8 @@ mod tests {
             local_bounds_max: [8.0, 16.0, 32.0],
             visibility: MapVisibilityBucket::Always,
             initial_progress: 0.0,
+            // Stays open: the auto-close tests opt in explicitly.
+            auto_close_after: None,
             motion: MapDoorMotion::Linear {
                 direction: [1.0, 0.0, 0.0],
                 distance,
@@ -1132,7 +1180,7 @@ mod tests {
 
     #[test]
     fn look_at_puts_eye_at_origin() {
-        let view = look_at([5.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let view = look_at([5.0, 0.0, 0.0], [0.0, 0.0, 0.0], SOURCE_UP);
         // Transforming the eye position must land on the origin.
         let x = view[0][0] * 5.0 + view[3][0];
         let y = view[0][1] * 5.0 + view[3][1];
@@ -1204,7 +1252,7 @@ mod tests {
         assert_eq!(above.fog_color, [0.8, 0.7, 0.6, 0.0]);
         assert_eq!(above.fog_params, [512.0, 8192.0, 0.5, 1.0]);
         assert_eq!(above.water_time_sky_tint[0], 12.0);
-        assert_eq!(submerged.fog_color, [0.03, 0.10, 0.10, 1.0]);
+        assert_eq!(submerged.fog_color, [0.03, 0.10, 0.10, 0.0]);
         assert_eq!(submerged.fog_params, [0.0, 2048.0, 1.0, 1.0]);
     }
 
@@ -1873,6 +1921,7 @@ mod tests {
             visibility_culling: false,
             phy_debug_visible: false,
             uniforms: Uniforms::for_model(&preview, &camera, bounds),
+            submerged: false,
             map_skybox_uniforms: None,
             sky_uniforms: None,
             door_poses: Vec::new(),
@@ -2097,5 +2146,29 @@ mod tests {
 
     fn bc_vtf_bytes(width: u16, height: u16, format: VtfFormat, block: &[u8]) -> Vec<u8> {
         fixture_vtf_bytes(width, height, format, &[block])
+    }
+}
+
+#[cfg(test)]
+mod uniform_layout {
+    use super::pipeline::Uniforms;
+
+    /// Every `.wgsl` in this feature declares `Uniforms` with these seven
+    /// members at these offsets, and the bind-group layout pins the buffer to
+    /// this size. Nothing can check the WGSL side from Rust, so this pins the
+    /// Rust side exactly: a reorder or an inserted member fails here, and the
+    /// fix is to mirror it in `model_viewer.wgsl`, `detail.wgsl`, `sky.wgsl`
+    /// and `water.wgsl`.
+    #[test]
+    fn uniforms_layout_matches_the_shaders() {
+        assert_eq!(size_of::<Uniforms>(), 160);
+        assert_eq!(align_of::<Uniforms>(), 4);
+        assert_eq!(std::mem::offset_of!(Uniforms, view_proj), 0);
+        assert_eq!(std::mem::offset_of!(Uniforms, light), 64);
+        assert_eq!(std::mem::offset_of!(Uniforms, camera_position), 80);
+        assert_eq!(std::mem::offset_of!(Uniforms, fog_color), 96);
+        assert_eq!(std::mem::offset_of!(Uniforms, fog_params), 112);
+        assert_eq!(std::mem::offset_of!(Uniforms, water_time_sky_tint), 128);
+        assert_eq!(std::mem::offset_of!(Uniforms, water_depth_params), 144);
     }
 }

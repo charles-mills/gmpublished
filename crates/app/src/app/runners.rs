@@ -7,6 +7,8 @@ use super::{
     WorkshopDownloadSuccess, downloader, gma, iced_mpsc, installed_addons, prepare_publish,
     preview_gma, search, size_analyzer, steam_session, tasks,
 };
+use crate::generation::Generation;
+use gmpublished_backend::transactions::TransactionId;
 
 pub(super) fn flatten_blocking_ui_result<T>(
     result: Result<Result<T, UiError>, RunBlockingError>,
@@ -34,7 +36,7 @@ pub(super) fn run_search_full(
     };
 
     let transaction = app.begin_transaction();
-    let transaction_id = transaction.id;
+    let transaction_id = transaction.id();
     ctx.correlate_backend_transaction(transaction_id, task);
     let started_id = app.start_search_full(&request, transaction);
     debug_assert_eq!(started_id, transaction_id);
@@ -110,7 +112,7 @@ pub(super) fn run_search_full(
 
 pub(super) fn run_installed_metadata_refresh(
     app: &BackendServices,
-    generation: u64,
+    generation: Generation,
     item_ids: &[PublishedFileId],
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
@@ -181,7 +183,7 @@ fn send_preview_urls(
     );
 }
 
-pub(super) fn search_full_transaction_id(event: &tasks::TransactionRuntimeEvent) -> u32 {
+pub(super) fn search_full_transaction_id(event: &tasks::TransactionRuntimeEvent) -> TransactionId {
     match event {
         tasks::TransactionRuntimeEvent::Finished { id, .. }
         | tasks::TransactionRuntimeEvent::Error { id, .. }
@@ -267,11 +269,11 @@ pub(super) fn run_local_gma_extraction(
     let archive = gma::PreviewArchive::open(path)?;
 
     let transaction = ctx.begin_transaction();
-    ctx.correlate_backend_transaction(transaction.id, task);
+    ctx.correlate_backend_transaction(transaction.id(), task);
     let result =
         archive.extract_all_with_transaction(destination, options, &transaction, ctx.backend());
     if let Err(error) = &result {
-        let _handled = ctx.error_backend_transaction_task(transaction.id, UiError::from(error));
+        let _handled = ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
     result
 }
@@ -326,7 +328,7 @@ pub(super) fn run_preview_gma_entry_extraction(
         .archive
         .extract_entry_with_transaction(&path, &transaction, ctx.backend());
     if let Err(error) = &result {
-        ctx.error_backend_transaction_task(transaction.id, UiError::from(error));
+        ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
     open_preview_gma_extracted_path(ctx, result.as_ref().ok(), "PreviewGMA entry", &path);
     log_preview_gma_extraction_result("PreviewGMA entry", &path, &result);
@@ -348,7 +350,7 @@ pub(super) fn run_preview_gma_archive_extraction(
         ctx.backend(),
     );
     if let Err(error) = &result {
-        ctx.error_backend_transaction_task(transaction.id, UiError::from(error));
+        ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
     open_preview_gma_extracted_path(ctx, result.as_ref().ok(), "PreviewGMA archive", &subject);
     log_preview_gma_extraction_result("PreviewGMA archive", &subject, &result);
@@ -360,7 +362,7 @@ pub(super) fn create_preview_gma_extract_transaction(
 ) -> gmpublished_backend::Transaction {
     let transaction = ctx.begin_transaction();
     let task = create_preview_gma_extract_task(ctx, total_bytes);
-    ctx.correlate_backend_transaction(transaction.id, task);
+    ctx.correlate_backend_transaction(transaction.id(), task);
     transaction
 }
 
