@@ -386,7 +386,7 @@ impl State {
         true
     }
 
-        pub(super) fn take_initial_entry_preview_request(&mut self) -> Option<PreviewRequest> {
+    pub(super) fn take_initial_entry_preview_request(&mut self) -> Option<PreviewRequest> {
         let entry_path = self.pending_initial_entry_preview.take()?;
         self.entry_preview_request(&entry_path)
     }
@@ -679,7 +679,7 @@ impl State {
         })
     }
 
-        pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
+    pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
         let archive = self.ready_archive()?;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {

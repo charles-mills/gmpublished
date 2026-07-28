@@ -10,8 +10,8 @@ use crate::bridge::{
 use gmpublished_backend::error_key::ErrorKey;
 use iced::widget::image;
 
-use super::{AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget};
 use super::ChangelogContent;
+use super::{AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget};
 use crate::features::prepare_publish::model::{
     ContentPathVerificationRequest, IgnorePatternMutationResult, IgnoredPattern,
     PublishSubmitContext, PublishSubmitResult, VerifiedContentPathState, VerifiedIcon,
@@ -262,9 +262,10 @@ fn stale_verification_result_is_ignored() {
         .begin_content_path_verification("/tmp/second")
         .expect("second request");
 
-    assert!(
-        !state.apply_verification_result(first.generation, Err(UiError::new(ErrorKey::new("ERR_BAD"))))
-    );
+    assert!(!state.apply_verification_result(
+        first.generation,
+        Err(UiError::new(ErrorKey::new("ERR_BAD")))
+    ));
     assert!(state.path_pending());
     assert!(state.path_error().is_none());
 }

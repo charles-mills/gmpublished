@@ -1,4 +1,3 @@
-
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -164,7 +163,7 @@ impl PreviewArchiveSource {
         matches!(self, Self::Gma(_))
     }
 
-        pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {
+    pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {
         match self {
             Self::Gma(archive) => archive
                 .entry_bytes(path)

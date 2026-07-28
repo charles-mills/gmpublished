@@ -494,7 +494,6 @@ impl Tokens {
         }
         height
     }
-
 }
 
 /// Semantic Steam Workshop tag chip palette shared across themes. Returns

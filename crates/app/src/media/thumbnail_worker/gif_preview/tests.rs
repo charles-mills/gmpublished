@@ -50,7 +50,6 @@ fn lazy_preview_holds_only_first_decoded_frame_initially() -> Result<(), Box<dyn
     Ok(())
 }
 
-
 #[test]
 fn bakes_display_sprite_atlas_with_clips_and_timing() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = gif_bytes(&[(RED, 30), (GREEN, 120), (BLUE, 250)])?;
@@ -487,7 +486,6 @@ fn previous_disposal_restores_canvas_before_next_frame() -> Result<(), Box<dyn s
     assert_eq!(rgba_pixels(&frames[2]), vec![RED, RED, BLUE]);
     Ok(())
 }
-
 
 #[test]
 fn invalid_bytes_return_typed_decode_error() {

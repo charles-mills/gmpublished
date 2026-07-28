@@ -595,7 +595,6 @@ pub fn decoded_byte_len(frames: &[GifPreviewFrame]) -> usize {
     })
 }
 
-
 fn pack_baked_animation(frames: &[GifPreviewFrame]) -> GifPreviewResult<BakedAnimation> {
     let frame_count = frames.len();
     let tile_width = frames[0].width();

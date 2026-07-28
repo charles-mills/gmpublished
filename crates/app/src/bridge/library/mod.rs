@@ -467,9 +467,7 @@ fn read_candidate(
 }
 
 fn library_meta(path: &Path) -> Result<GmaMeta, super::gma::GmaError> {
-        {
-        GmaMeta::open_index(path)
-    }
+    { GmaMeta::open_index(path) }
 }
 
 fn cached_meta<E>(
@@ -1194,7 +1192,7 @@ mod tests {
         assert_eq!(loaded, changed);
     }
 
-        #[test]
+    #[test]
     fn asset_studio_refresh_records_entry_metadata_for_file_search() {
         let temp = TestDir::new("gmpublished-library-entry-index");
         let gmod_dir = temp.dir("steamapps/common/GarrysMod");

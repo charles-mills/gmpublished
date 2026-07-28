@@ -964,9 +964,7 @@ fn my_workshop_tags_from_terms(terms: &[impl AsRef<str>], id: PublishedFileId) -
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::bridge::domain::{
-        SearchFullBatch, SearchItem, SearchItemSource, SearchQuickBatch,
-    };
+    use crate::bridge::domain::{SearchFullBatch, SearchItem, SearchItemSource, SearchQuickBatch};
 
     use super::*;
 
@@ -1141,11 +1139,7 @@ mod tests {
         let first = state.edit_query("first".to_owned()).quick_request.unwrap();
         let second = state.edit_query("second".to_owned()).quick_request.unwrap();
 
-        let batch = SearchQuickBatch::new(
-            first.key().clone(),
-            vec![hit("First", 1)],
-            false,
-        );
+        let batch = SearchQuickBatch::new(first.key().clone(), vec![hit("First", 1)], false);
 
         assert!(!state.apply_quick_result(first.key(), Ok(batch)));
         assert_eq!(state.rows().len(), 0);
@@ -1156,11 +1150,7 @@ mod tests {
     fn quick_result_maps_rows_and_selection() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
 
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
@@ -1178,11 +1168,7 @@ mod tests {
     fn full_search_batches_replace_quick_rows_then_append() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let quick = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Quick", 1)],
-            true,
-        );
+        let quick = SearchQuickBatch::new(request.key().clone(), vec![hit("Quick", 1)], true);
         assert!(state.apply_quick_result(request.key(), Ok(quick)));
 
         let start = state
@@ -1221,11 +1207,7 @@ mod tests {
     fn virtual_rows_render_visible_window_with_overscan_spacers() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            hits(20),
-            false,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), hits(20), false);
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
         let _changed = state.set_scroll_offset(RESULT_ROW_HEIGHT * 10.0);
@@ -1240,11 +1222,7 @@ mod tests {
     fn thumbnail_metadata_and_demands_include_prefetch_window() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            hits(20),
-            false,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), hits(20), false);
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
         let _changed = state.set_scroll_offset(RESULT_ROW_HEIGHT * 10.0);
@@ -1305,11 +1283,7 @@ mod tests {
     fn metadata_miss_keeps_row_loading_until_refresh_settles() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            false,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], false);
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
         let (generation, ids) = state

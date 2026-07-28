@@ -733,11 +733,12 @@ fn take_bytes<'a>(
     let end = offset
         .checked_add(len)
         .ok_or(CacheDecodeError("cache offset overflow"))?;
-    let slice = bytes.get(*offset..end).ok_or(CacheDecodeError("truncated cache"))?;
+    let slice = bytes
+        .get(*offset..end)
+        .ok_or(CacheDecodeError("truncated cache"))?;
     *offset = end;
     Ok(slice)
 }
-
 
 fn thumbnail_cache_files(cache_dir: &Path) -> std::io::Result<Vec<CacheFile>> {
     let entries = match fs::read_dir(cache_dir) {

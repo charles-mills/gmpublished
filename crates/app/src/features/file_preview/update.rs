@@ -5,9 +5,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::OpenRequested(request) => {
             let request = state.begin_open(request);
-                        {
-                vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
-            }
+            { vec![Effect::AudioStopRequested, Effect::LoadRequested(request)] }
         }
         Message::LoadStageChanged(request_id, stage) => {
             let _changed = state.apply_load_stage(request_id, stage);
@@ -19,12 +17,12 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::AnimationTick(now) => {
             state.tick_animation(now);
-                        if state.audio_playing() {
+            if state.audio_playing() {
                 return vec![Effect::AudioPositionPollRequested];
             }
             Vec::new()
         }
-                Message::AudioToggleRequested => {
+        Message::AudioToggleRequested => {
             if state.audio_playing() {
                 vec![Effect::AudioPauseRequested]
             } else {
@@ -36,51 +34,51 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 })
             }
         }
-                Message::AudioPlaybackStarted => {
+        Message::AudioPlaybackStarted => {
             state.start_audio();
             Vec::new()
         }
-                Message::AudioPlaybackPaused => {
+        Message::AudioPlaybackPaused => {
             state.pause_audio();
             Vec::new()
         }
-                Message::AudioPlaybackEnded => {
+        Message::AudioPlaybackEnded => {
             state.finish_audio();
             Vec::new()
         }
-                Message::AudioPositionUpdated(position_secs) => {
+        Message::AudioPositionUpdated(position_secs) => {
             state.update_audio_position(position_secs);
             Vec::new()
         }
-                Message::SkinSelected(skin) => {
+        Message::SkinSelected(skin) => {
             state.select_skin(skin);
             Vec::new()
         }
-                Message::BodygroupChoiceSelected { group, choice } => {
+        Message::BodygroupChoiceSelected { group, choice } => {
             state.select_bodygroup_choice(group, choice);
             Vec::new()
         }
-                Message::MapFogToggled(enabled) => {
+        Message::MapFogToggled(enabled) => {
             state.set_map_fog_enabled(enabled);
             Vec::new()
         }
-                Message::MapSkyboxToggled(enabled) => {
+        Message::MapSkyboxToggled(enabled) => {
             state.set_map_skybox_enabled(enabled);
             Vec::new()
         }
-                Message::MapVisibilityToggled(enabled) => {
+        Message::MapVisibilityToggled(enabled) => {
             state.set_map_visibility_enabled(enabled);
             Vec::new()
         }
-                Message::PhyDebugToggled(enabled) => {
+        Message::PhyDebugToggled(enabled) => {
             state.set_phy_debug_enabled(enabled);
             Vec::new()
         }
-                Message::FlyCameraChanged { pose, mode } => {
+        Message::FlyCameraChanged { pose, mode } => {
             state.set_fly_camera(pose, mode);
             Vec::new()
         }
-                Message::FlyCameraAndDoorAudioChanged {
+        Message::FlyCameraAndDoorAudioChanged {
             pose,
             mode,
             door_audio_events,
@@ -91,54 +89,54 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 .map(Effect::DoorAudioEvent)
                 .collect()
         }
-                Message::FlySpeedChanged { pose, mode } => {
+        Message::FlySpeedChanged { pose, mode } => {
             state.set_fly_camera(pose, mode);
             state.show_fly_speed_readout(pose.speed);
             Vec::new()
         }
-                Message::MovementModeSelected(mode) => {
+        Message::MovementModeSelected(mode) => {
             state.request_movement_mode(mode);
             Vec::new()
         }
-                Message::DoorAudioEvents(events) => {
+        Message::DoorAudioEvents(events) => {
             events.into_iter().map(Effect::DoorAudioEvent).collect()
         }
-                Message::OrbitPoseChanged(pose) => {
+        Message::OrbitPoseChanged(pose) => {
             state.set_orbit_pose(pose);
             Vec::new()
         }
-                Message::ParticleSystemSelected(index) => {
+        Message::ParticleSystemSelected(index) => {
             state.select_particle_system(index);
             Vec::new()
         }
-                Message::ParticlePlayToggled => {
+        Message::ParticlePlayToggled => {
             state.toggle_particle_playing();
             Vec::new()
         }
-                Message::ParticleRestartRequested => {
+        Message::ParticleRestartRequested => {
             state.request_particle_restart();
             Vec::new()
         }
-                Message::ParticleSpeedSelected(speed) => {
+        Message::ParticleSpeedSelected(speed) => {
             state.set_particle_speed(speed);
             Vec::new()
         }
-                Message::ParticleControlPointChanged { index, position } => {
+        Message::ParticleControlPointChanged { index, position } => {
             state.set_particle_control_point(index, position);
             Vec::new()
         }
-                Message::InspectorResized { split, ratio } => {
+        Message::InspectorResized { split, ratio } => {
             state.resize_inspector(split, ratio);
             Vec::new()
         }
-                Message::InspectorLayoutChanged(width) => {
+        Message::InspectorLayoutChanged(width) => {
             state.set_inspector_ratio(super::view::effective_inspector_ratio(
                 state.inspector_ratio(),
                 width,
             ));
             Vec::new()
         }
-                Message::InspectorReset(width) => {
+        Message::InspectorReset(width) => {
             state.reset_inspector();
             state.set_inspector_ratio(super::view::effective_inspector_ratio(
                 state.inspector_ratio(),
@@ -148,9 +146,9 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::BackRequested => vec![Effect::ModalCloseRequested],
         Message::ExpandToggled => {
-                        let was_expanded = state.expanded();
+            let was_expanded = state.expanded();
             state.toggle_expanded();
-                        {
+            {
                 if was_expanded {
                     vec![Effect::DoorAudioStopRequested]
                 } else {
@@ -160,17 +158,13 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::CloseFinished => {
             state.close();
-                        {
-                vec![Effect::AudioStopRequested, Effect::DoorAudioStopRequested]
-            }
+            { vec![Effect::AudioStopRequested, Effect::DoorAudioStopRequested] }
         }
         Message::RelatedPreviewRequested(entry_path) => state
             .related_preview_request(&entry_path)
             .map_or_else(Vec::new, |request| {
                 let request = state.begin_open(request);
-                                {
-                    vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
-                }
+                { vec![Effect::AudioStopRequested, Effect::LoadRequested(request)] }
             }),
         Message::LoadAnywayRequested => {
             state

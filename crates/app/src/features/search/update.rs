@@ -228,11 +228,7 @@ mod tests {
         let mut state = State::default();
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
         let _effects = update(
             &mut state,
             Message::QuickSearchCompleted(request.key().clone(), Ok(batch)),
@@ -333,11 +329,7 @@ mod tests {
         let mut state = State::default();
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
 
         let effects = update(
             &mut state,
@@ -359,11 +351,7 @@ mod tests {
             &mut state,
             Message::QueryEdited("second".to_owned()),
         ));
-        let batch = SearchQuickBatch::new(
-            first.key().clone(),
-            vec![hit("First", 1)],
-            true,
-        );
+        let batch = SearchQuickBatch::new(first.key().clone(), vec![hit("First", 1)], true);
 
         assert!(
             update(
@@ -383,11 +371,7 @@ mod tests {
         let mut state = State::default();
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            false,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], false);
         let _effects = update(
             &mut state,
             Message::QuickSearchCompleted(request.key().clone(), Ok(batch)),
@@ -434,11 +418,7 @@ mod tests {
 
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
         let _effects = update(
             &mut state,
             Message::QuickSearchCompleted(request.key().clone(), Ok(batch)),

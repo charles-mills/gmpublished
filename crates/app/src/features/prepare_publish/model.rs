@@ -53,7 +53,7 @@ pub struct VerifiedContentPath {
     pub(crate) path: PathBuf,
     pub(crate) total_size: u64,
     pub(crate) entries: Vec<file_browser::Entry>,
-        pub(crate) preview_source: Arc<crate::bridge::archive::PreviewArchiveSource>,
+    pub(crate) preview_source: Arc<crate::bridge::archive::PreviewArchiveSource>,
 }
 
 /// Minimal verified path state retained after the browser tree is built.
@@ -380,7 +380,7 @@ fn verify_content_tree(
         .map(|(entry, _)| file_browser_entry(entry))
         .collect::<Result<Vec<_>, _>>()?;
 
-        let preview_source = crate::bridge::archive::PreviewArchiveSource::from_folder(
+    let preview_source = crate::bridge::archive::PreviewArchiveSource::from_folder(
         entries
             .into_iter()
             .map(|(entry, disk_path)| (entry.path, entry.size, disk_path)),
@@ -391,7 +391,7 @@ fn verify_content_tree(
         path,
         total_size,
         entries: browser_entries,
-                preview_source,
+        preview_source,
     })
 }
 

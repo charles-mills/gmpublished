@@ -6,8 +6,8 @@ use std::{
     sync::Arc,
 };
 
-use thiserror::Error;
 use crate::util::main_thread_forbidden;
+use thiserror::Error;
 
 const VPK_VERSION_1_HEADER_SIZE: u64 = 12;
 const VPK_VERSION_2_HEADER_SIZE: u64 = 28;

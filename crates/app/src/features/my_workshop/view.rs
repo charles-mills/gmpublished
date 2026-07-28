@@ -82,11 +82,9 @@ fn status_line(state: &State, i18n: &I18n) -> Option<String> {
         // Empty is handled by the panel in `view`, not this header line.
         LoadStatus::Loading => Some(i18n.tr("my-workshop-loading")),
         LoadStatus::Empty => None,
-        LoadStatus::Error(error) => {
-            Some(i18n.trn(
-                "my-workshop-error",
-                &[("arg0", translated_error(i18n, error).as_str())],
-            ))
-        }
+        LoadStatus::Error(error) => Some(i18n.trn(
+            "my-workshop-error",
+            &[("arg0", translated_error(i18n, error).as_str())],
+        )),
     }
 }

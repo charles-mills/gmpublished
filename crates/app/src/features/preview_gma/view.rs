@@ -103,7 +103,7 @@ fn embedded_preview_body<'a>(
     expanded: bool,
     modal_width: f32,
 ) -> Option<Element<'a, Message>> {
-        {
+    {
         let tokens = *ctx.tokens;
         if !file_preview_state.is_open() {
             return None;
@@ -678,7 +678,6 @@ fn browser_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Elemen
 fn file_row_activation_message(path: std::sync::Arc<String>) -> Message {
     Message::PreviewEntryRequested(path)
 }
-
 
 fn ribbon<'a>(
     snapshot: &'a super::state::BrowserSnapshot,

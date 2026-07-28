@@ -294,7 +294,7 @@ impl GmaMeta {
         })
     }
 
-        pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
+    pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
         // One mmap + one parse; the previous open/header/entries chain
         // re-parsed the whole entry table three times.
@@ -422,7 +422,7 @@ impl PreviewArchive {
             .map_err(|_| GmaError::EntryNotFound)
     }
 
-        pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
+    pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
         let entry = self.entry(entry_path)?;
         self.view.read_payload_bytes(entry.data_offset, entry.size)
     }

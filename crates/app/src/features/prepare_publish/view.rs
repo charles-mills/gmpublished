@@ -96,7 +96,7 @@ fn embedded_preview_body<'a>(
     expanded: bool,
     modal_width: f32,
 ) -> Option<Element<'a, Message>> {
-        {
+    {
         let tokens = *ctx.tokens;
         if !file_preview_state.is_open() {
             return None;

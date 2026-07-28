@@ -1,6 +1,5 @@
 //! In-archive file preview modal for GMA entries.
 
-
 mod effect;
 mod message;
 pub mod model;
@@ -32,9 +31,7 @@ pub use view::pane;
 /// True while a host modal's embedded preview pane is in its expanded
 /// (near full-window) mode.
 pub fn embedded_expanded(state: &State) -> bool {
-        {
-        state.is_open() && state.expanded()
-    }
+    { state.is_open() && state.expanded() }
 }
 
 /// Animation clock for the preview modal's active work: runs only while the

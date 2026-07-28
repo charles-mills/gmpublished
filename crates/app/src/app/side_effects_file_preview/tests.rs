@@ -4,8 +4,8 @@ use vformats::vtf::VtfFormat;
 
 use super::*;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
-use crate::theme::ThemeVariant;
 use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
+use crate::theme::ThemeVariant;
 
 fn test_tokens() -> Tokens {
     Tokens::dark()

@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use gmpublished_backend::vpk::{VpkEntry, VpkFile};

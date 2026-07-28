@@ -695,4 +695,3 @@ impl App {
         self.downloader_local_extraction_task(paths)
     }
 }
-

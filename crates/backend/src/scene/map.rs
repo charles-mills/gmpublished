@@ -601,7 +601,6 @@ pub struct MapData {
     pub pakfile: MapPakFile,
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapMesh {
     pub vertices: Vec<MapVertex>,

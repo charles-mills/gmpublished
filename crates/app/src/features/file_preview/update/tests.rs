@@ -54,7 +54,7 @@ fn open_requested_emits_load_effects_without_modal_stack_work() {
     let effects = update(&mut state, Message::OpenRequested(request()));
 
     assert!(state.loading());
-        assert!(matches!(
+    assert!(matches!(
         effects.as_slice(),
         [
             Effect::AudioStopRequested,
@@ -104,7 +104,7 @@ fn expand_toggled_updates_state_and_stops_door_audio_on_collapse() {
     assert!(state.expanded());
 
     let effects = update(&mut state, Message::ExpandToggled);
-        assert_eq!(effects, vec![Effect::DoorAudioStopRequested]);
+    assert_eq!(effects, vec![Effect::DoorAudioStopRequested]);
     assert!(!state.expanded());
 }
 
@@ -149,7 +149,7 @@ fn related_preview_requested_opens_related_entry() {
         state.request().map(|request| request.entry_path.as_str()),
         Some("materials/test/thing.vtf")
     );
-        assert!(matches!(
+    assert!(matches!(
         effects.as_slice(),
         [
             Effect::AudioStopRequested,

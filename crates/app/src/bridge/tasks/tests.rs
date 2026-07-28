@@ -1123,12 +1123,10 @@ fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
         addon_type: "map".to_owned(),
         tags: vec!["scenic".to_owned()],
         changelog: Some("Updated icon".to_owned()),
-        preview: Some(PublishSubmitPreview::Selected(
-            PublishSelectedPreview {
-                path: PathBuf::from("/tmp/icon.png"),
-                upscale: true,
-            },
-        )),
+        preview: Some(PublishSubmitPreview::Selected(PublishSelectedPreview {
+            path: PathBuf::from("/tmp/icon.png"),
+            upscale: true,
+        })),
         ignore_globs: Vec::new(),
         total_size: 12,
         temp_dir: PathBuf::from("/tmp/app-publish-temp"),

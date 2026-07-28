@@ -19,13 +19,13 @@ use super::{
     whitelist::{self, AddonWhitelist},
 };
 
+use crate::util::{main_thread_forbidden, thread_pool};
 use parking_lot::Mutex;
 use rayon::{
     ThreadPool,
     iter::{IntoParallelRefIterator, ParallelIterator},
 };
 use serde::{Deserialize, Serialize};
-use crate::util::{main_thread_forbidden, thread_pool};
 
 static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
 

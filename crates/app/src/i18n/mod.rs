@@ -596,7 +596,11 @@ mod tests {
         let i18n = I18n::for_locale(Some("en"));
         let fallback = i18n.tr("err-unknown");
 
-        for key in [keys::GMOD_PATH_MISSING, keys::NO_ADDONS_FOUND, keys::IO_ERROR] {
+        for key in [
+            keys::GMOD_PATH_MISSING,
+            keys::NO_ADDONS_FOUND,
+            keys::IO_ERROR,
+        ] {
             let translated =
                 super::translated_error(&i18n, &crate::bridge::ui_error::UiError::new(key));
             assert_ne!(

@@ -181,11 +181,7 @@ impl LazyWorkerPool {
         }
     }
 
-    fn submit(
-        &self,
-        name: impl Into<Arc<str>>,
-        job: RuntimeJob,
-    ) -> Result<(), ScheduleError> {
+    fn submit(&self, name: impl Into<Arc<str>>, job: RuntimeJob) -> Result<(), ScheduleError> {
         let job_name = name.into();
         let mut pool = self.pool.lock();
         let pool = if let Some(pool) = pool.as_mut() {
@@ -270,11 +266,7 @@ impl WorkerPool {
         })
     }
 
-    fn submit(
-        &self,
-        name: impl Into<Arc<str>>,
-        job: RuntimeJob,
-    ) -> Result<(), ScheduleError> {
+    fn submit(&self, name: impl Into<Arc<str>>, job: RuntimeJob) -> Result<(), ScheduleError> {
         let name = name.into();
         let envelope = JobEnvelope {
             name: Arc::clone(&name),

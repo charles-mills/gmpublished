@@ -141,7 +141,6 @@ impl Transactions {
         };
         transaction.cancel()
     }
-
 }
 
 pub struct TransactionRef {

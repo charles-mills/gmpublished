@@ -6,8 +6,7 @@ use std::{
 
 use crate::bridge::domain::{
     AvatarRgba, InstalledAddon, PublishedFileId, SearchHit, SearchItem, SearchItemSource,
-    SearchQuickBatch, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess,
-    workshop_url,
+    SearchQuickBatch, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess, workshop_url,
 };
 use gmpublished_backend::appdata::{
     AppDataPathsSnapshot as BackendAppDataPathsSnapshot, AppDataSnapshot as BackendAppDataSnapshot,
@@ -1189,7 +1188,6 @@ fn preview_gma_executor_destination_select_opens_overlay() {
     assert_no_task(&task);
     assert!(app.state.modal_stack.overlay_active());
 }
-
 
 #[test]
 fn preview_gma_executor_entry_preview_opens_embedded_file_preview() {
@@ -2646,7 +2644,6 @@ fn preview_author_request() -> preview_gma::AuthorRequest {
         steamid64: 76_561_197_990_735_296,
     }
 }
-
 
 fn file_preview_request() -> file_preview::PreviewRequest {
     let archive = PreviewArchive::from_gma(

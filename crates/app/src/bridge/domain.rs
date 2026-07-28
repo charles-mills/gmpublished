@@ -285,11 +285,7 @@ pub struct SearchQuickBatch {
 }
 
 impl SearchQuickBatch {
-    pub(crate) fn new(
-        key: SearchRequestKey,
-        hits: Vec<SearchHit>,
-        has_more: bool,
-    ) -> Self {
+    pub(crate) fn new(key: SearchRequestKey, hits: Vec<SearchHit>, has_more: bool) -> Self {
         Self {
             key,
             hits,
@@ -366,10 +362,7 @@ impl SearchFullHits {
     }
 
     pub(crate) fn map_rows<R>(&self, mut map: impl FnMut(u32, &SearchItem) -> R) -> Vec<R> {
-        self.0
-            .iter()
-            .map(|hit| map(hit.score, &hit.item))
-            .collect()
+        self.0.iter().map(|hit| map(hit.score, &hit.item)).collect()
     }
 
     #[cfg(test)]

@@ -1,8 +1,7 @@
 use iced::border;
 use iced::widget::{
     button as button_widget, checkbox as checkbox_widget, container,
-    progress_bar as progress_bar_widget, scrollable, text_editor as text_editor_widget,
-    text_input,
+    progress_bar as progress_bar_widget, scrollable, text_editor as text_editor_widget, text_input,
 };
 use iced::{Border, Color, Font, Shadow, Vector, font};
 
@@ -923,8 +922,7 @@ mod tests {
             let panel = styles::select_menu(&tokens, tokens.radii.lg);
 
             assert_ne!(
-                selected.background,
-                panel.background,
+                selected.background, panel.background,
                 "{variant:?}: the chosen option is indistinguishable from the panel",
             );
         }

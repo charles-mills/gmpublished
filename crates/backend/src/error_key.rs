@@ -56,7 +56,8 @@ pub mod keys {
     pub const LZMA: ErrorKey = ErrorKey::new("ERR_LZMA");
     pub const WHITELIST: ErrorKey = ErrorKey::new("ERR_WHITELIST");
     pub const GMA_EXTRACTION_FAILED: ErrorKey = ErrorKey::new("ERR_GMA_EXTRACTION_FAILED");
-    pub const GMA_DESTINATION_UNAVAILABLE: ErrorKey = ErrorKey::new("ERR_GMA_DESTINATION_UNAVAILABLE");
+    pub const GMA_DESTINATION_UNAVAILABLE: ErrorKey =
+        ErrorKey::new("ERR_GMA_DESTINATION_UNAVAILABLE");
     // Not ERR_-shaped; the frozen wire value.
 
     pub const VPK_FORMAT_ERROR: ErrorKey = ErrorKey::new("ERR_VPK_FORMAT_ERROR");

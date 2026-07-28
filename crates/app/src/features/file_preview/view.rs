@@ -250,14 +250,14 @@ fn preview_content<'a>(
             height,
         } => image_preview(handle, *width, *height, ctx),
         PreviewContent::Font { handle, family, .. } => raster_preview(handle, family.clone(), ctx),
-                PreviewContent::Audio { duration_secs, .. } => audio_preview(state, *duration_secs, ctx),
-                PreviewContent::Model(model) => {
+        PreviewContent::Audio { duration_secs, .. } => audio_preview(state, *duration_secs, ctx),
+        PreviewContent::Model(model) => {
             model_preview(state, data, model, ctx, show_inspector, content_width)
         }
-                PreviewContent::Particle(preview) => {
+        PreviewContent::Particle(preview) => {
             particle_preview(state, data, preview, ctx, show_inspector, content_width)
         }
-                PreviewContent::Map {
+        PreviewContent::Map {
             scene,
             stats,
             fog,

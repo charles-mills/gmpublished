@@ -403,7 +403,10 @@ mod metadata_tests {
 
         assert!(matches!(metadata, GMAMetadata::Standard { .. }));
         assert_eq!(metadata.addon_type(), Some("map"));
-        assert_eq!(metadata.tags().map(Vec::as_slice), Some(&["scenic".to_owned()][..]));
+        assert_eq!(
+            metadata.tags().map(Vec::as_slice),
+            Some(&["scenic".to_owned()][..])
+        );
         assert_eq!(metadata.title(), "Addon");
     }
 
@@ -416,7 +419,10 @@ mod metadata_tests {
             let metadata =
                 metadata_from_embedded_fields("Addon".to_owned(), description.to_owned());
 
-            let GMAMetadata::Legacy { description: kept, .. } = &metadata else {
+            let GMAMetadata::Legacy {
+                description: kept, ..
+            } = &metadata
+            else {
                 panic!("{description} should stay Legacy, got {metadata:?}");
             };
             assert_eq!(kept, description, "the description must survive");

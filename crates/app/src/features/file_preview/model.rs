@@ -13,8 +13,7 @@ pub use gmpublished_backend::scene::map::{
 /// the extra lanes are the app's (prop lighting bakes into `color`,
 /// debug meshes tint it, maps use `lightmap_uv`/`blend_alpha`).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
@@ -154,19 +153,19 @@ pub enum PreviewContent {
         handle: image::Handle,
         family: String,
     },
-        Audio {
+    Audio {
         bytes: Arc<Vec<u8>>,
         duration_secs: Option<f32>,
     },
-        Model(Arc<ModelPreview>),
-        Map {
+    Model(Arc<ModelPreview>),
+    Map {
         scene: Arc<ModelPreview>,
         stats: MapStats,
         fog: Option<MapFog>,
         sky_camera: Option<MapSkyCamera>,
         spawn: Option<MapSpawn>,
     },
-        Particle(Arc<ParticlePreview>),
+    Particle(Arc<ParticlePreview>),
     Info {
         reason: InfoReason,
     },

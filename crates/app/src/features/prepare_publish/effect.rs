@@ -20,7 +20,7 @@ pub enum Effect {
     WorkshopSnapshotInspectionRequested(ContentPathVerificationRequest),
     CleanupPathRequested(std::path::PathBuf),
     PathVerificationRequested(ContentPathVerificationRequest),
-        EntryPreviewRequested(PreviewRequest),
+    EntryPreviewRequested(PreviewRequest),
     IconVerificationRequested(IconVerificationRequest),
     IgnorePatternMutationRequested(IgnorePatternMutation),
     SubmitContextRequested,

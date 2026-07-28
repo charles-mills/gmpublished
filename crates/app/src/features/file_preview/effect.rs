@@ -8,16 +8,11 @@ use std::sync::Arc;
 pub enum Effect {
     ModalCloseRequested,
     LoadRequested(PreviewRequest),
-    ExtractRequested {
-        entry_path: String,
-    },
-        AudioPlayRequested {
-        bytes: Arc<Vec<u8>>,
-        resume_at: f32,
-    },
-        AudioPauseRequested,
-        AudioStopRequested,
-        AudioPositionPollRequested,
-        DoorAudioEvent(DoorAudioEvent),
-        DoorAudioStopRequested,
+    ExtractRequested { entry_path: String },
+    AudioPlayRequested { bytes: Arc<Vec<u8>>, resume_at: f32 },
+    AudioPauseRequested,
+    AudioStopRequested,
+    AudioPositionPollRequested,
+    DoorAudioEvent(DoorAudioEvent),
+    DoorAudioStopRequested,
 }

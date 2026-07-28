@@ -83,7 +83,7 @@ impl App {
             prepare_publish::Effect::PathVerificationRequested(request) => {
                 self.prepare_publish_content_verification_task(request)
             }
-                        prepare_publish::Effect::EntryPreviewRequested(request) => {
+            prepare_publish::Effect::EntryPreviewRequested(request) => {
                 self.apply_file_preview_message(file_preview::Message::OpenRequested(request))
             }
             prepare_publish::Effect::IconVerificationRequested(request) => {

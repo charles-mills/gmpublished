@@ -10,7 +10,7 @@ pub enum Effect {
     WorkshopMetadataRequested(MetadataRequest),
     AuthorFetchRequested(AuthorRequest),
     DestinationSelectRequested,
-        EntryPreviewRequested(PreviewRequest),
+    EntryPreviewRequested(PreviewRequest),
     OpenUrlRequested(String),
     CopyTextRequested(String),
     RevealPathRequested(PathBuf),

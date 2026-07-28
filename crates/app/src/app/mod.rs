@@ -101,7 +101,7 @@ pub struct App {
     startup_phase: StartupPhase,
     /// One warm pass per session; set when the first library snapshot kicks it.
     library_warm_kicked: bool,
-        audio_playback: Option<AudioPlayback>,
+    audio_playback: Option<AudioPlayback>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -366,7 +366,7 @@ pub enum RootMessage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlobalShortcut {
     ToggleSearch,
-        ToggleFileSearch,
+    ToggleFileSearch,
     ToggleSettings,
     NavigateRoute(shell::Route),
 }
@@ -377,7 +377,7 @@ fn sync_search_installed_addons(
 ) {
     let items = snapshot.map_or_else(Vec::new, search_items_from_library);
     search.sync_installed_addons(items);
-        {
+    {
         let file_items = snapshot.map_or_else(Vec::new, search_file_items_from_library);
         search.sync_installed_addon_files(file_items);
     }
@@ -502,7 +502,7 @@ impl App {
             window_id: None,
             startup_phase,
             library_warm_kicked: false,
-                        audio_playback: None,
+            audio_playback: None,
         };
         #[cfg(target_os = "macos")]
         app.install_macos_menu();
@@ -611,11 +611,11 @@ impl App {
                 self.apply_destination_select_message(message)
             }
             RootMessage::FilePreview(message) => self.apply_file_preview_message(message),
-                        RootMessage::PreparePublish(prepare_publish::Message::FilePreview(message)) => {
+            RootMessage::PreparePublish(prepare_publish::Message::FilePreview(message)) => {
                 self.apply_file_preview_message(message)
             }
             RootMessage::PreparePublish(message) => self.prepare_publish_message_task(&message),
-                        RootMessage::PreviewGma(preview_gma::Message::FilePreview(message)) => {
+            RootMessage::PreviewGma(preview_gma::Message::FilePreview(message)) => {
                 self.apply_file_preview_message(message)
             }
             RootMessage::PreviewGma(message) => self.apply_preview_gma_message(message),
@@ -731,7 +731,7 @@ impl App {
 
                 match shortcut {
                     GlobalShortcut::ToggleSearch => self.toggle_search_palette_task(),
-                                        GlobalShortcut::ToggleFileSearch => self.toggle_file_search_palette_task(),
+                    GlobalShortcut::ToggleFileSearch => self.toggle_file_search_palette_task(),
                     GlobalShortcut::ToggleSettings => {
                         Task::batch([self.dismiss_account_menu_task(), self.settings_open_task()])
                     }
@@ -1203,7 +1203,7 @@ impl App {
                 };
                 self.destination_select_open_task(context)
             }
-                        preview_gma::Effect::EntryPreviewRequested(request) => {
+            preview_gma::Effect::EntryPreviewRequested(request) => {
                 self.apply_file_preview_message(file_preview::Message::OpenRequested(request))
             }
             preview_gma::Effect::OpenUrlRequested(url) => self.open_url_task(url),
@@ -1590,7 +1590,7 @@ impl App {
         }
     }
 
-        fn toggle_file_search_palette_task(&mut self) -> Task<RootMessage> {
+    fn toggle_file_search_palette_task(&mut self) -> Task<RootMessage> {
         if self.state.search.palette_open() && self.state.search.mode() == SearchMode::Files {
             self.apply_search_message(search::Message::DismissRequested)
         } else {
@@ -1780,7 +1780,7 @@ fn map_global_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> O
         keyboard::Key::Character(key) if key.eq_ignore_ascii_case("f") => {
             Some(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch))
         }
-                keyboard::Key::Character(key) if key.eq_ignore_ascii_case("k") => Some(
+        keyboard::Key::Character(key) if key.eq_ignore_ascii_case("k") => Some(
             RootMessage::GlobalShortcut(GlobalShortcut::ToggleFileSearch),
         ),
         keyboard::Key::Character(",") => {

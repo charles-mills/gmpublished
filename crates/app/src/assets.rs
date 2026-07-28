@@ -126,8 +126,8 @@ pub mod icons {
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
     svg_icon!(package_open, "../ui/images/package-open.svg");
 
-        svg_icon!(mode_fly, "../ui/images/mode-fly.svg");
-        svg_icon!(mode_walk, "../ui/images/mode-walk.svg");
+    svg_icon!(mode_fly, "../ui/images/mode-fly.svg");
+    svg_icon!(mode_walk, "../ui/images/mode-walk.svg");
 
     svg_icon!(route_downloader, "../ui/images/route-downloader.svg");
     svg_icon!(
@@ -353,8 +353,8 @@ mod tests {
             (icons::gear(), icons::gear()),
             (icons::gmod_logo(), icons::gmod_logo()),
             (icons::link_chain(), icons::link_chain()),
-                        (icons::mode_fly(), icons::mode_fly()),
-                        (icons::mode_walk(), icons::mode_walk()),
+            (icons::mode_fly(), icons::mode_fly()),
+            (icons::mode_walk(), icons::mode_walk()),
             (icons::route_downloader(), icons::route_downloader()),
             (
                 icons::route_installed_addons(),

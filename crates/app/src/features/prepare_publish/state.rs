@@ -325,7 +325,7 @@ pub struct State {
     submit_generation: u64,
     addon_path: String,
     verified_addon_path: Option<VerifiedContentPathState>,
-        preview_source: Option<Arc<PreviewArchiveSource>>,
+    preview_source: Option<Arc<PreviewArchiveSource>>,
     path_pending: bool,
     path_error: Option<UiError>,
     announce_path_success: bool,
@@ -380,7 +380,7 @@ impl Default for State {
             submit_generation: 0,
             addon_path: String::new(),
             verified_addon_path: None,
-                        preview_source: None,
+            preview_source: None,
             path_pending: false,
             path_error: None,
             announce_path_success: false,
@@ -949,12 +949,12 @@ impl State {
     }
 
     fn clear_preview_source(&mut self) {
-                {
+        {
             self.preview_source = None;
         }
     }
 
-        pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
+    pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
         let source = self.preview_source.as_ref()?;
         let entry = source.entry(entry_path).ok()?;
         Some(PreviewRequest {
@@ -1099,7 +1099,7 @@ impl State {
                 self.browser = Some(FileBrowserState::from_entries(
                     verified.entries.iter().cloned(),
                 ));
-                                {
+                {
                     self.preview_source = Some(Arc::clone(&verified.preview_source));
                 }
             }
@@ -1131,7 +1131,7 @@ impl State {
                 self.browser = Some(FileBrowserState::from_entries(
                     snapshot.entries.iter().cloned(),
                 ));
-                                {
+                {
                     self.preview_source = Some(Arc::clone(&snapshot.preview_source));
                 }
             }
