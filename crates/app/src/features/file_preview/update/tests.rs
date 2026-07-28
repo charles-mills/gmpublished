@@ -54,18 +54,10 @@ fn open_requested_emits_load_effects_without_modal_stack_work() {
     let effects = update(&mut state, Message::OpenRequested(request()));
 
     assert!(state.loading());
-    #[cfg(feature = "asset-studio")]
-    assert!(matches!(
+        assert!(matches!(
         effects.as_slice(),
         [
             Effect::AudioStopRequested,
-            Effect::LoadRequested(request)
-        ] if request.request_id == 1
-    ));
-    #[cfg(not(feature = "asset-studio"))]
-    assert!(matches!(
-        effects.as_slice(),
-        [
             Effect::LoadRequested(request)
         ] if request.request_id == 1
     ));
@@ -112,10 +104,7 @@ fn expand_toggled_updates_state_and_stops_door_audio_on_collapse() {
     assert!(state.expanded());
 
     let effects = update(&mut state, Message::ExpandToggled);
-    #[cfg(feature = "asset-studio")]
-    assert_eq!(effects, vec![Effect::DoorAudioStopRequested]);
-    #[cfg(not(feature = "asset-studio"))]
-    assert!(effects.is_empty());
+        assert_eq!(effects, vec![Effect::DoorAudioStopRequested]);
     assert!(!state.expanded());
 }
 
@@ -160,8 +149,7 @@ fn related_preview_requested_opens_related_entry() {
         state.request().map(|request| request.entry_path.as_str()),
         Some("materials/test/thing.vtf")
     );
-    #[cfg(feature = "asset-studio")]
-    assert!(matches!(
+        assert!(matches!(
         effects.as_slice(),
         [
             Effect::AudioStopRequested,
@@ -170,18 +158,8 @@ fn related_preview_requested_opens_related_entry() {
             && request.entry_path == "materials/test/thing.vtf"
             && request.size_bytes == 3
     ));
-    #[cfg(not(feature = "asset-studio"))]
-    assert!(matches!(
-        effects.as_slice(),
-        [
-            Effect::LoadRequested(request)
-        ] if request.request_id == 2
-            && request.entry_path == "materials/test/thing.vtf"
-            && request.size_bytes == 3
-    ));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_fog_toggle_round_trips_without_effects() {
     let mut state = State::default();
@@ -194,7 +172,6 @@ fn map_fog_toggle_round_trips_without_effects() {
     assert!(state.map_fog_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_skybox_toggle_round_trips_without_effects() {
     let mut state = State::default();
@@ -207,7 +184,6 @@ fn map_skybox_toggle_round_trips_without_effects() {
     assert!(!state.map_skybox_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_visibility_toggle_round_trips_without_effects() {
     let mut state = State::default();
@@ -220,7 +196,6 @@ fn map_visibility_toggle_round_trips_without_effects() {
     assert!(state.map_visibility_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn phy_debug_toggle_defaults_off_and_round_trips_without_effects() {
     let mut state = State::default();
@@ -234,7 +209,6 @@ fn phy_debug_toggle_defaults_off_and_round_trips_without_effects() {
     assert!(!state.phy_debug_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn pose_messages_update_state_without_effects() {
     let mut state = State::default();
@@ -271,7 +245,6 @@ fn pose_messages_update_state_without_effects() {
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn fly_speed_changed_updates_pose_and_readout() {
     let mut state = State::default();
@@ -302,7 +275,6 @@ fn fly_speed_changed_updates_pose_and_readout() {
     assert_eq!(state.fly_speed_readout(), Some(2.0));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn movement_mode_selected_requests_shader_mode_change() {
     let mut state = State::default();
@@ -323,7 +295,6 @@ fn movement_mode_selected_requests_shader_mode_change() {
     assert_eq!(state.fly_movement_mode(), None);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn movement_mode_selected_is_noop_for_active_mode() {
     let mut state = State::default();
@@ -355,7 +326,6 @@ fn movement_mode_selected_is_noop_for_active_mode() {
     assert_eq!(state.requested_movement_mode(), None);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn expanded_round_trip_preserves_viewer_poses() {
     let mut state = State::default();
@@ -421,7 +391,6 @@ fn extract_requested_emits_current_info_path() {
     );
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn audio_toggle_requests_play_then_pause_via_state_messages() {
     let mut state = State::default();
@@ -459,7 +428,6 @@ fn audio_toggle_requests_play_then_pause_via_state_messages() {
     assert!(!state.audio_playing());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn animation_tick_polls_audio_position_only_while_playing() {
     let mut state = State::default();
@@ -483,7 +451,6 @@ fn animation_tick_polls_audio_position_only_while_playing() {
     );
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn inspector_ratio_clamps_to_layout_and_survives_modal_close() {
     let mut state = State::default();

@@ -11,7 +11,6 @@ pub mod domain;
 pub mod gma;
 pub mod library;
 pub mod library_watch;
-#[cfg(feature = "asset-studio")]
 pub mod materials;
 pub mod metadata_snapshot;
 pub mod native;

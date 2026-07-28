@@ -9,7 +9,6 @@ use gmpublished_backend::bbcode::SpoilerId;
 use iced::widget::image;
 use iced::widget::pane_grid;
 
-#[cfg(feature = "asset-studio")]
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::bridge::gma::PreviewArchive;
 use crate::bridge::ui_error::UiError;
@@ -22,7 +21,6 @@ use crate::media::{
 use crate::widgets::file_browser::{Row as FileBrowserRowData, State as FileBrowserState};
 use crate::widgets::split_pane;
 
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview::PreviewRequest;
 
 use crate::bridge::domain::PublishedFileId;
@@ -388,8 +386,7 @@ impl State {
         true
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn take_initial_entry_preview_request(&mut self) -> Option<PreviewRequest> {
+        pub(super) fn take_initial_entry_preview_request(&mut self) -> Option<PreviewRequest> {
         let entry_path = self.pending_initial_entry_preview.take()?;
         self.entry_preview_request(&entry_path)
     }
@@ -682,8 +679,7 @@ impl State {
         })
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
+        pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
         let archive = self.ready_archive()?;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {

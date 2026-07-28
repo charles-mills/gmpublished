@@ -3,9 +3,7 @@ use std::sync::Arc;
 use iced::widget::image;
 
 use crate::bridge::archive::PreviewArchiveSource;
-#[cfg(feature = "asset-studio")]
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
-#[cfg(feature = "asset-studio")]
 pub use gmpublished_backend::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
     MapVisibilityBucket, MapWalkCollision,
@@ -16,7 +14,7 @@ pub use gmpublished_backend::scene::map::{
 /// debug meshes tint it, maps use `lightmap_uv`/`blend_alpha`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "asset-studio", derive(bytemuck::Pod, bytemuck::Zeroable))]
+#[derive(bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
@@ -95,7 +93,6 @@ impl From<vformats::mdl::ModelData> for ModelData {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 pub const PHY_DEBUG_MATERIAL_NAME: &str = "__debug/phy_collision";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,7 +109,6 @@ pub struct PreviewRequest {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(feature = "asset-studio"), derive(Eq))]
 pub struct PreviewData {
     pub(crate) entry_path: String,
     pub(crate) display_name: String,
@@ -144,7 +140,6 @@ pub enum RelatedPreviewKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(feature = "asset-studio"), derive(Eq))]
 pub enum PreviewContent {
     Code {
         lines: Vec<CodeLine>,
@@ -159,23 +154,19 @@ pub enum PreviewContent {
         handle: image::Handle,
         family: String,
     },
-    #[cfg(feature = "asset-studio")]
-    Audio {
+        Audio {
         bytes: Arc<Vec<u8>>,
         duration_secs: Option<f32>,
     },
-    #[cfg(feature = "asset-studio")]
-    Model(Arc<ModelPreview>),
-    #[cfg(feature = "asset-studio")]
-    Map {
+        Model(Arc<ModelPreview>),
+        Map {
         scene: Arc<ModelPreview>,
         stats: MapStats,
         fog: Option<MapFog>,
         sky_camera: Option<MapSkyCamera>,
         spawn: Option<MapSpawn>,
     },
-    #[cfg(feature = "asset-studio")]
-    Particle(Arc<ParticlePreview>),
+        Particle(Arc<ParticlePreview>),
     Info {
         reason: InfoReason,
     },
@@ -183,7 +174,6 @@ pub enum PreviewContent {
 
 /// A parsed .pcf plus everything resolved up front for its systems: per-
 /// system coverage/metadata and the de-duplicated sprite materials.
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParticlePreview {
     pub(crate) file: gmpublished_backend::scene::pcf::PcfFile,
@@ -191,7 +181,6 @@ pub struct ParticlePreview {
     pub(crate) materials: Vec<ParticleMaterialSlot>,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParticleSystemInfo {
     pub(crate) name: String,
@@ -201,7 +190,6 @@ pub struct ParticleSystemInfo {
     pub(crate) highest_control_point: usize,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParticleMaterialSlot {
     /// Normalized via [`normalize_particle_material`].
@@ -214,12 +202,11 @@ pub struct ParticleMaterialSlot {
 
 /// PCF material references are inconsistent ("effects\\spark.vmt",
 /// "particle/foo"); loader keys and renderer lookups share this form.
-#[cfg(feature = "asset-studio")]
 pub fn normalize_particle_material(name: &str) -> String {
     gmpublished_backend::particles::normalize_material_name(name)
 }
 
-#[cfg(all(test, feature = "asset-studio"))]
+#[cfg(test)]
 mod particle_material_tests {
     use super::normalize_particle_material;
 
@@ -236,7 +223,6 @@ mod particle_material_tests {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPreview {
     pub(crate) meshes: Vec<MeshData>,
@@ -261,7 +247,6 @@ pub struct ModelPreview {
     pub(crate) walk_collision: Option<MapWalkCollision>,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DoorInstance {
     pub(crate) class: MapDoorClass,
@@ -277,7 +262,6 @@ pub struct DoorInstance {
     pub(crate) meshes: Vec<MeshData>,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DoorSounds {
     pub(crate) move_sound: Option<DoorSound>,
@@ -286,7 +270,6 @@ pub struct DoorSounds {
     pub(crate) close_sound: Option<DoorSound>,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DoorSound {
     pub(crate) reference: String,
@@ -295,7 +278,6 @@ pub struct DoorSound {
     pub(crate) waves: Vec<DoorSoundWave>,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DoorSoundWave {
     pub(crate) path: String,
@@ -303,7 +285,6 @@ pub struct DoorSoundWave {
     pub(crate) bytes: Arc<Vec<u8>>,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum DoorSoundSourceTier {
     Pakfile,
@@ -314,7 +295,6 @@ pub enum DoorSoundSourceTier {
     Prepended,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DoorAudioEvent {
     pub(crate) content_id: u64,
@@ -323,7 +303,6 @@ pub struct DoorAudioEvent {
     pub(crate) gain: f32,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DoorAudioEventKind {
     MoveStarted,
@@ -332,7 +311,6 @@ pub enum DoorAudioEventKind {
     Parked,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorldVisibilityPlan {
     pub(crate) mesh_indices: Vec<Vec<u32>>,
@@ -342,7 +320,6 @@ pub struct WorldVisibilityPlan {
     pub(crate) visible_cluster_count: u32,
 }
 
-#[cfg(feature = "asset-studio")]
 impl WorldVisibilityPlan {
     pub(crate) fn from_visible_clusters(scene: &ModelPreview, visible_clusters: &[bool]) -> Self {
         Self {
@@ -403,7 +380,6 @@ impl WorldVisibilityPlan {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 fn visible_mesh_indices(
     source_indices: &[u32],
     visibility: &MapMeshVisibility,
@@ -443,7 +419,6 @@ fn visible_mesh_indices(
     indices
 }
 
-#[cfg(feature = "asset-studio")]
 fn push_visible_range(
     source_indices: &[u32],
     range: &MapMeshIndexRange,
@@ -465,7 +440,6 @@ fn push_visible_range(
     indices.extend_from_slice(slice);
 }
 
-#[cfg(feature = "asset-studio")]
 fn bucket_visible(bucket: MapVisibilityBucket, visible_clusters: &[bool]) -> bool {
     match bucket {
         MapVisibilityBucket::Always => true,
@@ -476,7 +450,6 @@ fn bucket_visible(bucket: MapVisibilityBucket, visible_clusters: &[bool]) -> boo
     }
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialSlot {
     pub(crate) name: String,
@@ -486,7 +459,6 @@ pub struct MaterialSlot {
     pub(crate) render_mode: RenderMode,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LightmapSlot {
     pub(crate) rgba: Vec<u8>,
@@ -494,7 +466,6 @@ pub struct LightmapSlot {
     pub(crate) height: u32,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetailSprite {
     pub(crate) origin: [f32; 3],
@@ -506,7 +477,6 @@ pub struct DetailSprite {
     pub(crate) visibility: MapVisibilityBucket,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverlayPrimitive {
     pub(crate) vertices: [OverlayVertex; 4],
@@ -514,7 +484,6 @@ pub struct OverlayPrimitive {
     pub(crate) visibility: MapVisibilityBucket,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlayVertex {
     pub(crate) position: [f32; 3],
@@ -522,16 +491,13 @@ pub struct OverlayVertex {
     pub(crate) uv: [f32; 2],
 }
 
-#[cfg(feature = "asset-studio")]
 pub const SKYBOX_FACE_COUNT: usize = 6;
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Skybox {
     pub(crate) faces: [Option<Arc<ResolvedTexture>>; SKYBOX_FACE_COUNT],
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkyboxFace {
     Rt,
@@ -542,7 +508,6 @@ pub enum SkyboxFace {
     Dn,
 }
 
-#[cfg(feature = "asset-studio")]
 impl SkyboxFace {
     pub(crate) const ALL: [Self; SKYBOX_FACE_COUNT] =
         [Self::Rt, Self::Lf, Self::Bk, Self::Ft, Self::Up, Self::Dn];
@@ -570,7 +535,6 @@ impl SkyboxFace {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ModelStats {
     pub(crate) bone_count: u32,
@@ -582,7 +546,6 @@ pub struct ModelStats {
     pub(crate) resolved_material_count: u32,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MapStats {
     pub(crate) face_count: u32,
@@ -603,7 +566,6 @@ pub struct MapStats {
     pub(crate) version: u32,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapFog {
     pub(crate) color_linear: [f32; 3],
@@ -612,7 +574,6 @@ pub struct MapFog {
     pub(crate) max_density: f32,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapSkyCamera {
     pub(crate) origin: [f32; 3],
@@ -620,7 +581,6 @@ pub struct MapSkyCamera {
     pub(crate) fog: Option<MapFog>,
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapSpawn {
     pub(crate) origin: [f32; 3],
@@ -680,7 +640,7 @@ impl PreviewData {
     }
 }
 
-#[cfg(all(test, feature = "asset-studio"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::bridge::materials::RenderMode;

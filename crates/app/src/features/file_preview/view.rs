@@ -19,12 +19,9 @@ use crate::{
 use super::model::{
     CodeLine, InfoReason, PreviewContent, PreviewData, PreviewRequest, RelatedPreviewKind,
 };
-#[cfg(feature = "asset-studio")]
 use super::model::{MapStats, ModelPreview, ParticlePreview};
-#[cfg(feature = "asset-studio")]
 use super::state::MovementMode;
 use super::{Message, State};
-#[cfg(feature = "asset-studio")]
 use gmpublished_backend::particles::SupportLevel;
 
 fn count_text(count: impl std::fmt::Display) -> String {
@@ -36,23 +33,14 @@ const SILKICON_SIZE: f32 = 16.0;
 const SPINNER_SIZE: f32 = 32.0;
 const INFO_LABEL_WIDTH: f32 = 76.0;
 const CODE_LINE_NUMBER_WIDTH: f32 = 32.0;
-#[cfg(feature = "asset-studio")]
 const VIEWER_MIN_WIDTH: f32 = 240.0;
-#[cfg(feature = "asset-studio")]
 const INSPECTOR_MIN_WIDTH: f32 = 200.0;
-#[cfg(feature = "asset-studio")]
 const INSPECTOR_MAX_WIDTH: f32 = 420.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_MARGIN: f32 = 12.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_PADDING: f32 = 3.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_SLOT_GAP: f32 = 2.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_SLOT_WIDTH: f32 = 34.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_SLOT_HEIGHT: f32 = 28.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_ICON_SIZE: f32 = 18.0;
 
 /// Renders the in-archive File Preview pane embedded in Preview GMA.
@@ -247,7 +235,6 @@ fn body<'a>(
     )
 }
 
-#[cfg_attr(not(feature = "asset-studio"), allow(unused_variables))]
 fn preview_content<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -263,18 +250,14 @@ fn preview_content<'a>(
             height,
         } => image_preview(handle, *width, *height, ctx),
         PreviewContent::Font { handle, family, .. } => raster_preview(handle, family.clone(), ctx),
-        #[cfg(feature = "asset-studio")]
-        PreviewContent::Audio { duration_secs, .. } => audio_preview(state, *duration_secs, ctx),
-        #[cfg(feature = "asset-studio")]
-        PreviewContent::Model(model) => {
+                PreviewContent::Audio { duration_secs, .. } => audio_preview(state, *duration_secs, ctx),
+                PreviewContent::Model(model) => {
             model_preview(state, data, model, ctx, show_inspector, content_width)
         }
-        #[cfg(feature = "asset-studio")]
-        PreviewContent::Particle(preview) => {
+                PreviewContent::Particle(preview) => {
             particle_preview(state, data, preview, ctx, show_inspector, content_width)
         }
-        #[cfg(feature = "asset-studio")]
-        PreviewContent::Map {
+                PreviewContent::Map {
             scene,
             stats,
             fog,
@@ -437,7 +420,6 @@ fn raster_preview<'a>(
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn audio_preview<'a>(
     state: &'a State,
     content_duration_secs: Option<f32>,
@@ -499,7 +481,6 @@ fn audio_preview<'a>(
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn format_audio_time(seconds: Option<f32>) -> String {
     let Some(seconds) = seconds else {
         return "--:--".to_owned();
@@ -578,7 +559,6 @@ fn info_preview<'a>(
         .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn model_preview<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -639,21 +619,18 @@ fn model_preview<'a>(
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IndexedChoice {
     index: usize,
     label: String,
 }
 
-#[cfg(feature = "asset-studio")]
 impl std::fmt::Display for IndexedChoice {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.label)
     }
 }
 
-#[cfg(feature = "asset-studio")]
 fn model_selectors<'a>(
     state: &'a State,
     model: &'a ModelPreview,
@@ -709,7 +686,6 @@ fn model_selectors<'a>(
     selectors.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn indexed_choices(count: usize, label: impl Fn(usize) -> String) -> Vec<IndexedChoice> {
     (0..count)
         .map(|index| IndexedChoice {
@@ -719,7 +695,6 @@ fn indexed_choices(count: usize, label: impl Fn(usize) -> String) -> Vec<Indexed
         .collect()
 }
 
-#[cfg(feature = "asset-studio")]
 fn selector_row<'a>(
     label: String,
     options: Vec<IndexedChoice>,
@@ -764,7 +739,6 @@ fn selector_row<'a>(
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn model_inspector_rows<'a>(
     data: &'a PreviewData,
     model: &'a ModelPreview,
@@ -845,7 +819,6 @@ fn model_inspector_rows<'a>(
     rows.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn particle_preview<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -902,10 +875,8 @@ fn particle_preview<'a>(
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
-#[cfg(feature = "asset-studio")]
 const PARTICLE_SPEED_OPTIONS: [f32; 5] = [0.1, 0.25, 0.5, 1.0, 2.0];
 
-#[cfg(feature = "asset-studio")]
 fn particle_speed_choices() -> Vec<IndexedChoice> {
     PARTICLE_SPEED_OPTIONS
         .iter()
@@ -917,7 +888,6 @@ fn particle_speed_choices() -> Vec<IndexedChoice> {
         .collect()
 }
 
-#[cfg(feature = "asset-studio")]
 fn particle_selectors<'a>(
     state: &'a State,
     preview: &'a ParticlePreview,
@@ -982,7 +952,6 @@ fn particle_selectors<'a>(
     selectors.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn particle_inspector_rows<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -1060,7 +1029,6 @@ fn particle_inspector_rows<'a>(
 }
 
 /// One operator line in the fidelity panel: a support-level dot + name.
-#[cfg(feature = "asset-studio")]
 fn coverage_row<'a>(
     entry: &'a gmpublished_backend::particles::CoverageEntry,
     ctx: ViewCtx<'a>,
@@ -1108,7 +1076,6 @@ fn coverage_row<'a>(
     )
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy)]
 struct MapPreviewParts<'a> {
     scene: &'a std::sync::Arc<ModelPreview>,
@@ -1118,7 +1085,6 @@ struct MapPreviewParts<'a> {
     spawn: Option<super::model::MapSpawn>,
 }
 
-#[cfg(feature = "asset-studio")]
 fn map_preview<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -1187,7 +1153,6 @@ fn map_preview<'a>(
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
-#[cfg(feature = "asset-studio")]
 fn resizable_inspector<'a>(
     state: &'a State,
     tokens: &Tokens,
@@ -1228,7 +1193,6 @@ fn resizable_inspector<'a>(
         .into()
 }
 
-#[cfg(feature = "asset-studio")]
 pub(super) fn effective_inspector_ratio(ratio: f32, width: f32) -> f32 {
     split_pane::clamp_ratio(
         ratio,
@@ -1240,7 +1204,6 @@ pub(super) fn effective_inspector_ratio(ratio: f32, width: f32) -> f32 {
     )
 }
 
-#[cfg(feature = "asset-studio")]
 fn map_viewer_with_overlays<'a>(
     viewer: Element<'a, Message>,
     state: &'a State,
@@ -1265,7 +1228,6 @@ fn map_viewer_with_overlays<'a>(
     layered
 }
 
-#[cfg(feature = "asset-studio")]
 fn speed_readout_overlay<'a>(speed: f32, tokens: &Tokens) -> Element<'a, Message> {
     let tokens = *tokens;
     let readout = container(
@@ -1289,7 +1251,6 @@ fn speed_readout_overlay<'a>(speed: f32, tokens: &Tokens) -> Element<'a, Message
     overlay.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_overlay(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message> {
     let pill = mode_pill(active_mode, ctx);
     column![
@@ -1302,7 +1263,6 @@ fn mode_pill_overlay(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_,
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
@@ -1330,7 +1290,6 @@ fn mode_pill(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_slot<'a>(
     mode: MovementMode,
     active_mode: MovementMode,
@@ -1356,7 +1315,6 @@ fn mode_pill_slot<'a>(
     tooltip_widget::below(slot, tooltip, tokens, TOOLTIP_MAX_WIDTH)
 }
 
-#[cfg(feature = "asset-studio")]
 fn scene_supports_walk(scene: &ModelPreview) -> bool {
     scene
         .walk_collision
@@ -1364,7 +1322,6 @@ fn scene_supports_walk(scene: &ModelPreview) -> bool {
         .is_some_and(|collision| !collision.is_empty())
 }
 
-#[cfg(feature = "asset-studio")]
 fn active_movement_mode(state: &State, spawn: Option<super::model::MapSpawn>) -> MovementMode {
     state.fly_movement_mode().unwrap_or_else(|| {
         if spawn.is_some() {
@@ -1375,7 +1332,6 @@ fn active_movement_mode(state: &State, spawn: Option<super::model::MapSpawn>) ->
     })
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_style() -> iced::widget::container::Style {
     iced::widget::container::Style {
         text_color: Some(Color::WHITE),
@@ -1390,7 +1346,6 @@ fn mode_pill_style() -> iced::widget::container::Style {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_slot_style(active: bool) -> iced::widget::button::Style {
     iced::widget::button::Style {
         background: active.then(|| Color::from_rgba(1.0, 1.0, 1.0, 0.16).into()),
@@ -1404,12 +1359,10 @@ fn mode_pill_slot_style(active: bool) -> iced::widget::button::Style {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 fn format_fly_speed(speed: f32) -> String {
     format!("{speed:.1}x")
 }
 
-#[cfg(feature = "asset-studio")]
 fn map_inspector_rows<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -1505,7 +1458,6 @@ fn map_inspector_rows<'a>(
     rows.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn phy_debug_checkbox<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
@@ -1517,12 +1469,10 @@ fn phy_debug_checkbox<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Mes
         .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn format_model_bounds(bounds: [f32; 3]) -> String {
     format!("{:.2}, {:.2}, {:.2}", bounds[0], bounds[1], bounds[2])
 }
 
-#[cfg(feature = "asset-studio")]
 fn material_status_text(resolved: u32, total: u32) -> String {
     format!("{resolved}/{total}")
 }

@@ -1,4 +1,3 @@
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview::PreviewRequest;
 
 use super::model::{
@@ -21,8 +20,7 @@ pub enum Effect {
     WorkshopSnapshotInspectionRequested(ContentPathVerificationRequest),
     CleanupPathRequested(std::path::PathBuf),
     PathVerificationRequested(ContentPathVerificationRequest),
-    #[cfg(feature = "asset-studio")]
-    EntryPreviewRequested(PreviewRequest),
+        EntryPreviewRequested(PreviewRequest),
     IconVerificationRequested(IconVerificationRequest),
     IgnorePatternMutationRequested(IgnorePatternMutation),
     SubmitContextRequested,

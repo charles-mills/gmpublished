@@ -818,7 +818,6 @@ fn set_verified_path(state: &mut State) {
     });
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn entry_preview_request_reads_the_verified_folder_source() {
     use crate::bridge::archive::PreviewArchiveSource;

@@ -15,17 +15,12 @@ name = "gmpublished"
 path = "src/main.rs"
 
 [features]
-default = ["asset-studio"]
 # Developer-only context-menu actions for simulating subscriber changes and
 # hiding addons from the current in-memory session.
 debug = []
-asset-studio = [
-    "dep:bytemuck",
-    "gmpublished-backend/scene",
-]
 
 [dependencies]
-bytemuck = { workspace = true, optional = true }
+bytemuck.workspace = true
 vformats.workspace = true
 # pinned to match iced 0.14's internal version — do not bump independently
 cosmic-text = { version = "0.15.0", default-features = false, features = ["std", "swash"] }
@@ -33,7 +28,7 @@ fast_image_resize.workspace = true
 fluent-bundle.workspace = true
 fluent-langneg.workspace = true
 gif.workspace = true
-gmpublished-backend = { path = "../backend" }
+gmpublished-backend = { path = "../backend", features = ["scene"] }
 iced.workspace = true
 image.workspace = true
 jiff.workspace = true

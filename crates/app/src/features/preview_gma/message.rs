@@ -5,7 +5,6 @@ use iced::widget::pane_grid;
 
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::ui_error::UiError;
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
 
 use super::model::{AuthorInfo, LoadedArchive, OpenTarget, WorkshopMetadata};
@@ -30,12 +29,8 @@ pub enum Message {
     },
     DirectoryOpened(Arc<String>),
     ExtractArchiveRequested,
-    #[cfg(not(feature = "asset-studio"))]
-    ExtractEntryRequested(Arc<String>),
-    #[cfg(feature = "asset-studio")]
-    PreviewEntryRequested(Arc<String>),
-    #[cfg(feature = "asset-studio")]
-    FilePreview(file_preview::Message),
+        PreviewEntryRequested(Arc<String>),
+        FilePreview(file_preview::Message),
     WorkshopLinkRequested,
     DescriptionLinkRequested(String),
     DescriptionSpoilerToggled(SpoilerId),

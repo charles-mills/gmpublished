@@ -2,10 +2,8 @@ use std::time::Instant;
 
 use iced::widget::pane_grid;
 
-#[cfg(feature = "asset-studio")]
 use super::model::DoorAudioEvent;
 use super::model::{PreviewData, PreviewLoadStage, PreviewRequest};
-#[cfg(feature = "asset-studio")]
 use super::state::{FlyPose, MovementMode, OrbitPose};
 use crate::bridge::archive::PreviewArchiveSourceError;
 use crate::bridge::tasks::ScheduleError;
@@ -42,75 +40,50 @@ pub enum Message {
     /// per-frame animation ticks.
     Loaded(u64, Box<Result<PreviewData, PreviewLoadError>>),
     AnimationTick(Instant),
-    #[cfg(feature = "asset-studio")]
-    AudioToggleRequested,
-    #[cfg(feature = "asset-studio")]
-    AudioPlaybackStarted,
-    #[cfg(feature = "asset-studio")]
-    AudioPlaybackPaused,
-    #[cfg(feature = "asset-studio")]
-    AudioPlaybackEnded,
-    #[cfg(feature = "asset-studio")]
-    AudioPositionUpdated(f32),
-    #[cfg(feature = "asset-studio")]
-    SkinSelected(usize),
-    #[cfg(feature = "asset-studio")]
-    BodygroupChoiceSelected {
+        AudioToggleRequested,
+        AudioPlaybackStarted,
+        AudioPlaybackPaused,
+        AudioPlaybackEnded,
+        AudioPositionUpdated(f32),
+        SkinSelected(usize),
+        BodygroupChoiceSelected {
         group: usize,
         choice: usize,
     },
-    #[cfg(feature = "asset-studio")]
-    MapFogToggled(bool),
-    #[cfg(feature = "asset-studio")]
-    MapSkyboxToggled(bool),
-    #[cfg(feature = "asset-studio")]
-    MapVisibilityToggled(bool),
-    #[cfg(feature = "asset-studio")]
-    PhyDebugToggled(bool),
-    #[cfg(feature = "asset-studio")]
-    FlyCameraChanged {
+        MapFogToggled(bool),
+        MapSkyboxToggled(bool),
+        MapVisibilityToggled(bool),
+        PhyDebugToggled(bool),
+        FlyCameraChanged {
         pose: FlyPose,
         mode: MovementMode,
     },
-    #[cfg(feature = "asset-studio")]
-    FlyCameraAndDoorAudioChanged {
+        FlyCameraAndDoorAudioChanged {
         pose: FlyPose,
         mode: MovementMode,
         door_audio_events: Vec<DoorAudioEvent>,
     },
-    #[cfg(feature = "asset-studio")]
-    FlySpeedChanged {
+        FlySpeedChanged {
         pose: FlyPose,
         mode: MovementMode,
     },
-    #[cfg(feature = "asset-studio")]
-    MovementModeSelected(MovementMode),
-    #[cfg(feature = "asset-studio")]
-    DoorAudioEvents(Vec<DoorAudioEvent>),
-    #[cfg(feature = "asset-studio")]
-    OrbitPoseChanged(OrbitPose),
-    #[cfg(feature = "asset-studio")]
-    ParticleSystemSelected(usize),
-    #[cfg(feature = "asset-studio")]
-    ParticlePlayToggled,
-    #[cfg(feature = "asset-studio")]
-    ParticleRestartRequested,
-    #[cfg(feature = "asset-studio")]
-    ParticleSpeedSelected(f32),
-    #[cfg(feature = "asset-studio")]
-    ParticleControlPointChanged {
+        MovementModeSelected(MovementMode),
+        DoorAudioEvents(Vec<DoorAudioEvent>),
+        OrbitPoseChanged(OrbitPose),
+        ParticleSystemSelected(usize),
+        ParticlePlayToggled,
+        ParticleRestartRequested,
+        ParticleSpeedSelected(f32),
+        ParticleControlPointChanged {
         index: usize,
         position: [f32; 3],
     },
-    #[cfg(feature = "asset-studio")]
-    InspectorResized {
+        InspectorResized {
         split: pane_grid::Split,
         ratio: f32,
     },
-    #[cfg(feature = "asset-studio")]
-    InspectorLayoutChanged(f32),
-    #[cfg(feature = "asset-studio")]
-    InspectorReset(f32),
+        InspectorLayoutChanged(f32),
+        InspectorReset(f32),
     BackRequested,
     ExpandToggled,
     CloseFinished,

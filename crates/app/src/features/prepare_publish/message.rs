@@ -4,7 +4,6 @@ use iced::widget::text_editor;
 
 use crate::bridge::domain::WorkshopDownloadSuccess;
 use crate::bridge::ui_error::UiError;
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
 
 use super::{
@@ -54,10 +53,8 @@ pub enum Message {
         offset: f32,
     },
     DirectoryOpened(Arc<String>),
-    #[cfg(feature = "asset-studio")]
-    PreviewEntryRequested(Arc<String>),
-    #[cfg(feature = "asset-studio")]
-    FilePreview(file_preview::Message),
+        PreviewEntryRequested(Arc<String>),
+        FilePreview(file_preview::Message),
     UpRequested,
     TitleEdited(String),
     ChangelogActionPerformed(text_editor::Action),

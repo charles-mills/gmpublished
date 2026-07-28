@@ -15,7 +15,6 @@ use gmpublished_backend::appdata::{
 };
 use iced::{Point, Size, Task, keyboard, theme::Mode, widget::image, window};
 
-#[cfg(feature = "asset-studio")]
 use crate::{bridge::archive::PreviewArchiveSource, features::file_preview};
 use crate::{
     bridge::{
@@ -1191,22 +1190,7 @@ fn preview_gma_executor_destination_select_opens_overlay() {
     assert!(app.state.modal_stack.overlay_active());
 }
 
-#[cfg(not(feature = "asset-studio"))]
-#[test]
-fn preview_gma_executor_entry_extraction_schedules_worker() {
-    let mut app = App::new_for_test();
 
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::EntryExtractionRequested(
-            preview_extraction_request(),
-        )],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[cfg(feature = "asset-studio")]
 #[test]
 fn preview_gma_executor_entry_preview_opens_embedded_file_preview() {
     let mut app = App::new_for_test();
@@ -1223,7 +1207,6 @@ fn preview_gma_executor_entry_preview_opens_embedded_file_preview() {
     assert!(app.state.file_preview.loading());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn prepare_publish_executor_entry_preview_opens_embedded_file_preview() {
     let mut app = App::new_for_test();
@@ -1239,7 +1222,6 @@ fn prepare_publish_executor_entry_preview_opens_embedded_file_preview() {
     assert!(app.state.file_preview.loading());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn preview_gma_close_request_chains_expanded_preview_back_then_modal() {
     let mut app = App::new_for_test();
@@ -1305,7 +1287,6 @@ fn preview_gma_close_request_chains_expanded_preview_back_then_modal() {
     assert!(!app.state.preview_gma.is_open());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn preview_gma_close_request_back_stops_embedded_audio_preview() {
     let mut app = App::new_for_test();
@@ -1516,7 +1497,6 @@ fn settings_executor_reset_run_schedules_worker() {
     assert_task_scheduled(&task);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn global_shortcut_mapper_matches_command_k() {
     assert!(matches!(
@@ -2667,25 +2647,7 @@ fn preview_author_request() -> preview_gma::AuthorRequest {
     }
 }
 
-#[cfg(not(feature = "asset-studio"))]
-fn preview_extraction_request() -> preview_gma::ExtractionRequest {
-    let archive = PreviewArchive::from_gma(
-        GmaFixtureBuilder::new("Preview")
-            .entry("lua/autorun/init.lua", b"print('ok')\n".to_vec())
-            .build(),
-    )
-    .expect("fixture archive should load");
-    preview_gma::ExtractionRequest {
-        request_id: 1,
-        archive: Arc::new(archive),
-        intent: preview_gma::ExtractionIntent::Entry {
-            path: "lua/autorun/init.lua".to_owned(),
-            size_bytes: 12,
-        },
-    }
-}
 
-#[cfg(feature = "asset-studio")]
 fn file_preview_request() -> file_preview::PreviewRequest {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Preview")

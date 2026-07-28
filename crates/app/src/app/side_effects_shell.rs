@@ -696,21 +696,3 @@ impl App {
     }
 }
 
-#[cfg(not(feature = "asset-studio"))]
-impl App {
-    pub(super) fn apply_file_preview_message(
-        &mut self,
-        message: file_preview::Message,
-    ) -> Task<RootMessage> {
-        let effects = file_preview::update(&mut self.state.file_preview, message);
-        self.batch_effects(effects, |app, effect| match effect {
-            file_preview::Effect::ModalCloseRequested => app.file_preview_close_finished_task(),
-            file_preview::Effect::LoadRequested(_)
-            | file_preview::Effect::ExtractRequested { .. } => Task::none(),
-        })
-    }
-
-    pub(super) fn file_preview_close_finished_task(&mut self) -> Task<RootMessage> {
-        self.apply_file_preview_message(file_preview::Message::CloseFinished)
-    }
-}

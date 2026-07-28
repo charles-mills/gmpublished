@@ -219,8 +219,7 @@ impl State {
         self.audio_duration_secs
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn current_audio_bytes(&self) -> Option<std::sync::Arc<Vec<u8>>> {
+        pub(crate) fn current_audio_bytes(&self) -> Option<std::sync::Arc<Vec<u8>>> {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Audio { bytes, .. }) => Some(std::sync::Arc::clone(bytes)),
             _ => None,
@@ -299,23 +298,19 @@ impl State {
         self.fly_speed_readout.as_ref().map(|readout| readout.speed)
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) const fn fly_pose(&self) -> Option<FlyPose> {
+        pub(crate) const fn fly_pose(&self) -> Option<FlyPose> {
         self.fly_pose
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) const fn fly_movement_mode(&self) -> Option<MovementMode> {
+        pub(crate) const fn fly_movement_mode(&self) -> Option<MovementMode> {
         self.fly_movement_mode
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) const fn requested_movement_mode(&self) -> Option<MovementMode> {
+        pub(crate) const fn requested_movement_mode(&self) -> Option<MovementMode> {
         self.requested_movement_mode
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) const fn orbit_pose(&self) -> Option<OrbitPose> {
+        pub(crate) const fn orbit_pose(&self) -> Option<OrbitPose> {
         self.orbit_pose
     }
 
@@ -381,8 +376,7 @@ impl State {
         true
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn show_fly_speed_readout(&mut self, speed: f32) {
+        pub(super) fn show_fly_speed_readout(&mut self, speed: f32) {
         if !self.open || !speed.is_finite() {
             return;
         }
@@ -393,7 +387,7 @@ impl State {
         });
     }
 
-    #[cfg(all(feature = "asset-studio", test))]
+    #[cfg(test)]
     pub(super) fn set_fly_pose(&mut self, pose: FlyPose) {
         if !self.open || !pose.is_finite() {
             return;
@@ -403,8 +397,7 @@ impl State {
         self.requested_movement_mode = None;
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn set_fly_camera(&mut self, pose: FlyPose, mode: MovementMode) {
+        pub(super) fn set_fly_camera(&mut self, pose: FlyPose, mode: MovementMode) {
         if !self.open || !pose.is_finite() {
             return;
         }
@@ -413,8 +406,7 @@ impl State {
         self.requested_movement_mode = None;
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn request_movement_mode(&mut self, mode: MovementMode) {
+        pub(super) fn request_movement_mode(&mut self, mode: MovementMode) {
         if !self.open {
             return;
         }
@@ -425,8 +417,7 @@ impl State {
         self.requested_movement_mode = Some(mode);
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn set_orbit_pose(&mut self, pose: OrbitPose) {
+        pub(super) fn set_orbit_pose(&mut self, pose: OrbitPose) {
         if self.open && pose.is_finite() {
             self.orbit_pose = Some(pose);
         }
@@ -456,21 +447,15 @@ impl State {
         self.phy_debug_enabled
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn map_fog_control_visible(&self) -> bool {
+        pub(crate) fn map_fog_control_visible(&self) -> bool {
         matches!(
             self.current.as_ref().map(|data| &data.content),
             Some(PreviewContent::Map { fog: Some(_), .. })
         )
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn map_fog_control_visible(&self) -> bool {
-        false
-    }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn map_skybox_control_visible(&self) -> bool {
+        pub(crate) fn map_skybox_control_visible(&self) -> bool {
         matches!(
             self.current.as_ref().map(|data| &data.content),
             Some(PreviewContent::Map { stats, .. })
@@ -481,26 +466,16 @@ impl State {
         )
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn map_skybox_control_visible(&self) -> bool {
-        false
-    }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn map_visibility_control_visible(&self) -> bool {
+        pub(crate) fn map_visibility_control_visible(&self) -> bool {
         matches!(
             self.current.as_ref().map(|data| &data.content),
             Some(PreviewContent::Map { scene, .. }) if scene.visibility.is_some()
         )
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn map_visibility_control_visible(&self) -> bool {
-        false
-    }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn phy_debug_control_visible(&self) -> bool {
+        pub(crate) fn phy_debug_control_visible(&self) -> bool {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => !model.phy_debug_meshes.is_empty(),
             Some(PreviewContent::Map { scene, .. }) => !scene.phy_debug_meshes.is_empty(),
@@ -508,33 +483,24 @@ impl State {
         }
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn phy_debug_control_visible(&self) -> bool {
-        false
-    }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_map_fog_enabled(&mut self, enabled: bool) {
+        pub(super) const fn set_map_fog_enabled(&mut self, enabled: bool) {
         self.map_fog_enabled = enabled;
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_map_skybox_enabled(&mut self, enabled: bool) {
+        pub(super) const fn set_map_skybox_enabled(&mut self, enabled: bool) {
         self.map_skybox_enabled = enabled;
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_map_visibility_enabled(&mut self, enabled: bool) {
+        pub(super) const fn set_map_visibility_enabled(&mut self, enabled: bool) {
         self.map_visibility_enabled = enabled;
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_phy_debug_enabled(&mut self, enabled: bool) {
+        pub(super) const fn set_phy_debug_enabled(&mut self, enabled: bool) {
         self.phy_debug_enabled = enabled;
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn select_skin(&mut self, skin: usize) {
+        pub(super) fn select_skin(&mut self, skin: usize) {
         let skin_count = self
             .current_model()
             .map_or(0, |model| model.skin_tables.len());
@@ -543,8 +509,7 @@ impl State {
         }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn select_bodygroup_choice(&mut self, group: usize, choice: usize) {
+        pub(super) fn select_bodygroup_choice(&mut self, group: usize, choice: usize) {
         let Some(choices) = self
             .current_model()
             .and_then(|model| model.bodygroups.get(group).copied())
@@ -558,8 +523,7 @@ impl State {
         }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn current_model(&self) -> Option<&std::sync::Arc<super::model::ModelPreview>> {
+        pub(crate) fn current_model(&self) -> Option<&std::sync::Arc<super::model::ModelPreview>> {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => Some(model),
             _ => None,
@@ -568,12 +532,9 @@ impl State {
 
     fn init_model_selections(&mut self, content: &PreviewContent) {
         self.clear_model_selections();
-        #[cfg(feature = "asset-studio")]
-        if let PreviewContent::Model(model) = content {
+                if let PreviewContent::Model(model) = content {
             self.bodygroup_choices = vec![0; model.bodygroups.len()];
         }
-        #[cfg(not(feature = "asset-studio"))]
-        let _ = content;
     }
 
     fn clear_model_selections(&mut self) {
@@ -704,16 +665,11 @@ impl State {
     }
 
     fn current_audio_available(&self) -> bool {
-        #[cfg(feature = "asset-studio")]
-        {
+                {
             matches!(
                 self.current.as_ref().map(|data| &data.content),
                 Some(PreviewContent::Audio { .. })
             )
-        }
-        #[cfg(not(feature = "asset-studio"))]
-        {
-            false
         }
     }
 
@@ -730,8 +686,7 @@ impl State {
 }
 
 fn audio_duration_secs(content: &PreviewContent) -> Option<f32> {
-    #[cfg(feature = "asset-studio")]
-    {
+        {
         if let PreviewContent::Audio { duration_secs, .. } = content {
             return *duration_secs;
         }

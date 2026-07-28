@@ -214,7 +214,6 @@ impl SearchGeneration {
 pub enum SearchMode {
     #[default]
     Addons,
-    #[cfg_attr(not(feature = "asset-studio"), allow(dead_code))]
     Files,
 }
 

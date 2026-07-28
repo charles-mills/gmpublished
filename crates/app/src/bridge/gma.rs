@@ -284,7 +284,7 @@ impl GmaMeta {
 
     /// Opens only the archive header for library discovery. `PreviewArchive`
     /// deliberately remains the full-entry path for the preview modal.
-    #[cfg(any(test, not(feature = "asset-studio")))]
+    #[cfg(test)]
     pub(crate) fn open_header_only(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
         Ok(Self {
@@ -294,8 +294,7 @@ impl GmaMeta {
         })
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
+        pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
         // One mmap + one parse; the previous open/header/entries chain
         // re-parsed the whole entry table three times.
@@ -423,8 +422,7 @@ impl PreviewArchive {
             .map_err(|_| GmaError::EntryNotFound)
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
+        pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
         let entry = self.entry(entry_path)?;
         self.view.read_payload_bytes(entry.data_offset, entry.size)
     }

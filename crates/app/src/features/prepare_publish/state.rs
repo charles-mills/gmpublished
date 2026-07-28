@@ -21,9 +21,7 @@ use crate::media::{
     thumbnail_worker::ThumbnailInput,
 };
 
-#[cfg(feature = "asset-studio")]
 use crate::bridge::archive::PreviewArchiveSource;
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview::PreviewRequest;
 use crate::util::paths::path_to_display;
 use crate::widgets::file_browser::{Row as FileBrowserRow, State as FileBrowserState};
@@ -327,8 +325,7 @@ pub struct State {
     submit_generation: u64,
     addon_path: String,
     verified_addon_path: Option<VerifiedContentPathState>,
-    #[cfg(feature = "asset-studio")]
-    preview_source: Option<Arc<PreviewArchiveSource>>,
+        preview_source: Option<Arc<PreviewArchiveSource>>,
     path_pending: bool,
     path_error: Option<UiError>,
     announce_path_success: bool,
@@ -383,8 +380,7 @@ impl Default for State {
             submit_generation: 0,
             addon_path: String::new(),
             verified_addon_path: None,
-            #[cfg(feature = "asset-studio")]
-            preview_source: None,
+                        preview_source: None,
             path_pending: false,
             path_error: None,
             announce_path_success: false,
@@ -952,22 +948,13 @@ impl State {
         self.active_workshop_request = None;
     }
 
-    #[cfg_attr(
-        not(feature = "asset-studio"),
-        expect(
-            clippy::needless_pass_by_ref_mut,
-            reason = "no-op without asset-studio; keeps call sites cfg-free"
-        )
-    )]
     fn clear_preview_source(&mut self) {
-        #[cfg(feature = "asset-studio")]
-        {
+                {
             self.preview_source = None;
         }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
+        pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
         let source = self.preview_source.as_ref()?;
         let entry = source.entry(entry_path).ok()?;
         Some(PreviewRequest {
@@ -1112,8 +1099,7 @@ impl State {
                 self.browser = Some(FileBrowserState::from_entries(
                     verified.entries.iter().cloned(),
                 ));
-                #[cfg(feature = "asset-studio")]
-                {
+                                {
                     self.preview_source = Some(Arc::clone(&verified.preview_source));
                 }
             }
@@ -1145,8 +1131,7 @@ impl State {
                 self.browser = Some(FileBrowserState::from_entries(
                     snapshot.entries.iter().cloned(),
                 ));
-                #[cfg(feature = "asset-studio")]
-                {
+                                {
                     self.preview_source = Some(Arc::clone(&snapshot.preview_source));
                 }
             }

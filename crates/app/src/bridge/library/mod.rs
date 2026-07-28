@@ -467,13 +467,8 @@ fn read_candidate(
 }
 
 fn library_meta(path: &Path) -> Result<GmaMeta, super::gma::GmaError> {
-    #[cfg(feature = "asset-studio")]
-    {
+        {
         GmaMeta::open_index(path)
-    }
-    #[cfg(not(feature = "asset-studio"))]
-    {
-        GmaMeta::open_header_only(path)
     }
 }
 
@@ -1199,8 +1194,7 @@ mod tests {
         assert_eq!(loaded, changed);
     }
 
-    #[cfg(feature = "asset-studio")]
-    #[test]
+        #[test]
     fn asset_studio_refresh_records_entry_metadata_for_file_search() {
         let temp = TestDir::new("gmpublished-library-entry-index");
         let gmod_dir = temp.dir("steamapps/common/GarrysMod");

@@ -31,10 +31,8 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 return Vec::new();
             }
             let effects = vec![Effect::BrowserPathChanged, Effect::ThumbnailDemandsChanged];
-            #[cfg(feature = "asset-studio")]
-            let mut effects = effects;
-            #[cfg(feature = "asset-studio")]
-            if let Some(request) = state.take_initial_entry_preview_request() {
+                        let mut effects = effects;
+                        if let Some(request) = state.take_initial_entry_preview_request() {
                 effects.insert(0, Effect::EntryPreviewRequested(request));
             }
             effects
@@ -75,20 +73,12 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 Vec::new()
             }
         }
-        #[cfg(not(feature = "asset-studio"))]
-        Message::ExtractEntryRequested(path) => state
-            .entry_extraction_request(&path)
-            .map_or_else(Vec::new, |request| {
-                vec![Effect::EntryExtractionRequested(request)]
-            }),
-        #[cfg(feature = "asset-studio")]
-        Message::PreviewEntryRequested(path) => state
+                Message::PreviewEntryRequested(path) => state
             .entry_preview_request(&path)
             .map_or_else(Vec::new, |request| {
                 vec![Effect::EntryPreviewRequested(request)]
             }),
-        #[cfg(feature = "asset-studio")]
-        Message::FilePreview(_) => Vec::new(),
+                Message::FilePreview(_) => Vec::new(),
         Message::WorkshopLinkRequested => state
             .workshop_link_url()
             .map_or_else(Vec::new, |url| vec![Effect::OpenUrlRequested(url)]),
@@ -260,8 +250,7 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "asset-studio")]
-    #[test]
+        #[test]
     fn loaded_archive_with_initial_entry_emits_entry_preview_effect() {
         let mut state = State::default();
         let _effects = update(

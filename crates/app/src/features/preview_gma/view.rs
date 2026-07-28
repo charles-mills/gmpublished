@@ -103,8 +103,7 @@ fn embedded_preview_body<'a>(
     expanded: bool,
     modal_width: f32,
 ) -> Option<Element<'a, Message>> {
-    #[cfg(feature = "asset-studio")]
-    {
+        {
         let tokens = *ctx.tokens;
         if !file_preview_state.is_open() {
             return None;
@@ -161,11 +160,6 @@ fn embedded_preview_body<'a>(
                     .into(),
             )
         }
-    }
-    #[cfg(not(feature = "asset-studio"))]
-    {
-        let _ = (state, file_preview_state, ctx, expanded, modal_width);
-        None
     }
 }
 
@@ -681,15 +675,10 @@ fn browser_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Elemen
     file_browser::row_view(row_data, Some(message), ctx)
 }
 
-#[cfg(feature = "asset-studio")]
 fn file_row_activation_message(path: std::sync::Arc<String>) -> Message {
     Message::PreviewEntryRequested(path)
 }
 
-#[cfg(not(feature = "asset-studio"))]
-fn file_row_activation_message(path: std::sync::Arc<String>) -> Message {
-    Message::ExtractEntryRequested(path)
-}
 
 fn ribbon<'a>(
     snapshot: &'a super::state::BrowserSnapshot,

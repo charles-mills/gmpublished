@@ -1,13 +1,10 @@
 use std::sync::Arc;
 
 use super::*;
-#[cfg(feature = "asset-studio")]
 use crate::bridge::materials::RenderMode;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview::model::ModelVertex;
 use crate::features::file_preview::model::{InfoReason, PreviewContent};
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview::model::{
     MapFog, MapStats, MaterialSlot, MeshData, ModelPreview, ModelStats,
 };
@@ -87,7 +84,6 @@ fn begin_open_clears_audio_state() {
     assert_eq!(state.audio_duration_secs(), None);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn begin_open_resets_map_fog_enabled() {
     let mut state = State::default();
@@ -98,7 +94,6 @@ fn begin_open_resets_map_fog_enabled() {
     assert!(state.map_fog_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn begin_open_resets_map_skybox_enabled() {
     let mut state = State::default();
@@ -109,7 +104,6 @@ fn begin_open_resets_map_skybox_enabled() {
     assert!(state.map_skybox_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn begin_open_resets_map_visibility_enabled() {
     let mut state = State::default();
@@ -120,7 +114,6 @@ fn begin_open_resets_map_visibility_enabled() {
     assert!(state.map_visibility_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn begin_open_clears_viewer_poses() {
     let mut state = State::default();
@@ -191,7 +184,6 @@ fn load_stage_is_request_scoped_and_cleared_by_loaded_result() {
     assert_eq!(state.loading_stage(), None);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn fly_speed_readout_expires_on_gated_ticks() {
     let mut state = State::default();
@@ -225,7 +217,6 @@ fn close_clears_modal_state_and_invalidates_stale_loads() {
     assert!(!state.apply_loaded(request.request_id, Ok(info_data(&request))));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn close_clears_viewer_poses() {
     let mut state = State::default();
@@ -297,7 +288,6 @@ fn truncated_code_loaded_state_is_preserved() {
     ));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn model_loaded_state_round_trips_through_apply_loaded() {
     let mut state = State::default();
@@ -361,7 +351,6 @@ fn model_loaded_state_round_trips_through_apply_loaded() {
     assert_eq!(state.selected_skin(), 0);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_loaded_state_round_trips_through_apply_loaded() {
     let mut state = State::default();
@@ -457,7 +446,6 @@ fn map_loaded_state_round_trips_through_apply_loaded() {
     assert!(!state.map_visibility_control_visible());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
     let mut state = State::default();
@@ -532,7 +520,6 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
     assert!(!state.phy_debug_control_visible());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
     let mut state = State::default();
@@ -613,7 +600,6 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
     assert!(state.phy_debug_control_visible());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn model_selections_apply_within_bounds_and_reset_on_close() {
     let mut state = State::default();

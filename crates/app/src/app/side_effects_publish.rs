@@ -3,7 +3,6 @@ use super::{
     WORKSHOP_LEGAL_URL, flatten_blocking_ui_result, modal_stack, prepare_publish, sounds,
     steam_session, workshop_url,
 };
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
 use gmpublished_backend::error_key::keys;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,8 +83,7 @@ impl App {
             prepare_publish::Effect::PathVerificationRequested(request) => {
                 self.prepare_publish_content_verification_task(request)
             }
-            #[cfg(feature = "asset-studio")]
-            prepare_publish::Effect::EntryPreviewRequested(request) => {
+                        prepare_publish::Effect::EntryPreviewRequested(request) => {
                 self.apply_file_preview_message(file_preview::Message::OpenRequested(request))
             }
             prepare_publish::Effect::IconVerificationRequested(request) => {

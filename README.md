@@ -2,7 +2,7 @@
 
 gmpublished is a web-view free fork of William Venner's [gmpublisher](https://github.com/WilliamVenner/gmpublisher), built with [Iced](https://iced.rs/).
 
-On top of the features offered by (and thanks to) gmpublisher, it includes full in-app preview tools for maps, models, code, materials and audio. Click [here](#compared-to-gmpublisher) for a more detailed comparison. Note that most additional features can be removed by building with --no-default-features.
+On top of the features offered by (and thanks to) gmpublisher, it includes full in-app preview tools for maps, models, code, materials and audio. Click [here](#compared-to-gmpublisher) for a more detailed comparison.
 
 ## Installation
 

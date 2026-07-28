@@ -96,8 +96,7 @@ fn embedded_preview_body<'a>(
     expanded: bool,
     modal_width: f32,
 ) -> Option<Element<'a, Message>> {
-    #[cfg(feature = "asset-studio")]
-    {
+        {
         let tokens = *ctx.tokens;
         if !file_preview_state.is_open() {
             return None;
@@ -123,11 +122,6 @@ fn embedded_preview_body<'a>(
                 .into(),
             )
         }
-    }
-    #[cfg(not(feature = "asset-studio"))]
-    {
-        let _ = (state, file_preview_state, ctx, expanded, modal_width);
-        None
     }
 }
 
@@ -682,24 +676,10 @@ fn browser_rows<'a>(
 
 fn file_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let message = match row_data.kind {
-        FileBrowserEntryKind::Directory => Some(Message::DirectoryOpened(row_data.shared_path())),
-        FileBrowserEntryKind::File => file_activation_message(row_data.shared_path()),
+        FileBrowserEntryKind::Directory => Message::DirectoryOpened(row_data.shared_path()),
+        FileBrowserEntryKind::File => Message::PreviewEntryRequested(row_data.shared_path()),
     };
-    file_browser::row_view(row_data, message, ctx)
-}
-
-#[cfg(feature = "asset-studio")]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "signature is shared with the non-asset-studio variant, which returns None"
-)]
-fn file_activation_message(path: std::sync::Arc<String>) -> Option<Message> {
-    Some(Message::PreviewEntryRequested(path))
-}
-
-#[cfg(not(feature = "asset-studio"))]
-fn file_activation_message(_path: std::sync::Arc<String>) -> Option<Message> {
-    None
+    file_browser::row_view(row_data, Some(message), ctx)
 }
 
 fn browser_footer<'a>(

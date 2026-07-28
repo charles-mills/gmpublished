@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "asset-studio"), allow(dead_code))]
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -165,8 +164,7 @@ impl PreviewArchiveSource {
         matches!(self, Self::Gma(_))
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {
+        pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {
         match self {
             Self::Gma(archive) => archive
                 .entry_bytes(path)
@@ -187,7 +185,7 @@ impl PreviewArchiveSource {
     }
 }
 
-#[cfg(all(test, feature = "asset-studio"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

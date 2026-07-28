@@ -161,14 +161,12 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             let _changed = state.open_directory(&path);
             Vec::new()
         }
-        #[cfg(feature = "asset-studio")]
-        Message::PreviewEntryRequested(path) => state
+                Message::PreviewEntryRequested(path) => state
             .entry_preview_request(&path)
             .map_or_else(Vec::new, |request| {
                 vec![Effect::EntryPreviewRequested(request)]
             }),
-        #[cfg(feature = "asset-studio")]
-        Message::FilePreview(_) => Vec::new(),
+                Message::FilePreview(_) => Vec::new(),
         Message::UpRequested => {
             let _changed = state.go_up();
             Vec::new()
