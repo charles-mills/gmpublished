@@ -53,8 +53,11 @@ pub struct DownloadCountFormatter {
 }
 
 impl Default for DownloadCountFormatter {
+    /// Follows the same automatic policy as any other formatter rather than
+    /// hardcoding one locale's separator. Used before settings load, then
+    /// replaced by `set_download_count_formatter`.
     fn default() -> Self {
-        Self::with_separator(',')
+        Self::from_format_and_locale(DownloadCountFormat::default(), None)
     }
 }
 

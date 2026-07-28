@@ -585,6 +585,29 @@ mod tests {
         );
     }
 
+    /// Every `ErrorKey` the UI can surface must derive a Fluent key that
+    /// exists, or `translated_error` silently degrades to `err-unknown`. That
+    /// is exactly what a prose key value like `ErrorKey("Garry's Mod path is
+    /// not configured")` used to do.
+    #[test]
+    fn error_keys_resolve_to_their_own_message_not_the_fallback() {
+        use gmpublished_backend::error_key::keys;
+
+        let i18n = I18n::for_locale(Some("en"));
+        let fallback = i18n.tr("err-unknown");
+
+        for key in [keys::GMOD_PATH_MISSING, keys::NO_ADDONS_FOUND, keys::IO_ERROR] {
+            let translated =
+                super::translated_error(&i18n, &crate::bridge::ui_error::UiError::new(key));
+            assert_ne!(
+                translated,
+                fallback,
+                "{} has no err-* catalog entry",
+                key.as_str()
+            );
+        }
+    }
+
     #[test]
     fn fluent_catalogs_have_matching_key_sets() {
         let english = catalog_message_ids(catalog_source("en"));

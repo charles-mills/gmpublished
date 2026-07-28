@@ -876,18 +876,6 @@ impl Default for TreemapLayers {
     }
 }
 
-impl Clone for TreemapLayers {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
-impl PartialEq for TreemapLayers {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
 impl fmt::Debug for TreemapLayers {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("TreemapLayers")

@@ -898,7 +898,7 @@ fn settings_modal_style(tokens: &Tokens) -> container::Style {
         background: Some(Color::from(tokens.colors.bg).into()),
         text_color: Some(tokens.colors.text.into()),
         border: Border {
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
             ..Border::default()
         },
         shadow: Shadow {
@@ -913,7 +913,7 @@ fn settings_modal_style(tokens: &Tokens) -> container::Style {
 fn desktop_tab_rail_style(tokens: &Tokens) -> container::Style {
     rail_style_with_radius(
         tokens,
-        border::radius(tokens.radii.md)
+        border::radius(tokens.radii.lg)
             .top_right(0.0)
             .bottom_right(0.0),
     )
@@ -922,7 +922,7 @@ fn desktop_tab_rail_style(tokens: &Tokens) -> container::Style {
 fn compact_tab_rail_style(tokens: &Tokens) -> container::Style {
     rail_style_with_radius(
         tokens,
-        border::radius(tokens.radii.md)
+        border::radius(tokens.radii.lg)
             .bottom_left(0.0)
             .bottom_right(0.0),
     )
@@ -930,9 +930,9 @@ fn compact_tab_rail_style(tokens: &Tokens) -> container::Style {
 
 fn content_panel_style(tokens: &Tokens, compact: bool) -> container::Style {
     let radius = if compact {
-        border::radius(tokens.radii.md).top_left(0.0).top_right(0.0)
+        border::radius(tokens.radii.lg).top_left(0.0).top_right(0.0)
     } else {
-        border::radius(tokens.radii.md)
+        border::radius(tokens.radii.lg)
             .top_left(0.0)
             .bottom_left(0.0)
     };
@@ -950,9 +950,9 @@ fn content_panel_style(tokens: &Tokens, compact: bool) -> container::Style {
 
 fn status_rail_style(tokens: &Tokens, compact: bool) -> container::Style {
     let radius = if compact {
-        border::radius(tokens.radii.md).top_left(0.0).top_right(0.0)
+        border::radius(tokens.radii.lg).top_left(0.0).top_right(0.0)
     } else {
-        border::radius(0.0).bottom_right(tokens.radii.md)
+        border::radius(0.0).bottom_right(tokens.radii.lg)
     };
     rail_style_with_radius(tokens, radius)
 }
@@ -982,7 +982,7 @@ fn tab_button_style(tokens: &Tokens, active: bool, status: button::Status) -> bu
         background: Some(Color::from(background).into()),
         text_color: tokens.colors.text.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -1025,7 +1025,7 @@ fn select_metrics(tokens: &Tokens) -> select::Metrics {
     select::Metrics {
         text_size: tokens.typography.body,
         padding: Padding::from([SELECT_PAD_Y, tokens.spacing.pad_sm]),
-        radius: tokens.radii.md,
+        radius: tokens.radii.lg,
         max_rows: select::MAX_ROWS,
     }
 }
@@ -1056,7 +1056,7 @@ fn input_style(tokens: &Tokens, error: bool, status: text_input::Status) -> text
             } else {
                 0.0
             },
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         icon: tokens.colors.icon_muted.into(),
         placeholder: tokens.colors.text_dim.into(),
@@ -1079,7 +1079,7 @@ fn swatch_style(tokens: &Tokens, rgb: u32, expanded: bool) -> container::Style {
             } else {
                 tokens.dims.border_width
             },
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         ..container::Style::default()
     }
@@ -1092,7 +1092,7 @@ fn color_picker_popover_style(tokens: &Tokens) -> container::Style {
         border: Border {
             color: tokens.colors.border_subtle.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
         },
         shadow: Shadow {
             color: tokens.colors.shadow_dropdown.into(),
@@ -1111,7 +1111,7 @@ fn hsv_slider_style(tokens: &Tokens, rail: Background, _status: slider::Status) 
             border: Border {
                 color: tokens.colors.border_subtle.into(),
                 width: tokens.dims.border_width,
-                radius: tokens.radii.base.into(),
+                radius: tokens.radii.sm.into(),
             },
         },
         handle: slider::Handle {
@@ -1141,7 +1141,7 @@ fn text_button_style(tokens: &Tokens, status: button::Status) -> button::Style {
         background: Some(Color::from(background).into()),
         text_color: tokens.colors.text.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -1175,7 +1175,7 @@ fn primary_button_style(tokens: &Tokens, danger: bool, status: button::Status) -
         background: Some(Color::from(background).into()),
         text_color: text_color.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -1188,7 +1188,7 @@ fn confirm_dialog_style(tokens: &Tokens) -> container::Style {
         background: Some(Color::from(tokens.colors.surface).into()),
         text_color: Some(tokens.colors.text.into()),
         border: Border {
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
             ..Border::default()
         },
         shadow: Shadow {

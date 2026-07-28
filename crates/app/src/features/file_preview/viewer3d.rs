@@ -115,7 +115,6 @@ const MIN_PITCH: f32 = -1.55;
 const MAX_PITCH: f32 = 1.55;
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
-const MODEL_VERTEX_FLOAT_COUNT: u64 = 14;
 const DETAIL_VERTEX_FLOAT_COUNT: u64 = 7;
 const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x3,

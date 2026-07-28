@@ -118,7 +118,11 @@ impl crate::error_key::HasErrorKey for GMAError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Deserialized in code, not by `#[serde(untagged)]`: with every `Standard`
+/// field defaulted, untagged matched `Standard` for *any* JSON object, so a
+/// legacy description that happened to be one silently lost its text and
+/// `Legacy` was unreachable. See [`metadata_from_embedded_fields`].
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum GMAMetadata {
     Standard {
@@ -137,6 +141,23 @@ pub enum GMAMetadata {
         description: String,
     },
 }
+/// The `addon.json` shape newer GMAs serialize into the description field.
+#[derive(Deserialize)]
+pub(crate) struct StandardManifest {
+    #[serde(rename = "type")]
+    pub(crate) addon_type: Option<String>,
+    pub(crate) tags: Option<Vec<String>>,
+    pub(crate) ignore: Option<Vec<String>>,
+}
+
+impl StandardManifest {
+    /// An object carrying none of these keys is free text that happens to be
+    /// JSON, not a manifest.
+    pub(crate) const fn is_manifest(&self) -> bool {
+        self.addon_type.is_some() || self.tags.is_some() || self.ignore.is_some()
+    }
+}
+
 impl GMAMetadata {
     pub fn title(&self) -> &str {
         match &self {

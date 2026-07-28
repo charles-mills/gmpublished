@@ -752,7 +752,7 @@ fn selector_row<'a>(
             select::Metrics {
                 text_size: tokens.typography.body_sm,
                 padding: Padding::from([tokens.spacing.pad_xs, tokens.spacing.pad_sm]),
-                radius: tokens.radii.base,
+                radius: tokens.radii.sm,
                 max_rows: select::MAX_ROWS,
             },
             select::Chevron::Shown,

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use gmpublished_backend::error_key::keys;
@@ -598,7 +599,7 @@ impl BackendServices {
 
     pub(crate) fn submit_publish_icon_request(
         &self,
-        icon_source_path: &PathBuf,
+        icon_source_path: &Path,
         upscale: bool,
         workshop_id: PublishedFileId,
         transaction: &transactions::Transaction,

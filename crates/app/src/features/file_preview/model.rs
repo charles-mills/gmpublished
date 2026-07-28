@@ -14,7 +14,9 @@ pub use gmpublished_backend::scene::map::{
 /// 14-float layout. `vformats` loads lean position/normal/uv vertices;
 /// the extra lanes are the app's (prop lighting bakes into `color`,
 /// debug meshes tint it, maps use `lightmap_uv`/`blend_alpha`).
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "asset-studio", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct ModelVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],

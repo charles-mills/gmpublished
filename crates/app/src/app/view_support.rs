@@ -25,7 +25,7 @@ pub(super) fn addon_drag_ghost<'a>(
                 .width(DRAG_GHOST_EDGE)
                 .height(DRAG_GHOST_EDGE)
                 .content_fit(ContentFit::Cover)
-                .border_radius(tokens.radii.base),
+                .border_radius(tokens.radii.sm),
         )
         .padding(2.0)
         .style(move |_| {

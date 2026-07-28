@@ -715,7 +715,7 @@ fn panel_style(tokens: &Tokens) -> container::Style {
         Border {
             color: tokens.colors.border.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.lg.into(),
+            radius: tokens.radii.md.into(),
         },
     )
 }
@@ -727,7 +727,7 @@ fn compact_tab_bar_style(tokens: &Tokens) -> container::Style {
         Border {
             color: tokens.colors.border.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.lg.into(),
+            radius: tokens.radii.md.into(),
         },
     )
 }
@@ -745,7 +745,7 @@ fn compact_tab_style(tokens: &Tokens, active: bool, status: button::Status) -> b
         background: Some(Color::from(background).into()),
         text_color: tokens.colors.text.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -814,7 +814,7 @@ fn top_input_style(
         border: Border {
             color: border_color.into(),
             width: border_width,
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         icon: if error {
             tokens.colors.error.into()
@@ -843,7 +843,7 @@ fn top_icon_button_style(tokens: &Tokens, status: button::Status) -> button::Sty
         border: Border {
             color: tokens.colors.bg.with_alpha(0).into(),
             width: 0.0,
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         shadow: Shadow::default(),
         snap: true,
@@ -866,7 +866,7 @@ fn downloader_button_style(tokens: &Tokens, status: button::Status) -> button::S
         border: Border {
             color: tokens.colors.bg.with_alpha(0).into(),
             width: 0.0,
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         shadow: Shadow::default(),
         snap: true,
@@ -889,7 +889,7 @@ fn idle_button_style(tokens: &Tokens, status: button::Status) -> button::Style {
         border: Border {
             color: tokens.colors.bg.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
         },
         shadow: Shadow::default(),
         snap: true,

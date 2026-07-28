@@ -1,3 +1,15 @@
+//! Everything gmpublished does that is not drawing: GMA archives, Steam, the
+//! local addon library, and Source asset decoding.
+//!
+//! [`Backend`] is the composition root. Fallible operations return a typed
+//! error implementing [`HasErrorKey`]; the UI maps that key to localized text,
+//! so nothing here formats an error for display. Most entry points block and
+//! belong off the main thread — `main_thread_forbidden!` asserts that in debug.
+// These two disagree about `pub` in a private module; for a library the true
+// public surface matters more than the shorter spelling.
+#![warn(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 pub mod error_key;
 pub use error_key::{ErrorKey, HasErrorKey};
 

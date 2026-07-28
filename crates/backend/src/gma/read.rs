@@ -375,21 +375,61 @@ fn metadata_from_embedded_fields(
     embedded_title: String,
     embedded_description: String,
 ) -> GMAMetadata {
-    match serde_json::de::from_str::<GMAMetadata>(&embedded_description) {
-        Ok(mut metadata) => {
-            match &mut metadata {
-                GMAMetadata::Standard { title, .. } => *title = embedded_title,
-                GMAMetadata::Legacy { title, description } => {
-                    *title = embedded_title;
-                    *description = embedded_description;
-                }
-            }
-            metadata
-        }
-        Err(_) => GMAMetadata::Legacy {
+    match serde_json::de::from_str::<super::StandardManifest>(&embedded_description) {
+        Ok(manifest) if manifest.is_manifest() => GMAMetadata::Standard {
+            title: embedded_title,
+            addon_type: manifest.addon_type.unwrap_or_default(),
+            tags: manifest.tags.unwrap_or_default(),
+            ignore: manifest.ignore.unwrap_or_default(),
+        },
+        _ => GMAMetadata::Legacy {
             title: embedded_title,
             description: embedded_description,
         },
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::metadata_from_embedded_fields;
+    use crate::gma::GMAMetadata;
+
+    #[test]
+    fn a_manifest_description_becomes_standard() {
+        let metadata = metadata_from_embedded_fields(
+            "Addon".to_owned(),
+            r#"{"type":"map","tags":["scenic"]}"#.to_owned(),
+        );
+
+        assert!(matches!(metadata, GMAMetadata::Standard { .. }));
+        assert_eq!(metadata.addon_type(), Some("map"));
+        assert_eq!(metadata.tags().map(Vec::as_slice), Some(&["scenic".to_owned()][..]));
+        assert_eq!(metadata.title(), "Addon");
+    }
+
+    /// Free text that happens to parse as JSON is not a manifest. Untagged
+    /// deserialization used to swallow these into an empty `Standard`,
+    /// discarding the description.
+    #[test]
+    fn a_json_shaped_description_without_manifest_keys_stays_legacy() {
+        for description in ["{}", r#"{"note":"see the workshop page"}"#] {
+            let metadata =
+                metadata_from_embedded_fields("Addon".to_owned(), description.to_owned());
+
+            let GMAMetadata::Legacy { description: kept, .. } = &metadata else {
+                panic!("{description} should stay Legacy, got {metadata:?}");
+            };
+            assert_eq!(kept, description, "the description must survive");
+        }
+    }
+
+    #[test]
+    fn plain_text_stays_legacy() {
+        let metadata =
+            metadata_from_embedded_fields("Addon".to_owned(), "just a description".to_owned());
+
+        assert!(matches!(metadata, GMAMetadata::Legacy { .. }));
+        assert_eq!(metadata.title(), "Addon");
     }
 }
 

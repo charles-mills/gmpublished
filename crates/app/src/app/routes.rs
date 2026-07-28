@@ -55,9 +55,9 @@ impl App {
         next: shell::Route,
     ) -> Task<RootMessage> {
         if previous == next {
-            debug_assert_ne!(
-                previous, next,
-                "route_transitioned_task is an invariant guard; shell emits Navigated only on changes"
+            debug_assert!(
+                false,
+                "shell emits Navigated only on real changes, but {previous:?} -> {next:?}"
             );
             return Task::none();
         }

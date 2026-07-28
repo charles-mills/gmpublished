@@ -235,7 +235,7 @@ fn context_menu_style(tokens: &Tokens, opacity: f32) -> container::Style {
             Color::from(tokens.colors.menu_bg).scale_alpha(opacity),
         )),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),

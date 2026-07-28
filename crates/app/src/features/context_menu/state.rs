@@ -250,17 +250,6 @@ impl Default for State {
     }
 }
 
-impl PartialEq for State {
-    fn eq(&self, other: &Self) -> bool {
-        self.open == other.open
-            && self.visible == other.visible
-            && self.owner == other.owner
-            && self.position == other.position
-            && self.entries == other.entries
-            && self.presence == other.presence
-    }
-}
-
 impl State {
     pub(crate) const fn open(&self) -> bool {
         self.open

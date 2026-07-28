@@ -145,16 +145,11 @@ fn material_texture_entry_path(texture_name: &str) -> String {
     }
 }
 
-/// The `.vtx` flavours Source ships, in the order a loader should try them.
+/// The `.vtx` flavours Source ships, most specific first — the bare `.vtx`
+/// must come last or `foo.dx90.vtx` would yield `foo.dx90.mdl`.
 ///
-/// Order is load-bearing twice over. [`model_companion_parent_path`] matches by
-/// suffix, so the bare `.vtx` must come last or `foo.dx90.vtx` would yield
-/// `foo.dx90.mdl`; and `load_model_companions` walks the same list as its
-/// fallback chain, so the most specific (and most commonly shipped) flavour
-/// must come first.
-///
-/// Both sides read this one list: classifying a flavour as a companion without
-/// the loader also trying it means the file redirects to its parent `.mdl` and
+/// `model_companion_parent_path` and `load_model_companions` both read this
+/// list; a flavour in one but not the other redirects to its parent `.mdl` and
 /// then fails to load.
 pub(super) const VTX_SUFFIXES: &[&str] = &[
     ".dx90.vtx",
@@ -165,9 +160,8 @@ pub(super) const VTX_SUFFIXES: &[&str] = &[
     ".vtx",
 ];
 
-/// Non-`.vtx` companions that redirect to the parent `.mdl`. Unlike
-/// [`VTX_SUFFIXES`] these are not alternatives to one another — `.vvd` is
-/// loaded unconditionally and `.phy`/`.ani` are not loaded at all.
+/// Non-`.vtx` companions. Not alternatives to one another, unlike
+/// [`VTX_SUFFIXES`].
 const OTHER_COMPANION_SUFFIXES: &[&str] = &[".vvd", ".phy", ".ani"];
 
 pub(super) fn model_companion_parent_path(path: &str) -> Option<String> {

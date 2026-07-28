@@ -12,7 +12,7 @@
 
 use std::{
     collections::HashSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         LazyLock,
         mpsc::{self, Receiver, Sender},
@@ -106,7 +106,7 @@ pub fn filter_open_gma_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<Pa
         .collect()
 }
 
-fn accept_open_gma_path(path: &PathBuf, seen: &mut HashSet<PathBuf>) -> bool {
+fn accept_open_gma_path(path: &Path, seen: &mut HashSet<PathBuf>) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         log::debug!("ignoring missing document-open path {}", path.display());
         return false;
@@ -119,7 +119,7 @@ fn accept_open_gma_path(path: &PathBuf, seen: &mut HashSet<PathBuf>) -> bool {
         log::debug!("ignoring non-GMA document-open path {}", path.display());
         return false;
     }
-    if !seen.insert(path.clone()) {
+    if !seen.insert(path.to_path_buf()) {
         log::debug!("ignoring duplicate document-open path {}", path.display());
         return false;
     }

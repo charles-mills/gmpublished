@@ -776,7 +776,7 @@ fn popover_style(tokens: &Tokens, opacity: f32) -> container::Style {
             ))
             .into(),
         ),
-        border: border::rounded(tokens.radii.lg),
+        border: border::rounded(tokens.radii.md),
         shadow: Shadow {
             color: Color::from(tokens.colors.shadow_dropdown).scale_alpha(opacity),
             offset: Vector::ZERO,
@@ -872,7 +872,7 @@ fn menu_row_style(tokens: &Tokens, status: button::Status, opacity: f32) -> butt
     button::Style {
         background,
         text_color: Color::from(tokens.colors.text).scale_alpha(opacity),
-        border: border::rounded(tokens.radii.base),
+        border: border::rounded(tokens.radii.sm),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -888,7 +888,7 @@ fn update_row_style(tokens: &Tokens, status: button::Status, opacity: f32) -> bu
     button::Style {
         background: Some(Color::from(theme::motion::scaled_alpha(background, opacity)).into()),
         text_color: Color::from(tokens.colors.text).scale_alpha(opacity),
-        border: border::rounded(tokens.radii.base),
+        border: border::rounded(tokens.radii.sm),
         shadow: Shadow::default(),
         snap: true,
     }

@@ -733,8 +733,6 @@ fn load_model_companions(
         return None;
     };
 
-    // Every flavour `model_companion_parent_path` redirects to the parent
-    // `.mdl` must be tried here, or that flavour previews as a decode failure.
     let Some(vtx_bytes) = VTX_SUFFIXES
         .iter()
         .find_map(|suffix| entry_bytes(&format!("{stem}{suffix}")))

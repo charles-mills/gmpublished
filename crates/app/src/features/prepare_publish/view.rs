@@ -419,7 +419,7 @@ fn select_metrics(tokens: &Tokens) -> select::Metrics {
     select::Metrics {
         text_size: tokens.typography.caption,
         padding: Padding::new(tokens.spacing.pad_control),
-        radius: tokens.radii.base,
+        radius: tokens.radii.sm,
         max_rows: select::MAX_ROWS,
     }
 }

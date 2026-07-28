@@ -242,7 +242,7 @@ fn pending_image_square_is_reserved_until_metadata_settles() {
     assert!(state.apply_workshop_metadata(
         request.request_id,
         PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-        Err(UiError::new(gmpublished_backend::error_key::ErrorKey(
+        Err(UiError::new(gmpublished_backend::error_key::ErrorKey::new(
             "ERR_TEST"
         )))
     ));

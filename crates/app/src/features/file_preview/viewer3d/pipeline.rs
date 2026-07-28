@@ -4,7 +4,7 @@ use super::{
     CHECKERBOARD_SIZE, CHECKERBOARD_SIZE_USIZE, Camera, DETAIL_SHADER_SOURCE,
     DETAIL_VERTEX_ATTRIBUTES, DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance,
     DoorRenderPose, DrawItem, DrawPlan, DrawPlans, FOV_Y, FlyCamera, MATERIAL_ANISOTROPY_CLAMP,
-    MODEL_VERTEX_ATTRIBUTES, MODEL_VERTEX_FLOAT_COUNT, MSAA_SAMPLE_COUNT, MapFog, MapSkyCamera,
+    MODEL_VERTEX_ATTRIBUTES, MSAA_SAMPLE_COUNT, MapFog, MapSkyCamera,
     MaterialSlot, MeshData, ModelPreview, ModelVertex, OverlayDrawItem, OverlayPrimitive,
     PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA, Rectangle, RenderMode, ResolvedBcMip, ResolvedTexture,
     SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, Skybox, SkyboxFace, TextureUploadLevel,
@@ -913,8 +913,7 @@ impl UploadedModel {
                 continue;
             };
             let transformed = transform_door_vertices(door, local_vertices.as_slice(), pose);
-            let bytes = model_vertex_bytes(transformed.as_slice());
-            queue.write_buffer(&mesh.vertices, 0, &bytes);
+            queue.write_buffer(&mesh.vertices, 0, bytemuck::cast_slice(&transformed));
             mesh.centroid = mesh_centroid(transformed.as_slice());
             mesh.last_door_pose = Some(pose);
         }
@@ -1980,7 +1979,7 @@ pub(super) fn overlay_depth_bias_state() -> wgpu::DepthBiasState {
 
 pub(super) fn model_vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
-        array_stride: MODEL_VERTEX_FLOAT_COUNT * std::mem::size_of::<f32>() as u64,
+        array_stride: std::mem::size_of::<ModelVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &MODEL_VERTEX_ATTRIBUTES,
     }
@@ -2648,24 +2647,7 @@ pub(super) fn upload_meshes(
         .enumerate()
         .filter(|(_, mesh)| !mesh.indices.is_empty())
         .map(|(scene_mesh_index, mesh)| {
-            let mut vertex_bytes = Vec::with_capacity(
-                mesh.vertices.len()
-                    * usize::try_from(MODEL_VERTEX_FLOAT_COUNT).unwrap_or(14)
-                    * std::mem::size_of::<f32>(),
-            );
-            for vertex in &mesh.vertices {
-                for component in vertex
-                    .position
-                    .iter()
-                    .chain(vertex.normal.iter())
-                    .chain(vertex.uv.iter())
-                    .chain(vertex.lightmap_uv.iter())
-                    .chain(vertex.color.iter())
-                {
-                    vertex_bytes.extend_from_slice(&component.to_le_bytes());
-                }
-                vertex_bytes.extend_from_slice(&vertex.blend_alpha.to_le_bytes());
-            }
+            let vertex_bytes: &[u8] = bytemuck::cast_slice(&mesh.vertices);
             let centroid = mesh_centroid(&mesh.vertices);
 
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2674,7 +2656,7 @@ pub(super) fn upload_meshes(
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&vertices, 0, &vertex_bytes);
+            queue.write_buffer(&vertices, 0, vertex_bytes);
 
             let indices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("file_preview.model_viewer.indices"),
@@ -2721,14 +2703,14 @@ pub(super) fn upload_door_meshes(
             }
             let transformed_vertices =
                 transform_door_vertices(door, mesh.vertices.as_slice(), pose);
-            let vertex_bytes = model_vertex_bytes(transformed_vertices.as_slice());
+            let vertex_bytes: &[u8] = bytemuck::cast_slice(&transformed_vertices);
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("file_preview.model_viewer.door_vertices"),
                 size: vertex_bytes.len() as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&vertices, 0, &vertex_bytes);
+            queue.write_buffer(&vertices, 0, vertex_bytes);
 
             let indices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("file_preview.model_viewer.door_indices"),
@@ -2757,23 +2739,6 @@ pub(super) fn upload_door_meshes(
         }
     }
     uploaded
-}
-
-pub(super) fn model_vertex_bytes(vertices: &[ModelVertex]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(
-        vertices.len()
-            * usize::try_from(MODEL_VERTEX_FLOAT_COUNT).unwrap_or(14)
-            * std::mem::size_of::<f32>(),
-    );
-    for vertex in vertices {
-        push_f32s(&mut bytes, &vertex.position);
-        push_f32s(&mut bytes, &vertex.normal);
-        push_f32s(&mut bytes, &vertex.uv);
-        push_f32s(&mut bytes, &vertex.lightmap_uv);
-        push_f32s(&mut bytes, &vertex.color);
-        bytes.extend_from_slice(&vertex.blend_alpha.to_le_bytes());
-    }
-    bytes
 }
 
 pub(super) fn push_detail_sprite_vertices(bytes: &mut Vec<u8>, sprite: &DetailSprite) {
@@ -2807,43 +2772,41 @@ pub(super) fn upload_overlays(
 ) -> Vec<UploadedOverlay> {
     overlays
         .iter()
-        .filter_map(|overlay| {
-            let vertex_bytes = overlay_vertex_bytes(overlay);
-            if vertex_bytes.is_empty() {
-                return None;
-            }
+        .map(|overlay| {
+            let vertices = overlay_vertices(overlay);
+            let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("file_preview.model_viewer.overlay_vertices"),
                 size: vertex_bytes.len() as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&vertices, 0, &vertex_bytes);
-            Some(UploadedOverlay {
+            queue.write_buffer(&vertices, 0, vertex_bytes);
+            UploadedOverlay {
                 vertices,
                 vertex_count: 6,
                 centroid: overlay_centroid(overlay),
                 material_index: overlay.material_index,
                 map_skybox,
-            })
+            }
         })
         .collect()
 }
 
-pub(super) fn overlay_vertex_bytes(overlay: &OverlayPrimitive) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(
-        6 * usize::try_from(MODEL_VERTEX_FLOAT_COUNT).unwrap_or(14) * std::mem::size_of::<f32>(),
-    );
-    for index in [0_usize, 1, 2, 0, 2, 3] {
+/// The overlay quad as two triangles. Overlays carry no lightmap, vertex
+/// colour, or blend weight, so those lanes take their neutral values.
+pub(super) fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
+    [0_usize, 1, 2, 0, 2, 3].map(|index| {
         let vertex = overlay.vertices[index];
-        push_f32s(&mut bytes, &vertex.position);
-        push_f32s(&mut bytes, &vertex.normal);
-        push_f32s(&mut bytes, &vertex.uv);
-        push_f32s(&mut bytes, &[0.0, 0.0]);
-        push_f32s(&mut bytes, &[1.0, 1.0, 1.0]);
-        push_f32s(&mut bytes, &[0.0]);
-    }
-    bytes
+        ModelVertex {
+            position: vertex.position,
+            normal: vertex.normal,
+            uv: vertex.uv,
+            lightmap_uv: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            blend_alpha: 0.0,
+        }
+    })
 }
 
 pub(super) fn overlay_centroid(overlay: &OverlayPrimitive) -> [f32; 3] {

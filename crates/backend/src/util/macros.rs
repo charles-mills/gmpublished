@@ -12,11 +12,11 @@ macro_rules! main_thread_forbidden {
 }
 pub(crate) use main_thread_forbidden;
 
-pub fn available_parallelism_count() -> usize {
+pub(crate) fn available_parallelism_count() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
-pub static NUM_THREADS: std::sync::LazyLock<usize> =
+pub(crate) static NUM_THREADS: std::sync::LazyLock<usize> =
     std::sync::LazyLock::new(|| available_parallelism_count().saturating_sub(2).max(2));
 
 macro_rules! thread_pool {

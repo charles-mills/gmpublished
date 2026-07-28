@@ -85,7 +85,7 @@ fn write_log_line(file: &mut Option<File>, log: &str) {
     }
 }
 
-pub fn enable_file_sink(logs_dir: PathBuf) {
+pub(crate) fn enable_file_sink(logs_dir: PathBuf) {
     let _ = LOGS_DIR.set(logs_dir);
     FILE_SINK_READY.store(true, Ordering::Release);
 }
@@ -93,7 +93,7 @@ pub fn enable_file_sink(logs_dir: PathBuf) {
 /// Idempotent: `log::set_logger`/`panic::set_hook` are one-shot process
 /// resources, so a second `Backend` built in the same process (tests, or a
 /// hypothetical re-init) reuses the first one's install rather than erroring.
-pub fn install() -> Result<(), log::SetLoggerError> {
+pub(crate) fn install() -> Result<(), log::SetLoggerError> {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
     if INSTALLED.get().is_some() {

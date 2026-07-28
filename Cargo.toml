@@ -23,7 +23,14 @@ iced_winit = { path = "crates/vendor/iced_winit" }
 
 # Applied by crates/app and crates/backend via `[lints] workspace = true`;
 # vendored crates deliberately do not opt in.
+# `unreachable_pub` is deliberately absent: it contradicts `redundant_pub_crate`
+# in a binary crate. Only the library opts in — see crates/backend/src/lib.rs.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 [workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
 # ownership / clones
 redundant_clone = "warn"
 implicit_clone = "warn"

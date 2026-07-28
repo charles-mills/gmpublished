@@ -1326,7 +1326,7 @@ impl App {
             layers = layers.push(account_menu.map(RootMessage::Shell));
         }
 
-        if self.state.modal_stack.active().is_some() {
+        if let Some(active) = self.state.modal_stack.active() {
             let modal_scale = self.state.modal_stack.scale(now);
             let modal_interactive = self.state.modal_stack.interactive();
             layers = layers.push(
@@ -1340,50 +1340,50 @@ impl App {
                 0.0
             };
 
-            if self.state.modal_stack.active() == Some(modal_stack::ActiveModal::PreparePublish) {
-                // An expanded preview leaves only a thin ring of app visible;
-                // black that ring out so it reads as background, not glow.
-                if file_preview::embedded_expanded(&self.state.file_preview) {
-                    layers = layers.push(
-                        modal_stack::expanded_scrim(&self.state.modal_stack, &tokens, now)
-                            .map(RootMessage::ModalStack),
-                    );
-                }
-                let content = prepare_publish::view(
-                    &self.state.prepare_publish,
-                    &self.state.file_preview,
-                    ctx,
-                    self.state.viewport_size,
-                    chrome_clearance,
-                    now,
-                )
-                .map(RootMessage::PreparePublish);
-                layers = layers.push(modal_stack::frame(content, modal_scale, modal_interactive));
+            // Only these two host a file preview. An expanded preview leaves
+            // just a thin ring of app visible; black it out so it reads as
+            // background, not glow.
+            let hosts_preview = matches!(
+                active,
+                modal_stack::ActiveModal::PreparePublish | modal_stack::ActiveModal::PreviewGma
+            );
+            if hosts_preview && file_preview::embedded_expanded(&self.state.file_preview) {
+                layers = layers.push(
+                    modal_stack::expanded_scrim(&self.state.modal_stack, &tokens, now)
+                        .map(RootMessage::ModalStack),
+                );
             }
 
-            if self.state.modal_stack.active() == Some(modal_stack::ActiveModal::PreviewGma) {
-                // An expanded preview leaves only a thin ring of app visible;
-                // black that ring out so it reads as background, not glow.
-                if file_preview::embedded_expanded(&self.state.file_preview) {
-                    layers = layers.push(
-                        modal_stack::expanded_scrim(&self.state.modal_stack, &tokens, now)
-                            .map(RootMessage::ModalStack),
-                    );
-                }
-                let content = preview_gma::view(
-                    &self.state.preview_gma,
-                    &self.state.file_preview,
-                    ctx,
-                    self.state.viewport_size,
-                    chrome_clearance,
-                )
-                .map(RootMessage::PreviewGma);
-                layers = layers.push(modal_stack::frame(content, modal_scale, modal_interactive));
-            }
-
-            if self.state.modal_stack.active() == Some(modal_stack::ActiveModal::Settings) {
-                let content = settings::view(&self.state.settings, ctx, self.state.viewport_size)
-                    .map(RootMessage::Settings);
+            let content = match active {
+                modal_stack::ActiveModal::PreparePublish => Some(
+                    prepare_publish::view(
+                        &self.state.prepare_publish,
+                        &self.state.file_preview,
+                        ctx,
+                        self.state.viewport_size,
+                        chrome_clearance,
+                        now,
+                    )
+                    .map(RootMessage::PreparePublish),
+                ),
+                modal_stack::ActiveModal::PreviewGma => Some(
+                    preview_gma::view(
+                        &self.state.preview_gma,
+                        &self.state.file_preview,
+                        ctx,
+                        self.state.viewport_size,
+                        chrome_clearance,
+                    )
+                    .map(RootMessage::PreviewGma),
+                ),
+                modal_stack::ActiveModal::Settings => Some(
+                    settings::view(&self.state.settings, ctx, self.state.viewport_size)
+                        .map(RootMessage::Settings),
+                ),
+                // Overlay-only; drawn in the overlay block below.
+                modal_stack::ActiveModal::DestinationSelect => None,
+            };
+            if let Some(content) = content {
                 layers = layers.push(modal_stack::frame(content, modal_scale, modal_interactive));
             }
         }
@@ -1398,13 +1398,21 @@ impl App {
                     .map(RootMessage::ModalStack),
             );
 
-            if overlay_modal == modal_stack::ActiveModal::DestinationSelect {
-                let content = destination_select::view(
-                    &self.state.destination_select,
-                    ctx,
-                    self.state.viewport_size,
-                )
-                .map(RootMessage::DestinationSelect);
+            let content = match overlay_modal {
+                modal_stack::ActiveModal::DestinationSelect => Some(
+                    destination_select::view(
+                        &self.state.destination_select,
+                        ctx,
+                        self.state.viewport_size,
+                    )
+                    .map(RootMessage::DestinationSelect),
+                ),
+                // Base modals; the stack never raises these to the overlay layer.
+                modal_stack::ActiveModal::PreparePublish
+                | modal_stack::ActiveModal::PreviewGma
+                | modal_stack::ActiveModal::Settings => None,
+            };
+            if let Some(content) = content {
                 layers = layers.push(modal_stack::frame(
                     content,
                     overlay_scale,
@@ -1470,15 +1478,14 @@ impl App {
             )
         };
 
-        match route {
+        match (route, blocker.as_ref()) {
             // The Downloader keeps its input row live and blocks only the
             // queue: pasting IDs while Steam boots is a reasonable thing to
             // be doing, and the queue starts as soon as it connects.
-            shell::Route::Downloader => downloader::view(
+            (shell::Route::Downloader, blocker) => downloader::view(
                 &self.state.downloader,
                 ctx,
                 blocker
-                    .as_ref()
                     .filter(|_| self.state.downloader.queue_is_empty())
                     .map(|blocker| {
                         prerequisites::view(
@@ -1491,15 +1498,15 @@ impl App {
                     }),
             )
             .map(RootMessage::Downloader),
-            _ if blocker.is_some() => panel(blocker.as_ref().expect("just matched as present")),
-            shell::Route::MyWorkshop => {
+            (_, Some(blocker)) => panel(blocker),
+            (shell::Route::MyWorkshop, None) => {
                 my_workshop::view(&self.state.my_workshop, ctx).map(RootMessage::MyWorkshop)
             }
-            shell::Route::InstalledAddons => {
+            (shell::Route::InstalledAddons, None) => {
                 installed_addons::view(&self.state.installed_addons, ctx)
                     .map(RootMessage::InstalledAddons)
             }
-            shell::Route::SizeAnalyzer => {
+            (shell::Route::SizeAnalyzer, None) => {
                 size_analyzer::view(&self.state.size_analyzer, ctx).map(RootMessage::SizeAnalyzer)
             }
         }

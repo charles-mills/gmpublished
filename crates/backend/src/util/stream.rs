@@ -2,7 +2,7 @@ use std::io::{BufRead, BufWriter, ErrorKind, Write};
 
 use crate::Transaction;
 
-pub fn stream_bytes<R: BufRead + ?Sized, W: Write>(
+pub(crate) fn stream_bytes<R: BufRead + ?Sized, W: Write>(
     r: &mut R,
     w: &mut BufWriter<W>,
     mut bytes: usize,
@@ -47,7 +47,7 @@ pub fn stream_bytes<R: BufRead + ?Sized, W: Write>(
     Ok(())
 }
 
-pub fn write_nt_string(writer: &mut impl Write, value: &str) -> Result<(), std::io::Error> {
+pub(crate) fn write_nt_string(writer: &mut impl Write, value: &str) -> Result<(), std::io::Error> {
     writer.write_all(value.as_bytes())?;
     writer.write_all(&[0])
 }

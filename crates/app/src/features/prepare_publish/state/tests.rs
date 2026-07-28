@@ -203,7 +203,7 @@ fn workshop_snapshot_error_leaves_manual_selection_available() {
             snapshot_destination: destination.clone(),
         },
     );
-    state.apply_workshop_submission_result(1, Err(UiError::new(ErrorKey("DOWNLOAD_FAILED"))));
+    state.apply_workshop_submission_result(1, Err(UiError::new(ErrorKey::new("DOWNLOAD_FAILED"))));
 
     assert!(!state.path_pending());
     assert!(state.path_error().is_some());
@@ -263,7 +263,7 @@ fn stale_verification_result_is_ignored() {
         .expect("second request");
 
     assert!(
-        !state.apply_verification_result(first.generation, Err(UiError::new(ErrorKey("ERR_BAD"))))
+        !state.apply_verification_result(first.generation, Err(UiError::new(ErrorKey::new("ERR_BAD"))))
     );
     assert!(state.path_pending());
     assert!(state.path_error().is_none());
@@ -379,7 +379,7 @@ fn stale_submit_completion_is_ignored() {
 
     assert!(!state.apply_submit_completion(
         envelope.generation + 1,
-        Err(UiError::new(ErrorKey("ERR_STALE"))),
+        Err(UiError::new(ErrorKey::new("ERR_STALE"))),
     ));
     assert!(state.submit_pending());
 
@@ -551,7 +551,7 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
 
     assert!(!state.apply_publish_icon_completion(
         envelope.generation + 1,
-        Err(UiError::new(ErrorKey("ERR_STALE"))),
+        Err(UiError::new(ErrorKey::new("ERR_STALE"))),
     ));
     assert!(state.submit_pending());
     assert!(state.apply_publish_icon_completion(

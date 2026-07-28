@@ -56,7 +56,7 @@ pub const MAX_TOTAL_PARTICLES: usize = 100_000;
 
 // --- Coverage ------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SupportLevel {
     /// Simulated with Source-equivalent math.
     Full,
@@ -576,7 +576,7 @@ impl ParticleEngine {
                     .find(|existing| existing.function == entry.function)
                 {
                     Some(existing) => {
-                        if rank(entry.level) > rank(existing.level) {
+                        if entry.level > existing.level {
                             existing.level = entry.level;
                         }
                     }
@@ -584,19 +584,7 @@ impl ParticleEngine {
                 }
             }
         }
-        fn rank(level: SupportLevel) -> u8 {
-            match level {
-                SupportLevel::Full => 0,
-                SupportLevel::Approximate => 1,
-                SupportLevel::PreviewInert => 2,
-                SupportLevel::Unsupported => 3,
-            }
-        }
-        entries.sort_by(|a, b| {
-            rank(b.level)
-                .cmp(&rank(a.level))
-                .then(a.function.cmp(&b.function))
-        });
+        entries.sort_by(|a, b| b.level.cmp(&a.level).then(a.function.cmp(&b.function)));
         entries
     }
 

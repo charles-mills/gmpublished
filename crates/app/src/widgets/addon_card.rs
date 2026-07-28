@@ -842,7 +842,7 @@ fn card_style(
         text_color: Some(text_color(enabled, tokens).into()),
         background,
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: if (hovered || hover_progress > 0.0) && enabled {

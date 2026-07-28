@@ -158,8 +158,7 @@ fn pak_source_lookup_is_case_insensitive_and_decodes_lzma_entries() {
     let pakfile = MapPakFile::from_pak_bytes(zip_fixture([
         zip_stored_entry("Materials/Test/Thing.VMT", stored_bytes.clone()),
         zip_lzma_entry("materials/test/thing.vtf", lzma_bytes.clone()),
-    ]))
-    .expect("pak fixture should parse");
+    ]));
     let source = PakSource::new(pakfile).expect("pak source should index");
 
     assert_eq!(
@@ -179,8 +178,7 @@ fn pak_source_lookup_is_case_insensitive_and_decodes_lzma_entries() {
 
 #[test]
 fn malformed_pak_source_degrades_to_absent_source() {
-    let pakfile = MapPakFile::from_pak_bytes(b"not a zip".to_vec())
-        .expect("malformed central directory is tolerated");
+    let pakfile = MapPakFile::from_pak_bytes(b"not a zip".to_vec());
 
     assert!(PakSource::new(pakfile).is_none());
 }

@@ -571,7 +571,7 @@ fn discard_faces_with_invalid_vertices(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MapData {
     pub meshes: Vec<MapMesh>,
     pub skybox_meshes: Vec<MapMesh>,
@@ -601,35 +601,6 @@ pub struct MapData {
     pub pakfile: MapPakFile,
 }
 
-impl PartialEq for MapData {
-    fn eq(&self, other: &Self) -> bool {
-        self.meshes == other.meshes
-            && self.skybox_meshes == other.skybox_meshes
-            && self.material_names == other.material_names
-            && self.static_props == other.static_props
-            && self.skybox_static_props == other.skybox_static_props
-            && self.doors == other.doors
-            && self.detail_material_name == other.detail_material_name
-            && self.detail_sprites == other.detail_sprites
-            && self.skybox_detail_sprites == other.skybox_detail_sprites
-            && self.overlays == other.overlays
-            && self.skybox_overlays == other.skybox_overlays
-            && self.ambient == other.ambient
-            && self.environment_lighting == other.environment_lighting
-            && self.player_start == other.player_start
-            && self.skyname == other.skyname
-            && self.fog == other.fog
-            && self.sky_camera == other.sky_camera
-            && self.skybox_completion_bounds == other.skybox_completion_bounds
-            && self.lightmap == other.lightmap
-            && self.bounds_min == other.bounds_min
-            && self.bounds_max == other.bounds_max
-            && self.stats == other.stats
-            && self.skybox_partition == other.skybox_partition
-            && self.visibility == other.visibility
-            && self.walk_collision == other.walk_collision
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapMesh {
@@ -890,7 +861,7 @@ pub struct MapSkyboxPartitionStats {
 /// The embedded pakfile lump's raw bytes. Parsed on demand via
 /// [`ZipReader`] (its reader borrows, so it cannot be cached across
 /// calls the way vbsp's `Packfile` cached an owned `zip::ZipArchive`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MapPakFile {
     bytes: Vec<u8>,
 }
@@ -903,8 +874,8 @@ pub struct MapPakFileEntry {
 }
 
 impl MapPakFile {
-    pub fn from_pak_bytes(bytes: Vec<u8>) -> Result<Self, BspError> {
-        Ok(Self { bytes })
+    pub fn from_pak_bytes(bytes: Vec<u8>) -> Self {
+        Self { bytes }
     }
 
     /// A malformed central directory, if the lump is not a readable ZIP
@@ -1142,8 +1113,7 @@ fn load_map_with_skybox_partition(
         .flat_map(|model_index| brush_indices_for_model(&bsp, *model_index))
         .collect::<BTreeSet<_>>();
     let walk_collision = MapWalkCollision::from_bsp_excluding(&bsp, &door_brush_indices);
-    let pakfile = MapPakFile::from_pak_bytes(bsp.pakfile_bytes)
-        .expect("from_pak_bytes never fails: it only stores the raw bytes");
+    let pakfile = MapPakFile::from_pak_bytes(bsp.pakfile_bytes);
     let skybox_completion_bounds = skybox_partition.completion_bounds();
     let skybox_partition = MapSkyboxPartitionStats {
         sky_camera_present: skybox_partition.sky_camera_present,

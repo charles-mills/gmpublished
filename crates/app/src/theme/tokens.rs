@@ -228,7 +228,7 @@ pub struct Spacing {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Radii {
     pub(crate) xs: f32,
-    pub(crate) base: f32,
+    pub(crate) sm: f32,
     pub(crate) md: f32,
     pub(crate) lg: f32,
 }
@@ -944,9 +944,9 @@ const fn spacing() -> Spacing {
 const fn radii() -> Radii {
     Radii {
         xs: 2.0,
-        base: 4.0,
-        md: 12.0,
-        lg: 6.0,
+        sm: 4.0,
+        md: 6.0,
+        lg: 12.0,
     }
 }
 
@@ -1161,8 +1161,13 @@ mod tests {
             tokens.colors.sidebar_item_hover
         );
         assert_eq!(tokens.spacing.gap, 16.0);
-        assert_eq!(tokens.radii.base, 4.0);
-        assert_eq!(tokens.radii.md, 12.0);
+        assert_eq!(tokens.radii.sm, 4.0);
+        assert_eq!(tokens.radii.lg, 12.0);
+        let radii = tokens.radii;
+        assert!(
+            radii.xs < radii.sm && radii.sm < radii.md && radii.md < radii.lg,
+            "radii must ascend with their names: {radii:?}"
+        );
         assert_eq!(tokens.typography.body, 14.0);
         assert_eq!(tokens.motion.modal_enter_ms, 180);
         assert_eq!(tokens.dims.sidebar_band_height, 38.0);
