@@ -221,7 +221,7 @@ impl SteamIdentity {
 }
 
 /// State owned by the Steam session feature.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     status: ConnectionStatus,
     startup_policy: StartupConnectPolicy,

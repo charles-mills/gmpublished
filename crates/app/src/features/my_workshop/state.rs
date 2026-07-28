@@ -17,7 +17,7 @@ use super::model::{
     PageResult, PreparePublishTarget, Row,
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "route visibility, load progress, and playback/focus flags are independent UI state"

@@ -310,7 +310,7 @@ impl Blockers {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each flag tracks an independent async-verification or UI-focus state, not mutually exclusive"

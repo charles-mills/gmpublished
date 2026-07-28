@@ -97,7 +97,7 @@ impl Layer {
 /// State owned by the modal-stack host: a base layer for the primary modals
 /// plus an overlay layer for secondary modals that stack over an open base
 /// modal instead of replacing it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub struct State {
     base: Layer,
     overlay: Layer,

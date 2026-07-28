@@ -76,7 +76,7 @@ pub enum Blocker {
 }
 
 /// Prerequisite facts the shell tracks for every route.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     game: GameStatus,
     steam_installed: bool,

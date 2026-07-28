@@ -6,7 +6,7 @@ use std::{
 
 use crate::bridge::domain::{
     AvatarRgba, InstalledAddon, PublishedFileId, SearchHit, SearchItem, SearchItemSource,
-    SearchQuickBatch, SearchQuickCarry, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess,
+    SearchQuickBatch, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess,
     workshop_url,
 };
 use gmpublished_backend::appdata::{
@@ -2827,7 +2827,6 @@ fn seed_search_result(app: &mut App, has_more: bool) -> SearchQuickRequest {
         request.key().clone(),
         vec![search_hit("Alpha", 42)],
         has_more,
-        SearchQuickCarry::default(),
     );
     assert!(
         app.state

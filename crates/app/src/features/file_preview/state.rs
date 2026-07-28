@@ -66,7 +66,7 @@ impl OrbitPose {
     clippy::struct_excessive_bools,
     reason = "each flag is an independently toggleable preview UI/setting, not a mode enum"
 )]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     open: bool,
     expanded: bool,

@@ -251,20 +251,14 @@ impl SearchRequestKey {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SearchQuickCarry {
-    index_epoch: u64,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchQuickRequest {
     key: SearchRequestKey,
-    carry: SearchQuickCarry,
 }
 
 impl SearchQuickRequest {
-    pub(crate) fn new(key: SearchRequestKey, carry: SearchQuickCarry) -> Self {
-        Self { key, carry }
+    pub(crate) const fn new(key: SearchRequestKey) -> Self {
+        Self { key }
     }
 
     pub(crate) const fn key(&self) -> &SearchRequestKey {
@@ -282,10 +276,6 @@ impl SearchQuickRequest {
     pub(crate) const fn mode(&self) -> SearchMode {
         self.key.mode()
     }
-
-    pub(crate) const fn carry(&self) -> &SearchQuickCarry {
-        &self.carry
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,7 +283,6 @@ pub struct SearchQuickBatch {
     key: SearchRequestKey,
     hits: Vec<SearchHit>,
     has_more: bool,
-    carry: SearchQuickCarry,
 }
 
 impl SearchQuickBatch {
@@ -301,13 +290,11 @@ impl SearchQuickBatch {
         key: SearchRequestKey,
         hits: Vec<SearchHit>,
         has_more: bool,
-        carry: SearchQuickCarry,
     ) -> Self {
         Self {
             key,
             hits,
             has_more,
-            carry,
         }
     }
 
@@ -372,32 +359,23 @@ impl SearchFullRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SearchFullHits {
-    Owned(Vec<SearchHit>),
-}
+pub struct SearchFullHits(Vec<SearchHit>);
 
 impl SearchFullHits {
-    pub(crate) fn len(&self) -> usize {
-        match self {
-            Self::Owned(hits) => hits.len(),
-        }
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.0.is_empty()
     }
 
     pub(crate) fn map_rows<R>(&self, mut map: impl FnMut(u32, &SearchItem) -> R) -> Vec<R> {
-        match self {
-            Self::Owned(hits) => hits.iter().map(|hit| map(hit.score, &hit.item)).collect(),
-        }
+        self.0
+            .iter()
+            .map(|hit| map(hit.score, &hit.item))
+            .collect()
     }
 
     #[cfg(test)]
     pub(crate) fn to_hits(&self) -> Vec<SearchHit> {
-        match self {
-            Self::Owned(hits) => hits.clone(),
-        }
+        self.0.clone()
     }
 }
 
@@ -420,7 +398,7 @@ impl SearchFullBatch {
             key,
             task_id,
             sequence,
-            hits: SearchFullHits::Owned(hits),
+            hits: SearchFullHits(hits),
         }
     }
 
@@ -482,7 +460,6 @@ pub struct SearchSession {
     has_more: bool,
     active_full_task: Option<TaskId>,
     full_replace_pending: bool,
-    quick_carry: SearchQuickCarry,
 }
 
 impl SearchSession {
@@ -529,10 +506,7 @@ impl SearchSession {
         self.has_more = false;
 
         SearchQueryChange {
-            quick_request: Some(SearchQuickRequest::new(
-                self.current_key(),
-                self.quick_carry.clone(),
-            )),
+            quick_request: Some(SearchQuickRequest::new(self.current_key())),
             cancel_task,
         }
     }
@@ -559,7 +533,6 @@ impl SearchSession {
         self.active_full_task = None;
         self.full_replace_pending = false;
         self.has_more = batch.has_more;
-        self.quick_carry = batch.carry;
 
         Some(SearchAcceptedQuickBatch {
             hits: batch.hits,
@@ -668,7 +641,6 @@ impl SearchSession {
         self.has_more = false;
         self.active_full_task = None;
         self.full_replace_pending = false;
-        self.quick_carry = SearchQuickCarry::default();
     }
 
     fn is_current_key(&self, key: &SearchRequestKey) -> bool {

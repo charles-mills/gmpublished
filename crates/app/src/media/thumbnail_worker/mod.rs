@@ -343,7 +343,7 @@ mod tests {
         );
     }
 
-    /// The interactive path is unchanged by (A): it still derives and persists.
+    /// The interactive path still derives *and* persists, unlike the warm path.
     /// Asserted next to the warm case so the asymmetry is deliberate rather
     /// than something a later edit can quietly flatten.
     #[test]

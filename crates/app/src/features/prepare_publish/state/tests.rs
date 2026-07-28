@@ -11,6 +11,7 @@ use gmpublished_backend::error_key::ErrorKey;
 use iced::widget::image;
 
 use super::{AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget};
+use super::ChangelogContent;
 use crate::features::prepare_publish::model::{
     ContentPathVerificationRequest, IgnorePatternMutationResult, IgnoredPattern,
     PublishSubmitContext, PublishSubmitResult, VerifiedContentPathState, VerifiedIcon,
@@ -630,7 +631,19 @@ fn changelog_content_round_trips_through_editor_actions() {
 
     assert!(!state.changelog_is_empty());
     assert_eq!(state.changelog_trimmed(), "Fixed things");
-    assert_eq!(state.clone(), state);
+}
+
+/// `text_editor::Content` is not `Clone`, so [`ChangelogContent`] hand-rolls
+/// `Clone` (reconstruct from text) and `PartialEq` (compare text). This guards
+/// that round-trip directly; it used to ride along on a `State`-level
+/// `assert_eq!(state.clone(), state)`, which obscured what was being tested.
+#[test]
+fn changelog_content_clone_round_trips_its_text() {
+    let content = ChangelogContent::from_text("Fixed things");
+    let cloned = content.clone();
+
+    assert_eq!(cloned, content);
+    assert_eq!(cloned.text(), "Fixed things");
 }
 
 #[test]

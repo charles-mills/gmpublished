@@ -47,7 +47,7 @@ pub(super) enum Pane {
     clippy::struct_excessive_bools,
     reason = "each flag independently tracks one async fetch/UI concern, not a mode enum"
 )]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     open: bool,
     loading: bool,

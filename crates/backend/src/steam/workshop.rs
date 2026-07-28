@@ -555,7 +555,7 @@ pub fn browse_my_workshop_page(
     page: u32,
 ) -> Option<WorkshopPage> {
     steam.client_wait(super::CLIENT_WAIT_DEFAULT_TIMEOUT).ok()?;
-    rayon::scope(|_| steam.browse_my_workshop_page(page, search))
+    steam.browse_my_workshop_page(page, search)
 }
 
 #[cfg(test)]

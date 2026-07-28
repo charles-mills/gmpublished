@@ -13,6 +13,62 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     compress_bundled_fonts()?;
+    compress_bundled_catalogs()?;
+    Ok(())
+}
+
+/// Locale ids, in the order [`CATALOGS`](../src/i18n/mod.rs) declares them.
+/// The generated table is keyed by id rather than position, so this order is
+/// cosmetic — unlike `FONT_SOURCES`, adding or reordering an entry here cannot
+/// silently mis-map a catalog.
+const CATALOG_LOCALE_IDS: &[&str] = &[
+    "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
+];
+
+/// Concatenates the Fluent catalogs and stores one LZMA blob plus an
+/// id-keyed table of the byte ranges needed to recover each one at runtime.
+///
+/// The catalogs are ~232 KiB of highly repetitive UTF-8 and compress by about
+/// 80%, which is worth having in a binary that ships as an ~8 MB AppImage.
+fn compress_bundled_catalogs() -> Result<(), Box<dyn Error>> {
+    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("no manifest dir")?);
+    let mut concatenated = Vec::new();
+    let mut segments = String::new();
+
+    for id in CATALOG_LOCALE_IDS {
+        let path = manifest_dir.join("i18n").join(format!("{id}.ftl"));
+        println!("cargo:rerun-if-changed={}", path.display());
+
+        let bytes = fs::read(&path)?;
+        let _ = writeln!(
+            segments,
+            "    ({:?}, {}, {}),",
+            id,
+            concatenated.len(),
+            bytes.len()
+        );
+        concatenated.extend_from_slice(&bytes);
+    }
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("no OUT_DIR")?);
+    let options = lzma_rust2::LzmaOptions::with_preset(9);
+    let mut encoder = lzma_rust2::LzmaWriter::new_use_header(
+        Vec::new(),
+        &options,
+        Some(concatenated.len() as u64),
+    )?;
+    encoder.write_all(&concatenated)?;
+    fs::write(out_dir.join("bundled_catalogs.lzma"), encoder.finish()?)?;
+
+    fs::write(
+        out_dir.join("catalog_segments.rs"),
+        format!(
+            "const CATALOG_SEGMENTS: &[(&str, usize, usize)] = &[\n{segments}];\n\
+             const CATALOGS_UNCOMPRESSED_LEN: usize = {};\n",
+            concatenated.len()
+        ),
+    )?;
+
     Ok(())
 }
 

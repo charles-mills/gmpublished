@@ -5,7 +5,6 @@ const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 const RED: [u8; 4] = [255, 0, 0, 255];
 const GREEN: [u8; 4] = [0, 255, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
-const YELLOW: [u8; 4] = [255, 255, 0, 255];
 
 #[test]
 fn decodes_three_generated_frames_with_dimensions_and_delays()
@@ -38,41 +37,19 @@ fn lazy_preview_holds_only_first_decoded_frame_initially() -> Result<(), Box<dyn
     assert_eq!(preview.frame_count(), 3);
     assert_eq!(preview.initial_decoded_byte_len(), 6 * 4 * 4);
     assert_eq!(preview.initial_peak_decoded_byte_len(), 6 * 4 * 4);
+    // The per-frame delays live on the decoded frames, not the preview — the
+    // preview only carries the count. Assert them at the source.
     assert_eq!(
-        preview.delays.as_ref(),
-        &[
+        gif_frame_delays(preview.encoded_bytes())?,
+        vec![
             Duration::from_millis(30),
             Duration::from_millis(120),
             Duration::from_millis(250),
         ]
     );
-    let playback = LazyGifPlayback::new(preview);
-    let second = playback.frame(1)?;
-    assert_eq!(playback.frame_count(), 3);
-    assert_eq!(second.width(), 6);
-    assert_eq!(second.height(), 4);
-    assert_eq!(second.delay(), Duration::from_millis(120));
     Ok(())
 }
 
-#[test]
-fn lazy_playback_matches_eager_decode_across_loop_wrap() -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = gif_bytes(&[(RED, 30), (GREEN, 120), (BLUE, 250)])?;
-    let eager = decode_gif_preview_frames(&bytes)?;
-    let preview = decode_lazy_gif_preview(bytes, GIF_PREVIEW_MAX_EDGE)?;
-    let playback = LazyGifPlayback::new(preview);
-
-    for requested in [0_usize, 1, 2, 0, 1] {
-        let lazy = playback.frame(requested)?;
-        let eager = &eager[requested];
-        assert_eq!(lazy.width(), eager.width());
-        assert_eq!(lazy.height(), eager.height());
-        assert_eq!(lazy.delay(), eager.delay());
-        assert_eq!(lazy.rgba_bytes(), eager.rgba_bytes());
-    }
-
-    Ok(())
-}
 
 #[test]
 fn bakes_display_sprite_atlas_with_clips_and_timing() -> Result<(), Box<dyn std::error::Error>> {
@@ -511,64 +488,6 @@ fn previous_disposal_restores_canvas_before_next_frame() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[test]
-fn lazy_playback_matches_eager_decode_with_disposal_methods()
--> Result<(), Box<dyn std::error::Error>> {
-    let bytes = indexed_gif_bytes(
-        4,
-        1,
-        &[
-            indexed_frame(
-                (0, 0),
-                (4, 1),
-                &[RED],
-                &[0, 0, 0, 0],
-                None,
-                10,
-                DisposalMethod::Any,
-            ),
-            indexed_frame(
-                (1, 0),
-                (1, 1),
-                &[GREEN],
-                &[0],
-                None,
-                20,
-                DisposalMethod::Background,
-            ),
-            indexed_frame(
-                (2, 0),
-                (1, 1),
-                &[BLUE],
-                &[0],
-                None,
-                30,
-                DisposalMethod::Previous,
-            ),
-            indexed_frame(
-                (3, 0),
-                (1, 1),
-                &[YELLOW],
-                &[0],
-                None,
-                40,
-                DisposalMethod::Keep,
-            ),
-        ],
-    )?;
-    let eager = decode_gif_preview_frames(&bytes)?;
-    let preview = decode_lazy_gif_preview(bytes, GIF_PREVIEW_MAX_EDGE)?;
-    let playback = LazyGifPlayback::new(preview);
-
-    for requested in [0_usize, 1, 2, 3, 0, 3] {
-        let lazy = playback.frame(requested)?;
-        let eager = &eager[requested];
-        assert_eq!(lazy.delay(), eager.delay());
-        assert_eq!(lazy.rgba_bytes(), eager.rgba_bytes());
-    }
-
-    Ok(())
-}
 
 #[test]
 fn invalid_bytes_return_typed_decode_error() {

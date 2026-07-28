@@ -76,7 +76,7 @@ impl AppWorkerRuntime {
     pub(super) fn spawn_blocking(
         &self,
         name: impl Into<Arc<str>>,
-        job: impl FnOnce(CancellationToken) + Send + 'static,
+        job: impl FnOnce() + Send + 'static,
     ) -> Result<(), ScheduleError> {
         self.spawn_blocking_job(name.into(), Box::new(job))
     }
@@ -86,7 +86,7 @@ impl AppWorkerRuntime {
         name: Arc<str>,
         job: RuntimeJob,
     ) -> Result<(), ScheduleError> {
-        self.blocking.submit(name, &CancellationToken::new(), job)
+        self.blocking.submit(name, job)
     }
 
     pub(super) fn spawn_media_job(
@@ -94,7 +94,7 @@ impl AppWorkerRuntime {
         name: Arc<str>,
         job: RuntimeJob,
     ) -> Result<(), ScheduleError> {
-        self.media.submit(name, &CancellationToken::new(), job)
+        self.media.submit(name, job)
     }
 }
 
@@ -124,39 +124,7 @@ pub(super) const fn media_worker_count() -> usize {
     MEDIA_THREADS
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
-    parents: Vec<Arc<AtomicBool>>,
-}
-
-impl CancellationToken {
-    fn new() -> Self {
-        Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            parents: Vec::new(),
-        }
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-            || self
-                .parents
-                .iter()
-                .any(|parent| parent.load(Ordering::Acquire))
-    }
-
-    fn with_parent(&self, parent: Arc<AtomicBool>) -> Self {
-        let mut parents = self.parents.clone();
-        parents.push(parent);
-        Self {
-            cancelled: Arc::clone(&self.cancelled),
-            parents,
-        }
-    }
-}
-
-pub(super) type RuntimeJob = Box<dyn FnOnce(CancellationToken) + Send + 'static>;
+pub(super) type RuntimeJob = Box<dyn FnOnce() + Send + 'static>;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ScheduleError {
@@ -182,7 +150,9 @@ pub(super) struct WorkerPoolInitError {
 
 pub(super) struct JobEnvelope {
     name: Arc<str>,
-    token: CancellationToken,
+    /// The owning pool's shutdown flag, checked once before the job runs so a
+    /// queue drained after `shutdown` does no work.
+    shutdown: Arc<AtomicBool>,
     job: RuntimeJob,
 }
 
@@ -214,7 +184,6 @@ impl LazyWorkerPool {
     fn submit(
         &self,
         name: impl Into<Arc<str>>,
-        token: &CancellationToken,
         job: RuntimeJob,
     ) -> Result<(), ScheduleError> {
         let job_name = name.into();
@@ -238,7 +207,7 @@ impl LazyWorkerPool {
             )
         };
 
-        pool.submit(job_name, token, job)
+        pool.submit(job_name, job)
     }
 
     #[cfg(test)]
@@ -304,13 +273,12 @@ impl WorkerPool {
     fn submit(
         &self,
         name: impl Into<Arc<str>>,
-        token: &CancellationToken,
         job: RuntimeJob,
     ) -> Result<(), ScheduleError> {
         let name = name.into();
         let envelope = JobEnvelope {
             name: Arc::clone(&name),
-            token: token.with_parent(Arc::clone(&self.shutdown)),
+            shutdown: Arc::clone(&self.shutdown),
             job,
         };
 
@@ -380,13 +348,17 @@ pub(super) fn worker_loop(receiver: &Arc<Mutex<mpsc::Receiver<JobEnvelope>>>) {
 }
 
 pub(super) fn run_envelope(envelope: JobEnvelope) {
-    let JobEnvelope { name, token, job } = envelope;
+    let JobEnvelope {
+        name,
+        shutdown,
+        job,
+    } = envelope;
 
-    if token.is_cancelled() {
+    if shutdown.load(Ordering::Acquire) {
         return;
     }
 
-    if catch_unwind(AssertUnwindSafe(|| job(token))).is_err() {
+    if catch_unwind(AssertUnwindSafe(job)).is_err() {
         log::error!("backend worker job `{name}` panicked");
     }
 }

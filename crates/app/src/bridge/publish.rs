@@ -42,8 +42,9 @@ pub enum PublishSubmitMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PublishSelectedPreview {
-    Source { path: PathBuf, upscale: bool },
+pub struct PublishSelectedPreview {
+    pub(crate) path: PathBuf,
+    pub(crate) upscale: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

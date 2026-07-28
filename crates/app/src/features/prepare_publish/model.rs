@@ -327,7 +327,7 @@ pub fn default_icon_path(temp_dir: &Path) -> PathBuf {
 }
 
 pub fn publish_selected_preview(icon: &VerifiedIcon, upscale_icon: bool) -> PublishSelectedPreview {
-    PublishSelectedPreview::Source {
+    PublishSelectedPreview {
         path: icon.path.clone(),
         upscale: upscale_icon && icon.can_upscale,
     }

@@ -1,5 +1,6 @@
 //! Fluent-backed runtime localization for the Iced UI.
 
+use std::io::Read as _;
 use std::rc::Rc;
 use std::{fmt, sync::OnceLock};
 
@@ -12,77 +13,99 @@ const FALLBACK_LOCALE: &str = "en";
 struct LocaleCatalog {
     id: &'static str,
     tag: &'static str,
-    source: &'static str,
+}
+
+include!(concat!(env!("OUT_DIR"), "/catalog_segments.rs"));
+
+/// The Fluent catalogs, LZMA-packed at build time into one blob.
+///
+/// ~232 KiB of repetitive UTF-8 compresses by about 80%. The decoder is
+/// already linked for the bundled fonts, so this costs no extra code.
+const COMPRESSED_CATALOGS: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/bundled_catalogs.lzma"));
+
+/// Decompresses every catalog once, on first use.
+///
+/// One blob rather than one per locale: they share almost all of their
+/// structure, so packing them together is what earns the ratio, and the
+/// fallback locale is built alongside the selected one anyway.
+fn unpacked_catalogs() -> &'static str {
+    static CATALOGS_TEXT: OnceLock<Box<str>> = OnceLock::new();
+    CATALOGS_TEXT.get_or_init(|| {
+        let mut decompressed = Vec::with_capacity(CATALOGS_UNCOMPRESSED_LEN);
+        lzma_rust2::LzmaReader::new_mem_limit(COMPRESSED_CATALOGS, u32::MAX, None)
+            .and_then(|mut reader| reader.read_to_end(&mut decompressed))
+            .expect("bundled catalogs must decompress");
+        assert_eq!(
+            decompressed.len(),
+            CATALOGS_UNCOMPRESSED_LEN,
+            "bundled catalog length must match its build-time segment table"
+        );
+        String::from_utf8(decompressed)
+            .expect("bundled catalogs are UTF-8")
+            .into_boxed_str()
+    })
 }
 
 fn catalog_source(id: &str) -> &'static str {
-    CATALOGS
+    let (_, start, len) = CATALOG_SEGMENTS
         .iter()
-        .find(|catalog| catalog.id == id)
-        .map(|catalog| catalog.source)
-        .expect("every bundled locale id must have a catalog")
+        .copied()
+        .find(|(catalog_id, _, _)| *catalog_id == id)
+        .expect("every bundled locale id must have a catalog");
+    // Segment bounds are whole-file boundaries in the concatenation, so they
+    // are always UTF-8 boundaries too.
+    &unpacked_catalogs()[start..start + len]
 }
 
 const CATALOGS: &[LocaleCatalog] = &[
     LocaleCatalog {
         id: "en",
         tag: "en",
-        source: include_str!("../../i18n/en.ftl"),
     },
     LocaleCatalog {
         id: "de",
         tag: "de",
-        source: include_str!("../../i18n/de.ftl"),
     },
     LocaleCatalog {
         id: "es",
         tag: "es",
-        source: include_str!("../../i18n/es.ftl"),
     },
     LocaleCatalog {
         id: "fr",
         tag: "fr",
-        source: include_str!("../../i18n/fr.ftl"),
     },
     LocaleCatalog {
         id: "kr",
         tag: "ko",
-        source: include_str!("../../i18n/kr.ftl"),
     },
     LocaleCatalog {
         id: "nl",
         tag: "nl",
-        source: include_str!("../../i18n/nl.ftl"),
     },
     LocaleCatalog {
         id: "pl",
         tag: "pl",
-        source: include_str!("../../i18n/pl.ftl"),
     },
     LocaleCatalog {
         id: "pt-BR",
         tag: "pt-BR",
-        source: include_str!("../../i18n/pt-BR.ftl"),
     },
     LocaleCatalog {
         id: "ru",
         tag: "ru",
-        source: include_str!("../../i18n/ru.ftl"),
     },
     LocaleCatalog {
         id: "tr",
         tag: "tr",
-        source: include_str!("../../i18n/tr.ftl"),
     },
     LocaleCatalog {
         id: "uk",
         tag: "uk",
-        source: include_str!("../../i18n/uk.ftl"),
     },
     LocaleCatalog {
         id: "zh-cn",
         tag: "zh-CN",
-        source: include_str!("../../i18n/zh-cn.ftl"),
     },
 ];
 

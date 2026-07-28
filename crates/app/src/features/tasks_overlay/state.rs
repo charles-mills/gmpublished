@@ -141,7 +141,7 @@ impl Toast {
 
 /// Bottom-center toast stack fed by task events the Downloader page does not
 /// own: publish submissions, quick extractions, and one-shot notices.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub struct State {
     toasts: Vec<Toast>,
 }

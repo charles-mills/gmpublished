@@ -52,7 +52,7 @@ fn runtime_pools_start_lazily() {
 
     let (done_tx, done_rx) = mpsc::channel();
     runtime
-        .spawn_blocking("first-lazy-job", move |_| {
+        .spawn_blocking("first-lazy-job", move || {
             done_tx.send(()).unwrap();
         })
         .unwrap();
@@ -65,7 +65,7 @@ fn runtime_pools_start_lazily() {
     runtime
         .spawn_media_job(
             std::sync::Arc::from("first-media-job"),
-            Box::new(move |_| {
+            Box::new(move || {
                 media_done_tx.send(()).unwrap();
             }),
         )
@@ -1124,7 +1124,7 @@ fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
         tags: vec!["scenic".to_owned()],
         changelog: Some("Updated icon".to_owned()),
         preview: Some(PublishSubmitPreview::Selected(
-            PublishSelectedPreview::Source {
+            PublishSelectedPreview {
                 path: PathBuf::from("/tmp/icon.png"),
                 upscale: true,
             },
@@ -1295,7 +1295,6 @@ fn full_search_transaction_payload_maps_to_app_batch() {
             ),
         }],
         true,
-        quick_request.carry().clone(),
     );
     session
         .accept_quick_batch(quick_batch)

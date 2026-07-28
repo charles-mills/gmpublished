@@ -7,7 +7,7 @@ use crate::bridge::tasks::{TaskEvent, TaskId};
 
 use super::model::{DownloaderEvent, DownloaderJob, DownloaderUiState, RowId, Section};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     route_visible: bool,
     input_text: String,

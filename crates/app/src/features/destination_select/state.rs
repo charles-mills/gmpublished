@@ -32,7 +32,7 @@ impl Default for OpenContext {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     settings: Settings,
     paths: AppPaths,

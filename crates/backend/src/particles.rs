@@ -465,8 +465,11 @@ impl ParticleEngine {
     }
 
     fn spawn_instance_tree(&mut self, system: usize, start_time: f32, parent: Option<usize>) {
-        // Duplicate systems in a cycle are cut off by depth: a child chain
-        // deeper than the compiled system count must be recursive.
+        // Cycles are cut off by total instance count, not by depth: a `.pcf`
+        // whose systems reference each other would otherwise spawn forever.
+        // Note this bounds the *breadth* of the tree; recursion depth is still
+        // bounded only by `systems.len()`, which is attacker-controlled — see
+        // CODE_REVIEW.md §37a.
         if self.instances.len() >= self.systems.len() * 2 {
             return;
         }

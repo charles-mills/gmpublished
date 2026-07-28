@@ -46,8 +46,12 @@ fn appearance_change_stream() -> impl iced::futures::Stream<Item = ()> + use<> {
                     &block,
                 )
         };
-        // The observer (and the sender its block holds) lives for the rest of
-        // the process, keeping this stream open.
+        // Deliberate leak, but not for the reason it looks like:
+        // `NSNotificationCenter` retains the observer token itself, so dropping
+        // our `Retained` would *not* deregister it (only `removeObserver:`
+        // does). What the leak keeps alive is the `RcBlock` — and therefore the
+        // `futures` mpsc sender cloned into it — which is what holds this
+        // stream open. Dropping the token would close the stream.
         std::mem::forget(observer);
     })
 }

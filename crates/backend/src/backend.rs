@@ -1,9 +1,14 @@
 //! Composition root: constructs every backend service, wires their
 //! dependencies together explicitly, and spawns the process-lifetime
 //! background threads (Steam connect/watchdog, workshop fetcher, downloads
-//! watchdog, whitelist warm-up). No backend service reaches for a process
-//! global; everything it needs is either a constructor parameter or a field
-//! set here.
+//! watchdog, whitelist warm-up). Services take their dependencies as
+//! constructor parameters or fields set here rather than reaching for each
+//! other.
+//!
+//! Not yet true of process globals: four `LazyLock` rayon pools
+//! (`steam::downloads`, `gma::write`, `gma::extract`) and two `AtomicU64`
+//! counters are still statics, and none of them observes shutdown. See
+//! CODE_REVIEW.md §33a.
 
 use std::{
     fmt,

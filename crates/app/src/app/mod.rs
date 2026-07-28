@@ -138,7 +138,7 @@ impl Drop for App {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     shell: shell::State,
     my_workshop: my_workshop::State,

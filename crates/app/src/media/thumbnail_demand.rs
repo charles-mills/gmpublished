@@ -43,28 +43,17 @@ const THUMBNAIL_SCALE_BUCKET: f32 = 0.5;
 const WORKSHOP_ICON_SOURCE_MAX_EDGE: u32 = 512;
 const WORKSHOP_ICON_SOURCE_MAX_SCALE: f32 = 2.0;
 
-type HandleCache =
-    Cache<ThumbnailKey, ReadyThumbnail, ReadyThumbnailWeighter, DefaultHashBuilder, EvictionTrace>;
-
-/// Reports evictions to the measurement sink.
+/// The cache deliberately uses `quick_cache`'s default lifecycle.
 ///
-/// `quick_cache` also exposes `is_pinned` here, which is what a visible-window
-/// pin would use. It was built and measured, and does **not** ship: it removed
+/// `Lifecycle` also exposes `is_pinned`, which is what a visible-window pin
+/// would use. That was built and measured and does **not** ship: it removed
 /// every eviction of an on-screen key (20 → 0 under animation pressure) while
 /// saving exactly zero decode work, because rows hold `Arc`d handles and an
-/// evicted-but-visible entry costs nothing until it is re-demanded. See the
-/// plan's pin section — the hit-rate collapse it was meant to fix is a capacity
-/// problem, not an eviction-policy one.
-#[derive(Clone, Default)]
-pub struct EvictionTrace;
-
-impl quick_cache::Lifecycle<ThumbnailKey, ReadyThumbnail> for EvictionTrace {
-    type RequestState = ();
-
-    fn on_evict(&self, _state: &mut Self::RequestState, _key: ThumbnailKey, value: ReadyThumbnail) {
-        let _ = value;
-    }
-}
+/// evicted-but-visible entry costs nothing until it is re-demanded. The
+/// hit-rate collapse it was meant to fix is a capacity problem, not an
+/// eviction-policy one — so raise [`Config::memory_capacity_bytes`] rather
+/// than reaching for a custom lifecycle again.
+type HandleCache = Cache<ThumbnailKey, ReadyThumbnail, ReadyThumbnailWeighter, DefaultHashBuilder>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -160,7 +149,7 @@ impl Manager {
             config.memory_capacity_bytes.max(1),
             ReadyThumbnailWeighter,
             DefaultHashBuilder::default(),
-            EvictionTrace,
+            quick_cache::unsync::DefaultLifecycle::default(),
         );
         let disk_cache = config
             .disk_cache_dir
@@ -545,8 +534,6 @@ impl Manager {
             };
             tasks.push(self.start_candidate(ctx, candidate));
         }
-        // `entries_total` is the scan width every `next_candidate` call above
-        // paid, which is the quantity Finding B is about.
         Task::batch(tasks)
     }
 
@@ -1210,8 +1197,8 @@ impl DemandIndex {
 
     /// Drops work nobody wants any more, releasing its media slot.
     ///
-    /// Cancelling an in-flight job is not the waste the `JobCancel` count makes
-    /// it look like: cancellation is cooperative and only checked before I/O, so
+    /// Cancelling an in-flight job wastes less than it looks like it should:
+    /// cancellation is cooperative and only checked before I/O, so
     /// a job already fetching runs to completion, and `complete_job` inserts the
     /// result into the memory cache *before* it checks whether anyone still
     /// wants it. The bytes are kept either way. What cancelling actually buys is
@@ -1440,8 +1427,8 @@ impl DemandIndex {
 
     fn cancel_key(&mut self, key: &ThumbnailKey) {
         if let Some(job) = self.active_jobs.remove(key) {
-            // Only an actually-running job counts as cancelled work; clearing a
-            // queued entry costs nothing and would inflate the waste ratio.
+            // Only an actually-running job needs signalling; a queued entry is
+            // dropped by removing it from `active_jobs` above.
             job.cancellation.cancel();
         }
         self.delayed_retries.remove(key);
@@ -1610,8 +1597,6 @@ fn ready_thumbnail(key: ThumbnailKey, thumbnail: &PreparedThumbnail) -> ReadyThu
         metadata.height,
         Bytes::from_owner(thumbnail.thumbnail().rgba_arc()),
     );
-    // The one place an `image::Id` and a cache key meet. Without this binding a
-    // painted image is anonymous and cannot be attributed to an addon.
     ReadyThumbnail {
         key,
         handle,

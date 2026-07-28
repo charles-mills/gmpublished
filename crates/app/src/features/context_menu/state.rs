@@ -222,7 +222,7 @@ impl OpenRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct State {
     open: bool,
     visible: bool,

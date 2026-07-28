@@ -105,7 +105,7 @@ pub fn traffic_light_center_y(tokens: &Tokens) -> f32 {
 }
 
 /// Root shell state owned by the Iced app.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "hover, drop-target, and menu open/visible flags are independent UI state, not mutually exclusive"
@@ -149,8 +149,6 @@ impl Default for State {
         }
     }
 }
-
-impl Eq for State {}
 
 impl State {
     pub(crate) const fn app_version(&self) -> &'static str {

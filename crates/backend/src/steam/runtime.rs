@@ -138,7 +138,6 @@ impl SteamRuntime {
         self.inner.started.store(true, Ordering::Release);
 
         if steam.wait_for_connected(self.inner.connect_timeout) {
-            self.inner.unavailable.store(false, Ordering::Release);
             Ok(())
         } else {
             self.inner.unavailable.store(true, Ordering::Release);

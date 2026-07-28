@@ -16,7 +16,7 @@ use super::model::{
     self, ContextMenuRequest, MetadataPatch, MetadataResolution, PreviewTarget, Row,
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "route visibility, watch health, and playback/focus flags are independent UI state"

@@ -31,7 +31,7 @@ const MAX_LABEL_SCALE: f32 = 3.0;
 const ANALYZER_THUMBNAIL_GENERATION: u64 = 0;
 
 /// State owned by the Size Analyzer route.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     route_visible: bool,
     load_status: LoadStatus,

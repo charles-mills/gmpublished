@@ -310,13 +310,11 @@ pub fn remove_source_bytes(cache: &WorkerDiskCache, url: &str) {
 /// Shares the derived tier's directory, index, and budget, so the two compete
 /// under one ceiling rather than needing a second one to tune.
 ///
-/// Note that they compete by **write age, not use**: `by_age` is keyed on
-/// mtime and no read path touches it. For the derived tier that is close
-/// enough, since entries are rewritten as they are re-derived. Sources are
-/// write-once and read-forever, so a hot source banked during the first warm
-/// ages toward the front of the eviction queue and can be dropped in favour of
-/// a newer source nothing has ever looked at. Correct but not ideal; see the
-/// plan's note on refreshing source age on read.
+/// They compete by **use**, not write age: sources are write-once and
+/// read-forever, so ranking them by mtime alone would let a hot source banked
+/// during the first warm age toward the front of the eviction queue.
+/// [`read_source_bytes`] calls [`refresh_source_age`] on every hit, which
+/// rewrites the mtime and re-inserts into `by_age`.
 pub fn write_source_bytes(cache: &WorkerDiskCache, url: &str, bytes: &[u8]) {
     let path = source_cache_path(&cache.dir, url);
     match crate::util::fs::atomic_write(&path, bytes) {
@@ -586,51 +584,15 @@ fn should_try_png_cache_payload(pixels: &[u8]) -> bool {
 }
 
 /// Why a cached thumbnail payload was rejected.
+/// Why a cached payload could not be decoded.
+///
+/// Deliberately not an enum: the sole consumer logs the reason and deletes the
+/// file, so per-cause variants bought 21 names and no dispatch. Three of them
+/// were also unconstructible — the length checks that would have made them
+/// reachable had already returned.
 #[derive(Debug, Error)]
-enum CacheDecodeError {
-    #[error("missing magic")]
-    MissingMagic,
-    #[error("invalid magic")]
-    InvalidMagic,
-    #[error("unsupported version")]
-    UnsupportedVersion,
-    #[error("missing format")]
-    MissingFormat,
-    #[error("invalid dimensions")]
-    InvalidDimensions,
-    #[error("stale max edge")]
-    StaleMaxEdge,
-    #[error("byte length overflow")]
-    ByteLengthOverflow,
-    #[error("byte length too large")]
-    ByteLengthTooLarge,
-    #[error("cache length overflow")]
-    CacheLengthOverflow,
-    #[error("cache length mismatch")]
-    CacheLengthMismatch,
-    #[error("missing pixels")]
-    MissingPixels,
-    #[error("raw byte length mismatch")]
-    RawByteLengthMismatch,
-    #[error("failed to decode payload")]
-    DecodePayloadFailed,
-    #[error("decoded dimensions mismatch")]
-    DecodedDimensionsMismatch,
-    #[error("decoded byte length mismatch")]
-    DecodedByteLengthMismatch,
-    #[error("failed to decode cached GIF")]
-    DecodeGifFailed,
-    #[error("cached GIF is not animated")]
-    GifNotAnimated,
-    #[error("unsupported cache payload format")]
-    UnsupportedFormat,
-    #[error("invalid decoded RGBA payload")]
-    InvalidRgbaPayload,
-    #[error("cache offset overflow")]
-    OffsetOverflow,
-    #[error("truncated cache")]
-    Truncated,
-}
+#[error("corrupt thumbnail cache entry: {0}")]
+struct CacheDecodeError(&'static str);
 
 fn deserialize_cached_thumbnail(
     bytes: &[u8],
@@ -638,16 +600,16 @@ fn deserialize_cached_thumbnail(
 ) -> Result<Thumbnail, CacheDecodeError> {
     let mut offset = 0;
     let Some(magic) = bytes.get(..CACHE_PAYLOAD_MAGIC.len()) else {
-        return Err(CacheDecodeError::MissingMagic);
+        return Err(CacheDecodeError("missing magic"));
     };
     if magic != CACHE_PAYLOAD_MAGIC {
-        return Err(CacheDecodeError::InvalidMagic);
+        return Err(CacheDecodeError("invalid magic"));
     }
     offset += CACHE_PAYLOAD_MAGIC.len();
 
     let version = read_u32_le(bytes, &mut offset)?;
     if version != CACHE_PAYLOAD_VERSION {
-        return Err(CacheDecodeError::UnsupportedVersion);
+        return Err(CacheDecodeError("unsupported version"));
     }
 
     let width = read_u32_le(bytes, &mut offset)?;
@@ -656,47 +618,41 @@ fn deserialize_cached_thumbnail(
     let source_height = read_u32_le(bytes, &mut offset)?;
     let max_edge = read_u32_le(bytes, &mut offset)?;
     let thumbhash = {
-        let len = usize::from(
-            *take_bytes(bytes, &mut offset, 1)?
-                .first()
-                .ok_or(CacheDecodeError::MissingFormat)?,
-        );
+        let len = usize::from(take_byte(bytes, &mut offset)?);
         if len > 0 {
             Some(Arc::<[u8]>::from(take_bytes(bytes, &mut offset, len)?))
         } else {
             None
         }
     };
-    let format = *take_bytes(bytes, &mut offset, 1)?
-        .first()
-        .ok_or(CacheDecodeError::MissingFormat)?;
+    let format = take_byte(bytes, &mut offset)?;
     let encoded_len = read_u64_le(bytes, &mut offset)?;
 
     if width == 0 || height == 0 || source_width == 0 || source_height == 0 {
-        return Err(CacheDecodeError::InvalidDimensions);
+        return Err(CacheDecodeError("invalid dimensions"));
     }
     if max_edge == 0 || max_edge != requested_max_edge || width.max(height) > max_edge {
-        return Err(CacheDecodeError::StaleMaxEdge);
+        return Err(CacheDecodeError("stale max edge"));
     }
 
     let expected_raw_len = crate::media::pixel::checked_rgba_len(width, height)
-        .ok_or(CacheDecodeError::ByteLengthOverflow)?;
+        .ok_or(CacheDecodeError("byte length overflow"))?;
     let encoded_len_usize =
-        usize::try_from(encoded_len).map_err(|_| CacheDecodeError::ByteLengthTooLarge)?;
+        usize::try_from(encoded_len).map_err(|_| CacheDecodeError("byte length too large"))?;
     let expected_total = offset
         .checked_add(encoded_len_usize)
-        .ok_or(CacheDecodeError::CacheLengthOverflow)?;
+        .ok_or(CacheDecodeError("cache length overflow"))?;
     if bytes.len() != expected_total {
-        return Err(CacheDecodeError::CacheLengthMismatch);
+        return Err(CacheDecodeError("cache length mismatch"));
     }
 
     let payload = bytes
         .get(offset..expected_total)
-        .ok_or(CacheDecodeError::MissingPixels)?;
+        .ok_or(CacheDecodeError("truncated cache"))?;
     let pixel_bytes = match format {
         CACHE_FORMAT_RAW_RGBA => {
             if payload.len() != expected_raw_len {
-                return Err(CacheDecodeError::RawByteLengthMismatch);
+                return Err(CacheDecodeError("raw byte length mismatch"));
             }
             payload.to_vec()
         }
@@ -706,27 +662,27 @@ fn deserialize_cached_thumbnail(
             reader.limits(thumbnail_decode_limits());
             let decoded = reader
                 .decode()
-                .map_err(|_| CacheDecodeError::DecodePayloadFailed)?;
+                .map_err(|_| CacheDecodeError("failed to decode payload"))?;
             if decoded.width() != width || decoded.height() != height {
-                return Err(CacheDecodeError::DecodedDimensionsMismatch);
+                return Err(CacheDecodeError("decoded dimensions mismatch"));
             }
             let pixel_bytes = decoded.into_rgba8().into_raw();
             if pixel_bytes.len() != expected_raw_len {
-                return Err(CacheDecodeError::DecodedByteLengthMismatch);
+                return Err(CacheDecodeError("decoded byte length mismatch"));
             }
             pixel_bytes
         }
         CACHE_FORMAT_GIF => {
             let preview = decode_lazy_gif_preview(Arc::<[u8]>::from(payload), max_edge)
-                .map_err(|_| CacheDecodeError::DecodeGifFailed)?;
+                .map_err(|_| CacheDecodeError("failed to decode cached GIF"))?;
             if preview.frame_count() <= 1 {
-                return Err(CacheDecodeError::GifNotAnimated);
+                return Err(CacheDecodeError("cached GIF is not animated"));
             }
             let mut thumbnail = Thumbnail::from_gif_preview(preview, max_edge);
             thumbnail.set_thumbhash(thumbhash);
             return Ok(thumbnail);
         }
-        _ => return Err(CacheDecodeError::UnsupportedFormat),
+        _ => return Err(CacheDecodeError("unsupported cache payload format")),
     };
 
     let mut thumbnail = Thumbnail::new(
@@ -739,9 +695,20 @@ fn deserialize_cached_thumbnail(
             max_edge,
         },
     )
-    .map_err(|_| CacheDecodeError::InvalidRgbaPayload)?;
+    .map_err(|_| CacheDecodeError("invalid decoded RGBA payload"))?;
     thumbnail.set_thumbhash(thumbhash);
     Ok(thumbnail)
+}
+
+/// Reads one byte, advancing `offset`. Bounds-checked here rather than
+/// slicing and then re-checking the slice.
+fn take_byte(bytes: &[u8], offset: &mut usize) -> Result<u8, CacheDecodeError> {
+    let byte = bytes
+        .get(*offset)
+        .copied()
+        .ok_or(CacheDecodeError("truncated cache"))?;
+    *offset += 1;
+    Ok(byte)
 }
 
 fn read_u32_le(bytes: &[u8], offset: &mut usize) -> Result<u32, CacheDecodeError> {
@@ -765,50 +732,12 @@ fn take_bytes<'a>(
 ) -> Result<&'a [u8], CacheDecodeError> {
     let end = offset
         .checked_add(len)
-        .ok_or(CacheDecodeError::OffsetOverflow)?;
-    let slice = bytes.get(*offset..end).ok_or(CacheDecodeError::Truncated)?;
+        .ok_or(CacheDecodeError("cache offset overflow"))?;
+    let slice = bytes.get(*offset..end).ok_or(CacheDecodeError("truncated cache"))?;
     *offset = end;
     Ok(slice)
 }
 
-#[cfg(test)]
-fn evict_disk_cache(cache_dir: &Path, max_bytes: u64) -> std::io::Result<u64> {
-    let mut files = thumbnail_cache_files(cache_dir)?;
-    let mut total = files.iter().map(|file| file.len).sum::<u64>();
-    if total <= max_bytes {
-        return Ok(total);
-    }
-
-    files.sort_by(|left, right| {
-        left.modified
-            .cmp(&right.modified)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-
-    for file in files {
-        if total <= max_bytes {
-            break;
-        }
-
-        match fs::remove_file(&file.path) {
-            Ok(()) => {
-                total = total.saturating_sub(file.len);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                total = total.saturating_sub(file.len);
-            }
-            Err(error) => {
-                total = total.saturating_sub(file.len);
-                log::warn!(
-                    "failed to remove thumbnail cache file {}: {error}",
-                    file.path.display()
-                );
-            }
-        }
-    }
-
-    Ok(total)
-}
 
 fn thumbnail_cache_files(cache_dir: &Path) -> std::io::Result<Vec<CacheFile>> {
     let entries = match fs::read_dir(cache_dir) {
@@ -1173,33 +1102,31 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// Eviction walks the cache directory, so it must consider only the files
+    /// it owns. Anything else living there is not its to delete.
     #[test]
-    fn thumbnails_disk_cache_eviction_keeps_cache_files_under_byte_limit() {
+    fn eviction_stays_under_budget_and_leaves_foreign_files_alone() {
+        const MAX_BYTES: u64 = 4_096;
+
         let root = TestDir::new("disk-cache-eviction");
         std::fs::create_dir_all(root.path()).expect("cache dir should be created");
         std::fs::write(root.path().join("keep.txt"), b"not cache")
             .expect("non-cache file should be written");
 
-        for index in 0..3 {
+        let cache = WorkerDiskCache::new(root.path().to_path_buf(), MAX_BYTES);
+        for index in 0..8 {
             let key = ThumbnailKey::for_bytes(format!("item-{index}"), 16);
-            let path = disk_cache_path(root.path(), &key);
-            let thumbnail = solid_thumbnail(16, 16, index as u8);
-            std::fs::write(
-                path,
-                serialize_cached_thumbnail(&thumbnail).expect("cache payload should encode"),
-            )
-            .expect("cache file should be written");
+            write_disk_cache(&cache, &key, &solid_thumbnail(32, 32, index as u8));
         }
 
-        let max_bytes = thumbnail_cache_files(root.path())
-            .expect("cache files")
-            .first()
-            .map_or(1, |file| file.len.saturating_add(1));
-
-        evict_disk_cache(root.path(), max_bytes).expect("eviction should succeed");
-
-        assert!(total_cache_bytes(root.path()) <= max_bytes);
-        assert!(root.path().join("keep.txt").is_file());
+        assert!(
+            total_cache_bytes(root.path()) <= MAX_BYTES,
+            "eviction left the cache over its byte budget"
+        );
+        assert!(
+            root.path().join("keep.txt").is_file(),
+            "eviction deleted a file it does not own"
+        );
     }
 
     fn multi_frame_gif_bytes() -> Vec<u8> {

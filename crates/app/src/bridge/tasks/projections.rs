@@ -47,7 +47,7 @@ pub(super) fn publish_preview_from_app_request(
     preview: Option<PublishSubmitPreview>,
 ) -> (Option<PathBuf>, bool) {
     match preview {
-        Some(PublishSubmitPreview::Selected(PublishSelectedPreview::Source { path, upscale })) => {
+        Some(PublishSubmitPreview::Selected(PublishSelectedPreview { path, upscale })) => {
             (Some(path), upscale)
         }
         Some(PublishSubmitPreview::Default(_)) | None => (None, false),
@@ -60,8 +60,7 @@ pub(super) fn search_quick_batch_from_backend(
 ) -> SearchQuickBatch {
     let hits = result.hits.iter().map(search_hit_from_backend).collect();
     let key = request.key().clone();
-    let carry = request.carry().clone();
-    SearchQuickBatch::new(key, hits, result.has_more, carry)
+    SearchQuickBatch::new(key, hits, result.has_more)
 }
 
 pub(super) fn search_full_batch_from_transaction_payload(

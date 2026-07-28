@@ -317,7 +317,7 @@ fn path_setting_value(settings: &Settings, kind: PathSetting) -> Option<&Path> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     open: bool,
     active_tab: Tab,

@@ -112,7 +112,6 @@ impl Transactions {
                 id: transaction.id,
                 ptr: Arc::downgrade(&transaction),
             });
-            registry.reserve(1);
         }
 
         transaction

@@ -38,8 +38,8 @@ iced.workspace = true
 image.workspace = true
 jiff.workspace = true
 log.workspace = true
-# Decoder for the build-time-compressed .ftl catalogs (already linked via the
-# backend crate, so this adds no code to the binary).
+# Decoder for the build-time-compressed font and Fluent-catalog blobs
+# (already linked via the backend crate, so this adds no code to the binary).
 lzma-rust2.workspace = true
 notify.workspace = true
 quick_cache.workspace = true
@@ -75,7 +75,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 raw-window-handle = "0.6.2"
 
 [build-dependencies]
-# Encoder only runs at build time to pack the .ftl catalogs; never ships.
+# Encoder only runs at build time to pack the bundled fonts and .ftl
+# catalogs; never ships.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [dev-dependencies]

@@ -93,7 +93,7 @@ impl BackendContext {
         match spawn(
             self.runtime.as_ref(),
             name.into(),
-            Box::new(move |_| {
+            Box::new(move || {
                 let _send_result = sender.send(job(&services));
             }),
         ) {
@@ -112,7 +112,7 @@ impl BackendContext {
         job: impl FnOnce(Arc<BackendServices>) + Send + 'static,
     ) -> Result<(), ScheduleError> {
         let services = Arc::clone(&self.services);
-        self.runtime.spawn_blocking(name, move |_| job(services))
+        self.runtime.spawn_blocking(name, move || job(services))
     }
 
     pub(crate) fn open_native_target_detached(

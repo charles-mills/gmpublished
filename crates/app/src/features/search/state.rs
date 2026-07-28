@@ -47,7 +47,7 @@ impl RowSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct State {
     input: String,
     mode: SearchMode,
@@ -965,7 +965,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::bridge::domain::{
-        SearchFullBatch, SearchItem, SearchItemSource, SearchQuickBatch, SearchQuickCarry,
+        SearchFullBatch, SearchItem, SearchItemSource, SearchQuickBatch,
     };
 
     use super::*;
@@ -1081,7 +1081,6 @@ mod tests {
             request.key().clone(),
             vec![my_workshop_hit("Alpha", 42)],
             false,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
         let generation = state.metadata_generation;
@@ -1112,7 +1111,6 @@ mod tests {
             request.key().clone(),
             vec![my_workshop_hit("Alpha", 42)],
             false,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
@@ -1147,7 +1145,6 @@ mod tests {
             first.key().clone(),
             vec![hit("First", 1)],
             false,
-            SearchQuickCarry::default(),
         );
 
         assert!(!state.apply_quick_result(first.key(), Ok(batch)));
@@ -1163,7 +1160,6 @@ mod tests {
             request.key().clone(),
             vec![hit("Alpha", 42)],
             true,
-            SearchQuickCarry::default(),
         );
 
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
@@ -1186,7 +1182,6 @@ mod tests {
             request.key().clone(),
             vec![hit("Quick", 1)],
             true,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(quick)));
 
@@ -1230,7 +1225,6 @@ mod tests {
             request.key().clone(),
             hits(20),
             false,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
@@ -1250,7 +1244,6 @@ mod tests {
             request.key().clone(),
             hits(20),
             false,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
@@ -1316,7 +1309,6 @@ mod tests {
             request.key().clone(),
             vec![hit("Alpha", 42)],
             false,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 

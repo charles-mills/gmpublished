@@ -193,7 +193,6 @@ fn keyboard_event(
 mod tests {
     use crate::bridge::domain::{
         PublishedFileId, SearchHit, SearchItem, SearchItemSource, SearchQuickBatch,
-        SearchQuickCarry,
     };
     use crate::bridge::tasks::TaskId;
     use crate::features::search::state::{MetadataPatch, MetadataResolution};
@@ -233,7 +232,6 @@ mod tests {
             request.key().clone(),
             vec![hit("Alpha", 42)],
             true,
-            SearchQuickCarry::default(),
         );
         let _effects = update(
             &mut state,
@@ -339,7 +337,6 @@ mod tests {
             request.key().clone(),
             vec![hit("Alpha", 42)],
             true,
-            SearchQuickCarry::default(),
         );
 
         let effects = update(
@@ -366,7 +363,6 @@ mod tests {
             first.key().clone(),
             vec![hit("First", 1)],
             true,
-            SearchQuickCarry::default(),
         );
 
         assert!(
@@ -391,7 +387,6 @@ mod tests {
             request.key().clone(),
             vec![hit("Alpha", 42)],
             false,
-            SearchQuickCarry::default(),
         );
         let _effects = update(
             &mut state,
@@ -443,7 +438,6 @@ mod tests {
             request.key().clone(),
             vec![hit("Alpha", 42)],
             true,
-            SearchQuickCarry::default(),
         );
         let _effects = update(
             &mut state,
