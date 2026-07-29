@@ -1282,6 +1282,67 @@ pub(super) fn draw_overlay_item<'a>(
     pass.draw(0..overlay.vertex_count, 0..1);
 }
 
+/// A uniform buffer sized for [`Uniforms`] and the bind group that reaches it.
+///
+/// The three uniform slots (model, sky, map skybox) are the same buffer and
+/// the same single-entry bind group; only the label distinguishes them, and
+/// labels are what a GPU capture shows you.
+fn uniforms(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    label: &str,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(&format!("{label}_buffer")),
+        size: std::mem::size_of::<Uniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("{label}_bind_group")),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+
+    (buffer, bind_group)
+}
+
+/// The axes this viewer's samplers actually vary on.
+#[derive(Clone, Copy)]
+struct SamplerSpec {
+    address: wgpu::AddressMode,
+    filter: wgpu::FilterMode,
+    mipmap: wgpu::FilterMode,
+    anisotropy: u16,
+}
+
+impl Default for SamplerSpec {
+    fn default() -> Self {
+        Self {
+            address: wgpu::AddressMode::ClampToEdge,
+            filter: wgpu::FilterMode::Nearest,
+            mipmap: wgpu::FilterMode::Nearest,
+            anisotropy: 1,
+        }
+    }
+}
+
+fn sampler(device: &wgpu::Device, label: &str, spec: &SamplerSpec) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some(label),
+        address_mode_u: spec.address,
+        address_mode_v: spec.address,
+        mag_filter: spec.filter,
+        min_filter: spec.filter,
+        mipmap_filter: spec.mipmap,
+        anisotropy_clamp: spec.anisotropy,
+        ..wgpu::SamplerDescriptor::default()
+    })
+}
+
 impl shader::Pipeline for ModelPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         // These shaders run on iced_wgpu's own device, so they must fit the
@@ -1689,87 +1750,62 @@ impl shader::Pipeline for ModelPipeline {
             cache: None,
         });
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("file_preview.model_viewer.uniform_buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let sky_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("file_preview.model_viewer.sky_uniform_buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let map_skybox_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("file_preview.model_viewer.map_skybox_uniform_buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let (uniform_buffer, uniform_bind_group) =
+            uniforms(device, &uniform_layout, "file_preview.model_viewer.uniform");
+        let (sky_uniform_buffer, sky_uniform_bind_group) = uniforms(
+            device,
+            &uniform_layout,
+            "file_preview.model_viewer.sky_uniform",
+        );
+        let (map_skybox_uniform_buffer, map_skybox_uniform_bind_group) = uniforms(
+            device,
+            &uniform_layout,
+            "file_preview.model_viewer.map_skybox_uniform",
+        );
 
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("file_preview.model_viewer.uniform_bind_group"),
-            layout: &uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-        let sky_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("file_preview.model_viewer.sky_uniform_bind_group"),
-            layout: &uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: sky_uniform_buffer.as_entire_binding(),
-            }],
-        });
-        let map_skybox_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("file_preview.model_viewer.map_skybox_uniform_bind_group"),
-            layout: &uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: map_skybox_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let material_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("file_preview.model_viewer.material_sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
-            anisotropy_clamp: MATERIAL_ANISOTROPY_CLAMP,
-            ..wgpu::SamplerDescriptor::default()
-        });
-        let simple_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("file_preview.model_viewer.simple_sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..wgpu::SamplerDescriptor::default()
-        });
-        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("file_preview.model_viewer.blit_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..wgpu::SamplerDescriptor::default()
-        });
-        let water_refraction_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("file_preview.model_viewer.water_refraction_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..wgpu::SamplerDescriptor::default()
-        });
+        // The four samplers differ only in the three axes `sampler` takes;
+        // spelled out, the differences were the easiest thing in this function
+        // to misread.
+        let material_sampler = sampler(
+            device,
+            "file_preview.model_viewer.material_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::Repeat,
+                filter: wgpu::FilterMode::Linear,
+                mipmap: wgpu::FilterMode::Linear,
+                anisotropy: MATERIAL_ANISOTROPY_CLAMP,
+            },
+        );
+        let simple_sampler = sampler(
+            device,
+            "file_preview.model_viewer.simple_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::Repeat,
+                filter: wgpu::FilterMode::Linear,
+                mipmap: wgpu::FilterMode::Nearest,
+                ..SamplerSpec::default()
+            },
+        );
+        let blit_sampler = sampler(
+            device,
+            "file_preview.model_viewer.blit_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::ClampToEdge,
+                filter: wgpu::FilterMode::Nearest,
+                mipmap: wgpu::FilterMode::Nearest,
+                ..SamplerSpec::default()
+            },
+        );
+        let water_refraction_sampler = sampler(
+            device,
+            "file_preview.model_viewer.water_refraction_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::ClampToEdge,
+                filter: wgpu::FilterMode::Linear,
+                mipmap: wgpu::FilterMode::Nearest,
+                ..SamplerSpec::default()
+            },
+        );
         let sky_vertex_bytes = skybox_vertex_bytes();
         let sky_vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("file_preview.model_viewer.sky_vertices"),

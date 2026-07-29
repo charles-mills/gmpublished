@@ -2,7 +2,7 @@ use iced::Task;
 
 use super::{App, RootMessage, file_preview, send_root_message, stream};
 use crate::features::file_preview::PreviewRequest;
-use crate::media::file_preview_decode::run_file_preview_load;
+use crate::media::file_preview_decode::load_preview;
 
 impl App {
     pub(super) fn apply_file_preview_message(
@@ -53,7 +53,25 @@ impl App {
         Task::stream(stream::channel(100, async move |output| {
             let mut schedule_error_output = output.clone();
             let schedule = ctx.spawn_blocking_detached("file-preview-load", move |_app| {
-                run_file_preview_load(&request, &tokens, gmod_dir, output);
+                // The decoder reports progress as plain stages; turning those
+                // into messages is this layer's job, not its.
+                let mut stage_output = output.clone();
+                let mut output = output;
+                let result = load_preview(&request, &tokens, gmod_dir, &mut |stage| {
+                    let _ = send_root_message(
+                        &mut stage_output,
+                        RootMessage::FilePreview(file_preview::Message::LoadStageChanged(
+                            request_id, stage,
+                        )),
+                    );
+                });
+                let _ = send_root_message(
+                    &mut output,
+                    RootMessage::FilePreview(file_preview::Message::Loaded(
+                        request_id,
+                        Box::new(result),
+                    )),
+                );
             });
             if let Err(error) = schedule {
                 log::warn!("failed to schedule file-preview worker: {error}");

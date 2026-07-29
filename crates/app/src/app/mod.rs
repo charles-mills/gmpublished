@@ -126,10 +126,20 @@ impl StartupPhase {
 
 impl Drop for App {
     /// Iced drops the root model when the event loop ends, so this is where
-    /// app quit reaches Steam's background threads: signal and join them
-    /// here rather than leaving process exit to race a still-running
-    /// connect retry or callback pump.
+    /// app quit reaches the background threads: signal and join them here
+    /// rather than leaving process exit to race a still-running connect retry,
+    /// callback pump, or archive write.
+    ///
+    /// Transactions are cancelled first. The worker pools are joined under a
+    /// deadline, so a job still running when that expires is abandoned where it
+    /// stands — mid-write, for an extraction that streams each entry straight
+    /// to its destination. Cancelling gives every such job the chance to stop
+    /// at its own next checkpoint instead.
     fn drop(&mut self) {
+        let cancelled = self.ctx.backend().transactions.cancel_all();
+        if cancelled > 0 {
+            log::info!("cancelled {cancelled} in-flight transaction(s) on quit");
+        }
         self.ctx.backend().steam.shutdown();
     }
 }
@@ -388,7 +398,7 @@ fn search_items_from_library(
         .iter()
         .map(|addon| {
             let metadata = &addon.meta.header.metadata;
-            let mut terms = metadata.tags().cloned().unwrap_or_default();
+            let mut terms = metadata.tags().map(<[String]>::to_vec).unwrap_or_default();
             if let Some(addon_type) = metadata.addon_type() {
                 terms.push(addon_type.to_owned());
             }
@@ -436,6 +446,23 @@ fn search_file_items_from_library(
         }));
     }
     items
+}
+
+/// Generates the root's per-feature message handlers.
+///
+/// `method => feature.field, run_effect;` expands to the three-step handler
+/// every uniform feature needs. Stating the mapping once keeps the list
+/// readable as a list, which is the thing thirty near-identical lines stop
+/// being.
+macro_rules! feature_dispatch {
+    ($($method:ident => $feature:ident . $field:ident, $run:ident;)*) => {
+        $(
+            fn $method(&mut self, message: $feature::Message) -> Task<RootMessage> {
+                let effects = $feature::update(&mut self.state.$field, message);
+                self.batch_effects(effects, Self::$run)
+            }
+        )*
+    };
 }
 
 impl App {
@@ -769,6 +796,22 @@ impl App {
         Task::batch(tasks)
     }
 
+    // The uniform half of the root's dispatch. Each of these is the same
+    // three steps — update the feature, take the effects it asked for, run
+    // each — so they are stated as a table rather than written out. Features
+    // whose update needs more than a message (shell, modal_stack,
+    // prepare_publish, my_workshop's debug filter) keep their own handler
+    // below, where the difference is visible.
+    feature_dispatch! {
+        apply_downloader_message => downloader.downloader, run_downloader_effect;
+        apply_installed_addons_message => installed_addons.installed_addons, run_installed_addons_effect;
+        apply_size_analyzer_message => size_analyzer.size_analyzer, run_size_analyzer_effect;
+        apply_search_message => search.search, run_search_effect;
+        apply_destination_select_message => destination_select.destination_select, run_destination_select_effect;
+        apply_preview_gma_message => preview_gma.preview_gma, run_preview_gma_effect;
+        apply_settings_message => settings.settings, run_settings_effect;
+    }
+
     fn apply_tasks_overlay_message(
         &mut self,
         message: tasks_overlay::Message,
@@ -843,11 +886,6 @@ impl App {
         }
     }
 
-    fn apply_downloader_message(&mut self, message: downloader::Message) -> Task<RootMessage> {
-        let effects = downloader::update(&mut self.state.downloader, message);
-        self.batch_effects(effects, Self::run_downloader_effect)
-    }
-
     fn apply_my_workshop_message(&mut self, message: my_workshop::Message) -> Task<RootMessage> {
         #[cfg(feature = "debug")]
         let message = self.filter_my_workshop_message(message);
@@ -870,45 +908,6 @@ impl App {
             }
             message => message,
         }
-    }
-
-    fn apply_installed_addons_message(
-        &mut self,
-        message: installed_addons::Message,
-    ) -> Task<RootMessage> {
-        let effects = installed_addons::update(&mut self.state.installed_addons, message);
-        self.batch_effects(effects, Self::run_installed_addons_effect)
-    }
-
-    fn apply_size_analyzer_message(
-        &mut self,
-        message: size_analyzer::Message,
-    ) -> Task<RootMessage> {
-        let effects = size_analyzer::update(&mut self.state.size_analyzer, message);
-        self.batch_effects(effects, Self::run_size_analyzer_effect)
-    }
-
-    fn apply_search_message(&mut self, message: search::Message) -> Task<RootMessage> {
-        let effects = search::update(&mut self.state.search, message);
-        self.batch_effects(effects, Self::run_search_effect)
-    }
-
-    fn apply_destination_select_message(
-        &mut self,
-        message: destination_select::Message,
-    ) -> Task<RootMessage> {
-        let effects = destination_select::update(&mut self.state.destination_select, message);
-        self.batch_effects(effects, Self::run_destination_select_effect)
-    }
-
-    fn apply_preview_gma_message(&mut self, message: preview_gma::Message) -> Task<RootMessage> {
-        let effects = preview_gma::update(&mut self.state.preview_gma, message);
-        self.batch_effects(effects, Self::run_preview_gma_effect)
-    }
-
-    fn apply_settings_message(&mut self, message: settings::Message) -> Task<RootMessage> {
-        let effects = settings::update(&mut self.state.settings, message);
-        self.batch_effects(effects, Self::run_settings_effect)
     }
 
     fn run_shell_effect(&mut self, effect: shell::Effect) -> Task<RootMessage> {

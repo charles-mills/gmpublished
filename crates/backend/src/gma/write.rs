@@ -115,9 +115,7 @@ impl GmaFile {
         let src_path = src_path.as_ref();
 
         let metadata = &self.metadata;
-        let ignore = metadata
-            .ignore()
-            .map(|ignore| ignore.clone().into_boxed_slice());
+        let ignore = metadata.ignore().map(Box::<[String]>::from);
 
         let (title, addon_json) = match metadata {
             GmaMetadata::Legacy { title, .. } => (title.as_str(), None),

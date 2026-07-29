@@ -382,7 +382,7 @@ impl GmaFile {
 
 fn write_entry_bytes(
     payload: &[u8],
-    entry_path: &PathBuf,
+    entry_path: &Path,
     transaction: Option<&Transaction>,
 ) -> Result<(), GmaError> {
     use std::io::Write;

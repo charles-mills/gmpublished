@@ -346,7 +346,11 @@ impl Searchable for WorkshopItem {
 }
 impl Searchable for GmaFile {
     fn search_item(&self) -> Option<SearchItem> {
-        let mut terms = self.metadata.tags().cloned().unwrap_or_default();
+        let mut terms = self
+            .metadata
+            .tags()
+            .map(<[String]>::to_vec)
+            .unwrap_or_default();
         if let Some(addon_type) = self.metadata.addon_type() {
             terms.push(addon_type.to_string());
         }

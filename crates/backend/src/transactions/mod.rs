@@ -171,6 +171,30 @@ impl Transactions {
         None
     }
 
+    /// Cancels every transaction still running, and reports how many were.
+    ///
+    /// The cooperative half of shutdown. Long backend operations already poll
+    /// [`Transaction::aborted`] between units of work — per archive entry when
+    /// packing or extracting — so cancelling here lets an in-flight job stop at
+    /// its next checkpoint instead of being abandoned mid-write when the worker
+    /// pools are joined. Extraction writes each entry straight to its
+    /// destination, so "abandoned mid-write" means a truncated file.
+    pub fn cancel_all(&self) -> usize {
+        // Bind before cancelling: `cancel` can finalize a transaction, whose
+        // `Drop` takes the registry write lock to remove itself.
+        let live: Vec<Transaction> = {
+            let registry = self.shared.registry.read();
+            registry
+                .iter()
+                .filter_map(TransactionRef::upgrade)
+                .collect()
+        };
+
+        live.iter()
+            .filter(|transaction| transaction.cancel())
+            .count()
+    }
+
     pub fn cancel_by_id(&self, id: TransactionId) -> bool {
         let Some(transaction) = self.find(id) else {
             return false;
@@ -497,6 +521,34 @@ mod tests {
     /// `find` must not treat a registry entry it cannot upgrade as a bug:
     /// `Drop` removes the entry strictly after the strong count reaches zero,
     /// so a concurrent lookup can legitimately observe one.
+    /// Shutdown's cooperative half: every live transaction is cancelled, so a
+    /// job polling `aborted()` stops at its own checkpoint rather than being
+    /// abandoned mid-write when the pools are joined.
+    #[test]
+    fn cancel_all_cancels_every_live_transaction() {
+        let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));
+        let first = transactions.begin();
+        let second = transactions.begin();
+
+        assert_eq!(transactions.cancel_all(), 2);
+        assert!(first.aborted());
+        assert!(second.aborted());
+    }
+
+    /// Already-finished transactions are not counted, and cancelling twice
+    /// does not double-count — quit can reach this after a user cancel.
+    #[test]
+    fn cancel_all_ignores_transactions_that_already_finished() {
+        let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));
+        let done = transactions.begin();
+        done.finished(crate::transactions::TransactionPayload::None);
+        let running = transactions.begin();
+
+        assert_eq!(transactions.cancel_all(), 1);
+        assert_eq!(transactions.cancel_all(), 0);
+        assert!(running.aborted());
+    }
+
     #[test]
     fn find_returns_none_for_an_entry_that_cannot_upgrade() {
         let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));

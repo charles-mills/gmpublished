@@ -185,14 +185,14 @@ impl GmaMetadata {
         }
     }
 
-    pub fn tags(&self) -> Option<&Vec<String>> {
+    pub fn tags(&self) -> Option<&[String]> {
         match &self {
             Self::Standard { tags, .. } => Some(tags),
             Self::Legacy { .. } => None,
         }
     }
 
-    pub fn ignore(&self) -> Option<&Vec<String>> {
+    pub fn ignore(&self) -> Option<&[String]> {
         match &self {
             Self::Standard { ignore, .. } => Some(ignore),
             Self::Legacy { .. } => None,

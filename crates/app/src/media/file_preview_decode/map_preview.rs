@@ -23,7 +23,7 @@ pub(super) fn map_preview_data(
     request: &PreviewRequest,
     bsp_bytes: &[u8],
     gmod_dir: Option<std::path::PathBuf>,
-    emit_stage: &mut impl FnMut(PreviewLoadStage),
+    emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
     map_preview_data_with_prop_model_loader(
         request,
@@ -38,7 +38,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     request: &PreviewRequest,
     bsp_bytes: &[u8],
     gmod_dir: Option<std::path::PathBuf>,
-    emit_stage: &mut impl FnMut(PreviewLoadStage),
+    emit_stage: &mut dyn FnMut(PreviewLoadStage),
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
 ) -> PreviewData {
     if !request.bypass_size_limits && bsp_bytes.len() > MAP_TOO_LARGE_BYTES {

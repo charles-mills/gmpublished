@@ -435,10 +435,7 @@ mod metadata_tests {
 
         assert!(matches!(metadata, GmaMetadata::Standard { .. }));
         assert_eq!(metadata.addon_type(), Some("map"));
-        assert_eq!(
-            metadata.tags().map(Vec::as_slice),
-            Some(&["scenic".to_owned()][..])
-        );
+        assert_eq!(metadata.tags(), Some(&["scenic".to_owned()][..]));
         assert_eq!(metadata.title(), "Addon");
     }
 

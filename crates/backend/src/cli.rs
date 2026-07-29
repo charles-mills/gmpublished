@@ -9,8 +9,10 @@ use crate::{
 
 /// Whether the process was invoked with CLI-style arguments (a bare
 /// `gmpublished <file.gma>` from a file association, or `-e`/`--extract`).
-/// Recomputed on demand rather than cached: it's a cheap `argv` length check,
-/// not process state worth memoizing behind a global.
+///
+/// An `argv` probe, and only [`run`] should need it. Anything asking "is this
+/// process headless?" wants [`is_headless`], which is what `run` decided
+/// rather than what the arguments hint at.
 ///
 /// This is where opening a `.gma` diverges by platform. macOS delivers
 /// documents by Apple Event, leaving `argv` empty, so the GUI starts and
@@ -20,6 +22,19 @@ use crate::{
 pub fn is_cli_mode() -> bool {
     std::env::args_os().len() > 1
 }
+
+/// Whether this process took the headless path.
+///
+/// Latched by [`run`] rather than re-derived from `argv`, because
+/// `main_thread_forbidden!` consults it: deriving it means any argument at all
+/// — `cargo run -- --some-flag`, a debugger's, a profiler's — silently disarms
+/// that assertion for a GUI session it was never about.
+#[must_use]
+pub fn is_headless() -> bool {
+    HEADLESS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+static HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What a CLI invocation asked for, and how it ended.
 ///
@@ -31,6 +46,7 @@ pub fn run() -> Option<Result<(), CliError>> {
     if !is_cli_mode() {
         return None;
     }
+    HEADLESS.store(true, std::sync::atomic::Ordering::Release);
 
     // CLI mode prints product output directly; remove any host-installed backend panic hook.
     let _ = std::panic::take_hook();

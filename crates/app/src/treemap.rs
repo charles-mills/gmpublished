@@ -79,7 +79,7 @@ impl SizeAnalyzerAddon {
             title: addon.meta.title().to_owned(),
             group_tag: normalized_group_tag(
                 metadata.addon_type(),
-                metadata.tags().map_or(&[], Vec::as_slice),
+                metadata.tags().unwrap_or_default(),
             ),
             file_size_bytes: addon.file_size_bytes,
         }

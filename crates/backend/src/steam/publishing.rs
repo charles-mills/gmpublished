@@ -42,7 +42,15 @@ pub enum PublishError {
     #[error("the icon is not a format the Workshop accepts")]
     IconInvalidFormat,
     #[error("publish I/O failed")]
-    IOError(#[source] Option<std::sync::Arc<std::io::Error>>),
+    IOError(#[source] crate::IoFailure),
+    /// A filesystem operation failed while publishing, and the path it failed
+    /// on is the reportable part.
+    ///
+    /// Carried on the error rather than emitted alongside it, so reporting is
+    /// derived from the error the caller receives instead of reaching the user
+    /// through one route while the error travels another and arrives empty.
+    #[error("publishing failed on {}", path.display())]
+    PathIo { path: PathBuf },
     #[error("Steam returned an error: {0}")]
     SteamError(SteamError),
     #[error("image processing failed: {0}")]
@@ -67,6 +75,7 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::IconTooSmall => keys::ICON_TOO_SMALL,
             Self::IconInvalidFormat => keys::ICON_INVALID_FORMAT,
             Self::IOError(_) => keys::IO_ERROR,
+            Self::PathIo { .. } => keys::PATH_IO_ERROR,
             Self::SteamError(_) => keys::STEAM_ERROR,
             Self::ImageError(_) => keys::IMAGE_ERROR,
             Self::Cancelled => keys::CANCELLED,
@@ -79,7 +88,8 @@ impl crate::error_key::HasErrorKey for PublishError {
         match self {
             Self::NotWhitelisted(failed) => Some(failed.join("\n")),
             Self::DuplicateEntry(path) => Some(path.clone()),
-            Self::IOError(Some(source)) => Some(source.to_string()),
+            Self::IOError(source) => Some(source.to_string()),
+            Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::SteamError(error) => Some(error.to_string()),
             Self::ImageError(error) => Some(error.to_string()),
             Self::Gma(error) => error.error_detail(),
@@ -108,7 +118,7 @@ impl From<ImageError> for PublishError {
 }
 impl From<std::io::Error> for PublishError {
     fn from(error: std::io::Error) -> Self {
-        Self::IOError(Some(std::sync::Arc::new(error)))
+        Self::IOError(error.into())
     }
 }
 
@@ -389,15 +399,11 @@ impl WorkshopIcon {
         }
     }
 
-    /// [`Self::into_preview_path`], reporting a write failure on `transaction`
-    /// and converting it to the [`PublishError`] the publish flow returns.
-    fn resolve_preview_path(
-        self,
-        app_data: &AppData,
-        transaction: &Transaction,
-    ) -> Result<PreviewPath, PublishError> {
+    /// [`Self::into_preview_path`], with a write failure carrying the path it
+    /// failed on into the [`PublishError`] the publish flow returns.
+    fn resolve_preview_path(self, app_data: &AppData) -> Result<PreviewPath, PublishError> {
         self.into_preview_path(app_data)
-            .map_err(|PreviewIconWriteFailed(path)| fail_publish_preview_path(transaction, path))
+            .map_err(|PreviewIconWriteFailed(path)| PublishError::PathIo { path })
     }
 }
 impl WorkshopIcon {
@@ -525,7 +531,7 @@ impl ConnectedSteam<'_> {
             } => {
                 let tags = publish_tags(tags, addon_type);
 
-                let preview_path = preview.resolve_preview_path(app_data, transaction)?;
+                let preview_path = preview.resolve_preview_path(app_data)?;
 
                 let handle = self
                     .interface
@@ -553,7 +559,7 @@ impl ConnectedSteam<'_> {
                 let tags = publish_tags(tags, addon_type);
 
                 let preview_path = preview
-                    .map(|icon| icon.resolve_preview_path(app_data, transaction))
+                    .map(|icon| icon.resolve_preview_path(app_data))
                     .transpose()?;
 
                 let update = self
@@ -636,7 +642,7 @@ impl ConnectedSteam<'_> {
         transaction: &Transaction,
         app_data: &AppData,
     ) -> Result<bool, PublishError> {
-        let preview_path = icon.resolve_preview_path(app_data, transaction)?;
+        let preview_path = icon.resolve_preview_path(app_data)?;
 
         let (result_tx, result_rx) = mpsc::channel();
         let update_handle = self
@@ -821,16 +827,6 @@ fn emit_publish_error(
 ) -> Result<PublishSubmissionOutcome, PublishError> {
     transaction.error(&error);
     Err(error)
-}
-
-/// Fails the transaction with the preview path that could not be materialized
-/// and yields the error the publish flow returns early with.
-fn fail_publish_preview_path(transaction: &Transaction, path: PathBuf) -> PublishError {
-    transaction.error(crate::transactions::TransactionError::detailed(
-        crate::error_key::keys::PATH_IO_ERROR,
-        crate::transactions::detail_from_serialize(path),
-    ));
-    PublishError::IOError(None)
 }
 
 /// A Steam callback channel that disconnects, or goes quiet past its
@@ -1086,7 +1082,13 @@ mod tests {
             "ERR_ICON_INVALID_FORMAT",
             None,
         );
-        assert_wire(PublishError::IOError(None), "ERR_IO_ERROR", None);
+        assert_wire(
+            PublishError::PathIo {
+                path: PathBuf::from("/addons/icon.png"),
+            },
+            "ERR_PATH_IO_ERROR",
+            Some("/addons/icon.png"),
+        );
     }
 
     #[test]

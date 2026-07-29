@@ -4,7 +4,7 @@ pub mod threads;
 
 mod macros;
 pub(crate) use macros::NUM_THREADS;
-pub(crate) use macros::available_parallelism_count;
+pub(crate) use macros::pool_threads;
 pub(crate) use macros::{main_thread_forbidden, thread_pool};
 
 mod stream;

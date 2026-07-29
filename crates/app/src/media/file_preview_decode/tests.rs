@@ -396,9 +396,7 @@ fn model_companion_load_previews_the_parent_entry() {
     )
     .expect("fixture archive should load");
     let request = request_from_archive(archive, "Models/Test/Thing.VVD".to_owned(), 9, 123);
-    let (mut output, _receiver) = iced_mpsc::channel(16);
-
-    let data = load_preview_data(request, &test_tokens(), None, &mut output)
+    let data = load_preview_data(request, &test_tokens(), None, &mut |_stage| {})
         .expect("companion load should resolve through the parent");
 
     assert_eq!(data.entry_path, "Models/Test/Thing.MDL");
@@ -414,9 +412,7 @@ fn model_companion_load_without_parent_reports_the_companion_itself() {
     )
     .expect("fixture archive should load");
     let request = request_from_archive(archive, "models/test/orphan.dx80.vtx".to_owned(), 9, 123);
-    let (mut output, _receiver) = iced_mpsc::channel(16);
-
-    let data = load_preview_data(request, &test_tokens(), None, &mut output)
+    let data = load_preview_data(request, &test_tokens(), None, &mut |_stage| {})
         .expect("orphaned companion should still produce an info preview");
 
     assert_eq!(data.entry_path, "models/test/orphan.dx80.vtx");

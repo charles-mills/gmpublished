@@ -1,7 +1,8 @@
 //! Decoding for the file previewer: fonts, images, VTF/model/particle assets,
 //! BSP prop baking, and source highlighting.
 //!
-//! The `impl App` methods that schedule this live in `app/`; nothing here
+//! The `impl App` methods that schedule this live in `app/`, and so does the
+//! translation of what comes back into application messages — nothing here
 //! touches the message loop.
 
 use std::{
@@ -10,12 +11,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-
-use iced::futures::channel::mpsc as iced_mpsc;
-
-use crate::app::RootMessage;
-use crate::app::runners::send_root_message;
-use crate::features::file_preview;
 
 use crate::features::file_preview::model::{MeshData, ModelData, ModelVertex};
 use cosmic_text::{
@@ -47,7 +42,6 @@ use crate::features::file_preview::{
     PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest, Skybox,
     SkyboxFace, normalize_particle_material,
 };
-use crate::generation::Generation;
 use crate::theme::Tokens;
 
 mod map_preview;
@@ -100,33 +94,33 @@ const MAP_DETAIL_SPRITE_PLACEMENT_CAP: usize = 65_536;
 const SKYBOX_FACE_DIMENSION_CAP: u32 = 2048;
 const PHY_DEBUG_VERTEX_COLOR: [f32; 3] = [0.5, 0.5, 0.5];
 
-pub fn run_file_preview_load(
+/// Decodes one preview, reporting progress through `on_stage`.
+///
+/// Takes a callback rather than a message sender so this module owes nothing
+/// to the UI framework: what a stage *means* to the app — which message it
+/// becomes, which route it reaches — is the caller's to decide.
+pub fn load_preview(
     request: &PreviewRequest,
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
-    mut output: iced_mpsc::Sender<RootMessage>,
-) {
-    let request_id = request.request_id;
-    let result = catch_preview_build_result(request, || {
-        load_preview_data(request.clone(), tokens, gmod_dir, &mut output)
-    });
-    let _ = send_root_message(
-        &mut output,
-        RootMessage::FilePreview(file_preview::Message::Loaded(request_id, Box::new(result))),
-    );
+    on_stage: &mut dyn FnMut(PreviewLoadStage),
+) -> Result<PreviewData, PreviewLoadError> {
+    catch_preview_build_result(request, || {
+        load_preview_data(request.clone(), tokens, gmod_dir, on_stage)
+    })
 }
 
 fn load_preview_data(
     mut request: PreviewRequest,
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
-    output: &mut iced_mpsc::Sender<RootMessage>,
+    on_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> Result<PreviewData, PreviewLoadError> {
     let entry_class = match classify_entry_path(&request.entry_path) {
         EntryClass::Previewable(class) => class,
         EntryClass::ModelCompanion => {
             let Some(parent_request) = model_companion_preview_request(&request) else {
-                send_load_stage(output, request.request_id, PreviewLoadStage::ReadingArchive);
+                on_stage(PreviewLoadStage::ReadingArchive);
                 log::debug!(
                     "file preview model companion {} missing parent .mdl",
                     request.entry_path
@@ -137,7 +131,7 @@ fn load_preview_data(
             PreviewClass::Model
         }
     };
-    send_load_stage(output, request.request_id, initial_load_stage(entry_class));
+    on_stage(initial_load_stage(entry_class));
     let bytes = request.archive.entry_bytes(&request.entry_path)?;
     // Loose-folder entries carry crc32 = 0, which would collide the
     // size-derived content_id for same-size files; derive the real one now
@@ -152,19 +146,8 @@ fn load_preview_data(
         tokens,
         gmod_dir,
         entry_class,
-        &mut |stage| send_load_stage(output, request.request_id, stage),
+        on_stage,
     ))
-}
-
-fn send_load_stage(
-    output: &mut iced_mpsc::Sender<RootMessage>,
-    request_id: Generation,
-    stage: PreviewLoadStage,
-) {
-    let _ = send_root_message(
-        output,
-        RootMessage::FilePreview(file_preview::Message::LoadStageChanged(request_id, stage)),
-    );
 }
 
 const fn initial_load_stage(entry_class: PreviewClass) -> PreviewLoadStage {
@@ -235,7 +218,7 @@ fn preview_data_from_bytes_with_stages(
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
     entry_class: PreviewClass,
-    emit_stage: &mut impl FnMut(PreviewLoadStage),
+    emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
     catch_preview_build_data(request, || {
         preview_data_from_bytes_inner(request, bytes, tokens, gmod_dir, entry_class, emit_stage)
@@ -248,7 +231,7 @@ fn preview_data_from_bytes_inner(
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
     entry_class: PreviewClass,
-    emit_stage: &mut impl FnMut(PreviewLoadStage),
+    emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
     let mut data = match entry_class {
         PreviewClass::Code { syntax } => code_preview_data(request, bytes, syntax, tokens),
@@ -469,7 +452,7 @@ fn particle_preview_data(
     request: &PreviewRequest,
     bytes: &[u8],
     gmod_dir: Option<std::path::PathBuf>,
-    emit_stage: &mut impl FnMut(PreviewLoadStage),
+    emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
     use gmpublished_backend::particles::ParticleEngine;
     use gmpublished_backend::scene::pcf;
