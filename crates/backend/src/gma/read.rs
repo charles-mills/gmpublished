@@ -1,6 +1,6 @@
 //! Read-side plumbing: the GMA wire format lives in [`vformats::gma`];
 //! this adapts it to the app's [`GmaView`] (bytes provider) and
-//! [`GMAFile`] (parsed identity/summary). Bytes come from a workshop
+//! [`GmaFile`] (parsed identity/summary). Bytes come from a workshop
 //! decompression buffer, a decompressed spill file, or a read-only
 //! memory map of the addon on disk (never loaded whole — addons reach
 //! gigabytes; the map pages in only what parsing and extraction
@@ -12,7 +12,7 @@ use tempfile::TempPath;
 
 use crate::ArcBytes;
 
-use super::{GMAEntry, GMAError, GMAFile, GMAHeader, GMAMetadata, is_unsafe_entry_path};
+use super::{GmaEntry, GmaError, GmaFile, GmaHeader, GmaMetadata, is_unsafe_entry_path};
 use crate::util::main_thread_forbidden;
 
 /// Where a GMA's (decompressed) bytes live for parsing.
@@ -37,19 +37,19 @@ impl GmaBytes {
     }
 }
 
-fn map_parse_error(error: &vformats::gma::GmaError) -> GMAError {
+fn map_parse_error(error: &vformats::gma::GmaError) -> GmaError {
     use vformats::gma::GmaError as Parse;
     match error {
-        Parse::BadMagic | Parse::UnsupportedVersion(_) => GMAError::InvalidHeader,
-        _ => GMAError::FormatError,
+        Parse::BadMagic | Parse::UnsupportedVersion(_) => GmaError::InvalidHeader,
+        _ => GmaError::FormatError,
     }
 }
 
 /// The bytes provider for one GMA read/extract operation, created when an
 /// operation actually needs entry data and dropped after. Cheap to
-/// construct for on-disk addons ([`GMAFile::view`] mmaps on demand); the
+/// construct for on-disk addons ([`GmaFile::view`] mmaps on demand); the
 /// membuffer/spill variants are constructed once by the download/decompress
-/// flow that produced the bytes and carried alongside the [`GMAFile`]
+/// flow that produced the bytes and carried alongside the [`GmaFile`]
 /// handle derived from them, since there is no on-disk GMA to re-view.
 pub struct GmaView {
     bytes: GmaBytes,
@@ -70,7 +70,7 @@ impl GmaView {
     /// gmpublisher accepted it: the alternative is re-reading every addon
     /// through a seeking reader on every preview. Every public constructor
     /// below inherits the risk and repeats it.
-    pub(crate) fn mmap(path: &Path) -> Result<Self, GMAError> {
+    pub(crate) fn mmap(path: &Path) -> Result<Self, GmaError> {
         main_thread_forbidden!();
 
         let file = File::open(path)?;
@@ -93,7 +93,7 @@ impl GmaView {
     /// A GMA decompressed to a spill file; `path` keeps naming the
     /// original payload so the addon's identity (extracted-name
     /// fallback, dedup by path) is unchanged.
-    pub(crate) fn from_temp_backing(temp_path: TempPath) -> Result<Self, GMAError> {
+    pub(crate) fn from_temp_backing(temp_path: TempPath) -> Result<Self, GmaError> {
         let file = File::open(&temp_path)?;
         // SAFETY: see `mmap`'s doc comment; this spill file is exclusively
         // owned by the decompression that produced it.
@@ -106,14 +106,16 @@ impl GmaView {
         })
     }
 
+    #[cfg(feature = "test-support")]
     /// Whether this view's bytes are a decompressed-to-disk spill file
     /// rather than an in-memory buffer or a direct on-disk mapping.
-    /// Exposed for tests asserting `GMAFile::decompress`'s memory-vs-spill
+    /// Exposed for tests asserting `GmaFile::decompress`'s memory-vs-spill
     /// threshold; production code never branches on it.
     pub fn is_temp_backed(&self) -> bool {
         matches!(self.bytes, GmaBytes::TempBacked { .. })
     }
 
+    #[cfg(feature = "test-support")]
     /// The spill file's path, when [`Self::is_temp_backed`]. Exposed for
     /// tests asserting the spill file is deleted once nothing holds this
     /// view anymore.
@@ -124,7 +126,7 @@ impl GmaView {
         }
     }
 
-    pub fn parse(&self) -> Result<vformats::gma::Gma<'_>, GMAError> {
+    pub fn parse(&self) -> Result<vformats::gma::Gma<'_>, GmaError> {
         main_thread_forbidden!();
         // No whole-input or per-entry cap: these bytes are already
         // materialized (a buffer or a file mapping) and parsing plus
@@ -146,14 +148,14 @@ impl GmaView {
     ///
     /// Carries [`Self::mmap`]'s accepted risk: truncating the file while the
     /// returned view is alive is undefined behaviour.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, GMAError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         Self::mmap(path.as_ref())
     }
 
     /// Parses the header + metadata and builds the identity handle for
     /// this view's content; `path` names the addon for identity purposes
     /// (see the constructors above).
-    pub fn handle(&self, path: impl AsRef<Path>) -> Result<GMAFile, GMAError> {
+    pub fn handle(&self, path: impl AsRef<Path>) -> Result<GmaFile, GmaError> {
         let parsed = self.parse()?;
         Ok(self.handle_from_parsed(&parsed, path))
     }
@@ -162,9 +164,9 @@ impl GmaView {
         &self,
         parsed: &vformats::gma::Gma<'_>,
         path: impl AsRef<Path>,
-    ) -> GMAFile {
+    ) -> GmaFile {
         let meta = &parsed.metadata;
-        let mut gma = GMAFile {
+        let mut gma = GmaFile {
             path: path.as_ref().to_owned(),
             size: self.bytes.as_slice().len() as u64,
             id: None,
@@ -176,7 +178,7 @@ impl GmaView {
             extracted_name: String::new(),
             modified: None,
         };
-        gma.compute_extracted_name();
+        gma.adopt_path_id_and_name();
         gma
     }
 
@@ -184,10 +186,10 @@ impl GmaView {
     /// parse. [`Self::handle`], [`Self::header`] and [`Self::entries`]
     /// each re-walk the whole entry table; index and discovery reads use
     /// this instead.
-    pub fn meta(&self, path: impl AsRef<Path>) -> Result<GmaMetaBundle, GMAError> {
+    pub fn meta(&self, path: impl AsRef<Path>) -> Result<GmaMetaBundle, GmaError> {
         let parsed = self.parse()?;
         let handle = self.handle_from_parsed(&parsed, path);
-        let header = GMAHeader {
+        let header = GmaHeader {
             version: parsed.metadata.version,
             timestamp: parsed.metadata.timestamp,
             metadata: handle.metadata.clone(),
@@ -204,7 +206,7 @@ impl GmaView {
 
     /// Header plus safe-path entry extents for library indexing, without
     /// constructing the extraction handle that preview/extraction needs.
-    pub fn index_meta(&self) -> Result<GmaIndexBundle, GMAError> {
+    pub fn index_meta(&self) -> Result<GmaIndexBundle, GmaError> {
         let parsed = self.parse()?;
         Ok(GmaIndexBundle {
             header: header_from_parsed(&parsed),
@@ -212,7 +214,7 @@ impl GmaView {
         })
     }
 
-    pub fn header(&self) -> Result<GMAHeader, GMAError> {
+    pub fn header(&self) -> Result<GmaHeader, GmaError> {
         let parsed = self.parse()?;
         Ok(header_from_parsed(&parsed))
     }
@@ -220,37 +222,37 @@ impl GmaView {
     /// Safe-path-filtered entry projection, computed fresh on every call.
     /// Callers that need it persistently own the result (it is not a
     /// populated field).
-    pub fn entries(&self) -> Result<HashMap<String, GMAEntry>, GMAError> {
+    pub fn entries(&self) -> Result<HashMap<String, GmaEntry>, GmaError> {
         let parsed = self.parse()?;
         Ok(entries_from_parsed(&parsed))
     }
 
     /// Reads one entry's payload by path. Rejects unsafe paths the same
     /// way [`Self::entries`] filters them out of its projection.
-    pub fn read_entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GMAError> {
+    pub fn read_entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
         if is_unsafe_entry_path(entry_path) {
-            return Err(GMAError::EntryNotFound);
+            return Err(GmaError::EntryNotFound);
         }
         let parsed = self.parse()?;
-        let (_, payload) = parsed.get(entry_path).ok_or(GMAError::EntryNotFound)?;
+        let (_, payload) = parsed.get(entry_path).ok_or(GmaError::EntryNotFound)?;
         Ok(payload.to_vec())
     }
 
     /// Copies a payload extent recorded by [`Self::meta`] without reparsing
     /// the archive. Every access is checked against the backing bytes again.
-    pub fn read_payload_bytes(&self, offset: u64, len: u64) -> Result<Vec<u8>, GMAError> {
-        let start = usize::try_from(offset).map_err(|_| GMAError::FormatError)?;
-        let len = usize::try_from(len).map_err(|_| GMAError::FormatError)?;
-        let end = start.checked_add(len).ok_or(GMAError::FormatError)?;
+    pub fn read_payload_bytes(&self, offset: u64, len: u64) -> Result<Vec<u8>, GmaError> {
+        let start = usize::try_from(offset).map_err(|_| GmaError::FormatError)?;
+        let len = usize::try_from(len).map_err(|_| GmaError::FormatError)?;
+        let end = start.checked_add(len).ok_or(GmaError::FormatError)?;
         self.bytes
             .as_slice()
             .get(start..end)
             .map(<[u8]>::to_vec)
-            .ok_or(GMAError::FormatError)
+            .ok_or(GmaError::FormatError)
     }
 }
 
-pub(super) fn entries_from_parsed(parsed: &vformats::gma::Gma<'_>) -> HashMap<String, GMAEntry> {
+pub(super) fn entries_from_parsed(parsed: &vformats::gma::Gma<'_>) -> HashMap<String, GmaEntry> {
     let mut entries = HashMap::with_capacity(parsed.entries().len());
     for (index, entry) in parsed.entries().iter().enumerate() {
         // An entry whose path could escape an extraction root is skipped,
@@ -261,7 +263,7 @@ pub(super) fn entries_from_parsed(parsed: &vformats::gma::Gma<'_>) -> HashMap<St
         }
         entries.insert(
             entry.path.to_string(),
-            GMAEntry {
+            GmaEntry {
                 path: entry.path.to_string(),
                 size: entry.size,
                 crc: entry.crc32,
@@ -272,9 +274,9 @@ pub(super) fn entries_from_parsed(parsed: &vformats::gma::Gma<'_>) -> HashMap<St
     entries
 }
 
-fn header_from_parsed(parsed: &vformats::gma::Gma<'_>) -> GMAHeader {
+fn header_from_parsed(parsed: &vformats::gma::Gma<'_>) -> GmaHeader {
     let meta = &parsed.metadata;
-    GMAHeader {
+    GmaHeader {
         version: meta.version,
         timestamp: meta.timestamp,
         metadata: metadata_from_embedded_fields(
@@ -296,7 +298,7 @@ impl GmaView {
     fn indexed_entries_from_parsed(
         &self,
         parsed: &vformats::gma::Gma<'_>,
-    ) -> Result<Vec<GmaIndexedEntry>, GMAError> {
+    ) -> Result<Vec<GmaIndexedEntry>, GmaError> {
         let bytes = self.bytes.as_slice();
         let mut entries = Vec::with_capacity(parsed.entries().len());
         for (index, entry) in parsed.entries().iter().enumerate() {
@@ -306,25 +308,25 @@ impl GmaView {
             }
             let payload = parsed
                 .entry_bytes(index)
-                .map_err(|_| GMAError::FormatError)?;
+                .map_err(|_| GmaError::FormatError)?;
             let offset = payload
                 .as_ptr()
                 .addr()
                 .checked_sub(bytes.as_ptr().addr())
-                .ok_or(GMAError::FormatError)?;
+                .ok_or(GmaError::FormatError)?;
             // The payload must lie wholly inside this view, or the offset
             // names bytes from some other buffer.
             if offset
                 .checked_add(payload.len())
                 .is_none_or(|end| end > bytes.len())
             {
-                return Err(GMAError::FormatError);
+                return Err(GmaError::FormatError);
             }
             entries.push(GmaIndexedEntry {
                 path: entry.path.to_string(),
                 size: entry.size,
                 crc: entry.crc32,
-                data_offset: u64::try_from(offset).map_err(|_| GMAError::FormatError)?,
+                data_offset: u64::try_from(offset).map_err(|_| GmaError::FormatError)?,
             });
         }
         Ok(entries)
@@ -349,14 +351,14 @@ pub(super) fn safe_entry_indices_from_parsed(
 /// handle, the header, and the safe-path entry list in table order.
 #[derive(Debug, Clone)]
 pub struct GmaMetaBundle {
-    pub handle: GMAFile,
-    pub header: GMAHeader,
+    pub handle: GmaFile,
+    pub header: GmaHeader,
     pub entries: Vec<GmaIndexedEntry>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GmaIndexBundle {
-    pub header: GMAHeader,
+    pub header: GmaHeader,
     pub entries: Vec<GmaIndexedEntry>,
 }
 
@@ -368,35 +370,35 @@ pub struct GmaIndexedEntry {
     pub data_offset: u64,
 }
 
-impl GMAFile {
+impl GmaFile {
     /// Memory-maps this addon's bytes for one read/extract operation.
     /// Only valid for on-disk addons; membuffer/spill flows hold the view
     /// they constructed instead of re-viewing through a handle.
     ///
     /// Carries [`GmaView::mmap`]'s accepted risk: truncating the file while
     /// the returned view is alive is undefined behaviour.
-    pub fn view(&self) -> Result<GmaView, GMAError> {
+    pub fn view(&self) -> Result<GmaView, GmaError> {
         GmaView::mmap(&self.path)
     }
 
-    pub fn header(&self) -> Result<GMAHeader, GMAError> {
+    pub fn header(&self) -> Result<GmaHeader, GmaError> {
         self.view()?.header()
     }
 
     /// One-mmap, one-parse open: handle + header + entry list together.
     ///
     /// Carries [`GmaView::mmap`]'s accepted risk for the duration of the call.
-    pub fn open_meta<P: AsRef<Path>>(path: P) -> Result<GmaMetaBundle, GMAError> {
+    pub fn open_meta<P: AsRef<Path>>(path: P) -> Result<GmaMetaBundle, GmaError> {
         GmaView::mmap(path.as_ref())?.meta(path)
     }
 
     /// One-mmap, one-parse library index without an unused extraction handle.
-    pub fn open_index<P: AsRef<Path>>(path: P) -> Result<GmaIndexBundle, GMAError> {
+    pub fn open_index<P: AsRef<Path>>(path: P) -> Result<GmaIndexBundle, GmaError> {
         GmaView::mmap(path.as_ref())?.index_meta()
     }
 
     /// One-mmap, one-parse header read without projecting the entry table.
-    pub fn open_header<P: AsRef<Path>>(path: P) -> Result<GMAHeader, GMAError> {
+    pub fn open_header<P: AsRef<Path>>(path: P) -> Result<GmaHeader, GmaError> {
         GmaView::mmap(path.as_ref())?.header()
     }
 }
@@ -404,15 +406,15 @@ impl GMAFile {
 fn metadata_from_embedded_fields(
     embedded_title: String,
     embedded_description: String,
-) -> GMAMetadata {
+) -> GmaMetadata {
     match serde_json::de::from_str::<super::StandardManifest>(&embedded_description) {
-        Ok(manifest) if manifest.is_manifest() => GMAMetadata::Standard {
+        Ok(manifest) if manifest.is_manifest() => GmaMetadata::Standard {
             title: embedded_title,
             addon_type: manifest.addon_type.unwrap_or_default(),
             tags: manifest.tags.unwrap_or_default(),
             ignore: manifest.ignore.unwrap_or_default(),
         },
-        _ => GMAMetadata::Legacy {
+        _ => GmaMetadata::Legacy {
             title: embedded_title,
             description: embedded_description,
         },
@@ -422,7 +424,7 @@ fn metadata_from_embedded_fields(
 #[cfg(test)]
 mod metadata_tests {
     use super::metadata_from_embedded_fields;
-    use crate::gma::GMAMetadata;
+    use crate::gma::GmaMetadata;
 
     #[test]
     fn a_manifest_description_becomes_standard() {
@@ -431,7 +433,7 @@ mod metadata_tests {
             r#"{"type":"map","tags":["scenic"]}"#.to_owned(),
         );
 
-        assert!(matches!(metadata, GMAMetadata::Standard { .. }));
+        assert!(matches!(metadata, GmaMetadata::Standard { .. }));
         assert_eq!(metadata.addon_type(), Some("map"));
         assert_eq!(
             metadata.tags().map(Vec::as_slice),
@@ -441,15 +443,15 @@ mod metadata_tests {
     }
 
     /// Free text that happens to parse as JSON is not a manifest. Untagged
-    /// deserialization used to swallow these into an empty `Standard`,
-    /// discarding the description.
+    /// deserialization swallows these into an empty `Standard` and discards
+    /// the description, which is why the manifest keys are checked explicitly.
     #[test]
     fn a_json_shaped_description_without_manifest_keys_stays_legacy() {
         for description in ["{}", r#"{"note":"see the workshop page"}"#] {
             let metadata =
                 metadata_from_embedded_fields("Addon".to_owned(), description.to_owned());
 
-            let GMAMetadata::Legacy {
+            let GmaMetadata::Legacy {
                 description: kept, ..
             } = &metadata
             else {
@@ -464,14 +466,14 @@ mod metadata_tests {
         let metadata =
             metadata_from_embedded_fields("Addon".to_owned(), "just a description".to_owned());
 
-        assert!(matches!(metadata, GMAMetadata::Legacy { .. }));
+        assert!(matches!(metadata, GmaMetadata::Legacy { .. }));
         assert_eq!(metadata.title(), "Addon");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::gma::{GMAError, is_unsafe_entry_path};
+    use crate::gma::{GmaError, is_unsafe_entry_path};
 
     use super::GmaView;
 
@@ -483,11 +485,11 @@ mod tests {
         assert_eq!(view.read_payload_bytes(4, 0).unwrap(), Vec::<u8>::new());
         assert!(matches!(
             view.read_payload_bytes(4, 1),
-            Err(GMAError::FormatError)
+            Err(GmaError::FormatError)
         ));
         assert!(matches!(
             view.read_payload_bytes(u64::MAX, 2),
-            Err(GMAError::FormatError)
+            Err(GmaError::FormatError)
         ));
     }
 

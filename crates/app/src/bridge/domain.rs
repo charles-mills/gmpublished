@@ -16,8 +16,26 @@ impl PublishedFileId {
         NonZeroU64::new(id).map(Self)
     }
 
+    /// A workshop id arriving from the backend.
+    ///
+    /// The backend's id type is a plain `u64` wrapper, so this is the boundary
+    /// that enforces nonzero — every backend parse path (`ws_id_from_file_name`,
+    /// the Web API item lists) filters zero out, and this is what happens if
+    /// one is ever added that does not.
+    pub(crate) fn from_backend(id: gmpublished_backend::appdata::SettingsPublishedFileId) -> Self {
+        Self::new(id.0).expect("a zero workshop id reached the bridge unfiltered")
+    }
+
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
+    }
+
+    /// A literal workshop id in a test. Panics on zero, which is a broken
+    /// fixture rather than a runtime condition — stated once so the fixtures
+    /// do not each carry their own wording for it.
+    #[cfg(test)]
+    pub(crate) fn fixture(id: u64) -> Self {
+        Self::new(id).expect("a fixture workshop id must be nonzero")
     }
 }
 

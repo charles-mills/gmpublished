@@ -1690,31 +1690,7 @@ fn skybox_partition_bsp_fixture_with_extra_entities(
     include_vis: bool,
     extra_entities: &str,
 ) -> Vec<u8> {
-    const HEADER_LEN: usize = 8;
-    const LUMP_COUNT: usize = 64;
-    const LUMP_ENTRY_LEN: usize = 16;
-    const ENTITIES_LUMP_INDEX: usize = 0;
-    const PLANES_LUMP_INDEX: usize = 1;
-    const TEXTURE_DATA_LUMP_INDEX: usize = 2;
-    const VERTICES_LUMP_INDEX: usize = 3;
-    const VISIBILITY_LUMP_INDEX: usize = 4;
-    const NODES_LUMP_INDEX: usize = 5;
-    const TEXTURE_INFO_LUMP_INDEX: usize = 6;
-    const FACES_LUMP_INDEX: usize = 7;
-    const LEAVES_LUMP_INDEX: usize = 10;
-    const EDGES_LUMP_INDEX: usize = 12;
-    const SURFACE_EDGES_LUMP_INDEX: usize = 13;
-    const MODELS_LUMP_INDEX: usize = 14;
-    const LEAF_FACES_LUMP_INDEX: usize = 16;
-    const GAME_LUMP_INDEX: usize = 35;
-    const PAKFILE_LUMP_INDEX: usize = 40;
-    const TEXTURE_STRING_DATA_LUMP_INDEX: usize = 43;
-    const TEXTURE_STRING_TABLE_LUMP_INDEX: usize = 44;
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VBSP");
-    bytes.extend_from_slice(&20_u32.to_le_bytes());
-    bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
+    let mut bytes = bsp_fixture_header();
 
     let sky_camera_entity = if include_sky_camera {
         r#"{ "classname" "sky_camera" "origin" "32 0 0" }"#
@@ -1809,16 +1785,7 @@ fn skybox_partition_bsp_fixture_with_extra_entities(
     append_lump(&mut bytes, LEAF_FACES_LUMP_INDEX, &leaf_faces, 0);
 
     let prop_data = static_prop_game_lump_data();
-    let game_lump_offset = bytes.len();
-    let prop_offset = game_lump_offset + 20;
-    bytes.extend_from_slice(&1_i32.to_le_bytes());
-    bytes.extend_from_slice(&i32::from_be_bytes(*b"sprp").to_le_bytes());
-    bytes.extend_from_slice(&0_u16.to_le_bytes());
-    bytes.extend_from_slice(&10_u16.to_le_bytes());
-    bytes.extend_from_slice(&(prop_offset as i32).to_le_bytes());
-    bytes.extend_from_slice(&(prop_data.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(&prop_data);
-    write_lump_entry(&mut bytes, GAME_LUMP_INDEX, game_lump_offset, 20, 0);
+    append_sprp_game_lump(&mut bytes, &prop_data);
 
     let pakfile_offset = bytes.len();
     let empty_zip = empty_zip_bytes();
@@ -1848,31 +1815,7 @@ fn skybox_partition_bsp_fixture_with_extra_entities(
 }
 
 fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
-    const HEADER_LEN: usize = 8;
-    const LUMP_COUNT: usize = 64;
-    const LUMP_ENTRY_LEN: usize = 16;
-    const ENTITIES_LUMP_INDEX: usize = 0;
-    const PLANES_LUMP_INDEX: usize = 1;
-    const TEXTURE_DATA_LUMP_INDEX: usize = 2;
-    const VERTICES_LUMP_INDEX: usize = 3;
-    const VISIBILITY_LUMP_INDEX: usize = 4;
-    const NODES_LUMP_INDEX: usize = 5;
-    const TEXTURE_INFO_LUMP_INDEX: usize = 6;
-    const FACES_LUMP_INDEX: usize = 7;
-    const LEAVES_LUMP_INDEX: usize = 10;
-    const EDGES_LUMP_INDEX: usize = 12;
-    const SURFACE_EDGES_LUMP_INDEX: usize = 13;
-    const MODELS_LUMP_INDEX: usize = 14;
-    const LEAF_FACES_LUMP_INDEX: usize = 16;
-    const GAME_LUMP_INDEX: usize = 35;
-    const PAKFILE_LUMP_INDEX: usize = 40;
-    const TEXTURE_STRING_DATA_LUMP_INDEX: usize = 43;
-    const TEXTURE_STRING_TABLE_LUMP_INDEX: usize = 44;
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VBSP");
-    bytes.extend_from_slice(&20_u32.to_le_bytes());
-    bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
+    let mut bytes = bsp_fixture_header();
 
     append_lump(
         &mut bytes,
@@ -1957,16 +1900,7 @@ fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
     append_lump(&mut bytes, LEAF_FACES_LUMP_INDEX, &leaf_faces, 0);
 
     let prop_data = static_prop_game_lump_data_with([10.0, 20.0, 30.0], &[1, 2]);
-    let game_lump_offset = bytes.len();
-    let prop_offset = game_lump_offset + 20;
-    bytes.extend_from_slice(&1_i32.to_le_bytes());
-    bytes.extend_from_slice(&i32::from_be_bytes(*b"sprp").to_le_bytes());
-    bytes.extend_from_slice(&0_u16.to_le_bytes());
-    bytes.extend_from_slice(&10_u16.to_le_bytes());
-    bytes.extend_from_slice(&(prop_offset as i32).to_le_bytes());
-    bytes.extend_from_slice(&(prop_data.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(&prop_data);
-    write_lump_entry(&mut bytes, GAME_LUMP_INDEX, game_lump_offset, 20, 0);
+    append_sprp_game_lump(&mut bytes, &prop_data);
 
     let pakfile_offset = bytes.len();
     let empty_zip = empty_zip_bytes();
@@ -1996,31 +1930,7 @@ fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
 }
 
 fn skybox_completion_bsp_fixture(spawn_origin: [f32; 3]) -> Vec<u8> {
-    const HEADER_LEN: usize = 8;
-    const LUMP_COUNT: usize = 64;
-    const LUMP_ENTRY_LEN: usize = 16;
-    const ENTITIES_LUMP_INDEX: usize = 0;
-    const PLANES_LUMP_INDEX: usize = 1;
-    const TEXTURE_DATA_LUMP_INDEX: usize = 2;
-    const VERTICES_LUMP_INDEX: usize = 3;
-    const VISIBILITY_LUMP_INDEX: usize = 4;
-    const NODES_LUMP_INDEX: usize = 5;
-    const TEXTURE_INFO_LUMP_INDEX: usize = 6;
-    const FACES_LUMP_INDEX: usize = 7;
-    const LEAVES_LUMP_INDEX: usize = 10;
-    const EDGES_LUMP_INDEX: usize = 12;
-    const SURFACE_EDGES_LUMP_INDEX: usize = 13;
-    const MODELS_LUMP_INDEX: usize = 14;
-    const LEAF_FACES_LUMP_INDEX: usize = 16;
-    const GAME_LUMP_INDEX: usize = 35;
-    const PAKFILE_LUMP_INDEX: usize = 40;
-    const TEXTURE_STRING_DATA_LUMP_INDEX: usize = 43;
-    const TEXTURE_STRING_TABLE_LUMP_INDEX: usize = 44;
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VBSP");
-    bytes.extend_from_slice(&20_u32.to_le_bytes());
-    bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
+    let mut bytes = bsp_fixture_header();
 
     let entities = format!(
         r#"
@@ -2114,16 +2024,7 @@ fn skybox_completion_bsp_fixture(spawn_origin: [f32; 3]) -> Vec<u8> {
     append_lump(&mut bytes, LEAF_FACES_LUMP_INDEX, &leaf_faces, 0);
 
     let prop_data = empty_static_prop_game_lump_data();
-    let game_lump_offset = bytes.len();
-    let prop_offset = game_lump_offset + 20;
-    bytes.extend_from_slice(&1_i32.to_le_bytes());
-    bytes.extend_from_slice(&i32::from_be_bytes(*b"sprp").to_le_bytes());
-    bytes.extend_from_slice(&0_u16.to_le_bytes());
-    bytes.extend_from_slice(&10_u16.to_le_bytes());
-    bytes.extend_from_slice(&(prop_offset as i32).to_le_bytes());
-    bytes.extend_from_slice(&(prop_data.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(&prop_data);
-    write_lump_entry(&mut bytes, GAME_LUMP_INDEX, game_lump_offset, 20, 0);
+    append_sprp_game_lump(&mut bytes, &prop_data);
 
     let pakfile_offset = bytes.len();
     let empty_zip = empty_zip_bytes();
@@ -2217,30 +2118,7 @@ fn read_fixture_bsp(bytes: &[u8]) -> MapBsp {
 }
 
 fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
-    const HEADER_LEN: usize = 8;
-    const LUMP_COUNT: usize = 64;
-    const LUMP_ENTRY_LEN: usize = 16;
-    const ENTITIES_LUMP_INDEX: usize = 0;
-    const PLANES_LUMP_INDEX: usize = 1;
-    const TEXTURE_DATA_LUMP_INDEX: usize = 2;
-    const VERTICES_LUMP_INDEX: usize = 3;
-    const NODES_LUMP_INDEX: usize = 5;
-    const TEXTURE_INFO_LUMP_INDEX: usize = 6;
-    const FACES_LUMP_INDEX: usize = 7;
-    const LEAVES_LUMP_INDEX: usize = 10;
-    const EDGES_LUMP_INDEX: usize = 12;
-    const SURFACE_EDGES_LUMP_INDEX: usize = 13;
-    const MODELS_LUMP_INDEX: usize = 14;
-    const LEAF_FACES_LUMP_INDEX: usize = 16;
-    const GAME_LUMP_INDEX: usize = 35;
-    const PAKFILE_LUMP_INDEX: usize = 40;
-    const TEXTURE_STRING_DATA_LUMP_INDEX: usize = 43;
-    const TEXTURE_STRING_TABLE_LUMP_INDEX: usize = 44;
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VBSP");
-    bytes.extend_from_slice(&20_u32.to_le_bytes());
-    bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
+    let mut bytes = bsp_fixture_header();
 
     let entities = format!(
         r#"
@@ -2347,16 +2225,7 @@ fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
     append_lump(&mut bytes, LEAF_FACES_LUMP_INDEX, &leaf_faces, 0);
 
     let prop_data = empty_static_prop_game_lump_data();
-    let game_lump_offset = bytes.len();
-    let prop_offset = game_lump_offset + 20;
-    bytes.extend_from_slice(&1_i32.to_le_bytes());
-    bytes.extend_from_slice(&i32::from_be_bytes(*b"sprp").to_le_bytes());
-    bytes.extend_from_slice(&0_u16.to_le_bytes());
-    bytes.extend_from_slice(&10_u16.to_le_bytes());
-    bytes.extend_from_slice(&(prop_offset as i32).to_le_bytes());
-    bytes.extend_from_slice(&(prop_data.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(&prop_data);
-    write_lump_entry(&mut bytes, GAME_LUMP_INDEX, game_lump_offset, 20, 0);
+    append_sprp_game_lump(&mut bytes, &prop_data);
 
     let pakfile_offset = bytes.len();
     let empty_zip = empty_zip_bytes();
@@ -2388,29 +2257,9 @@ fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
 }
 
 fn water_underside_bsp_fixture() -> Vec<u8> {
-    const HEADER_LEN: usize = 8;
-    const LUMP_COUNT: usize = 64;
-    const LUMP_ENTRY_LEN: usize = 16;
-    const PLANES_LUMP_INDEX: usize = 1;
-    const TEXTURE_DATA_LUMP_INDEX: usize = 2;
-    const VERTICES_LUMP_INDEX: usize = 3;
-    const NODES_LUMP_INDEX: usize = 5;
-    const TEXTURE_INFO_LUMP_INDEX: usize = 6;
-    const FACES_LUMP_INDEX: usize = 7;
-    const LEAVES_LUMP_INDEX: usize = 10;
-    const EDGES_LUMP_INDEX: usize = 12;
-    const SURFACE_EDGES_LUMP_INDEX: usize = 13;
-    const MODELS_LUMP_INDEX: usize = 14;
-    const GAME_LUMP_INDEX: usize = 35;
-    const PAKFILE_LUMP_INDEX: usize = 40;
-    const TEXTURE_STRING_DATA_LUMP_INDEX: usize = 43;
-    const TEXTURE_STRING_TABLE_LUMP_INDEX: usize = 44;
     const SURF_WARP: u32 = 0x8;
 
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VBSP");
-    bytes.extend_from_slice(&20_u32.to_le_bytes());
-    bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
+    let mut bytes = bsp_fixture_header();
 
     let mut planes = Vec::new();
     push_plane(&mut planes, [0.0, 0.0, -1.0]);
@@ -2484,16 +2333,7 @@ fn water_underside_bsp_fixture() -> Vec<u8> {
     append_lump(&mut bytes, MODELS_LUMP_INDEX, &models, 0);
 
     let prop_data = empty_static_prop_game_lump_data();
-    let game_lump_offset = bytes.len();
-    let prop_offset = game_lump_offset + 20;
-    bytes.extend_from_slice(&1_i32.to_le_bytes());
-    bytes.extend_from_slice(&i32::from_be_bytes(*b"sprp").to_le_bytes());
-    bytes.extend_from_slice(&0_u16.to_le_bytes());
-    bytes.extend_from_slice(&10_u16.to_le_bytes());
-    bytes.extend_from_slice(&(prop_offset as i32).to_le_bytes());
-    bytes.extend_from_slice(&(prop_data.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(&prop_data);
-    write_lump_entry(&mut bytes, GAME_LUMP_INDEX, game_lump_offset, 20, 0);
+    append_sprp_game_lump(&mut bytes, &prop_data);
 
     let pakfile_offset = bytes.len();
     let empty_zip = empty_zip_bytes();
@@ -2524,20 +2364,7 @@ fn water_underside_bsp_fixture() -> Vec<u8> {
 }
 
 fn bsp_fixture(entities: Option<&str>) -> Vec<u8> {
-    const HEADER_LEN: usize = 8;
-    const LUMP_COUNT: usize = 64;
-    const LUMP_ENTRY_LEN: usize = 16;
-    const ENTITIES_LUMP_INDEX: usize = 0;
-    const PLANES_LUMP_INDEX: usize = 1;
-    const NODES_LUMP_INDEX: usize = 5;
-    const LEAVES_LUMP_INDEX: usize = 10;
-    const GAME_LUMP_INDEX: usize = 35;
-    const PAKFILE_LUMP_INDEX: usize = 40;
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"VBSP");
-    bytes.extend_from_slice(&20_u32.to_le_bytes());
-    bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
+    let mut bytes = bsp_fixture_header();
 
     if let Some(entities) = entities {
         let entities_offset = bytes.len();
@@ -2551,34 +2378,21 @@ fn bsp_fixture(entities: Option<&str>) -> Vec<u8> {
         );
     }
 
-    let planes_offset = bytes.len();
-    push_vec3(&mut bytes, [0.0, 0.0, 1.0]);
-    bytes.extend_from_slice(&0.0_f32.to_le_bytes());
-    bytes.extend_from_slice(&0_i32.to_le_bytes());
-    write_lump_entry(&mut bytes, PLANES_LUMP_INDEX, planes_offset, 20, 0);
+    let mut plane = Vec::new();
+    push_plane(&mut plane, [0.0, 0.0, 1.0]);
+    append_lump(&mut bytes, PLANES_LUMP_INDEX, &plane, 0);
 
-    let nodes_offset = bytes.len();
-    bytes.extend_from_slice(&0_i32.to_le_bytes());
-    bytes.extend_from_slice(&(-1_i32).to_le_bytes());
-    bytes.extend_from_slice(&(-1_i32).to_le_bytes());
-    bytes.extend_from_slice(&[0_u8; 20]);
-    write_lump_entry(&mut bytes, NODES_LUMP_INDEX, nodes_offset, 32, 0);
+    let mut node = Vec::new();
+    node.extend_from_slice(&0_i32.to_le_bytes());
+    node.extend_from_slice(&(-1_i32).to_le_bytes());
+    node.extend_from_slice(&(-1_i32).to_le_bytes());
+    node.extend_from_slice(&[0_u8; 20]);
+    append_lump(&mut bytes, NODES_LUMP_INDEX, &node, 0);
 
-    let leaves_offset = bytes.len();
-    bytes.extend_from_slice(&[0_u8; 56]);
-    write_lump_entry(&mut bytes, LEAVES_LUMP_INDEX, leaves_offset, 56, 0);
+    append_lump(&mut bytes, LEAVES_LUMP_INDEX, &[0_u8; 56], 0);
 
     let prop_data = static_prop_game_lump_data();
-    let game_lump_offset = bytes.len();
-    let prop_offset = game_lump_offset + 20;
-    bytes.extend_from_slice(&1_i32.to_le_bytes());
-    bytes.extend_from_slice(&i32::from_be_bytes(*b"sprp").to_le_bytes());
-    bytes.extend_from_slice(&0_u16.to_le_bytes());
-    bytes.extend_from_slice(&10_u16.to_le_bytes());
-    bytes.extend_from_slice(&(prop_offset as i32).to_le_bytes());
-    bytes.extend_from_slice(&(prop_data.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(&prop_data);
-    write_lump_entry(&mut bytes, GAME_LUMP_INDEX, game_lump_offset, 20, 0);
+    append_sprp_game_lump(&mut bytes, &prop_data);
 
     let pakfile_offset = bytes.len();
     let empty_zip = empty_zip_bytes();
@@ -2592,6 +2406,34 @@ fn bsp_fixture(entities: Option<&str>) -> Vec<u8> {
     );
 
     bytes
+}
+
+/// Appends a game lump holding one `sprp` (static prop) directory entry.
+///
+/// The header is 20 bytes and the payload follows it, so the entry's offset
+/// and the directory's own length are the same fact written twice — kept
+/// together here rather than restated in each fixture, where a mismatch
+/// produces a *valid* BSP whose props the parser cannot find.
+fn append_sprp_game_lump(bytes: &mut Vec<u8>, prop_data: &[u8]) {
+    const GAME_LUMP_HEADER_LEN: usize = 20;
+    const SPRP_VERSION: u16 = 10;
+
+    let game_lump_offset = bytes.len();
+    let prop_offset = game_lump_offset + GAME_LUMP_HEADER_LEN;
+    bytes.extend_from_slice(&1_i32.to_le_bytes());
+    bytes.extend_from_slice(&i32::from_be_bytes(*b"sprp").to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&SPRP_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(prop_offset as i32).to_le_bytes());
+    bytes.extend_from_slice(&(prop_data.len() as i32).to_le_bytes());
+    bytes.extend_from_slice(prop_data);
+    write_lump_entry(
+        bytes,
+        GAME_LUMP_INDEX,
+        game_lump_offset,
+        GAME_LUMP_HEADER_LEN,
+        0,
+    );
 }
 
 fn append_lump(bytes: &mut Vec<u8>, lump_index: usize, data: &[u8], version: u32) {
@@ -2730,6 +2572,40 @@ fn push_vec3(bytes: &mut Vec<u8>, values: [f32; 3]) {
     }
 }
 
+// VBSP header layout and the lump indices the fixtures write. Declared once
+// because a wrong index writes a *valid* file describing the wrong lump, and
+// the parser then simply sees no data — a silent fixture failure.
+const HEADER_LEN: usize = 8;
+const LUMP_COUNT: usize = 64;
+const LUMP_ENTRY_LEN: usize = 16;
+const GAME_LUMP_INDEX: usize = 35;
+const EDGES_LUMP_INDEX: usize = 12;
+const FACES_LUMP_INDEX: usize = 7;
+const NODES_LUMP_INDEX: usize = 5;
+const LEAVES_LUMP_INDEX: usize = 10;
+const MODELS_LUMP_INDEX: usize = 14;
+const PLANES_LUMP_INDEX: usize = 1;
+const PAKFILE_LUMP_INDEX: usize = 40;
+const ENTITIES_LUMP_INDEX: usize = 0;
+const VERTICES_LUMP_INDEX: usize = 3;
+const LEAF_FACES_LUMP_INDEX: usize = 16;
+const VISIBILITY_LUMP_INDEX: usize = 4;
+const TEXTURE_DATA_LUMP_INDEX: usize = 2;
+const TEXTURE_INFO_LUMP_INDEX: usize = 6;
+const SURFACE_EDGES_LUMP_INDEX: usize = 13;
+const TEXTURE_STRING_DATA_LUMP_INDEX: usize = 43;
+const TEXTURE_STRING_TABLE_LUMP_INDEX: usize = 44;
+
+/// Starts a VBSP file: magic, version, and a zeroed lump directory ready for
+/// [`write_lump_entry`] to fill in.
+fn bsp_fixture_header() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"VBSP");
+    bytes.extend_from_slice(&20_u32.to_le_bytes());
+    bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
+    bytes
+}
+
 fn write_lump_entry(
     bytes: &mut [u8],
     lump_index: usize,
@@ -2737,7 +2613,7 @@ fn write_lump_entry(
     length: usize,
     version: u32,
 ) {
-    let start = 8 + lump_index * 16;
+    let start = HEADER_LEN + lump_index * LUMP_ENTRY_LEN;
     bytes[start..start + 4].copy_from_slice(&(offset as u32).to_le_bytes());
     bytes[start + 4..start + 8].copy_from_slice(&(length as u32).to_le_bytes());
     bytes[start + 8..start + 12].copy_from_slice(&version.to_le_bytes());
@@ -2810,10 +2686,13 @@ fn a_cyclic_node_graph_terminates_instead_of_spinning() {
 
 #[test]
 fn an_acyclic_walk_still_reaches_its_leaf_at_full_depth() {
+    /// Nodes in the degenerate tree below — deep enough to reach the walk's
+    /// own iteration bound.
+    const DEPTH: usize = 64;
+
     // A degenerate maximally deep tree: every node's front child is the next
     // node, and the last one points at leaf 0 (encoded as !0 == -1). The
     // iteration bound must not cut this short.
-    const DEPTH: usize = 64;
 
     let leaf = super::walk_to_leaf(
         [1.0, 0.0, 0.0],

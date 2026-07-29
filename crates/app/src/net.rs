@@ -21,14 +21,7 @@ fn agent_builder(
     connect: Duration,
     response: Duration,
 ) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
-    ureq::Agent::config_builder()
-        // The workspace ureq build carries no bundled webpki roots; certificate
-        // verification must go through the OS trust store (PlatformVerifier).
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
+    gmpublished_backend::net::tls_agent_builder()
         .http_status_as_error(true)
         .timeout_global(Some(global))
         .timeout_connect(Some(connect))

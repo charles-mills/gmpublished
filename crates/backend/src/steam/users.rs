@@ -53,9 +53,7 @@ impl ConnectedSteam<'_> {
             }
         }
 
-        // See the field doc: overlapping persona waits clobber each other's
-        // callback registration and turn into full timeouts.
-        let _fetch_guard = self.steam.persona_fetch.lock();
+        let _slot = self.steam.persona_slot.claim();
         // Another serialized fetch may have completed while this caller was
         // waiting for the callback slot. Reuse it instead of starting the
         // same persona/avatar wait again.
@@ -122,14 +120,14 @@ impl ConnectedSteam<'_> {
     }
 }
 
-pub fn fetch_steam_user(steam: ConnectedSteam<'_>, steamid64: u64) -> SteamUser {
-    steam.fetch_user(SteamId::from_raw(steamid64))
+pub fn fetch_steam_user(steam: ConnectedSteam<'_>, steamid: SteamId) -> SteamUser {
+    steam.fetch_user(steamid)
 }
 
 pub fn fetch_steam_user_streaming(
     steam: ConnectedSteam<'_>,
-    steamid64: u64,
+    steamid: SteamId,
     on_user: impl FnMut(SteamUser),
 ) {
-    steam.fetch_user_streaming(SteamId::from_raw(steamid64), on_user);
+    steam.fetch_user_streaming(steamid, on_user);
 }

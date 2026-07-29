@@ -1,5 +1,6 @@
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset};
+use crate::generation::Generation;
 use std::path::PathBuf;
 
 use super::state::{
@@ -34,7 +35,7 @@ pub enum Message {
     ResetRequested(ResetAction),
     ResetCancelled,
     ResetConfirmed,
-    SaveCompleted(Result<Box<SettingsSnapshot>, UiError>),
+    SaveCompleted(Generation, Result<Box<SettingsSnapshot>, UiError>),
     ResetCompleted(ResetAction, Result<Option<Box<SettingsSnapshot>>, UiError>),
     EscapePressed,
 }

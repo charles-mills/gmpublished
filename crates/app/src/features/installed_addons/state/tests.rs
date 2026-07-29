@@ -13,10 +13,7 @@ fn fixture_state(count: usize) -> State {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
@@ -57,7 +54,7 @@ fn patch_batch(start: u64, count: u64) -> Vec<MetadataPatch> {
     (start..start + count)
         .map(|id| {
             MetadataPatch::for_test(
-                PublishedFileId::new(id + 1).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(id + 1),
                 "Updated title",
                 Some("https://example.test/p.jpg"),
             )
@@ -101,18 +98,14 @@ fn visible_metadata_request_includes_after_window_before_beyond_rows() {
 
     // Row `i` carries id `i + 1` (see `fixture_state`).
     let visible_ids = visible
-        .map(|index| {
-            PublishedFileId::new(index as u64 + 1).expect("test fixture ids are always nonzero")
-        })
+        .map(|index| PublishedFileId::fixture(index as u64 + 1))
         .collect::<Vec<_>>();
     assert_eq!(&ids[..visible_ids.len()], visible_ids.as_slice());
     assert_eq!(
         ids[visible_ids.len()],
-        PublishedFileId::new(after.start as u64 + 1).expect("test fixture ids are always nonzero")
+        PublishedFileId::fixture(after.start as u64 + 1)
     );
-    assert!(!ids.contains(
-        &PublishedFileId::new(after.end as u64 + 1).expect("test fixture ids are always nonzero")
-    ));
+    assert!(!ids.contains(&PublishedFileId::fixture(after.end as u64 + 1)));
 }
 
 #[test]
@@ -121,12 +114,9 @@ fn visible_metadata_request_dedups_prefetch_window_against_known_ids() {
     let visible = state.grid.visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible, state.rows().len());
     // Row `i` carries id `i + 1` (see `fixture_state`).
-    let in_flight =
-        PublishedFileId::new(after.start as u64 + 1).expect("test fixture ids are always nonzero");
-    let finished = PublishedFileId::new(after.start.saturating_add(1) as u64 + 1)
-        .expect("test fixture ids are always nonzero");
-    let still_new = PublishedFileId::new(after.start.saturating_add(2) as u64 + 1)
-        .expect("test fixture ids are always nonzero");
+    let in_flight = PublishedFileId::fixture(after.start as u64 + 1);
+    let finished = PublishedFileId::fixture(after.start.saturating_add(1) as u64 + 1);
+    let still_new = PublishedFileId::fixture(after.start.saturating_add(2) as u64 + 1);
     state.metadata_in_flight.insert(in_flight);
     state.metadata_finished.insert(finished);
 
@@ -180,10 +170,7 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
@@ -194,36 +181,22 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
     assert_eq!(state.grid().items_len(), 120);
 
     let patches = vec![
-        MetadataPatch::for_test(
-            PublishedFileId::new(10).expect("test fixture ids are always nonzero"),
-            "Patched Early",
-            None,
-        ),
-        MetadataPatch::for_test(
-            PublishedFileId::new(115).expect("test fixture ids are always nonzero"),
-            "Patched Late",
-            None,
-        ),
+        MetadataPatch::for_test(PublishedFileId::fixture(10), "Patched Early", None),
+        MetadataPatch::for_test(PublishedFileId::fixture(115), "Patched Late", None),
     ];
     state.apply_metadata_patches(generation, &patches);
 
     let early = state
         .rows()
         .iter()
-        .find(|row| {
-            row.workshop_id()
-                == Some(PublishedFileId::new(10).expect("test fixture ids are always nonzero"))
-        })
+        .find(|row| row.workshop_id() == Some(PublishedFileId::fixture(10)))
         .expect("row 10 should be present");
     assert_eq!(early.title_for_test(), "Patched Early");
 
     let late = state
         .rows()
         .iter()
-        .find(|row| {
-            row.workshop_id()
-                == Some(PublishedFileId::new(115).expect("test fixture ids are always nonzero"))
-        })
+        .find(|row| row.workshop_id() == Some(PublishedFileId::fixture(115)))
         .expect("row 115 should be present");
     assert_eq!(late.title_for_test(), "Patched Late");
 
@@ -242,16 +215,8 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
 #[test]
 fn duplicate_workshop_ids_both_receive_patch() {
     let rows = vec![
-        Row::for_test(
-            "/addons/a.gma",
-            "Title",
-            Some(PublishedFileId::new(7).expect("test fixture ids are always nonzero")),
-        ),
-        Row::for_test(
-            "/addons/b.gma",
-            "Title",
-            Some(PublishedFileId::new(7).expect("test fixture ids are always nonzero")),
-        ),
+        Row::for_test("/addons/a.gma", "Title", Some(PublishedFileId::fixture(7))),
+        Row::for_test("/addons/b.gma", "Title", Some(PublishedFileId::fixture(7))),
     ];
     let workshop_index = build_workshop_index(&rows);
     let mut state = State {
@@ -264,7 +229,7 @@ fn duplicate_workshop_ids_both_receive_patch() {
     state.apply_metadata_patches(
         Generation::from_raw(1),
         &[MetadataPatch::for_test(
-            PublishedFileId::new(7).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(7),
             "Patched",
             None,
         )],
@@ -300,18 +265,10 @@ fn disk_change_swaps_quietly_and_carries_unchanged_rows() {
 
     let fresh = vec![
         // Same fingerprint (0/0) as the fixture row: carried over.
-        Row::for_test(
-            "/addons/0.gma",
-            "Title",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
-        ),
+        Row::for_test("/addons/0.gma", "Title", Some(PublishedFileId::fixture(1))),
         // Changed fingerprint: replaced by the fresh scan row.
-        Row::for_test(
-            "/addons/1.gma",
-            "Title",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
-        )
-        .with_file_fingerprint_for_test(9, 9),
+        Row::for_test("/addons/1.gma", "Title", Some(PublishedFileId::fixture(1)))
+            .with_file_fingerprint_for_test(9, 9),
     ];
     state.apply_snapshot(LibraryRefreshReason::DiskChanged, Ok(fresh));
 
@@ -330,10 +287,7 @@ fn quiet_apply_replaces_the_full_row_set() {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
@@ -347,10 +301,7 @@ fn quiet_apply_replaces_the_full_row_set() {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
@@ -370,7 +321,7 @@ fn disk_snapshot_while_hidden_updates_projection_without_thumbnail_work() {
         Ok(vec![Row::for_test(
             "/addons/new.gma",
             "Title",
-            Some(PublishedFileId::new(9).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(9)),
         )]),
     );
 

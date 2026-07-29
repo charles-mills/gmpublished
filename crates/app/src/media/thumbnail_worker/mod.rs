@@ -19,8 +19,9 @@ pub use disk_cache::{
     WorkerDiskCache, read_disk_cache, read_source_bytes, remove_source_bytes, write_disk_cache,
     write_source_bytes,
 };
+pub use thumbnail::ThumbnailDecodeError;
 pub use thumbnail_key::{
-    THUMBNAIL_SOURCE_FILE_EXTENSION, ThumbnailKey, ThumbnailMode, normalize_url,
+    THUMBNAIL_SOURCE_FILE_EXTENSION, ThumbnailKey, ThumbnailMode, normalized_url,
 };
 pub use types::{PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail, ThumbnailRequest};
 pub use types::{Thumbnail, ThumbnailError, ThumbnailInput, ThumbnailMetadata, ThumbnailResult};
@@ -260,7 +261,7 @@ fn finish_fresh_decode(mut thumbnail: Thumbnail, key: &ThumbnailKey) -> Thumbnai
 
 pub fn validate_max_edge(max_edge: u32) -> ThumbnailResult<()> {
     if max_edge == 0 {
-        return Err(ThumbnailError::InvalidMaxEdge);
+        return Err(ThumbnailDecodeError::InvalidMaxEdge.into());
     }
 
     Ok(())

@@ -1,12 +1,10 @@
-use crate::scene::QAngle;
-
 use super::{
     BTreeSet, BrushIndex, BrushSide, HashMap, MapBounds, MapBsp, MapLeaf, MapNode, MapPlane,
     MapPropVisibility, NodeChild, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT, PROP_AABB_MAX_LEAVES,
     add, cluster_in_range, contents_flags, cross, displacement_vertices, dot, dot_abs,
-    length_squared, lerp, mul, normalize, sub, texture_flags, vector_is_finite_nonzero,
-    walk_to_leaf,
+    length_squared, lerp, mul, sub, texture_flags, vector_is_finite_nonzero, walk_to_leaf,
 };
+use crate::math::{normalize, normalize_or_zero};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapWalkCollision {
@@ -289,10 +287,9 @@ impl MapWalkCollision {
         if !self.has_sky_sides() {
             return false;
         }
-        let direction = normalize(direction);
-        if !vector_is_finite_nonzero(direction) {
+        let Some(direction) = normalize(direction).filter(|d| vector_is_finite_nonzero(*d)) else {
             return false;
-        }
+        };
         let end = add(start, mul(direction, SKY_TRACE_DISTANCE));
         let ray_bounds = bounds_from_points([start, end]).unwrap_or(MapBounds {
             min: start,
@@ -466,7 +463,7 @@ pub(super) fn walk_brushes_from_bsp(
             .iter()
             .filter_map(|side| {
                 let plane = bsp.planes.get(usize::from(side.plane))?;
-                let normal = normalize(plane.normal);
+                let normal = normalize_or_zero(plane.normal);
                 vector_is_finite_nonzero(normal).then_some(MapWalkBrushPlane {
                     plane: MapPlane {
                         normal,
@@ -800,7 +797,7 @@ pub(super) fn prop_planes_from_hull(
             *hull.vertices.get(triangle[1])?,
             *hull.vertices.get(triangle[2])?,
         ];
-        let normal = normalize(cross(
+        let normal = normalize_or_zero(cross(
             sub(vertices[1], vertices[0]),
             sub(vertices[2], vertices[0]),
         ));
@@ -873,7 +870,7 @@ pub(super) fn add_prop_bevel_planes(hull: &ConvexHull, planes: &mut Vec<MapPlane
             continue;
         }
         for axis in axes {
-            let normal = normalize(cross(edge, axis));
+            let normal = normalize_or_zero(cross(edge, axis));
             if !vector_is_finite_nonzero(normal) {
                 continue;
             }
@@ -911,7 +908,7 @@ pub(super) fn transform_prop_plane(
     angles: [f32; 3],
     scale: f32,
 ) -> Option<MapPlane> {
-    let normal = normalize(rotate_prop_vector(plane.normal, angles));
+    let normal = normalize_or_zero(rotate_prop_vector(plane.normal, angles));
     if !vector_is_finite_nonzero(normal) {
         return None;
     }
@@ -980,41 +977,11 @@ pub(super) fn prop_grid_cell_count(min_cell: [i32; 3], max_cell: [i32; 3]) -> Op
     Some(count)
 }
 
-pub(super) fn rotate_prop_vector(vector: [f32; 3], angles: [f32; 3]) -> [f32; 3] {
-    let QAngle { pitch, yaw, roll } = QAngle::from_source_degrees(angles);
-    rotate_z(rotate_y(rotate_x(vector, roll), pitch), yaw)
-}
-
-pub(super) fn rotate_x(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0],
-        vector[1] * cos - vector[2] * sin,
-        vector[1] * sin + vector[2] * cos,
-    ]
-}
-
-pub(super) fn rotate_y(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0] * cos + vector[2] * sin,
-        vector[1],
-        -vector[0] * sin + vector[2] * cos,
-    ]
-}
-
-pub(super) fn rotate_z(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0] * cos - vector[1] * sin,
-        vector[0] * sin + vector[1] * cos,
-        vector[2],
-    ]
-}
+pub(super) use crate::math::rotate_source_vector as rotate_prop_vector;
 
 impl MapWalkTriangle {
     pub(super) fn new(vertices: [[f32; 3]; 3]) -> Option<Self> {
-        let normal = normalize(cross(
+        let normal = normalize_or_zero(cross(
             sub(vertices[1], vertices[0]),
             sub(vertices[2], vertices[0]),
         ));
@@ -1211,10 +1178,9 @@ pub(super) fn trace_triangle_aabb(
     }
 
     for axis in axes {
-        let axis = normalize(axis);
-        if !vector_is_finite_nonzero(axis) {
+        let Some(axis) = normalize(axis).filter(|a| vector_is_finite_nonzero(*a)) else {
             continue;
-        }
+        };
         let center_projection = dot(start, axis);
         let radius = dot_abs(axis, half_extents);
         let a_min = center_projection - radius;

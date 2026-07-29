@@ -197,17 +197,13 @@ fn parse_level_filter(value: &str) -> log::LevelFilter {
 }
 
 fn open_log_file() -> Option<File> {
-    std::panic::catch_unwind(|| {
-        let logs_dir = LOGS_DIR.get()?;
-        std::fs::create_dir_all(logs_dir).ok()?;
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(logs_dir.join(LOG_FILE_NAME))
-            .ok()
-    })
-    .ok()
-    .flatten()
+    let logs_dir = LOGS_DIR.get()?;
+    std::fs::create_dir_all(logs_dir).ok()?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs_dir.join(LOG_FILE_NAME))
+        .ok()
 }
 
 fn panic(panic: &PanicHookInfo<'_>) {

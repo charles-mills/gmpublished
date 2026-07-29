@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::model::DownloadPreviewTarget;
+use super::jobs::DownloadPreviewTarget;
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::tasks::TaskId;
 

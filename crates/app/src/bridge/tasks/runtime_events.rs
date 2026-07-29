@@ -18,26 +18,6 @@ pub(super) const fn install_backend_event_sink_by_default() -> bool {
     false
 }
 
-#[cfg(not(test))]
-pub(super) const fn persist_appdata_settings_by_default() -> bool {
-    true
-}
-
-#[cfg(test)]
-pub(super) const fn persist_appdata_settings_by_default() -> bool {
-    false
-}
-
-#[cfg(not(test))]
-pub(super) const fn persist_ui_settings_by_default() -> bool {
-    true
-}
-
-#[cfg(test)]
-pub(super) const fn persist_ui_settings_by_default() -> bool {
-    false
-}
-
 /// Forwards `Backend`-emitted events into the app's task/event pipeline:
 /// this is itself the `Arc<dyn BackendEventSink>` handed to `BackendConfig`
 /// at `Backend::init` time — no process-global sink involved.
@@ -94,11 +74,10 @@ impl BackendEventHub {
     }
 
     fn emit(&self, event: &BackendRuntimeEvent) {
-        if event.is_terminal() {
-            // Terminals (Finished/Error) must never be silently dropped: the
-            // consumer is the dedicated forwarder thread, which always
-            // drains, so a full queue here is a transient backlog, not a
-            // stall worth blocking indefinitely to avoid.
+        if event.must_not_drop() {
+            // The consumer is the dedicated forwarder thread, which always
+            // drains, so a full queue here is a transient backlog rather than
+            // a stall worth dropping state-establishing events to avoid.
             let _disconnected = self.root.send(event.clone());
         } else {
             match self.root.try_send(event.clone()) {
@@ -175,12 +154,23 @@ impl BackendRuntimeEvent {
     /// (Finished/Error - cancellation rides the `Error` variant with a
     /// `CANCELLED` error key). Terminal events must reach their subscriber;
     /// everything else may be dropped under backpressure.
-    pub(crate) fn is_terminal(&self) -> bool {
+    /// Whether dropping this event would leave the app in a wrong state
+    /// rather than merely a stale one.
+    ///
+    /// Progress is safe to drop: the next one supersedes it. Lifecycle is not.
+    /// `DownloadStarted` and `ExtractionStarted` are what correlate a backend
+    /// transaction with an app task, and a terminal for an uncorrelated
+    /// transaction is discarded — so dropping a start strands its task as
+    /// running forever, and dropping a terminal loses the completion.
+    pub(crate) const fn must_not_drop(&self) -> bool {
         matches!(
             self,
-            Self::Transaction(
-                TransactionRuntimeEvent::Finished { .. } | TransactionRuntimeEvent::Error { .. }
-            )
+            Self::DownloadStarted { .. }
+                | Self::ExtractionStarted { .. }
+                | Self::Transaction(
+                    TransactionRuntimeEvent::Finished { .. }
+                        | TransactionRuntimeEvent::Error { .. }
+                )
         )
     }
 }
@@ -324,9 +314,7 @@ impl From<BackendExtractionStartedEvent> for BackendRuntimeEvent {
             transaction_id: event.transaction_id,
             source_path: event.source_path,
             file_name: event.file_name,
-            workshop_id: event.workshop_id.map(|id| {
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
-            }),
+            workshop_id: event.workshop_id.map(PublishedFileId::from_backend),
             request_id: event.request_id,
         }
     }

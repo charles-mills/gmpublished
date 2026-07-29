@@ -16,6 +16,7 @@ use super::model::{
     self, ContextMenuRequest, MetadataPatch, MetadataResolution, PreviewTarget, Row,
 };
 use crate::generation::Generation;
+use crate::widgets::grid_rows;
 
 #[derive(Debug)]
 #[expect(
@@ -217,7 +218,7 @@ impl State {
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
         let changed =
-            model::invalidate_ready_thumbnails(self.rows.as_deref_mut().unwrap_or_default());
+            grid_rows::invalidate_ready_thumbnails(self.rows.as_deref_mut().unwrap_or_default());
         if changed {
             self.sync_grid_items();
             self.last_animation_tick = None;
@@ -231,7 +232,7 @@ impl State {
     /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
         let visible = self.grid.visible_item_range();
-        let changed = model::release_offscreen_thumbnails(
+        let changed = grid_rows::release_offscreen_thumbnails(
             self.rows.as_deref_mut().unwrap_or_default(),
             visible,
         );

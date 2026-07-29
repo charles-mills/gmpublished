@@ -18,6 +18,7 @@ pub(crate) mod logging;
 pub const GMOD_APP_ID: steamworks::AppId = steamworks::AppId(4000);
 
 pub(crate) mod util;
+pub use util::panic::payload_message as panic_payload_message;
 pub use util::path;
 pub(crate) use util::{stream_bytes, write_nt_string};
 
@@ -40,9 +41,18 @@ pub mod appdata;
 pub use appdata::AppData;
 
 pub mod gma;
-pub use gma::{GMAError, GMAFile, GMAHeader, GMAMetadata};
+/// The GMA vocabulary, flattened so callers never have to know which
+/// submodule a type happens to live in. Everything the app crate reaches for
+/// is here; `gma::` itself stays public for the operations, not the types.
+pub use gma::read::{GmaIndexedEntry, GmaView};
+pub use gma::{GmaEntry, GmaError, GmaFile, GmaHeader, GmaMetadata};
 
 pub mod vpk;
+
+/// Vector maths shared by the scene, particle and viewer code.
+pub mod math;
+pub mod net;
+pub mod signal;
 
 #[cfg(feature = "scene")]
 pub mod scene;

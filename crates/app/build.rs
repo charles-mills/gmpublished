@@ -72,12 +72,17 @@ fn compress_bundled_catalogs() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-const FONT_SOURCES: &[&str] = &[
-    "ui/fonts/Inter-Regular.ttf",
-    "ui/fonts/Inter-SemiBold.ttf",
-    "ui/fonts/Inter-Bold.ttf",
-    "ui/fonts/GMPCJKSCUI-Regular.otf",
-    "ui/fonts/GMPCJKKRUI-Regular.otf",
+/// The bundled faces, and the constant each is reachable by at runtime.
+///
+/// The generated constants are what `assets.rs` uses, so reordering this list
+/// moves the *names* with the faces rather than silently repointing a
+/// hardcoded index at a different font.
+const FONT_SOURCES: &[(&str, &str)] = &[
+    ("INTER_REGULAR", "ui/fonts/Inter-Regular.ttf"),
+    ("INTER_SEMI_BOLD", "ui/fonts/Inter-SemiBold.ttf"),
+    ("INTER_BOLD", "ui/fonts/Inter-Bold.ttf"),
+    ("CJK_SC_REGULAR", "ui/fonts/GMPCJKSCUI-Regular.otf"),
+    ("CJK_KR_REGULAR", "ui/fonts/GMPCJKKRUI-Regular.otf"),
 ];
 
 /// Concatenates the bundled font faces and stores one LZMA blob plus the
@@ -87,12 +92,19 @@ fn compress_bundled_fonts() -> Result<(), Box<dyn Error>> {
     let mut concatenated = Vec::new();
     let mut segments = String::new();
 
-    for relative_path in FONT_SOURCES {
+    let mut constants = String::new();
+    for (index, (name, relative_path)) in FONT_SOURCES.iter().enumerate() {
         let path = manifest_dir.join(relative_path);
         println!("cargo:rerun-if-changed={}", path.display());
 
         let bytes = fs::read(path)?;
-        let _ = writeln!(segments, "    ({}, {}),", concatenated.len(), bytes.len());
+        let _ = writeln!(
+            segments,
+            "    FontSegment {{ start: {}, len: {} }},",
+            concatenated.len(),
+            bytes.len()
+        );
+        let _ = writeln!(constants, "pub const {name}: usize = {index};");
         concatenated.extend_from_slice(&bytes);
     }
 
@@ -109,8 +121,14 @@ fn compress_bundled_fonts() -> Result<(), Box<dyn Error>> {
     fs::write(
         out_dir.join("font_segments.rs"),
         format!(
-            "const FONT_SEGMENTS: &[(usize, usize)] = &[\n{segments}];\n\
-             const FONTS_UNCOMPRESSED_LEN: usize = {};\n",
+            "/// Where one bundled face sits in the decompressed blob. Named\n\
+             /// fields because `start` and `len` are both `usize` and a swap\n\
+             /// would yield a valid-looking range over the wrong bytes.\n\
+             struct FontSegment {{\n    start: usize,\n    len: usize,\n}}\n\n\
+             const FONT_SEGMENTS: &[FontSegment] = &[\n{segments}];\n\
+             pub const FONT_COUNT: usize = {};\n\
+             const FONTS_UNCOMPRESSED_LEN: usize = {};\n\n{constants}",
+            FONT_SOURCES.len(),
             concatenated.len()
         ),
     )?;

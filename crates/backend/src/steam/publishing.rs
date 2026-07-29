@@ -1,7 +1,8 @@
+use crate::transactions::status;
 use crate::{
     GMOD_APP_ID, Transaction,
     appdata::AppData,
-    gma::{GMAEntry, GMAFile, GMAMetadata, whitelist::AddonWhitelist},
+    gma::{GmaEntry, GmaFile, GmaMetadata, whitelist::AddonWhitelist},
 };
 use image::{DynamicImage, ImageError, ImageFormat};
 use std::{
@@ -47,7 +48,7 @@ pub enum PublishError {
     #[error("cancelled")]
     Cancelled,
     #[error(transparent)]
-    Gma(#[from] crate::gma::GMAError),
+    Gma(#[from] crate::gma::GmaError),
     #[error(transparent)]
     Runtime(#[from] crate::steam::runtime::SteamRuntimeError),
 }
@@ -220,11 +221,11 @@ fn publish_tags(mut tags: Vec<String>, addon_type: String) -> Vec<String> {
 fn publish_update_status_key(processed: steamworks::UpdateStatus) -> Option<&'static str> {
     Some(match processed {
         steamworks::UpdateStatus::Invalid => return None,
-        steamworks::UpdateStatus::PreparingConfig => "PUBLISH_PREPARING_CONFIG",
-        steamworks::UpdateStatus::PreparingContent => "PUBLISH_PREPARING_CONTENT",
-        steamworks::UpdateStatus::UploadingContent => "PUBLISH_UPLOADING_CONTENT",
-        steamworks::UpdateStatus::UploadingPreviewFile => "PUBLISH_UPLOADING_PREVIEW_FILE",
-        steamworks::UpdateStatus::CommittingChanges => "PUBLISH_COMMITTING_CHANGES",
+        steamworks::UpdateStatus::PreparingConfig => status::PUBLISH_PREPARING_CONFIG,
+        steamworks::UpdateStatus::PreparingContent => status::PUBLISH_PREPARING_CONTENT,
+        steamworks::UpdateStatus::UploadingContent => status::PUBLISH_UPLOADING_CONTENT,
+        steamworks::UpdateStatus::UploadingPreviewFile => status::PUBLISH_UPLOADING_PREVIEW_FILE,
+        steamworks::UpdateStatus::CommittingChanges => status::PUBLISH_COMMITTING_CHANGES,
     })
 }
 
@@ -233,6 +234,12 @@ fn publish_update_status_key(processed: steamworks::UpdateStatus) -> Option<&'st
 /// every phase change (or while the total is unknown) since a byte count
 /// from the previous phase would otherwise show; once a phase is underway
 /// its own byte-level progress is reported normally.
+///
+/// A cancel here stops *waiting*, not uploading: steamworks owns the transfer
+/// once the handle is submitted and offers no way to recall it. The user gets
+/// their UI back and the transaction ends; Steam finishes or abandons the
+/// upload on its own. Packing, which happens before this and takes far longer,
+/// is genuinely cancellable.
 fn pump_publish_progress(
     update_handle: &steamworks::UpdateWatchHandle,
     transaction: &Transaction,
@@ -240,6 +247,9 @@ fn pump_publish_progress(
 ) -> Result<Result<(PublishedFileId, bool), SteamError>, PublishError> {
     let mut last_processed = None;
     loop {
+        if transaction.aborted() {
+            return Err(PublishError::Cancelled);
+        }
         let (processed, progress, total) = update_handle.progress();
         if let Some(status) = publish_update_status_key(processed) {
             transaction.status(status);
@@ -593,10 +603,13 @@ impl ConnectedSteam<'_> {
             },
         );
 
-        let id = match published_rx.recv() {
+        // Bounded, unlike the upload progress loop: creating the item is a
+        // single round trip with nothing to report progress on, so a callback
+        // that has not landed by now is not going to.
+        let id = match published_rx.recv_timeout(super::CALLBACK_RESULT_TIMEOUT) {
             Ok(Ok((id, _))) => id,
             Ok(Err(error)) => return Err(PublishError::SteamError(error)),
-            Err(mpsc::RecvError) => return Err(fail_publish_callback_channel(transaction)),
+            Err(_) => return Err(fail_publish_callback_channel(transaction)),
         };
 
         match self.update(id, details, transaction, app_data) {
@@ -698,11 +711,11 @@ pub fn submit_with_transaction(
     let _publish_dir_guard = PublishDirGuard(publish_dir.clone());
 
     {
-        let gma = GMAFile {
+        let gma = GmaFile {
             path: publish_dir.join("gmpublisher.gma"),
             size: 0,
             id: None,
-            metadata: GMAMetadata::Standard {
+            metadata: GmaMetadata::Standard {
                 title: title.clone(),
                 addon_type: addon_type.clone(),
                 tags: tags.clone(),
@@ -714,10 +727,14 @@ pub fn submit_with_transaction(
         };
 
         if let Err(error) = gma.create(&content_path_src, transaction, whitelist) {
-            if !transaction.aborted() {
-                return emit_publish_error(transaction, error.into());
+            // The pack reports cancellation as its own error, so this reads the
+            // cause rather than re-observing the transaction and hoping the two
+            // agree — an I/O failure that happens to coincide with a cancel is
+            // still an I/O failure worth surfacing.
+            if matches!(error, crate::GmaError::Cancelled) {
+                return Err(PublishError::Cancelled);
             }
-            return Err(PublishError::Cancelled);
+            return emit_publish_error(transaction, error.into());
         }
     }
 
@@ -811,8 +828,9 @@ fn fail_publish_preview_path(transaction: &Transaction, path: PathBuf) -> Publis
     PublishError::IOError(None)
 }
 
-/// A disconnected Steam callback channel means Steam died mid-publish; fail
-/// the transaction and yield the error the publish flow returns early with.
+/// A Steam callback channel that disconnects, or goes quiet past its
+/// deadline, means the publish will never get its answer; fail the transaction
+/// and yield the error the publish flow returns early with.
 fn fail_publish_callback_channel(transaction: &Transaction) -> PublishError {
     transaction.error(crate::transactions::TransactionError::detailed(
         crate::error_key::keys::STEAM_ERROR,
@@ -837,7 +855,7 @@ pub fn verify_whitelist(
     path: &Path,
     ignore_globs: &[String],
     whitelist: &AddonWhitelist,
-) -> Result<(Vec<GMAEntry>, u64), PublishError> {
+) -> Result<(Vec<GmaEntry>, u64), PublishError> {
     if !path.is_dir() || !path.is_absolute() {
         return Err(PublishError::InvalidContentPath);
     }
@@ -896,7 +914,7 @@ pub fn verify_whitelist(
         } else if failed.is_empty() {
             let entry_size = entry.metadata().map_or(0, |metadata| metadata.len());
             size += entry_size;
-            files.push(GMAEntry {
+            files.push(GmaEntry {
                 path: relative_path,
                 size: entry_size,
                 crc: 0,

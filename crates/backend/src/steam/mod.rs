@@ -9,20 +9,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
 use steamworks::{
-    Callback, CallbackHandle, Client, PublishedFileId, SteamId, SteamServersConnected,
-    SteamServersDisconnected,
+    Callback, CallbackHandle, Client, SteamServersConnected, SteamServersDisconnected,
 };
+
+/// Steam's own id types, re-exported so the app builds them at its boundary
+/// rather than passing raw integers through this crate's API.
+pub use steamworks::{PublishedFileId, SteamId};
 
 use crate::appdata::AppData;
 use crate::events::BackendEvent;
 use crate::search::Search;
+use crate::signal::Signal;
 use crate::steam::downloads::Downloads;
 use crate::transactions::Transactions;
 
 use self::users::SteamUser;
 
+mod callback_slot;
 pub mod downloads;
 pub mod publishing;
 pub mod runtime;
@@ -54,6 +59,14 @@ const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// Generous default for [`Steam::client_wait`] call sites with no more
 /// specific deadline of their own.
 pub const CLIENT_WAIT_DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on waiting for a steamworks callback to deliver its result.
+///
+/// steamworks owns the callback's lifetime: it may drop the closure without
+/// invoking it, or hold it indefinitely, and neither is something this side
+/// can observe. Every wait on a callback result therefore needs a deadline,
+/// or a caller blocks for the life of the process.
+pub(crate) const CALLBACK_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Interface {
     client: Client,
@@ -87,7 +100,7 @@ impl From<Client> for Interface {
 
 pub struct Steam {
     connected: AtomicBool,
-    connected_wait: (Mutex<bool>, Condvar),
+    connected_wait: Signal,
 
     /// Set exactly once, by [`Self::connect`]'s first success. Never cleared
     /// afterward: a later disconnect flips `connected` back to `false` but
@@ -97,10 +110,9 @@ pub struct Steam {
     /// `discover_gmod_dir`'s race) leans on this.
     interface: OnceLock<Interface>,
 
-    /// Signals every background thread spawned from this `Steam` to stop.
-    /// Paired with a `Condvar` so a sleeping thread wakes immediately
-    /// instead of finishing out its tick.
-    shutdown: (Mutex<bool>, Condvar),
+    /// Signals every background thread spawned from this `Steam` to stop. A
+    /// sleeping thread wakes immediately rather than finishing out its tick.
+    shutdown: Signal,
     /// Handles for every thread spawned from this `Steam`, joined by
     /// [`Self::shutdown`].
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -112,10 +124,8 @@ pub struct Steam {
     shutdown_wakers: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 
     users: RwLock<HashMap<SteamId, SteamUser>>,
-    /// steamworks keeps a single callback slot per event type — a later
-    /// registration replaces the current one, and any handle's drop clears
-    /// the slot — so persona waits ([`Self::fetch_user`]) must not overlap.
-    persona_fetch: Mutex<()>,
+    /// The slot persona waits ([`Self::fetch_user`]) contend for.
+    persona_slot: callback_slot::CallbackSlot,
 
     workshop_dedup: Mutex<HashSet<PublishedFileId>>,
     workshop_queue_tx: mpsc::Sender<Vec<PublishedFileId>>,
@@ -130,13 +140,13 @@ impl Steam {
         let (workshop_queue_tx, workshop_queue_rx) = mpsc::channel();
         Self {
             connected: AtomicBool::new(false),
-            connected_wait: (Mutex::new(false), Condvar::new()),
+            connected_wait: Signal::new(),
             interface: OnceLock::new(),
-            shutdown: (Mutex::new(false), Condvar::new()),
+            shutdown: Signal::new(),
             threads: Mutex::new(Vec::new()),
             shutdown_wakers: Mutex::new(Vec::new()),
             users: RwLock::new(HashMap::new()),
-            persona_fetch: Mutex::new(()),
+            persona_slot: callback_slot::CallbackSlot::default(),
 
             workshop_dedup: Mutex::new(HashSet::new()),
             workshop_queue_tx,
@@ -197,7 +207,7 @@ impl Steam {
             pump.run_callbacks();
             // Parked on the shutdown signal rather than a plain sleep, so
             // exit is prompt.
-            if condvar_wait_bool(&steam.shutdown, CALLBACK_PUMP_INTERVAL) {
+            if steam.shutdown.wait_until_set(CALLBACK_PUMP_INTERVAL) {
                 return;
             }
         }
@@ -286,10 +296,7 @@ impl Steam {
     fn set_connected(&self, connected: bool) {
         self.connected.store(connected, Ordering::Release);
         {
-            let mut connected_wait = self.connected_wait.0.lock();
-            *connected_wait = connected;
-            drop(connected_wait);
-            self.connected_wait.1.notify_all();
+            self.connected_wait.store(connected);
         }
         self.transactions.emit(if connected {
             BackendEvent::SteamConnected
@@ -327,7 +334,7 @@ impl Steam {
     /// interface (or [`runtime::SteamRuntimeError::NotConnected`] if the
     /// deadline passed first).
     pub fn client_wait(&self, timeout: Duration) -> Result<&Interface, runtime::SteamRuntimeError> {
-        if condvar_wait_bool(&self.connected_wait, timeout) {
+        if self.connected_wait.wait_until_set(timeout) {
             self.client()
         } else {
             Err(runtime::SteamRuntimeError::NotConnected)
@@ -336,14 +343,14 @@ impl Steam {
 
     /// Blocks until connected or `timeout` elapses, returning whether it connected.
     pub fn wait_for_connected(&self, timeout: Duration) -> bool {
-        condvar_wait_bool(&self.connected_wait, timeout)
+        self.connected_wait.wait_until_set(timeout)
     }
 
     /// Whether [`Self::shutdown`] has been signaled. Background threads that
     /// block on something other than the shutdown condvar check this after
     /// every wake-up.
     pub(crate) fn shutting_down(&self) -> bool {
-        *self.shutdown.0.lock()
+        self.shutdown.is_set()
     }
 
     /// Registers a nudge run by [`Self::shutdown`] after the flag is set.
@@ -363,8 +370,7 @@ impl Steam {
     /// blocking process exit. Idempotent: safe to call more than once (e.g.
     /// from both an explicit app-exit path and a `Backend` drop).
     pub fn shutdown(&self) {
-        *self.shutdown.0.lock() = true;
-        self.shutdown.1.notify_all();
+        self.shutdown.set();
 
         // The workshop fetcher parks in a blocking `recv` on this queue, and
         // the sender it waits on lives on the `Steam` its own `Arc` clone
@@ -424,7 +430,7 @@ fn join_all_within(handles: Vec<JoinHandle<()>>, timeout: Duration) {
 /// until it returns `true` or `shutdown` is signaled. Returns whether it
 /// succeeded — `false` only means shutdown interrupted the retry first.
 fn retry_until_shutdown(
-    shutdown: &(Mutex<bool>, Condvar),
+    shutdown: &Signal,
     initial: Duration,
     max: Duration,
     mut attempt: impl FnMut() -> bool,
@@ -434,24 +440,11 @@ fn retry_until_shutdown(
         if attempt() {
             return true;
         }
-        if condvar_wait_bool(shutdown, delay) {
+        if shutdown.wait_until_set(delay) {
             return false;
         }
         delay = (delay * 2).min(max);
     }
-}
-
-// Condvar pairing: the guard is handed to wait_while_for.
-#[expect(clippy::significant_drop_tightening)]
-fn condvar_wait_bool(pair: &(Mutex<bool>, Condvar), timeout: Duration) -> bool {
-    let mut value = pair.0.lock();
-    if *value {
-        return true;
-    }
-    !pair
-        .1
-        .wait_while_for(&mut value, |value| !*value, timeout)
-        .timed_out()
 }
 
 #[cfg(test)]
@@ -464,40 +457,13 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use parking_lot::{Condvar, Mutex};
+    use crate::signal::Signal;
 
     fn test_steam() -> Arc<super::Steam> {
         Arc::new(super::Steam::new(crate::transactions::Transactions::new(
             Arc::new(crate::events::NullEventSink),
             false,
         )))
-    }
-
-    #[test]
-    fn condvar_wait_bool_returns_immediately_when_already_true() {
-        let pair = (Mutex::new(true), Condvar::new());
-
-        assert!(super::condvar_wait_bool(&pair, Duration::from_millis(1)));
-    }
-
-    #[test]
-    fn condvar_wait_bool_wakes_up_when_set_before_timeout() {
-        let pair = Arc::new((Mutex::new(false), Condvar::new()));
-        let setter = pair.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            *setter.0.lock() = true;
-            setter.1.notify_all();
-        });
-
-        assert!(super::condvar_wait_bool(&pair, Duration::from_secs(5)));
-    }
-
-    #[test]
-    fn condvar_wait_bool_times_out_when_never_set() {
-        let pair = (Mutex::new(false), Condvar::new());
-
-        assert!(!super::condvar_wait_bool(&pair, Duration::from_millis(20)));
     }
 
     #[test]
@@ -515,12 +481,11 @@ mod tests {
 
     #[test]
     fn retry_until_shutdown_exits_promptly_once_signaled() {
-        let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
+        let shutdown = Arc::new(Signal::new());
         let signaler = Arc::clone(&shutdown);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            *signaler.0.lock() = true;
-            signaler.1.notify_all();
+            signaler.set();
         });
 
         let started = Instant::now();
@@ -539,7 +504,7 @@ mod tests {
 
     #[test]
     fn retry_until_shutdown_returns_true_on_first_success() {
-        let shutdown = (Mutex::new(false), Condvar::new());
+        let shutdown = Signal::new();
 
         let succeeded = super::retry_until_shutdown(
             &shutdown,
@@ -560,12 +525,12 @@ mod tests {
 
         // Mirrors the shape of the real background threads: owns an
         // `Arc<Steam>` clone, loops checking the shutdown signal each tick,
-        // parked on the same condvar pair `shutdown()` notifies.
+        // parked on the same signal `shutdown()` sets.
         let handle = {
             let steam = Arc::clone(&steam);
             std::thread::spawn(move || {
                 loop {
-                    if super::condvar_wait_bool(&steam.shutdown, Duration::from_secs(30)) {
+                    if steam.shutdown.wait_until_set(Duration::from_secs(30)) {
                         return;
                     }
                 }
@@ -620,7 +585,7 @@ mod tests {
     #[test]
     fn shutdown_wakes_a_thread_parked_on_a_registered_waker() {
         let steam = test_steam();
-        let park = Arc::new((Mutex::new(false), Condvar::new()));
+        let park = Arc::new(Signal::new());
         let exited = Arc::new(AtomicBool::new(false));
 
         // Only the waker sets the predicate, so the thread below cannot
@@ -629,8 +594,7 @@ mod tests {
         steam.register_shutdown_waker({
             let park = Arc::clone(&park);
             move || {
-                *park.0.lock() = true;
-                park.1.notify_all();
+                park.set();
             }
         });
 
@@ -641,10 +605,7 @@ mod tests {
             let park = Arc::clone(&park);
             let exited = Arc::clone(&exited);
             std::thread::spawn(move || {
-                let mut guard = park.0.lock();
-                while !*guard {
-                    park.1.wait(&mut guard);
-                }
+                park.wait_until_set(Duration::from_secs(60));
                 exited.store(true, Ordering::SeqCst);
             })
         };
@@ -667,11 +628,8 @@ mod tests {
         // bound; joined concurrently against a shared deadline, one.
         for _ in 0..6 {
             let handle = std::thread::spawn(move || {
-                let never = (Mutex::new(false), Condvar::new());
-                let mut guard = never.0.lock();
-                while !*guard {
-                    never.1.wait(&mut guard);
-                }
+                // Never set, so this thread outlives the join bound.
+                Signal::new().wait_until_set(Duration::from_secs(3600));
             });
             steam.threads.lock().push(handle);
         }

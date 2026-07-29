@@ -19,7 +19,7 @@ use nucleo_matcher::{
 };
 
 use crate::transactions::TransactionId;
-use crate::{GMAFile, Transaction, WorkshopItem, transactions::TransactionPayload};
+use crate::{GmaFile, Transaction, WorkshopItem, transactions::TransactionPayload};
 
 const MAX_QUICK_RESULTS: u8 = 10;
 
@@ -340,7 +340,7 @@ impl Searchable for WorkshopItem {
         ))
     }
 }
-impl Searchable for GMAFile {
+impl Searchable for GmaFile {
     fn search_item(&self) -> Option<SearchItem> {
         let mut terms = self.metadata.tags().cloned().unwrap_or_default();
         if let Some(addon_type) = self.metadata.addon_type() {

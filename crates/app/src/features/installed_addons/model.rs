@@ -18,9 +18,7 @@ use crate::widgets::{
     grid_rows::{self, GridRow},
 };
 
-const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
-const THUMBNAIL_PLAY_POLICY: thumbnail_animation::PlayPolicy =
-    thumbnail_animation::PlayPolicy::OnHover;
+use crate::widgets::grid_rows::{ADDON_THUMBNAIL_MAX_EDGE, RowThumbnail, THUMBNAIL_PLAY_POLICY};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -373,18 +371,6 @@ impl GridRow for Row {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum RowThumbnail {
-    Loading,
-    /// Blurred ThumbHash stand-in shown until the real pixels decode.
-    Placeholder(image::Handle),
-    Dead,
-    Ready {
-        still: image::Handle,
-        animation: Option<thumbnail_animation::Playback>,
-    },
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewTarget {
     pub(crate) row_id: String,
@@ -512,19 +498,6 @@ pub fn thumbnail_demands(
     grid_rows::thumbnail_demands(rows, visible_range, generation, thumbnail_owner())
 }
 
-/// Releases Ready thumbnails outside visible+prefetch so scrolled-away rows
-/// stop pinning decoded RGBA; the demand/cache path re-delivers on return.
-pub fn release_offscreen_thumbnails(
-    rows: &mut [Row],
-    visible_range: std::ops::Range<usize>,
-) -> Vec<usize> {
-    grid_rows::release_offscreen_thumbnails(rows, visible_range)
-}
-
-pub fn invalidate_ready_thumbnails(rows: &mut [Row]) -> bool {
-    grid_rows::invalidate_ready_thumbnails(rows)
-}
-
 pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {
     thumbnail_demand::DemandSet::empty(thumbnail_owner())
 }
@@ -546,7 +519,7 @@ mod tests {
         };
         use crate::media::thumbnail_worker::ThumbnailMetadata;
 
-        let workshop_id = PublishedFileId::new(42).expect("test fixture ids are always nonzero");
+        let workshop_id = PublishedFileId::fixture(42);
         let mut row = Row::for_test("/tmp/addon.gma", "Addon", Some(workshop_id));
         row.apply_metadata_patch(&MetadataPatch::for_test(
             workshop_id,
@@ -602,10 +575,10 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/addon.gma",
             "Local title",
-            Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(42)),
         );
         let patch = MetadataPatch::for_test(
-            PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(42),
             "Workshop title",
             Some("https://example.test/a.jpg"),
         );
@@ -623,10 +596,10 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/addon.gma",
             "Local title",
-            Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(42)),
         );
         let patch = MetadataPatch::for_test(
-            PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(42),
             "Workshop title",
             Some("https://example.test/a.jpg"),
         );
@@ -645,7 +618,7 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/addon.gma",
             "Addon",
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(123)),
         );
         row.preview_url = Some("https://example.test/preview.jpg".to_owned());
 
@@ -680,9 +653,7 @@ mod tests {
         assert_eq!(actions, expected);
         assert_eq!(
             menu.workshop_url,
-            Some(workshop_item_url(
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-            ))
+            Some(workshop_item_url(PublishedFileId::fixture(123)))
         );
     }
 
@@ -691,15 +662,11 @@ mod tests {
         let mut loading = Row::for_test(
             "/tmp/loading.gma",
             "Loading",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(1)),
         );
         loading.preview_url = Some("https://example.test/loading.jpg".to_owned());
         loading.thumbnail = RowThumbnail::Loading;
-        let dead = Row::for_test(
-            "/tmp/dead.gma",
-            "Dead",
-            Some(PublishedFileId::new(2).expect("test fixture ids are always nonzero")),
-        );
+        let dead = Row::for_test("/tmp/dead.gma", "Dead", Some(PublishedFileId::fixture(2)));
 
         let set = thumbnail_demands(&[loading, dead], 0..2, Generation::from_raw(7));
 
@@ -714,7 +681,7 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/animated.gma",
             "Animated",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(1)),
         )
         .with_ready_animation_for_test();
 

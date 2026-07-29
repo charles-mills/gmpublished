@@ -1,3 +1,4 @@
+pub mod color;
 pub mod motion;
 pub mod styles;
 pub mod tokens;

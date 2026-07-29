@@ -223,10 +223,7 @@ mod tests {
             &mut state,
             Message::StatsRefreshCompleted(
                 Generation::from_raw(1),
-                Ok(HashMap::from([(
-                    PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-                    25,
-                )])),
+                Ok(HashMap::from([(PublishedFileId::fixture(42), 25)])),
             ),
         );
 
@@ -270,10 +267,7 @@ mod tests {
 
         match effects.as_slice() {
             [Effect::PreparePublishRequested(PreparePublishTarget::Update(update))] => {
-                assert_eq!(
-                    update.workshop_id,
-                    PublishedFileId::new(42).expect("test fixture ids are always nonzero")
-                );
+                assert_eq!(update.workshop_id, PublishedFileId::fixture(42));
                 assert_eq!(update.title, "Addon");
             }
             other => panic!("expected update target effect, got {other:?}"),
@@ -296,7 +290,7 @@ mod tests {
         assert!(matches!(
             effects.as_slice(),
             [Effect::ContextMenuRequested(menu)]
-                if menu.workshop_id == PublishedFileId::new(42).expect("test fixture ids are always nonzero") && menu.position == iced::Point::new(10.0, 20.0)
+                if menu.workshop_id == PublishedFileId::fixture(42) && menu.position == iced::Point::new(10.0, 20.0)
         ));
     }
 
@@ -309,7 +303,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::DebugSubscribersAdjusted {
-                workshop_id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                workshop_id: PublishedFileId::fixture(42),
                 delta: 1_000_000,
             },
         );
@@ -419,9 +413,7 @@ mod tests {
             ),
             vec![Effect::AddonDragPressed {
                 card_id: "42".to_owned(),
-                workshop_id: Some(
-                    PublishedFileId::new(42).expect("test fixture ids are always nonzero")
-                ),
+                workshop_id: Some(PublishedFileId::fixture(42)),
             }]
         );
         assert_eq!(

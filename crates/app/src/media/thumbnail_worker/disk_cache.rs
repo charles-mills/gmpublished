@@ -27,6 +27,12 @@ const CACHE_FORMAT_PNG_RGBA: u8 = 1;
 // Animated GIF: the payload is the raw encoded GIF stream, replayed on read.
 const CACHE_FORMAT_GIF: u8 = 2;
 
+/// The on-disk thumbnail cache, with an in-memory index of what it holds.
+///
+/// Single-writer: clones share one index, but a second process sharing the
+/// directory keeps its own. `max_bytes` is therefore a soft target, not a
+/// ceiling, and [`Self::contains_source`] answers from this process's index
+/// rather than the filesystem.
 #[derive(Clone, Debug)]
 pub struct WorkerDiskCache {
     dir: PathBuf,
@@ -205,7 +211,6 @@ pub fn read_disk_cache(
                     path.display()
                 );
             }
-            remove_indexed_cache_file(cache, &path);
             None
         }
     }
@@ -226,8 +231,19 @@ pub fn read_source_bytes(cache: &WorkerDiskCache, url: &str) -> Option<Vec<u8>> 
             let _ = refresh_source_age(cache, &path);
             Some(bytes)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // The read path is the only place that learns the index is wrong.
+            // A second instance sharing this directory evicts against its own
+            // private index and unlinks files this one still has recorded;
+            // without this, `contains_source` reports the URL as banked
+            // forever and the warm filter never re-fetches it.
+            remove_indexed_cache_file(cache, &path);
+            None
+        }
         Err(error) => {
+            // Deliberately not a repair: an unreadable file is still a file,
+            // and dropping its index entry would leak its bytes from the
+            // budget while eviction still has to unlink it.
             log::debug!(
                 "failed to read thumbnail source {}: {error}",
                 path.display()
@@ -986,6 +1002,30 @@ mod tests {
         write_source_bytes(&cache, present, &[1, 2, 3, 4]);
         assert!(cache.contains_source(present));
         assert!(!cache.contains_source(absent));
+    }
+
+    /// A second instance sharing this directory evicts against its own private
+    /// index, so a file can vanish under a path this one still has recorded.
+    /// The read is the only operation that finds out, and `contains_source`
+    /// answers from the index alone — so without the repair the URL reads as
+    /// banked forever and warming never re-fetches it.
+    #[test]
+    fn a_source_deleted_out_of_band_stops_reading_as_banked() {
+        let root = TestDir::new("disk-cache-external-eviction");
+        let cache = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
+        let url = "https://example.invalid/evicted-elsewhere.png";
+
+        write_source_bytes(&cache, url, &[1, 2, 3, 4]);
+        assert!(cache.contains_source(url));
+
+        std::fs::remove_file(source_cache_path(root.path(), url))
+            .expect("the banked source should exist on disk");
+
+        assert!(read_source_bytes(&cache, url).is_none());
+        assert!(
+            !cache.contains_source(url),
+            "the read should have repaired the index it found wrong"
+        );
     }
 
     /// A derived entry is not a source. Warming skips URLs whose *source* is

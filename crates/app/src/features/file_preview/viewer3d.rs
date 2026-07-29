@@ -11,6 +11,10 @@ use iced::{Event, Point, Rectangle};
 
 use super::model::ModelVertex;
 use crate::bridge::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
+use gmpublished_backend::math::{
+    self, add, cross, distance, distance_squared, dot, length_squared, normalize_or_zero,
+    scale as mul, sub,
+};
 use gmpublished_backend::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDirection};
 use vformats::vtf::BcFormat;
 
@@ -63,10 +67,11 @@ use texture::{
     write_bc_texture_level, write_texture_level,
 };
 
-const SHADER_SOURCE: &str = include_str!("model_viewer.wgsl");
-const WATER_SHADER_SOURCE: &str = include_str!("water.wgsl");
-const DETAIL_SHADER_SOURCE: &str = include_str!("detail.wgsl");
-const SKY_SHADER_SOURCE: &str = include_str!("sky.wgsl");
+pub(super) const MODEL_SHADER_SOURCE: &str = include_str!("model_viewer.wgsl");
+const SHADER_SOURCE: &str = MODEL_SHADER_SOURCE;
+pub(super) const WATER_SHADER_SOURCE: &str = include_str!("water.wgsl");
+pub(super) const DETAIL_SHADER_SOURCE: &str = include_str!("detail.wgsl");
+pub(super) const SKY_SHADER_SOURCE: &str = include_str!("sky.wgsl");
 const BLIT_SHADER_SOURCE: &str = r"
 var<private> uvs: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2<f32>(0.0, 0.0),
@@ -109,10 +114,6 @@ const CHECKERBOARD_MIP_1X1_BYTES: usize = 4;
 const PHY_DEBUG_RGBA: [u8; 4] = [48, 210, 255, 96];
 const MSAA_SAMPLE_COUNT: u32 = 4;
 const MATERIAL_ANISOTROPY_CLAMP: u16 = 16;
-const ORBIT_SENSITIVITY: f32 = 0.008;
-const ZOOM_STEP: f32 = 0.9;
-const MIN_PITCH: f32 = -1.55;
-const MAX_PITCH: f32 = 1.55;
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
 const DETAIL_VERTEX_FLOAT_COUNT: u64 = 7;
@@ -145,18 +146,6 @@ fn half_extent(min: [f32; 3], max: [f32; 3]) -> f32 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn mul(vector: [f32; 3], scalar: f32) -> [f32; 3] {
-    [vector[0] * scalar, vector[1] * scalar, vector[2] * scalar]
-}
-
 fn skybox_eye(world_eye: [f32; 3], sky_origin: [f32; 3], sky_scale: f32) -> [f32; 3] {
     let scale = if sky_scale.is_finite() && sky_scale > 0.0 {
         sky_scale
@@ -170,47 +159,12 @@ fn skybox_eye(world_eye: [f32; 3], sky_origin: [f32; 3], sky_scale: f32) -> [f32
     ]
 }
 
-fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
-    let delta = sub(a, b);
-    dot(delta, delta)
-}
-
-fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
-    distance_squared(a, b).sqrt()
-}
-
-fn length_squared(vector: [f32; 3]) -> f32 {
-    dot(vector, vector)
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
+/// A direction, falling back to Source's world up.
+///
+/// The camera-basis convention: a `look_at` needs three usable axes, and a
+/// zero vector there produces a NaN view matrix rather than a degenerate one.
 fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let len = dot(v, v).sqrt();
-    if len <= f32::EPSILON {
-        [0.0, 0.0, 1.0]
-    } else {
-        [v[0] / len, v[1] / len, v[2] / len]
-    }
-}
-
-fn normalize_or_zero(v: [f32; 3]) -> [f32; 3] {
-    let len = dot(v, v).sqrt();
-    if len <= f32::EPSILON {
-        [0.0; 3]
-    } else {
-        [v[0] / len, v[1] / len, v[2] / len]
-    }
+    math::normalize(v).unwrap_or(SOURCE_UP)
 }
 
 /// Source's world up. The engine is Z-up, so this is +Z rather than the +Y
@@ -1725,9 +1679,14 @@ mod tests {
     fn orbit_camera_without_pose_uses_default_framing() {
         let mut camera = Camera {
             content_id: None,
-            yaw: 9.0,
-            pitch: -9.0,
-            distance: 4.0,
+            orbit: crate::features::file_preview::orbit::Orbit::from_pose(
+                OrbitPose {
+                    yaw: 9.0,
+                    pitch: -9.0,
+                    distance: 4.0,
+                },
+                crate::features::file_preview::orbit::ZoomFloor::SolidMesh,
+            ),
             drag_from: Some(Point::new(1.0, 2.0)),
         };
 

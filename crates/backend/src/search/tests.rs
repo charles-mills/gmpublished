@@ -8,12 +8,12 @@ fn gma_for_search(
     title: &str,
     id: Option<PublishedFileId>,
     modified: Option<u64>,
-) -> GMAFile {
-    GMAFile {
+) -> GmaFile {
+    GmaFile {
         path,
         size: 0,
         id,
-        metadata: crate::gma::GMAMetadata::Standard {
+        metadata: crate::gma::GmaMetadata::Standard {
             title: title.to_owned(),
             addon_type: "servercontent".to_owned(),
             tags: vec!["build".to_owned(), "fun".to_owned()],

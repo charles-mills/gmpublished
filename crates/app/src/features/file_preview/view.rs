@@ -29,7 +29,6 @@ fn count_text(count: impl std::fmt::Display) -> String {
     count.to_string()
 }
 
-const TOOLTIP_MAX_WIDTH: f32 = 280.0;
 const SILKICON_SIZE: f32 = 16.0;
 const SPINNER_SIZE: f32 = 32.0;
 const INFO_LABEL_WIDTH: f32 = 76.0;
@@ -86,7 +85,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
         i18n.tr("file-preview-back"),
         &tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     );
     let (expand_icon, expand_tooltip) = if state.expanded() {
         (
@@ -110,7 +109,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
         expand_tooltip,
         &tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     );
 
     let name = scrollable(
@@ -155,7 +154,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
             tooltip,
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ));
     }
 
@@ -173,7 +172,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
             i18n.tr("file-preview-extract"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ));
     }
     container(controls)
@@ -1076,7 +1075,7 @@ fn coverage_row<'a>(
         .spacing(tokens.spacing.gap_sm),
         i18n.tr(level_key),
         &tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     )
 }
 
@@ -1316,7 +1315,7 @@ fn mode_pill_slot<'a>(
     .on_press_maybe((!active).then_some(Message::MovementModeSelected(mode)))
     .style(move |_, _| mode_pill_slot_style(active));
 
-    tooltip_widget::below(slot, tooltip, tokens, TOOLTIP_MAX_WIDTH)
+    tooltip_widget::below(slot, tooltip, tokens, tokens.dims.tooltip_max_width)
 }
 
 fn scene_supports_walk(scene: &ModelPreview) -> bool {
@@ -1544,7 +1543,7 @@ fn silk_image<'a>(icon: SilkIcon, tooltip: String, tokens: &Tokens) -> Element<'
             .height(Length::Fixed(SILKICON_SIZE)),
         tooltip,
         tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     )
 }
 

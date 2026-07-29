@@ -1,9 +1,9 @@
 use super::{
     App, PublishedFileId, RootMessage, SearchFullRequest, SearchQuickRequest, Task, TaskHandle,
-    TaskKind, UiError, flatten_blocking_ui_result, prepare_publish, preview_gma, run_search_full,
-    search, send_root_message, spawn_blocking_detached_or_warn, steam_session, stream,
-    workshop_url,
+    TaskKind, flatten_blocking_ui_result, prepare_publish, preview_gma, run_search_full, search,
+    send_root_message, spawn_blocking_detached_or_warn, steam_session, stream, workshop_url,
 };
+use crate::bridge::ui_error::ResultExt as _;
 
 use crate::generation::Generation;
 use iced::widget::operation;
@@ -30,7 +30,7 @@ impl App {
             .map(move |result| {
                 RootMessage::Search(search::Message::QuickSearchCompleted(
                     key.clone(),
-                    result.map_err(|error| UiError::from(&error)),
+                    result.ui_err(),
                 ))
             })
     }
@@ -50,7 +50,7 @@ impl App {
                 RootMessage::Search(search::Message::MetadataCompleted(
                     generation,
                     delivery_item_ids.clone(),
-                    result.map_err(|error| UiError::from(&error)),
+                    result.ui_err(),
                 ))
             })
     }
@@ -155,7 +155,7 @@ impl App {
                 prepare_publish::Message::OpenRequested {
                     target: {
                         let (snapshot_request_id, snapshot_destination) =
-                            self.prepare_publish_workshop_snapshot(workshop_id);
+                            self.publish().workshop_snapshot(workshop_id);
                         prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
                             workshop_id,
                             title,
@@ -165,8 +165,8 @@ impl App {
                             snapshot_destination,
                         })
                     },
-                    ignored_patterns: self.prepare_publish_ignored_patterns(),
-                    upscale_icon_default: self.prepare_publish_upscale_default(),
+                    ignored_patterns: self.publish().ignored_patterns(),
+                    upscale_icon_default: self.publish().upscale_default(),
                 },
             )),
             search::SelectionAction::SteamWorkshop { workshop_id } => {

@@ -1,5 +1,3 @@
-#[cfg(feature = "debug")]
-use std::collections::HashSet;
 use std::{
     collections::HashMap,
     fs,
@@ -50,8 +48,10 @@ const MAX_DROPPED_TEXT_BYTES: u64 = 1024 * 1024;
 const WORKSHOP_DRAG_PREFIX: &str = "gmpublished/workshop-id:";
 
 mod drag;
+mod hidden_addons;
+mod ports;
 mod routes;
-mod runners;
+pub mod runners;
 mod side_effects_addons;
 mod side_effects_audio;
 mod side_effects_downloader;
@@ -70,6 +70,7 @@ mod view_support;
 #[cfg(test)]
 mod tests;
 
+use crate::media::audio_playback::AudioPlayback;
 #[cfg(test)]
 use drag::AddonDragOutcome;
 use drag::{
@@ -85,7 +86,6 @@ use runners::{
     run_preview_gma_entry_extraction, run_search_full, run_size_analyzer_preview_urls,
     schedule_native_open_target, send_root_message, spawn_blocking_detached_or_warn,
 };
-use side_effects_audio::AudioPlayback;
 use side_effects_shell::ContextMenuTarget;
 #[cfg(test)]
 use side_effects_shell::LocalMenuTarget;
@@ -161,10 +161,7 @@ pub struct State {
     addon_drag: AddonDragState,
     context_menu_target: Option<ContextMenuTarget>,
     context_menu_extract_paths: Option<Vec<PathBuf>>,
-    #[cfg(feature = "debug")]
-    hidden_workshop_ids: HashSet<PublishedFileId>,
-    #[cfg(feature = "debug")]
-    hidden_addon_paths: HashSet<PathBuf>,
+    hidden_addons: hidden_addons::HiddenAddons,
     viewport_size: Size,
     i18n: I18n,
 }
@@ -201,10 +198,7 @@ impl Default for State {
             addon_drag: AddonDragState::default(),
             context_menu_target: None,
             context_menu_extract_paths: None,
-            #[cfg(feature = "debug")]
-            hidden_workshop_ids: HashSet::new(),
-            #[cfg(feature = "debug")]
-            hidden_addon_paths: HashSet::new(),
+            hidden_addons: hidden_addons::HiddenAddons::default(),
             viewport_size: Size::ZERO,
             i18n: I18n::from_user_or_system(None),
         };
@@ -347,19 +341,8 @@ pub enum RootMessage {
     AddonDrag(AddonDragMessage),
     LayoutObserved(Size),
     GlobalShortcut(GlobalShortcut),
-    #[cfg(target_os = "macos")]
-    Menu(platform_menu::Command),
-    #[cfg(target_os = "macos")]
-    MenuOpenGmaCompleted(Option<PathBuf>),
-    /// The system flipped between light and dark appearance; AppKit resets
-    /// the custom traffic-light frames during that re-layout.
-    #[cfg(target_os = "macos")]
-    SystemAppearanceChanged,
+    Platform(crate::platform::Message),
     FileDropped(PathBuf),
-    /// `.gma` documents were opened via the OS file association (macOS
-    /// double-click / "Open With"), delivered by the platform-open bridge.
-    #[cfg(target_os = "macos")]
-    GmaDocumentsOpened(Vec<PathBuf>),
     AnimationTick(Instant),
 }
 
@@ -456,6 +439,19 @@ fn search_file_items_from_library(
 }
 
 impl App {
+    /// The narrow surface an effect runner gets. See [`ports`].
+    fn ports(&self) -> ports::Ports<'_> {
+        ports::Ports {
+            ctx: &self.ctx,
+            i18n: &self.state.i18n,
+            tokens: &self.state.tokens,
+        }
+    }
+
+    fn publish(&self) -> side_effects_publish::PublishRunner<'_> {
+        side_effects_publish::PublishRunner::new(self.ports())
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         Self::from_context(
@@ -527,8 +523,7 @@ impl App {
             self.ctx
                 .library_snapshot()
                 .map_or_else(Task::none, |snapshot| {
-                    #[cfg(feature = "debug")]
-                    let snapshot = self.visible_library_snapshot(&snapshot);
+                    let snapshot = self.state.hidden_addons.visible(&snapshot);
                     let installed = self.apply_installed_addons_message(
                         installed_addons::Message::SnapshotPushed(
                             LibraryRefreshReason::Startup,
@@ -611,13 +606,7 @@ impl App {
                 self.apply_destination_select_message(message)
             }
             RootMessage::FilePreview(message) => self.apply_file_preview_message(message),
-            RootMessage::PreparePublish(prepare_publish::Message::FilePreview(message)) => {
-                self.apply_file_preview_message(message)
-            }
             RootMessage::PreparePublish(message) => self.prepare_publish_message_task(&message),
-            RootMessage::PreviewGma(preview_gma::Message::FilePreview(message)) => {
-                self.apply_file_preview_message(message)
-            }
             RootMessage::PreviewGma(message) => self.apply_preview_gma_message(message),
             RootMessage::Settings(message) => self.apply_settings_message(message),
             RootMessage::ContextMenu(message) => self.apply_context_menu_message(message),
@@ -740,19 +729,8 @@ impl App {
                     }
                 }
             }
-            #[cfg(target_os = "macos")]
-            RootMessage::Menu(command) => self.menu_command_task(command),
-            #[cfg(target_os = "macos")]
-            RootMessage::MenuOpenGmaCompleted(path) => path.map_or_else(Task::none, |path| {
-                Task::done(RootMessage::FileDropped(path))
-            }),
-            #[cfg(target_os = "macos")]
-            RootMessage::SystemAppearanceChanged => self
-                .window_id
-                .map_or_else(Task::none, |id| self.traffic_light_position_task(id)),
+            RootMessage::Platform(message) => self.platform_task(message),
             RootMessage::FileDropped(path) => self.handle_file_drop(path),
-            #[cfg(target_os = "macos")]
-            RootMessage::GmaDocumentsOpened(paths) => self.gma_documents_opened_task(paths),
             RootMessage::AnimationTick(now) => {
                 self.state.context_menu.tick(now);
                 self.state.prerequisites.tick(now);
@@ -823,6 +801,31 @@ impl App {
     }
 
     #[cfg(target_os = "macos")]
+    fn platform_task(&self, message: crate::platform::Message) -> Task<RootMessage> {
+        use crate::platform::Message;
+        match message {
+            Message::MenuCommand(command) => self.menu_command_task(command),
+            Message::MenuOpenGmaCompleted(path) => path.map_or_else(Task::none, |path| {
+                Task::done(RootMessage::FileDropped(path))
+            }),
+            Message::SystemAppearanceChanged => self
+                .window_id
+                .map_or_else(Task::none, |id| self.traffic_light_position_task(id)),
+            Message::GmaDocumentsOpened(paths) => self.gma_documents_opened_task(paths),
+        }
+    }
+
+    /// `Message` is uninhabited here, so this arm can never run.
+    #[cfg(not(target_os = "macos"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "matches the macOS handler, which dispatches on self"
+    )]
+    fn platform_task(&self, message: crate::platform::Message) -> Task<RootMessage> {
+        match message {}
+    }
+
+    #[cfg(target_os = "macos")]
     fn menu_command_task(&self, command: platform_menu::Command) -> Task<RootMessage> {
         match command {
             platform_menu::Command::Settings => {
@@ -856,34 +859,16 @@ impl App {
     fn filter_my_workshop_message(&self, message: my_workshop::Message) -> my_workshop::Message {
         match message {
             my_workshop::Message::PageCompleted(generation, page, Ok(mut result)) => {
-                result.retain_visible(&self.state.hidden_workshop_ids);
+                result.retain_visible(self.state.hidden_addons.workshop_ids());
                 my_workshop::Message::PageCompleted(generation, page, Ok(result))
             }
             my_workshop::Message::StatsRefreshCompleted(generation, Ok(mut counts)) => {
-                counts
-                    .retain(|workshop_id, _| !self.state.hidden_workshop_ids.contains(workshop_id));
+                counts.retain(|workshop_id, _| {
+                    !self.state.hidden_addons.contains_workshop_id(*workshop_id)
+                });
                 my_workshop::Message::StatsRefreshCompleted(generation, Ok(counts))
             }
             message => message,
-        }
-    }
-
-    #[cfg(feature = "debug")]
-    fn visible_library_snapshot(&self, snapshot: &LibrarySnapshot) -> LibrarySnapshot {
-        LibrarySnapshot {
-            addons: snapshot
-                .addons
-                .iter()
-                .filter(|addon| {
-                    !self.state.hidden_addon_paths.contains(&addon.path)
-                        && !addon.workshop_id.is_some_and(|workshop_id| {
-                            self.state.hidden_workshop_ids.contains(&workshop_id)
-                        })
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-                .into(),
-            epoch: snapshot.epoch,
         }
     }
 
@@ -1177,6 +1162,7 @@ impl App {
 
     fn run_preview_gma_effect(&mut self, effect: preview_gma::Effect) -> Task<RootMessage> {
         match effect {
+            preview_gma::Effect::FilePreview(message) => self.apply_file_preview_message(message),
             preview_gma::Effect::ModalOpenRequested => {
                 self.open_modal_stack_task(modal_stack::ActiveModal::PreviewGma)
             }
@@ -1224,9 +1210,9 @@ impl App {
             settings::Effect::PathValidationRequested(request) => {
                 self.settings_path_validation_task(request)
             }
-            settings::Effect::MutationApplied(mutation) => {
+            settings::Effect::MutationApplied(generation, mutation) => {
                 let runtime_task = self.apply_settings_mutation_runtime(&mutation);
-                let save_task = self.settings_save_task(mutation);
+                let save_task = self.settings_save_task(generation, mutation);
                 Task::batch([runtime_task, save_task])
             }
             settings::Effect::SnapshotApplied(snapshot) => {
@@ -1534,13 +1520,10 @@ impl App {
             }
         };
 
-        #[cfg(feature = "debug")]
         let visible_snapshot = refresh
             .snapshot
             .as_ref()
-            .map(|snapshot| self.visible_library_snapshot(snapshot));
-        #[cfg(not(feature = "debug"))]
-        let visible_snapshot = refresh.snapshot.clone();
+            .map(|snapshot| self.state.hidden_addons.visible(snapshot));
 
         sync_search_installed_addons(&self.ctx.backend().search, visible_snapshot.as_ref());
 
@@ -1700,15 +1683,11 @@ impl App {
         // and context menus capture their position at press time. Pointer
         // movement stays out of the message loop entirely (idle-0%).
         streams.push(event::listen_with(file_drop_event));
-        #[cfg(target_os = "macos")]
-        streams.push(crate::platform_menu::subscription().map(RootMessage::Menu));
-        #[cfg(target_os = "macos")]
-        streams.push(
-            crate::platform_chrome::appearance_change_subscription()
-                .map(|()| RootMessage::SystemAppearanceChanged),
+        streams.extend(
+            crate::platform::subscriptions()
+                .into_iter()
+                .map(|stream| stream.map(RootMessage::Platform)),
         );
-        #[cfg(target_os = "macos")]
-        streams.push(crate::platform_open::subscription().map(RootMessage::GmaDocumentsOpened));
         Subscription::batch(streams)
     }
 

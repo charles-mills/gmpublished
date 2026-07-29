@@ -14,6 +14,7 @@ use iced::wgpu;
 use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
+use super::orbit::{Orbit, ZoomFloor};
 use gmpublished_backend::particles::{
     ControlPointIndex, MAX_CONTROL_POINTS, ParticleEngine, RendererKind,
 };
@@ -27,10 +28,6 @@ use crate::bridge::materials::ResolvedTexture;
 
 const SHADER_SOURCE: &str = include_str!("particles.wgsl");
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
-const ORBIT_SENSITIVITY: f32 = 0.008;
-const ZOOM_STEP: f32 = 0.9;
-const MIN_PITCH: f32 = -1.55;
-const MAX_PITCH: f32 = 1.55;
 /// Fallback frame delta when a drag needs a velocity hint.
 const DRAG_DT_HINT: f32 = 1.0 / 60.0;
 /// Gizmo colors cycle for control points 1..; CP0 is pinned and undrawn.
@@ -69,9 +66,7 @@ enum Drag {
 
 pub(super) struct SimState {
     key: Option<(u64, usize)>,
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    orbit: Orbit,
     drag: Option<Drag>,
     engine: Option<ParticleEngine>,
     last_frame: Option<Instant>,
@@ -80,12 +75,9 @@ pub(super) struct SimState {
 
 impl Default for SimState {
     fn default() -> Self {
-        let pose = OrbitPose::default();
         Self {
             key: None,
-            yaw: pose.yaw,
-            pitch: pose.pitch,
-            distance: pose.distance,
+            orbit: Orbit::new(ZoomFloor::ParticleCloud),
             drag: None,
             engine: None,
             last_frame: None,
@@ -105,10 +97,8 @@ impl SimState {
                 // Content-derived seed keeps replays identical per file.
                 viewer.content_id ^ (viewer.system_index as u64).wrapping_mul(0x9E37),
             );
-            let pose = viewer.pose.unwrap_or_default();
-            self.yaw = pose.yaw;
-            self.pitch = pose.pitch;
-            self.distance = pose.distance;
+            self.orbit =
+                Orbit::from_pose(viewer.pose.unwrap_or_default(), ZoomFloor::ParticleCloud);
             self.drag = None;
             self.last_frame = None;
             self.restart_epoch = viewer.restart_epoch;
@@ -152,11 +142,7 @@ impl SimState {
     }
 
     fn pose(&self) -> OrbitPose {
-        OrbitPose {
-            yaw: self.yaw,
-            pitch: self.pitch,
-            distance: self.distance,
-        }
+        self.orbit.pose()
     }
 }
 
@@ -218,11 +204,11 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
         .as_ref()
         .map_or(64.0, ParticleEngine::bounding_radius);
     let center = [0.0, 0.0, 0.0];
-    let distance = radius * 2.2 * state.distance;
+    let distance = radius * 2.2 * state.orbit.distance();
     let eye = [
-        center[0] + distance * state.pitch.cos() * state.yaw.sin(),
-        center[1] + distance * state.pitch.cos() * state.yaw.cos(),
-        center[2] + distance * state.pitch.sin(),
+        center[0] + distance * state.orbit.pitch().cos() * state.orbit.yaw().sin(),
+        center[1] + distance * state.orbit.pitch().cos() * state.orbit.yaw().cos(),
+        center[2] + distance * state.orbit.pitch().sin(),
     ];
     // Source is Z-up.
     let forward = v_normalize(v_sub(center, eye));
@@ -335,9 +321,7 @@ impl shader::Program<Message> for ParticleViewer {
             Event::Mouse(mouse::Event::CursorMoved { .. }) => match state.drag? {
                 Drag::Orbit(from) => {
                     let to = cursor.position()?;
-                    state.yaw += (to.x - from.x) * ORBIT_SENSITIVITY;
-                    state.pitch = (state.pitch + (to.y - from.y) * ORBIT_SENSITIVITY)
-                        .clamp(MIN_PITCH, MAX_PITCH);
+                    state.orbit.drag(to.x - from.x, to.y - from.y);
                     state.drag = Some(Drag::Orbit(to));
                     Some(Action::publish(Message::OrbitPoseChanged(state.pose())).and_capture())
                 }
@@ -364,7 +348,7 @@ impl shader::Program<Message> for ParticleViewer {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
                 };
-                state.distance = (state.distance * ZOOM_STEP.powf(steps)).clamp(0.05, 8.0);
+                state.orbit.zoom(steps);
                 Some(Action::publish(Message::OrbitPoseChanged(state.pose())).and_capture())
             }
             Event::Window(iced::window::Event::RedrawRequested(now)) => {

@@ -8,10 +8,8 @@ use std::{collections::HashMap, sync::OnceLock};
 use parking_lot::Mutex;
 use quick_cache::unsync::Cache;
 
-use crate::bridge::size_analyzer::{
-    Rect as TreemapRect, TreemapLayout, TreemapSquare, TreemapSquareData,
-};
 use crate::media::text;
+use crate::treemap::{Rect as TreemapRect, TreemapLayout, TreemapSquare, TreemapSquareData};
 use cosmic_text::{Align, Color as TextColor, FontSystem, SwashCache};
 use iced::widget::image;
 
@@ -757,10 +755,8 @@ fn premultiply(rgba: [u8; 4]) -> [u8; 4] {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::bridge::{
-        domain::PublishedFileId,
-        size_analyzer::{SizeAnalyzerAddon, TreemapBounds, TreemapLayout, analyze_addons},
-    };
+    use crate::bridge::domain::PublishedFileId;
+    use crate::treemap::{SizeAnalyzerAddon, TreemapBounds, TreemapLayout, analyze_addons};
 
     use super::*;
 

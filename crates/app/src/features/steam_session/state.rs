@@ -625,7 +625,7 @@ mod tests {
         };
         let metadata = PendingRetry::InstalledMetadata {
             generation: Generation::from_raw(7),
-            item_ids: vec![PublishedFileId::new(1).expect("test fixture ids are always nonzero")],
+            item_ids: vec![PublishedFileId::fixture(1)],
         };
 
         state.push_pending_retry(page.clone());
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn same_kind_pending_retries_coalesce_instead_of_queueing() {
         let mut state = State::default();
-        let id = |value| PublishedFileId::new(value).expect("test fixture ids are always nonzero");
+        let id = |value| PublishedFileId::fixture(value);
 
         state.push_pending_retry(PendingRetry::InstalledMetadata {
             generation: Generation::from_raw(7),

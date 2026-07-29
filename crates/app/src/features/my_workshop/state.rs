@@ -17,6 +17,7 @@ use super::model::{
     PageResult, PreparePublishTarget, Row,
 };
 use crate::generation::Generation;
+use crate::widgets::grid_rows;
 
 /// What a grid card id refers to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,7 +181,7 @@ impl State {
     }
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
-        let changed = model::invalidate_ready_thumbnails(&mut self.rows);
+        let changed = grid_rows::invalidate_ready_thumbnails(&mut self.rows);
         if changed {
             self.sync_grid_items();
             self.last_animation_tick = None;
@@ -194,7 +195,7 @@ impl State {
     /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
         let visible_range = self.visible_row_range();
-        let changed = model::release_offscreen_thumbnails(&mut self.rows, visible_range);
+        let changed = grid_rows::release_offscreen_thumbnails(&mut self.rows, visible_range);
         for index in &changed {
             self.refresh_item_thumbnail(*index);
         }
@@ -626,10 +627,9 @@ impl State {
 
     #[cfg(test)]
     pub(crate) fn row_for_test(&self, id: u64) -> Option<&Row> {
-        self.rows.iter().find(|row| {
-            row.workshop_id()
-                == PublishedFileId::new(id).expect("test fixture ids are always nonzero")
-        })
+        self.rows
+            .iter()
+            .find(|row| row.workshop_id() == PublishedFileId::fixture(id))
     }
 
     #[cfg(test)]
@@ -819,12 +819,7 @@ mod tests {
 
         let changed = state.apply_stats_counts(
             Generation::from_raw(1),
-            Ok([(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-                25,
-            )]
-            .into_iter()
-            .collect()),
+            Ok([(PublishedFileId::fixture(42), 25)].into_iter().collect()),
         );
 
         assert!(changed);

@@ -55,3 +55,21 @@ impl<E: HasErrorKey> From<&E> for UiError {
         Self::detailed(error.error_key(), error.error_detail())
     }
 }
+
+/// Converts a fallible result's error into a [`UiError`], so `?` works.
+///
+/// The `From` impl above has to take `&E` — a blanket `From<E>` would collide
+/// with the identity impl — which is exactly the form `?` cannot use. Without
+/// this, every fallible call at the boundary has to spell out
+/// `.map_err(|error| UiError::from(&error))`.
+pub trait ResultExt<T> {
+    /// # Errors
+    /// Forwards the receiver's error, translated to a [`UiError`].
+    fn ui_err(self) -> Result<T, UiError>;
+}
+
+impl<T, E: HasErrorKey> ResultExt<T> for Result<T, E> {
+    fn ui_err(self) -> Result<T, UiError> {
+        self.map_err(|error| UiError::from(&error))
+    }
+}

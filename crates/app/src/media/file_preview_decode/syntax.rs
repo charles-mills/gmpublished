@@ -91,7 +91,7 @@ fn glua_highlight_line(
         }
 
         if matches!(bytes[index], b'\'' | b'"') {
-            let (end, closed) = quoted_string_end(bytes, index, bytes[index]);
+            let (end, closed) = quoted_string_end(line, index, bytes[index]);
             push_quoted_string_spans(&mut spans, line, index, end, closed, palette);
             index = end;
             continue;
@@ -174,7 +174,7 @@ fn json_highlight_line(line: &str, palette: CodeHighlightPalette) -> CodeLine {
         }
 
         if bytes[index] == b'"' {
-            let (end, closed) = quoted_string_end(bytes, index, b'"');
+            let (end, closed) = quoted_string_end(line, index, b'"');
             push_quoted_string_spans(&mut spans, line, index, end, closed, palette);
             index = end;
             continue;
@@ -237,31 +237,24 @@ fn push_quoted_string_spans(
     }
 }
 
-fn quoted_string_end(bytes: &[u8], start: usize, quote: u8) -> (usize, bool) {
-    let mut index = start.saturating_add(1);
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => {
-                index += 1;
-                if index < bytes.len() {
-                    index += utf8_character_len(bytes[index]);
-                }
-            }
-            byte if byte == quote => return (index + 1, true),
-            byte => index += utf8_character_len(byte),
+/// Byte index just past the closing `quote`, and whether one was found.
+///
+/// Walks characters rather than bytes: an escape must skip a whole character,
+/// and a multi-byte one skipped a byte at a time would land the scanner
+/// mid-character and treat a continuation byte as content.
+fn quoted_string_end(line: &str, start: usize, quote: u8) -> (usize, bool) {
+    let mut escaped = false;
+    for (offset, character) in line[start.saturating_add(1)..].char_indices() {
+        let index = start + 1 + offset;
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == char::from(quote) {
+            return (index + character.len_utf8(), true);
         }
     }
-    (bytes.len(), false)
-}
-
-fn utf8_character_len(first_byte: u8) -> usize {
-    match first_byte {
-        0x00..=0x7f => 1,
-        0xc0..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf7 => 4,
-        _ => 1,
-    }
+    (line.len(), false)
 }
 
 fn glua_long_opener(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
@@ -756,4 +749,28 @@ fn color_to_rgba(color: Color) -> [u8; 4] {
 
 fn color_channel(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    /// A multi-byte character inside a string must not split the scan: byte
+    /// stepping would land mid-character and read a continuation byte as
+    /// content, so the closing quote after one would be missed.
+    #[test]
+    fn a_quoted_string_containing_multibyte_characters_closes() {
+        for line in [
+            r#""café" trailing"#,
+            r#""日本語のテキスト" trailing"#,
+            r#""with é inside" trailing"#,
+        ] {
+            let (end, closed) = super::quoted_string_end(line, 0, b'"');
+            assert!(closed, "{line} never closed");
+            assert!(line.is_char_boundary(end), "{line} ended mid-character");
+            assert_eq!(
+                &line[end..],
+                " trailing",
+                "{line} closed in the wrong place"
+            );
+        }
+    }
 }

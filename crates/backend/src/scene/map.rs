@@ -7,6 +7,10 @@
 //! since vformats deliberately leaves scene-assembly concerns like
 //! these to its callers.
 
+use crate::math::{
+    add, cross, distance_squared, dot, dot_abs, length_squared, lerp, normalize_or_zero,
+    scale as mul, sub,
+};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -132,6 +136,15 @@ impl MapEntity {
             .iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    /// Whether this is an entity of `classname`.
+    ///
+    /// Named rather than spelled `prop("classname") == Some(..)` at each use:
+    /// `classname` is the one key every lookup starts from, and a misspelling
+    /// of it silently matches nothing rather than failing.
+    fn is_class(&self, classname: &str) -> bool {
+        self.prop("classname") == Some(classname)
     }
 }
 
@@ -1236,6 +1249,13 @@ fn load_map_with_skybox_partition(
     })
 }
 
+/// Reads the container version from the first eight bytes.
+///
+/// `bsp::parse` also reports a version, but only after a full 1036-byte header
+/// and lump directory. Anything shorter than that fails there as `Truncated`,
+/// so a truncated map of a version this build cannot open would be diagnosed as
+/// a broken file rather than an unsupported one. Eight bytes is all the version
+/// costs, and it is read before the parse for exactly that reason.
 fn bsp_version(bytes: &[u8]) -> Result<u32, BspError> {
     let Some(header) = bytes.get(..8) else {
         return Err(BspError::Malformed {
@@ -1673,7 +1693,8 @@ fn angle_vectors_forward(angles: [f32; 3]) -> [f32; 3] {
     let QAngle { pitch, yaw, .. } = QAngle::from_source_degrees(angles);
     let (sin_pitch, cos_pitch) = pitch.sin_cos();
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
-    normalize([cos_pitch * cos_yaw, cos_pitch * sin_yaw, -sin_pitch])
+    // Unit by construction: cos²p(cos²y + sin²y) + sin²p == 1.
+    [cos_pitch * cos_yaw, cos_pitch * sin_yaw, -sin_pitch]
 }
 
 fn parse_entity_float_default(
@@ -2070,7 +2091,7 @@ fn partitioned_map_overlays(
                 id: overlay.id,
                 material_name,
                 positions: overlay_quad_positions(OverlayBasis::from_overlay(overlay))?,
-                normal: normalize(overlay.basis_normal),
+                normal: normalize_or_zero(overlay.basis_normal),
                 u: overlay.u,
                 v: overlay.v,
                 face_count: overlay.face_count().try_into().unwrap_or(u16::MAX),
@@ -2120,7 +2141,7 @@ impl OverlayBasis {
 }
 
 fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[[f32; 3]; 4]> {
-    let normal = normalize(overlay.basis_normal);
+    let normal = normalize_or_zero(overlay.basis_normal);
     if !vector_is_finite_nonzero(normal) {
         log::debug!("bsp overlay {} skipped: invalid basis normal", overlay.id);
         return None;
@@ -2132,7 +2153,7 @@ fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[[f32; 3]; 4]> {
     // cross(normal, basisU) . basisV < 0). The xy pairs are corner
     // coordinates in that basis — z is NOT a normal offset.
     let uv_points = overlay.uv_points;
-    let u_axis = normalize([uv_points[0][2], uv_points[1][2], uv_points[2][2]]);
+    let u_axis = normalize_or_zero([uv_points[0][2], uv_points[1][2], uv_points[2][2]]);
     if !vector_is_finite_nonzero(u_axis) {
         log::debug!(
             "bsp overlay {} skipped: degenerate packed U basis",
@@ -2140,7 +2161,7 @@ fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[[f32; 3]; 4]> {
         );
         return None;
     }
-    let mut v_axis = normalize(cross(normal, u_axis));
+    let mut v_axis = normalize_or_zero(cross(normal, u_axis));
     if uv_points[3][2] == 1.0 {
         v_axis = mul(v_axis, -1.0);
     }
@@ -2153,7 +2174,7 @@ fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[[f32; 3]; 4]> {
 fn worldspawn_detail_material_name(entities: &[MapEntity]) -> String {
     entities
         .iter()
-        .find(|entity| entity.prop("classname") == Some("worldspawn"))
+        .find(|entity| entity.is_class("worldspawn"))
         .and_then(|entity| entity.prop("detailmaterial"))
         .and_then(normalize_material_name)
         .unwrap_or_else(|| DEFAULT_DETAIL_MATERIAL.to_owned())
@@ -2162,7 +2183,7 @@ fn worldspawn_detail_material_name(entities: &[MapEntity]) -> String {
 fn info_player_start(entities: &[MapEntity]) -> Option<MapPlayerStart> {
     entities
         .iter()
-        .filter(|entity| entity.prop("classname") == Some("info_player_start"))
+        .filter(|entity| entity.is_class("info_player_start"))
         .find_map(|entity| {
             Some(MapPlayerStart {
                 origin: parse_entity_vec3(entity.prop("origin")?)?,
@@ -2178,7 +2199,7 @@ fn info_player_start(entities: &[MapEntity]) -> Option<MapPlayerStart> {
 fn map_sky_camera(entities: &[MapEntity]) -> Option<MapSkyCamera> {
     entities
         .iter()
-        .filter(|entity| entity.prop("classname") == Some("sky_camera"))
+        .filter(|entity| entity.is_class("sky_camera"))
         .find_map(|entity| {
             let origin = parse_entity_vec3(entity.prop("origin")?)?;
             let scale = entity
@@ -2204,7 +2225,7 @@ fn map_sky_camera(entities: &[MapEntity]) -> Option<MapSkyCamera> {
 fn worldspawn_skyname(entities: &[MapEntity]) -> Option<String> {
     entities
         .iter()
-        .find(|entity| entity.prop("classname") == Some("worldspawn"))
+        .find(|entity| entity.is_class("worldspawn"))
         .and_then(|entity| entity.prop("skyname"))
         .and_then(normalize_skyname)
 }
@@ -2213,7 +2234,7 @@ fn map_fog(entities: &[MapEntity]) -> Option<MapFog> {
     entities
         .iter()
         .find(|entity| {
-            entity.prop("classname") == Some("env_fog_controller")
+            entity.is_class("env_fog_controller")
                 && entity.prop("fogenable").is_some_and(fog_bool_enabled)
         })
         .and_then(|entity| {
@@ -2329,55 +2350,6 @@ fn normalize_skyname(value: &str) -> Option<String> {
     }
     let value = segments.join("/");
     (!value.is_empty()).then_some(value.to_ascii_lowercase())
-}
-
-fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
-    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
-}
-
-fn sub(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-fn mul(vector: [f32; 3], scalar: f32) -> [f32; 3] {
-    [vector[0] * scalar, vector[1] * scalar, vector[2] * scalar]
-}
-
-fn lerp(start: [f32; 3], end: [f32; 3], fraction: f32) -> [f32; 3] {
-    add(start, mul(sub(end, start), fraction))
-}
-
-fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-
-fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-}
-
-fn dot_abs(left: [f32; 3], right: [f32; 3]) -> f32 {
-    left[0].abs() * right[0] + left[1].abs() * right[1] + left[2].abs() * right[2]
-}
-
-fn length_squared(vector: [f32; 3]) -> f32 {
-    vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]
-}
-
-fn distance_squared(left: [f32; 3], right: [f32; 3]) -> f32 {
-    length_squared(sub(left, right))
-}
-
-fn normalize(vector: [f32; 3]) -> [f32; 3] {
-    let length = length_squared(vector).sqrt();
-    if length <= f32::EPSILON {
-        [0.0; 3]
-    } else {
-        [vector[0] / length, vector[1] / length, vector[2] / length]
-    }
 }
 
 fn vector_is_finite_nonzero(vector: [f32; 3]) -> bool {

@@ -4,9 +4,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, DirEntry, Metadata},
+    fs::{DirEntry, Metadata},
     hash::Hash,
-    io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::SystemTime,
@@ -265,9 +264,9 @@ fn discover(
     load_header_cache_if_needed(header_cache);
 
     let mut candidates = Vec::new();
-    collect_addons_dir(gmod, &mut candidates);
+    let mut complete = collect_gma_dir(gmod, ADDONS_DIR, &mut candidates);
     let addons_dir_count = candidates.len();
-    collect_cache_dir(gmod, &mut candidates);
+    complete &= collect_gma_dir(gmod, WORKSHOP_CACHE_DIR, &mut candidates);
     let cache_dir_count = candidates.len() - addons_dir_count;
     collect_workshop_content_dir(gmod, &mut candidates);
     let workshop_count = candidates.len() - addons_dir_count - cache_dir_count;
@@ -291,7 +290,14 @@ fn discover(
             .then_with(|| left.path.cmp(&right.path))
     });
 
-    prune_header_cache(header_cache, &seen_cache_keys);
+    // Pruning evicts every cached header this scan did not see. After an
+    // incomplete enumeration that includes addons which still exist, so the
+    // next scan would re-read them from disk for nothing.
+    if complete {
+        prune_header_cache(header_cache, &seen_cache_keys);
+    } else {
+        log::warn!("library scan was incomplete; keeping the header cache intact");
+    }
 
     Some(addons)
 }
@@ -307,12 +313,30 @@ fn process_candidates(
     (addons, seen_cache_keys)
 }
 
-fn collect_addons_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
-    let addons_dir = gmod.join("GarrysMod/addons");
-    let Ok(read_dir) = addons_dir.read_dir() else {
-        return;
+/// Collects the GMAs directly inside one of Garry's Mod's addon directories.
+///
+/// Both directories hold the same thing under different names — hand-installed
+/// addons in one, Workshop downloads in the other — so the only difference is
+/// which one to walk.
+/// `false` when the directory exists but could not be read through, so the
+/// caller knows its candidate list is short rather than the library small.
+fn collect_gma_dir(
+    gmod: &Path,
+    relative_dir: &str,
+    candidates: &mut Vec<DiscoveredCandidate>,
+) -> bool {
+    let dir = gmod.join(relative_dir);
+    let read_dir = match dir.read_dir() {
+        Ok(read_dir) => read_dir,
+        // A directory that is simply absent is a complete answer: there are no
+        // addons in it. Anything else means addons may exist and be unseen.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(error) => {
+            log::warn!("failed to enumerate {}: {error}", dir.display());
+            return false;
+        }
     };
-    let canonical_dir = gmpublished_backend::path::canonicalize(addons_dir);
+    let canonical_dir = gmpublished_backend::path::canonicalize(dir);
 
     for entry in read_dir.flatten() {
         let Some((path, canonical_path)) = discovered_file_paths(&entry, &canonical_dir) else {
@@ -331,33 +355,13 @@ fn collect_addons_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
             workshop_id,
         });
     }
+    true
 }
 
-fn collect_cache_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
-    let cache_dir = gmod.join("GarrysMod/cache/workshop");
-    let Ok(read_dir) = cache_dir.read_dir() else {
-        return;
-    };
-    let canonical_dir = gmpublished_backend::path::canonicalize(cache_dir);
-
-    for entry in read_dir.flatten() {
-        let Some((path, canonical_path)) = discovered_file_paths(&entry, &canonical_dir) else {
-            continue;
-        };
-        if !is_gma_path(&path) {
-            continue;
-        }
-        let workshop_id = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(workshop_id_from_name);
-        candidates.push(DiscoveredCandidate {
-            path,
-            canonical_path,
-            workshop_id,
-        });
-    }
-}
+/// Hand-installed addons.
+const ADDONS_DIR: &str = "GarrysMod/addons";
+/// Workshop downloads the game has already fetched.
+const WORKSHOP_CACHE_DIR: &str = "GarrysMod/cache/workshop";
 
 fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
     let Some(content_dir) = gmod
@@ -547,11 +551,30 @@ fn persist_header_cache_if_dirty(header_cache: &Arc<Mutex<HeaderCacheStore>>) {
         drop(cache);
     }
 
+    let spawn_cache = Arc::clone(header_cache);
+    // A blocking disk write, so not `rayon::spawn` — its pool is CPU-bound and
+    // `process_candidates` has just saturated it. Not inline either: the
+    // snapshot must reach the UI without waiting for the disk. `Running` above
+    // keeps this to one thread at a time.
+    let spawn = |job: Box<dyn FnOnce() + Send + 'static>| {
+        if let Err(error) = std::thread::Builder::new()
+            .name("library-header-persist".to_owned())
+            .spawn(job)
+        {
+            // Release the slot the claim above took, or `Running` with no
+            // thread to drain it stops persistence for good. `dirty` survives,
+            // so the next mutation retries.
+            log::warn!("failed to spawn header cache persist: {error}");
+            spawn_cache.lock().persist_state = HeaderCachePersistState::Idle;
+        }
+    };
     let header_cache = Arc::clone(header_cache);
     #[cfg(not(test))]
-    rayon::spawn(move || persist_header_cache_inner(&header_cache, || {}, || {}));
+    spawn(Box::new(move || {
+        persist_header_cache_inner(&header_cache, || {}, || {});
+    }));
     #[cfg(test)]
-    rayon::spawn(move || {
+    spawn(Box::new(move || {
         persist_header_cache_inner(
             &header_cache,
             || {
@@ -565,9 +588,8 @@ fn persist_header_cache_if_dirty(header_cache: &Arc<Mutex<HeaderCacheStore>>) {
                 }
             },
         );
-    });
+    }));
 }
-
 fn persist_header_cache_inner(
     header_cache: &Mutex<HeaderCacheStore>,
     mut before_write: impl FnMut(),
@@ -631,22 +653,8 @@ fn persist_header_cache_inner(
 fn write_header_cache_snapshot(
     path: &Path,
     snapshot: &HeaderSnapshotFile,
-) -> Result<(), HeaderSnapshotWriteError> {
-    let write_error = |source| HeaderSnapshotWriteError::Write {
-        path: path.to_path_buf(),
-        source,
-    };
-    let mut temp = crate::util::fs::atomic_tempfile(path).map_err(write_error)?;
-    {
-        let mut writer = BufWriter::with_capacity(
-            crate::util::fs::ATOMIC_WRITE_BUFFER_SIZE,
-            temp.as_file_mut(),
-        );
-        serde_json::to_writer(&mut writer, snapshot)
-            .map_err(HeaderSnapshotWriteError::Serialize)?;
-        writer.flush().map_err(write_error)?;
-    }
-    crate::util::fs::persist_atomic(temp, path).map_err(write_error)
+) -> Result<(), crate::bridge::snapshot::SnapshotWriteError> {
+    crate::bridge::snapshot::write(path, snapshot)
 }
 
 fn modified_epoch_seconds(metadata: &Metadata) -> u64 {
@@ -666,8 +674,7 @@ fn modified_epoch_nanos(metadata: &Metadata) -> u128 {
 }
 
 fn workshop_id_from_name(name: &str) -> Option<PublishedFileId> {
-    gmpublished_backend::gma::ws_id_from_file_name(name)
-        .map(|id| PublishedFileId::new(id.0).expect("backend never returns a zero workshop id"))
+    gmpublished_backend::gma::ws_id_from_file_name(name).map(PublishedFileId::from_backend)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -870,61 +877,25 @@ impl From<HeaderSnapshotMetadata> for GmaMetadata {
     }
 }
 
-fn load_header_cache_snapshot(path: &Path) -> HeaderCache {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            match error.kind() {
-                io::ErrorKind::NotFound => {
-                    log::debug!("library header snapshot {} is missing", path.display());
-                }
-                _ => {
-                    log::debug!(
-                        "ignoring unreadable library header snapshot {}: {error}",
-                        path.display()
-                    );
-                }
-            }
-            return HeaderCache::default();
-        }
-    };
+impl crate::bridge::snapshot::Versioned for HeaderSnapshotFile {
+    const VERSION: u32 = HEADER_SNAPSHOT_VERSION;
+    const NOUN: &'static str = "library header";
 
-    let snapshot = match serde_json::from_str::<HeaderSnapshotFile>(&contents) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            log::debug!(
-                "discarding unparseable library header snapshot {}: {error}",
-                path.display()
-            );
-            return HeaderCache::default();
-        }
-    };
-    if snapshot.version != HEADER_SNAPSHOT_VERSION {
-        log::debug!(
-            "discarding library header snapshot {} with unsupported version {}",
-            path.display(),
-            snapshot.version
-        );
-        return HeaderCache::default();
+    fn version(&self) -> u32 {
+        self.version
     }
+}
+
+fn load_header_cache_snapshot(path: &Path) -> HeaderCache {
+    let Some(snapshot) = crate::bridge::snapshot::load::<HeaderSnapshotFile>(path) else {
+        return HeaderCache::default();
+    };
 
     snapshot
         .entries
         .into_iter()
         .filter_map(HeaderSnapshotEntry::into_cache)
         .collect()
-}
-
-#[derive(Debug, thiserror::Error)]
-enum HeaderSnapshotWriteError {
-    #[error("failed to serialize library header snapshot: {0}")]
-    Serialize(#[source] serde_json::Error),
-    #[error("failed to persist library header snapshot {}: {source}", path.display())]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 fn prepare_header_cache_snapshot(entries: &HeaderCache) -> HeaderSnapshotFile {
@@ -945,10 +916,18 @@ fn prepare_header_cache_snapshot(entries: &HeaderCache) -> HeaderSnapshotFile {
 }
 
 #[cfg(test)]
+use crate::bridge::snapshot::Versioned as _;
+
+#[cfg(test)]
 fn serialize_header_cache_snapshot(
     snapshot: &HeaderSnapshotFile,
-) -> Result<Vec<u8>, HeaderSnapshotWriteError> {
-    serde_json::to_vec(&snapshot).map_err(HeaderSnapshotWriteError::Serialize)
+) -> Result<Vec<u8>, crate::bridge::snapshot::SnapshotWriteError> {
+    serde_json::to_vec(&snapshot).map_err(|source| {
+        crate::bridge::snapshot::SnapshotWriteError::Serialize {
+            noun: HeaderSnapshotFile::NOUN,
+            source,
+        }
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -960,6 +939,34 @@ struct DiscoveredCandidate {
 
 #[cfg(test)]
 mod tests {
+    /// An unreadable directory is not an empty one. Reporting it as complete
+    /// lets a partial scan replace the snapshot and prune every cached header
+    /// the scan did not reach — for addons that still exist.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_addons_dir_reports_an_incomplete_scan() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons = temp.path().join(ADDONS_DIR);
+        std::fs::create_dir_all(&addons).expect("addons dir");
+        let original = std::fs::metadata(&addons).expect("metadata").permissions();
+        std::fs::set_permissions(&addons, std::fs::Permissions::from_mode(0o000))
+            .expect("lock down");
+
+        let mut candidates = Vec::new();
+        let complete = collect_gma_dir(temp.path(), ADDONS_DIR, &mut candidates);
+
+        std::fs::set_permissions(&addons, original).expect("restore");
+        assert!(!complete, "an unreadable directory must not read as empty");
+
+        let mut candidates = Vec::new();
+        assert!(
+            collect_gma_dir(temp.path(), "GarrysMod/does-not-exist", &mut candidates),
+            "an absent directory is a complete answer: no addons in it"
+        );
+    }
+
     use std::{
         fs,
         sync::atomic::{AtomicUsize, Ordering},
@@ -1044,7 +1051,7 @@ mod tests {
         symlink(&target, &link).expect("fixture symlink");
 
         let mut candidates = Vec::new();
-        collect_addons_dir(temp.path(), &mut candidates);
+        collect_gma_dir(temp.path(), ADDONS_DIR, &mut candidates);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, link);
@@ -1069,7 +1076,7 @@ mod tests {
         symlink(&real_gmod, &linked_gmod).expect("fixture directory symlink");
 
         let mut candidates = Vec::new();
-        collect_addons_dir(&linked_gmod, &mut candidates);
+        collect_gma_dir(&linked_gmod, ADDONS_DIR, &mut candidates);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(
@@ -1193,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_studio_refresh_records_entry_metadata_for_file_search() {
+    fn a_refresh_records_entry_metadata_for_file_search() {
         let temp = TestDir::new("gmpublished-library-entry-index");
         let gmod_dir = temp.dir("steamapps/common/GarrysMod");
         write_installed_gma(&gmod_dir, "addon.gma");
@@ -1246,7 +1253,7 @@ mod tests {
         }
 
         let mut candidates = Vec::new();
-        collect_addons_dir(&gmod_dir, &mut candidates);
+        collect_gma_dir(&gmod_dir, ADDONS_DIR, &mut candidates);
         let serial_cache = test_cache();
         let serial = sorted_addons(
             candidates

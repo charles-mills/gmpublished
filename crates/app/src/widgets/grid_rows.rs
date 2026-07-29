@@ -4,6 +4,27 @@ use crate::generation::Generation;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
 
+/// Longest edge a grid card's thumbnail is decoded to.
+pub const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
+
+/// Grid cards animate on hover only: a wall of GIFs all playing at once is
+/// both unreadable and expensive.
+pub const THUMBNAIL_PLAY_POLICY: crate::media::thumbnail_animation::PlayPolicy =
+    crate::media::thumbnail_animation::PlayPolicy::OnHover;
+
+/// What a grid card currently has to draw.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowThumbnail {
+    Loading,
+    /// Blurred ThumbHash stand-in shown until the real pixels decode.
+    Placeholder(iced::widget::image::Handle),
+    Dead,
+    Ready {
+        still: iced::widget::image::Handle,
+        animation: Option<crate::media::thumbnail_animation::Playback>,
+    },
+}
+
 pub trait GridRow {
     fn thumbnail_demand(
         &self,

@@ -2,9 +2,10 @@ use crate::scene::QAngle;
 
 use super::{
     BuildMesh, ColorRgbExp, Face, LeafAmbientIndex, LeafAmbientSample, MapBsp, MapEntity, MapLeaf,
-    MapLeafLocator, TexInfo, distance_squared, mul, normalize, parse_entity_float,
-    parse_entity_vec3, texture_coord, vector_is_finite_nonzero,
+    MapLeafLocator, TexInfo, distance_squared, mul, parse_entity_float, parse_entity_vec3,
+    texture_coord, vector_is_finite_nonzero,
 };
+use crate::math::normalize_or_zero;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AmbientCube {
@@ -17,7 +18,7 @@ impl AmbientCube {
     };
 
     pub fn evaluate(self, normal: [f32; 3]) -> [f32; 3] {
-        let normal = normalize(normal);
+        let normal = normalize_or_zero(normal);
         let mut color = [0.0_f32; 3];
         for (axis, component) in normal.into_iter().enumerate() {
             let side = if component >= 0.0 {
@@ -348,7 +349,7 @@ pub(super) fn parse_light_environment_direction(entity: &MapEntity) -> Option<[f
         .and_then(parse_entity_float)
         .map(f32::to_radians)
         .or_else(|| angles.map(|angles| angles.pitch))?;
-    let travel_direction = normalize([
+    let travel_direction = normalize_or_zero([
         pitch.cos() * yaw.cos(),
         pitch.cos() * yaw.sin(),
         pitch.sin(),

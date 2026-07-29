@@ -1,9 +1,10 @@
-#[cfg(target_os = "macos")]
 use super::window;
 use super::{
-    App, LibraryRefreshReason, RootMessage, Task, UiError, destination_select,
-    flatten_blocking_ui_result, resolve_tokens, settings, shell, theme,
+    App, LibraryRefreshReason, RootMessage, Task, destination_select, flatten_blocking_ui_result,
+    resolve_tokens, settings, shell, theme,
 };
+#[cfg(target_os = "macos")]
+use crate::bridge::ui_error::ResultExt as _;
 
 impl App {
     pub(super) fn apply_settings_snapshot_runtime(
@@ -162,12 +163,16 @@ impl App {
                 Ok(result) => {
                     RootMessage::Settings(settings::Message::PathValidationCompleted(result))
                 }
-                Err(error) => RootMessage::Settings(settings::Message::SaveCompleted(Err(error))),
+                Err(error) => RootMessage::Settings(settings::Message::SaveCompleted(
+                    crate::generation::Generation::INITIAL,
+                    Err(error),
+                )),
             })
     }
 
     pub(super) fn settings_save_task(
         &self,
+        generation: crate::generation::Generation,
         mutation: settings::SettingsMutation,
     ) -> Task<RootMessage> {
         let system_scheme = self.state.system_scheme;
@@ -183,10 +188,11 @@ impl App {
                         system_scheme,
                     ))
                 })
-                .map_err(|error| UiError::from(&error))
+                .ui_err()
             })
-            .map(|result| {
+            .map(move |result| {
                 RootMessage::Settings(settings::Message::SaveCompleted(
+                    generation,
                     flatten_blocking_ui_result(result),
                 ))
             })
@@ -197,10 +203,7 @@ impl App {
         self.ctx
             .run_blocking("settings-reset", move |app| {
                 let settings = match action {
-                    settings::ResetAction::Settings => app
-                        .reset_settings()
-                        .map(Some)
-                        .map_err(|error| UiError::from(&error))?,
+                    settings::ResetAction::Settings => app.reset_settings().map(Some).ui_err()?,
                     settings::ResetAction::TempFiles => app.clear_temp_files().map(|()| None)?,
                     settings::ResetAction::UserData => app.clear_user_data().map(|()| None)?,
                 };

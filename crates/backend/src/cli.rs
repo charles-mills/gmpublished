@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Arg, ArgGroup, ArgMatches, Command};
 
 use crate::{
-    Backend, BackendConfig, GMAFile,
+    Backend, BackendConfig, GmaFile,
     gma::{ExtractDestination, ExtractOptions, Whitelist},
 };
 
@@ -11,14 +11,25 @@ use crate::{
 /// `gmpublished <file.gma>` from a file association, or `-e`/`--extract`).
 /// Recomputed on demand rather than cached: it's a cheap `argv` length check,
 /// not process state worth memoizing behind a global.
+///
+/// This is where opening a `.gma` diverges by platform. macOS delivers
+/// documents by Apple Event, leaving `argv` empty, so the GUI starts and
+/// previews; every other shell passes the path in `argv`, so the process
+/// extracts headlessly and exits.
 #[must_use]
 pub fn is_cli_mode() -> bool {
     std::env::args_os().len() > 1
 }
 
-pub fn stdin() -> bool {
+/// What a CLI invocation asked for, and how it ended.
+///
+/// `None` means the process was not invoked CLI-style and the GUI should
+/// start. The `Result` is the process's exit status: a failed extraction has
+/// to reach the shell as a failure, or scripts and file-association handlers
+/// read every error as success.
+pub fn run() -> Option<Result<(), CliError>> {
     if !is_cli_mode() {
-        return false;
+        return None;
     }
 
     // CLI mode prints product output directly; remove any host-installed backend panic hook.
@@ -29,11 +40,20 @@ pub fn stdin() -> bool {
     #[cfg(debug_assertions)]
     std::eprintln!("{matches:#?}");
 
-    if let Some(request) = extraction_request(&matches) {
-        run_extraction(request);
-    }
+    // Clap handles `--help`/`--version` by exiting itself, so reaching here
+    // with no request means the arguments named no work to do.
+    Some(extraction_request(&matches).map_or(Ok(()), run_extraction))
+}
 
-    true
+/// Why a CLI invocation failed, as the shell should see it.
+#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    #[error("{} is not a file", .0.display())]
+    NotAFile(PathBuf),
+    #[error("backend initialization failed: {0}")]
+    BackendInit(#[from] crate::BackendInitError),
+    #[error(transparent)]
+    Gma(#[from] crate::gma::GmaError),
 }
 
 fn command() -> Command {
@@ -87,10 +107,9 @@ fn extraction_request(matches: &ArgMatches) -> Option<ExtractionRequest> {
     })
 }
 
-fn run_extraction(request: ExtractionRequest) {
+fn run_extraction(request: ExtractionRequest) -> Result<(), CliError> {
     if !request.path.is_file() {
-        std::eprintln!("Invalid GMA file path provided.");
-        return;
+        return Err(CliError::NotAFile(request.path));
     }
 
     // No background threads: extraction never used Steam, and the remote
@@ -102,43 +121,47 @@ fn run_extraction(request: ExtractionRequest) {
         background_services: crate::BackgroundServices::Disabled,
         ..BackendConfig::default()
     });
-    let backend = match backend {
-        Ok(backend) => backend,
-        Err(error) => {
-            std::eprintln!("Warning: backend initialization failed ({error}); extracting anyway.");
-            return;
-        }
-    };
+    // Extraction needs the whitelist and the transaction sink, so a failed
+    // init is fatal here rather than something to continue past.
+    let backend = backend?;
     backend.whitelist.refresh_from_remote();
 
-    match GMAFile::open(request.path) {
-        Ok(gma) => {
-            let extract_result = gma.view().and_then(|view| {
-                view.extract(
-                    &gma,
-                    request.destination,
-                    &backend.transactions.begin(),
-                    ExtractOptions {
-                        open_after: true,
-                        whitelist: Whitelist::Ignore,
-                    },
-                    &backend.whitelist,
-                    &backend.app_data,
-                    &backend.steam,
-                )
-            });
-            if let Err(err) = extract_result {
-                std::eprintln!("Error: {err:#?}");
-            }
-        }
-        Err(err) => {
-            std::eprintln!("Error: {err:#?}");
-        }
-    }
+    let gma = GmaFile::open(request.path)?;
+    gma.view().and_then(|view| {
+        view.extract(
+            &gma,
+            request.destination,
+            &backend.transactions.begin(),
+            ExtractOptions {
+                open_after: true,
+                whitelist: Whitelist::Ignore,
+            },
+            &backend.whitelist,
+            &backend.app_data,
+            &backend.steam,
+        )
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    /// A file association or a script reads the exit status, so an extraction
+    /// that could not happen must not report success. Printing a message and
+    /// returning is not enough — the shell only sees the code.
+    #[test]
+    fn a_missing_file_is_an_error_rather_than_a_silent_success() {
+        let request = ExtractionRequest {
+            path: std::path::PathBuf::from("/nonexistent/definitely-not-here.gma"),
+            destination: ExtractDestination::Temp,
+        };
+
+        assert!(matches!(
+            super::run_extraction(request),
+            Err(CliError::NotAFile(_))
+        ));
+    }
+
     use super::*;
 
     fn matches(args: &[&str]) -> ArgMatches {

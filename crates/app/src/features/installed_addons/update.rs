@@ -187,10 +187,7 @@ mod tests {
                 Row::for_test(
                     &format!("/tmp/{index}.gma"),
                     &format!("Addon {index}"),
-                    Some(
-                        PublishedFileId::new(index as u64)
-                            .expect("test fixture ids are always nonzero"),
-                    ),
+                    Some(PublishedFileId::fixture(index as u64)),
                 )
             })
             .collect();
@@ -216,16 +213,8 @@ mod tests {
             addon_grid::Message::ViewportResized(500, 500),
         );
         let rows = vec![
-            Row::for_test(
-                "/tmp/one.gma",
-                "One",
-                Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
-            ),
-            Row::for_test(
-                "/tmp/two.gma",
-                "Two",
-                Some(PublishedFileId::new(2).expect("test fixture ids are always nonzero")),
-            ),
+            Row::for_test("/tmp/one.gma", "One", Some(PublishedFileId::fixture(1))),
+            Row::for_test("/tmp/two.gma", "Two", Some(PublishedFileId::fixture(2))),
         ];
 
         let effects = update(
@@ -238,10 +227,7 @@ mod tests {
             vec![
                 Effect::MetadataRequested {
                     generation: Generation::from_raw(1),
-                    item_ids: vec![
-                        PublishedFileId::new(1).expect("test fixture ids are always nonzero"),
-                        PublishedFileId::new(2).expect("test fixture ids are always nonzero")
-                    ],
+                    item_ids: vec![PublishedFileId::fixture(1), PublishedFileId::fixture(2)],
                 },
                 Effect::ThumbnailDemandsChanged,
             ]
@@ -255,7 +241,7 @@ mod tests {
         let rows = vec![Row::for_test(
             "/tmp/one.gma",
             "One",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(1)),
         )];
         let _effects = update(
             &mut state,
@@ -266,12 +252,10 @@ mod tests {
             &mut state,
             Message::MetadataCompleted(
                 Generation::from_raw(1),
-                vec![PublishedFileId::new(1).expect("test fixture ids are always nonzero")],
+                vec![PublishedFileId::fixture(1)],
                 Ok(MetadataResolution {
                     patches: Vec::new(),
-                    stale_ids: vec![
-                        PublishedFileId::new(1).expect("test fixture ids are always nonzero"),
-                    ],
+                    stale_ids: vec![PublishedFileId::fixture(1)],
                 }),
             ),
         );
@@ -281,9 +265,7 @@ mod tests {
             vec![
                 Effect::MetadataRefreshRequested {
                     generation: Generation::from_raw(1),
-                    item_ids: vec![
-                        PublishedFileId::new(1).expect("test fixture ids are always nonzero")
-                    ],
+                    item_ids: vec![PublishedFileId::fixture(1)],
                 },
                 Effect::ThumbnailDemandsChanged,
             ]
@@ -299,7 +281,7 @@ mod tests {
             Ok(vec![Row::for_test(
                 "/tmp/one.gma",
                 "One",
-                Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(1)),
             )]),
         );
 
@@ -360,7 +342,7 @@ mod tests {
             Ok(vec![Row::for_test(
                 "/tmp/one.gma",
                 "One",
-                Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(1)),
             )]),
         );
 
@@ -371,9 +353,7 @@ mod tests {
             ),
             vec![Effect::AddonDragPressed {
                 card_id: "/tmp/one.gma".to_owned(),
-                workshop_id: Some(
-                    PublishedFileId::new(1).expect("test fixture ids are always nonzero")
-                ),
+                workshop_id: Some(PublishedFileId::fixture(1)),
             }]
         );
         assert_eq!(
@@ -396,7 +376,7 @@ mod tests {
                 Row::for_test(
                     "/tmp/animated.gma",
                     "Animated",
-                    Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+                    Some(PublishedFileId::fixture(1)),
                 )
                 .with_ready_animation_for_test(),
             ]),
@@ -431,7 +411,7 @@ mod tests {
                 Row::for_test(
                     "/tmp/animated.gma",
                     "Animated",
-                    Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+                    Some(PublishedFileId::fixture(1)),
                 )
                 .with_ready_animation_for_test(),
             ]),

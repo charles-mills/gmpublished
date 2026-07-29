@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::bridge::domain::PublishedFileId;
 
-use super::model::Section;
+use super::jobs::Section;
 use super::{Effect, Message, State};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {

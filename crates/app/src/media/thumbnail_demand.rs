@@ -19,7 +19,7 @@ use crate::{
     media::thumbnail_worker::{
         FetchProfile, PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail,
         ThumbnailCancellation, ThumbnailError, ThumbnailInput, ThumbnailKey, ThumbnailMetadata,
-        ThumbnailMode, ThumbnailRequest, ThumbnailWorkerOutcome, WorkerDiskCache, normalize_url,
+        ThumbnailMode, ThumbnailRequest, ThumbnailWorkerOutcome, WorkerDiskCache, normalized_url,
         run_prepared_thumbnail_request, validate_max_edge,
     },
 };
@@ -55,6 +55,15 @@ const WORKSHOP_ICON_SOURCE_MAX_SCALE: f32 = 2.0;
 /// eviction-policy one — so raise [`Config::memory_capacity_bytes`] rather
 /// than reaching for a custom lifecycle again.
 type HandleCache = Cache<ThumbnailKey, ReadyThumbnail, ReadyThumbnailWeighter, DefaultHashBuilder>;
+
+/// Placeholder images held at once.
+///
+/// A retained row window is four times the visible count (see
+/// [`prefetch_ranges`]), so this covers several windows across every owner at
+/// roughly 4 KB each.
+const PLACEHOLDER_CACHE_ITEMS: usize = 512;
+
+type PlaceholderCache = Cache<Arc<str>, PlaceholderImage>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -136,11 +145,18 @@ pub struct Manager {
     scale_bucket: f32,
     next_sequence: u64,
     next_work_id: u64,
-    // Preview-URL ThumbHashes seeded from the metadata snapshot and topped up by
-    // completions, plus the tiny placeholder images they decode to (kept once
-    // per URL so a scrolled row reuses a stable handle instead of re-uploading).
-    thumbhashes: HashMap<String, Arc<[u8]>>,
-    placeholders: HashMap<String, PlaceholderImage>,
+    /// Preview-URL ThumbHashes, seeded from the metadata snapshot and topped up
+    /// by completions.
+    ///
+    /// Unbounded on purpose: ~25 bytes per addon, and nothing re-reads the
+    /// snapshot, so an evicted hash costs that row its placeholder for good.
+    thumbhashes: HashMap<Arc<str>, Arc<[u8]>>,
+    /// Placeholders decoded from [`Self::thumbhashes`], kept so a scrolled row
+    /// reuses a stable handle instead of re-uploading.
+    ///
+    /// Bounded, unlike the hashes: each entry holds a GPU-uploadable handle,
+    /// and a miss costs one small decode.
+    placeholders: PlaceholderCache,
 }
 
 impl Manager {
@@ -167,7 +183,7 @@ impl Manager {
             next_sequence: 1,
             next_work_id: 1,
             thumbhashes: HashMap::new(),
-            placeholders: HashMap::new(),
+            placeholders: PlaceholderCache::new(PLACEHOLDER_CACHE_ITEMS),
         }
     }
 
@@ -179,7 +195,7 @@ impl Manager {
         entries: impl IntoIterator<Item = (String, Arc<[u8]>)>,
     ) {
         for (url, hash) in entries {
-            self.thumbhashes.entry(normalize_url(url)).or_insert(hash);
+            self.remember_thumbhash(&url, hash);
         }
     }
 
@@ -568,20 +584,27 @@ impl Manager {
         .map(move |result| worker_result_message(message_key.clone(), job_id, attempt, result))
     }
 
+    /// Records a URL's ThumbHash under its normalized key. Seeded URLs come
+    /// straight off Steam metadata and are not normalized yet; completions
+    /// arrive through a [`ThumbnailKey`], which already did it.
     fn remember_thumbhash(&mut self, url: &str, hash: Arc<[u8]>) {
-        self.thumbhashes.entry(normalize_url(url)).or_insert(hash);
+        let url = normalized_url(url);
+        if !self.thumbhashes.contains_key(url) {
+            self.thumbhashes.insert(Arc::from(url), hash);
+        }
     }
 
     /// Returns (decoding and caching once per URL) the placeholder image for a
     /// URL whose ThumbHash we know, or `None` if we don't or it won't decode.
     fn placeholder_for(&mut self, url: &str) -> Option<PlaceholderImage> {
+        let url = normalized_url(url);
         if let Some(placeholder) = self.placeholders.get(url) {
             return Some(placeholder.clone());
         }
-        let hash = self.thumbhashes.get(url)?.clone();
+        let (key, hash) = self.thumbhashes.get_key_value(url)?;
+        let (key, hash) = (Arc::clone(key), Arc::clone(hash));
         let placeholder = decode_placeholder(&hash)?;
-        self.placeholders
-            .insert(url.to_owned(), placeholder.clone());
+        self.placeholders.insert(key, placeholder.clone());
         Some(placeholder)
     }
 
@@ -1102,20 +1125,8 @@ impl DemandIndex {
             return;
         };
         let stale = interests.difference(keep).cloned().collect::<Vec<_>>();
-        if stale.is_empty() {
-            return;
-        }
-
-        if let Some(interests) = self.by_owner.get_mut(owner) {
-            for interest in &stale {
-                let _ = interests.remove(interest);
-            }
-            if interests.is_empty() {
-                let _ = self.by_owner.remove(owner);
-            }
-        }
         for interest in &stale {
-            let _ = self.detach_interest(interest);
+            let _ = self.remove_interest(interest);
         }
     }
 
@@ -1177,28 +1188,23 @@ impl DemandIndex {
         }
     }
 
+    /// The only way an interest leaves the index, so every derived map stays
+    /// in step. Callers must not prune `by_owner` themselves — an entry
+    /// removed while its bucket keeps it is a ghost nothing revisits.
+    ///
+    /// Any stale heap candidate is skipped on pop.
     fn remove_interest(&mut self, interest: &InterestKey) -> Option<DemandEntry> {
-        let entry = self.detach_interest(interest)?;
-        // `retain_owner` prunes the bucket itself before detaching, so it uses
-        // `detach_interest` directly; every other caller removes one interest
-        // and must keep the owner bucket in step.
-        if let Some(interests) = self.by_owner.get_mut(&entry.owner) {
-            let _ = interests.remove(interest);
-            if interests.is_empty() {
-                let _ = self.by_owner.remove(&entry.owner);
-            }
-        }
-        Some(entry)
-    }
-
-    /// Removes an interest from `entries` and `key_to_interests` without
-    /// touching `by_owner`. Any stale heap candidate is skipped on pop.
-    fn detach_interest(&mut self, interest: &InterestKey) -> Option<DemandEntry> {
         let entry = self.entries.remove(interest)?;
         if let Some(interests) = self.key_to_interests.get_mut(&entry.key) {
             interests.retain(|candidate| candidate != interest);
             if interests.is_empty() {
                 self.key_to_interests.remove(&entry.key);
+            }
+        }
+        if let Some(interests) = self.by_owner.get_mut(&entry.owner) {
+            let _ = interests.remove(interest);
+            if interests.is_empty() {
+                let _ = self.by_owner.remove(&entry.owner);
             }
         }
         Some(entry)
@@ -1835,6 +1841,56 @@ mod tests {
             Message::Delivered(delivery)
                 if matches!(delivery.result, DeliveryResult::Ready(_))
         )));
+    }
+
+    /// Placeholders hold GPU-uploadable handles, so the map that keeps them is
+    /// bounded while the ~25-byte hashes they derive from are not. A URL whose
+    /// placeholder has been evicted still paints — it just decodes again.
+    #[test]
+    fn placeholders_are_capped_while_the_hashes_they_derive_from_are_kept() {
+        let mut manager = Manager::new(Config::default());
+        let hash: Arc<[u8]> = Arc::from(
+            crate::media::thumbhash::encode(4, 4, &[128; 4 * 4 * 4]).expect("hash encodes"),
+        );
+        let url = |index: usize| format!("https://example.invalid/{index}.jpg");
+        let seeded = PLACEHOLDER_CACHE_ITEMS * 2;
+
+        manager.seed_thumbhashes((0..seeded).map(|index| (url(index), Arc::clone(&hash))));
+        for index in 0..seeded {
+            assert!(
+                manager.placeholder_for(&url(index)).is_some(),
+                "every seeded URL should paint a placeholder"
+            );
+        }
+
+        assert_eq!(manager.thumbhashes.len(), seeded);
+        assert!(
+            manager.placeholders.len() <= PLACEHOLDER_CACHE_ITEMS,
+            "placeholder cache held {} entries",
+            manager.placeholders.len()
+        );
+        // The evicted end still resolves, because the hash behind it survived.
+        assert!(manager.placeholder_for(&url(0)).is_some());
+    }
+
+    /// Seeds come straight off Steam metadata, where a stray-whitespace URL is
+    /// possible; lookups come through a `ThumbnailKey`, which already
+    /// normalized. Both have to land on the same key.
+    #[test]
+    fn a_seeded_url_is_found_however_it_was_padded() {
+        let mut manager = Manager::new(Config::default());
+        let hash = crate::media::thumbhash::encode(4, 4, &[128; 4 * 4 * 4]).expect("hash encodes");
+        manager.seed_thumbhashes([(
+            "  https://example.invalid/poster.jpg\n".to_owned(),
+            Arc::from(hash),
+        )]);
+
+        assert!(
+            manager
+                .placeholder_for("https://example.invalid/poster.jpg")
+                .is_some()
+        );
+        assert_eq!(manager.thumbhashes.len(), 1);
     }
 
     #[test]
@@ -2579,9 +2635,12 @@ mod tests {
                 &ThumbnailKey::for_url("https://example.invalid/missing.jpg", 64),
                 ureq::Error::StatusCode(404),
             ),
-            ThumbnailDeliveryError::Thumbnail(Arc::new(ThumbnailError::ImageIo(
-                std::io::Error::other("invalid image bytes"),
-            ))),
+            ThumbnailDeliveryError::Thumbnail(Arc::new(
+                crate::media::thumbnail_worker::ThumbnailDecodeError::ImageIo(
+                    std::io::Error::other("invalid image bytes"),
+                )
+                .into(),
+            )),
         ];
 
         for error in errors {
@@ -2610,6 +2669,54 @@ mod tests {
             ));
             assert_eq!(manager.pending_count(), 0);
         }
+    }
+
+    /// The invariant the two removal paths kept breaking: an interest dropped
+    /// from `entries` without pruning `by_owner` leaves a ghost that
+    /// accumulates for the whole session, because nothing ever revisits that
+    /// bucket.
+    #[test]
+    fn replacing_an_owners_demands_leaves_no_ghosts_in_its_bucket() {
+        let mut manager = Manager::new(Config::default());
+        let first = ThumbnailInput::from_url("https://example.invalid/first.jpg");
+        let second = ThumbnailInput::from_url("https://example.invalid/second.jpg");
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(1),
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row-1", first, 256, Priority::VisibleRow)],
+        });
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(2),
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row-2", second, 256, Priority::VisibleRow)],
+        });
+
+        assert_eq!(manager.pending_count(), 1);
+        assert_eq!(
+            manager
+                .index
+                .by_owner
+                .get(&Owner::InstalledAddons)
+                .map_or(0, HashSet::len),
+            1,
+            "the replaced interest must not survive in the owner bucket"
+        );
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::InstalledAddons,
+            generation: Generation::from_raw(3),
+            replace: ReplaceMode::Owner,
+            demands: Vec::new(),
+        });
+
+        assert_eq!(manager.pending_count(), 0);
+        assert!(
+            !manager.index.by_owner.contains_key(&Owner::InstalledAddons),
+            "an owner with no interests must not keep an empty bucket"
+        );
     }
 
     #[test]

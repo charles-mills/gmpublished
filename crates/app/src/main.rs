@@ -29,6 +29,7 @@ mod generation;
 mod i18n;
 mod media;
 mod net;
+mod platform;
 #[cfg(target_os = "macos")]
 mod platform_chrome;
 #[cfg(target_os = "macos")]
@@ -39,6 +40,7 @@ mod spinner_clock;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod treemap;
 mod util;
 mod widgets;
 
@@ -71,11 +73,13 @@ enum RunError {
     BackendInit(#[from] gmpublished_backend::BackendInitError),
     #[error(transparent)]
     Iced(#[from] iced::Error),
+    #[error(transparent)]
+    Cli(#[from] gmpublished_backend::cli::CliError),
 }
 
 fn run() -> Result<(), RunError> {
-    if gmpublished_backend::cli::stdin() {
-        return Ok(());
+    if let Some(outcome) = gmpublished_backend::cli::run() {
+        return Ok(outcome?);
     }
 
     // The hook must be live before backend construction so init panics reach
@@ -244,15 +248,7 @@ fn panic_location(panic: &PanicHookInfo<'_>) -> String {
 }
 
 fn panic_message(panic: &PanicHookInfo<'_>) -> String {
-    panic.payload().downcast_ref::<&str>().map_or_else(
-        || {
-            panic
-                .payload()
-                .downcast_ref::<String>()
-                .map_or_else(|| "non-string panic payload".to_owned(), String::clone)
-        },
-        |message| (*message).to_owned(),
-    )
+    gmpublished_backend::panic_payload_message(panic.payload())
 }
 
 #[cfg(test)]

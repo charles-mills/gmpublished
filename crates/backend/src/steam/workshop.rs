@@ -1,8 +1,15 @@
-use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, sync::mpsc};
+use std::{
+    collections::HashSet,
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 use steamworks::{PublishedFileId, QueryResult, QueryResults, SteamError, SteamId};
 
-use super::{ConnectedSteam, Steam, users::SteamUser};
+use super::{CALLBACK_RESULT_TIMEOUT, ConnectedSteam, Steam, users::SteamUser};
 
 use crate::util::main_thread_forbidden;
 use crate::{GMOD_APP_ID, search::Search};
@@ -21,6 +28,9 @@ impl DescriptionLength {
     }
 }
 
+/// Deliberately has no `Eq`/`Ord`: the ordering this type invites is browse
+/// chronology, which as an `Eq` makes two snapshots of one item compare
+/// unequal. Presentation order belongs at the call site that wants it.
 #[derive(Clone, Debug)]
 pub struct WorkshopItem {
     pub id: PublishedFileId,
@@ -83,34 +93,6 @@ impl From<PublishedFileId> for WorkshopItem {
         }
     }
 }
-impl WorkshopItem {
-    fn sort_key(&self) -> (u32, PublishedFileId) {
-        let effective_timestamp = if self.time_created != 0 {
-            self.time_created
-        } else {
-            self.time_updated
-        };
-        (effective_timestamp, self.id)
-    }
-}
-impl PartialEq for WorkshopItem {
-    fn eq(&self, other: &Self) -> bool {
-        self.sort_key() == other.sort_key()
-    }
-}
-impl Eq for WorkshopItem {}
-impl PartialOrd for WorkshopItem {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for WorkshopItem {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.sort_key().cmp(&other.sort_key())
-    }
-}
-
 fn enrich_workshop_item(item: QueryResult, index: u32, results: &QueryResults<'_>) -> WorkshopItem {
     let mut item: WorkshopItem = item.into();
     item.preview_url = results.preview_url(index);
@@ -132,6 +114,12 @@ fn format_steam_query_error(error: &str, formatter: &mut fmt::Formatter<'_>) -> 
 pub enum WorkshopQueryError {
     #[error("could not create a Workshop query")]
     QueryCreateFailed,
+    /// steamworks never delivered a result for the query — it dropped the
+    /// callback without invoking it, or held it past
+    /// [`CALLBACK_RESULT_TIMEOUT`]. Distinct from [`Self::Steam`], which is a
+    /// result Steam did return.
+    #[error("Steam did not answer the Workshop query")]
+    Abandoned,
     #[error(fmt = format_steam_query_error)]
     Steam(String),
 }
@@ -144,6 +132,7 @@ impl crate::error_key::HasErrorKey for WorkshopQueryError {
     fn error_detail(&self) -> Option<String> {
         match self {
             Self::QueryCreateFailed => Some("QUERY_CREATE_FAILED".to_owned()),
+            Self::Abandoned => Some("CALLBACK_ABANDONED".to_owned()),
             Self::Steam(error) => Some(error.clone()),
         }
     }
@@ -223,9 +212,26 @@ impl Steam {
                     let _ = done_tx.send(());
                 }
 
-                let _ = done_rx.recv();
+                let _ = done_rx.recv_timeout(CALLBACK_RESULT_TIMEOUT);
             }
         }
+    }
+
+    /// Runs `use_cache` against the set of Workshop ids the metadata fetcher
+    /// already knows, or against `None` if the cache is busy.
+    ///
+    /// Bounded rather than blocking: both callers are on a download path, and
+    /// `None` ("assume nothing is known") only costs a wider Steam query.
+    ///
+    /// `use_cache` runs under the fetcher's lock — keep it O(ids), no I/O.
+    pub(crate) fn with_known_workshop_items<R>(
+        &self,
+        use_cache: impl FnOnce(Option<&HashSet<PublishedFileId>>) -> R,
+    ) -> R {
+        let cache = self
+            .workshop_dedup
+            .try_lock_for(super::CALLBACK_PUMP_INTERVAL + Duration::from_millis(1));
+        use_cache(cache.as_deref())
     }
 
     pub fn fetch_workshop_items(&self, ids: Vec<PublishedFileId>) {
@@ -294,7 +300,7 @@ impl Steam {
                 let _ = tx.send(page);
             });
 
-        rx.recv().ok().flatten()
+        rx.recv_timeout(CALLBACK_RESULT_TIMEOUT).ok().flatten()
     }
 }
 
@@ -362,6 +368,23 @@ fn combine_workshop_chunk_results(
     Err(last_error.unwrap_or(WorkshopQueryError::QueryCreateFailed))
 }
 
+/// Waits for one chunk result, giving up at `deadline`.
+///
+/// `None` covers a dropped sender and an expired deadline alike: steamworks
+/// owns the callback's lifetime, so a result that never arrives is a failed
+/// query, not a broken invariant.
+///
+/// One deadline spans a whole fan-out — the chunks are concurrent, so a
+/// per-`recv` budget would multiply by the chunk count.
+fn recv_chunk_by(
+    results: &mpsc::Receiver<(usize, WorkshopChunkQueryResult)>,
+    deadline: Instant,
+) -> Option<(usize, WorkshopChunkQueryResult)> {
+    results
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+}
+
 /// Drains chunk query results as they arrive, handing each successful chunk
 /// to `on_chunk` immediately for incremental hydration. A failed chunk is
 /// logged and skipped so its ids stay stale for a later refresh; the call
@@ -369,15 +392,18 @@ fn combine_workshop_chunk_results(
 fn drain_workshop_chunk_results(
     results: &mpsc::Receiver<(usize, WorkshopChunkQueryResult)>,
     chunk_count: usize,
+    deadline: Instant,
     mut on_chunk: impl FnMut(Vec<WorkshopItem>),
 ) -> Result<(), WorkshopQueryError> {
     let mut any_chunk_succeeded = false;
     let mut last_error = None;
 
     for _ in 0..chunk_count {
-        let (_chunk_index, result) = results
-            .recv()
-            .expect("all workshop query chunks should be complete");
+        let Some((_chunk_index, result)) = recv_chunk_by(results, deadline) else {
+            log::warn!("Steam abandoned a workshop metadata chunk query; leaving its ids stale");
+            last_error = Some(WorkshopQueryError::Abandoned);
+            break;
+        };
         match result {
             Ok(items) => {
                 any_chunk_succeeded = true;
@@ -438,16 +464,17 @@ impl ConnectedSteam<'_> {
         }
         drop(result_tx);
 
+        let deadline = Instant::now() + CALLBACK_RESULT_TIMEOUT;
         let mut chunk_results: Vec<Option<WorkshopChunkQueryResult>> = vec![None; chunk_count];
         for _ in 0..chunk_count {
-            let (chunk_index, result) = result_rx
-                .recv()
-                .expect("all workshop query chunks should be complete");
+            let Some((chunk_index, result)) = recv_chunk_by(&result_rx, deadline) else {
+                break;
+            };
             chunk_results[chunk_index] = Some(result);
         }
         let chunk_results = chunk_results
             .into_iter()
-            .map(|result| result.expect("all workshop query chunks should be complete"))
+            .map(|result| result.unwrap_or(Err(WorkshopQueryError::Abandoned)))
             .collect();
 
         combine_workshop_chunk_results(chunk_results, ids.len())
@@ -483,7 +510,12 @@ impl ConnectedSteam<'_> {
         }
         drop(result_tx);
 
-        drain_workshop_chunk_results(&result_rx, chunk_count, on_chunk)
+        drain_workshop_chunk_results(
+            &result_rx,
+            chunk_count,
+            Instant::now() + CALLBACK_RESULT_TIMEOUT,
+            on_chunk,
+        )
     }
 
     fn register_workshop_items_chunk_query(
@@ -518,34 +550,24 @@ impl ConnectedSteam<'_> {
 
 pub fn query_workshop_items(
     steam: ConnectedSteam<'_>,
-    ids: Vec<u64>,
+    ids: &[PublishedFileId],
 ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let ids: Vec<PublishedFileId> = ids.into_iter().map(PublishedFileId).collect();
-    steam.query_workshop_items(&ids)
+    steam.query_workshop_items(ids)
 }
 
 pub fn query_workshop_item_details(
     steam: ConnectedSteam<'_>,
-    id: u64,
+    id: PublishedFileId,
 ) -> Result<WorkshopItem, WorkshopQueryError> {
-    steam.query_workshop_item_details(PublishedFileId(id))
+    steam.query_workshop_item_details(id)
 }
 
 pub fn query_workshop_items_streaming(
     steam: ConnectedSteam<'_>,
-    ids: Vec<u64>,
+    ids: &[PublishedFileId],
     on_chunk: impl FnMut(Vec<WorkshopItem>),
 ) -> Result<(), WorkshopQueryError> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-
-    let ids: Vec<PublishedFileId> = ids.into_iter().map(PublishedFileId).collect();
-    steam.query_workshop_items_streaming(&ids, on_chunk)
+    steam.query_workshop_items_streaming(ids, on_chunk)
 }
 
 pub fn browse_my_workshop_page(
@@ -564,9 +586,17 @@ mod tests {
     use steamworks::PublishedFileId;
 
     use super::{
-        DescriptionLength, WorkshopItem, WorkshopQueryError, combine_workshop_chunk_results,
-        drain_workshop_chunk_results, filter_new_workshop_ids, workshop_item_id_chunks,
+        DescriptionLength, Instant, WorkshopChunkQueryResult, WorkshopItem, WorkshopQueryError,
+        combine_workshop_chunk_results, drain_workshop_chunk_results, filter_new_workshop_ids,
+        workshop_item_id_chunks,
     };
+
+    /// Every drain in these tests is fed a channel that is already closed or
+    /// already full, so nothing waits — the deadline only has to be in the
+    /// future, not realistic.
+    fn deadline() -> Instant {
+        Instant::now() + super::CALLBACK_RESULT_TIMEOUT
+    }
 
     #[test]
     fn detail_queries_request_full_descriptions() {
@@ -689,7 +719,7 @@ mod tests {
         drop(tx);
 
         let mut delivered: Vec<Vec<PublishedFileId>> = Vec::new();
-        drain_workshop_chunk_results(&rx, 3, |chunk| {
+        drain_workshop_chunk_results(&rx, 3, deadline(), |chunk: Vec<WorkshopItem>| {
             delivered.push(chunk.into_iter().map(|item| item.id).collect());
         })
         .expect("a partially successful query is not an error");
@@ -716,11 +746,38 @@ mod tests {
             .unwrap();
         drop(tx);
 
-        let error = drain_workshop_chunk_results(&rx, 2, |_| {
+        let error = drain_workshop_chunk_results(&rx, 2, deadline(), |_| {
             panic!("no chunk should be delivered when all fail")
         })
         .expect_err("all failed chunks should surface the last failure");
 
         assert_eq!(error, WorkshopQueryError::Steam("last".to_owned()));
+    }
+
+    /// steamworks may drop a query's callback without ever invoking it, so a
+    /// chunk that never reports is an outcome the drain has to survive rather
+    /// than an invariant it can rely on.
+    #[test]
+    fn a_chunk_steam_never_answers_is_an_error_rather_than_a_panic() {
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel();
+        tx.send((0, Ok(vec![WorkshopItem::from(PublishedFileId(10))])))
+            .unwrap();
+        drop(tx);
+
+        let mut delivered = 0;
+        drain_workshop_chunk_results(&rx, 2, deadline(), |_| delivered += 1)
+            .expect("the chunk that did answer still counts as a success");
+        assert_eq!(delivered, 1);
+
+        let (tx, rx) = mpsc::channel::<(usize, WorkshopChunkQueryResult)>();
+        drop(tx);
+        let error = drain_workshop_chunk_results(&rx, 1, deadline(), |_| {
+            panic!("no chunk should be delivered when Steam answers none")
+        })
+        .expect_err("a query Steam never answered is a failed query");
+
+        assert_eq!(error, WorkshopQueryError::Abandoned);
     }
 }

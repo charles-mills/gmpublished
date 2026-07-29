@@ -16,7 +16,7 @@ pub mod materials;
 pub mod metadata_snapshot;
 pub mod native;
 pub mod publish;
-pub mod size_analyzer;
+pub mod snapshot;
 pub mod tasks;
 pub mod ui_error;
 pub mod vpk;
@@ -62,7 +62,14 @@ impl UiSettings {
     pub(crate) fn load_from_file_or_default(path: &Path) -> Self {
         match fs::read_to_string(path) {
             Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(value) => Self::from_json_value(&value),
+                Ok(value) => Self::from_json_value(&value).unwrap_or_else(|| {
+                    log::warn!(
+                        "UI settings at {} are from a newer version; starting from defaults \
+                         rather than rewriting them in this build's shape",
+                        path.display()
+                    );
+                    Self::default()
+                }),
                 Err(error) => {
                     log::warn!(
                         "failed to parse UI settings from {}: {error}",
@@ -99,9 +106,15 @@ impl UiSettings {
     /// default for the whole struct if `value` is not an object, and
     /// independently, per field, if a field is missing or holds a value of
     /// the wrong shape.
-    fn from_json_value(value: &serde_json::Value) -> Self {
-        serde_json::from_value::<UiSettingsDto>(value.clone())
-            .map_or_else(|_| Self::default(), |dto| Self::from_dto(&dto))
+    /// `None` for a file this build must not adopt.
+    ///
+    /// A newer `version` means fields this build does not know: taking it
+    /// would drop them and the next save would write the truncated shape back
+    /// over the user's file. Older versions load as-is — every field is
+    /// independently optional, so a missing one takes its default.
+    fn from_json_value(value: &serde_json::Value) -> Option<Self> {
+        let dto = serde_json::from_value::<UiSettingsDto>(value.clone()).ok()?;
+        (dto.version <= UI_SETTINGS_SCHEMA_VERSION).then(|| Self::from_dto(&dto))
     }
 
     fn from_dto(dto: &UiSettingsDto) -> Self {
@@ -494,11 +507,11 @@ mod tests {
                 "download_count_format": "space",
                 "theme_preset": "dark",
             })),
-            UiSettings {
+            Some(UiSettings {
                 play_gifs_by_default: true,
                 download_count_format: DownloadCountFormat::Space,
                 theme_preset: ThemePreset::Dark,
-            }
+            })
         );
 
         assert_eq!(
@@ -507,7 +520,17 @@ mod tests {
                 "download_count_format": "grouped",
                 "theme_preset": "system",
             })),
-            UiSettings::default()
+            Some(UiSettings::default())
+        );
+
+        // A file from a newer build carries fields this one would drop, so
+        // adopting it would rewrite the user's settings in a smaller shape.
+        assert_eq!(
+            UiSettings::from_json_value(&serde_json::json!({
+                "version": UI_SETTINGS_SCHEMA_VERSION + 1,
+                "theme_preset": "dark",
+            })),
+            None
         );
     }
 
@@ -607,111 +630,6 @@ mod tests {
         settings_with_invalid_override.downloads = Some(temp.path().join("missing-downloads"));
         let resolved = AppPaths::resolve_with_defaults(&settings_with_invalid_override, paths);
         assert_eq!(resolved.downloads_dir, Some(downloads_dir));
-    }
-}
-
-pub mod theme {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Rgb {
-        pub(crate) r: u8,
-        pub(crate) g: u8,
-        pub(crate) b: u8,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct DerivedColor {
-        pub(crate) base: Rgb,
-        pub(crate) dark: Rgb,
-    }
-
-    pub fn derive(rgb: u32) -> DerivedColor {
-        let base = Rgb {
-            r: ((rgb & 0xFF0000) >> 16) as u8,
-            g: ((rgb & 0x00FF00) >> 8) as u8,
-            b: (rgb & 0x0000FF) as u8,
-        };
-        let (h, s, l) = rgb_to_hsl(base);
-        let dark = hsl_to_rgb(h, s, l * 0.85);
-        DerivedColor { base, dark }
-    }
-
-    fn rgb_to_hsl(rgb: Rgb) -> (f64, f64, f64) {
-        let r = f64::from(rgb.r) / 255.0;
-        let g = f64::from(rgb.g) / 255.0;
-        let b = f64::from(rgb.b) / 255.0;
-
-        let max = r.max(g).max(b);
-        let min = r.min(g).min(b);
-        let l = (max + min) / 2.0;
-
-        if (max - min).abs() < f64::EPSILON {
-            return (0.0, 0.0, l);
-        }
-
-        let d = max - min;
-        let s = if l > 0.5 {
-            d / (2.0 - max - min)
-        } else {
-            d / (max + min)
-        };
-
-        let mut h = if (max - r).abs() < f64::EPSILON {
-            (g - b) / d + if g < b { 6.0 } else { 0.0 }
-        } else if (max - g).abs() < f64::EPSILON {
-            (b - r) / d + 2.0
-        } else {
-            (r - g) / d + 4.0
-        };
-        h /= 6.0;
-
-        (h, s, l)
-    }
-
-    fn hsl_to_rgb(h: f64, s: f64, l: f64) -> Rgb {
-        if s.abs() < f64::EPSILON {
-            let channel = float_channel(l);
-            return Rgb {
-                r: channel,
-                g: channel,
-                b: channel,
-            };
-        }
-
-        let q = if l < 0.5 {
-            l * (1.0 + s)
-        } else {
-            l + s - l * s
-        };
-        let p = 2.0 * l - q;
-
-        Rgb {
-            r: float_channel(hue_to_rgb(p, q, h + (1.0 / 3.0))),
-            g: float_channel(hue_to_rgb(p, q, h)),
-            b: float_channel(hue_to_rgb(p, q, h - (1.0 / 3.0))),
-        }
-    }
-
-    fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
-        if t < 0.0 {
-            t += 1.0;
-        }
-        if t > 1.0 {
-            t -= 1.0;
-        }
-        if t < 1.0 / 6.0 {
-            return p + (q - p) * 6.0 * t;
-        }
-        if t < 1.0 / 2.0 {
-            return q;
-        }
-        if t < 2.0 / 3.0 {
-            return p + (q - p) * ((2.0 / 3.0) - t) * 6.0;
-        }
-        p
-    }
-
-    fn float_channel(value: f64) -> u8 {
-        (value.clamp(0.0, 1.0) * 255.0).round() as u8
     }
 }
 

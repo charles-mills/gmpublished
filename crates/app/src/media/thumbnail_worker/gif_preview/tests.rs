@@ -686,3 +686,41 @@ fn rgba_pixels(frame: &GifPreviewFrame) -> Vec<[u8; 4]> {
         .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
         .collect()
 }
+
+/// Frame count is the dimension the screen, allocation and atlas limits leave
+/// open: frames composite one at a time over a reused canvas, so an
+/// over-long GIF costs unbounded work at flat memory — and pays it twice,
+/// once priming and once baking.
+#[test]
+fn a_gif_with_more_source_frames_than_the_cap_is_refused_by_every_walk()
+-> Result<(), Box<dyn std::error::Error>> {
+    let under = vec![(RED, 10); GIF_SOURCE_MAX_FRAMES];
+    let over = vec![(RED, 10); GIF_SOURCE_MAX_FRAMES + 1];
+
+    let bytes = gif_bytes_with_size(1, 1, &under)?;
+    assert_eq!(gif_frame_delays(&bytes)?.len(), GIF_SOURCE_MAX_FRAMES);
+    assert_eq!(
+        bake_gif_animation(&bytes, GIF_PREVIEW_MAX_EDGE)?.frame_count(),
+        BAKED_ANIMATION_MAX_FRAMES
+    );
+
+    let bytes = gif_bytes_with_size(1, 1, &over)?;
+    for error in [
+        gif_frame_delays(&bytes).expect_err("the metadata walk carries its own cap"),
+        bake_gif_animation(&bytes, GIF_PREVIEW_MAX_EDGE)
+            .expect_err("the priming pass hits the cap before the bake pass does"),
+        decode_lazy_gif_preview(bytes, GIF_PREVIEW_MAX_EDGE)
+            .expect_err("preparing a lazy preview reads every delay"),
+    ] {
+        assert!(
+            matches!(
+                error,
+                GifPreviewError::TooManyFrames {
+                    limit: GIF_SOURCE_MAX_FRAMES
+                }
+            ),
+            "expected a frame-count refusal, got {error}"
+        );
+    }
+    Ok(())
+}

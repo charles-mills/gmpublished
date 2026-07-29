@@ -14,9 +14,9 @@ use std::{
 
 use walkdir::WalkDir;
 
-use crate::{GMAFile, transactions::Transaction, write_nt_string};
+use crate::{GmaFile, transactions::Transaction, write_nt_string};
 
-use super::{GMAError, GMAMetadata, whitelist, whitelist::AddonWhitelist};
+use super::{GmaError, GmaMetadata, whitelist, whitelist::AddonWhitelist};
 
 use super::GMA_HEADER;
 use crate::util::thread_pool;
@@ -50,7 +50,7 @@ fn unique_temp_path(final_path: &Path) -> PathBuf {
 }
 
 /// Deletes the temp file it guards unless [`Self::commit`] was called. Covers
-/// every early return in [`GMAFile::create`] (an error, a panic unwind, a
+/// every early return in [`GmaFile::create`] (an error, a panic unwind, a
 /// cancelled transaction) with one mechanism instead of a cleanup call at
 /// each exit point.
 struct TempFileGuard {
@@ -101,13 +101,13 @@ mod entry_name_tests {
     }
 }
 
-impl GMAFile {
+impl GmaFile {
     pub fn create<P: AsRef<Path>>(
         &self,
         src_path: P,
         transaction: &Transaction,
         whitelist: &AddonWhitelist,
-    ) -> Result<(), GMAError> {
+    ) -> Result<(), GmaError> {
         let temp_path = unique_temp_path(&self.path);
         let guard = TempFileGuard::new(temp_path.clone());
         let mut f = BufWriter::new(File::create(&temp_path)?);
@@ -120,8 +120,8 @@ impl GMAFile {
             .map(|ignore| ignore.clone().into_boxed_slice());
 
         let (title, addon_json) = match metadata {
-            GMAMetadata::Legacy { title, .. } => (title.as_str(), None),
-            GMAMetadata::Standard { title, .. } => (title.as_str(), Some(metadata)),
+            GmaMetadata::Legacy { title, .. } => (title.as_str(), None),
+            GmaMetadata::Standard { title, .. } => (title.as_str(), Some(metadata)),
         };
 
         f.write_all(GMA_HEADER)?;
@@ -174,7 +174,7 @@ impl GMAFile {
                 crate::error_key::keys::PATH_IO_ERROR,
                 crate::transactions::detail_from_serialize(path),
             ));
-            GMAError::IOError(None)
+            GmaError::IOError(None)
         };
 
         let mut file_list: BTreeMap<String, Pending> = BTreeMap::new();
@@ -182,6 +182,9 @@ impl GMAFile {
             let whitelist_snapshot = whitelist.snapshot();
 
             for entry in WalkDir::new(src_path).follow_links(false) {
+                if transaction.aborted() {
+                    return Err(GmaError::Cancelled);
+                }
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(err) => {
@@ -261,6 +264,9 @@ impl GMAFile {
 
         let mut i = 0;
         while i < file_list.len() {
+            if transaction.aborted() {
+                return Err(GmaError::Cancelled);
+            }
             let (_, pending) = &file_list[i];
 
             if pending.size > BATCH_FILE_MAX {
@@ -271,6 +277,12 @@ impl GMAFile {
                 let mut crc32 = crc32fast::Hasher::new();
                 let mut written: u64 = 0;
                 loop {
+                    // Per chunk, not just per file: one entry over
+                    // `BATCH_FILE_MAX` can be most of the archive, and a cancel
+                    // that only lands between files would not land at all.
+                    if transaction.aborted() {
+                        return Err(GmaError::Cancelled);
+                    }
                     match reader.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(n) => {
@@ -358,6 +370,55 @@ impl GMAFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Packing is the long phase of a publish — minutes on a large addon — so
+    /// a cancel has to reach it. Without an `aborted()` check the pack runs to
+    /// completion regardless, and `transaction.progress` logs a warning per
+    /// file on the way, so the only symptom is noise in the log.
+    #[test]
+    fn cancelling_stops_the_pack_instead_of_warning_once_per_file() {
+        use crate::events::BackendEventCollector;
+        use crate::transactions::Transactions;
+        use std::sync::Arc;
+
+        let source = tempfile::tempdir().expect("tempdir");
+        for index in 0..8 {
+            std::fs::create_dir_all(source.path().join("lua/autorun")).expect("source tree");
+            std::fs::write(
+                source.path().join(format!("lua/autorun/entry_{index}.lua")),
+                vec![b'x'; 4096],
+            )
+            .expect("source entry");
+        }
+        let destination = tempfile::tempdir().expect("tempdir");
+        let gma_path = destination.path().join("cancelled.gma");
+
+        let transactions = Transactions::new(Arc::new(BackendEventCollector::default()), false);
+        let transaction = transactions.begin();
+        assert!(transaction.cancel());
+
+        let gma = GmaFile {
+            path: gma_path.clone(),
+            size: 0,
+            id: None,
+            metadata: GmaMetadata::Legacy {
+                title: "Cancelled Addon".to_owned(),
+                description: String::new(),
+            },
+            version: 3,
+            extracted_name: String::new(),
+            modified: None,
+        };
+
+        assert!(matches!(
+            gma.create(source.path(), &transaction, &AddonWhitelist::builtin_only()),
+            Err(GmaError::Cancelled)
+        ));
+        assert!(
+            !gma_path.exists(),
+            "a cancelled pack must leave no half-written archive"
+        );
+    }
 
     #[test]
     fn relative_entry_name_lowercases_and_uses_forward_slashes() {

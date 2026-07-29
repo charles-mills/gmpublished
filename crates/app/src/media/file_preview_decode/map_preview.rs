@@ -17,6 +17,7 @@ use super::{
     SkipReason, StaticPropPlacement, catch_asset_decode, entry_stem, info_preview_data,
     load_model_catching_panic, load_model_companions, srgb_byte_to_linear,
 };
+use rayon::prelude::*;
 
 pub(super) fn map_preview_data(
     request: &PreviewRequest,
@@ -118,25 +119,28 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .collect::<Vec<_>>();
     emit_stage(PreviewLoadStage::PlacingProps);
     let props_started = Instant::now();
+    // Loaded once, up front, and threaded through the AABB passes, collision
+    // enrichment and the bake below. Each of those can build its own cache
+    // from the same placements, which parses every entity-prop model again.
+    let prop_load_started = Instant::now();
+    let loaded_model_cache =
+        load_unique_prop_models_parallel(&static_props, &material_resolver, load_model);
+    let skybox_loaded_model_cache =
+        load_unique_prop_models_parallel(&skybox_static_props, &material_resolver, load_model);
     refresh_entity_prop_aabb_visibility(
         &mut static_props,
         usize::try_from(raw_stats.world_static_prop_count).unwrap_or(usize::MAX),
         usize::try_from(raw_stats.world_entity_prop_count).unwrap_or(0),
         visibility.as_ref(),
-        &material_resolver,
-        load_model,
+        &loaded_model_cache,
     );
     refresh_entity_prop_aabb_visibility(
         &mut skybox_static_props,
         usize::try_from(raw_stats.skybox_static_prop_count).unwrap_or(usize::MAX),
         usize::try_from(raw_stats.skybox_entity_prop_count).unwrap_or(0),
         visibility.as_ref(),
-        &material_resolver,
-        load_model,
+        &skybox_loaded_model_cache,
     );
-    let prop_load_started = Instant::now();
-    let loaded_model_cache =
-        load_unique_prop_models_parallel(&static_props, &material_resolver, load_model);
     let (enriched_walk_collision, prop_collision_stats) = enrich_walk_collision_with_prop_collision(
         walk_collision,
         &static_props,
@@ -173,12 +177,19 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         prop_lighting,
         prop_load_started,
     );
-    let skybox_prop_bake = bake_static_props_with_prop_model_loader(
+    let skybox_pre_resolved_prop_materials = pre_resolve_prop_materials(
+        &skybox_static_props,
+        &skybox_loaded_model_cache,
+        &material_resolver,
+    );
+    let skybox_prop_bake = bake_static_props_from_loaded_model_cache(
         &skybox_static_props,
         &material_resolver,
         &mut table,
+        &skybox_loaded_model_cache,
+        Some(&skybox_pre_resolved_prop_materials),
         prop_lighting,
-        load_model,
+        prop_load_started,
     );
     let door_bake = bake_map_doors_with_prop_model_loader(
         &map_doors,
@@ -316,30 +327,28 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         skybox_overlay_count: map_skybox_overlay_count,
         version: raw_stats.version,
     };
-    log::info!(
-        "map {}: materials resolved {resolved_material_count}/{material_count}{water_status}{render_mode_status}, textures {texture_mib} MiB{texture_payloads}, {lightmap_status}, {sky_status}, clusters {}, skybox faces {}, props {}, props placed {} (skipped {}: cap {}, triangles {}, load {}, invalid {}, empty {}), prop mesh {} bytes ({} MiB), detail sprites {}, overlays {} (skipped {}), timings: bsp {}ms, materials {}ms, props {}ms, props load {}ms, bake {}ms, lightmap {}ms",
-        request.entry_path,
-        stats.cluster_count,
-        stats.skybox_face_count,
-        stats.skybox_prop_count,
-        stats.placed_prop_count,
-        stats.skipped_prop_count,
-        prop_skip_stats.placement_cap,
-        prop_skip_stats.triangle_cap,
-        prop_skip_stats.load_failure,
-        prop_skip_stats.invalid_model_path,
-        prop_skip_stats.no_bakeable_mesh,
+    log_map_preview_summary(
+        &request.entry_path,
+        &stats,
+        &MapPreviewStatuses {
+            water: &water_status,
+            render_mode: &render_mode_status,
+            texture_mib: &texture_mib,
+            texture_payloads: &texture_payloads,
+            lightmap: &lightmap_status,
+            sky: &sky_status,
+        },
+        &prop_skip_stats,
         prop_mesh_bytes,
-        format_mib(prop_mesh_bytes),
-        stats.detail_sprite_count,
-        stats.overlay_count,
         skipped_overlay_count,
-        duration_ms(bsp_timing),
-        duration_ms(materials_timing),
-        duration_ms(props_timing),
-        duration_ms(prop_bake_timing.load),
-        duration_ms(prop_bake_timing.bake),
-        duration_ms(lightmap_timing)
+        &MapPreviewTimings {
+            bsp: bsp_timing,
+            materials: materials_timing,
+            props: props_timing,
+            prop_load: prop_bake_timing.load,
+            prop_bake: prop_bake_timing.bake,
+            lightmap: lightmap_timing,
+        },
     );
 
     PreviewData::from_request(
@@ -354,46 +363,30 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     )
 }
 
+/// Maps `work` over `items` in parallel, preserving order.
+///
+/// The preview pool is capped rather than using rayon's global one: these run
+/// on a worker thread while the UI is live, and saturating every core makes
+/// the window stutter during a map load.
 pub(super) fn parallel_collect<T, R, F>(items: &[T], work: F) -> Vec<R>
 where
-    T: Sync,
+    T: Sync + Send,
     R: Send,
-    F: Fn(usize, &T) -> R + Sync,
+    F: Fn(&T) -> R + Sync + Send,
 {
-    if items.is_empty() {
-        return Vec::new();
+    if items.len() <= 1 {
+        return items.iter().map(work).collect();
     }
-
-    let worker_count = preview_worker_count(items.len());
-    if worker_count == 1 {
-        return items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| work(index, item))
-            .collect();
-    }
-
-    let chunk_size = items.len().div_ceil(worker_count);
-    std::thread::scope(|scope| {
-        items
-            .chunks(chunk_size)
-            .enumerate()
-            .map(|(chunk_index, chunk)| {
-                let base_index = chunk_index * chunk_size;
-                let work = &work;
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, item)| work(base_index + offset, item))
-                        .collect::<Vec<R>>()
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("parallel_collect worker panicked"))
-            .collect()
-    })
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(preview_worker_count(items.len()))
+        .build()
+        .map_or_else(
+            |error| {
+                log::debug!("preview thread pool unavailable, mapping serially: {error}");
+                items.iter().map(&work).collect()
+            },
+            |pool| pool.install(|| items.par_iter().map(&work).collect()),
+        )
 }
 
 pub(super) fn preview_worker_count(item_count: usize) -> usize {
@@ -765,7 +758,7 @@ const PROP_LIGHT_LINEAR_CLAMP: f32 = 2.0;
 
 impl PropPlacementLighting {
     pub(super) fn evaluate(self, normal: [f32; 3]) -> [f32; 3] {
-        let normal = normalize(normal);
+        let normal = normalize_or_zero(normal);
         let mut color = self.ambient_cube.evaluate(normal);
         if let Some(sun) = self.sun.filter(|sun| sun.visible) {
             let amount = dot(normal, sun.direction_to_sun).max(0.0);
@@ -807,8 +800,7 @@ pub(super) fn refresh_entity_prop_aabb_visibility(
     entity_start: usize,
     entity_count: usize,
     visibility: Option<&MapVisibility>,
-    resolver: &MaterialResolver,
-    load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
+    loaded_model_cache: &HashMap<String, Option<Arc<LoadedPropModel>>>,
 ) {
     if entity_count == 0 {
         return;
@@ -829,7 +821,6 @@ pub(super) fn refresh_entity_prop_aabb_visibility(
         );
         return;
     };
-    let loaded_model_cache = load_unique_prop_models_parallel(entity_props, resolver, load_model);
     for placement in entity_props {
         let Some(model) = loaded_model_cache
             .get(&placement.model_path)
@@ -897,6 +888,10 @@ pub(super) fn bake_static_props(
     )
 }
 
+/// Builds the model cache itself, for callers that have no other use for one.
+/// The map pipeline builds its cache up front and bakes from it instead —
+/// every placement set is parsed exactly once per preview.
+#[cfg(test)]
 pub(super) fn bake_static_props_with_prop_model_loader(
     placements: &[StaticPropPlacement],
     resolver: &MaterialResolver,
@@ -1054,10 +1049,7 @@ pub(super) fn resolve_door_sound_slot(
     cache: &mut HashMap<String, Option<DoorSound>>,
 ) -> Option<DoorSound> {
     let reference = reference?;
-    let key = reference.trim().to_ascii_lowercase();
-    if key.is_empty() {
-        return None;
-    }
+    let key = MaterialResolver::sound_reference_key(reference)?;
     if let Some(cached) = cache.get(&key) {
         return cached.clone();
     }
@@ -1212,6 +1204,12 @@ fn bake_selected_with(
     }
 }
 
+/// The differential oracle for the parallel prop bake.
+///
+/// Shares [`bake_selected_with`] and [`select_static_prop_placements`] with
+/// production; only the bake strategy differs, which is what
+/// `parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges`
+/// compares.
 #[cfg(test)]
 pub(super) fn bake_static_props_with_loader_serial(
     placements: &[StaticPropPlacement],
@@ -1560,6 +1558,72 @@ pub(super) fn bake_prop_door_meshes(
         .collect()
 }
 
+/// The pre-formatted status fragments the summary line splices in, bundled so
+/// the call site is not six same-typed `&str` arguments in a row.
+struct MapPreviewStatuses<'a> {
+    water: &'a str,
+    render_mode: &'a str,
+    texture_mib: &'a str,
+    texture_payloads: &'a str,
+    lightmap: &'a str,
+    sky: &'a str,
+}
+
+/// How long each phase of the map build took.
+struct MapPreviewTimings {
+    bsp: Duration,
+    materials: Duration,
+    props: Duration,
+    prop_load: Duration,
+    prop_bake: Duration,
+    lightmap: Duration,
+}
+
+/// One line summarising a map build, at `info` because it is the first thing
+/// worth having when a user reports a map that looks wrong.
+fn log_map_preview_summary(
+    entry_path: &str,
+    stats: &MapStats,
+    statuses: &MapPreviewStatuses<'_>,
+    prop_skip_stats: &PropBakeSkipStats,
+    prop_mesh_bytes: usize,
+    skipped_overlay_count: u32,
+    timings: &MapPreviewTimings,
+) {
+    let MapPreviewStatuses {
+        water,
+        render_mode,
+        texture_mib,
+        texture_payloads,
+        lightmap,
+        sky,
+    } = statuses;
+    log::info!(
+        "map {entry_path}: materials resolved {}/{}{water}{render_mode}, textures {texture_mib} MiB{texture_payloads}, {lightmap}, {sky}, clusters {}, skybox faces {}, props {}, props placed {} (skipped {}: cap {}, triangles {}, load {}, invalid {}, empty {}), prop mesh {prop_mesh_bytes} bytes ({} MiB), detail sprites {}, overlays {} (skipped {skipped_overlay_count}), timings: bsp {}ms, materials {}ms, props {}ms, props load {}ms, bake {}ms, lightmap {}ms",
+        stats.resolved_material_count,
+        stats.material_count,
+        stats.cluster_count,
+        stats.skybox_face_count,
+        stats.skybox_prop_count,
+        stats.placed_prop_count,
+        stats.skipped_prop_count,
+        prop_skip_stats.placement_cap,
+        prop_skip_stats.triangle_cap,
+        prop_skip_stats.load_failure,
+        prop_skip_stats.invalid_model_path,
+        prop_skip_stats.no_bakeable_mesh,
+        format_mib(prop_mesh_bytes),
+        stats.detail_sprite_count,
+        stats.overlay_count,
+        duration_ms(timings.bsp),
+        duration_ms(timings.materials),
+        duration_ms(timings.props),
+        duration_ms(timings.prop_load),
+        duration_ms(timings.prop_bake),
+        duration_ms(timings.lightmap),
+    );
+}
+
 pub(super) struct PropMaterialContext<'a> {
     pub(super) resolver: &'a MaterialResolver,
     pub(super) pre_resolved_prop_materials:
@@ -1591,7 +1655,7 @@ pub(super) fn load_unique_prop_models_parallel(
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
 ) -> HashMap<String, Option<Arc<LoadedPropModel>>> {
     let model_paths = unique_prop_model_paths(placements);
-    parallel_collect(&model_paths, |_, model_path| {
+    parallel_collect(&model_paths, |model_path| {
         let context = format!("static prop model {model_path}");
         (
             model_path.clone(),
@@ -1741,7 +1805,7 @@ impl PhyDebugMeshBuilder {
         if !positions.iter().flatten().all(|value| value.is_finite()) {
             return;
         }
-        let normal = normalize(cross(
+        let normal = normalize_or_zero(cross(
             sub(positions[1], positions[0]),
             sub(positions[2], positions[0]),
         ));
@@ -1813,7 +1877,7 @@ pub(super) fn pre_resolve_prop_materials(
     resolver: &MaterialResolver,
 ) -> HashMap<String, Option<ResolvedPrimaryMaterial>> {
     let jobs = unique_prop_material_resolve_jobs(placements, loaded_model_cache);
-    parallel_collect(&jobs, |_, job| {
+    parallel_collect(&jobs, |job| {
         (
             job.key.clone(),
             resolver.resolve_primary(&job.material_dirs, &job.name),
@@ -2105,76 +2169,13 @@ pub(super) fn transform_prop_position(
 }
 
 pub(super) fn transform_prop_normal(normal: [f32; 3], placement: &StaticPropPlacement) -> [f32; 3] {
-    normalize(rotate_prop_vector(normal, placement.angles))
+    normalize_or_zero(rotate_prop_vector(normal, placement.angles))
 }
 
-pub(super) fn rotate_prop_vector(vector: [f32; 3], angles: [f32; 3]) -> [f32; 3] {
-    let gmpublished_backend::scene::QAngle { pitch, yaw, roll } =
-        gmpublished_backend::scene::QAngle::from_source_degrees(angles);
-    // Source AngleMatrix is Rz(yaw)·Ry(pitch)·Rx(roll): roll reaches the
-    // vector first, yaw last.
-    rotate_z(rotate_y(rotate_x(vector, roll), pitch), yaw)
-}
-
-pub(super) fn rotate_x(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0],
-        vector[1] * cos - vector[2] * sin,
-        vector[1] * sin + vector[2] * cos,
-    ]
-}
-
-pub(super) fn rotate_y(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0] * cos + vector[2] * sin,
-        vector[1],
-        -vector[0] * sin + vector[2] * cos,
-    ]
-}
-
-pub(super) fn rotate_z(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0] * cos - vector[1] * sin,
-        vector[0] * sin + vector[1] * cos,
-        vector[2],
-    ]
-}
-
-pub(super) fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
-    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
-}
-
-pub(super) fn sub(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-pub(super) fn scale_vector(vector: [f32; 3], scale: f32) -> [f32; 3] {
-    [vector[0] * scale, vector[1] * scale, vector[2] * scale]
-}
-
-pub(super) fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-}
-
-pub(super) fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-
-pub(super) fn normalize(vector: [f32; 3]) -> [f32; 3] {
-    let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
-    if length <= f32::EPSILON {
-        [0.0; 3]
-    } else {
-        [vector[0] / length, vector[1] / length, vector[2] / length]
-    }
-}
+pub(super) use gmpublished_backend::math::{
+    add, cross, dot, normalize_or_zero, rotate_source_vector as rotate_prop_vector,
+    scale as scale_vector, sub,
+};
 
 pub(super) fn map_mesh_to_model_mesh(
     mesh: &gmpublished_backend::scene::map::MapMesh,

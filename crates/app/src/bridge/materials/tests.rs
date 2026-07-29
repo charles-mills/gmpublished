@@ -134,18 +134,21 @@ fn pak_source_lookup_is_case_insensitive_and_decodes_lzma_entries() {
     assert_eq!(
         source
             .entry_bytes(&content_path("materials/test/thing.vmt"))
+            .expect("the pakfile reads")
             .expect("stored vmt"),
         stored_bytes
     );
     assert_eq!(
         source
             .entry_bytes(&content_path("MATERIALS/TEST/THING.VTF"))
+            .expect("the pakfile reads")
             .expect("lzma vtf"),
         lzma_bytes
     );
     assert!(
         source
             .entry_bytes(&content_path("materials/test/missing.vmt"))
+            .expect("a missing entry is not a read failure")
             .is_none()
     );
 }
@@ -1162,6 +1165,7 @@ fn sibling_legacy_bin_index_reads_lzma_gma_fixture() {
     assert_eq!(
         index
             .entry_bytes(&content_path("materials/models/test/thing.vmt"))
+            .expect("the archive reads")
             .expect("indexed vmt"),
         br#""VertexlitGeneric" { "$basetexture" "models/test/bin_color" }"#
     );
@@ -1169,6 +1173,7 @@ fn sibling_legacy_bin_index_reads_lzma_gma_fixture() {
         decode_vtf_rgba(
             &index
                 .entry_bytes(&content_path("materials/models/test/bin_color.vtf"))
+                .expect("the archive reads")
                 .expect("indexed vtf")
         )
         .expect("decoded vtf")
@@ -1547,4 +1552,76 @@ fn build_tree(entries: Vec<PreparedEntry>) -> Vec<u8> {
 fn write_c_string(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(0);
+}
+
+/// Rebuilding the shared state for a variant means reopening every game VPK
+/// and re-indexing the whole workshop folder — per map preview, since
+/// `map_preview` derives three resolvers in a chain plus one for the skybox.
+#[test]
+fn a_resolver_variant_shares_the_indexes_the_original_already_built() {
+    let archive = archive_with_texture(
+        "materials/models/test/thing.vmt",
+        r#""VertexlitGeneric" { "$basetexture" "models/test/thing_color" }"#,
+        "materials/models/test/thing_color.vtf",
+        &[255, 0, 0, 255],
+    );
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let variant = resolver.with_decoded_texture_max_dimension(512);
+
+    assert!(
+        Arc::ptr_eq(&resolver.shared, &variant.shared),
+        "a variant must not rebuild the sources it inherited"
+    );
+    assert_eq!(variant.config.decoded_texture_max_dimension, Some(512));
+    assert_eq!(resolver.config.decoded_texture_max_dimension, None);
+}
+
+/// Sharing the decode cache between variants removes the accidental isolation
+/// that made the missing dimension safe: without it a resolver capped at 512
+/// is served whatever an uncapped sibling decoded first.
+#[test]
+fn the_decoded_texture_cache_key_separates_resolutions() {
+    let uncapped = DecodedTextureCacheKey::Rgba {
+        path: ContentPath::new("materials/x.vtf").expect("valid content path"),
+        preserve_alpha: false,
+        max_dimension: None,
+    };
+    let capped = DecodedTextureCacheKey::Rgba {
+        path: ContentPath::new("materials/x.vtf").expect("valid content path"),
+        preserve_alpha: false,
+        max_dimension: Some(512),
+    };
+
+    assert_ne!(uncapped, capped);
+}
+
+/// The whole point of the tier boundary returning a `Result`. Reporting both
+/// as `None` would leave "materials resolved 12/340" unable to tell a
+/// self-contained addon from a disk it has no permission to read.
+#[cfg(unix)]
+#[test]
+fn a_loose_dir_distinguishes_an_unreadable_file_from_an_absent_one() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(root.path().join("materials/test")).expect("source tree");
+    let unreadable = root.path().join("materials/test/locked.vmt");
+    std::fs::write(&unreadable, b"\"UnlitGeneric\" {}").expect("entry");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
+        .expect("drop read permission");
+
+    let dir = LooseSourceDir::new(root.path().to_owned());
+
+    assert!(
+        dir.entry_bytes(&content_path("materials/test/absent.vmt"))
+            .expect("an absent file is not a read failure")
+            .is_none()
+    );
+    assert!(
+        matches!(
+            dir.entry_bytes(&content_path("materials/test/locked.vmt")),
+            Err(SourceError::Loose { .. })
+        ),
+        "an unreadable file must not report as absent"
+    );
 }

@@ -22,9 +22,7 @@ pub const STATS_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 pub const COUNT_ROLL_TICK_INTERVAL: Duration = Duration::from_millis(16);
 pub const COUNT_ROLL_DURATION: Duration = Duration::from_millis(300);
 
-const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
-const THUMBNAIL_PLAY_POLICY: thumbnail_animation::PlayPolicy =
-    thumbnail_animation::PlayPolicy::OnHover;
+use crate::widgets::grid_rows::{ADDON_THUMBNAIL_MAX_EDGE, RowThumbnail, THUMBNAIL_PLAY_POLICY};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -325,7 +323,7 @@ impl Row {
     #[cfg(test)]
     pub(crate) fn for_test(id: u64, title: &str, subscriptions: u64) -> Self {
         Self {
-            workshop_id: PublishedFileId::new(id).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(id),
             id: id.to_string(),
             title: title.to_owned(),
             tags: Vec::new(),
@@ -411,20 +409,6 @@ struct CountRoll {
     to: u64,
     elapsed: Duration,
 }
-
-#[derive(Clone, Debug, PartialEq)]
-enum RowThumbnail {
-    Loading,
-    /// Blurred ThumbHash stand-in shown until the real pixels decode.
-    Placeholder(image::Handle),
-    Dead,
-    Ready {
-        still: image::Handle,
-        animation: Option<thumbnail_animation::Playback>,
-    },
-}
-
-impl RowThumbnail {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreparePublishTarget {
@@ -512,19 +496,6 @@ pub fn thumbnail_demands(
     generation: Generation,
 ) -> thumbnail_demand::DemandSet {
     grid_rows::thumbnail_demands(rows, visible_range, generation, thumbnail_owner())
-}
-
-/// Releases Ready thumbnails outside visible+prefetch so scrolled-away rows
-/// stop pinning decoded RGBA; the demand/cache path re-delivers on return.
-pub fn release_offscreen_thumbnails(
-    rows: &mut [Row],
-    visible_range: std::ops::Range<usize>,
-) -> Vec<usize> {
-    grid_rows::release_offscreen_thumbnails(rows, visible_range)
-}
-
-pub fn invalidate_ready_thumbnails(rows: &mut [Row]) -> bool {
-    grid_rows::invalidate_ready_thumbnails(rows)
 }
 
 pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {

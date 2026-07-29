@@ -23,17 +23,13 @@ impl gmpublished_backend::error_key::HasErrorKey for RunBlockingError {
 }
 
 pub(super) fn show_native_open_error_dialog(description: String) {
-    let _ = block_on_worker(
+    let _ = futures::executor::block_on(
         rfd::AsyncMessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
             .set_title("gmpublished")
             .set_description(description)
             .show(),
     );
-}
-
-pub(super) fn block_on_worker<F: std::future::Future>(future: F) -> F::Output {
-    futures::executor::block_on(future)
 }
 
 pub(super) type WorkerPoolSpawner =
@@ -222,9 +218,23 @@ pub(super) struct WorkerPoolConfig {
 #[derive(Debug)]
 pub(super) struct WorkerPool {
     name: &'static str,
-    sender: Mutex<Option<SyncSender<JobEnvelope>>>,
-    workers: Mutex<Vec<JoinHandle<()>>>,
+    state: Mutex<PoolState>,
     shutdown: Arc<AtomicBool>,
+}
+
+/// One lock over the sender and the threads it feeds, because they are one
+/// fact: a pool is either accepting work through a live channel with workers
+/// draining it, or it is not.
+///
+/// Splitting them across two mutexes makes "sender present, workers gone"
+/// representable — a state nothing can check for and nothing could act on.
+#[derive(Debug)]
+enum PoolState {
+    Running {
+        sender: SyncSender<JobEnvelope>,
+        workers: Vec<JoinHandle<()>>,
+    },
+    Stopped,
 }
 
 impl WorkerPool {
@@ -260,8 +270,7 @@ impl WorkerPool {
 
         Ok(Self {
             name,
-            sender: Mutex::new(Some(sender)),
-            workers: Mutex::new(workers),
+            state: Mutex::new(PoolState::Running { sender, workers }),
             shutdown,
         })
     }
@@ -275,10 +284,10 @@ impl WorkerPool {
         };
 
         let result = {
-            let sender = self.sender.lock();
-            match sender.as_ref() {
-                Some(sender) => sender.try_send(envelope),
-                None => return Err(self.reject(name, ScheduleErrorKind::Stopped)),
+            let state = self.state.lock();
+            match &*state {
+                PoolState::Running { sender, .. } => sender.try_send(envelope),
+                PoolState::Stopped => return Err(self.reject(name, ScheduleErrorKind::Stopped)),
             }
         };
 
@@ -308,13 +317,20 @@ impl WorkerPool {
 impl Drop for WorkerPool {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        {
-            let mut sender = self.sender.lock();
-            sender.take();
-        }
-
-        let mut workers = self.workers.lock();
-        join_started_workers(std::mem::take(&mut *workers));
+        let mut state = self.state.lock();
+        let PoolState::Running { sender, workers } =
+            std::mem::replace(&mut *state, PoolState::Stopped)
+        else {
+            return;
+        };
+        // The lock goes before the join, not after: holding it across a join
+        // would block a concurrent `submit` for as long as the slowest worker
+        // takes to notice the shutdown.
+        drop(state);
+        // Dropped before the join, because a worker only sees the channel
+        // disconnect once the last sender is gone.
+        drop(sender);
+        join_started_workers(workers);
     }
 }
 

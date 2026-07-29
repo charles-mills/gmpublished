@@ -166,7 +166,7 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             .map_or_else(Vec::new, |request| {
                 vec![Effect::EntryPreviewRequested(request)]
             }),
-        Message::FilePreview(_) => Vec::new(),
+        Message::FilePreview(message) => vec![Effect::FilePreview(message)],
         Message::UpRequested => {
             let _changed = state.go_up();
             Vec::new()

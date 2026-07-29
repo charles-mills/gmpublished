@@ -1,3 +1,4 @@
+use crate::bridge::ui_error::ResultExt as _;
 use gmpublished_backend::error_key::keys;
 
 use super::{
@@ -81,7 +82,7 @@ impl App {
             my_workshop::PreparePublishTarget::Update(update) => {
                 let workshop_id = update.workshop_id;
                 let (snapshot_request_id, snapshot_destination) =
-                    self.prepare_publish_workshop_snapshot(workshop_id);
+                    self.publish().workshop_snapshot(workshop_id);
                 prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
                     workshop_id,
                     title: update.title,
@@ -95,8 +96,8 @@ impl App {
         Task::done(RootMessage::PreparePublish(
             prepare_publish::Message::OpenRequested {
                 target,
-                ignored_patterns: self.prepare_publish_ignored_patterns(),
-                upscale_icon_default: self.prepare_publish_upscale_default(),
+                ignored_patterns: self.publish().ignored_patterns(),
+                upscale_icon_default: self.publish().upscale_default(),
             },
         ))
     }
@@ -136,7 +137,7 @@ impl App {
                 RootMessage::InstalledAddons(installed_addons::Message::MetadataCompleted(
                     generation,
                     delivery_item_ids.clone(),
-                    result.map_err(|error| UiError::from(&error)),
+                    result.ui_err(),
                 ))
             })
     }

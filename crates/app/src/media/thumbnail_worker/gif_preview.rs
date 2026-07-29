@@ -42,6 +42,14 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const GIF_DECODER_MAX_IMAGE_EDGE: u32 = 4096;
 const GIF_DECODER_MAX_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Source frames walked before a GIF is refused.
+///
+/// Frames composite one at a time over a reused canvas, so frame count is the
+/// one dimension the size limits above do not bound. Refused rather than
+/// truncated: the baked atlas summarises the whole animation, so a short walk
+/// is a wrong answer rather than a smaller one.
+const GIF_SOURCE_MAX_FRAMES: usize = 1024;
+
 pub type GifPreviewResult<T> = Result<T, GifPreviewError>;
 
 /// One decoded GIF frame as plain RGBA bytes with a normalized frame delay.
@@ -538,6 +546,13 @@ fn gif_frame_delays(bytes: &[u8]) -> GifPreviewResult<Vec<Duration>> {
         .next_frame_info()
         .map_err(GifPreviewError::GifParse)?
     {
+        // The one frame walk that does not go through the composited stream,
+        // so it carries the cap itself.
+        if delays.len() == GIF_SOURCE_MAX_FRAMES {
+            return Err(GifPreviewError::TooManyFrames {
+                limit: GIF_SOURCE_MAX_FRAMES,
+            });
+        }
         delays.push(normalize_gif_delay(frame.delay));
     }
     Ok(delays)
@@ -755,6 +770,15 @@ impl<R: Read> CompositedGifFrameStream<R> {
         let Some(info) = self.next_frame_info()? else {
             return Ok(None);
         };
+        // Enforced here rather than at each walk: the priming pass, the bake
+        // pass and the test decode all reach frames only through this method.
+        // After the `None` check, not before — every walk calls once past the
+        // last frame to discover the end, and that call is not a frame.
+        if frame_index >= GIF_SOURCE_MAX_FRAMES {
+            return Err(GifPreviewError::TooManyFrames {
+                limit: GIF_SOURCE_MAX_FRAMES,
+            });
+        }
         validate_frame_dimensions(frame_index, info.width, info.height)?;
         let expected = bounded_frame_rgba_len(frame_index, info.width, info.height)?;
         let actual = self.decoder.buffer_size();
@@ -1102,6 +1126,9 @@ pub enum GifPreviewError {
     /// The GIF decoded successfully but did not contain any frames.
     #[error("GIF preview contains no frames")]
     EmptyFrameSet,
+    /// The GIF declares more source frames than the preview decoder will walk.
+    #[error("GIF preview has more than {limit} source frames")]
+    TooManyFrames { limit: usize },
     /// Requested GIF frame was not present.
     #[error("GIF preview frame {frame_index} was out of range for {frame_count} frames")]
     FrameIndexOutOfRange {

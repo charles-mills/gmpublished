@@ -1,9 +1,7 @@
-use std::path::{Path, PathBuf};
+use crate::bridge::ui_error::ResultExt as _;
+use std::path::PathBuf;
 
-use super::{
-    App, LibraryRefreshReason, RootMessage, Task, UiError, flatten_blocking_ui_result,
-    prerequisites, steam_session,
-};
+use super::{App, LibraryRefreshReason, RootMessage, Task, UiError, prerequisites, steam_session};
 
 /// Opens (or focuses) the Steam client.
 const STEAM_OPEN_URL: &str = "steam://open/main";
@@ -23,7 +21,7 @@ impl App {
                 selected.map_or_else(Task::none, |path| self.game_folder_chosen_task(path))
             }
             prerequisites::Message::GameSearchCompleted(resolved) => {
-                self.game_search_completed_task(resolved.as_deref())
+                self.game_search_completed_task(resolved)
             }
         }
     }
@@ -86,15 +84,14 @@ impl App {
 
         self.state.prerequisites.begin_game_search();
         self.ctx
-            .run_blocking("prerequisites-set-gmod-dir", move |app| {
+            .run_blocking_ui("prerequisites-set-gmod-dir", move |app| {
                 app.update_settings_snapshot(|settings| {
                     settings.gmod = Some(path);
                 })
                 .map(|()| app.paths().gmod_dir)
-                .map_err(|error| UiError::from(&error))
+                .ui_err()
             })
-            .map(|result| {
-                let resolved = flatten_blocking_ui_result(result).unwrap_or_default();
+            .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
             })
     }
@@ -102,17 +99,29 @@ impl App {
     fn game_search_task(&mut self) -> Task<RootMessage> {
         self.state.prerequisites.begin_game_search();
         self.ctx
-            .run_blocking("prerequisites-discover-gmod-dir", |app| {
-                app.rediscover_gmod_dir()
+            .run_blocking_ui("prerequisites-discover-gmod-dir", |app| {
+                Ok(app.rediscover_gmod_dir())
             })
-            .map(|result| {
-                RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(
-                    result.ok().flatten(),
-                ))
+            .map(|resolved| {
+                RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
             })
     }
 
-    fn game_search_completed_task(&mut self, resolved: Option<&Path>) -> Task<RootMessage> {
+    fn game_search_completed_task(
+        &mut self,
+        resolved: Result<Option<PathBuf>, UiError>,
+    ) -> Task<RootMessage> {
+        // A search that could not run is not a search that found nothing: the
+        // status stays as it was, so the user is not told the folder is
+        // missing when we never looked.
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                log::warn!("Garry's Mod folder search could not run: {error}");
+                return Task::none();
+            }
+        };
+        let resolved = resolved.as_deref();
         let (configured, _) = self.ctx.game_paths();
         self.state
             .prerequisites

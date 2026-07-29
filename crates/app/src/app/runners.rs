@@ -533,7 +533,7 @@ pub(super) fn send_downloader_submission_failed(
     );
 }
 
-pub(super) fn send_root_message(
+pub fn send_root_message(
     output: &mut iced_mpsc::Sender<RootMessage>,
     message: RootMessage,
 ) -> bool {

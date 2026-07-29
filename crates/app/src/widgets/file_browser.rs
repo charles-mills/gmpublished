@@ -18,7 +18,6 @@ use crate::widgets::tooltip as tooltip_widget;
 const SILKICON_SIZE: f32 = 16.0;
 const TYPE_COLUMN_MAX_WIDTH: f32 = 170.0;
 const SIZE_COLUMN_WIDTH: f32 = 78.0;
-const TOOLTIP_MAX_WIDTH: f32 = 320.0;
 pub const ROW_HEIGHT: f32 = 32.0;
 const ROW_OVERSCAN: usize = 4;
 
@@ -189,7 +188,7 @@ fn silk_image<'a, Message: 'a>(
             .height(Length::Fixed(SILKICON_SIZE)),
         tooltip,
         tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     )
 }
 

@@ -1,3 +1,9 @@
+//! The downloader's job state machine: rows, their progress, and the
+//! task-event reducer that drives them.
+//!
+//! Not `model.rs`: there is no domain layer here to separate out, so the file
+//! is named for what it holds. `state::State` delegates to a [`Jobs`].
+
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -299,7 +305,7 @@ pub enum JobProgress {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DownloaderUiState {
+pub struct Jobs {
     downloading: Vec<DownloaderJob>,
     extracting: Vec<DownloaderJob>,
     active_items: HashSet<PublishedFileId>,
@@ -316,7 +322,7 @@ pub struct DownloaderUiState {
     next_synthetic_row_id: i32,
 }
 
-impl Default for DownloaderUiState {
+impl Default for Jobs {
     fn default() -> Self {
         Self {
             downloading: Vec::new(),
@@ -335,7 +341,7 @@ impl Default for DownloaderUiState {
     }
 }
 
-impl DownloaderUiState {
+impl Jobs {
     pub(crate) fn downloading(&self) -> &[DownloaderJob] {
         &self.downloading
     }

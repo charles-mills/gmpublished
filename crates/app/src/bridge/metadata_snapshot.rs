@@ -6,10 +6,9 @@
 //! cache: missing, corrupt, or version-mismatched snapshots are silently
 //! discarded and rebuilt.
 
+use crate::bridge::snapshot::SnapshotWriteError;
 use std::{
     collections::HashMap,
-    fs, io,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -84,42 +83,23 @@ struct SnapshotEntry {
     thumbhash: Option<Vec<u8>>,
 }
 
+impl crate::bridge::snapshot::Versioned for SnapshotFile {
+    const VERSION: u32 = SNAPSHOT_VERSION;
+    const NOUN: &'static str = "Workshop metadata";
+
+    fn version(&self) -> u32 {
+        self.version
+    }
+}
+
 pub fn load(path: &Path) -> HashMap<PublishedFileId, CachedWorkshopMetadata> {
     load_at(path, now_unix_seconds())
 }
 
 fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, CachedWorkshopMetadata> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            if error.kind() != io::ErrorKind::NotFound {
-                log::debug!(
-                    "ignoring unreadable Workshop metadata snapshot {}: {error}",
-                    path.display()
-                );
-            }
-            return HashMap::new();
-        }
-    };
-
-    let snapshot = match serde_json::from_str::<SnapshotFile>(&contents) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            log::debug!(
-                "discarding unparseable Workshop metadata snapshot {}: {error}",
-                path.display()
-            );
-            return HashMap::new();
-        }
-    };
-    if snapshot.version != SNAPSHOT_VERSION {
-        log::debug!(
-            "discarding Workshop metadata snapshot {} with unsupported version {}",
-            path.display(),
-            snapshot.version
-        );
+    let Some(snapshot) = crate::bridge::snapshot::load::<SnapshotFile>(path) else {
         return HashMap::new();
-    }
+    };
 
     snapshot
         .entries
@@ -149,18 +129,6 @@ fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, Cache
             Some((id, cached))
         })
         .collect()
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MetadataSnapshotWriteError {
-    #[error("failed to serialize snapshot: {0}")]
-    Serialize(#[source] serde_json::Error),
-    #[error("failed to persist snapshot {}: {source}", path.display())]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 /// Detached, deterministically ordered snapshot. Building this while holding
@@ -201,29 +169,15 @@ pub fn prepare(
 pub fn write_prepared(
     path: &Path,
     snapshot: &PreparedMetadataSnapshot,
-) -> Result<(), MetadataSnapshotWriteError> {
-    let write_error = |source| MetadataSnapshotWriteError::Write {
-        path: path.to_path_buf(),
-        source,
-    };
-    let mut temp = crate::util::fs::atomic_tempfile(path).map_err(write_error)?;
-    {
-        let mut writer = BufWriter::with_capacity(
-            crate::util::fs::ATOMIC_WRITE_BUFFER_SIZE,
-            temp.as_file_mut(),
-        );
-        serde_json::to_writer(&mut writer, &snapshot.0)
-            .map_err(MetadataSnapshotWriteError::Serialize)?;
-        writer.flush().map_err(write_error)?;
-    }
-    crate::util::fs::persist_atomic(temp, path).map_err(write_error)
+) -> Result<(), SnapshotWriteError> {
+    crate::bridge::snapshot::write(path, &snapshot.0)
 }
 
 #[cfg(test)]
 fn write(
     path: &Path,
     entries: &HashMap<PublishedFileId, CachedWorkshopMetadata>,
-) -> Result<(), MetadataSnapshotWriteError> {
+) -> Result<(), SnapshotWriteError> {
     write_prepared(path, &prepare(entries))
 }
 
@@ -251,7 +205,7 @@ mod tests {
     fn sample_cached(id: u64, fetched_at: u64) -> CachedWorkshopMetadata {
         CachedWorkshopMetadata {
             metadata: WorkshopMetadata {
-                id: PublishedFileId::new(id).expect("test fixture ids are always nonzero"),
+                id: PublishedFileId::fixture(id),
                 title: format!("Addon {id}"),
                 time_created: 10,
                 time_updated: 20,
@@ -363,7 +317,7 @@ mod tests {
         std::fs::write(&path, legacy.to_string()).expect("write legacy snapshot");
 
         let loaded = load_at(&path, NOW);
-        let id = PublishedFileId::new(123).expect("nonzero");
+        let id = PublishedFileId::fixture(123);
         assert!(
             loaded
                 .get(&id)

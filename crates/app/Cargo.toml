@@ -76,6 +76,7 @@ lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [dev-dependencies]
 crc32fast.workspace = true
+gmpublished-backend = { path = "../backend", features = ["scene", "test-support"] }
 # Headless widget-tree simulator for click-through view tests.
 iced_test = "0.14.0"
 lzma-rust2 = { workspace = true, features = ["encoder"] }

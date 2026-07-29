@@ -115,12 +115,7 @@ pub(super) fn search_item_source_from_backend(
         // its `nonzero_workshop_id` helper), so every id it hands us
         // converts cleanly.
         gmpublished_backend::search::SearchItemSource::InstalledAddons(path, id) => {
-            SearchItemSource::InstalledAddons(
-                path.clone(),
-                id.map(|id| {
-                    PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
-                }),
-            )
+            SearchItemSource::InstalledAddons(path.clone(), id.map(PublishedFileId::from_backend))
         }
         gmpublished_backend::search::SearchItemSource::InstalledAddonFile {
             addon,
@@ -130,22 +125,16 @@ pub(super) fn search_item_source_from_backend(
         } => SearchItemSource::InstalledAddonFile {
             addon_path: addon.path.clone(),
             addon_title: addon.title.clone(),
-            workshop_id: addon.workshop_id.map(|id| {
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
-            }),
+            workshop_id: addon.workshop_id.map(PublishedFileId::from_backend),
             entry_path: entry_path.clone(),
             size_bytes: *size_bytes,
             crc32: *crc32,
         },
         gmpublished_backend::search::SearchItemSource::MyWorkshop(id) => {
-            SearchItemSource::MyWorkshop(
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id"),
-            )
+            SearchItemSource::MyWorkshop(PublishedFileId::from_backend(*id))
         }
         gmpublished_backend::search::SearchItemSource::WorkshopItem(id) => {
-            SearchItemSource::WorkshopItem(
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id"),
-            )
+            SearchItemSource::WorkshopItem(PublishedFileId::from_backend(*id))
         }
     }
 }
@@ -173,7 +162,7 @@ pub(super) fn steam_user_from_workshop_backend(user: steam_users::SteamUser) -> 
 
 pub(super) fn workshop_item_from_backend(item: gmpublished_backend::WorkshopItem) -> WorkshopItem {
     WorkshopItem {
-        id: PublishedFileId::new(item.id.0).expect("Steam never issues a zero published file id"),
+        id: PublishedFileId::from_backend(item.id),
         title: item.title,
         owner: item.owner.map(steam_user_from_workshop_backend),
         steamid: item.steamid.map(|steamid| SteamId::new(steamid.raw())),

@@ -69,9 +69,14 @@ impl Layer {
         self.presence.needs_ticks()
     }
 
-    fn open(&mut self, modal: ActiveModal, now: Instant) {
+    /// Returns the modal this one replaced, if it displaced a different one.
+    /// Re-opening the modal already on the layer reverses its close animation
+    /// instead, so nothing is displaced.
+    fn open(&mut self, modal: ActiveModal, now: Instant) -> Option<ActiveModal> {
+        let displaced = self.active().filter(|active| *active != modal);
         self.phase = Phase::Visible(modal);
         self.presence.go(true, now);
+        displaced
     }
 
     fn close(&mut self, now: Instant) {
@@ -163,11 +168,13 @@ impl State {
         finished
     }
 
-    pub(super) fn open(&mut self, modal: ActiveModal, now: Instant) {
+    /// Returns the modal that was displaced without animating closed, so the
+    /// caller can run the teardown [`Self::tick`] will never report.
+    pub(super) fn open(&mut self, modal: ActiveModal, now: Instant) -> Option<ActiveModal> {
         if modal.is_overlay() {
-            self.overlay.open(modal, now);
+            self.overlay.open(modal, now)
         } else {
-            self.base.open(modal, now);
+            self.base.open(modal, now)
         }
     }
 

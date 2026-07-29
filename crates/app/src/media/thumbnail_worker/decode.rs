@@ -291,6 +291,7 @@ fn validate_http_url(url: &str) -> ThumbnailResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ThumbnailDecodeError;
     /// The warm path fetches a Steam CDN *variant* URL, but the source tier is
     /// read by the bare URL from the cache key. Banking under the fetch URL
     /// wrote a file nothing could find — budgeted and evicted, never read — so
@@ -458,7 +459,10 @@ mod tests {
             .decode_and_resize_bytes(b"not decoded", 0)
             .expect_err("zero max edge should be rejected before decode");
 
-        assert!(matches!(error, ThumbnailError::InvalidMaxEdge));
+        assert!(matches!(
+            error,
+            ThumbnailError::Decode(ThumbnailDecodeError::InvalidMaxEdge)
+        ));
         assert!(super::super::validate_max_edge(0).is_err());
     }
 

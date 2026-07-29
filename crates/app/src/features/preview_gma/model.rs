@@ -1,3 +1,4 @@
+use crate::bridge::ui_error::ResultExt as _;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -172,7 +173,7 @@ impl LoadedArchive {
     ) -> Result<Self, UiError> {
         PreviewArchive::open_with_workshop_id(path, workshop_id.map(PublishedFileId::get))
             .map(Self::from_archive)
-            .map_err(|error| UiError::from(&error))
+            .ui_err()
     }
 
     pub(crate) fn from_archive(archive: PreviewArchive) -> Self {
@@ -291,10 +292,4 @@ fn live_user_name(user: &SteamUser) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-fn score_bucket(score: f32) -> i32 {
-    (score.clamp(0.0, 1.0) * 5.0).round() as i32
-}
-
-fn score_label(score: f32) -> String {
-    format!("{:.2}%", score.clamp(0.0, 1.0) * 100.0)
-}
+use crate::widgets::grid_rows::{score_bucket, score_label};

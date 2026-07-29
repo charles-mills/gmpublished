@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::path::PathBuf;
 use std::{sync::Arc, time::Duration};
 
 use thiserror::Error;
@@ -111,25 +109,25 @@ pub struct PreparedAnimation {
 
 impl PreparedAnimation {
     pub(crate) fn from_encoded_gif(bytes: &[u8], max_edge: u32) -> ThumbnailResult<Self> {
-        Self::from_baked(&bake_gif_animation(bytes, max_edge).map_err(ThumbnailError::GifDecode)?)
+        Self::from_baked(
+            &bake_gif_animation(bytes, max_edge).map_err(ThumbnailDecodeError::GifDecode)?,
+        )
     }
 
     fn from_lazy_preview(preview: &LazyGifPreview) -> ThumbnailResult<Self> {
-        Self::from_baked(&bake_lazy_gif_preview(preview).map_err(ThumbnailError::GifDecode)?)
+        Self::from_baked(&bake_lazy_gif_preview(preview).map_err(ThumbnailDecodeError::GifDecode)?)
     }
 
     fn from_baked(animation: &BakedAnimation) -> ThumbnailResult<Self> {
         let cumulative = animation.cumulative_frame_times();
         let mut frames = Vec::with_capacity(animation.frame_count());
         for frame_index in 0..animation.frame_count() {
-            let clip = animation
-                .frame_clip(frame_index)
-                .ok_or(ThumbnailError::GifDecode(
-                    GifPreviewError::FrameIndexOutOfRange {
-                        frame_index,
-                        frame_count: animation.frame_count(),
-                    },
-                ))?;
+            let clip = animation.frame_clip(frame_index).ok_or_else(|| {
+                ThumbnailDecodeError::GifDecode(GifPreviewError::FrameIndexOutOfRange {
+                    frame_index,
+                    frame_count: animation.frame_count(),
+                })
+            })?;
             frames.push(PreparedAnimationFrame {
                 width: clip.width,
                 height: clip.height,
@@ -227,13 +225,13 @@ fn frame_rgba(
     clip: BakedAnimationFrameClip,
 ) -> ThumbnailResult<Vec<u8>> {
     let row_len = crate::media::pixel::checked_rgba_len(clip.width, 1).ok_or(
-        ThumbnailError::RgbaLengthOverflow {
+        ThumbnailDecodeError::RgbaLengthOverflow {
             width: clip.width,
             height: 1,
         },
     )?;
     let frame_len = crate::media::pixel::checked_rgba_len(clip.width, clip.height).ok_or(
-        ThumbnailError::RgbaLengthOverflow {
+        ThumbnailDecodeError::RgbaLengthOverflow {
             width: clip.width,
             height: clip.height,
         },
@@ -245,23 +243,24 @@ fn frame_rgba(
     for row in 0..clip.height {
         let y = u64::from(clip.y)
             .checked_add(u64::from(row))
-            .ok_or(ThumbnailError::DimensionOverflow)?;
+            .ok_or(ThumbnailDecodeError::DimensionOverflow)?;
         let pixel_offset = y
             .checked_mul(atlas_width)
             .and_then(|offset| offset.checked_add(u64::from(clip.x)))
-            .ok_or(ThumbnailError::DimensionOverflow)?;
+            .ok_or(ThumbnailDecodeError::DimensionOverflow)?;
         let byte_offset = pixel_offset
             .checked_mul(4)
             .and_then(|offset| usize::try_from(offset).ok())
-            .ok_or(ThumbnailError::DimensionOverflow)?;
+            .ok_or(ThumbnailDecodeError::DimensionOverflow)?;
         let end = byte_offset
             .checked_add(row_len)
-            .ok_or(ThumbnailError::DimensionOverflow)?;
+            .ok_or(ThumbnailDecodeError::DimensionOverflow)?;
         let Some(row_bytes) = atlas.get(byte_offset..end) else {
-            return Err(ThumbnailError::RgbaLengthMismatch {
+            return Err(ThumbnailDecodeError::RgbaLengthMismatch {
                 expected: end,
                 actual: atlas.len(),
-            });
+            }
+            .into());
         };
         rgba.extend_from_slice(row_bytes);
     }
@@ -269,32 +268,16 @@ fn frame_rgba(
     Ok(rgba)
 }
 
-/// Errors returned by thumbnail decode, resize, cache, and scheduling helpers.
+/// Errors returned while fetching a thumbnail's bytes, plus whatever decoding
+/// them reported.
+///
+/// Decoding has its own error type, carried whole rather than re-listed: a
+/// second enum mirroring its variants needs a hand-written map between them,
+/// which is one edit away from disagreeing.
 #[derive(Debug, Error)]
 pub enum ThumbnailError {
-    /// Requested size was zero.
-    #[error("thumbnail max edge must be greater than zero")]
-    InvalidMaxEdge,
-    /// Source image has no pixels.
-    #[error("source image has invalid dimensions {width}x{height}")]
-    EmptyImage { width: u32, height: u32 },
-    /// Output dimensions overflowed supported integer bounds.
-    #[error("thumbnail dimensions overflowed")]
-    DimensionOverflow,
-    /// A trusted RGBA payload could not be represented.
-    #[error("thumbnail RGBA dimensions {width}x{height} overflow byte length")]
-    RgbaLengthOverflow { width: u32, height: u32 },
-    /// A trusted RGBA payload has the wrong length.
-    #[error("thumbnail RGBA buffer length mismatch: expected {expected}, got {actual}")]
-    RgbaLengthMismatch { expected: usize, actual: usize },
-    /// Failed to read a local image file.
-    #[cfg(test)]
-    #[error("failed to read image file {}", path.display())]
-    FileRead {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error(transparent)]
+    Decode(#[from] ThumbnailDecodeError),
     /// URL is not a valid HTTP(S) URL.
     #[error("invalid thumbnail URL {url}")]
     InvalidUrl { url: String },
@@ -315,46 +298,6 @@ pub enum ThumbnailError {
         #[source]
         source: ureq::Error,
     },
-    /// Failed while guessing an encoded image format.
-    #[error("failed to inspect image bytes")]
-    ImageIo(#[source] std::io::Error),
-    /// Failed to decode an encoded image.
-    #[error("failed to decode image")]
-    ImageDecode(#[source] image::ImageError),
-    /// Failed to decode GIF thumbnail frames.
-    #[error("failed to decode GIF thumbnail")]
-    GifDecode(#[source] GifPreviewError),
-    /// Failed to construct a resize image view.
-    #[error("failed to construct resize image")]
-    ResizeImage(#[source] fast_image_resize::ImageBufferError),
-    /// Failed to resize decoded image data.
-    #[error("failed to resize image")]
-    Resize(#[source] fast_image_resize::ResizeError),
-}
-
-impl From<ThumbnailDecodeError> for ThumbnailError {
-    fn from(error: ThumbnailDecodeError) -> Self {
-        match error {
-            ThumbnailDecodeError::InvalidMaxEdge => Self::InvalidMaxEdge,
-            ThumbnailDecodeError::EmptyImage { width, height } => {
-                Self::EmptyImage { width, height }
-            }
-            ThumbnailDecodeError::DimensionOverflow => Self::DimensionOverflow,
-            ThumbnailDecodeError::RgbaLengthOverflow { width, height } => {
-                Self::RgbaLengthOverflow { width, height }
-            }
-            ThumbnailDecodeError::RgbaLengthMismatch { expected, actual } => {
-                Self::RgbaLengthMismatch { expected, actual }
-            }
-            #[cfg(test)]
-            ThumbnailDecodeError::FileRead { path, source } => Self::FileRead { path, source },
-            ThumbnailDecodeError::ImageIo(source) => Self::ImageIo(source),
-            ThumbnailDecodeError::ImageDecode(source) => Self::ImageDecode(source),
-            ThumbnailDecodeError::GifDecode(source) => Self::GifDecode(source),
-            ThumbnailDecodeError::ResizeImage(source) => Self::ResizeImage(source),
-            ThumbnailDecodeError::Resize(source) => Self::Resize(source),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -74,10 +74,7 @@ mod tests {
         let mut state = State::default();
         let retry = PendingRetry::InstalledMetadata {
             generation: Generation::from_raw(3),
-            item_ids: vec![
-                PublishedFileId::new(10).expect("test fixture ids are always nonzero"),
-                PublishedFileId::new(20).expect("test fixture ids are always nonzero"),
-            ],
+            item_ids: vec![PublishedFileId::fixture(10), PublishedFileId::fixture(20)],
         };
 
         let _effects = update(&mut state, Message::PendingRetrySet(retry.clone()));

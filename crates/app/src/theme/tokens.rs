@@ -1,4 +1,5 @@
-use crate::bridge::{EffectiveThemePreset, ThemePreset, theme as core_theme};
+use crate::bridge::{EffectiveThemePreset, ThemePreset};
+use crate::theme::color as core_theme;
 use iced::Color;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -274,6 +275,10 @@ pub struct Dimensions {
     pub(crate) control_height: f32,
     pub(crate) control_height_lg: f32,
     pub(crate) control_height_xl: f32,
+    /// Widest a tooltip may grow before wrapping. One value app-wide: a
+    /// tooltip that wraps at a different width in each panel reads as a
+    /// different component.
+    pub(crate) tooltip_max_width: f32,
     pub(crate) icon_size_sm: f32,
     pub(crate) icon_size: f32,
     pub(crate) icon_size_md: f32,
@@ -992,6 +997,7 @@ const fn dimensions() -> Dimensions {
         control_height: 40.0,
         control_height_lg: 44.0,
         control_height_xl: 48.0,
+        tooltip_max_width: 320.0,
         icon_size_sm: 12.0,
         icon_size: 16.0,
         icon_size_md: 18.0,

@@ -27,7 +27,6 @@ use super::details::{AuthorDisplay, Details, MetadataRow, MetadataValue, Relativ
 use super::update::{browser_rows_scrollable_id, nav_path_scrollable_id};
 use super::{Message, State};
 
-const TOOLTIP_MAX_WIDTH: f32 = 280.0;
 const AVATAR_SIZE: f32 = 24.0;
 const DEAD_GLYPH_SIZE: f32 = 32.0;
 const SPINNER_SIZE: f32 = 32.0;
@@ -341,7 +340,7 @@ fn stats_row<'a>(details: &'a Details, tokens: &Tokens) -> Element<'a, Message> 
             stars,
             details.score_label.clone(),
             tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         )
     };
 
@@ -522,7 +521,12 @@ fn timestamp_value<'a>(row_data: &'a MetadataRow, ctx: ViewCtx<'a>) -> Element<'
     if row_data.tooltip.trim().is_empty() {
         value.into()
     } else {
-        tooltip_widget::below(value, row_data.tooltip.clone(), &tokens, TOOLTIP_MAX_WIDTH)
+        tooltip_widget::below(
+            value,
+            row_data.tooltip.clone(),
+            &tokens,
+            tokens.dims.tooltip_max_width,
+        )
     }
 }
 
@@ -668,7 +672,7 @@ fn nav_control<'a>(
     .padding(tokens.spacing.pad_xs)
     .style(move |_, status| theme::styles::ghost_button(&tokens, status));
 
-    tooltip_widget::below(control, tooltip, &tokens, TOOLTIP_MAX_WIDTH)
+    tooltip_widget::below(control, tooltip, &tokens, tokens.dims.tooltip_max_width)
 }
 
 fn browser_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {

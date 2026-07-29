@@ -8,7 +8,7 @@ use crate::bridge::tasks::{
 use crate::bridge::ui_error::UiError;
 use gmpublished_backend::error_key::keys;
 
-use super::super::model::{
+use super::super::jobs::{
     DownloaderEvent, JobProgress, LocalExtractionOutcome, RowId, Section, workshop_result_success,
     workshop_result_success_with_gma,
 };

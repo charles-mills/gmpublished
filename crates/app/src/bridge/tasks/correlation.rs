@@ -374,10 +374,9 @@ fn apply_transaction_event_to_task(
         }
         TransactionRuntimeEvent::Data { payload, .. } => {
             let mut actions = match payload {
-                TransactionPayload::WorkshopItem(item_id) => task.set_workshop_item_id(
-                    PublishedFileId::new(item_id.0)
-                        .expect("Steam never issues a zero published file id"),
-                ),
+                TransactionPayload::WorkshopItem(item_id) => {
+                    task.set_workshop_item_id(PublishedFileId::from_backend(*item_id))
+                }
                 _ => Vec::new(),
             };
             match payload {

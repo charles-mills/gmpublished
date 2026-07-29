@@ -141,12 +141,12 @@ impl Uniforms {
     pub(super) fn for_model(model: &ModelPreview, camera: &Camera, bounds: Rectangle) -> Self {
         let center = mid(model.bounds_min, model.bounds_max);
         let radius = half_extent(model.bounds_min, model.bounds_max).max(1.0);
-        let distance = radius * 2.2 * camera.distance;
+        let distance = radius * 2.2 * camera.orbit.distance();
 
         let eye = [
-            center[0] + distance * camera.pitch.cos() * camera.yaw.sin(),
-            center[1] + distance * camera.pitch.cos() * camera.yaw.cos(),
-            center[2] + distance * camera.pitch.sin(),
+            center[0] + distance * camera.orbit.pitch().cos() * camera.orbit.yaw().sin(),
+            center[1] + distance * camera.orbit.pitch().cos() * camera.orbit.yaw().cos(),
+            center[2] + distance * camera.orbit.pitch().sin(),
         ];
         // Source models are Z-up.
         let view = look_at(eye, center, SOURCE_UP);
@@ -203,7 +203,6 @@ impl FlyCameraFrame {
     }
 }
 
-const DEFAULT_WATER_FOG_COLOR: [f32; 3] = [0.03, 0.10, 0.10];
 const DEFAULT_SKY_TINT: [f32; 3] = [0.12, 0.18, 0.24];
 
 fn scene_water_fog_color(scene: &ModelPreview) -> [f32; 3] {
@@ -213,7 +212,7 @@ fn scene_water_fog_color(scene: &ModelPreview) -> [f32; 3] {
         .filter_map(|slot| slot.texture.as_deref())
         .find(|texture| texture.is_water_fallback())
         .and_then(texture_smallest_mip_average)
-        .unwrap_or(DEFAULT_WATER_FOG_COLOR)
+        .unwrap_or(crate::bridge::materials::DEFAULT_WATER_FOG_LINEAR)
 }
 
 fn scene_sky_tint(skybox: Option<&Skybox>) -> [f32; 3] {
@@ -1374,7 +1373,14 @@ impl shader::Pipeline for ModelPipeline {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        // Declared, not `None`: this is wgpu's one hook for
+                        // catching a shader whose declaration of this uniform
+                        // has drifted from the Rust struct, and `None`
+                        // declines it. Binding 0 above already declares its
+                        // size; this one was the exception.
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<MaterialUniform>() as u64,
+                        ),
                     },
                     count: None,
                 },
@@ -3004,5 +3010,67 @@ mod tests {
         );
         // Without the refractive pipeline, water stays on the single-pass path.
         assert_eq!(frame_layout(Some(&plan), false), FrameLayout::SinglePass);
+    }
+}
+
+#[cfg(test)]
+mod uniform_layout_tests {
+    use super::Uniforms;
+
+    /// Every shader that binds the shared uniform buffer declares its own copy
+    /// of the struct, and WGSL only requires the buffer to be *at least* as
+    /// large as the declaration. A shader carrying a prefix therefore compiles
+    /// and runs, reading the wrong fields the moment one is inserted anywhere
+    /// but the end — silently, on the GPU, with no Rust-side symptom.
+    ///
+    /// `min_binding_size` catches a buffer that is too small; nothing catches
+    /// a declaration that is too short. This does.
+    #[test]
+    fn every_shader_declares_the_whole_uniform_struct() {
+        for (name, source) in [
+            (
+                "model_viewer.wgsl",
+                crate::features::file_preview::viewer3d::MODEL_SHADER_SOURCE,
+            ),
+            (
+                "water.wgsl",
+                crate::features::file_preview::viewer3d::WATER_SHADER_SOURCE,
+            ),
+            (
+                "detail.wgsl",
+                crate::features::file_preview::viewer3d::DETAIL_SHADER_SOURCE,
+            ),
+            (
+                "sky.wgsl",
+                crate::features::file_preview::viewer3d::SKY_SHADER_SOURCE,
+            ),
+        ] {
+            assert_eq!(
+                declared_uniform_size(source),
+                Some(std::mem::size_of::<Uniforms>()),
+                "{name} does not declare the whole `Uniforms` struct"
+            );
+        }
+    }
+
+    /// Byte size of the `Uniforms` struct a WGSL source declares, by summing
+    /// its members. `None` if it declares none, or uses a member type this
+    /// does not know — either is a reason to look rather than pass.
+    fn declared_uniform_size(source: &str) -> Option<usize> {
+        let body = source.split_once("struct Uniforms {")?.1.split_once('}')?.0;
+        let mut total = 0;
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            let ty = line.split_once(':')?.1.trim().trim_end_matches(',');
+            total += match ty {
+                "mat4x4<f32>" => 64,
+                "vec4<f32>" => 16,
+                _ => return None,
+            };
+        }
+        Some(total)
     }
 }

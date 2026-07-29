@@ -78,7 +78,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             .map_or_else(Vec::new, |request| {
                 vec![Effect::EntryPreviewRequested(request)]
             }),
-        Message::FilePreview(_) => Vec::new(),
+        Message::FilePreview(message) => vec![Effect::FilePreview(message)],
         Message::WorkshopLinkRequested => state
             .workshop_link_url()
             .map_or_else(Vec::new, |url| vec![Effect::OpenUrlRequested(url)]),
@@ -177,16 +177,13 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/addon.gma"),
                 "Addon",
-                Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(123)),
             )),
         );
 
         assert!(state.is_open());
         assert!(state.loading());
-        assert_eq!(
-            state.workshop_id(),
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
-        );
+        assert_eq!(state.workshop_id(), Some(PublishedFileId::fixture(123)));
         assert_eq!(
             effects,
             vec![
@@ -194,14 +191,11 @@ mod tests {
                 Effect::ArchiveOpenRequested(OpenRequest {
                     request_id: Generation::from_raw(1),
                     path: PathBuf::from("/tmp/addon.gma"),
-                    workshop_id: Some(
-                        PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-                    ),
+                    workshop_id: Some(PublishedFileId::fixture(123)),
                 }),
                 Effect::WorkshopMetadataRequested(MetadataRequest {
                     request_id: Generation::from_raw(1),
-                    workshop_id: PublishedFileId::new(123)
-                        .expect("test fixture ids are always nonzero"),
+                    workshop_id: PublishedFileId::fixture(123),
                 }),
                 Effect::ThumbnailDemandsChanged,
             ]
@@ -236,7 +230,7 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/addon.gma"),
                 "Addon",
-                Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(123)),
             )),
         );
 
@@ -260,7 +254,7 @@ mod tests {
                 OpenTarget::new(
                     PathBuf::from("/tmp/addon.gma"),
                     "Addon",
-                    Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                    Some(PublishedFileId::fixture(123)),
                 )
                 .with_initial_entry_preview("lua/autorun/init.lua"),
             ),
@@ -289,7 +283,7 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/first.gma"),
                 "First",
-                Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(123)),
             )),
         );
         let _effects = update(
@@ -297,7 +291,7 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/second.gma"),
                 "Second",
-                Some(PublishedFileId::new(456).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(456)),
             )),
         );
 

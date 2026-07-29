@@ -9,6 +9,12 @@
 //! Paths that arrive before the subscription is live (i.e. documents that
 //! launched the app) are buffered inside the queue's std `mpsc` channel and
 //! drained once the subscription's forwarder thread starts.
+//!
+//! There is no sibling module for other platforms, and that is not an
+//! omission: elsewhere the shell puts the path in `argv`, which
+//! [`gmpublished_backend::cli::is_cli_mode`] treats as a headless extraction
+//! request — so the GUI never starts and there is nothing to forward. That
+//! divergence is documented there, where both halves are visible.
 
 use std::{
     collections::HashSet,

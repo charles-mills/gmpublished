@@ -14,8 +14,6 @@ use crate::{
 use super::model::DestinationKind;
 use super::{DestinationError, Message, State};
 
-const TOOLTIP_MAX_WIDTH: f32 = 320.0;
-
 pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, viewport_size: Size) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
@@ -164,7 +162,7 @@ fn tile<'a>(
             area,
             i18n.tr("destination-open-tip"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         )
     } else {
         area.into()

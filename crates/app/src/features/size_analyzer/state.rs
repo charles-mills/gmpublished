@@ -11,9 +11,6 @@ use iced::{Point, Size};
 
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::library::LibrarySnapshot;
-use crate::bridge::size_analyzer::{
-    Rect, SizeAnalyzerError, TreemapAddon, TreemapBounds, TreemapLayout, analyze_installed_addons,
-};
 use crate::bridge::ui_error::UiError;
 use crate::features::context_menu;
 use crate::generation::Generation;
@@ -21,6 +18,9 @@ use crate::media::{
     size_analyzer_render::{RgbaColor, SizeAnalyzerLabelSprite, tag_color},
     thumbnail_demand::{self, DeliveryResult},
     thumbnail_worker::ThumbnailInput,
+};
+use crate::treemap::{
+    Rect, SizeAnalyzerError, TreemapAddon, TreemapBounds, TreemapLayout, analyze_installed_addons,
 };
 
 const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;

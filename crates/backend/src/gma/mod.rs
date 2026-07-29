@@ -11,7 +11,7 @@ const GMA_HEADER: &[u8; 4] = b"GMAD";
 
 /// Zero is never a real Steam Workshop id; treat it as "no id" wherever a
 /// digit-suffix or folder-name parse can produce it.
-fn nonzero_workshop_id(id: u64) -> Option<PublishedFileId> {
+pub(crate) fn nonzero_workshop_id(id: u64) -> Option<PublishedFileId> {
     (id != 0).then_some(PublishedFileId(id))
 }
 
@@ -22,7 +22,7 @@ pub fn ws_id_from_file_name<S: AsRef<str>>(file_name: S) -> Option<PublishedFile
     let file_name = file_name.strip_prefix("ds_").unwrap_or(file_name);
 
     if let Ok(id) = file_name.parse::<u64>() {
-        return Some(PublishedFileId(id));
+        return nonzero_workshop_id(id);
     }
 
     extract_suffix_ws_id(file_name)
@@ -46,7 +46,7 @@ fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<PublishedFileId> 
 }
 
 #[derive(Debug, Clone, Error)]
-pub enum GMAError {
+pub enum GmaError {
     #[error("GMA I/O failed")]
     IOError(#[source] Option<std::sync::Arc<std::io::Error>>),
     #[error("the GMA is malformed")]
@@ -76,12 +76,12 @@ pub enum GMAError {
     #[error("the extraction destination is unavailable")]
     DestinationUnavailable,
 }
-impl From<std::io::Error> for GMAError {
+impl From<std::io::Error> for GmaError {
     fn from(error: std::io::Error) -> Self {
         Self::IOError(Some(std::sync::Arc::new(error)))
     }
 }
-impl crate::error_key::HasErrorKey for GMAError {
+impl crate::error_key::HasErrorKey for GmaError {
     fn error_key(&self) -> crate::error_key::ErrorKey {
         use crate::error_key::keys;
         match self {
@@ -122,9 +122,9 @@ impl crate::error_key::HasErrorKey for GMAError {
 /// field defaulted, untagged matched `Standard` for *any* JSON object, so a
 /// legacy description that happened to be one silently lost its text and
 /// `Legacy` was unreachable. See [`metadata_from_embedded_fields`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum GMAMetadata {
+pub enum GmaMetadata {
     Standard {
         #[serde(default)]
         title: String,
@@ -158,7 +158,7 @@ impl StandardManifest {
     }
 }
 
-impl GMAMetadata {
+impl GmaMetadata {
     pub fn title(&self) -> &str {
         match &self {
             Self::Standard { title, .. } => title,
@@ -189,22 +189,22 @@ impl GMAMetadata {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct GMAHeader {
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct GmaHeader {
     pub version: u8,
     pub timestamp: u64,
-    pub metadata: GMAMetadata,
+    pub metadata: GmaMetadata,
     pub author: String,
     pub addon_version: i32,
 }
-impl GMAHeader {
+impl GmaHeader {
     pub fn title(&self) -> &str {
         self.metadata.title()
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct GMAEntry {
+pub struct GmaEntry {
     pub path: String,
     pub size: u64,
     pub crc: u32,
@@ -237,29 +237,27 @@ pub fn is_unsafe_entry_path(path: &str) -> bool {
     false
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GMAFile {
-    #[serde(serialize_with = "serde_canonicalize")]
+/// `PartialEq` is structural, and deliberately so: keying it on the discovery
+/// list's order would make two different archives at one path compare equal
+/// whenever their mtimes match.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GmaFile {
     pub path: PathBuf,
     pub size: u64,
 
     pub id: Option<PublishedFileId>,
 
-    #[serde(flatten)]
-    pub metadata: GMAMetadata,
+    pub metadata: GmaMetadata,
 
-    #[serde(skip)]
     pub version: u8,
 
     pub extracted_name: String,
 
-    #[serde(skip)]
     pub modified: Option<u64>,
 }
-impl std::fmt::Debug for GMAFile {
+impl std::fmt::Debug for GmaFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GMAFile")
+        f.debug_struct("GmaFile")
             .field("path", &self.path)
             .field("size", &self.size)
             .field("id", &self.id)
@@ -270,43 +268,31 @@ impl std::fmt::Debug for GMAFile {
             .finish()
     }
 }
-impl GMAFile {
-    /// Newest-modified first, then path, so `Ord`/`Eq` agree with each
-    /// other and with the discovery list's presentation order.
-    fn sort_key(&self) -> (std::cmp::Reverse<Option<u64>>, &Path) {
-        (std::cmp::Reverse(self.modified), self.path.as_path())
-    }
-}
-impl PartialEq for GMAFile {
-    fn eq(&self, other: &Self) -> bool {
-        self.sort_key() == other.sort_key()
-    }
-}
-impl Eq for GMAFile {}
-impl PartialOrd for GMAFile {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for GMAFile {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.sort_key().cmp(&other.sort_key())
-    }
-}
-
-impl GMAFile {
+impl GmaFile {
     /// Carries [`read::GmaView::mmap`]'s accepted risk for the duration of the
     /// call.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GMAError> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GmaError> {
         read::GmaView::mmap(path.as_ref())?.handle(path)
     }
 
     pub fn set_ws_id(&mut self, id: PublishedFileId) {
         self.id = Some(id);
-        self.compute_extracted_name();
+        self.extracted_name = self.derive_extracted_name();
     }
 
-    pub(crate) fn compute_extracted_name(&mut self) {
+    /// Takes the workshop id from the file name when the archive itself did not
+    /// carry one, then derives the extraction name.
+    ///
+    /// Steam names a downloaded addon after its published file id, so a file on
+    /// disk identifies itself even when its embedded metadata does not — but
+    /// that is an identity change, not a naming one, which is why it is in this
+    /// method's name rather than hidden inside the derive.
+    pub(crate) fn adopt_path_id_and_name(&mut self) {
+        self.id = self.id.or_else(|| id_from_path(&self.path));
+        self.extracted_name = self.derive_extracted_name();
+    }
+
+    fn derive_extracted_name(&self) -> String {
         let mut extracted_name = String::new();
         let mut underscored = false;
 
@@ -325,16 +311,6 @@ impl GMAFile {
                     extracted_name.push('_');
                 }
                 first = false;
-            }
-        }
-
-        if self.id.is_none()
-            && let Some(stem) = self.path.file_stem()
-        {
-            let stem = stem.to_string_lossy();
-            let found_id = ws_id_from_file_name(&stem);
-            if found_id.is_some() {
-                self.id = found_id;
             }
         }
 
@@ -361,18 +337,13 @@ impl GMAFile {
                 );
         }
 
-        self.extracted_name = extracted_name;
+        extracted_name
     }
 }
 
-fn serde_canonicalize<S>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match dunce::canonicalize(path) {
-        Ok(path) => path.serialize(serializer),
-        Err(_) => path.serialize(serializer),
-    }
+/// The workshop id a `.gma`'s own file name carries, if any.
+fn id_from_path(path: &Path) -> Option<PublishedFileId> {
+    ws_id_from_file_name(path.file_stem()?.to_string_lossy())
 }
 
 pub mod whitelist;
@@ -386,6 +357,22 @@ pub mod write;
 
 #[cfg(test)]
 mod tests {
+    /// `0.gma` is a legal filename, and the app turns every discovered id into
+    /// a `NonZeroU64` — so a zero reaching the bridge panics library discovery
+    /// rather than being ignored. Every parse path has to filter it, including
+    /// the whole-name-is-a-number fast path.
+    #[test]
+    fn a_zero_workshop_id_is_no_id_on_every_parse_path() {
+        assert_eq!(super::ws_id_from_file_name("0"), None);
+        assert_eq!(super::ws_id_from_file_name("ds_0"), None);
+        assert_eq!(super::ws_id_from_file_name("addon_0"), None);
+        assert_eq!(super::ws_id_from_file_name("00"), None);
+        assert_eq!(
+            super::ws_id_from_file_name("123"),
+            Some(steamworks::PublishedFileId(123))
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -1,8 +1,10 @@
+use super::ports::Ports;
 use super::{
     App, BackendServices, Path, PathBuf, PublishedFileId, RootMessage, Task, TaskKind, UiError,
     WORKSHOP_LEGAL_URL, flatten_blocking_ui_result, modal_stack, prepare_publish, sounds,
     steam_session, workshop_url,
 };
+use crate::bridge::ui_error::ResultExt as _;
 use crate::features::file_preview;
 use gmpublished_backend::error_key::keys;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,6 +44,9 @@ impl App {
         effect: prepare_publish::Effect,
     ) -> Task<RootMessage> {
         match effect {
+            prepare_publish::Effect::FilePreview(message) => {
+                self.apply_file_preview_message(message)
+            }
             prepare_publish::Effect::ModalOpenRequested => {
                 self.open_modal_stack_task(modal_stack::ActiveModal::PreparePublish)
             }
@@ -60,7 +65,7 @@ impl App {
             prepare_publish::Effect::IconPickerRequested => self.prepare_publish_icon_picker_task(),
             prepare_publish::Effect::OpenUrlRequested(url) => self.open_url_task(url),
             prepare_publish::Effect::WorkshopContentRequested(request) => {
-                self.prepare_publish_workshop_content_task(request)
+                self.publish().workshop_content_task(request)
             }
             prepare_publish::Effect::WorkshopSnapshotInspectionRequested(request) => {
                 let generation = request.generation;
@@ -78,102 +83,31 @@ impl App {
                     })
             }
             prepare_publish::Effect::CleanupPathRequested(path) => {
-                self.prepare_publish_cleanup_path_task(path)
+                self.publish().cleanup_path_task(path)
             }
             prepare_publish::Effect::PathVerificationRequested(request) => {
-                self.prepare_publish_content_verification_task(request)
+                self.publish().content_verification_task(request)
             }
             prepare_publish::Effect::EntryPreviewRequested(request) => {
                 self.apply_file_preview_message(file_preview::Message::OpenRequested(request))
             }
             prepare_publish::Effect::IconVerificationRequested(request) => {
-                self.prepare_publish_icon_verification_task(request)
+                self.publish().icon_verification_task(request)
             }
             prepare_publish::Effect::IgnorePatternMutationRequested(mutation) => {
-                self.prepare_publish_ignore_mutation_task(mutation)
+                self.publish().ignore_mutation_task(mutation)
             }
-            prepare_publish::Effect::SubmitContextRequested => {
-                self.prepare_publish_submit_context_task()
-            }
+            prepare_publish::Effect::SubmitContextRequested => self.publish().submit_context_task(),
             prepare_publish::Effect::PublishSubmitRequested(request) => {
-                self.prepare_publish_submit_task(request)
+                self.publish().submit_task(request)
             }
             prepare_publish::Effect::PublishIconSubmitRequested(request) => {
-                self.prepare_publish_publish_icon_task(request)
+                self.publish().publish_icon_task(request)
             }
             prepare_publish::Effect::PublishSuccessUrlsRequested(result) => {
                 self.prepare_publish_success_urls_task(result)
             }
         }
-    }
-
-    pub(super) fn prepare_publish_ignored_patterns(&self) -> Vec<prepare_publish::IgnoredPattern> {
-        let (settings, _paths) = self.ctx.settings_and_paths_snapshot();
-        prepare_publish::ignored_patterns_from_settings(&settings)
-    }
-
-    pub(super) fn prepare_publish_upscale_default(&self) -> bool {
-        let (settings, _paths) = self.ctx.settings_and_paths_snapshot();
-        settings.upscale_addon_icon
-    }
-
-    pub(super) fn prepare_publish_workshop_snapshot(
-        &self,
-        workshop_id: PublishedFileId,
-    ) -> (u64, PathBuf) {
-        let (_settings, paths) = self.ctx.settings_and_paths_snapshot();
-        let sequence = WORKSHOP_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = paths
-            .temp_dir
-            .join("prepare-publish-workshop")
-            .join(format!("{}-{sequence}", workshop_id.get()));
-        (sequence, path)
-    }
-
-    pub(super) fn prepare_publish_workshop_content_task(
-        &self,
-        request: prepare_publish::WorkshopContentRequest,
-    ) -> Task<RootMessage> {
-        let request_id = request.request_id;
-        self.ctx
-            .run_blocking("prepare-publish-workshop-content", move |app| {
-                if request.destination.exists() {
-                    std::fs::remove_dir_all(&request.destination).map_err(|error| {
-                        UiError::detailed(keys::IO_ERROR, Some(error.to_string()))
-                    })?;
-                }
-                prepare_publish_connect_steam(app)?;
-                app.submit_workshop_snapshot(
-                    request.workshop_id,
-                    crate::bridge::gma::ExtractDestination::Directory(request.destination),
-                    request_id,
-                )
-            })
-            .map(move |result| {
-                RootMessage::PreparePublish(
-                    prepare_publish::Message::WorkshopContentSubmissionCompleted(
-                        request_id,
-                        flatten_blocking_ui_result(result),
-                    ),
-                )
-            })
-    }
-
-    pub(super) fn prepare_publish_cleanup_path_task(&self, path: PathBuf) -> Task<RootMessage> {
-        self.ctx
-            .run_blocking("prepare-publish-workshop-cleanup", move |_app| {
-                match std::fs::remove_dir_all(&path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        log::warn!(
-                            "failed to clean Prepare Publish Workshop snapshot {}: {error}",
-                            path.display()
-                        );
-                    }
-                }
-            })
-            .discard()
     }
 
     /// Plays the modal's UI sounds in response to a `prepare_publish::Message`.
@@ -257,165 +191,13 @@ impl App {
     pub(super) fn prepare_publish_content_picker_task(&self) -> Task<RootMessage> {
         let directory =
             prepare_publish_initial_content_directory(self.state.prepare_publish.addon_path());
-        let title = self
-            .state
-            .i18n
-            .tr("native-dialog-select-addon-content-folder");
-        Task::future(async move {
-            let selected = rfd::AsyncFileDialog::new()
-                .set_title(title)
-                .set_directory(directory)
-                .set_can_create_directories(false)
-                .pick_folder()
-                .await
-                .map(|folder| folder.path().to_path_buf());
-            RootMessage::PreparePublish(prepare_publish::Message::AddonPathBrowseCompleted(
-                selected,
-            ))
-        })
+        self.publish().content_picker_task(directory)
     }
 
     pub(super) fn prepare_publish_icon_picker_task(&self) -> Task<RootMessage> {
         let directory =
             prepare_publish_initial_icon_directory(self.state.prepare_publish.icon_display_path());
-        let (_settings, paths) = self.ctx.settings_and_paths_snapshot();
-        let temp_dir = paths.temp_dir;
-        let title = self.state.i18n.tr("native-dialog-select-workshop-icon");
-        let filter = self.state.i18n.tr("native-dialog-workshop-icon-filter");
-        let well = self.state.tokens.colors.surface_sunken;
-        let well_rgb = [well.r, well.g, well.b];
-        Task::future(async move {
-            let selected = rfd::AsyncFileDialog::new()
-                .set_title(title)
-                .set_directory(directory)
-                .add_filter(filter, &["jpg", "jpeg", "png", "gif"])
-                .pick_file()
-                .await
-                .map(|file| file.path().to_path_buf());
-            RootMessage::PreparePublish(prepare_publish::Message::IconBrowseCompleted {
-                path: selected,
-                temp_dir,
-                well_rgb,
-            })
-        })
-    }
-
-    pub(super) fn prepare_publish_content_verification_task(
-        &self,
-        request: prepare_publish::ContentPathVerificationRequest,
-    ) -> Task<RootMessage> {
-        let generation = request.generation;
-        self.ctx
-            .run_blocking("prepare-publish-verify", move |app| {
-                prepare_publish::verify_content_path(app, request)
-            })
-            .map(move |result| {
-                RootMessage::PreparePublish(prepare_publish::Message::PathVerificationCompleted(
-                    generation,
-                    flatten_blocking_ui_result(result),
-                ))
-            })
-    }
-
-    pub(super) fn prepare_publish_icon_verification_task(
-        &self,
-        request: prepare_publish::IconVerificationRequest,
-    ) -> Task<RootMessage> {
-        let generation = request.generation;
-        self.ctx
-            .run_blocking("prepare-publish-icon", move |_app| {
-                prepare_publish::verify_icon_preview(request)
-            })
-            .map(move |result| {
-                RootMessage::PreparePublish(prepare_publish::Message::IconVerificationCompleted(
-                    generation,
-                    flatten_blocking_ui_result(result),
-                ))
-            })
-    }
-
-    pub(super) fn prepare_publish_ignore_mutation_task(
-        &self,
-        mutation: prepare_publish::IgnorePatternMutation,
-    ) -> Task<RootMessage> {
-        let worker_name = mutation.worker_name();
-        self.ctx
-            .run_blocking(worker_name, move |app| {
-                prepare_publish::apply_ignore_pattern_mutation(app, mutation)
-            })
-            .map(move |result| {
-                RootMessage::PreparePublish(
-                    prepare_publish::Message::IgnorePatternMutationCompleted(
-                        result.map_err(|error| UiError::from(&error)),
-                    ),
-                )
-            })
-    }
-
-    pub(super) fn prepare_publish_submit_context_task(&self) -> Task<RootMessage> {
-        let (settings, paths) = self.ctx.settings_and_paths_snapshot();
-        let context = prepare_publish::PublishSubmitContext {
-            ignore_globs: settings.ignore_globs,
-            temp_dir: paths.temp_dir,
-        };
-
-        Task::done(RootMessage::PreparePublish(
-            prepare_publish::Message::SubmitContextLoaded(Ok(context)),
-        ))
-    }
-
-    pub(super) fn prepare_publish_submit_task(
-        &self,
-        envelope: prepare_publish::PublishSubmitRequestEnvelope,
-    ) -> Task<RootMessage> {
-        let generation = envelope.generation;
-        let initial_status = envelope.initial_status();
-        let task = self.ctx.create_task(TaskKind::Publish, initial_status);
-        let ctx = self.ctx.clone();
-        self.ctx
-            .run_blocking("prepare-publish-submit", move |app| {
-                prepare_publish::run_publish_submit(
-                    &ctx,
-                    app,
-                    prepare_publish_connect_steam,
-                    task,
-                    envelope.request,
-                )
-            })
-            .map(move |result| {
-                RootMessage::PreparePublish(prepare_publish::Message::PublishSubmitCompleted(
-                    generation,
-                    flatten_blocking_ui_result(result),
-                ))
-            })
-    }
-
-    pub(super) fn prepare_publish_publish_icon_task(
-        &self,
-        request: prepare_publish::PublishIconSubmitRequestEnvelope,
-    ) -> Task<RootMessage> {
-        let generation = request.generation;
-        let task = self.ctx.create_task(
-            TaskKind::Publish,
-            crate::bridge::tasks::PUBLISH_PROCESSING_ICON_STATUS,
-        );
-        let ctx = self.ctx.clone();
-        self.ctx
-            .run_blocking("prepare-publish-icon-submit", move |app| {
-                prepare_publish::run_publish_icon_submit(
-                    &ctx,
-                    app,
-                    prepare_publish_connect_steam,
-                    task,
-                    &request,
-                )
-            })
-            .map(move |result| {
-                RootMessage::PreparePublish(prepare_publish::Message::PublishIconSubmitCompleted(
-                    generation,
-                    flatten_blocking_ui_result(result),
-                ))
-            })
+        self.publish().icon_picker_task(directory)
     }
 
     pub(super) fn prepare_publish_success_urls_task(
@@ -476,4 +258,251 @@ pub(super) fn fallback_current_dir() -> PathBuf {
         log::debug!("current_dir failed while opening Prepare Publish picker: {error}");
         std::env::temp_dir()
     })
+}
+
+/// Publish effects that need only [`Ports`] — no `State`, and so no way to
+/// reach another feature's.
+pub(super) struct PublishRunner<'a> {
+    ports: Ports<'a>,
+}
+
+impl<'a> PublishRunner<'a> {
+    pub(super) const fn new(ports: Ports<'a>) -> Self {
+        Self { ports }
+    }
+
+    pub(super) fn ignored_patterns(&self) -> Vec<prepare_publish::IgnoredPattern> {
+        let (settings, _paths) = self.ports.ctx.settings_and_paths_snapshot();
+        prepare_publish::ignored_patterns_from_settings(&settings)
+    }
+
+    pub(super) fn upscale_default(&self) -> bool {
+        let (settings, _paths) = self.ports.ctx.settings_and_paths_snapshot();
+        settings.upscale_addon_icon
+    }
+
+    pub(super) fn workshop_snapshot(&self, workshop_id: PublishedFileId) -> (u64, PathBuf) {
+        let (_settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
+        let sequence = WORKSHOP_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = paths
+            .temp_dir
+            .join("prepare-publish-workshop")
+            .join(format!("{}-{sequence}", workshop_id.get()));
+        (sequence, path)
+    }
+
+    pub(super) fn workshop_content_task(
+        &self,
+        request: prepare_publish::WorkshopContentRequest,
+    ) -> Task<RootMessage> {
+        let request_id = request.request_id;
+        self.ports
+            .ctx
+            .run_blocking("prepare-publish-workshop-content", move |app| {
+                if request.destination.exists() {
+                    std::fs::remove_dir_all(&request.destination).map_err(|error| {
+                        UiError::detailed(keys::IO_ERROR, Some(error.to_string()))
+                    })?;
+                }
+                prepare_publish_connect_steam(app)?;
+                app.submit_workshop_snapshot(
+                    request.workshop_id,
+                    crate::bridge::gma::ExtractDestination::Directory(request.destination),
+                    request_id,
+                )
+            })
+            .map(move |result| {
+                RootMessage::PreparePublish(
+                    prepare_publish::Message::WorkshopContentSubmissionCompleted(
+                        request_id,
+                        flatten_blocking_ui_result(result),
+                    ),
+                )
+            })
+    }
+
+    pub(super) fn cleanup_path_task(&self, path: PathBuf) -> Task<RootMessage> {
+        self.ports
+            .ctx
+            .run_blocking("prepare-publish-workshop-cleanup", move |_app| {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        log::warn!(
+                            "failed to clean Prepare Publish Workshop snapshot {}: {error}",
+                            path.display()
+                        );
+                    }
+                }
+            })
+            .discard()
+    }
+
+    pub(super) fn content_verification_task(
+        &self,
+        request: prepare_publish::ContentPathVerificationRequest,
+    ) -> Task<RootMessage> {
+        let generation = request.generation;
+        self.ports
+            .ctx
+            .run_blocking("prepare-publish-verify", move |app| {
+                prepare_publish::verify_content_path(app, request)
+            })
+            .map(move |result| {
+                RootMessage::PreparePublish(prepare_publish::Message::PathVerificationCompleted(
+                    generation,
+                    flatten_blocking_ui_result(result),
+                ))
+            })
+    }
+
+    pub(super) fn icon_verification_task(
+        &self,
+        request: prepare_publish::IconVerificationRequest,
+    ) -> Task<RootMessage> {
+        let generation = request.generation;
+        self.ports
+            .ctx
+            .run_blocking("prepare-publish-icon", move |_app| {
+                prepare_publish::verify_icon_preview(request)
+            })
+            .map(move |result| {
+                RootMessage::PreparePublish(prepare_publish::Message::IconVerificationCompleted(
+                    generation,
+                    flatten_blocking_ui_result(result),
+                ))
+            })
+    }
+
+    pub(super) fn ignore_mutation_task(
+        &self,
+        mutation: prepare_publish::IgnorePatternMutation,
+    ) -> Task<RootMessage> {
+        let worker_name = mutation.worker_name();
+        self.ports
+            .ctx
+            .run_blocking(worker_name, move |app| {
+                prepare_publish::apply_ignore_pattern_mutation(app, mutation)
+            })
+            .map(move |result| {
+                RootMessage::PreparePublish(
+                    prepare_publish::Message::IgnorePatternMutationCompleted(result.ui_err()),
+                )
+            })
+    }
+
+    pub(super) fn submit_context_task(&self) -> Task<RootMessage> {
+        let (settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
+        let context = prepare_publish::PublishSubmitContext {
+            ignore_globs: settings.ignore_globs,
+            temp_dir: paths.temp_dir,
+        };
+
+        Task::done(RootMessage::PreparePublish(
+            prepare_publish::Message::SubmitContextLoaded(Ok(context)),
+        ))
+    }
+
+    pub(super) fn submit_task(
+        &self,
+        envelope: prepare_publish::PublishSubmitRequestEnvelope,
+    ) -> Task<RootMessage> {
+        let generation = envelope.generation;
+        let initial_status = envelope.initial_status();
+        let task = self
+            .ports
+            .ctx
+            .create_task(TaskKind::Publish, initial_status);
+        let ctx = self.ports.ctx.clone();
+        self.ports
+            .ctx
+            .run_blocking("prepare-publish-submit", move |app| {
+                prepare_publish::run_publish_submit(
+                    &ctx,
+                    app,
+                    prepare_publish_connect_steam,
+                    task,
+                    envelope.request,
+                )
+            })
+            .map(move |result| {
+                RootMessage::PreparePublish(prepare_publish::Message::PublishSubmitCompleted(
+                    generation,
+                    flatten_blocking_ui_result(result),
+                ))
+            })
+    }
+
+    pub(super) fn publish_icon_task(
+        &self,
+        request: prepare_publish::PublishIconSubmitRequestEnvelope,
+    ) -> Task<RootMessage> {
+        let generation = request.generation;
+        let task = self.ports.ctx.create_task(
+            TaskKind::Publish,
+            crate::bridge::tasks::PUBLISH_PROCESSING_ICON_STATUS,
+        );
+        let ctx = self.ports.ctx.clone();
+        self.ports
+            .ctx
+            .run_blocking("prepare-publish-icon-submit", move |app| {
+                prepare_publish::run_publish_icon_submit(
+                    &ctx,
+                    app,
+                    prepare_publish_connect_steam,
+                    task,
+                    &request,
+                )
+            })
+            .map(move |result| {
+                RootMessage::PreparePublish(prepare_publish::Message::PublishIconSubmitCompleted(
+                    generation,
+                    flatten_blocking_ui_result(result),
+                ))
+            })
+    }
+
+    pub(super) fn content_picker_task(&self, directory: PathBuf) -> Task<RootMessage> {
+        let title = self
+            .ports
+            .i18n
+            .tr("native-dialog-select-addon-content-folder");
+
+        Task::future(async move {
+            let selected = rfd::AsyncFileDialog::new()
+                .set_title(title)
+                .set_directory(directory)
+                .set_can_create_directories(false)
+                .pick_folder()
+                .await
+                .map(|folder| folder.path().to_path_buf());
+            RootMessage::PreparePublish(prepare_publish::Message::AddonPathBrowseCompleted(
+                selected,
+            ))
+        })
+    }
+
+    pub(super) fn icon_picker_task(&self, directory: PathBuf) -> Task<RootMessage> {
+        let (_settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
+        let temp_dir = paths.temp_dir;
+        let title = self.ports.i18n.tr("native-dialog-select-workshop-icon");
+        let filter = self.ports.i18n.tr("native-dialog-workshop-icon-filter");
+        let well = self.ports.tokens.colors.surface_sunken;
+        let well_rgb = [well.r, well.g, well.b];
+        Task::future(async move {
+            let selected = rfd::AsyncFileDialog::new()
+                .set_title(title)
+                .set_directory(directory)
+                .add_filter(filter, &["jpg", "jpeg", "png", "gif"])
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf());
+            RootMessage::PreparePublish(prepare_publish::Message::IconBrowseCompleted {
+                path: selected,
+                temp_dir,
+                well_rgb,
+            })
+        })
+    }
 }

@@ -43,9 +43,9 @@ impl Fixture {
 
     fn extract(
         &self,
-        gma: &(GMAFile, GmaView),
+        gma: &(GmaFile, GmaView),
         destination: ExtractDestination,
-    ) -> Result<PathBuf, GMAError> {
+    ) -> Result<PathBuf, GmaError> {
         let (handle, view) = gma;
         let transaction = self.transactions.begin();
         view.extract(
@@ -107,8 +107,8 @@ fn write_raw_gma(path: &Path, entries: &[(&str, &[u8])]) {
     std::fs::write(path, bytes).expect("write raw gma");
 }
 
-fn open_fixture_gma(path: &Path) -> (GMAFile, GmaView) {
-    let gma = GMAFile::open(path).expect("fixture gma");
+fn open_fixture_gma(path: &Path) -> (GmaFile, GmaView) {
+    let gma = GmaFile::open(path).expect("fixture gma");
     let view = gma.view().expect("fixture view");
     assert_eq!(gma.extracted_name, FIXTURE_EXTRACTED_NAME);
     (gma, view)
@@ -212,7 +212,7 @@ fn cancelling_before_extraction_stops_it_with_no_finish() {
         &fixture.steam,
     );
 
-    assert!(matches!(result, Err(GMAError::Cancelled)));
+    assert!(matches!(result, Err(GmaError::Cancelled)));
     assert!(!destination.exists());
     assert!(fixture.collector.drain().into_iter().all(|event| !matches!(
         event,
@@ -318,7 +318,7 @@ fn suffix_exhaustion_errors_instead_of_falling_back_to_parent() {
         },
     );
 
-    assert!(matches!(result, Err(GMAError::DestinationUnavailable)));
+    assert!(matches!(result, Err(GmaError::DestinationUnavailable)));
     // The pre-existing destination is untouched: cleanup failed, so nothing
     // was ever removed, and no fallback path was written into either.
     assert!(existing.join("stale.txt").exists());
@@ -413,7 +413,10 @@ fn extract_entry_uses_appdata_temp_root() {
             &handle,
             "lua/autorun/overwrite.lua".to_owned(),
             &transaction,
-            false,
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Ignore,
+            },
             &fixture.app_data,
             &fixture.steam,
         )
@@ -450,7 +453,7 @@ fn partial_entry_failure_reports_error_with_counts() {
             ("blocked/bad.lua", b"print('bad')\n"),
         ],
     );
-    let gma = GMAFile::open(&gma_path).expect("fixture gma");
+    let gma = GmaFile::open(&gma_path).expect("fixture gma");
     let view = gma.view().expect("fixture view");
 
     let destination = temp.path().join("partial-failure-dest");
@@ -475,7 +478,7 @@ fn partial_entry_failure_reports_error_with_counts() {
     );
 
     match result {
-        Err(GMAError::ExtractionFailed {
+        Err(GmaError::ExtractionFailed {
             extracted,
             failed,
             rejected,
@@ -504,7 +507,7 @@ fn all_entries_rejected_by_whitelist_reports_error() {
     let temp = tempfile::tempdir().expect("tempdir");
     let gma_path = temp.path().join("all-rejected.gma");
     write_raw_gma(&gma_path, &[("malware.exe", b"nope")]);
-    let gma = GMAFile::open(&gma_path).expect("fixture gma");
+    let gma = GmaFile::open(&gma_path).expect("fixture gma");
     let view = gma.view().expect("fixture view");
     let destination = temp.path().join("all-rejected-dest");
 
@@ -523,7 +526,7 @@ fn all_entries_rejected_by_whitelist_reports_error() {
     );
 
     match result {
-        Err(GMAError::ExtractionFailed {
+        Err(GmaError::ExtractionFailed {
             extracted,
             failed,
             rejected,
@@ -545,7 +548,7 @@ fn refuses_to_extract_through_a_pre_existing_symlinked_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
     let gma_path = temp.path().join("symlink-entry.gma");
     write_raw_gma(&gma_path, &[("evil/payload.lua", b"print('pwned')\n")]);
-    let gma = GMAFile::open(&gma_path).expect("fixture gma");
+    let gma = GmaFile::open(&gma_path).expect("fixture gma");
     let view = gma.view().expect("fixture view");
 
     let destination = temp.path().join("symlink-dest");
@@ -569,7 +572,7 @@ fn refuses_to_extract_through_a_pre_existing_symlinked_directory() {
     );
 
     match result {
-        Err(GMAError::ExtractionFailed {
+        Err(GmaError::ExtractionFailed {
             extracted, failed, ..
         }) => {
             assert_eq!(extracted, 0);

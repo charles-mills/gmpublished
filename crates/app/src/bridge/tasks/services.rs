@@ -1,3 +1,4 @@
+use crate::bridge::ui_error::ResultExt as _;
 use gmpublished_backend::transactions::TransactionId;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,8 +13,7 @@ use super::{
     SearchFullRequest, SearchMode, SearchQuickBatch, SearchQuickRequest, Settings,
     SettingsPersistError, SteamRuntime, SteamRuntimeError, SteamUser, TransactionPayload, UiError,
     UiSettings, WorkshopItem, WorkshopMetadata, WorkshopPage, appdata_snapshot_from_backend,
-    clear_directory_contents, default_paths, downloads, library, metadata_snapshot, native,
-    persist_appdata_settings_by_default, persist_ui_settings_by_default,
+    clear_directory_contents, downloads, fallback_paths, library, metadata_snapshot, native,
     publish_submission_from_app_request, search_full_batch_from_transaction_payload,
     search_quick_batch_from_backend, steam_publishing, steam_user_from_backend,
     steam_user_from_workshop_backend, steam_users, steam_workshop, subscription_counts_from_items,
@@ -38,6 +38,56 @@ pub struct BackendServices {
     _test_data_root: Option<tempfile::TempDir>,
 }
 
+/// The error every Steam-facing call returns when it finds no connection.
+fn steam_not_connected() -> UiError {
+    UiError::from(&SteamRuntimeError::NotConnected)
+}
+
+/// What a [`BackendServices`] needs to know about its environment.
+///
+/// Production and tests both build one and call the same constructor. Deciding
+/// it with `cfg!(test)` inside would run different code on the two paths,
+/// making a production-only bug invisible to the suite.
+pub(super) struct BackendServicesConfig {
+    /// Whether settings changes are written back to the backend's store.
+    persist_appdata_settings: bool,
+    /// Whether UI settings are loaded from, and written to, their file.
+    persist_ui_settings: bool,
+    /// Where the Workshop metadata snapshot lives; `None` keeps it in memory.
+    metadata_snapshot_file: Option<PathBuf>,
+    /// Where the library header snapshot lives; `None` keeps it in memory.
+    header_snapshot_file: Option<PathBuf>,
+    /// Overrides the UI settings file derived from `paths.settings_file`.
+    /// Tests point this at a private file; production derives it.
+    ui_settings_file: Option<PathBuf>,
+}
+
+impl BackendServicesConfig {
+    /// Reads and writes the real user directories.
+    fn production() -> Self {
+        Self {
+            persist_appdata_settings: true,
+            persist_ui_settings: true,
+            metadata_snapshot_file: metadata_snapshot::snapshot_path(),
+            header_snapshot_file: library::header_snapshot_path(),
+            ui_settings_file: None,
+        }
+    }
+
+    /// Touches no directory the developer also uses, and persists nothing —
+    /// many isolated roots coexist in one test process.
+    #[cfg(test)]
+    fn isolated() -> Self {
+        Self {
+            persist_appdata_settings: false,
+            persist_ui_settings: false,
+            metadata_snapshot_file: None,
+            header_snapshot_file: None,
+            ui_settings_file: None,
+        }
+    }
+}
+
 impl BackendServices {
     /// The default entry point every `App::new()` (production) or
     /// `BackendContext::new()` (tests) goes through. Builds one `Backend`
@@ -59,12 +109,13 @@ impl BackendServices {
         let (settings, paths) =
             appdata_snapshot_from_backend(backend.app_data.snapshot(), &UiSettings::default());
         let steam_runtime = SteamRuntime::new(Arc::clone(&backend.steam));
-        let services = Self::new_with_steam_runtime(
+        let services = Self::with_steam_runtime(
             backend,
             settings,
             paths,
             steam_runtime,
             backend_event_sink,
+            BackendServicesConfig::production(),
         );
         #[cfg(test)]
         let services = {
@@ -75,51 +126,38 @@ impl BackendServices {
         Ok(services)
     }
 
-    fn new_with_steam_runtime(
-        backend: Arc<Backend>,
-        settings: Settings,
-        paths: AppPaths,
-        steam_runtime: SteamRuntime,
-        backend_event_sink: Option<BackendEventSinkRegistration>,
-    ) -> Self {
-        let mut services =
-            Self::with_steam_runtime(backend, settings, paths, steam_runtime, backend_event_sink);
-        // Tests construct through this path too; never let them read or write
-        // the developer's real cache directory.
-        if !cfg!(test) {
-            services.metadata_snapshot_file = metadata_snapshot::snapshot_path();
-            if let Some(path) = library::header_snapshot_path() {
-                services.library.set_header_snapshot_file(path);
-            }
-        }
-        services
-    }
-
     fn with_steam_runtime(
         backend: Arc<Backend>,
         settings: Settings,
         paths: AppPaths,
         steam_runtime: SteamRuntime,
         backend_event_sink: Option<BackendEventSinkRegistration>,
+        config: BackendServicesConfig,
     ) -> Self {
-        let ui_settings_file = ui_settings_file_for(&paths.settings_file);
-        let persist_ui_settings = persist_ui_settings_by_default();
+        let ui_settings_file = config
+            .ui_settings_file
+            .unwrap_or_else(|| ui_settings_file_for(&paths.settings_file));
         let mut settings = settings;
-        if persist_ui_settings {
+        if config.persist_ui_settings {
             settings.apply_ui_settings(&UiSettings::load_from_file_or_default(&ui_settings_file));
+        }
+
+        let library = LibraryStore::new();
+        if let Some(path) = config.header_snapshot_file {
+            library.set_header_snapshot_file(path);
         }
 
         Self {
             backend,
             settings: Mutex::new(settings),
             paths: Mutex::new(paths),
-            persist_appdata_settings: persist_appdata_settings_by_default(),
-            persist_ui_settings,
+            persist_appdata_settings: config.persist_appdata_settings,
+            persist_ui_settings: config.persist_ui_settings,
             ui_settings_file,
             steam_runtime,
-            library: LibraryStore::new(),
+            library,
             workshop_metadata: Mutex::new(HashMap::new()),
-            metadata_snapshot_file: None,
+            metadata_snapshot_file: config.metadata_snapshot_file,
             _backend_event_sink: backend_event_sink,
             #[cfg(test)]
             _test_data_root: None,
@@ -162,15 +200,15 @@ impl BackendServices {
         let (backend, test_data_root) =
             build_default_backend(event_sink).expect("test backend init");
         let settings = Settings::default();
-        let paths = default_paths(&settings);
+        let paths = fallback_paths(&settings);
         let mut services = Self::with_steam_runtime(
             backend,
             settings,
             paths,
             SteamRuntime::unavailable_for_tests(),
             None,
+            BackendServicesConfig::isolated(),
         );
-        services.persist_appdata_settings = false;
         services._test_data_root = Some(test_data_root);
         services
     }
@@ -183,17 +221,19 @@ impl BackendServices {
         let ui = UiSettings::load_from_file_or_default(&ui_settings_file);
         let mut settings = Settings::default();
         settings.apply_ui_settings(&ui);
-        let paths = default_paths(&settings);
+        let paths = fallback_paths(&settings);
         let mut services = Self::with_steam_runtime(
             backend,
             settings,
             paths,
             SteamRuntime::unavailable_for_tests(),
             None,
+            BackendServicesConfig {
+                persist_ui_settings: true,
+                ui_settings_file: Some(ui_settings_file),
+                ..BackendServicesConfig::isolated()
+            },
         );
-        services.persist_appdata_settings = false;
-        services.persist_ui_settings = true;
-        services.ui_settings_file = ui_settings_file;
         services._test_data_root = Some(test_data_root);
         services
     }
@@ -262,7 +302,7 @@ impl BackendServices {
             *self.paths.lock() = paths;
         } else {
             self.persist_ui_settings(&ui)?;
-            let paths = AppPaths::resolve_with_defaults(&settings, default_paths(&settings));
+            let paths = AppPaths::resolve_with_defaults(&settings, fallback_paths(&settings));
             *guard = settings;
             *self.paths.lock() = paths;
         }
@@ -289,7 +329,7 @@ impl BackendServices {
             Ok(settings)
         } else {
             *guard = Settings::default();
-            let paths = AppPaths::resolve_with_defaults(&guard, default_paths(&guard));
+            let paths = AppPaths::resolve_with_defaults(&guard, fallback_paths(&guard));
             *self.paths.lock() = paths;
             let settings = guard.clone();
             drop(guard);
@@ -328,12 +368,12 @@ impl BackendServices {
 
     pub(crate) fn clear_temp_files(&self) -> Result<(), UiError> {
         let temp_dir = self.paths().temp_dir;
-        clear_directory_contents(&temp_dir).map_err(|error| UiError::from(&error))
+        clear_directory_contents(&temp_dir).ui_err()
     }
 
     pub(crate) fn clear_user_data(&self) -> Result<(), UiError> {
         let user_data_dir = self.paths().user_data_dir;
-        clear_directory_contents(&user_data_dir).map_err(|error| UiError::from(&error))
+        clear_directory_contents(&user_data_dir).ui_err()
     }
 
     pub(crate) fn library_snapshot(&self) -> Option<LibrarySnapshot> {
@@ -354,7 +394,7 @@ impl BackendServices {
 
     pub(crate) fn browse_my_workshop_page(&self, page: u32) -> Result<WorkshopPage, UiError> {
         if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+            return Err(steam_not_connected());
         }
 
         let page = self.fetch_my_workshop_page_connected(page)?;
@@ -374,7 +414,7 @@ impl BackendServices {
         }
 
         if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+            return Err(steam_not_connected());
         }
 
         let mut counts = HashMap::new();
@@ -443,8 +483,8 @@ impl BackendServices {
         let steam = self.require_steam_client()?;
 
         let mut cached_any = false;
-        let raw_ids = item_ids.iter().map(|id| id.get()).collect();
-        let result = steam_workshop::query_workshop_items_streaming(steam, raw_ids, |items| {
+        let ids = backend_workshop_ids(item_ids);
+        let result = steam_workshop::query_workshop_items_streaming(steam, &ids, |items| {
             let items = items
                 .into_iter()
                 .map(workshop_item_from_backend)
@@ -459,7 +499,7 @@ impl BackendServices {
         if cached_any {
             self.write_metadata_snapshot_best_effort();
         }
-        result.map_err(|error| UiError::from(&error))
+        result.ui_err()
     }
 
     pub(crate) fn workshop_item_details(
@@ -468,9 +508,9 @@ impl BackendServices {
     ) -> Result<crate::bridge::domain::WorkshopItem, UiError> {
         let steam = self.require_steam_client()?;
 
-        let item = steam_workshop::query_workshop_item_details(steam, id.get())
+        let item = steam_workshop::query_workshop_item_details(steam, backend_workshop_id(id))
             .map(workshop_item_from_backend)
-            .map_err(|error| UiError::from(&error))?;
+            .ui_err()?;
         self.cache_workshop_item_details(&item);
         Ok(item)
     }
@@ -489,7 +529,7 @@ impl BackendServices {
     #[cfg(test)]
     pub(crate) fn steam_user_details(&self, steamid: SteamId) -> Result<SteamUser, UiError> {
         Ok(steam_user_from_workshop_backend(
-            steam_users::fetch_steam_user(self.require_steam_client()?, steamid.get()),
+            steam_users::fetch_steam_user(self.require_steam_client()?, backend_steam_id(steamid)),
         ))
     }
 
@@ -500,7 +540,7 @@ impl BackendServices {
     ) -> Result<(), UiError> {
         steam_users::fetch_steam_user_streaming(
             self.require_steam_client()?,
-            steamid.get(),
+            backend_steam_id(steamid),
             |user| {
                 on_user(steam_user_from_workshop_backend(user));
             },
@@ -511,10 +551,7 @@ impl BackendServices {
     fn require_steam_client(
         &self,
     ) -> Result<gmpublished_backend::steam::ConnectedSteam<'_>, UiError> {
-        self.backend
-            .steam
-            .require_client()
-            .map_err(|error| UiError::from(&error))
+        self.backend.steam.require_client().ui_err()
     }
 
     pub(crate) fn steam_connected(&self) -> bool {
@@ -522,16 +559,14 @@ impl BackendServices {
     }
 
     pub(crate) fn connect_steam(&self) -> Result<(), UiError> {
-        self.steam_runtime
-            .connect()
-            .map_err(|error| UiError::from(&error))
+        self.steam_runtime.connect().ui_err()
     }
 
     pub(crate) fn current_steam_user(&self) -> Result<SteamUser, UiError> {
         self.steam_runtime
             .current_user()
             .map(steam_user_from_backend)
-            .map_err(|error| UiError::from(&error))
+            .ui_err()
     }
 
     pub(crate) fn submit_workshop_downloads(
@@ -539,7 +574,7 @@ impl BackendServices {
         item_ids: Vec<PublishedFileId>,
     ) -> Result<(), UiError> {
         if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+            return Err(steam_not_connected());
         }
 
         downloads::queue_workshop_downloads(
@@ -558,7 +593,7 @@ impl BackendServices {
         request_id: u64,
     ) -> Result<(), UiError> {
         if !self.steam_connected() {
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+            return Err(steam_not_connected());
         }
 
         downloads::queue_workshop_download_to(
@@ -577,7 +612,7 @@ impl BackendServices {
     ) -> Result<PublishSubmitOutcome, UiError> {
         if !self.steam_connected() {
             transaction.error(&SteamRuntimeError::NotConnected);
-            return Err(UiError::from(&SteamRuntimeError::NotConnected));
+            return Err(steam_not_connected());
         }
 
         let content_source_path = request.content_source_path.clone();
@@ -589,10 +624,9 @@ impl BackendServices {
             &self.backend.steam,
             &self.backend.whitelist,
         )
-        .map_err(|error| UiError::from(&error))?;
+        .ui_err()?;
         let outcome = PublishSubmitOutcome {
-            published_file_id: PublishedFileId::new(outcome.published_file_id.0)
-                .expect("Steam never issues a zero published file id"),
+            published_file_id: PublishedFileId::from_backend(outcome.published_file_id),
             legal_agreement_required: outcome.legal_agreement_required,
         };
         self.record_published_local_path(outcome.published_file_id, content_source_path);
@@ -609,8 +643,7 @@ impl BackendServices {
         let steam = self.require_steam_client().inspect_err(|_| {
             transaction.error(&SteamRuntimeError::NotConnected);
         })?;
-        let icon = steam_publishing::WorkshopIcon::new(icon_source_path, upscale)
-            .map_err(|error| UiError::from(&error))?;
+        let icon = steam_publishing::WorkshopIcon::new(icon_source_path, upscale).ui_err()?;
         steam
             .update_icon(
                 gmpublished_backend::appdata::SettingsPublishedFileId(workshop_id.get()),
@@ -618,7 +651,7 @@ impl BackendServices {
                 transaction,
                 &self.backend.app_data,
             )
-            .map_err(|error| UiError::from(&error))
+            .ui_err()
     }
 
     pub(crate) fn search_quick(&self, request: &SearchQuickRequest) -> SearchQuickBatch {
@@ -694,10 +727,10 @@ impl BackendServices {
 
         let steam = self.require_steam_client()?;
 
-        let raw_ids = item_ids.iter().map(|id| id.get()).collect();
-        steam_workshop::query_workshop_items(steam, raw_ids)
+        let ids = backend_workshop_ids(item_ids);
+        steam_workshop::query_workshop_items(steam, &ids)
             .map(|items| items.into_iter().map(workshop_item_from_backend).collect())
-            .map_err(|error| UiError::from(&error))
+            .ui_err()
     }
 
     fn fetch_my_workshop_page_connected(&self, page: u32) -> Result<WorkshopPage, UiError> {
@@ -873,7 +906,7 @@ mod performance_tests {
     fn one_hash_per_shared_preview_url_is_sufficient() {
         let mut cache = (1..=2)
             .map(|raw_id| {
-                let id = PublishedFileId::new(raw_id).expect("nonzero fixture id");
+                let id = PublishedFileId::fixture(raw_id);
                 (
                     id,
                     CachedWorkshopMetadata {
@@ -932,4 +965,19 @@ fn build_default_backend(
         ..gmpublished_backend::BackendConfig::for_test(root.path())
     })?;
     Ok((backend, root))
+}
+
+/// The backend's id types, built at the one place the app hands ids across.
+fn backend_workshop_id(id: PublishedFileId) -> gmpublished_backend::steam::PublishedFileId {
+    gmpublished_backend::steam::PublishedFileId(id.get())
+}
+
+fn backend_workshop_ids(
+    ids: &[PublishedFileId],
+) -> Vec<gmpublished_backend::steam::PublishedFileId> {
+    ids.iter().copied().map(backend_workshop_id).collect()
+}
+
+fn backend_steam_id(id: SteamId) -> gmpublished_backend::steam::SteamId {
+    gmpublished_backend::steam::SteamId::from_raw(id.get())
 }

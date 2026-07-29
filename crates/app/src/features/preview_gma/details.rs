@@ -422,7 +422,7 @@ mod tests {
         )
         .expect("fixture archive should load");
         let mut workshop = WorkshopMetadata {
-            id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            id: PublishedFileId::fixture(123),
             title: "Remote Title".to_owned(),
             author: Some("Ada".to_owned()),
             steamid64: Some(SteamId::new(76_561_197_990_735_296)),
@@ -503,7 +503,7 @@ mod tests {
         )
         .expect("fixture archive should load");
         let workshop = WorkshopMetadata {
-            id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            id: PublishedFileId::fixture(123),
             title: "Remote".to_owned(),
             author: None,
             steamid64: Some(SteamId::new(76_561_197_990_735_296)),

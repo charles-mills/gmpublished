@@ -238,19 +238,8 @@ fn initialize_stage<T>(
 ) -> Result<T, BackendInitError> {
     catch_unwind(AssertUnwindSafe(init)).map_err(|panic| BackendInitError::StagePanic {
         stage,
-        message: panic_payload_message(&panic),
+        message: crate::panic_payload_message(&panic),
     })
-}
-
-fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
-    panic.downcast_ref::<&str>().map_or_else(
-        || {
-            panic
-                .downcast_ref::<String>()
-                .map_or_else(|| "non-string panic payload".to_owned(), Clone::clone)
-        },
-        |message| (*message).to_owned(),
-    )
 }
 
 #[cfg(test)]

@@ -45,16 +45,13 @@ pub fn play(sound: Sound, enabled: bool) {
 }
 
 fn play_blocking(sound: Sound) {
-    let mut output = match rodio::DeviceSinkBuilder::from_default_device()
-        .and_then(rodio::DeviceSinkBuilder::open_stream)
-    {
+    let output = match super::audio_output::open_default_sink() {
         Ok(output) => output,
         Err(error) => {
             log::debug!("UI sound output unavailable: {error}");
             return;
         }
     };
-    output.log_on_drop(false);
 
     match rodio::play(output.mixer(), Cursor::new(sound.bytes())) {
         Ok(player) => player.sleep_until_end(),

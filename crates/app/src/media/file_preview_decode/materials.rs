@@ -9,12 +9,20 @@ pub(super) fn resolve_map_material_slots_parallel(
     material_names: &[String],
     resolver: &MaterialResolver,
 ) -> MaterialTable {
-    let resolved = parallel_collect(material_names, |_, name| {
+    let resolved = parallel_collect(material_names, |name| {
         resolver.resolve_with_base2(&[], name)
     });
     map_material_resolution_from_results(material_names, resolved)
 }
 
+/// The differential oracle for [`resolve_map_material_slots_parallel`].
+///
+/// Not a duplicate of it: both build their results through
+/// [`map_material_resolution_from_results`], and the only difference is the
+/// iteration strategy — which is precisely what
+/// `parallel_material_resolution_matches_serial_slots_in_order` exists to
+/// compare. Deleting this would delete the check that the parallel path keeps
+/// slot order.
 #[cfg(test)]
 pub(super) fn resolve_map_material_slots_serial(
     material_names: &[String],
@@ -170,7 +178,7 @@ pub(super) fn pre_resolve_overlay_materials(
             names.push(overlay.material_name.clone());
         }
     }
-    parallel_collect(&names, |_, name| {
+    parallel_collect(&names, |name| {
         (name.clone(), resolver.resolve_with_base2(&[], name))
     })
     .into_iter()

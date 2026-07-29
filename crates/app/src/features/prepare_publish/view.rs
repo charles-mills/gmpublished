@@ -21,8 +21,6 @@ use crate::{
 
 use super::{Message, State};
 
-const TOOLTIP_MAX_WIDTH: f32 = 320.0;
-
 pub fn view<'a>(
     state: &'a State,
     file_preview_state: &'a file_preview::State,
@@ -245,7 +243,7 @@ fn icon_preview<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
             preview,
             translated_error(i18n, error),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ),
         None => preview.into(),
     }
@@ -314,7 +312,7 @@ fn icon_controls<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message>
             upload,
             i18n.tr("prepare-publish-publish-icon"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ));
     }
 
@@ -361,7 +359,7 @@ fn addon_path_row<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message
             field,
             translated_error(i18n, error),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ),
         None => field.into(),
     };
@@ -402,7 +400,7 @@ fn title_input<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             field,
             i18n.tr("prepare-publish-title-locked"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         )
     } else {
         field.into()
@@ -507,7 +505,7 @@ fn submit_button<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message>
         .style(move |_, status| theme::styles::action_button(&tokens, status));
 
     match state.submit_tooltip(i18n) {
-        Some(label) => tooltip_widget::below(submit, label, &tokens, TOOLTIP_MAX_WIDTH),
+        Some(label) => tooltip_widget::below(submit, label, &tokens, tokens.dims.tooltip_max_width),
         None => submit.into(),
     }
 }
@@ -827,7 +825,7 @@ fn ignored_pattern_row(
             cell,
             i18n.tr("prepare-publish-ignored-for-convenience"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         )
     } else {
         mouse_area(cell)

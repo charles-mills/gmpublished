@@ -100,6 +100,9 @@ const BACKEND_EVENT_QUEUE_CAPACITY: usize = 256;
 pub const DOWNLOAD_STATUS_DOWNLOADING: &str = "downloading";
 pub const EXTRACT_STATUS: &str = "extracting_progress";
 pub const SEARCH_STATUS: &str = "searching";
+/// Status for the simulated notice toast. Only the `debug` menu raises it, but
+/// it is still a Fluent key, so the catalog test enumerates it either way.
+#[cfg(any(test, feature = "debug"))]
 pub const NOTICE_STATUS: &str = "context-menu-debug-toast-notice";
 pub use gmpublished_backend::transactions::status::{
     LOCATING as DOWNLOAD_STATUS_LOCATING, PUBLISH_PACKING as PUBLISH_PACKING_STATUS,

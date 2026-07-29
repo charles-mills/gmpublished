@@ -8,8 +8,8 @@ struct Uniforms {
     fog_params: vec4<f32>,
     // x: animation time, yzw: sky tint.
     water_time_sky_tint: vec4<f32>,
-    // xy: near and far clip distances.
     water_depth_params: vec4<f32>,
+    // xy: near and far clip distances.
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;

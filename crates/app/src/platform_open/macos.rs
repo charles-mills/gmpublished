@@ -35,9 +35,7 @@ const DELEGATE_PATCH_ATTEMPTS: u32 = 50;
 /// the run loop (and therefore winit's `NSApplicationDelegate`) exists.
 pub fn install() {
     match apple_event::install_document_open_handler(super::accept_paths) {
-        Ok(registration) => {
-            // Keeps the handler installed for the process lifetime.
-            Box::leak(Box::new(registration));
+        Ok(()) => {
             log::info!("installed macOS document-open Apple Event fallback handler");
         }
         Err(error) => {
@@ -199,10 +197,6 @@ mod apple_event {
         ptr::{self, NonNull},
     };
 
-    pub(super) struct MacDocumentOpenRegistration {
-        state: NonNull<NativeHandlerState>,
-    }
-
     struct NativeHandlerState {
         sender: Box<dyn Fn(Vec<PathBuf>)>,
     }
@@ -225,17 +219,27 @@ mod apple_event {
 
     impl std::error::Error for MacDocumentOpenError {}
 
+    /// Installs the `aevt/odoc` handler for the process lifetime.
+    ///
+    /// There is no teardown, and no handle to one. The handler must stay
+    /// installed as long as the process runs, so the state it needs is leaked
+    /// deliberately.
+    ///
+    /// A registration guard with an `AERemoveEventHandler` `Drop` would be
+    /// unsafe code that never executes — the handle would have to be leaked to
+    /// keep the handler alive, so the `Drop` could not run. If removal is ever
+    /// wanted, the teardown belongs with the change that stops leaking.
     pub(super) fn install_document_open_handler(
         sender: impl Fn(Vec<PathBuf>) + 'static,
-    ) -> Result<MacDocumentOpenRegistration, MacDocumentOpenError> {
+    ) -> Result<(), MacDocumentOpenError> {
         let state = Box::new(NativeHandlerState {
             sender: Box::new(sender),
         });
         let state = NonNull::from(Box::leak(state));
         // SAFETY: `handle_open_documents` matches the `AEEventHandlerUPP`
         // signature Carbon expects, and `state.as_ptr()` is the pointer just
-        // produced by `Box::leak` above, so it stays valid for as long as the
-        // registration lives (freed on the error path below, or in Drop).
+        // produced by `Box::leak` above, so it stays valid for the process
+        // lifetime (the error path below is the only thing that reclaims it).
         let status = unsafe {
             AEInstallEventHandler(
                 K_CORE_EVENT_CLASS,
@@ -258,37 +262,7 @@ mod apple_event {
             });
         }
 
-        Ok(MacDocumentOpenRegistration { state })
-    }
-
-    impl Drop for MacDocumentOpenRegistration {
-        fn drop(&mut self) {
-            // SAFETY: this passes the exact class/id/handler/is_sys_handler
-            // tuple used to install this handler in
-            // `install_document_open_handler`, which Carbon requires to
-            // identify the registration to remove; `self` owns the
-            // registration, so this can't double-remove it.
-            let status = unsafe {
-                AERemoveEventHandler(
-                    K_CORE_EVENT_CLASS,
-                    K_AE_OPEN_DOCUMENTS,
-                    Some(handle_open_documents),
-                    FALSE,
-                )
-            };
-            if status != NO_ERR {
-                log::debug!("failed to remove macOS document-open handler: {status}");
-                return;
-            }
-            // SAFETY: `self.state` is the same pointer produced by
-            // `Box::leak` in `install_document_open_handler`, owned
-            // exclusively by this registration; the handler was just
-            // successfully removed above, so Carbon can no longer call it
-            // with this pointer, and `Drop::drop` runs at most once.
-            unsafe {
-                drop(Box::from_raw(self.state.as_ptr()));
-            }
-        }
+        Ok(())
     }
 
     // SAFETY: this is only invoked by Carbon's Apple Event dispatcher as the
@@ -584,12 +558,6 @@ mod apple_event {
             the_ae_event_id: AEEventID,
             handler: AEEventHandlerUPP,
             handler_refcon: SRefCon,
-            is_sys_handler: Boolean,
-        ) -> OSErr;
-        fn AERemoveEventHandler(
-            the_ae_event_class: AEEventClass,
-            the_ae_event_id: AEEventID,
-            handler: AEEventHandlerUPP,
             is_sys_handler: Boolean,
         ) -> OSErr;
         fn AEGetParamDesc(

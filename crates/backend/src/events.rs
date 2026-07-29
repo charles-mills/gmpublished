@@ -96,13 +96,17 @@ impl BackendEventSink for NullEventSink {
 }
 
 /// A `BackendEventSink` that records every event it receives, in order.
-/// Not test-gated: downstream crates (the app's own test suite) use it as a
-/// generic testing utility too, not just this crate's unit tests.
+///
+/// Behind `test-support` rather than `cfg(test)`, because the app crate's own
+/// test suite uses it too — a `cfg(test)` item is invisible to a downstream
+/// crate, and this needs to reach one.
+#[cfg(feature = "test-support")]
 #[derive(Clone, Default)]
 pub struct BackendEventCollector {
     events: std::sync::Arc<parking_lot::Mutex<Vec<BackendEvent>>>,
 }
 
+#[cfg(feature = "test-support")]
 impl BackendEventCollector {
     #[must_use]
     pub fn snapshot(&self) -> Vec<BackendEvent> {
@@ -114,6 +118,7 @@ impl BackendEventCollector {
     }
 }
 
+#[cfg(feature = "test-support")]
 impl BackendEventSink for BackendEventCollector {
     fn emit(&self, event: BackendEvent) {
         self.events.lock().push(event);

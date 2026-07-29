@@ -1,11 +1,12 @@
-#[cfg(target_os = "macos")]
 use super::shell;
 use super::{
-    App, NativeOpenTarget, PathBuf, Point, PublishedFileId, RootMessage, Task, UiError,
-    context_menu, destination_select, downloader, file_preview, flatten_blocking_ui_result,
-    installed_addons, modal_stack, my_workshop, open_modal_message, prepare_publish, preview_gma,
+    App, NativeOpenTarget, PathBuf, Point, PublishedFileId, RootMessage, Task, context_menu,
+    destination_select, downloader, file_preview, flatten_blocking_ui_result, installed_addons,
+    modal_stack, my_workshop, open_modal_message, prepare_publish, preview_gma,
     schedule_native_open_target, settings, size_analyzer, window, workshop_url,
 };
+#[cfg(target_os = "macos")]
+use crate::bridge::ui_error::ResultExt as _;
 
 /// A local addon (installed library or size-analyzer leaf), which shares the
 /// same context-menu shape regardless of which route hovered it.
@@ -92,7 +93,9 @@ impl App {
 
     pub(super) fn modal_stack_task(&mut self, message: &modal_stack::Message) -> Task<RootMessage> {
         let effects = modal_stack::update(&mut self.state.modal_stack, message);
-        self.batch_effects(effects, |_app, effect| match effect {})
+        self.batch_effects(effects, |app, effect| match effect {
+            modal_stack::Effect::Displaced(modal) => app.finish_modal_close_task(modal),
+        })
     }
 
     pub(super) fn open_modal_stack_task(
@@ -281,7 +284,7 @@ impl App {
                         app.paths(),
                     ))
                 })
-                .map_err(|error| UiError::from(&error))
+                .ui_err()
             })
             .map(|result| {
                 RootMessage::DestinationSelect(destination_select::Message::CreateFolderSaved(
@@ -325,7 +328,7 @@ impl App {
                         app.paths(),
                     ))
                 })
-                .map_err(|error| UiError::from(&error))
+                .ui_err()
             })
             .map(|result| {
                 let result = flatten_blocking_ui_result(result);
@@ -545,12 +548,9 @@ impl App {
             ContextMenuTarget::Local(local) => (local.workshop_id, Some(local.path)),
         };
 
+        self.state.hidden_addons.hide(workshop_id, path.as_deref());
         if let Some(workshop_id) = workshop_id {
-            self.state.hidden_workshop_ids.insert(workshop_id);
             self.state.my_workshop.hide_workshop_id(workshop_id);
-        }
-        if let Some(path) = path.as_ref() {
-            self.state.hidden_addon_paths.insert(path.clone());
         }
         self.state
             .installed_addons
@@ -562,7 +562,7 @@ impl App {
         let snapshot = self
             .ctx
             .library_snapshot()
-            .map(|snapshot| self.visible_library_snapshot(&snapshot));
+            .map(|snapshot| self.state.hidden_addons.visible(&snapshot));
         super::sync_search_installed_addons(&self.ctx.backend().search, snapshot.as_ref());
 
         Task::batch([

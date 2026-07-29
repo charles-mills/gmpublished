@@ -206,7 +206,7 @@ impl App {
                 .await
                 .map(|file| file.path().to_path_buf())
         })
-        .map(RootMessage::MenuOpenGmaCompleted)
+        .map(|path| RootMessage::Platform(crate::platform::Message::MenuOpenGmaCompleted(path)))
     }
 }
 

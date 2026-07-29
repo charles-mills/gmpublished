@@ -62,14 +62,7 @@ impl PublishedFileDetail {
 }
 
 fn api_agent() -> ureq::Agent {
-    // The workspace ureq build carries no bundled webpki roots; certificate
-    // verification must go through the OS trust store (PlatformVerifier).
-    ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
+    crate::net::tls_agent_builder()
         .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .into()
@@ -78,12 +71,7 @@ fn api_agent() -> ureq::Agent {
 /// Agent for CDN payload downloads: no global deadline (large addons on
 /// slow lines take minutes), but bounded connect/response latency.
 pub(super) fn download_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
+    crate::net::tls_agent_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
         .build()
@@ -233,10 +221,13 @@ fn parse_collection_details(json: &str) -> Result<Vec<CollectionRow>, WebApiErro
                         children
                             .iter()
                             .filter_map(|child| {
-                                let id = child.get("publishedfileid").and_then(value_as_u64)?;
+                                let id = child
+                                    .get("publishedfileid")
+                                    .and_then(value_as_u64)
+                                    .and_then(crate::gma::nonzero_workshop_id)?;
                                 let is_collection = child.get("filetype").and_then(value_as_u64)
                                     == Some(FILETYPE_COLLECTION);
-                                Some((PublishedFileId(id), is_collection))
+                                Some((id, is_collection))
                             })
                             .collect()
                     })

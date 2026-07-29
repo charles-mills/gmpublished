@@ -12,10 +12,19 @@ pub mod status {
     pub const PUBLISH_STARTING: &str = "PUBLISH_STARTING";
     pub const PUBLISH_PROCESSING_ICON: &str = "PUBLISH_PROCESSING_ICON";
     pub const PUBLISH_PACKING: &str = "PUBLISH_PACKING";
+    pub const PUBLISH_PREPARING_CONFIG: &str = "PUBLISH_PREPARING_CONFIG";
+    pub const PUBLISH_PREPARING_CONTENT: &str = "PUBLISH_PREPARING_CONTENT";
+    pub const PUBLISH_UPLOADING_CONTENT: &str = "PUBLISH_UPLOADING_CONTENT";
+    pub const PUBLISH_UPLOADING_PREVIEW_FILE: &str = "PUBLISH_UPLOADING_PREVIEW_FILE";
+    pub const PUBLISH_COMMITTING_CHANGES: &str = "PUBLISH_COMMITTING_CHANGES";
 
-    /// Every status above. The app renders a status by looking its string up
-    /// as a translation key, so it walks this to check each one has an entry —
-    /// a status added without one reaches the user as its raw wire string.
+    /// Every status this module declares.
+    ///
+    /// The app renders a status by looking its string up as a translation key
+    /// and walks this to check each one has an entry, so a status must be
+    /// declared here rather than passed to `Transaction::status` as a literal
+    /// — a literal is invisible to that guard and reaches the user as raw wire
+    /// text.
     pub const ALL: &[&str] = &[
         LOCATING,
         DECOMPRESSING,
@@ -23,6 +32,11 @@ pub mod status {
         PUBLISH_STARTING,
         PUBLISH_PROCESSING_ICON,
         PUBLISH_PACKING,
+        PUBLISH_PREPARING_CONFIG,
+        PUBLISH_PREPARING_CONTENT,
+        PUBLISH_UPLOADING_CONTENT,
+        PUBLISH_UPLOADING_PREVIEW_FILE,
+        PUBLISH_COMMITTING_CHANGES,
     ];
 }
 

@@ -2,7 +2,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use rayon::ThreadPool;
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     io::{Read, Write},
     path::PathBuf,
     sync::{
@@ -17,13 +17,13 @@ use steamworks::{ItemState, PublishedFileId, QueryResults, UGC};
 
 use crate::util::thread_pool;
 use crate::{
-    GMAError, GMAFile, GMOD_APP_ID,
+    GMOD_APP_ID, GmaError, GmaFile,
     appdata::AppData,
     events::{BackendEvent, DownloadStartedEvent, ExtractionStartedEvent},
     gma::{
         ExtractDestination, ExtractOptions, Whitelist, read::GmaView, whitelist::AddonWhitelist,
     },
-    steam::Steam,
+    steam::{CALLBACK_RESULT_TIMEOUT, Steam},
     transactions::Transactions,
 };
 
@@ -311,8 +311,8 @@ impl Downloads {
                     request_id,
                 }));
 
-            let open_on_disk = |path: PathBuf| -> Result<(GMAFile, GmaView), GMAError> {
-                let gma = GMAFile::open(path)?;
+            let open_on_disk = |path: PathBuf| -> Result<(GmaFile, GmaView), GmaError> {
+                let gma = GmaFile::open(path)?;
                 let view = gma.view()?;
                 Ok((gma, view))
             };
@@ -331,7 +331,7 @@ impl Downloads {
                     gma
                 } else {
                     transaction.status(crate::transactions::status::DECOMPRESSING);
-                    match GMAFile::decompress(
+                    match GmaFile::decompress(
                         folder,
                         &transaction,
                         &downloads.app_data,
@@ -475,16 +475,12 @@ impl Downloads {
         // few batched keyless calls, with no side effects on failure —
         // items with a public `file_url` then bypass the Steam client's
         // serial download queue entirely.
-        let (known_items, possible_collections) = {
-            let workshop = self
-                .steam
-                .workshop_dedup
-                .try_lock_for(CALLBACK_PUMP_INTERVAL + Duration::from_millis(1));
-            workshop.as_deref().map_or_else(
+        let (known_items, possible_collections) = self.steam.with_known_workshop_items(|cache| {
+            cache.map_or_else(
                 || (Vec::new(), ids.clone()),
                 |cache| ids.iter().partition(|id| cache.contains(id)),
             )
-        };
+        });
         match webapi::resolve_downloads(known_items, possible_collections) {
             Ok(details) => {
                 self.dispatch_preflighted(details, &extract_destination, token);
@@ -713,13 +709,10 @@ impl Downloads {
         extract_destination: &Arc<ExtractDestination>,
         token: BatchToken,
     ) {
-        let possible_collections: Arc<Mutex<PossibleCollectionsState>> = Arc::new(Mutex::new({
-            let workshop = self
-                .steam
-                .workshop_dedup
-                .try_lock_for(CALLBACK_PUMP_INTERVAL + Duration::from_millis(1));
-            PossibleCollectionsState::split_initial(&mut ids, workshop.as_deref())
-        }));
+        let possible_collections: Arc<Mutex<PossibleCollectionsState>> =
+            Arc::new(Mutex::new(self.steam.with_known_workshop_items(|cache| {
+                PossibleCollectionsState::split_initial(&mut ids, cache)
+            })));
 
         loop {
             let possible_collections_query;
@@ -845,7 +838,7 @@ impl Downloads {
                     },
                 );
 
-            let _ = done_rx.recv();
+            let _ = done_rx.recv_timeout(CALLBACK_RESULT_TIMEOUT);
         }
 
         let mut pending = self.pending.lock();
@@ -892,15 +885,22 @@ impl Downloads {
         let interface = steam
             .client()
             .expect("Downloads::watchdog only runs after Steam has connected");
-        let in_progress_state: Arc<(Mutex<BTreeMap<PublishedFileId, Download>>, Condvar)> =
-            Arc::new((Mutex::new(BTreeMap::new()), Condvar::new()));
+        // `Option`, not a map: the Steam client downloads workshop items
+        // serially, so exactly one can be in flight. The loop below only ever
+        // started a download when the map was empty — which made "at most one"
+        // an invariant of the loop rather than a fact about the type.
+        let in_progress_state: Arc<(Mutex<Option<Download>>, Condvar)> =
+            Arc::new((Mutex::new(None), Condvar::new()));
         let in_progress_ref = in_progress_state.clone();
         let downloads_for_callback = Arc::clone(downloads);
         let steam_for_callback = Arc::clone(steam);
         let _cb = interface.register_callback(move |result: steamworks::DownloadItemResult| {
             if result.app_id == GMOD_APP_ID {
                 let mut in_progress = in_progress_ref.0.lock();
-                if let Some(download) = in_progress.remove(&result.published_file_id) {
+                let matched = in_progress
+                    .as_ref()
+                    .is_some_and(|download| download.item == result.published_file_id);
+                if let Some(download) = matched.then(|| in_progress.take()).flatten() {
                     if let Some(error) = result.error {
                         log::error!("ISteamUGC Download ERROR: {:?}", download.item);
                         download.transaction.error(
@@ -960,7 +960,7 @@ impl Downloads {
 
             let mut in_progress = in_progress_state.0.lock();
 
-            if in_progress.is_empty() {
+            if in_progress.is_none() {
                 let Some(download) = queue.pop_front() else {
                     drop(in_progress);
                     let mut downloading = downloads.downloading.lock();
@@ -983,11 +983,11 @@ impl Downloads {
                 }
                 log::info!("Starting ISteamUGC Download for {:?}", download.item);
 
-                in_progress.insert(download.item, download);
+                *in_progress = Some(download);
             }
 
             let ugc = interface.client().ugc();
-            in_progress.retain(|_, download| {
+            let keep = in_progress.as_ref().is_some_and(|download| {
                 // ISteamUGC has no per-item cancel: dropping our tracking is
                 // all a cancel can do here — the Steam client finishes the
                 // transfer in the background, and the completion callback
@@ -1012,8 +1012,11 @@ impl Downloads {
 
                 true
             });
+            if !keep {
+                *in_progress = None;
+            }
 
-            if in_progress.is_empty() {
+            if in_progress.is_none() {
                 // Feed the next queued item immediately.
                 continue;
             }

@@ -19,6 +19,8 @@ mod compiler;
 pub use compiler::{CompiledSystem, RendererInfo, RendererKind};
 use compiler::{Emitter, Force, Initializer, Operator, ScalarField, VectorField, compile_system};
 
+use crate::math::{add, length, lerp as lerp3, scale, simple_spline, sub};
+
 /// Canonical material identity shared by particle loading, compilation, and
 /// per-frame rendering.
 pub fn normalize_material_name(name: &str) -> String {
@@ -84,6 +86,11 @@ impl ControlPointIndex {
         (0..MAX_CONTROL_POINTS).map(Self)
     }
 }
+/// How deep a chain of child systems may go. Separate from the instance-count
+/// ceiling, which bounds how many instances a file produces rather than how
+/// far the walk descends.
+pub const MAX_INSTANCE_TREE_DEPTH: usize = 64;
+
 /// Hard ceiling across all instances so a hostile file cannot OOM the app.
 pub const MAX_TOTAL_PARTICLES: usize = 100_000;
 
@@ -236,42 +243,12 @@ fn value_noise(x: f32, y: f32, z: f32, w: f32) -> f32 {
 
 // --- Small vector helpers ------------------------------------------------
 
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
-fn length(a: [f32; 3]) -> f32 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
-}
-
-fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-    ]
-}
-
 fn color_to_rgb(color: [u8; 4]) -> [f32; 3] {
     [
         f32::from(color[0]) / 255.0,
         f32::from(color[1]) / 255.0,
         f32::from(color[2]) / 255.0,
     ]
-}
-
-/// Source's SimpleSpline ease used by `ease_in_and_out` operator flags.
-fn simple_spline(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// Source's bias curve (0.5 = identity).
@@ -284,69 +261,62 @@ fn bias(t: f32, amount: f32) -> f32 {
 
 // --- Particle storage ------------------------------------------------------
 
-/// Structure-of-arrays particle storage; swap-remove keeps steps O(live).
-#[derive(Debug, Default, Clone)]
-struct ParticleSet {
-    position: Vec<[f32; 3]>,
-    velocity: Vec<[f32; 3]>,
+/// Declares the particle struct-of-arrays once.
+///
+/// The whole-set operations are generated from the same field list, so a field
+/// cannot be added to one and missed in another — every read indexes all
+/// sixteen arrays by the same position.
+macro_rules! particle_set {
+    ($($(#[$meta:meta])* $field:ident: $ty:ty),+ $(,)?) => {
+        /// Structure-of-arrays particle storage; swap-remove keeps steps
+        /// O(live).
+        #[derive(Debug, Default, Clone)]
+        struct ParticleSet {
+            $($(#[$meta])* $field: Vec<$ty>,)+
+        }
+
+        impl ParticleSet {
+            fn swap_remove(&mut self, index: usize) {
+                $(self.$field.swap_remove(index);)+
+            }
+
+            fn clear(&mut self) {
+                $(self.$field.clear();)+
+            }
+
+            /// Every array holds one entry per live particle.
+            #[cfg(test)]
+            fn arrays_are_parallel(&self) -> bool {
+                let len = self.position.len();
+                $(self.$field.len() == len &&)+ true
+            }
+        }
+    };
+}
+
+particle_set! {
+    position: [f32; 3],
+    velocity: [f32; 3],
     /// System time at spawn, already shifted by any pre-age.
-    creation_time: Vec<f32>,
-    lifetime: Vec<f32>,
-    radius_initial: Vec<f32>,
-    radius: Vec<f32>,
-    alpha_initial: Vec<f32>,
-    alpha: Vec<f32>,
-    color_initial: Vec<[f32; 3]>,
-    color: Vec<[f32; 3]>,
-    rotation: Vec<f32>,
-    rotation_speed: Vec<f32>,
-    sequence: Vec<i32>,
-    trail_length: Vec<f32>,
-    mirrored: Vec<bool>,
-    spawn_index: Vec<u32>,
+    creation_time: f32,
+    lifetime: f32,
+    radius_initial: f32,
+    radius: f32,
+    alpha_initial: f32,
+    alpha: f32,
+    color_initial: [f32; 3],
+    color: [f32; 3],
+    rotation: f32,
+    rotation_speed: f32,
+    sequence: i32,
+    trail_length: f32,
+    mirrored: bool,
+    spawn_index: u32,
 }
 
 impl ParticleSet {
     fn len(&self) -> usize {
         self.position.len()
-    }
-
-    fn swap_remove(&mut self, index: usize) {
-        self.position.swap_remove(index);
-        self.velocity.swap_remove(index);
-        self.creation_time.swap_remove(index);
-        self.lifetime.swap_remove(index);
-        self.radius_initial.swap_remove(index);
-        self.radius.swap_remove(index);
-        self.alpha_initial.swap_remove(index);
-        self.alpha.swap_remove(index);
-        self.color_initial.swap_remove(index);
-        self.color.swap_remove(index);
-        self.rotation.swap_remove(index);
-        self.rotation_speed.swap_remove(index);
-        self.sequence.swap_remove(index);
-        self.trail_length.swap_remove(index);
-        self.mirrored.swap_remove(index);
-        self.spawn_index.swap_remove(index);
-    }
-
-    fn clear(&mut self) {
-        self.position.clear();
-        self.velocity.clear();
-        self.creation_time.clear();
-        self.lifetime.clear();
-        self.radius_initial.clear();
-        self.radius.clear();
-        self.alpha_initial.clear();
-        self.alpha.clear();
-        self.color_initial.clear();
-        self.color.clear();
-        self.rotation.clear();
-        self.rotation_speed.clear();
-        self.sequence.clear();
-        self.trail_length.clear();
-        self.mirrored.clear();
-        self.spawn_index.clear();
     }
 
     fn scalar_mut(&mut self, field: ScalarField, index: usize) -> &mut f32 {
@@ -497,34 +467,44 @@ impl ParticleEngine {
         Some(engine)
     }
 
+    /// Spawns a system and its child systems.
+    ///
+    /// An explicit stack, not recursion: `.pcf` child links are untrusted and
+    /// can cycle, so depth would be attacker-controlled stack frames. Bounded
+    /// twice — [`MAX_INSTANCE_TREE_DEPTH`] for a deep chain, the instance
+    /// count for a wide one.
     fn spawn_instance_tree(&mut self, system: usize, start_time: f32, parent: Option<usize>) {
-        // Cycles are cut off by total instance count, not by depth: a `.pcf`
-        // whose systems reference each other would otherwise spawn forever.
-        // Note this bounds the *breadth* of the tree; recursion depth is still
-        // bounded only by `systems.len()`, which is attacker-controlled — see
-        // CODE_REVIEW.md §37a.
-        if self.instances.len() >= self.systems.len() * 2 {
-            return;
-        }
-        let compiled = &self.systems[system];
-        let instance_index = self.instances.len();
-        self.instances.push(Instance {
-            system,
-            start_time,
-            parent,
-            particles: ParticleSet::default(),
-            emit_accumulator: vec![0.0; compiled.emitters.len()],
-            burst_done: vec![false; compiled.emitters.len()],
-            spawn_counter: 0,
-            rng: Rng::new(
-                self.seed
-                    .wrapping_add(instance_index as u64)
-                    .wrapping_mul(0x9E3779B97F4A7C15),
-            ),
-        });
-        let children = self.systems[system].children.clone();
-        for child in children {
-            self.spawn_instance_tree(child.system, start_time + child.delay, Some(instance_index));
+        let mut pending = vec![(system, start_time, parent, 0_usize)];
+        while let Some((system, start_time, parent, depth)) = pending.pop() {
+            if self.instances.len() >= self.systems.len() * 2 || depth >= MAX_INSTANCE_TREE_DEPTH {
+                continue;
+            }
+            let compiled = &self.systems[system];
+            let instance_index = self.instances.len();
+            self.instances.push(Instance {
+                system,
+                start_time,
+                parent,
+                particles: ParticleSet::default(),
+                emit_accumulator: vec![0.0; compiled.emitters.len()],
+                burst_done: vec![false; compiled.emitters.len()],
+                spawn_counter: 0,
+                rng: Rng::new(
+                    self.seed
+                        .wrapping_add(instance_index as u64)
+                        .wrapping_mul(0x9E3779B97F4A7C15),
+                ),
+            });
+            // Reversed: a stack pops last-pushed first, so pushing in
+            // reverse spawns children in declaration order.
+            for child in self.systems[system].children.clone().into_iter().rev() {
+                pending.push((
+                    child.system,
+                    start_time + child.delay,
+                    Some(instance_index),
+                    depth + 1,
+                ));
+            }
         }
     }
 
@@ -1534,15 +1514,7 @@ impl ParticleEngine {
         }
 
         // Decay last so freshly-faded values are what the final frame shows.
-        let has_decay = compiled
-            .operators
-            .iter()
-            .any(|operator| matches!(operator, Operator::LifespanDecay))
-            || compiled
-                .operators
-                .iter()
-                .any(|operator| matches!(operator, Operator::AlphaFadeAndDecay { .. }));
-        if has_decay {
+        if compiled.retires_particles {
             let mut index = 0;
             while index < particles.len() {
                 let (age, lifetime) = age_of(particles, index, local_time);
@@ -1698,6 +1670,25 @@ mod tests {
         ParticleEngine::new(&file, 0, 7).expect("engine builds")
     }
 
+    /// Decided at compile time, not rediscovered by two full scans of
+    /// `operators` per instance per substep. The predicate has to keep
+    /// matching both operators that retire particles — dropping either would
+    /// leave dead particles on screen forever, which no frame-count assertion
+    /// elsewhere distinguishes from a slow emitter.
+    #[test]
+    fn retirement_is_decided_once_at_compile_time() {
+        let with_decay = engine_for(vec![basic_system()]);
+        assert!(with_decay.systems[0].retires_particles);
+
+        let mut fading = basic_system();
+        fading.operators = vec![function("Alpha Fade and Decay", &[])];
+        assert!(engine_for(vec![fading]).systems[0].retires_particles);
+
+        let mut immortal = basic_system();
+        immortal.operators = Vec::new();
+        assert!(!engine_for(vec![immortal]).systems[0].retires_particles);
+    }
+
     #[test]
     fn continuous_emission_rate_and_decay() {
         let mut engine = engine_for(vec![basic_system()]);
@@ -1811,6 +1802,62 @@ mod tests {
         let particle = engine.render_instances()[0].particles[0];
         assert!(particle.position[2] < -1.0, "z={}", particle.position[2]);
         assert!(particle.velocity[2] < -20.0);
+    }
+
+    /// A `.pcf` is untrusted, and its child links can chain arbitrarily deep.
+    /// The walk must stop at a fixed depth rather than following the file —
+    /// a recursive version would spend attacker-controlled stack frames.
+    #[test]
+    fn a_deep_child_chain_stops_at_the_depth_bound() {
+        let depth = MAX_INSTANCE_TREE_DEPTH * 2;
+        let systems = (0..depth)
+            .map(|index| {
+                let mut system = basic_system();
+                system.name = format!("system{index}");
+                if index + 1 < depth {
+                    system.children = vec![PcfChild {
+                        name: format!("system{}", index + 1),
+                        system_index: Some(index + 1),
+                        delay: 0.0,
+                    }];
+                }
+                system
+            })
+            .collect::<Vec<_>>();
+
+        let engine = engine_for(systems);
+
+        assert_eq!(
+            engine.instances.len(),
+            MAX_INSTANCE_TREE_DEPTH,
+            "the walk must stop exactly at the bound, not before or past it"
+        );
+    }
+
+    /// A cycle between two systems must terminate on the instance ceiling.
+    #[test]
+    fn a_child_cycle_terminates() {
+        let mut first = basic_system();
+        first.name = "first".to_owned();
+        first.children = vec![PcfChild {
+            name: "second".to_owned(),
+            system_index: Some(1),
+            delay: 0.0,
+        }];
+        let mut second = basic_system();
+        second.name = "second".to_owned();
+        second.children = vec![PcfChild {
+            name: "first".to_owned(),
+            system_index: Some(0),
+            delay: 0.0,
+        }];
+
+        let engine = engine_for(vec![first, second]);
+
+        assert!(
+            engine.instances.len() <= 4,
+            "instance ceiling is 2 * systems"
+        );
     }
 
     #[test]
@@ -1930,5 +1977,37 @@ mod tests {
             ControlPointIndex::clamped(usize::MAX).get(),
             MAX_CONTROL_POINTS - 1
         );
+    }
+
+    /// Every read indexes all sixteen arrays by the same position, so a
+    /// whole-set operation that misses one desynchronises them permanently.
+    /// Spawning *and* expiring particles exercises `push` and `swap_remove`.
+    #[test]
+    fn whole_set_operations_keep_the_arrays_parallel() {
+        let mut engine = engine_for(vec![basic_system()]);
+        engine.step(0.5);
+        assert!(engine.live_particles() > 0, "the fixture must spawn");
+        for instance in &engine.instances {
+            assert!(instance.particles.arrays_are_parallel(), "push went ragged");
+        }
+
+        // Past the 1s lifetime, so the earliest particles swap_remove out
+        // while the continuous emitter keeps spawning. The live count alone
+        // cannot show that — it stays roughly flat — but having spawned more
+        // than are alive can.
+        engine.step(2.0);
+        assert!(
+            engine
+                .instances
+                .iter()
+                .any(|instance| instance.spawn_counter as usize > instance.particles.len()),
+            "nothing expired, so swap_remove never ran"
+        );
+        for instance in &engine.instances {
+            assert!(
+                instance.particles.arrays_are_parallel(),
+                "swap_remove went ragged"
+            );
+        }
     }
 }

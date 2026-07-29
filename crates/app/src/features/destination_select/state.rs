@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use crate::bridge::tasks::fallback_paths;
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{AppPaths, Settings};
-use crate::util::paths::{fallback_current_dir, fallback_paths, path_to_display};
+use crate::util::paths::{fallback_current_dir, path_to_display};
 
 use super::model::{
     self, DestinationError, DestinationKind, DestinationPersistRequest, DestinationRoot,

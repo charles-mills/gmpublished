@@ -125,7 +125,8 @@ bytemuck = { version = "1", default-features = false, features = ["derive"] }
 # `rustls-no-provider` + `_ring` gives rustls with the ring crypto provider but
 # WITHOUT the bundled Mozilla webpki roots; `platform-verifier` enables
 # certificate verification against the OS trust store (rustls-platform-verifier).
-# Every agent must set `RootCerts::PlatformVerifier` — the WebPki default panics.
+# No bundled webpki roots: build agents through `backend::net::tls_agent_builder`,
+# which is where the trust-store choice and its rationale live.
 ureq = { version = "3.3.0", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
 walkdir = "2.5.0"
 
@@ -133,7 +134,6 @@ walkdir = "2.5.0"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
 opt-level = "s"
 
 [profile.profiling]

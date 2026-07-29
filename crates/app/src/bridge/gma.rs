@@ -5,12 +5,12 @@ use std::{
 };
 
 use gmpublished_backend::{
-    GMAFile, Transaction,
+    GmaFile, Transaction,
     gma::{is_unsafe_entry_path, read::GmaView},
 };
 
 pub use gmpublished_backend::{
-    GMAError as GmaError,
+    GmaError,
     gma::{ExtractDestination, ExtractOptions, ExtractionOverwriteMode, Whitelist, whitelist},
 };
 
@@ -138,108 +138,13 @@ impl From<ArchiveDirectoryPath> for String {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum GmaMetadata {
-    Standard {
-        title: String,
-        addon_type: String,
-        tags: Vec<String>,
-        ignore: Vec<String>,
-    },
-    Legacy {
-        title: String,
-        description: String,
-    },
-}
-
-impl GmaMetadata {
-    pub(crate) fn title(&self) -> &str {
-        match self {
-            Self::Standard { title, .. } | Self::Legacy { title, .. } => title,
-        }
-    }
-
-    pub(crate) fn addon_type(&self) -> Option<&str> {
-        match self {
-            Self::Standard { addon_type, .. } => Some(addon_type.as_str()),
-            Self::Legacy { .. } => None,
-        }
-    }
-
-    pub(crate) fn tags(&self) -> Option<&Vec<String>> {
-        match self {
-            Self::Standard { tags, .. } => Some(tags),
-            Self::Legacy { .. } => None,
-        }
-    }
-}
-
-impl From<gmpublished_backend::GMAMetadata> for GmaMetadata {
-    fn from(metadata: gmpublished_backend::GMAMetadata) -> Self {
-        match metadata {
-            gmpublished_backend::GMAMetadata::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            } => Self::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            },
-            gmpublished_backend::GMAMetadata::Legacy { title, description } => {
-                Self::Legacy { title, description }
-            }
-        }
-    }
-}
-
-impl From<GmaMetadata> for gmpublished_backend::GMAMetadata {
-    fn from(metadata: GmaMetadata) -> Self {
-        match metadata {
-            GmaMetadata::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            } => Self::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            },
-            GmaMetadata::Legacy { title, description } => Self::Legacy { title, description },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct GmaHeader {
-    pub(crate) version: u8,
-    pub(crate) timestamp: u64,
-    pub(crate) metadata: GmaMetadata,
-    pub(crate) author: String,
-    pub(crate) addon_version: i32,
-}
-
-impl GmaHeader {
-    pub(crate) fn title(&self) -> &str {
-        self.metadata.title()
-    }
-}
-
-impl From<gmpublished_backend::GMAHeader> for GmaHeader {
-    fn from(header: gmpublished_backend::GMAHeader) -> Self {
-        Self {
-            version: header.version,
-            timestamp: header.timestamp,
-            metadata: header.metadata.into(),
-            author: header.author,
-            addon_version: header.addon_version,
-        }
-    }
-}
+/// The backend's own types.
+///
+/// Not mirrored: both were duplicated field-for-field *and* accessor-for-
+/// accessor, with identity `From` impls in each direction. A newtype earns its
+/// conversions by refining something — see [`PublishedFileId`], which enforces
+/// non-zero where the backend's does not. These refined nothing.
+pub use gmpublished_backend::{GmaHeader, GmaMetadata};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct GmaMetaEntry {
@@ -289,7 +194,7 @@ impl GmaMeta {
         let path = path.as_ref();
         Ok(Self {
             path: path.to_path_buf(),
-            header: GMAFile::open_header(path)?.into(),
+            header: GmaFile::open_header(path)?,
             entries: Arc::from([]),
         })
     }
@@ -298,7 +203,7 @@ impl GmaMeta {
         let path = path.as_ref();
         // One mmap + one parse; the previous open/header/entries chain
         // re-parsed the whole entry table three times.
-        let bundle = GMAFile::open_index(path)?;
+        let bundle = GmaFile::open_index(path)?;
         let mut entries: Vec<GmaMetaEntry> = bundle
             .entries
             .into_iter()
@@ -311,7 +216,7 @@ impl GmaMeta {
         entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         Ok(Self {
             path: path.to_path_buf(),
-            header: bundle.header.into(),
+            header: bundle.header,
             entries: entries.into(),
         })
     }
@@ -331,7 +236,7 @@ pub struct PreviewEntry {
 /// `PartialEq` are hand-written to skip it.
 #[derive(Clone)]
 pub struct PreviewArchive {
-    gma: GMAFile,
+    gma: GmaFile,
     view: Arc<GmaView>,
     header: GmaHeader,
     entries: Vec<PreviewEntry>,
@@ -375,7 +280,7 @@ impl PreviewArchive {
             // Recomputes extracted_name so it includes both title and id.
             gma.set_ws_id(gmpublished_backend::appdata::SettingsPublishedFileId(id));
         }
-        let header = bundle.header.into();
+        let header = bundle.header;
         let entries = preview_entries_from_backend(bundle.entries);
 
         Ok(Self {
@@ -438,7 +343,10 @@ impl PreviewArchive {
             &self.gma,
             entry_path.to_owned(),
             transaction,
-            false,
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Ignore,
+            },
             &backend.app_data,
             &backend.steam,
         )
@@ -532,7 +440,7 @@ pub fn crc32(bytes: &[u8]) -> u32 {
 }
 
 fn preview_entries_from_backend(
-    entries: Vec<gmpublished_backend::gma::read::GmaIndexedEntry>,
+    entries: Vec<gmpublished_backend::GmaIndexedEntry>,
 ) -> Vec<PreviewEntry> {
     let mut preview = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -600,14 +508,13 @@ fn preview_archive_from_fixture(gma: FixtureGmaFile) -> Result<PreviewArchive, G
     if gma.header.version > 1 {
         bytes.push(0); // required content
     }
-    let backend_metadata: gmpublished_backend::GMAMetadata = gma.header.metadata.clone().into();
-    let (title, description) = match &backend_metadata {
-        gmpublished_backend::GMAMetadata::Legacy { title, description } => {
+    let (title, description) = match &gma.header.metadata {
+        gmpublished_backend::GmaMetadata::Legacy { title, description } => {
             (title.clone(), description.clone())
         }
-        gmpublished_backend::GMAMetadata::Standard { title, .. } => (
+        gmpublished_backend::GmaMetadata::Standard { title, .. } => (
             title.clone(),
-            serde_json::to_string(&backend_metadata).expect("fixture metadata serializes"),
+            serde_json::to_string(&gma.header.metadata).expect("fixture metadata serializes"),
         ),
     };
     for field in [&title, &description, &gma.header.author] {

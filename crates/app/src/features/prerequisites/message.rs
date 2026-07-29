@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::bridge::ui_error::UiError;
+
 /// A button on a prerequisite panel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
@@ -24,5 +26,7 @@ pub enum Message {
     /// A folder picker closed; `None` means the user cancelled.
     GameFolderPicked(Option<PathBuf>),
     /// Discovery finished, carrying whatever path it resolved.
-    GameSearchCompleted(Option<PathBuf>),
+    /// The search's outcome, not just its result: `Ok(None)` is "no Garry's
+    /// Mod folder found", which is a different thing from never having looked.
+    GameSearchCompleted(Result<Option<PathBuf>, UiError>),
 }

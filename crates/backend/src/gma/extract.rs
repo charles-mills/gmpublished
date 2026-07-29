@@ -14,7 +14,7 @@ use crate::steam::Steam;
 use crate::transactions::Transaction;
 
 use super::{
-    GMAError, GMAFile, GMAMetadata, is_unsafe_entry_path,
+    GmaError, GmaFile, GmaMetadata, is_unsafe_entry_path,
     read::GmaView,
     whitelist::{self, AddonWhitelist},
 };
@@ -54,22 +54,12 @@ pub enum ExtractDestination {
     NamedDirectory(PathBuf),
 }
 impl ExtractDestination {
-    fn prepare<S: AsRef<str>>(
-        self,
-        extracted_name: S,
-        app_data: &AppData,
-        steam: &Steam,
-    ) -> Result<PathBuf, GMAError> {
-        let context = ExtractionAppDataContext::for_destination(&self, app_data, steam);
-        self.prepare_with_context(extracted_name, &context, cleanup_existing_destination)
-    }
-
     fn prepare_with_context<S: AsRef<str>>(
         self,
         extracted_name: S,
         context: &ExtractionAppDataContext,
         cleanup_existing: impl Fn(&Path, &ExtractionOverwriteMode) -> bool,
-    ) -> Result<PathBuf, GMAError> {
+    ) -> Result<PathBuf, GmaError> {
         use ExtractDestination::{Addons, Directory, Downloads, NamedDirectory, Temp};
 
         let push_extracted_name = |mut path: PathBuf| {
@@ -145,7 +135,7 @@ fn cleanup_existing_destination(path: &Path, overwrite_mode: &ExtractionOverwrit
 /// Tries suffixed sibling names (`name (1)`, `name (2)`, ...) until an
 /// unused one turns up. Errors once every suffix up to `(255)` is taken
 /// rather than silently handing back the popped parent directory.
-fn use_suffixed_fallback_destination(path: &mut PathBuf) -> Result<(), GMAError> {
+fn use_suffixed_fallback_destination(path: &mut PathBuf) -> Result<(), GmaError> {
     // Root/`..`-terminated paths have no file name; fall back to a static one
     // instead of panicking. Normal destinations are unaffected.
     let dir_name = path.file_name().map_or_else(
@@ -162,7 +152,7 @@ fn use_suffixed_fallback_destination(path: &mut PathBuf) -> Result<(), GMAError>
         path.pop();
     }
 
-    Err(GMAError::DestinationUnavailable)
+    Err(GmaError::DestinationUnavailable)
 }
 
 /// Tracks compressed bytes handed to the LZMA decoder so decompression
@@ -180,7 +170,7 @@ impl<R: Read> Read for CountingReader<R> {
     }
 }
 
-impl GMAFile {
+impl GmaFile {
     /// Decompressed payloads at most this large are kept in memory for the
     /// extraction that follows; anything larger (or of unknown size) spills
     /// to a temp .gma so peak RSS stays bounded regardless of addon size.
@@ -195,7 +185,7 @@ impl GMAFile {
         transaction: &Transaction,
         app_data: &AppData,
         steam: &Steam,
-    ) -> Result<(Self, GmaView), GMAError> {
+    ) -> Result<(Self, GmaView), GmaError> {
         main_thread_forbidden!();
 
         let mut input = File::open(path.as_ref())?;
@@ -209,7 +199,7 @@ impl GMAFile {
         let mut header = [0u8; 13];
         input.read_exact(&mut header).map_err(|err| {
             log::error!("LZMA error: {err:?}");
-            GMAError::LZMA
+            GmaError::LZMA
         })?;
         let props = header[0];
         let dict_size = u32::from_le_bytes(header[1..5].try_into().unwrap());
@@ -224,7 +214,7 @@ impl GMAFile {
             lzma_rust2::LzmaReader::new_with_props(counting, unpacked_size, props, dict_size, None)
                 .map_err(|err| {
                     log::error!("LZMA error: {err:?}");
-                    GMAError::LZMA
+                    GmaError::LZMA
                 })?;
 
         enum Sink {
@@ -307,7 +297,7 @@ impl GMAFile {
 
                 loop {
                     if transaction.aborted() {
-                        return Err(GMAError::Cancelled);
+                        return Err(GmaError::Cancelled);
                     }
                     match decoder.read(&mut buf) {
                         Ok(0) => break Ok(()),
@@ -341,7 +331,7 @@ impl GMAFile {
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
                     if transaction.aborted() {
-                        return Err(GMAError::Cancelled);
+                        return Err(GmaError::Cancelled);
                     }
                     match decoder.read(&mut buf) {
                         Ok(0) => break Ok(()),
@@ -359,7 +349,7 @@ impl GMAFile {
 
         if let Err(err) = result {
             log::error!("LZMA error: {err:#?}");
-            return Err(GMAError::LZMA);
+            return Err(GmaError::LZMA);
         }
 
         match sink {
@@ -394,7 +384,7 @@ fn write_entry_bytes(
     payload: &[u8],
     entry_path: &PathBuf,
     transaction: Option<&Transaction>,
-) -> Result<(), GMAError> {
+) -> Result<(), GmaError> {
     use std::io::Write;
 
     fs::create_dir_all(entry_path.with_file_name(""))?;
@@ -408,13 +398,13 @@ fn write_entry_bytes(
     Ok(())
 }
 
-/// Writes `addon.json` for `GMAMetadata::Standard` addons; a no-op for
+/// Writes `addon.json` for `GmaMetadata::Standard` addons; a no-op for
 /// `Legacy` metadata, which has nothing to serialize. Runs straight-line,
 /// exactly once, after the parallel entry loop has fully joined and before
 /// the transaction is reported finished — a half-extracted addon should
 /// never look "done" while its manifest is still missing.
-fn write_addon_json(handle: &GMAFile, dest_path: &Path) -> std::io::Result<()> {
-    let GMAMetadata::Standard { .. } = &handle.metadata else {
+fn write_addon_json(handle: &GmaFile, dest_path: &Path) -> std::io::Result<()> {
+    let GmaMetadata::Standard { .. } = &handle.metadata else {
         return Ok(());
     };
     let json = serde_json::ser::to_string_pretty(&handle.metadata)
@@ -488,21 +478,29 @@ impl GmaView {
     #[expect(clippy::too_many_arguments)]
     pub fn extract(
         &self,
-        handle: &GMAFile,
+        handle: &GmaFile,
         dest: ExtractDestination,
         transaction: &Transaction,
         options: ExtractOptions,
         whitelist: &AddonWhitelist,
         app_data: &AppData,
         steam: &Steam,
-    ) -> Result<PathBuf, GMAError> {
+    ) -> Result<PathBuf, GmaError> {
         let ExtractOptions {
             open_after,
             whitelist: whitelist_mode,
         } = options;
+        // Resolved here, at the one boundary that has the services, so the
+        // extraction below depends on the four paths it actually reads rather
+        // than on `AppData` and `Steam`.
+        let destination_context = ExtractionAppDataContext::for_destination(&dest, app_data, steam);
 
-        let result = THREAD_POOL.install(|| -> Result<PathBuf, GMAError> {
-            let dest_path = dest.prepare(&handle.extracted_name, app_data, steam)?;
+        let result = THREAD_POOL.install(|| -> Result<PathBuf, GmaError> {
+            let dest_path = dest.prepare_with_context(
+                &handle.extracted_name,
+                &destination_context,
+                cleanup_existing_destination,
+            )?;
             // Only a destination that survived cleanup (or was never
             // touched, e.g. an explicit `Directory`) can carry out-of-band
             // symlinks; a freshly allocated one has nothing planted in it.
@@ -525,12 +523,12 @@ impl GmaView {
             };
 
             entries.par_iter().try_for_each(
-                |(entry_path, entry_index)| -> Result<(), GMAError> {
+                |(entry_path, entry_index)| -> Result<(), GmaError> {
                     if matches!(whitelist_mode, Whitelist::Ignore)
                         || whitelist::is_whitelisted_in(&whitelist_snapshot, entry_path)
                     {
                         if transaction.aborted() {
-                            return Err(GMAError::Cancelled);
+                            return Err(GmaError::Cancelled);
                         }
 
                         let final_path = dest_path.join(entry_path);
@@ -608,7 +606,7 @@ impl GmaView {
                 && extracted > 0
                 && let Err(err) = write_addon_json(handle, &dest_path)
             {
-                return Err(GMAError::ExtractionFailed {
+                return Err(GmaError::ExtractionFailed {
                     extracted,
                     failed: 1,
                     rejected,
@@ -617,7 +615,7 @@ impl GmaView {
             }
 
             if failed > 0 || extracted == 0 {
-                return Err(GMAError::ExtractionFailed {
+                return Err(GmaError::ExtractionFailed {
                     extracted,
                     failed,
                     rejected,
@@ -656,13 +654,19 @@ impl GmaView {
     )]
     pub fn extract_entry(
         &self,
-        handle: &GMAFile,
+        handle: &GmaFile,
         entry_path: String,
         transaction: &Transaction,
-        open_after_extract: bool,
+        options: ExtractOptions,
         app_data: &AppData,
         steam: &Steam,
-    ) -> Result<PathBuf, GMAError> {
+    ) -> Result<PathBuf, GmaError> {
+        // A single entry always lands in the temp dir, so the destination half
+        // of `ExtractOptions` has nothing to choose; only `open_after` applies.
+        let ExtractOptions {
+            open_after: open_after_extract,
+            whitelist: _,
+        } = options;
         let context = ExtractionAppDataContext::for_temp_entry(app_data, steam);
         let mut base = context.temp_dir;
         base.push("gmpublisher");
@@ -672,7 +676,7 @@ impl GmaView {
         path.push(&entry_path);
 
         if !path.starts_with(&base) {
-            return Err(GMAError::FormatError);
+            return Err(GmaError::FormatError);
         }
 
         let parsed = self.parse()?;
@@ -687,10 +691,10 @@ impl GmaView {
                     .position(|entry| entry.path == entry_path)
             })
             .flatten()
-            .ok_or(GMAError::EntryNotFound)?;
+            .ok_or(GmaError::EntryNotFound)?;
         let result = parsed
             .entry_bytes(entry_index)
-            .map_err(|_| GMAError::FormatError)
+            .map_err(|_| GmaError::FormatError)
             .and_then(|payload| write_entry_bytes(payload, &path, Some(transaction)))
             .map(|_| path.clone());
 

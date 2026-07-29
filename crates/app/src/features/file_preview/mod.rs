@@ -3,6 +3,7 @@
 mod effect;
 mod message;
 pub mod model;
+mod orbit;
 mod particles3d;
 mod state;
 mod update;

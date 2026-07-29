@@ -8,7 +8,7 @@ pub enum Effect {
     ModalCloseRequested,
     PathBrowseRequested(PathSetting),
     PathValidationRequested(PathValidationRequest),
-    MutationApplied(SettingsMutation),
+    MutationApplied(crate::generation::Generation, SettingsMutation),
     SnapshotApplied(Box<SettingsSnapshot>),
     ResetRunRequested(ResetAction),
 }

@@ -208,14 +208,7 @@ impl Default for AddonWhitelist {
 }
 
 fn download_addon_whitelist() -> Result<Vec<String>, std::io::Error> {
-    // The workspace ureq build carries no bundled webpki roots; certificate
-    // verification must go through the OS trust store (PlatformVerifier).
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
+    let agent: ureq::Agent = crate::net::tls_agent_builder()
         .timeout_global(Some(Duration::from_secs(2)))
         .build()
         .into();

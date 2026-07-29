@@ -1559,6 +1559,7 @@ dependencies = [
  "crc32fast",
  "dirs",
  "dunce",
+ "gmpublished-backend",
  "image",
  "log",
  "lzma-rust2",

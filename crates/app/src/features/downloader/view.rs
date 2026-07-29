@@ -16,7 +16,7 @@ use crate::{
     widgets::tooltip as tooltip_widget,
 };
 
-use super::model::{DownloaderJob, EXTRACT_STATUS, JobProgress, Section};
+use super::jobs::{DownloaderJob, EXTRACT_STATUS, JobProgress, Section};
 use super::{Message, State};
 
 const JOB_ROW_HEIGHT: f32 = 44.0;
@@ -936,7 +936,7 @@ mod tests {
     use crate::i18n::I18n;
     use crate::theme::{Tokens, ViewCtx};
 
-    use super::super::model::{DownloaderEvent, workshop_result_success_with_gma};
+    use super::super::jobs::{DownloaderEvent, workshop_result_success_with_gma};
     use super::super::update;
     use super::{LayoutMode, Message, State, layout_mode, view};
 

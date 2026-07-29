@@ -94,7 +94,7 @@ fn modal_stack_close_clears_preview_gma_state() {
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
             PathBuf::from("/tmp/test.gma"),
             "Test",
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(123)),
         )),
     ));
 
@@ -130,7 +130,7 @@ fn destination_overlay_layers_over_preview_and_closes_first() {
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
             PathBuf::from("/tmp/test.gma"),
             "Test",
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(123)),
         )),
     ));
     let _task = app.update(RootMessage::ModalStack(
@@ -208,6 +208,58 @@ fn modal_stack_close_clears_prepare_publish_state() {
     assert!(!app.state.prepare_publish.open());
 }
 
+/// A modal that is replaced rather than closed never animates out, so the
+/// close teardown has to be driven by the displacement itself: without it
+/// `prepare_publish` keeps its staged temp paths and thumbnail demands alive
+/// behind whatever took the layer.
+#[test]
+fn a_displaced_modal_runs_the_close_teardown_it_never_animated_into() {
+    let mut app = App::new_for_test();
+
+    let _task = app.update(RootMessage::PreparePublish(
+        prepare_publish::Message::OpenRequested {
+            target: prepare_publish::OpenTarget::New,
+            ignored_patterns: Vec::new(),
+            upscale_icon_default: false,
+        },
+    ));
+    assert!(app.state.prepare_publish.open());
+
+    let snapshot = app.settings_snapshot();
+    let _task = app.update(RootMessage::Settings(settings::Message::OpenRequested(
+        snapshot,
+    )));
+
+    assert_eq!(
+        app.state.modal_stack.active(),
+        Some(modal_stack::ActiveModal::Settings)
+    );
+    assert!(!app.state.prepare_publish.open());
+}
+
+/// The previewer's messages travel as an effect, so no root match arm has to
+/// be ordered ahead of the general `PreparePublish(_)` one. Handling them at
+/// the root instead would make that ordering load-bearing: swap the two arms
+/// and the message falls through to a feature whose own update ignores it.
+#[test]
+fn a_preview_message_wrapped_by_prepare_publish_still_reaches_the_previewer() {
+    let mut app = App::new_for_test();
+
+    let _task = app.update(RootMessage::FilePreview(
+        file_preview::Message::OpenRequested(file_preview_request()),
+    ));
+    assert!(!app.state.file_preview.expanded());
+
+    let _task = app.update(RootMessage::PreparePublish(
+        prepare_publish::Message::FilePreview(file_preview::Message::ExpandToggled),
+    ));
+
+    assert!(
+        app.state.file_preview.expanded(),
+        "the wrapped message must reach file_preview's own update"
+    );
+}
+
 #[test]
 fn settings_activation_claims_modal_stack_slot() {
     let mut app = App::new_for_test();
@@ -274,7 +326,7 @@ fn downloader_executor_submission_schedules_worker_task() {
 
     let task = app.batch_effects(
         vec![downloader::Effect::WorkshopSubmissionAccepted(vec![
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(123),
         ])],
         App::run_downloader_effect,
     );
@@ -358,7 +410,7 @@ fn downloader_row_cancel_button_is_clickable_through_the_full_app_view() {
     let _task = app.update(RootMessage::Downloader(downloader::Message::EventReceived(
         downloader::DownloaderEvent::TaskStarted {
             kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            item_id: PublishedFileId::fixture(123),
             task_id: TaskId::from_raw(7),
         },
     )));
@@ -412,7 +464,7 @@ fn downloader_executor_open_workshop_schedules_url_task() {
 
     let task = app.batch_effects(
         vec![downloader::Effect::WorkshopPageOpenRequested(Some(
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(123),
         ))],
         App::run_downloader_effect,
     );
@@ -563,8 +615,12 @@ fn destination_select_executor_persist_request_schedules_save() {
     assert_task_scheduled(&task);
 }
 
+/// Persisting starts the overlay's close: it stops taking input immediately,
+/// while the overlay itself stays up until the fade finishes. Nothing here
+/// ticks the animation, so `overlay_active` is still true — that is the state
+/// under test, not an oversight.
 #[test]
-fn destination_select_executor_persisted_closes_overlay_and_runs_handoffs() {
+fn destination_select_executor_persisted_begins_closing_the_overlay() {
     let mut app = App::new_for_test();
     let _task = app.batch_effects(
         vec![destination_select::Effect::ModalOpenRequested],
@@ -601,7 +657,7 @@ fn downloader_executor_title_query_schedules_metadata_task() {
 
     let task = app.batch_effects(
         vec![downloader::Effect::WorkshopTitleQueryRequested(vec![
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(123),
         ])],
         App::run_downloader_effect,
     );
@@ -759,7 +815,7 @@ fn search_executor_metadata_refresh_defers_until_steam_connects() {
     let _task = app.batch_effects(
         vec![search::Effect::MetadataRefreshRequested {
             generation: Generation::from_raw(7),
-            item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
+            item_ids: vec![PublishedFileId::fixture(123)],
         }],
         App::run_search_effect,
     );
@@ -768,7 +824,7 @@ fn search_executor_metadata_refresh_defers_until_steam_connects() {
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::SearchMetadataRefresh {
             generation: Generation::from_raw(7),
-            item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
+            item_ids: vec![PublishedFileId::fixture(123)],
         }]
     );
 }
@@ -844,12 +900,19 @@ fn my_workshop_executor_context_menu_sets_target_and_schedules_open() {
     assert!(matches!(
         app.state.context_menu_target,
         Some(ContextMenuTarget::MyWorkshop { workshop_id, .. })
-            if workshop_id == PublishedFileId::new(123).expect("test fixture ids are always nonzero")
+            if workshop_id == PublishedFileId::fixture(123)
     ));
 }
 
+/// The demand handlers must not schedule work — they mutate the demand index
+/// and let the pump drive fetches.
+///
+/// That is all these four check. Observing the demand itself needs a laid-out
+/// grid: `thumbnail_demands` reads `visible_item_range`, which is empty until
+/// a layout pass, and the harness has no way to simulate one. Recorded in
+/// CODE_REVIEW.md rather than papered over.
 #[test]
-fn my_workshop_executor_thumbnail_demands_runs_owner_sync() {
+fn my_workshop_executor_thumbnail_demands_schedules_no_task() {
     let mut app = App::new_for_test();
 
     let task = app.batch_effects(
@@ -867,9 +930,7 @@ fn my_workshop_executor_drag_press_updates_drag_state() {
     let task = app.batch_effects(
         vec![my_workshop::Effect::AddonDragPressed {
             card_id: "123".to_owned(),
-            workshop_id: Some(
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            ),
+            workshop_id: Some(PublishedFileId::fixture(123)),
         }],
         App::run_my_workshop_effect,
     );
@@ -884,7 +945,7 @@ fn my_workshop_executor_drag_release_finishes_drag() {
     app.state.addon_drag.press(
         AddonDragSource::MyWorkshop,
         "123".to_owned(),
-        Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(123)),
         None,
     );
 
@@ -904,7 +965,7 @@ fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
     let _task = app.batch_effects(
         vec![installed_addons::Effect::MetadataRequested {
             generation: Generation::from_raw(7),
-            item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
+            item_ids: vec![PublishedFileId::fixture(123)],
         }],
         App::run_installed_addons_effect,
     );
@@ -913,7 +974,7 @@ fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::InstalledMetadata {
             generation: Generation::from_raw(7),
-            item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
+            item_ids: vec![PublishedFileId::fixture(123)],
         }]
     );
 }
@@ -925,7 +986,7 @@ fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
     let _task = app.batch_effects(
         vec![installed_addons::Effect::MetadataRefreshRequested {
             generation: Generation::from_raw(7),
-            item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
+            item_ids: vec![PublishedFileId::fixture(123)],
         }],
         App::run_installed_addons_effect,
     );
@@ -934,7 +995,7 @@ fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
         app.state.steam_session.pending_retries(),
         [steam_session::PendingRetry::InstalledMetadataRefresh {
             generation: Generation::from_raw(7),
-            item_ids: vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")],
+            item_ids: vec![PublishedFileId::fixture(123)],
         }]
     );
 }
@@ -972,12 +1033,12 @@ fn installed_addons_executor_context_menu_sets_target_and_schedules_open() {
     assert!(matches!(
         app.state.context_menu_target,
         Some(ContextMenuTarget::Local(LocalMenuTarget { workshop_id, .. }))
-            if workshop_id == Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+            if workshop_id == Some(PublishedFileId::fixture(123))
     ));
 }
 
 #[test]
-fn installed_addons_executor_thumbnail_demands_runs_owner_sync() {
+fn installed_addons_executor_thumbnail_demands_schedules_no_task() {
     let mut app = App::new_for_test();
 
     let task = app.batch_effects(
@@ -995,9 +1056,7 @@ fn installed_addons_executor_drag_press_updates_drag_state() {
     let task = app.batch_effects(
         vec![installed_addons::Effect::AddonDragPressed {
             card_id: "/tmp/drag.gma".to_owned(),
-            workshop_id: Some(
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            ),
+            workshop_id: Some(PublishedFileId::fixture(123)),
         }],
         App::run_installed_addons_effect,
     );
@@ -1012,7 +1071,7 @@ fn installed_addons_executor_drag_release_finishes_drag() {
     app.state.addon_drag.press(
         AddonDragSource::InstalledAddons,
         "/tmp/drag.gma".to_owned(),
-        Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(123)),
         None,
     );
 
@@ -1031,7 +1090,7 @@ fn size_analyzer_executor_preview_url_resolve_schedules_worker() {
 
     let task = app.batch_effects(
         vec![size_analyzer::Effect::PreviewUrlsResolveRequested(vec![
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(123),
         ])],
         App::run_size_analyzer_effect,
     );
@@ -1048,9 +1107,7 @@ fn size_analyzer_executor_preview_schedules_preview_open() {
             size_analyzer::PreviewTarget {
                 path: PathBuf::from("/tmp/size-preview.gma"),
                 title: "Size Preview".to_owned(),
-                workshop_id: Some(
-                    PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-                ),
+                workshop_id: Some(PublishedFileId::fixture(123)),
             },
         )],
         App::run_size_analyzer_effect,
@@ -1073,12 +1130,12 @@ fn size_analyzer_executor_context_menu_sets_target_and_schedules_open() {
     assert!(matches!(
         app.state.context_menu_target,
         Some(ContextMenuTarget::Local(LocalMenuTarget { workshop_id, .. }))
-            if workshop_id == Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+            if workshop_id == Some(PublishedFileId::fixture(123))
     ));
 }
 
 #[test]
-fn size_analyzer_executor_thumbnail_demands_runs_owner_sync() {
+fn size_analyzer_executor_thumbnail_demands_schedules_no_task() {
     let mut app = App::new_for_test();
 
     let task = app.batch_effects(
@@ -1096,9 +1153,7 @@ fn size_analyzer_executor_drag_press_updates_drag_state() {
     let task = app.batch_effects(
         vec![size_analyzer::Effect::AddonDragPressed {
             card_id: "/tmp/size-drag.gma".to_owned(),
-            workshop_id: Some(
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            ),
+            workshop_id: Some(PublishedFileId::fixture(123)),
         }],
         App::run_size_analyzer_effect,
     );
@@ -1113,7 +1168,7 @@ fn size_analyzer_executor_drag_release_finishes_drag() {
     app.state.addon_drag.press(
         AddonDragSource::SizeAnalyzer,
         "/tmp/size-drag.gma".to_owned(),
-        Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(123)),
         None,
     );
 
@@ -1236,7 +1291,7 @@ fn preview_gma_close_request_chains_expanded_preview_back_then_modal() {
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
             PathBuf::from("/tmp/test.gma"),
             "Test",
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(123)),
         )),
     ));
     let _task = app.update(RootMessage::FilePreview(
@@ -1301,7 +1356,7 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
         preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
             PathBuf::from("/tmp/test.gma"),
             "Test",
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(123)),
         )),
     ));
     let _task = app.update(RootMessage::FilePreview(
@@ -1397,7 +1452,7 @@ fn preview_gma_executor_browser_path_changed_schedules_autoscroll() {
 }
 
 #[test]
-fn preview_gma_executor_thumbnail_demands_runs_owner_sync() {
+fn preview_gma_executor_thumbnail_demands_schedules_no_task() {
     let mut app = App::new_for_test();
 
     let task = app.batch_effects(
@@ -1481,6 +1536,7 @@ fn settings_executor_mutation_applies_runtime_and_schedules_save() {
 
     let task = app.batch_effects(
         vec![settings::Effect::MutationApplied(
+            crate::generation::Generation::INITIAL,
             settings::SettingsMutation::PlayGifsByDefault(false),
         )],
         App::run_settings_effect,
@@ -1659,8 +1715,13 @@ fn command_comma_dismisses_account_menu_and_defers_to_settings_open_task() {
     assert_eq!(app.state.modal_stack.active(), None);
 }
 
+/// The shortcut's own contribution is the scheduled close task; the harness
+/// does not run tasks, so the `CloseRequested` below stands in for what that
+/// task delivers. What is verified here is the settling: once the close is
+/// requested, the layer clears on the next animation tick rather than
+/// stranding an inactive modal.
 #[test]
-fn command_comma_closes_settings_when_it_is_the_active_modal() {
+fn requesting_a_settings_close_clears_the_modal_on_the_next_tick() {
     let mut app = App::new_for_test();
     let snapshot = app.settings_snapshot();
     let _task = app.update(RootMessage::Settings(settings::Message::OpenRequested(
@@ -1790,10 +1851,8 @@ fn context_menu_extract_opens_destination_select_with_pending_path() {
 fn context_menu_dismiss_clears_active_target() {
     let mut app = App::new_for_test();
     app.state.context_menu_target = Some(ContextMenuTarget::MyWorkshop {
-        workshop_id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-        workshop_url: workshop_url::workshop_item_url(
-            PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-        ),
+        workshop_id: PublishedFileId::fixture(42),
+        workshop_url: workshop_url::workshop_item_url(PublishedFileId::fixture(42)),
         preview_url: None,
     });
 
@@ -1808,7 +1867,7 @@ fn context_menu_dismiss_clears_active_target() {
 #[test]
 fn hide_addon_context_action_is_session_scoped_and_removes_my_workshop_row() {
     let mut app = App::new_for_test();
-    let workshop_id = PublishedFileId::new(123).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(123);
     app.state
         .my_workshop
         .push_rows_for_test(vec![my_workshop::Row::for_test(123, "Hidden", 10)], 1);
@@ -1820,7 +1879,7 @@ fn hide_addon_context_action_is_session_scoped_and_removes_my_workshop_row() {
 
     let _task = app.route_context_menu_action(context_menu::ContextMenuAction::HideAddon);
 
-    assert!(app.state.hidden_workshop_ids.contains(&workshop_id));
+    assert!(app.state.hidden_addons.contains_workshop_id(workshop_id));
     assert!(app.state.my_workshop.row_for_test(123).is_none());
 }
 
@@ -1842,7 +1901,7 @@ fn addon_drag_state_preserves_click_when_released_before_drag_threshold() {
     drag.press(
         AddonDragSource::MyWorkshop,
         "42".to_owned(),
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
         None,
     );
     drag.cursor_moved(Point::new(10.0, 10.0));
@@ -1864,7 +1923,7 @@ fn addon_drag_state_promotes_after_threshold_and_drops_on_target() {
     drag.press(
         AddonDragSource::InstalledAddons,
         "/tmp/a.gma".to_owned(),
-        Some(PublishedFileId::new(99).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(99)),
         None,
     );
     drag.cursor_moved(Point::new(0.0, 0.0));
@@ -1877,7 +1936,7 @@ fn addon_drag_state_promotes_after_threshold_and_drops_on_target() {
     assert_eq!(
         drag.release(true),
         Some(AddonDragOutcome::Drop {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero")
+            workshop_id: PublishedFileId::fixture(99)
         })
     );
     assert!(!drag.is_active());
@@ -1891,7 +1950,7 @@ fn addon_drag_state_keeps_captured_thumbnail_while_dragging() {
     drag.press(
         AddonDragSource::MyWorkshop,
         "42".to_owned(),
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
         Some(thumbnail.clone()),
     );
     drag.cursor_moved(Point::ORIGIN);
@@ -1907,7 +1966,7 @@ fn addon_drag_state_cancels_active_drag_released_outside_target() {
     drag.press(
         AddonDragSource::MyWorkshop,
         "42".to_owned(),
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
         None,
     );
     drag.cursor_moved(Point::new(1.0, 1.0));
@@ -1947,7 +2006,7 @@ fn addon_drag_update_events_promote_and_finish_drag() {
     app.state.addon_drag.press(
         AddonDragSource::MyWorkshop,
         "42".to_owned(),
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
         None,
     );
 
@@ -2127,7 +2186,7 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
 fn backend_runtime_actions_translate_to_downloader_events() {
     let start = backend_runtime_action_message(BackendRuntimeAction::DownloadTaskStarted {
         kind: WorkshopDownloadTaskKind::Download,
-        item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+        item_id: PublishedFileId::fixture(123),
         task_id: TaskId::from_raw(7),
     });
     assert!(matches!(
@@ -2138,12 +2197,12 @@ fn backend_runtime_actions_translate_to_downloader_events() {
                 item_id,
                 task_id
             }
-        )) if item_id == PublishedFileId::new(123).expect("test fixture ids are always nonzero") && task_id == TaskId::from_raw(7)
+        )) if item_id == PublishedFileId::fixture(123) && task_id == TaskId::from_raw(7)
     ));
 
     let finished = backend_runtime_action_message(BackendRuntimeAction::DownloadFinished {
         request_id: None,
-        item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+        item_id: PublishedFileId::fixture(456),
         installed_path: None,
         extracted_path: PathBuf::from("/tmp/extracted/456"),
     });
@@ -2151,7 +2210,7 @@ fn backend_runtime_actions_translate_to_downloader_events() {
         finished,
         RootMessage::Downloader(downloader::Message::EventReceived(
             downloader::DownloaderEvent::WorkshopDownloadFinished(result)
-        )) if result.item_id == PublishedFileId::new(456).expect("test fixture ids are always nonzero")
+        )) if result.item_id == PublishedFileId::fixture(456)
             && result.outcome.as_ref().is_ok_and(|success| {
                 success.extracted_path == std::path::Path::new("/tmp/extracted/456")
                     && success.installed_path.is_none()
@@ -2160,7 +2219,7 @@ fn backend_runtime_actions_translate_to_downloader_events() {
 
     let snapshot = backend_runtime_action_message(BackendRuntimeAction::DownloadFinished {
         request_id: Some(77),
-        item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+        item_id: PublishedFileId::fixture(456),
         installed_path: None,
         extracted_path: PathBuf::from("/tmp/snapshot/456"),
     });
@@ -2169,14 +2228,14 @@ fn backend_runtime_actions_translate_to_downloader_events() {
         RootMessage::PreparePublish(prepare_publish::Message::WorkshopContentDownloaded(
             77,
             WorkshopDownloadSuccess { item_id, .. }
-        )) if item_id == PublishedFileId::new(456).expect("test fixture ids are always nonzero")
+        )) if item_id == PublishedFileId::fixture(456)
     ));
 }
 
 #[test]
 fn workshop_download_completion_starts_baseline_inspection() {
     let mut app = App::new_for_test();
-    let workshop_id = PublishedFileId::new(456).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(456);
     let extracted_path = PathBuf::from("/tmp/prepare-publish-workshop/456-0");
     let _task = app.update(RootMessage::PreparePublish(
         prepare_publish::Message::OpenRequested {
@@ -2550,7 +2609,7 @@ fn downloader_start_events_sync_shell_job_badge() {
     let _task = app.update(RootMessage::Downloader(downloader::Message::EventReceived(
         downloader::DownloaderEvent::TaskStarted {
             kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            item_id: PublishedFileId::fixture(123),
             task_id: TaskId::from_raw(7),
         },
     )));
@@ -2636,14 +2695,14 @@ fn preview_open_request() -> preview_gma::OpenRequest {
     preview_gma::OpenRequest {
         request_id: Generation::from_raw(1),
         path: PathBuf::from("/tmp/preview-open.gma"),
-        workshop_id: Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+        workshop_id: Some(PublishedFileId::fixture(123)),
     }
 }
 
 fn preview_metadata_request() -> preview_gma::MetadataRequest {
     preview_gma::MetadataRequest {
         request_id: Generation::from_raw(1),
-        workshop_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+        workshop_id: PublishedFileId::fixture(123),
     }
 }
 
@@ -2677,7 +2736,7 @@ fn installed_preview_target() -> installed_addons::PreviewTarget {
         row_id: "/tmp/installed-preview.gma".to_owned(),
         path: PathBuf::from("/tmp/installed-preview.gma"),
         title: "Installed Preview".to_owned(),
-        workshop_id: Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+        workshop_id: Some(PublishedFileId::fixture(123)),
         preview_url: Some("https://example.invalid/installed.jpg".to_owned()),
         subscription_count: 1_234,
         score_bucket: 4,
@@ -2691,10 +2750,10 @@ fn installed_context_menu_request() -> installed_addons::ContextMenuRequest {
         row_id: "/tmp/installed-context.gma".to_owned(),
         path: PathBuf::from("/tmp/installed-context.gma"),
         path_text: "/tmp/installed-context.gma".to_owned(),
-        workshop_id: Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
-        workshop_url: Some(workshop_url::workshop_item_url(
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-        )),
+        workshop_id: Some(PublishedFileId::fixture(123)),
+        workshop_url: Some(workshop_url::workshop_item_url(PublishedFileId::fixture(
+            123,
+        ))),
         preview_url: Some("https://example.invalid/installed.jpg".to_owned()),
         entries: vec![context_menu::Entry::copy_path()],
     }
@@ -2704,10 +2763,8 @@ fn my_workshop_context_menu_request() -> my_workshop::ContextMenuRequest {
     my_workshop::ContextMenuRequest {
         position: Point::new(12.0, 24.0),
         row_id: "123".to_owned(),
-        workshop_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-        workshop_url: workshop_url::workshop_item_url(
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-        ),
+        workshop_id: PublishedFileId::fixture(123),
+        workshop_url: workshop_url::workshop_item_url(PublishedFileId::fixture(123)),
         preview_url: Some("https://example.invalid/my-workshop.jpg".to_owned()),
         entries: vec![context_menu::Entry::copy_link()],
     }
@@ -2811,7 +2868,7 @@ fn seed_search_result(app: &mut App, has_more: bool) -> SearchQuickRequest {
         generation,
         &ids,
         Ok(vec![search::MetadataPatch::for_test(
-            PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(42),
             Some("https://example.test/alpha.png")
         )]),
     ));
@@ -2822,9 +2879,7 @@ fn search_hit(label: &str, workshop_id: u64) -> SearchHit {
     SearchHit {
         score: 1,
         item: SearchItem::new(
-            SearchItemSource::WorkshopItem(
-                PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero"),
-            ),
+            SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
             label,
             Vec::<String>::new(),
             0,
@@ -2948,7 +3003,7 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
     let _task = app.update(RootMessage::InstalledAddons(
         installed_addons::Message::RouteEntered,
     ));
-    let workshop_id = PublishedFileId::new(1).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(1);
     // A snapshot only to advance the metadata generation the completion below
     // is keyed on; the parking this asserts on is generation-scoped, not
     // row-scoped, so the rows themselves are beside the point here.

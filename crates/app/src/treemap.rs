@@ -1,9 +1,12 @@
+//! Squarified-treemap layout and hit testing for the Size Analyzer: addon
+//! sizes in, rectangles out, plus which rectangle a point lands in.
+
 use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
 
 use gmpublished_backend::error_key::{ErrorKey, HasErrorKey, keys};
 use thiserror::Error;
 
-use super::domain::{InstalledAddon, PublishedFileId};
+use crate::bridge::domain::{InstalledAddon, PublishedFileId};
 
 const DEFAULT_ADDON_TAG: &str = "addon";
 

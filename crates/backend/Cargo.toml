@@ -19,6 +19,14 @@ path = "src/lib.rs"
 # which is always available.
 scene = []
 
+# Surface that exists only for tests to observe: the spill-file probes on
+# `GmaView`, `SteamRuntime::unavailable_for_tests`, and
+# `events::BackendEventCollector`. Off by default so a reader of the public
+# API cannot mistake them for real operations; the self dev-dependency below
+# turns it on for this crate's own integration tests, and the app crate's
+# dev-dependencies turn it on for theirs.
+test-support = []
+
 [dependencies]
 vformats.workspace = true
 # Read-only maps of GMA archives (never fully loaded; addons reach GBs).
@@ -46,6 +54,10 @@ ureq.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+# Also enables `scene`, without which `cargo test -p gmpublished-backend`
+# silently skips the entire BSP and particle decode suite — 96 tests that
+# compile only when the feature is on.
+gmpublished-backend = { path = ".", features = ["test-support", "scene"] }
 # The encoder feature is only needed to build LZMA-alone test fixtures.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 steamworks-sys = "0.13.0"

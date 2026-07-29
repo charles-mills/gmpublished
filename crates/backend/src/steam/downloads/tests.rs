@@ -69,11 +69,11 @@ fn write_installed_gma(
     fs::write(source.join("lua/installed.lua"), "print('installed')\n").expect("source file");
 
     let gma_path = installed.join(file_name);
-    let gma = GMAFile {
+    let gma = GmaFile {
         path: gma_path.clone(),
         size: 0,
         id: None,
-        metadata: crate::gma::GMAMetadata::Standard {
+        metadata: crate::gma::GmaMetadata::Standard {
             title: title.to_owned(),
             addon_type: "servercontent".to_owned(),
             tags: vec!["build".to_owned()],
@@ -410,13 +410,11 @@ fn pending_batch_append_moves_all_items_in_one_scheduling_batch() {
 
 /// The lost-wakeup regression.
 ///
-/// `wake_watchdog` used to only `notify_all()`, while the predicate the
-/// watchdog exits on (`Steam::shutting_down`) lived under a different mutex on
-/// a different object. A shutdown landing between the watchdog's loop-top
-/// check and its `wait` therefore had no waiter to notify, the signal was
-/// dropped, and the thread slept until `join_all_within` gave up and detached
-/// it. The flag now lives under the mutex the condvar is paired with, so the
-/// park predicate observes it no matter which side wins the race.
+/// The shutdown flag lives under the mutex its condvar is paired with, so the
+/// park predicate observes it whichever side wins the race. Signalling with a
+/// bare `notify_all()` against a flag under a different mutex loses a shutdown
+/// landing between the loop-top check and the `wait`, and the thread sleeps
+/// until `join_all_within` gives up and detaches it.
 #[test]
 fn shutdown_landing_before_the_park_is_not_lost() {
     let temp = tempfile::tempdir().expect("tempdir");

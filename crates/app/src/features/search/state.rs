@@ -1084,9 +1084,9 @@ mod tests {
         let generation = state.metadata_generation;
         assert!(state.apply_metadata_refresh(
             generation,
-            &[PublishedFileId::new(42).expect("test fixture ids are always nonzero")],
+            &[PublishedFileId::fixture(42)],
             Ok(vec![MetadataPatch::for_test(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(42),
                 Some("https://example.test/alpha.png")
             )]),
         ));
@@ -1115,9 +1115,9 @@ mod tests {
         let generation = state.metadata_generation;
         assert!(state.apply_metadata_refresh(
             generation,
-            &[PublishedFileId::new(42).expect("test fixture ids are always nonzero")],
+            &[PublishedFileId::fixture(42)],
             Ok(vec![MetadataPatch::for_test(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(42),
                 Some("https://example.test/alpha.png")
             )]),
         ));
@@ -1159,7 +1159,7 @@ mod tests {
         assert_eq!(
             state.selection_for(0).map(|selection| selection.action),
             Some(SelectionAction::SteamWorkshop {
-                workshop_id: PublishedFileId::new(42).expect("test fixture ids are always nonzero")
+                workshop_id: PublishedFileId::fixture(42)
             })
         );
     }
@@ -1235,7 +1235,7 @@ mod tests {
             ids,
             [11, 12, 13, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19]
                 .into_iter()
-                .map(|id| PublishedFileId::new(id).expect("test fixture ids are always nonzero"))
+                .map(PublishedFileId::fixture)
                 .collect::<Vec<_>>()
         );
 
@@ -1304,7 +1304,7 @@ mod tests {
             generation,
             &ids,
             Ok(vec![MetadataPatch::for_test(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(42),
                 Some("https://example.test/alpha.png")
             )]),
         ));
@@ -1319,9 +1319,7 @@ mod tests {
                 SearchItemSource::InstalledAddonFile {
                     addon_path: PathBuf::from("/tmp/riverden.gma"),
                     addon_title: "Riverden".to_owned(),
-                    workshop_id: Some(
-                        PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-                    ),
+                    workshop_id: Some(PublishedFileId::fixture(123)),
                     entry_path: "maps/rp_riverden_v1a.bsp".to_owned(),
                     size_bytes: 42,
                     crc32: 77,
@@ -1340,9 +1338,7 @@ mod tests {
             SelectionAction::InstalledAddonFile {
                 addon_path: PathBuf::from("/tmp/riverden.gma"),
                 addon_title: "Riverden".to_owned(),
-                workshop_id: Some(
-                    PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-                ),
+                workshop_id: Some(PublishedFileId::fixture(123)),
                 entry_path: "maps/rp_riverden_v1a.bsp".to_owned(),
             }
         );
@@ -1358,9 +1354,7 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::WorkshopItem(
-                    PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero"),
-                ),
+                SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
                 label,
                 Vec::<String>::new(),
                 0,
@@ -1372,9 +1366,7 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::MyWorkshop(
-                    PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero"),
-                ),
+                SearchItemSource::MyWorkshop(PublishedFileId::fixture(workshop_id)),
                 label,
                 Vec::<String>::new(),
                 0,

@@ -74,6 +74,24 @@ impl BackendContext {
         self.run_worker_pool(name, job, AppWorkerRuntime::spawn_blocking_job)
     }
 
+    /// [`Self::run_blocking`] for a job that is itself fallible.
+    ///
+    /// Flattens at the boundary instead of at each call site. A job that fails
+    /// and a job that never got scheduled both arrive as one `UiError`, which
+    /// is the point: the nested `Result` made "discard the scheduling error"
+    /// the shortest thing to write, and several call sites took it — turning a
+    /// failure to schedule into a result indistinguishable from success.
+    pub(crate) fn run_blocking_ui<T: Send + 'static>(
+        &self,
+        name: impl Into<Arc<str>>,
+        job: impl FnOnce(&BackendServices) -> Result<T, UiError> + Send + 'static,
+    ) -> Task<Result<T, UiError>> {
+        self.run_blocking(name, job).map(|result| match result {
+            Ok(inner) => inner,
+            Err(error) => Err(UiError::from(&error)),
+        })
+    }
+
     pub(crate) fn run_blocking_media<T: Send + 'static>(
         &self,
         name: impl Into<Arc<str>>,
@@ -346,7 +364,11 @@ impl fmt::Debug for BackendContext {
     }
 }
 
-pub(super) fn default_paths(settings: &Settings) -> AppPaths {
+/// Last-resort `AppPaths` for when nothing better has resolved yet — the
+/// backend before it reads settings, and the pickers rendering before a
+/// backend exists. The directories land under one temp subdirectory so a
+/// fallback run's scratch space is removable in one go.
+pub fn fallback_paths(settings: &Settings) -> AppPaths {
     let temp = std::env::temp_dir().join("gmpublished");
     AppPaths::resolve_with_defaults(
         settings,

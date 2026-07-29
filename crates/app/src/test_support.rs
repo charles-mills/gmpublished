@@ -212,8 +212,7 @@ fn write_nt_string(file: &mut File, value: &str) {
 fn embedded_description(metadata: &GmaMetadata) -> String {
     match metadata {
         GmaMetadata::Standard { .. } => {
-            let backend_metadata: gmpublished_backend::GMAMetadata = metadata.clone().into();
-            serde_json::to_string(&backend_metadata).expect("standard gma metadata should encode")
+            serde_json::to_string(metadata).expect("standard gma metadata should encode")
         }
         GmaMetadata::Legacy { description, .. } => description.clone(),
     }

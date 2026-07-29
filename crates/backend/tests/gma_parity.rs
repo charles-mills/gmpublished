@@ -5,7 +5,7 @@ use std::{
 };
 
 use gmpublished_backend::{
-    GMAFile, GMAMetadata,
+    GmaFile, GmaMetadata,
     appdata::{AppData, AppDataPaths},
     events::{BackendEvent, BackendEventCollector, NullEventSink, TransactionEvent},
     gma::extract::{ExtractOptions, Whitelist},
@@ -81,8 +81,8 @@ fn write_fixture_source(root: &Path) {
     fs::write(lua_dir.join("ignored.lua"), b"print('ignored')\n").unwrap();
 }
 
-fn fixture_metadata(title: &str) -> GMAMetadata {
-    GMAMetadata::Standard {
+fn fixture_metadata(title: &str) -> GmaMetadata {
+    GmaMetadata::Standard {
         title: title.to_string(),
         addon_type: "tool".to_string(),
         tags: vec!["build".to_string(), "fun".to_string()],
@@ -95,7 +95,7 @@ fn create_fixture_gma(fixture: &Fixture, dir: &TempDir, title: &str) -> PathBuf 
     write_fixture_source(&source);
 
     let gma_path = dir.path().join("fixture.gma");
-    let gma = GMAFile {
+    let gma = GmaFile {
         path: gma_path.clone(),
         size: 0,
         id: None,
@@ -113,8 +113,8 @@ fn create_fixture_gma(fixture: &Fixture, dir: &TempDir, title: &str) -> PathBuf 
     gma_path
 }
 
-fn read_generated_gma(path: &Path) -> (GMAFile, GmaView) {
-    let gma = GMAFile::open(path).unwrap();
+fn read_generated_gma(path: &Path) -> (GmaFile, GmaView) {
+    let gma = GmaFile::open(path).unwrap();
     let view = gma.view().unwrap();
     (gma, view)
 }
@@ -231,7 +231,7 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
     fs::write(lua_dir.join("z_after.lua"), b"print('after')\n").unwrap();
 
     let gma_path = dir.path().join("large.gma");
-    let gma = GMAFile {
+    let gma = GmaFile {
         path: gma_path.clone(),
         size: 0,
         id: None,
@@ -310,7 +310,7 @@ fn gma_create_failure_leaves_nothing_at_the_final_path() {
     let gma_path = dir.path().join("blocked.gma");
     fs::create_dir_all(&gma_path).unwrap();
 
-    let gma = GMAFile {
+    let gma = GmaFile {
         path: gma_path.clone(),
         size: 0,
         id: None,
@@ -356,7 +356,7 @@ fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
     let gma_path = dir.path().join("walk-error.gma");
-    let gma = GMAFile {
+    let gma = GmaFile {
         path: gma_path.clone(),
         size: 0,
         id: None,
@@ -408,7 +408,7 @@ fn gma_create_non_utf8_entry_name_errors_naming_the_path() {
     fs::write(source.join(bad_name), b"print('bad name')\n").unwrap();
 
     let gma_path = dir.path().join("non-utf8.gma");
-    let gma = GMAFile {
+    let gma = GmaFile {
         path: gma_path.clone(),
         size: 0,
         id: None,
@@ -448,7 +448,7 @@ fn gma_lzma_bin_decompresses_generated_gma_payload() {
 
     let transaction = fixture.transactions.begin();
     let (decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
 
     assert_eq!(decompressed.metadata.title(), "LZMA Fixture");
@@ -477,7 +477,7 @@ fn gma_lzma_bin_with_known_size_decompresses_in_memory() {
 
     let transaction = fixture.transactions.begin();
     let (decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
 
     assert!(!view.is_temp_backed());
@@ -516,7 +516,7 @@ fn gma_read_entry_bytes_round_trips_from_lzma_membuffer_archive() {
 
     let transaction = fixture.transactions.begin();
     let (_decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
     assert!(!view.is_temp_backed());
 
@@ -538,7 +538,7 @@ fn gma_lzma_bin_with_unknown_size_spills_to_disk_and_cleans_up_on_drop() {
 
     let transaction = fixture.transactions.begin();
     let (decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
 
     assert!(view.is_temp_backed());
@@ -608,7 +608,7 @@ fn gma_header_projects_full_fields_matching_the_constructed_handle() {
     let gma_path = dir.path().join("header-projection.gma");
     write_raw_gma(&gma_path, &[("lua/autorun/safe.lua", b"safe")]);
 
-    let gma = GMAFile::open(&gma_path).unwrap();
+    let gma = GmaFile::open(&gma_path).unwrap();
     let header = gma.header().unwrap();
 
     assert_eq!(header.version, 3);
@@ -656,7 +656,7 @@ fn indexed_entry_offsets_address_their_own_payload() {
     let dir = TempDir::new().unwrap();
     let gma_path = create_fixture_gma(&fixture, &dir, "Offset Round Trip");
 
-    let bundle = GMAFile::open_meta(&gma_path).unwrap();
+    let bundle = GmaFile::open_meta(&gma_path).unwrap();
     let view = GmaView::open(&gma_path).unwrap();
     let entries = view.entries().unwrap();
 

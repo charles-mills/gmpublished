@@ -22,7 +22,7 @@ use crate::features::prepare_publish::model::{
 use crate::generation::Generation;
 use crate::media::{
     thumbnail_demand,
-    thumbnail_worker::{ThumbnailError, ThumbnailInput},
+    thumbnail_worker::{ThumbnailDecodeError, ThumbnailError, ThumbnailInput},
 };
 use crate::test_support::TestDir;
 
@@ -32,7 +32,7 @@ fn open_new_resets_to_blank_new_mode() {
     let _request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(42),
             title: "Old".to_owned(),
             tags: vec!["map".to_owned()],
             preview_url: None,
@@ -56,7 +56,7 @@ fn open_update_prefills_workshop_metadata() {
     let request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(99),
             title: "Workshop Addon".to_owned(),
             tags: vec!["Addon".to_owned(), "map".to_owned(), "scenic".to_owned()],
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
@@ -74,9 +74,9 @@ fn open_update_prefills_workshop_metadata() {
     assert_eq!(state.tags[0], Some(AddonTag::Scenic));
     assert_eq!(
         state.workshop_url(),
-        Some(workshop_url::workshop_item_url(
-            PublishedFileId::new(99).expect("test fixture ids are always nonzero")
-        ))
+        Some(workshop_url::workshop_item_url(PublishedFileId::fixture(
+            99
+        )))
     );
     assert_eq!(
         state.update_warning(&crate::i18n::I18n::for_locale(Some("en"))),
@@ -92,7 +92,7 @@ fn open_update_prefills_workshop_metadata() {
 #[test]
 fn workshop_download_hydrates_the_current_update_path() {
     let mut state = State::default();
-    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(99);
     let destination = PathBuf::from("/tmp/workshop-99");
     let _request = open_update(
         &mut state,
@@ -126,7 +126,7 @@ fn inspected_workshop_baseline_is_visible_but_not_a_publish_source() {
     let root = TestDir::new("prepare-publish-baseline");
     root.file("lua/autorun/init.lua", b"print('ready')");
     let destination = root.path().to_path_buf();
-    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(99);
     let mut state = State::default();
     let _request = open_update(
         &mut state,
@@ -160,7 +160,7 @@ fn inspected_workshop_baseline_is_visible_but_not_a_publish_source() {
 #[test]
 fn late_workshop_download_is_cleaned_after_close() {
     let mut state = State::default();
-    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(99);
     let destination = PathBuf::from("/tmp/workshop-99");
     let _request = open_update(
         &mut state,
@@ -193,7 +193,7 @@ fn late_workshop_download_is_cleaned_after_close() {
 #[test]
 fn workshop_snapshot_error_leaves_manual_selection_available() {
     let mut state = State::default();
-    let workshop_id = PublishedFileId::new(99).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(99);
     let destination = PathBuf::from("/tmp/workshop-99");
     let _request = open_update(
         &mut state,
@@ -224,7 +224,7 @@ fn update_mode_title_is_read_only() {
     let _request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(99),
             title: "Original".to_owned(),
             tags: Vec::new(),
             preview_url: None,
@@ -347,7 +347,7 @@ fn begin_update_submit_uses_workshop_id_changelog_and_no_default_preview() {
     let _request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(99),
             title: "Existing Addon".to_owned(),
             tags: vec!["Addon".to_owned(), "map".to_owned(), "scenic".to_owned()],
             preview_url: None,
@@ -365,7 +365,7 @@ fn begin_update_submit_uses_workshop_id_changelog_and_no_default_preview() {
     assert_eq!(
         envelope.request.mode,
         PublishSubmitMode::Update {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(99),
         }
     );
     assert_eq!(envelope.request.title, "Existing Addon");
@@ -390,8 +390,7 @@ fn stale_submit_completion_is_ignored() {
     assert!(state.apply_submit_completion(
         envelope.generation,
         Ok(PublishSubmitResult {
-            published_file_id:
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            published_file_id: PublishedFileId::fixture(123),
             legal_agreement_required: false,
         }),
     ));
@@ -516,7 +515,7 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
     let _request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(99),
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: None,
@@ -544,10 +543,7 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
         .expect("selected icon should submit");
 
     assert!(state.submit_pending());
-    assert_eq!(
-        envelope.workshop_id,
-        PublishedFileId::new(99).expect("test fixture ids are always nonzero")
-    );
+    assert_eq!(envelope.workshop_id, PublishedFileId::fixture(99));
     assert_eq!(envelope.icon_source_path, PathBuf::from("/tmp/icon.png"));
     assert!(envelope.upscale);
 
@@ -618,7 +614,7 @@ fn changelog_content_round_trips_through_editor_actions() {
     let _request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(7).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(7),
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: None,
@@ -656,7 +652,7 @@ fn open_update_seeds_workshop_preview_display_only() {
     let _request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(99),
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
@@ -704,7 +700,7 @@ fn browsed_icon_replaces_the_seeded_preview() {
     let _request = open_update(
         &mut state,
         UpdateTarget {
-            workshop_id: PublishedFileId::new(99).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(99),
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
@@ -763,7 +759,7 @@ fn failed_seed_delivery(generation: Generation, workshop_id: u64) -> thumbnail_d
         key: input.cache_key(super::SEED_THUMBNAIL_MAX_EDGE),
         result: thumbnail_demand::DeliveryResult::Failed {
             error: thumbnail_demand::ThumbnailDeliveryError::Thumbnail(Arc::new(
-                ThumbnailError::InvalidMaxEdge,
+                ThumbnailError::Decode(ThumbnailDecodeError::InvalidMaxEdge),
             )),
         },
     }
@@ -860,7 +856,7 @@ fn en() -> crate::i18n::I18n {
 
 fn workshop_update_target() -> UpdateTarget {
     UpdateTarget {
-        workshop_id: PublishedFileId::new(77).expect("test fixture ids are always nonzero"),
+        workshop_id: PublishedFileId::fixture(77),
         title: "Workshop Addon".to_owned(),
         tags: Vec::new(),
         preview_url: None,

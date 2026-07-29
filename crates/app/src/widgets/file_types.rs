@@ -19,6 +19,91 @@ pub enum SilkIcon {
     Wand,
 }
 
+impl SilkIcon {
+    /// Every icon, in declaration order.
+    ///
+    /// A new variant is caught by [`Self::bytes`]'s exhaustive match, not by
+    /// this array — its length is a literal, so a missing entry here compiles.
+    /// Getting the *order* wrong compiles too, which is what
+    /// `all_matches_declaration_order` exists for.
+    pub const ALL: [Self; 13] = [
+        Self::Bricks,
+        Self::Comments,
+        Self::Folder,
+        Self::Font,
+        Self::Map,
+        Self::PageWhite,
+        Self::PageWhiteText,
+        Self::PageWhiteWrench,
+        Self::Photo,
+        Self::PictureLink,
+        Self::ScriptCode,
+        Self::Sound,
+        Self::Wand,
+    ];
+
+    /// The bundled PNG for this icon, and the file name to blame if it fails
+    /// to decode.
+    ///
+    /// An exhaustive match rather than a position in a parallel array: the
+    /// icon and its bytes are one fact, and a positional pairing is two
+    /// orderings kept in step by hand.
+    #[must_use]
+    pub const fn bytes(self) -> (&'static str, &'static [u8]) {
+        match self {
+            Self::Bricks => (
+                "bricks",
+                include_bytes!("../../ui/images/silkicons/bricks.png"),
+            ),
+            Self::Comments => (
+                "comments",
+                include_bytes!("../../ui/images/silkicons/comments.png"),
+            ),
+            Self::Folder => (
+                "folder",
+                include_bytes!("../../ui/images/silkicons/folder.png"),
+            ),
+            Self::Font => ("font", include_bytes!("../../ui/images/silkicons/font.png")),
+            Self::Map => ("map", include_bytes!("../../ui/images/silkicons/map.png")),
+            Self::PageWhite => (
+                "page_white",
+                include_bytes!("../../ui/images/silkicons/page_white.png"),
+            ),
+            Self::PageWhiteText => (
+                "page_white_text",
+                include_bytes!("../../ui/images/silkicons/page_white_text.png"),
+            ),
+            Self::PageWhiteWrench => (
+                "page_white_wrench",
+                include_bytes!("../../ui/images/silkicons/page_white_wrench.png"),
+            ),
+            Self::Photo => (
+                "photo",
+                include_bytes!("../../ui/images/silkicons/photo.png"),
+            ),
+            Self::PictureLink => (
+                "picture_link",
+                include_bytes!("../../ui/images/silkicons/picture_link.png"),
+            ),
+            Self::ScriptCode => (
+                "script_code",
+                include_bytes!("../../ui/images/silkicons/script_code.png"),
+            ),
+            Self::Sound => (
+                "sound",
+                include_bytes!("../../ui/images/silkicons/sound.png"),
+            ),
+            Self::Wand => ("wand", include_bytes!("../../ui/images/silkicons/wand.png")),
+        }
+    }
+
+    /// This icon's position in [`Self::ALL`], which is declaration order.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Matches steam.js `getFileTypeInfo`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileTypeInfo<'a> {
@@ -115,5 +200,32 @@ mod tests {
         assert_eq!(bare.icon, SilkIcon::PageWhite);
         assert_eq!(bare.translation_key, "file-type-unknown");
         assert_eq!(bare.extension, "");
+    }
+
+    /// `ALL` is indexed by `index()`, which is the discriminant. If the two
+    /// disagree, every icon past the divergence renders as another icon —
+    /// which nothing else in the app would notice.
+    #[test]
+    fn all_matches_declaration_order() {
+        for (index, icon) in SilkIcon::ALL.into_iter().enumerate() {
+            assert_eq!(icon.index(), index, "{icon:?} is out of order in ALL");
+        }
+    }
+
+    /// Two icons sharing a PNG is always a copy-paste slip, and the slip
+    /// pairs a *correct* name with the wrong bytes — so comparing names alone
+    /// would miss it.
+    #[test]
+    fn every_icon_has_its_own_bundled_image() {
+        for (position, icon) in SilkIcon::ALL.into_iter().enumerate() {
+            for other in SilkIcon::ALL.into_iter().skip(position + 1) {
+                assert_ne!(
+                    icon.bytes().1,
+                    other.bytes().1,
+                    "{icon:?} and {other:?} include the same PNG"
+                );
+                assert_ne!(icon.bytes().0, other.bytes().0, "{icon:?} name reused");
+            }
+        }
     }
 }

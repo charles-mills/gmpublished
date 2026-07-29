@@ -37,7 +37,6 @@ fn worker_count_bounds_blocking_threads() {
     assert_eq!(blocking_worker_count(NonZeroUsize::new(4)), 4);
     assert_eq!(blocking_worker_count(NonZeroUsize::new(64)), 8);
     assert_eq!(blocking_worker_count(None), 4);
-    assert_eq!(media_worker_count(), MEDIA_THREADS);
 }
 
 #[test]
@@ -420,9 +419,7 @@ fn backend_context_forwards_installed_backend_events() {
             transaction_id: TransactionId::from_raw(41),
             source_path: Some(PathBuf::from("/tmp/addon.gma")),
             file_name: Some("addon.gma".to_owned()),
-            workshop_id: Some(
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-            ),
+            workshop_id: Some(PublishedFileId::fixture(123)),
             request_id: None,
         }
     );
@@ -539,9 +536,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
             transaction_id: TransactionId::from_raw(500),
             source_path: Some(PathBuf::from("/tmp/source.gma")),
             file_name: Some("source.gma".to_owned()),
-            workshop_id: Some(
-                PublishedFileId::new(765).expect("test fixture ids are always nonzero")
-            ),
+            workshop_id: Some(PublishedFileId::fixture(765)),
             request_id: None,
         })
         .handled_event()
@@ -757,7 +752,7 @@ fn download_start_waits_for_item_payload_before_downloader_action() {
             kind: WorkshopDownloadTaskKind::Download,
             item_id,
             ..
-        } if *item_id == PublishedFileId::new(123).expect("test fixture ids are always nonzero")
+        } if *item_id == PublishedFileId::fixture(123)
     ));
 }
 
@@ -769,7 +764,7 @@ fn extraction_start_and_finish_emit_downloader_actions() {
         transaction_id: TransactionId::from_raw(620),
         source_path: None,
         file_name: None,
-        workshop_id: Some(PublishedFileId::new(456).expect("test fixture ids are always nonzero")),
+        workshop_id: Some(PublishedFileId::fixture(456)),
         request_id: None,
     });
     assert!(effects.handled_event());
@@ -781,7 +776,7 @@ fn extraction_start_and_finish_emit_downloader_actions() {
             kind: WorkshopDownloadTaskKind::Extract,
             item_id,
             ..
-        } if *item_id == PublishedFileId::new(456).expect("test fixture ids are always nonzero")
+        } if *item_id == PublishedFileId::fixture(456)
     ));
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
@@ -795,7 +790,7 @@ fn extraction_start_and_finish_emit_downloader_actions() {
         effects.into_actions(),
         vec![BackendRuntimeAction::DownloadFinished {
             request_id: None,
-            item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+            item_id: PublishedFileId::fixture(456),
             installed_path: None,
             extracted_path: PathBuf::from("/tmp/extracted/456"),
         }]
@@ -811,7 +806,7 @@ fn extraction_finish_carries_the_source_gma_from_the_started_event() {
         transaction_id: TransactionId::from_raw(621),
         source_path: Some(source_gma.clone()),
         file_name: None,
-        workshop_id: Some(PublishedFileId::new(457).expect("test fixture ids are always nonzero")),
+        workshop_id: Some(PublishedFileId::fixture(457)),
         request_id: None,
     });
     assert!(effects.handled_event());
@@ -827,7 +822,7 @@ fn extraction_finish_carries_the_source_gma_from_the_started_event() {
         effects.into_actions(),
         vec![BackendRuntimeAction::DownloadFinished {
             request_id: None,
-            item_id: PublishedFileId::new(457).expect("test fixture ids are always nonzero"),
+            item_id: PublishedFileId::fixture(457),
             installed_path: Some(source_gma),
             extracted_path: PathBuf::from("/tmp/extracted/457"),
         }]
@@ -837,7 +832,7 @@ fn extraction_finish_carries_the_source_gma_from_the_started_event() {
 #[test]
 fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
     let ctx = BackendContext::new().expect("test backend context");
-    let workshop_id = PublishedFileId::new(458).expect("test fixture ids are always nonzero");
+    let workshop_id = PublishedFileId::fixture(458);
 
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
         transaction_id: TransactionId::from_raw(622),
@@ -969,7 +964,7 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
         transaction_id: TransactionId::from_raw(630),
         source_path: None,
         file_name: None,
-        workshop_id: Some(PublishedFileId::new(789).expect("test fixture ids are always nonzero")),
+        workshop_id: Some(PublishedFileId::fixture(789)),
         request_id: None,
     });
     assert!(effects.handled_event());
@@ -979,7 +974,7 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
             kind: WorkshopDownloadTaskKind::Extract,
             item_id,
             ..
-        }] if *item_id == PublishedFileId::new(789).expect("test fixture ids are always nonzero")
+        }] if *item_id == PublishedFileId::fixture(789)
     ));
 
     let updates: Vec<_> = receiver
@@ -1008,8 +1003,30 @@ fn extraction_pre_start_buffer_is_globally_bounded() {
         assert!(effects.handled_event());
     }
 
+    // One transaction gets more events than its own cap allows, so the
+    // per-entry bound is exercised rather than asserted against entries of
+    // length one.
+    let noisy = TransactionId::from_raw(9_999);
+    for _ in 0..(MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION + 5) {
+        let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+            TransactionRuntimeEvent::Status {
+                id: noisy,
+                status: DOWNLOAD_STATUS_LOCATING.to_owned(),
+            },
+        ));
+        assert!(effects.handled_event());
+    }
+
     let pending = ctx.transaction_tasks.pending_pre_start.lock();
     assert!(pending.len() <= MAX_PENDING_PRE_START_TRANSACTIONS);
+    assert_eq!(
+        pending
+            .get(&noisy)
+            .expect("the noisy transaction is the most recent, so it survives eviction")
+            .len(),
+        MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION,
+        "the per-transaction cap must drop the oldest, not grow"
+    );
     assert!(
         pending
             .values()
@@ -1024,9 +1041,7 @@ fn downloader_workshop_submission_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .submit_workshop_downloads(vec![
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-            ])
+            .submit_workshop_downloads(vec![PublishedFileId::fixture(123)])
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
@@ -1038,17 +1053,13 @@ fn workshop_metadata_refresh_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .refresh_workshop_metadata(&[
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-            ])
+            .refresh_workshop_metadata(&[PublishedFileId::fixture(123)])
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
     assert_eq!(
         services
-            .workshop_item_details(
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-            )
+            .workshop_item_details(PublishedFileId::fixture(123))
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
@@ -1132,7 +1143,7 @@ fn publish_submit_request_maps_default_preview_to_backend_submission() {
 fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
     let request = PublishSubmitRequest {
         mode: PublishSubmitMode::Update {
-            workshop_id: PublishedFileId::new(987).expect("test fixture ids are always nonzero"),
+            workshop_id: PublishedFileId::fixture(987),
         },
         content_source_path: PathBuf::from("/tmp/source-addon"),
         title: "Ignored For Update".to_owned(),
@@ -1306,9 +1317,7 @@ fn full_search_transaction_payload_maps_to_app_batch() {
         vec![SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::WorkshopItem(
-                    PublishedFileId::new(1).expect("test fixture ids are always nonzero"),
-                ),
+                SearchItemSource::WorkshopItem(PublishedFileId::fixture(1)),
                 "Needle Quick",
                 Vec::<String>::new(),
                 0,
@@ -1357,7 +1366,7 @@ fn full_search_transaction_payload_maps_to_app_batch() {
 fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
     let services = BackendServices::for_test();
     let live_item = WorkshopItem {
-        id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(123),
         title: "  Example Addon  ".to_owned(),
         owner: None,
         steamid: Some(SteamId::new(76561198000000000)),
@@ -1371,15 +1380,14 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
         local_file: None,
         dead: false,
     };
-    let dead_item =
-        WorkshopItem::dead(PublishedFileId::new(456).expect("test fixture ids are always nonzero"));
+    let dead_item = WorkshopItem::dead(PublishedFileId::fixture(456));
 
     let metadata = services.cache_workshop_items(&[live_item, dead_item]);
 
     assert_eq!(
         metadata,
         vec![WorkshopMetadata {
-            id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            id: PublishedFileId::fixture(123),
             title: "  Example Addon  ".to_owned(),
             time_created: 10,
             time_updated: 20,
@@ -1394,17 +1402,14 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
     );
 
     let (cached, stale) = services.resolve_workshop_metadata(&[
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-        PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
-        PublishedFileId::new(789).expect("test fixture ids are always nonzero"),
+        PublishedFileId::fixture(123),
+        PublishedFileId::fixture(456),
+        PublishedFileId::fixture(789),
     ]);
     assert_eq!(cached, metadata);
     assert_eq!(
         stale,
-        vec![
-            PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
-            PublishedFileId::new(789).expect("test fixture ids are always nonzero")
-        ]
+        vec![PublishedFileId::fixture(456), PublishedFileId::fixture(789)]
     );
 }
 
@@ -1438,7 +1443,7 @@ fn workshop_detail_cache_persists_full_description_across_summary_refreshes() {
 
 fn live_workshop_item_for_metadata_tests(id: u64) -> WorkshopItem {
     WorkshopItem {
-        id: PublishedFileId::new(id).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(id),
         title: format!("Addon {id}"),
         owner: None,
         steamid: Some(SteamId::new(76561198000000000)),
@@ -1459,29 +1464,19 @@ fn workshop_metadata_older_than_ttl_serves_stale_while_marking_for_refresh() {
     let services = BackendServices::for_test();
     let metadata = services.cache_workshop_items(&[live_workshop_item_for_metadata_tests(123)]);
 
-    let (cached, stale) = services.resolve_workshop_metadata(&[
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-    ]);
+    let (cached, stale) = services.resolve_workshop_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, metadata);
     assert!(stale.is_empty());
 
     let aged =
         metadata_snapshot::now_unix_seconds() - metadata_snapshot::METADATA_TTL.as_secs() - 1;
-    services.set_workshop_metadata_fetched_at_for_test(
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-        aged,
-    );
+    services.set_workshop_metadata_fetched_at_for_test(PublishedFileId::fixture(123), aged);
 
     // Stale-while-revalidate: the aged entry still renders AND is re-queued
     // for the background refresh.
-    let (cached, stale) = services.resolve_workshop_metadata(&[
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-    ]);
+    let (cached, stale) = services.resolve_workshop_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, metadata);
-    assert_eq!(
-        stale,
-        vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")]
-    );
+    assert_eq!(stale, vec![PublishedFileId::fixture(123)]);
 }
 
 #[test]
@@ -1499,9 +1494,7 @@ fn workshop_metadata_snapshot_write_hydrates_across_restart() {
     restarted.set_metadata_snapshot_file_for_test(snapshot_file);
     restarted.hydrate_workshop_metadata_snapshot_for_test();
 
-    let (cached, stale) = restarted.resolve_workshop_metadata(&[
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-    ]);
+    let (cached, stale) = restarted.resolve_workshop_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, written);
     assert!(stale.is_empty());
 }
@@ -1509,7 +1502,7 @@ fn workshop_metadata_snapshot_write_hydrates_across_restart() {
 #[test]
 fn my_workshop_subscription_counts_skip_dead_items() {
     let live_item = WorkshopItem {
-        id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(123),
         title: "Example Addon".to_owned(),
         owner: None,
         steamid: Some(SteamId::new(76561198000000000)),
@@ -1523,15 +1516,11 @@ fn my_workshop_subscription_counts_skip_dead_items() {
         local_file: None,
         dead: false,
     };
-    let dead_item =
-        WorkshopItem::dead(PublishedFileId::new(456).expect("test fixture ids are always nonzero"));
+    let dead_item = WorkshopItem::dead(PublishedFileId::fixture(456));
 
     assert_eq!(
         subscription_counts_from_items(&[live_item, dead_item]),
-        HashMap::from([(
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            42
-        )])
+        HashMap::from([(PublishedFileId::fixture(123), 42)])
     );
 }
 
@@ -1592,7 +1581,7 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
 #[test]
 fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events() {
     use gmpublished_backend::{
-        GMAFile,
+        GmaFile,
         gma::{ExtractDestination, ExtractOptions, Whitelist},
     };
 
@@ -1611,7 +1600,7 @@ fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events(
         .take_receiver()
         .expect("task event receiver");
 
-    let gma = GMAFile::open(&gma_path).expect("fixture gma");
+    let gma = GmaFile::open(&gma_path).expect("fixture gma");
     let view = gma.view().expect("fixture view");
     let transaction = ctx.begin_transaction();
     let task = ctx.create_task(TaskKind::Extract, EXTRACT_STATUS);

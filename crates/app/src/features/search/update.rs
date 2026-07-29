@@ -387,12 +387,10 @@ mod tests {
                 ids,
                 Ok(MetadataResolution {
                     patches: vec![MetadataPatch::for_test(
-                        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                        PublishedFileId::fixture(42),
                         Some("https://example.test/alpha.png"),
                     )],
-                    stale_ids: vec![
-                        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-                    ],
+                    stale_ids: vec![PublishedFileId::fixture(42)],
                 }),
             ),
         );
@@ -402,9 +400,7 @@ mod tests {
             vec![
                 Effect::MetadataRefreshRequested {
                     generation,
-                    item_ids: vec![
-                        PublishedFileId::new(42).expect("test fixture ids are always nonzero")
-                    ],
+                    item_ids: vec![PublishedFileId::fixture(42)],
                 },
                 Effect::ThumbnailDemandsChanged,
             ]
@@ -465,9 +461,7 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::WorkshopItem(
-                    PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero"),
-                ),
+                SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
                 label,
                 Vec::<String>::new(),
                 0,

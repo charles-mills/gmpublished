@@ -6,9 +6,11 @@ use crate::bridge::{
     AppPaths, DownloadCountFormat, EffectiveThemePreset, Settings, SystemColorScheme, ThemePreset,
     TitlebarPreference, effective_theme_preset, validate_gmod,
 };
+use crate::generation::Generation;
 
+use crate::bridge::tasks::fallback_paths;
 use crate::theme::AccentInputs;
-use crate::util::paths::{fallback_current_dir, fallback_paths, path_to_display};
+use crate::util::paths::{fallback_current_dir, path_to_display};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsSnapshot {
@@ -325,6 +327,8 @@ pub struct State {
     active_color_picker: Option<ColorSetting>,
     color_picker_draft: Option<HsvColor>,
     status: SettingsStatus,
+    /// Stamps each issued save so an out-of-order completion is discarded.
+    save_generation: Generation,
     reset_busy: bool,
     pending_reset: Option<ResetAction>,
 }
@@ -345,6 +349,7 @@ impl Default for State {
             paths,
             system_scheme: SystemColorScheme::Dark,
             status: SettingsStatus::None,
+            save_generation: Generation::INITIAL,
             reset_busy: false,
             pending_reset: None,
         }
@@ -656,17 +661,37 @@ impl State {
         }
     }
 
-    pub(crate) fn apply_save_started(&mut self) {
+    /// Stamps a save and returns the token its completion must carry.
+    ///
+    /// Saves run on the multi-worker runtime, so two rapid edits can complete
+    /// out of order. Without a token the older completion's snapshot is
+    /// reapplied over the newer one and the UI reverts.
+    #[cfg(test)]
+    pub(crate) const fn save_generation_for_test(&self) -> Generation {
+        self.save_generation
+    }
+
+    pub(crate) fn apply_save_started(&mut self) -> Generation {
         self.status = SettingsStatus::Saving;
+        self.save_generation = self.save_generation.next();
+        self.save_generation
     }
 
     /// Applies a finished save and, on success, hands back the snapshot now
     /// stored in `self` (see `apply_reset_completed`).
     pub(crate) fn apply_save_completed(
         &mut self,
+        generation: Generation,
         result: Result<SettingsSnapshot, UiError>,
     ) -> Option<SettingsSnapshot> {
         match result {
+            Ok(snapshot) if generation != self.save_generation => {
+                // A later edit has already been issued; adopting this older
+                // snapshot would revert it in the UI.
+                log::debug!("discarding a settings save superseded by a later edit");
+                let _superseded = snapshot;
+                None
+            }
             Ok(snapshot) => {
                 self.apply_snapshot(snapshot);
                 self.status = SettingsStatus::Saved;

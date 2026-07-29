@@ -1,15 +1,16 @@
+use super::super::orbit::{MAX_PITCH, MIN_PITCH, Orbit, ZoomFloor};
 use super::{
     Action, Arc, DOOR_PROGRESS_EPSILON, DOOR_USE_REACH, DoorAudioEvent, DoorAudioEventKind,
-    DoorInstance, DoorMotion, DoorRenderPose, DoorRuntime, DoorTarget, Event, FlyPose, MAX_PITCH,
-    MIN_PITCH, MapFog, MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket, MapWalkCollision,
-    Message, ModelPreview, ModelPrimitive, MovementMode, ORBIT_SENSITIVITY, OrbitPose, Point,
-    Rectangle, SOURCE_UP, Uniforms, ZOOM_STEP, add, bounds_intersect, choose_door_swing, cross,
-    door_audio_event, door_progress_step, door_sound_gain, door_uses_move_loop, door_world_bounds,
-    dot, endpoint_sound, expand_bounds, half_extent, initial_door_swing, length_squared, mid,
-    mouse, mul, normalize, normalize_or_zero, ray_aabb_distance, shader, sub,
-    trace_aabb_against_aabb,
+    DoorInstance, DoorMotion, DoorRenderPose, DoorRuntime, DoorTarget, Event, FlyPose, MapFog,
+    MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket, MapWalkCollision, Message, ModelPreview,
+    ModelPrimitive, MovementMode, OrbitPose, Point, Rectangle, SOURCE_UP, Uniforms, add,
+    bounds_intersect, choose_door_swing, cross, door_audio_event, door_progress_step,
+    door_sound_gain, door_uses_move_loop, door_world_bounds, dot, endpoint_sound, expand_bounds,
+    half_extent, initial_door_swing, length_squared, mid, mouse, mul, normalize, normalize_or_zero,
+    ray_aabb_distance, shader, sub, trace_aabb_against_aabb,
 };
-use gmpublished_backend::scene::QAngle;
+pub(super) use gmpublished_backend::math::rotate_source_vector;
+use gmpublished_backend::math::{QAngle, simple_spline};
 
 /// Shader-widget program: owns nothing but a handle to the loaded model;
 /// camera state lives in the widget tree so it survives redraws.
@@ -28,21 +29,16 @@ pub struct Viewer3d {
 #[derive(Debug)]
 pub struct Camera {
     pub(super) content_id: Option<u64>,
-    pub(super) yaw: f32,
-    pub(super) pitch: f32,
-    /// Multiplier over the model's auto-framed distance.
-    pub(super) distance: f32,
+    /// `distance` is a multiplier over the model's auto-framed distance.
+    pub(super) orbit: Orbit,
     pub(super) drag_from: Option<Point>,
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        let pose = OrbitPose::default();
         Self {
             content_id: None,
-            yaw: pose.yaw,
-            pitch: pose.pitch,
-            distance: pose.distance,
+            orbit: Orbit::new(ZoomFloor::SolidMesh),
             drag_from: None,
         }
     }
@@ -53,20 +49,13 @@ impl Camera {
         if self.content_id == Some(content_id) {
             return;
         }
-        let pose = pose.unwrap_or_default();
         self.content_id = Some(content_id);
-        self.yaw = pose.yaw;
-        self.pitch = pose.pitch;
-        self.distance = pose.distance;
+        self.orbit = Orbit::from_pose(pose.unwrap_or_default(), ZoomFloor::SolidMesh);
         self.drag_from = None;
     }
 
     pub(super) fn pose(&self) -> OrbitPose {
-        OrbitPose {
-            yaw: self.yaw,
-            pitch: self.pitch,
-            distance: self.distance,
-        }
+        self.orbit.pose()
     }
 }
 
@@ -91,9 +80,7 @@ impl shader::Program<Message> for Viewer3d {
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let from = camera.drag_from?;
                 let to = cursor.position()?;
-                camera.yaw += (to.x - from.x) * ORBIT_SENSITIVITY;
-                camera.pitch = (camera.pitch + (to.y - from.y) * ORBIT_SENSITIVITY)
-                    .clamp(MIN_PITCH, MAX_PITCH);
+                camera.orbit.drag(to.x - from.x, to.y - from.y);
                 camera.drag_from = Some(to);
                 Some(Action::publish(Message::OrbitPoseChanged(camera.pose())).and_capture())
             }
@@ -106,7 +93,7 @@ impl shader::Program<Message> for Viewer3d {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
                 };
-                camera.distance = (camera.distance * ZOOM_STEP.powf(steps)).clamp(0.2, 8.0);
+                camera.orbit.zoom(steps);
                 Some(Action::publish(Message::OrbitPoseChanged(camera.pose())).and_capture())
             }
             _ => None,
@@ -378,18 +365,8 @@ impl FlyCamera {
         self.look_from = None;
         self.held = HeldKeys::default();
         self.last_frame = None;
-        self.move_factor = 0.0;
         self.mode = MovementMode::Fly;
-        self.walk_velocity = [0.0; 3];
-        self.grounded = false;
-        self.jump_requested = false;
-        self.walk_bob_phase = 0.0;
-        self.walk_bob_offset = 0.0;
-        self.land_bob_elapsed = LAND_BOB_DURATION;
-        self.land_bob_amplitude = 0.0;
-        self.water = WaterLevel::Dry;
-        self.water_exit_assist = false;
-        self.reset_duck_state();
+        self.reset_walk_state();
         self.doors = scene
             .doors
             .iter()
@@ -581,15 +558,7 @@ impl FlyCamera {
 
     pub(super) fn exit_walk(&mut self) {
         self.mode = MovementMode::Fly;
-        self.walk_velocity = [0.0; 3];
-        self.grounded = false;
-        self.jump_requested = false;
-        self.walk_bob_offset = 0.0;
-        self.land_bob_elapsed = LAND_BOB_DURATION;
-        self.land_bob_amplitude = 0.0;
-        self.water = WaterLevel::Dry;
-        self.water_exit_assist = false;
-        self.reset_duck_state();
+        self.reset_walk_state();
     }
 
     pub(super) fn toggle_walk(&mut self, scene: &ModelPreview) -> bool {
@@ -641,6 +610,21 @@ impl FlyCamera {
         }
         self.position = Some(start);
         self.mode = MovementMode::Walk;
+        self.reset_walk_state();
+        true
+    }
+
+    /// Clears every field that only means something while walking.
+    ///
+    /// One definition, because three sites need it and a field missed by one
+    /// of them is silent: leaving `walk_bob_phase` behind carries the previous
+    /// walk's head-bob into the next one, and leaving `move_factor` behind
+    /// carries its speed ramp.
+    ///
+    /// `mode` is deliberately not touched: each caller sets it to the mode it
+    /// is entering, and folding that in here would let a reset silently
+    /// change which mode the camera is in.
+    fn reset_walk_state(&mut self) {
         self.walk_velocity = [0.0; 3];
         self.grounded = false;
         self.jump_requested = false;
@@ -651,7 +635,7 @@ impl FlyCamera {
         self.water = WaterLevel::Dry;
         self.water_exit_assist = false;
         self.move_factor = 0.0;
-        true
+        self.reset_duck_state();
     }
 
     pub(super) fn reset_duck_state(&mut self) {
@@ -1479,42 +1463,6 @@ impl FlyCamera {
     }
 }
 
-pub(super) fn rotate_source_vector(vector: [f32; 3], angles: [f32; 3]) -> [f32; 3] {
-    let QAngle { pitch, yaw, roll } = QAngle::from_source_degrees(angles);
-    rotate_z(rotate_y(rotate_x(vector, roll), pitch), yaw)
-}
-
-pub(super) fn rotate_x(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0],
-        vector[1] * cos - vector[2] * sin,
-        vector[1] * sin + vector[2] * cos,
-    ]
-}
-
-pub(super) fn rotate_y(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0] * cos + vector[2] * sin,
-        vector[1],
-        -vector[0] * sin + vector[2] * cos,
-    ]
-}
-
-pub(super) fn rotate_z(vector: [f32; 3], radians: f32) -> [f32; 3] {
-    let (sin, cos) = radians.sin_cos();
-    [
-        vector[0] * cos - vector[1] * sin,
-        vector[0] * sin + vector[1] * cos,
-        vector[2],
-    ]
-}
-
-pub(super) fn simple_spline(t: f32) -> f32 {
-    t * t * (3.0 - 2.0 * t)
-}
-
 pub(super) fn clip_along_plane(vector: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     let into_plane = dot(vector, normal);
     if into_plane < 0.0 {
@@ -1744,5 +1692,51 @@ impl shader::Program<Message> for FlyViewer {
         } else {
             mouse::Interaction::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlyCamera, LAND_BOB_DURATION, MovementMode, WalkHull, WaterLevel};
+
+    /// Three sites leave walk mode, and a field missed by one of them is
+    /// silent: dropping `walk_bob_phase` carries the previous walk's head-bob
+    /// into the next one, dropping `move_factor` carries its speed ramp. This
+    /// fails if any single field escapes the shared reset.
+    #[test]
+    fn leaving_walk_clears_every_walk_only_field() {
+        let mut camera = FlyCamera {
+            mode: MovementMode::Walk,
+            walk_velocity: [1.0, 2.0, 3.0],
+            grounded: true,
+            jump_requested: true,
+            walk_bob_phase: 1.5,
+            walk_bob_offset: 4.0,
+            land_bob_elapsed: 0.0,
+            land_bob_amplitude: 9.0,
+            water: WaterLevel::Eyes,
+            water_exit_assist: true,
+            walk_hull: WalkHull::Ducked,
+            duck_reconcile_requested: true,
+            move_factor: 0.75,
+            ..FlyCamera::default()
+        };
+
+        camera.exit_walk();
+
+        assert_eq!(camera.mode, MovementMode::Fly);
+        assert_eq!(camera.walk_velocity, [0.0; 3]);
+        assert!(!camera.grounded);
+        assert!(!camera.jump_requested);
+        assert_eq!(camera.walk_bob_phase, 0.0);
+        assert_eq!(camera.walk_bob_offset, 0.0);
+        assert_eq!(camera.land_bob_elapsed, LAND_BOB_DURATION);
+        assert_eq!(camera.land_bob_amplitude, 0.0);
+        assert_eq!(camera.water, WaterLevel::Dry);
+        assert!(!camera.water_exit_assist);
+        assert_eq!(camera.walk_hull, WalkHull::Standing);
+        assert!(camera.duck_view_animation.is_none());
+        assert!(!camera.duck_reconcile_requested);
+        assert_eq!(camera.move_factor, 0.0);
     }
 }

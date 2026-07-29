@@ -381,6 +381,13 @@ pub struct CompiledSystem {
     pub(super) highest_control_point: usize,
     /// Rough world-space extent for camera framing.
     pub(super) bounding_radius: f32,
+    /// Whether any operator retires particles at end of life.
+    ///
+    /// A property of the compiled system, so it is decided once here rather
+    /// than rediscovered by two full scans of `operators` per instance per
+    /// substep — which is what the simulator did, on data that cannot change
+    /// after compilation.
+    pub(super) retires_particles: bool,
 }
 
 impl CompiledSystem {
@@ -532,6 +539,12 @@ pub(super) fn compile_system(
             _ => 0.0,
         })
         .fold(0.0_f32, f32::max);
+    let retires_particles = operators.iter().any(|operator| {
+        matches!(
+            operator,
+            Operator::LifespanDecay | Operator::AlphaFadeAndDecay { .. }
+        )
+    });
     CompiledSystem {
         name: definition.name.clone(),
         material: super::normalize_material_name(definition.material().unwrap_or("")),
@@ -553,6 +566,7 @@ pub(super) fn compile_system(
         coverage: compiler.coverage,
         highest_control_point: compiler.highest_control_point,
         bounding_radius: bbox_extent.max(spawn_reach).max(24.0),
+        retires_particles,
     }
 }
 
