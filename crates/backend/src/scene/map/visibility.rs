@@ -511,3 +511,13 @@ pub(super) fn model_face_range(
     let end = start.checked_add(count)?;
     (end <= face_count).then_some(start..end)
 }
+
+pub(super) fn point_visibility_bucket(
+    bsp: &MapBsp,
+    point: [f32; 3],
+    cluster_count: u32,
+) -> MapVisibilityBucket {
+    point_cluster(bsp, point).map_or(MapVisibilityBucket::Always, |cluster| {
+        visibility_bucket(cluster, cluster_count)
+    })
+}

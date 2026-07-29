@@ -1,9 +1,8 @@
 use super::{
     BTreeMap, BspError, ColorRgbExp, DispInfo, Face, HashMap, MapBsp, MapFaceVisibility,
     MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapVertex, PendingLightmapBlock,
-    TexInfo, add, brush_lightmap_uv, displacement_lightmap_uv, extract_face_lightmap, face_normal,
-    fan_indices, is_preview_material_visible, is_water_underside_face, length_squared, mul,
-    normalize_material_name, sub,
+    TexInfo, add, brush_lightmap_uv, displacement_lightmap_uv, extract_face_lightmap,
+    is_preview_material_visible, length_squared, mul, normalize_material_name, sub, texture_flags,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -406,4 +405,31 @@ pub(super) fn displacement_corner_positions(
         .map_or(0, |(index, _)| index);
     corners.rotate_left(start_index);
     Ok(corners)
+}
+
+pub(super) fn fan_indices(vertex_count: usize) -> Result<Vec<u32>, BspError> {
+    if vertex_count < 3 {
+        return Ok(Vec::new());
+    }
+
+    let mut indices = Vec::with_capacity((vertex_count - 2) * 3);
+    for index in 1..vertex_count - 1 {
+        indices.push(0);
+        indices.push(u32::try_from(index).map_err(|_| BspError::TooLarge { item: "indices" })?);
+        indices.push(u32::try_from(index + 1).map_err(|_| BspError::TooLarge { item: "indices" })?);
+    }
+    Ok(indices)
+}
+
+fn face_normal(bsp: &MapBsp, face: &Face) -> [f32; 3] {
+    let normal = bsp.face_plane_normal(face);
+    if face.side == 0 {
+        normal
+    } else {
+        [-normal[0], -normal[1], -normal[2]]
+    }
+}
+
+fn is_water_underside_face(texinfo: &TexInfo, normal: [f32; 3]) -> bool {
+    texinfo.flags & texture_flags::WARP != 0 && normal[2] < 0.0
 }

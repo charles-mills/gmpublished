@@ -116,9 +116,12 @@ pub(super) fn blocking_worker_count(available: Option<NonZeroUsize>) -> usize {
 /// Media jobs are network-latency-bound: a synchronous ureq fetch of a small
 /// CDN image dominates, and decode/resize is a millisecond-scale tail. Size
 /// this pool for concurrent CDN fetches rather than core count; parked threads
-/// cost no CPU. `thumbnail_demand::DEFAULT_MAX_IN_FLIGHT` is 2x this width and
-/// `thumbnail_worker::decode::HTTP_MAX_IDLE_CONNECTIONS_PER_HOST` is 1x; move
-/// all three together.
+/// cost no CPU.
+///
+/// Two other numbers are sized against this one — the thumbnail manager's
+/// in-flight ceiling at 2x, and the decoder's per-host idle connection limit at
+/// 1x. Both live in `crate::media` and are private to it, so this is a note to
+/// move all three together rather than a link that would compile-check.
 pub(super) const fn media_worker_count() -> usize {
     MEDIA_THREADS
 }

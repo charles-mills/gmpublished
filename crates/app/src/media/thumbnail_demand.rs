@@ -1,32 +1,42 @@
 //! Views report visible rows. Feature updates translate those rows into demand
 //! sets, and this manager is the only path that starts decode work.
 
-use std::{
-    collections::{BinaryHeap, HashMap, HashSet},
-    fmt,
-    ops::Range,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, time::Duration};
 
-use bytes::Bytes;
-use iced::{Task, widget::image};
-use quick_cache::{DefaultHashBuilder, Weighter, unsync::Cache};
+use iced::Task;
+use quick_cache::{DefaultHashBuilder, unsync::Cache};
 
 use crate::{
-    bridge::tasks::{BackendContext, RunBlockingError, ScheduleError},
+    bridge::tasks::BackendContext,
     media::thumbnail_worker::{
-        FetchProfile, PreparedAnimation, PreparedAnimationFrame, PreparedThumbnail,
-        ThumbnailCancellation, ThumbnailError, ThumbnailInput, ThumbnailKey, ThumbnailMetadata,
-        ThumbnailMode, ThumbnailRequest, ThumbnailWorkerOutcome, WorkerDiskCache, normalized_url,
-        run_prepared_thumbnail_request, validate_max_edge,
+        FetchProfile, PreparedThumbnail, ThumbnailError, ThumbnailKey, ThumbnailMode,
+        ThumbnailWorkerOutcome, WorkerDiskCache, run_prepared_thumbnail_request, validate_max_edge,
     },
 };
 
+#[cfg(test)]
 use crate::generation::Generation;
 #[cfg(test)]
-use crate::media::thumbnail_worker::Thumbnail;
+use crate::media::thumbnail_worker::{Thumbnail, ThumbnailInput, ThumbnailMetadata};
+
+mod delivery;
+mod demand;
+mod index;
+mod placeholders;
+
+pub use delivery::{Delivery, DeliveryResult, Message, ReadyThumbnail, ThumbnailDeliveryError};
+pub use demand::{
+    Demand, DemandId, DemandSet, Owner, Priority, ReplaceMode, bucketed_thumbnail_scale,
+    physical_thumbnail_edge, prefetch_ranges, retained_rows,
+};
+pub use index::{JobId, RetryAttempt, RetryId};
+pub use placeholders::PlaceholderImage;
+
+use delivery::{ReadyThumbnailWeighter, ready_thumbnail, worker_result_message};
+#[cfg(test)]
+use index::DemandState;
+use index::{DemandEntry, DemandIndex, StartCandidate};
+use placeholders::PlaceholderStore;
 
 const DEFAULT_ESTIMATED_ITEMS: usize = 128;
 // Two media-pool widths hide the WorkerFinished -> pump round trip while
@@ -37,12 +47,13 @@ const DEFAULT_MAX_IN_FLIGHT: usize = 32;
 // quadratically with density.
 const DEFAULT_MEMORY_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_DISK_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
-/// Slots background warming may occupy; the rest of the pipe stays free for
-/// interactive tiers so a scroll burst never queues behind warm fetches.
+/// Ceiling on background warm jobs in flight.
+///
+/// A cap on warm, not a reservation for it: the gate counts *total* in-flight
+/// work, so interactive jobs occupy the same pipe and warm gets whatever is
+/// left under this number. That is the conservative direction — a scroll burst
+/// squeezes warming out rather than queueing behind it.
 const WARM_MAX_IN_FLIGHT: usize = 8;
-const THUMBNAIL_SCALE_BUCKET: f32 = 0.5;
-const WORKSHOP_ICON_SOURCE_MAX_EDGE: u32 = 512;
-const WORKSHOP_ICON_SOURCE_MAX_SCALE: f32 = 2.0;
 
 /// The cache deliberately uses `quick_cache`'s default lifecycle.
 ///
@@ -55,15 +66,6 @@ const WORKSHOP_ICON_SOURCE_MAX_SCALE: f32 = 2.0;
 /// eviction-policy one — so raise [`Config::memory_capacity_bytes`] rather
 /// than reaching for a custom lifecycle again.
 type HandleCache = Cache<ThumbnailKey, ReadyThumbnail, ReadyThumbnailWeighter, DefaultHashBuilder>;
-
-/// Placeholder images held at once.
-///
-/// A retained row window is four times the visible count (see
-/// [`prefetch_ranges`]), so this covers several windows across every owner at
-/// roughly 4 KB each.
-const PLACEHOLDER_CACHE_ITEMS: usize = 512;
-
-type PlaceholderCache = Cache<Arc<str>, PlaceholderImage>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -86,56 +88,6 @@ impl Default for Config {
     }
 }
 
-pub fn bucketed_thumbnail_scale(scale_factor: f32) -> f32 {
-    if !scale_factor.is_finite() || scale_factor <= 1.0 {
-        return 1.0;
-    }
-
-    ((scale_factor / THUMBNAIL_SCALE_BUCKET).ceil() * THUMBNAIL_SCALE_BUCKET)
-        .min(WORKSHOP_ICON_SOURCE_MAX_SCALE)
-}
-
-pub fn physical_thumbnail_edge(logical_edge: u32, scale_factor: f32) -> u32 {
-    let scaled = f64::from(logical_edge) * f64::from(bucketed_thumbnail_scale(scale_factor));
-    scaled
-        .round()
-        .max(f64::from(logical_edge))
-        .min(f64::from(WORKSHOP_ICON_SOURCE_MAX_EDGE)) as u32
-}
-
-pub fn prefetch_ranges(visible: Range<usize>, total: usize) -> (Range<usize>, Range<usize>) {
-    if total == 0 {
-        return (0..0, 0..0);
-    }
-
-    let start = visible.start.min(total);
-    let end = visible.end.min(total).max(start);
-    let visible_len = end.saturating_sub(start);
-    if visible_len == 0 {
-        return (0..0, 0..0);
-    }
-
-    let before_len = visible_len.max(4);
-    let after_len = visible_len.saturating_mul(2).max(4);
-    (
-        start.saturating_sub(before_len)..start,
-        end..end.saturating_add(after_len).min(total),
-    )
-}
-
-/// Rows inside this window keep their thumbnails when a grid releases
-/// off-screen handles; everything else downgrades to Loading. `None` means
-/// "release nothing" (transient empty viewport, e.g. before the first
-/// visible-range event — releasing everything then would flash the grid).
-pub fn retained_rows(visible: Range<usize>, total: usize) -> Option<Range<usize>> {
-    let visible = visible.start.min(total)..visible.end.min(total);
-    if visible.is_empty() {
-        return None;
-    }
-    let (prefetch_before, prefetch_after) = prefetch_ranges(visible, total);
-    Some(prefetch_before.start..prefetch_after.end)
-}
-
 pub struct Manager {
     config: Config,
     disk_cache: Option<WorkerDiskCache>,
@@ -145,18 +97,7 @@ pub struct Manager {
     scale_bucket: f32,
     next_sequence: u64,
     next_work_id: u64,
-    /// Preview-URL ThumbHashes, seeded from the metadata snapshot and topped up
-    /// by completions.
-    ///
-    /// Unbounded on purpose: ~25 bytes per addon, and nothing re-reads the
-    /// snapshot, so an evicted hash costs that row its placeholder for good.
-    thumbhashes: HashMap<Arc<str>, Arc<[u8]>>,
-    /// Placeholders decoded from [`Self::thumbhashes`], kept so a scrolled row
-    /// reuses a stable handle instead of re-uploading.
-    ///
-    /// Bounded, unlike the hashes: each entry holds a GPU-uploadable handle,
-    /// and a miss costs one small decode.
-    placeholders: PlaceholderCache,
+    placeholders: PlaceholderStore,
 }
 
 impl Manager {
@@ -182,8 +123,7 @@ impl Manager {
             scale_bucket: bucketed_thumbnail_scale(1.0),
             next_sequence: 1,
             next_work_id: 1,
-            thumbhashes: HashMap::new(),
-            placeholders: PlaceholderCache::new(PLACEHOLDER_CACHE_ITEMS),
+            placeholders: PlaceholderStore::default(),
         }
     }
 
@@ -195,7 +135,7 @@ impl Manager {
         entries: impl IntoIterator<Item = (String, Arc<[u8]>)>,
     ) {
         for (url, hash) in entries {
-            self.remember_thumbhash(&url, hash);
+            self.placeholders.remember(&url, hash);
         }
     }
 
@@ -292,7 +232,7 @@ impl Manager {
             } else {
                 demand.input.cache_key(physical_max_edge)
             };
-            let interest = InterestKey {
+            let interest = index::InterestKey {
                 owner: set.owner,
                 generation: set.generation,
                 id: demand.id.clone(),
@@ -402,7 +342,7 @@ impl Manager {
             // this URL. Surfaces ignore a placeholder once they hold real pixels,
             // so re-emitting during the in-flight window is a harmless no-op.
             if set.owner != Owner::SizeAnalyzer
-                && let Some(placeholder) = self.placeholder_for(demand.input.source_url())
+                && let Some(placeholder) = self.placeholders.get(demand.input.source_url())
             {
                 immediate.push(Message::Delivered(Box::new(Delivery::placeholder(
                     set.owner,
@@ -441,7 +381,7 @@ impl Manager {
                 if let (Some(url), Some(hash)) =
                     (key.source_url(), thumbnail.thumbnail().thumbhash_arc())
                 {
-                    self.remember_thumbhash(url, hash);
+                    self.placeholders.remember(url, hash);
                 }
                 let ready = ready_thumbnail(key.clone(), thumbnail);
                 // Warm-only completions fill the disk cache without churning
@@ -584,30 +524,6 @@ impl Manager {
         .map(move |result| worker_result_message(message_key.clone(), job_id, attempt, result))
     }
 
-    /// Records a URL's ThumbHash under its normalized key. Seeded URLs come
-    /// straight off Steam metadata and are not normalized yet; completions
-    /// arrive through a [`ThumbnailKey`], which already did it.
-    fn remember_thumbhash(&mut self, url: &str, hash: Arc<[u8]>) {
-        let url = normalized_url(url);
-        if !self.thumbhashes.contains_key(url) {
-            self.thumbhashes.insert(Arc::from(url), hash);
-        }
-    }
-
-    /// Returns (decoding and caching once per URL) the placeholder image for a
-    /// URL whose ThumbHash we know, or `None` if we don't or it won't decode.
-    fn placeholder_for(&mut self, url: &str) -> Option<PlaceholderImage> {
-        let url = normalized_url(url);
-        if let Some(placeholder) = self.placeholders.get(url) {
-            return Some(placeholder.clone());
-        }
-        let (key, hash) = self.thumbhashes.get_key_value(url)?;
-        let (key, hash) = (Arc::clone(key), Arc::clone(hash));
-        let placeholder = decode_placeholder(&hash)?;
-        self.placeholders.insert(key, placeholder.clone());
-        Some(placeholder)
-    }
-
     fn allocate_sequence(&mut self) -> u64 {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
@@ -634,17 +550,17 @@ impl Manager {
 
     #[cfg(test)]
     fn pending_count(&self) -> usize {
-        self.index.entries.len()
+        self.index.pending_len()
     }
 
-    /// Scales the disk-cache eviction budget to the library so a full warm
-    /// actually fits (the 256 MB default thrashes below library size).
     /// A clone of the disk-cache handle, for work that belongs on a blocking
     /// thread rather than in `update`. Clones share one index and one budget.
     pub(crate) fn disk_cache_handle(&self) -> Option<WorkerDiskCache> {
         self.disk_cache.clone()
     }
 
+    /// Scales the disk-cache eviction budget to the library so a full warm
+    /// actually fits (the 256 MB default thrashes below library size).
     pub(crate) fn scale_disk_cache_to_library(&self, addon_count: usize) {
         const PER_ADDON_BYTES: u64 = 1_310_720; // ~1.25 MiB decoded at 512px
         const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -677,897 +593,9 @@ impl fmt::Debug for Manager {
             .field("config", &self.config)
             .field("cache_len", &self.cache.len())
             .field("cache_weight", &self.cache.weight())
-            .field("pending", &self.index.entries.len())
-            .field("in_flight", &self.index.active_jobs.len())
+            .field("pending", &self.index.pending_len())
+            .field("in_flight", &self.index.in_flight_count())
             .finish()
-    }
-}
-
-/// Why a thumbnail request failed: either the decode/resize pipeline
-/// rejected it, or the worker pool couldn't schedule it. Kept transparent so
-/// `Display` reproduces the underlying error text verbatim for logging.
-#[derive(Clone, Debug, thiserror::Error)]
-pub enum ThumbnailDeliveryError {
-    #[error(transparent)]
-    Thumbnail(#[from] Arc<ThumbnailError>),
-    #[error(transparent)]
-    Schedule(#[from] Arc<RunBlockingError>),
-}
-
-#[derive(Clone, Debug)]
-pub enum Message {
-    WorkerFinished {
-        key: ThumbnailKey,
-        job_id: JobId,
-        attempt: RetryAttempt,
-        /// Boxed to keep this variant from setting the size of `RootMessage`,
-        /// which every message in the app pays.
-        result: Box<Result<ThumbnailWorkerOutcome<PreparedThumbnail>, ThumbnailDeliveryError>>,
-    },
-    WorkerBackpressured {
-        key: ThumbnailKey,
-        job_id: JobId,
-        attempt: RetryAttempt,
-    },
-    RetryReady {
-        key: ThumbnailKey,
-        retry_id: RetryId,
-    },
-    /// Boxed: `Delivery` embeds a `ReadyThumbnail` (~184 bytes) inline, which
-    /// would otherwise set the size of `RootMessage`.
-    Delivered(Box<Delivery>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Owner {
-    InstalledAddons,
-    MyWorkshop,
-    PreparePublish,
-    PreviewGma,
-    Search,
-    SizeAnalyzer,
-    WarmLibrary,
-}
-
-impl Owner {
-    /// Whole-library disk-cache warming, as opposed to anything a user is
-    /// looking at. Nothing paints for this owner.
-    pub(crate) const fn is_warm(self) -> bool {
-        matches!(self, Self::WarmLibrary)
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct DemandId(Arc<str>);
-
-impl DemandId {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(Arc::from(value.into()))
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Priority {
-    ActiveDetail = 0,
-    VisibleRow = 1,
-    SizeAnalyzer = 2,
-    Prefetch = 3,
-    /// Whole-library disk-cache warming; only runs in slots interactive
-    /// tiers leave idle, and its completions skip the memory cache.
-    WarmLibrary = 4,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReplaceMode {
-    Owner,
-}
-
-#[derive(Clone, Debug)]
-pub struct Demand {
-    pub(crate) id: DemandId,
-    pub(crate) input: ThumbnailInput,
-    pub(crate) logical_max_edge: u32,
-    pub(crate) priority: Priority,
-}
-
-#[derive(Clone, Debug)]
-pub struct DemandSet {
-    pub(crate) owner: Owner,
-    pub(crate) generation: Generation,
-    pub(crate) replace: ReplaceMode,
-    pub(crate) demands: Vec<Demand>,
-}
-
-impl DemandSet {
-    pub(crate) fn empty(owner: Owner) -> Self {
-        Self {
-            owner,
-            generation: Generation::INITIAL,
-            replace: ReplaceMode::Owner,
-            demands: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ReadyThumbnail {
-    key: ThumbnailKey,
-    handle: image::Handle,
-    metadata: ThumbnailMetadata,
-    animation: Option<ReadyAnimation>,
-    thumbhash: Option<Arc<[u8]>>,
-    byte_len: usize,
-}
-
-impl ReadyThumbnail {
-    pub(crate) fn key(&self) -> &ThumbnailKey {
-        &self.key
-    }
-
-    pub(crate) fn handle(&self) -> &image::Handle {
-        &self.handle
-    }
-
-    pub(crate) fn metadata(&self) -> &ThumbnailMetadata {
-        &self.metadata
-    }
-
-    pub(crate) fn animation(&self) -> Option<&ReadyAnimation> {
-        self.animation.as_ref()
-    }
-
-    pub(crate) fn thumbhash(&self) -> Option<&[u8]> {
-        self.thumbhash.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(key: ThumbnailKey, metadata: ThumbnailMetadata, rgba: Vec<u8>) -> Self {
-        let byte_len = rgba.len();
-        let handle = image::Handle::from_rgba(metadata.width, metadata.height, rgba);
-        Self {
-            key,
-            handle,
-            metadata,
-            animation: None,
-            thumbhash: None,
-            byte_len,
-        }
-    }
-}
-
-impl fmt::Debug for ReadyThumbnail {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ReadyThumbnail")
-            .field("key", &self.key)
-            .field("metadata", &self.metadata)
-            .field(
-                "animation_frames",
-                &self.animation.as_ref().map(ReadyAnimation::frame_count),
-            )
-            .field("byte_len", &self.byte_len)
-            .finish()
-    }
-}
-
-#[derive(Clone)]
-pub struct ReadyAnimation {
-    frames: Vec<ReadyAnimationFrame>,
-    byte_len: usize,
-}
-
-impl ReadyAnimation {
-    pub(crate) fn frames(&self) -> &[ReadyAnimationFrame] {
-        &self.frames
-    }
-
-    pub(crate) fn frame_count(&self) -> usize {
-        self.frames.len()
-    }
-}
-
-impl fmt::Debug for ReadyAnimation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ReadyAnimation")
-            .field("frame_count", &self.frames.len())
-            .field("byte_len", &self.byte_len)
-            .finish()
-    }
-}
-
-#[derive(Clone)]
-pub struct ReadyAnimationFrame {
-    handle: image::Handle,
-    delay: std::time::Duration,
-}
-
-impl ReadyAnimationFrame {
-    pub(crate) fn handle(&self) -> &image::Handle {
-        &self.handle
-    }
-
-    pub(crate) const fn delay(&self) -> std::time::Duration {
-        self.delay
-    }
-}
-
-impl fmt::Debug for ReadyAnimationFrame {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ReadyAnimationFrame")
-            .field("delay", &self.delay)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Delivery {
-    pub(crate) owner: Owner,
-    pub(crate) generation: Generation,
-    pub(crate) id: DemandId,
-    pub(crate) key: ThumbnailKey,
-    pub(crate) result: DeliveryResult,
-}
-
-impl Delivery {
-    fn ready(
-        owner: Owner,
-        generation: Generation,
-        id: DemandId,
-        key: ThumbnailKey,
-        ready: ReadyThumbnail,
-    ) -> Self {
-        Self {
-            owner,
-            generation,
-            id,
-            key,
-            result: DeliveryResult::Ready(ready),
-        }
-    }
-
-    fn failed(
-        owner: Owner,
-        generation: Generation,
-        id: DemandId,
-        key: ThumbnailKey,
-        error: ThumbnailDeliveryError,
-    ) -> Self {
-        Self {
-            owner,
-            generation,
-            id,
-            key,
-            result: DeliveryResult::Failed { error },
-        }
-    }
-
-    fn placeholder(
-        owner: Owner,
-        generation: Generation,
-        id: DemandId,
-        key: ThumbnailKey,
-        placeholder: PlaceholderImage,
-    ) -> Self {
-        Self {
-            owner,
-            generation,
-            id,
-            key,
-            result: DeliveryResult::Placeholder(placeholder),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum DeliveryResult {
-    Ready(ReadyThumbnail),
-    /// A blurred ThumbHash stand-in painted before real pixels arrive. Replaced
-    /// by [`DeliveryResult::Ready`] once the decode lands.
-    Placeholder(PlaceholderImage),
-    Failed {
-        error: ThumbnailDeliveryError,
-    },
-}
-
-/// Tiny ThumbHash-decoded image the GPU upscales into a blurred placeholder.
-#[derive(Clone)]
-pub struct PlaceholderImage {
-    handle: image::Handle,
-    width: u32,
-    height: u32,
-}
-
-impl PlaceholderImage {
-    pub(crate) fn handle(&self) -> &image::Handle {
-        &self.handle
-    }
-
-    pub(crate) const fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub(crate) const fn height(&self) -> u32 {
-        self.height
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(width: u32, height: u32) -> Self {
-        Self {
-            handle: image::Handle::from_rgba(
-                width,
-                height,
-                vec![32; (width * height * 4) as usize],
-            ),
-            width,
-            height,
-        }
-    }
-}
-
-impl fmt::Debug for PlaceholderImage {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PlaceholderImage")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .finish_non_exhaustive()
-    }
-}
-
-fn decode_placeholder(hash: &[u8]) -> Option<PlaceholderImage> {
-    let (width, height, rgba) = crate::media::thumbhash::decode(hash)?;
-    Some(PlaceholderImage {
-        handle: image::Handle::from_rgba(width, height, rgba),
-        width,
-        height,
-    })
-}
-
-#[derive(Default)]
-struct DemandIndex {
-    entries: HashMap<InterestKey, DemandEntry>,
-    key_to_interests: HashMap<ThumbnailKey, Vec<InterestKey>>,
-    active_jobs: HashMap<ThumbnailKey, ActiveJob>,
-    delayed_retries: HashMap<ThumbnailKey, RetryId>,
-    retry_attempts: HashMap<ThumbnailKey, RetryAttempt>,
-    /// Interests grouped by owner, so a demand-set replacement touches only
-    /// that owner's entries.
-    ///
-    /// Without it, tearing down a grid's ~72-entry window scanned every entry
-    /// in the index — including the whole-library warm set, which on a cold
-    /// disk cache is one entry per addon.
-    by_owner: HashMap<Owner, HashSet<InterestKey>>,
-    /// Queued interactive candidates, ordered by `(priority, sequence)`.
-    ///
-    /// Lazily deleted: entries are pushed on queue and simply skipped when
-    /// popped if they are no longer queued. Removing from the middle of a heap
-    /// is what an index of heap positions would buy, and the bookkeeping costs
-    /// more than the stale pops it avoids.
-    ready: BinaryHeap<Candidate>,
-    /// Queued whole-library warm candidates, kept in their own heap.
-    ///
-    /// Warm work is blocked outright whenever the interactive tiers hold more
-    /// than `WARM_MAX_IN_FLIGHT` slots. Sharing one heap meant every call in
-    /// that state popped the entire warm backlog just to discover none of it
-    /// was startable, then pushed it all back — reintroducing the O(library)
-    /// scan the heap exists to remove. Partitioning lets that case skip the
-    /// backlog entirely.
-    ready_warm: BinaryHeap<Candidate>,
-}
-
-/// Heap entry ordering candidates by scheduling preference.
-///
-/// `Reverse` on both fields because `BinaryHeap` is a max-heap and the most
-/// preferred candidate is the lowest priority value, then the lowest sequence.
-#[derive(Clone, Eq, PartialEq)]
-struct Candidate {
-    priority: std::cmp::Reverse<Priority>,
-    sequence: std::cmp::Reverse<u64>,
-    interest: InterestKey,
-}
-
-impl Ord for Candidate {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority
-            .cmp(&other.priority)
-            .then_with(|| self.sequence.cmp(&other.sequence))
-    }
-}
-
-impl PartialOrd for Candidate {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl DemandIndex {
-    fn add(&mut self, entry: DemandEntry) {
-        let interest = entry.interest_key();
-        let key = entry.key.clone();
-        self.key_to_interests
-            .entry(key)
-            .or_default()
-            .push(interest.clone());
-        let _ = self
-            .by_owner
-            .entry(entry.owner)
-            .or_default()
-            .insert(interest.clone());
-        if entry.state == DemandState::Queued {
-            self.enqueue(&interest, entry.priority, entry.sequence);
-        }
-        self.entries.insert(interest, entry);
-    }
-
-    fn enqueue(&mut self, interest: &InterestKey, priority: Priority, sequence: u64) {
-        let candidate = Candidate {
-            priority: std::cmp::Reverse(priority),
-            sequence: std::cmp::Reverse(sequence),
-            interest: interest.clone(),
-        };
-        if priority == Priority::WarmLibrary {
-            self.ready_warm.push(candidate);
-        } else {
-            self.ready.push(candidate);
-        }
-    }
-
-    /// Drops this owner's interests that are absent from `keep`, leaving the
-    /// rest untouched.
-    fn retain_owner(&mut self, owner: &Owner, keep: &HashSet<InterestKey>) {
-        let Some(interests) = self.by_owner.get(owner) else {
-            return;
-        };
-        let stale = interests.difference(keep).cloned().collect::<Vec<_>>();
-        for interest in &stale {
-            let _ = self.remove_interest(interest);
-        }
-    }
-
-    /// Whether this exact interest is already demanded, re-prioritising it if
-    /// the caller now wants it more urgently.
-    ///
-    /// Priority is deliberately *not* part of `InterestKey` — the same row at a
-    /// new priority is the same interest, not a second one. But that means a
-    /// row promoted from `Prefetch` to `VisibleRow` as the user scrolls toward
-    /// it looks unchanged to a plain existence check, and would keep serving at
-    /// prefetch priority for as long as it stayed on screen. Nothing in the
-    /// delivered results would look wrong; it would simply be slow.
-    fn reprioritise_existing(
-        &mut self,
-        owner: &Owner,
-        generation: Generation,
-        id: &DemandId,
-        key: &ThumbnailKey,
-        priority: Priority,
-        promoted_sequence: u64,
-    ) -> bool {
-        let interest = InterestKey {
-            owner: *owner,
-            generation,
-            id: id.clone(),
-            key: key.clone(),
-        };
-        let Some(entry) = self.entries.get_mut(&interest) else {
-            return false;
-        };
-
-        if entry.priority != priority {
-            entry.priority = priority;
-            entry.sequence = promoted_sequence;
-            let (state, sequence) = (entry.state, entry.sequence);
-            if state == DemandState::Queued {
-                // The old heap candidate still carries the old priority and
-                // sequence; it is skipped on pop by the sequence check.
-                self.enqueue(&interest, priority, sequence);
-            }
-        }
-        true
-    }
-
-    fn remove_queued_warm(&mut self, ids: &HashSet<DemandId>) {
-        self.remove_where(|entry| {
-            entry.owner.is_warm() && entry.state != DemandState::InFlight && ids.contains(&entry.id)
-        });
-    }
-
-    fn remove_where(&mut self, predicate: impl Fn(&DemandEntry) -> bool) {
-        let interests = self
-            .entries
-            .iter()
-            .filter_map(|(interest, entry)| predicate(entry).then_some(interest.clone()))
-            .collect::<Vec<_>>();
-        for interest in interests {
-            self.remove_interest(&interest);
-        }
-    }
-
-    /// The only way an interest leaves the index, so every derived map stays
-    /// in step. Callers must not prune `by_owner` themselves — an entry
-    /// removed while its bucket keeps it is a ghost nothing revisits.
-    ///
-    /// Any stale heap candidate is skipped on pop.
-    fn remove_interest(&mut self, interest: &InterestKey) -> Option<DemandEntry> {
-        let entry = self.entries.remove(interest)?;
-        if let Some(interests) = self.key_to_interests.get_mut(&entry.key) {
-            interests.retain(|candidate| candidate != interest);
-            if interests.is_empty() {
-                self.key_to_interests.remove(&entry.key);
-            }
-        }
-        if let Some(interests) = self.by_owner.get_mut(&entry.owner) {
-            let _ = interests.remove(interest);
-            if interests.is_empty() {
-                let _ = self.by_owner.remove(&entry.owner);
-            }
-        }
-        Some(entry)
-    }
-
-    /// Drops work nobody wants any more, releasing its media slot.
-    ///
-    /// Cancelling an in-flight job wastes less than it looks like it should:
-    /// cancellation is cooperative and only checked before I/O, so
-    /// a job already fetching runs to completion, and `complete_job` inserts the
-    /// result into the memory cache *before* it checks whether anyone still
-    /// wants it. The bytes are kept either way. What cancelling actually buys is
-    /// the slot, immediately, for rows the user has now scrolled to.
-    fn cancel_uninterested_work(&mut self) {
-        let keys = self
-            .active_jobs
-            .keys()
-            .chain(self.delayed_retries.keys())
-            .filter(|key| !self.has_interests(key))
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.cancel_key(&key);
-        }
-    }
-
-    fn state_for_key(&self, key: &ThumbnailKey) -> DemandState {
-        if self.active_jobs.contains_key(key) {
-            DemandState::InFlight
-        } else if self.delayed_retries.contains_key(key) {
-            DemandState::RetryWaiting
-        } else {
-            DemandState::Queued
-        }
-    }
-
-    fn next_candidate(&mut self, job_id: JobId, allow_warm: bool) -> Option<StartCandidate> {
-        // Pops in scheduling order, discarding candidates that are stale
-        // (their entry is gone, or no longer queued) and setting aside the ones
-        // that are merely blocked right now so they are not lost.
-        let selected = self
-            .take_startable(false)
-            .or_else(|| allow_warm.then(|| self.take_startable(true)).flatten());
-
-        let (key, input, physical_max_edge, priority) = selected?;
-        if let Some(interests) = self.key_to_interests.get(&key) {
-            for interest in interests {
-                if let Some(entry) = self.entries.get_mut(interest) {
-                    entry.state = DemandState::InFlight;
-                }
-            }
-        }
-        let attempt = self.retry_attempts.remove(&key).unwrap_or_default();
-        let cancellation = ThumbnailCancellation::default();
-        self.active_jobs.insert(
-            key.clone(),
-            ActiveJob {
-                job_id,
-                cancellation: cancellation.clone(),
-            },
-        );
-
-        // Emitted here rather than in `pump` so every caller that claims a job
-        // is counted, including the headless driver's simulated worker pool.
-
-        Some(StartCandidate {
-            request: ThumbnailRequest::new(input, physical_max_edge, key.mode()),
-            priority,
-            job_id,
-            attempt,
-            cancellation,
-        })
-    }
-
-    /// Pops the best startable candidate from one tier's heap.
-    ///
-    /// Candidates that are stale (entry gone, no longer queued, or superseded
-    /// by a newer sequence) are dropped. Candidates that are merely blocked
-    /// right now — their source already has a job running, or a static request
-    /// is waiting on the animated decode of the same source — are set aside and
-    /// returned to the heap, because they are still wanted.
-    fn take_startable(
-        &mut self,
-        warm: bool,
-    ) -> Option<(ThumbnailKey, ThumbnailInput, u32, Priority)> {
-        let mut deferred = Vec::new();
-        let selected = loop {
-            let heap = if warm {
-                &mut self.ready_warm
-            } else {
-                &mut self.ready
-            };
-            let Some(candidate) = heap.pop() else {
-                break None;
-            };
-
-            let Some(entry) = self.entries.get(&candidate.interest) else {
-                continue;
-            };
-            if entry.state != DemandState::Queued || entry.sequence != candidate.sequence.0 {
-                continue;
-            }
-
-            let blocked = self.active_jobs.contains_key(&entry.key)
-                || (entry.key.mode() == ThumbnailMode::Static
-                    && self.active_jobs.keys().any(|active| {
-                        active.mode() == ThumbnailMode::Animated
-                            && active.source == entry.key.source
-                    }));
-            if blocked {
-                deferred.push(candidate);
-                continue;
-            }
-
-            break Some((
-                entry.key.clone(),
-                entry.input.clone(),
-                entry.physical_max_edge,
-                entry.priority,
-            ));
-        };
-
-        if warm {
-            self.ready_warm.extend(deferred);
-        } else {
-            self.ready.extend(deferred);
-        }
-        selected
-    }
-
-    /// True when `key` has at least one interest and every one is warm-tier —
-    /// the completion should fill the disk cache without churning the memory
-    /// cache's recency window. No interests at all is NOT warm-only: a
-    /// scrolled-past completion is exactly what the memory cache wants.
-    fn interests_warm_only(&self, key: &ThumbnailKey) -> bool {
-        self.key_to_interests.get(key).is_some_and(|interests| {
-            !interests.is_empty()
-                && interests.iter().all(|interest| {
-                    self.entries
-                        .get(interest)
-                        .is_some_and(|entry| entry.priority == Priority::WarmLibrary)
-                })
-        })
-    }
-
-    fn mark_key_queued(&mut self, key: &ThumbnailKey, job_id: JobId, attempt: RetryAttempt) {
-        if !self.finish_job(key, job_id) {
-            return;
-        }
-        self.retry_attempts.insert(key.clone(), attempt);
-        self.mark_interests_queued(key);
-    }
-
-    /// Retires the warm interests in `key` and re-queues everything else.
-    ///
-    /// A warm job hands back no pixels, so the two halves have to be handled
-    /// differently. Warm interests are *satisfied* — the bytes they wanted are
-    /// on disk — and must not be re-queued, or the pump would restart a job
-    /// that banks-and-completes immediately, forever. An interactive interest
-    /// that attached while the warm job was in flight is *not* satisfied, and
-    /// would otherwise sit `InFlight` waiting for a delivery that is never
-    /// coming; re-queuing it restarts it at its own priority, and that restart
-    /// is local, since the source it needs was just banked.
-    fn retire_warm_interests(&mut self, key: &ThumbnailKey) {
-        let Some(interests) = self.key_to_interests.get(key).cloned() else {
-            return;
-        };
-        // The warm fetch succeeded, so any backoff it accumulated is spent.
-        self.retry_attempts.remove(key);
-        for interest in interests {
-            let Some(entry) = self.entries.get_mut(&interest) else {
-                continue;
-            };
-            if entry.priority == Priority::WarmLibrary {
-                let _ = self.remove_interest(&interest);
-                continue;
-            }
-            entry.state = DemandState::Queued;
-            let (priority, sequence) = (entry.priority, entry.sequence);
-            self.enqueue(&interest, priority, sequence);
-        }
-    }
-
-    fn mark_interests_queued(&mut self, key: &ThumbnailKey) {
-        let Some(interests) = self.key_to_interests.get(key).cloned() else {
-            return;
-        };
-        for interest in interests {
-            let Some(entry) = self.entries.get_mut(&interest) else {
-                continue;
-            };
-            entry.state = DemandState::Queued;
-            let (priority, sequence) = (entry.priority, entry.sequence);
-            // Re-offer: the entry's previous heap candidate was consumed when
-            // it left the queue, so becoming queued again needs a fresh one.
-            self.enqueue(&interest, priority, sequence);
-        }
-    }
-
-    fn begin_retry(&mut self, key: &ThumbnailKey, retry_id: RetryId, attempt: RetryAttempt) {
-        self.delayed_retries.insert(key.clone(), retry_id);
-        self.retry_attempts.insert(key.clone(), attempt);
-        if let Some(interests) = self.key_to_interests.get(key) {
-            for interest in interests {
-                if let Some(entry) = self.entries.get_mut(interest) {
-                    entry.state = DemandState::RetryWaiting;
-                }
-            }
-        }
-    }
-
-    fn mark_retry_ready(&mut self, key: &ThumbnailKey, retry_id: RetryId) {
-        if self.delayed_retries.get(key) != Some(&retry_id) {
-            return;
-        }
-        self.delayed_retries.remove(key);
-        self.mark_interests_queued(key);
-    }
-
-    fn finish_job(&mut self, key: &ThumbnailKey, job_id: JobId) -> bool {
-        if self.active_jobs.get(key).map(|job| job.job_id) != Some(job_id) {
-            return false;
-        }
-        self.active_jobs.remove(key);
-        true
-    }
-
-    fn has_interests(&self, key: &ThumbnailKey) -> bool {
-        self.key_to_interests
-            .get(key)
-            .is_some_and(|interests| !interests.is_empty())
-    }
-
-    fn cancel_key(&mut self, key: &ThumbnailKey) {
-        if let Some(job) = self.active_jobs.remove(key) {
-            // Only an actually-running job needs signalling; a queued entry is
-            // dropped by removing it from `active_jobs` above.
-            job.cancellation.cancel();
-        }
-        self.delayed_retries.remove(key);
-        self.retry_attempts.remove(key);
-    }
-
-    /// Retires every interest in `key`, returning them so the caller can
-    /// deliver to each.
-    ///
-    /// Removals go through `remove_interest` so the owner bucket is kept in
-    /// step. Dropping straight out of `entries` left the interest behind in
-    /// `by_owner` — harmless today, because `retain_owner` is that map's only
-    /// reader and it tolerates entries that no longer exist, but the ghosts
-    /// accumulated for a whole session under `Owner::WarmLibrary` (which
-    /// applies exactly one demand set and so never prunes again), and any
-    /// future reader of `by_owner` would have inherited a lie.
-    fn complete_key(&mut self, key: &ThumbnailKey) -> Vec<DemandEntry> {
-        self.cancel_key(key);
-        let interests = self.key_to_interests.remove(key).unwrap_or_default();
-        interests
-            .into_iter()
-            .filter_map(|interest| self.remove_interest(&interest))
-            .collect()
-    }
-
-    fn in_flight_count(&self) -> usize {
-        self.active_jobs.len()
-    }
-}
-
-struct ActiveJob {
-    job_id: JobId,
-    cancellation: ThumbnailCancellation,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct InterestKey {
-    owner: Owner,
-    generation: Generation,
-    id: DemandId,
-    key: ThumbnailKey,
-}
-
-struct DemandEntry {
-    owner: Owner,
-    generation: Generation,
-    id: DemandId,
-    input: ThumbnailInput,
-    key: ThumbnailKey,
-    physical_max_edge: u32,
-    priority: Priority,
-    state: DemandState,
-    sequence: u64,
-}
-
-impl DemandEntry {
-    fn new(
-        owner: Owner,
-        generation: Generation,
-        sequence: u64,
-        demand: Demand,
-        key: ThumbnailKey,
-        physical_max_edge: u32,
-        state: DemandState,
-    ) -> Self {
-        Self {
-            owner,
-            generation,
-            id: demand.id,
-            input: demand.input,
-            key,
-            physical_max_edge,
-            priority: demand.priority,
-            state,
-            sequence,
-        }
-    }
-
-    fn interest_key(&self) -> InterestKey {
-        InterestKey {
-            owner: self.owner,
-            generation: self.generation,
-            id: self.id.clone(),
-            key: self.key.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DemandState {
-    Queued,
-    InFlight,
-    RetryWaiting,
-}
-
-struct StartCandidate {
-    /// The whole request, not the parts to rebuild one from: the key it
-    /// caches under is derived here and cannot disagree with the input and
-    /// edge the job actually fetches.
-    request: ThumbnailRequest,
-    priority: Priority,
-    job_id: JobId,
-    attempt: RetryAttempt,
-    cancellation: ThumbnailCancellation,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct JobId(u64);
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RetryId(u64);
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RetryAttempt(u8);
-
-impl RetryAttempt {
-    fn next(self) -> Option<Self> {
-        (self.0 < 2).then(|| Self(self.0 + 1))
-    }
-
-    fn delay(self) -> Duration {
-        match self.0 {
-            1 => Duration::from_secs(1),
-            2 => Duration::from_secs(4),
-            _ => Duration::ZERO,
-        }
     }
 }
 
@@ -1592,98 +620,6 @@ struct RetrySchedule {
     delay: Duration,
 }
 
-#[derive(Clone)]
-struct ReadyThumbnailWeighter;
-
-impl Weighter<ThumbnailKey, ReadyThumbnail> for ReadyThumbnailWeighter {
-    fn weight(&self, _key: &ThumbnailKey, value: &ReadyThumbnail) -> u64 {
-        value.byte_len as u64
-    }
-}
-
-fn ready_thumbnail(key: ThumbnailKey, thumbnail: &PreparedThumbnail) -> ReadyThumbnail {
-    let metadata = thumbnail.thumbnail().metadata().clone();
-    let rgba_len = thumbnail.thumbnail().rgba_bytes().len();
-    let animation = thumbnail.animation().map(ready_animation);
-    let byte_len = rgba_len + animation.as_ref().map_or(0, |animation| animation.byte_len);
-    let handle = image::Handle::from_rgba(
-        metadata.width,
-        metadata.height,
-        Bytes::from_owner(thumbnail.thumbnail().rgba_arc()),
-    );
-    ReadyThumbnail {
-        key,
-        handle,
-        metadata,
-        animation,
-        thumbhash: thumbnail.thumbnail().thumbhash_arc(),
-        byte_len,
-    }
-}
-
-fn ready_animation(animation: &PreparedAnimation) -> ReadyAnimation {
-    let mut byte_len = 0_usize;
-    let frames = animation
-        .frames()
-        .iter()
-        .map(|frame| {
-            byte_len = byte_len.saturating_add(frame.rgba_bytes().len());
-            ready_animation_frame(frame)
-        })
-        .collect();
-
-    ReadyAnimation { frames, byte_len }
-}
-
-fn ready_animation_frame(frame: &PreparedAnimationFrame) -> ReadyAnimationFrame {
-    ReadyAnimationFrame {
-        handle: image::Handle::from_rgba(
-            frame.width(),
-            frame.height(),
-            Bytes::from_owner(frame.rgba_arc()),
-        ),
-        delay: frame.delay(),
-    }
-}
-
-fn worker_result_message(
-    key: ThumbnailKey,
-    job_id: JobId,
-    attempt: RetryAttempt,
-    result: Result<
-        Result<ThumbnailWorkerOutcome<PreparedThumbnail>, ThumbnailError>,
-        RunBlockingError,
-    >,
-) -> Message {
-    match result {
-        Err(RunBlockingError::Schedule(ScheduleError::QueueFull { .. })) => {
-            Message::WorkerBackpressured {
-                key,
-                job_id,
-                attempt,
-            }
-        }
-        Err(error) => Message::WorkerFinished {
-            key,
-            job_id,
-            attempt,
-            result: Box::new(Err(ThumbnailDeliveryError::Schedule(Arc::new(error)))),
-        },
-        Ok(Err(error)) => Message::WorkerFinished {
-            key,
-            job_id,
-            attempt,
-            result: Box::new(Err(ThumbnailDeliveryError::Thumbnail(Arc::new(error)))),
-        },
-        Ok(Ok(outcome)) => Message::WorkerFinished {
-            key,
-            job_id,
-            attempt,
-            result: Box::new(Ok(outcome)),
-        },
-    }
-}
-
 fn retry_delay(attempt: RetryAttempt, error: &ThumbnailDeliveryError) -> Option<Duration> {
     let next_attempt = attempt.next()?;
     let ThumbnailDeliveryError::Thumbnail(error) = error else {
@@ -1706,64 +642,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-
-    #[test]
-    fn retained_rows_covers_visible_plus_prefetch_and_guards_empty_viewports() {
-        assert_eq!(retained_rows(0..0, 200), None);
-        assert_eq!(retained_rows(5..5, 200), None);
-        assert_eq!(retained_rows(10..20, 0), None);
-
-        let retained = retained_rows(40..52, 200).expect("window");
-        let (before, after) = prefetch_ranges(40..52, 200);
-        assert_eq!(retained, before.start..after.end);
-        assert!(retained.contains(&40) && retained.contains(&51));
-        assert!(retained.start < 40 && retained.end > 52);
-
-        let retained = retained_rows(0..12, 200).expect("window");
-        assert_eq!(retained.start, 0);
-        let retained = retained_rows(190..210, 200).expect("window");
-        assert_eq!(retained.end, 200);
-    }
-
-    #[test]
-    fn physical_thumbnail_edge_keeps_standard_dpi_size() {
-        assert_eq!(physical_thumbnail_edge(256, 1.0), 256);
-        assert_eq!(physical_thumbnail_edge(256, 0.0), 256);
-        assert_eq!(physical_thumbnail_edge(256, f32::NAN), 256);
-    }
-
-    #[test]
-    fn physical_thumbnail_edge_rounds_up_to_hidpi_bucket_and_source_cap() {
-        assert_eq!(physical_thumbnail_edge(256, 1.25), 384);
-        assert_eq!(physical_thumbnail_edge(256, 2.0), 512);
-        assert_eq!(physical_thumbnail_edge(256, 9.0), 512);
-    }
-
-    #[test]
-    fn prefetch_ranges_expand_middle_visible_window() {
-        assert_eq!(prefetch_ranges(20..30, 100), (10..20, 30..50));
-    }
-
-    #[test]
-    fn prefetch_ranges_clamp_at_start() {
-        assert_eq!(prefetch_ranges(0..5, 100), (0..0, 5..15));
-    }
-
-    #[test]
-    fn prefetch_ranges_clamp_at_end() {
-        assert_eq!(prefetch_ranges(95..100, 100), (90..95, 100..100));
-    }
-
-    #[test]
-    fn prefetch_ranges_use_minimum_window_for_tiny_lists() {
-        assert_eq!(prefetch_ranges(1..2, 3), (0..1, 2..3));
-    }
-
-    #[test]
-    fn prefetch_ranges_keep_empty_visible_range_empty() {
-        assert_eq!(prefetch_ranges(3..3, 10), (0..0, 0..0));
-        assert_eq!(prefetch_ranges(0..0, 0), (0..0, 0..0));
-    }
 
     #[test]
     fn cached_demand_delivers_ready_without_queueing_decode() {
@@ -1841,56 +719,6 @@ mod tests {
             Message::Delivered(delivery)
                 if matches!(delivery.result, DeliveryResult::Ready(_))
         )));
-    }
-
-    /// Placeholders hold GPU-uploadable handles, so the map that keeps them is
-    /// bounded while the ~25-byte hashes they derive from are not. A URL whose
-    /// placeholder has been evicted still paints — it just decodes again.
-    #[test]
-    fn placeholders_are_capped_while_the_hashes_they_derive_from_are_kept() {
-        let mut manager = Manager::new(Config::default());
-        let hash: Arc<[u8]> = Arc::from(
-            crate::media::thumbhash::encode(4, 4, &[128; 4 * 4 * 4]).expect("hash encodes"),
-        );
-        let url = |index: usize| format!("https://example.invalid/{index}.jpg");
-        let seeded = PLACEHOLDER_CACHE_ITEMS * 2;
-
-        manager.seed_thumbhashes((0..seeded).map(|index| (url(index), Arc::clone(&hash))));
-        for index in 0..seeded {
-            assert!(
-                manager.placeholder_for(&url(index)).is_some(),
-                "every seeded URL should paint a placeholder"
-            );
-        }
-
-        assert_eq!(manager.thumbhashes.len(), seeded);
-        assert!(
-            manager.placeholders.len() <= PLACEHOLDER_CACHE_ITEMS,
-            "placeholder cache held {} entries",
-            manager.placeholders.len()
-        );
-        // The evicted end still resolves, because the hash behind it survived.
-        assert!(manager.placeholder_for(&url(0)).is_some());
-    }
-
-    /// Seeds come straight off Steam metadata, where a stray-whitespace URL is
-    /// possible; lookups come through a `ThumbnailKey`, which already
-    /// normalized. Both have to land on the same key.
-    #[test]
-    fn a_seeded_url_is_found_however_it_was_padded() {
-        let mut manager = Manager::new(Config::default());
-        let hash = crate::media::thumbhash::encode(4, 4, &[128; 4 * 4 * 4]).expect("hash encodes");
-        manager.seed_thumbhashes([(
-            "  https://example.invalid/poster.jpg\n".to_owned(),
-            Arc::from(hash),
-        )]);
-
-        assert!(
-            manager
-                .placeholder_for("https://example.invalid/poster.jpg")
-                .is_some()
-        );
-        assert_eq!(manager.thumbhashes.len(), 1);
     }
 
     #[test]
@@ -2423,28 +1251,6 @@ mod tests {
     }
 
     #[test]
-    fn ready_thumbnail_creates_animation_frame_handles_once() {
-        let dir = crate::test_support::TestDir::new("gmpublished-ready-animation");
-        let gif = dir.gif("animated.gif", 8, 8);
-        let thumbnail = crate::media::thumbnail_worker::ThumbnailDecoder::new()
-            .decode_and_resize_file(gif, 64)
-            .expect("animated GIF thumbnail should decode");
-        let ready = ready_thumbnail(
-            ThumbnailKey::for_bytes("animated", 64),
-            &prepared_thumbnail(thumbnail),
-        );
-
-        let animation = ready
-            .animation()
-            .expect("animated GIF should prepare ready frames");
-
-        assert_eq!(animation.frame_count(), 2);
-        assert!(animation.frames().iter().all(|frame| {
-            frame.delay() > std::time::Duration::ZERO && frame.handle().id() != ready.handle().id()
-        }));
-    }
-
-    #[test]
     fn owner_replacement_drops_offscreen_demand() {
         let mut manager = Manager::new(Config::default());
         let owner = Owner::InstalledAddons;
@@ -2502,6 +1308,54 @@ mod tests {
         assert_ne!(fresh.job_id, candidate.job_id);
         assert_eq!(fresh.attempt, RetryAttempt::default());
         assert!(!fresh.cancellation.is_cancelled());
+    }
+
+    /// A backpressured job that is then abandoned must not leave its attempt
+    /// count behind: the key is out of `active_jobs` and never was a delayed
+    /// retry, so it is reachable only through `retry_attempts`. A survivor
+    /// there silently costs the *next* demand for that key its retries.
+    #[test]
+    fn abandoning_a_backpressured_job_does_not_strand_its_attempt_count() {
+        let mut manager = Manager::new(Config::default());
+        let owner = Owner::InstalledAddons;
+        let input = ThumbnailInput::from_url("https://example.invalid/backpressured.jpg");
+
+        let _ = manager.apply_demands(DemandSet {
+            owner,
+            generation: Generation::from_raw(1),
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row", input.clone(), 64, Priority::VisibleRow)],
+        });
+        let candidate = manager
+            .next_candidate_for_test()
+            .expect("thumbnail job should start");
+
+        // The worker pool refused it, so the key returns to queued carrying an
+        // attempt count.
+        let key = candidate.request.key().clone();
+        let attempt = candidate.attempt.next().expect("a first retry is allowed");
+        manager
+            .index
+            .mark_key_queued(&key, candidate.job_id, attempt);
+
+        let _ = manager.apply_demands(DemandSet::empty(owner));
+        assert_eq!(manager.pending_count(), 0);
+
+        let _ = manager.apply_demands(DemandSet {
+            owner,
+            generation: Generation::from_raw(2),
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("row", input, 64, Priority::VisibleRow)],
+        });
+        let fresh = manager
+            .next_candidate_for_test()
+            .expect("re-demanded thumbnail should start");
+
+        assert_eq!(
+            fresh.attempt,
+            RetryAttempt::default(),
+            "a fresh demand must begin at attempt zero, not inherit the abandoned job's"
+        );
     }
 
     #[test]
@@ -2594,7 +1448,7 @@ mod tests {
                 &key,
                 candidate.job_id,
                 candidate.attempt,
-                Err(fetch_error(&key, source)),
+                Err(fetch_error(source)),
             );
 
             assert!(effects.messages.is_empty());
@@ -2609,10 +1463,7 @@ mod tests {
 
     #[test]
     fn retry_backoff_is_one_then_four_seconds_and_stops_after_two_retries() {
-        let error = fetch_error(
-            &ThumbnailKey::for_url("https://example.invalid/retry.jpg", 64),
-            ureq::Error::ConnectionFailed,
-        );
+        let error = fetch_error(ureq::Error::ConnectionFailed);
 
         assert_eq!(
             retry_delay(RetryAttempt(0), &error),
@@ -2628,10 +1479,7 @@ mod tests {
     #[test]
     fn client_and_decode_failures_deliver_terminal_failure_without_retry() {
         let errors = [
-            fetch_error(
-                &ThumbnailKey::for_url("https://example.invalid/missing.jpg", 64),
-                ureq::Error::StatusCode(404),
-            ),
+            fetch_error(ureq::Error::StatusCode(404)),
             ThumbnailDeliveryError::Thumbnail(Arc::new(
                 crate::media::thumbnail_worker::ThumbnailDecodeError::ImageIo(
                     std::io::Error::other("invalid image bytes"),
@@ -2695,9 +1543,8 @@ mod tests {
         assert_eq!(
             manager
                 .index
-                .by_owner
-                .get(&Owner::InstalledAddons)
-                .map_or(0, HashSet::len),
+                .owner_bucket_len(&Owner::InstalledAddons)
+                .unwrap_or(0),
             1,
             "the replaced interest must not survive in the owner bucket"
         );
@@ -2711,7 +1558,10 @@ mod tests {
 
         assert_eq!(manager.pending_count(), 0);
         assert!(
-            !manager.index.by_owner.contains_key(&Owner::InstalledAddons),
+            manager
+                .index
+                .owner_bucket_len(&Owner::InstalledAddons)
+                .is_none(),
             "an owner with no interests must not keep an empty bucket"
         );
     }
@@ -2787,6 +1637,32 @@ mod tests {
         );
     }
 
+    /// Warm-ness is asked of the priority at five sites and of the owner at
+    /// one. A set whose owner is warm but whose demands carry an interactive
+    /// priority must not be classified both ways.
+    #[test]
+    fn a_warm_owner_overrides_an_interactive_demand_priority() {
+        let mut manager = Manager::new(Config::default());
+        let input = ThumbnailInput::from_url("https://example.com/warm.png");
+
+        let _ = manager.apply_demands(DemandSet {
+            owner: Owner::WarmLibrary,
+            generation: Generation::INITIAL,
+            replace: ReplaceMode::Owner,
+            demands: vec![demand("1", input, 256, Priority::VisibleRow)],
+        });
+
+        assert_eq!(manager.pending_count(), 1, "the demand should be queued");
+        assert!(
+            manager
+                .index
+                .priorities()
+                .iter()
+                .all(|priority| *priority == Priority::WarmLibrary),
+            "a warm owner's demands are warm regardless of the priority asked for"
+        );
+    }
+
     fn demand(
         id: impl Into<String>,
         input: ThumbnailInput,
@@ -2824,35 +1700,10 @@ mod tests {
         PreparedThumbnail::from_thumbnail(thumbnail)
     }
 
-    fn fetch_error(_key: &ThumbnailKey, source: ureq::Error) -> ThumbnailDeliveryError {
+    fn fetch_error(source: ureq::Error) -> ThumbnailDeliveryError {
         ThumbnailDeliveryError::Thumbnail(Arc::new(ThumbnailError::UrlFetch {
             url: String::from("https://example.invalid/thumbnail.jpg"),
             source,
         }))
-    }
-    /// Warm-ness is asked of the priority at five sites and of the owner at
-    /// one. A set whose owner is warm but whose demands carry an interactive
-    /// priority must not be classified both ways.
-    #[test]
-    fn a_warm_owner_overrides_an_interactive_demand_priority() {
-        let mut manager = Manager::new(Config::default());
-        let input = ThumbnailInput::from_url("https://example.com/warm.png");
-
-        let _ = manager.apply_demands(DemandSet {
-            owner: Owner::WarmLibrary,
-            generation: Generation::INITIAL,
-            replace: ReplaceMode::Owner,
-            demands: vec![demand("1", input, 256, Priority::VisibleRow)],
-        });
-
-        assert_eq!(manager.pending_count(), 1, "the demand should be queued");
-        assert!(
-            manager
-                .index
-                .entries
-                .values()
-                .all(|entry| entry.priority == Priority::WarmLibrary),
-            "a warm owner's demands are warm regardless of the priority asked for"
-        );
     }
 }
