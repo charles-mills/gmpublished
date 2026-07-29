@@ -6,7 +6,7 @@ use std::{collections::HashMap, fmt, io::Cursor, sync::Arc, time::Duration};
 
 use rodio::Source as _;
 
-use crate::features::file_preview;
+use crate::media::preview_model;
 
 const MAX_DOOR_PLAYERS: usize = 16;
 const MIN_DOOR_GAIN: f32 = 0.001;
@@ -111,15 +111,15 @@ impl AudioPlayback {
 
     pub fn handle_door_audio_event(
         &mut self,
-        event: file_preview::DoorAudioEvent,
-        door: &file_preview::DoorInstance,
+        event: preview_model::DoorAudioEvent,
+        door: &preview_model::DoorInstance,
     ) {
         let key = DoorLoopKey {
             content_id: event.content_id,
             door_index: event.door_index,
         };
         match event.kind {
-            file_preview::DoorAudioEventKind::MoveStarted => {
+            preview_model::DoorAudioEventKind::MoveStarted => {
                 self.stop_door_loop(key);
                 if door.class == gmpublished_backend::scene::map::MapDoorClass::PropDoorRotating {
                     if let Some(sound) = door.sounds.move_sound.as_ref() {
@@ -129,14 +129,14 @@ impl AudioPlayback {
                     self.start_door_loop(key, sound, event.gain);
                 }
             }
-            file_preview::DoorAudioEventKind::MoveLoopVolumeChanged => {
+            preview_model::DoorAudioEventKind::MoveLoopVolumeChanged => {
                 if let Some(looping) = self.door_loops.get_mut(&key) {
                     let gain = event.gain.max(0.0);
                     looping.gain = gain;
                     looping.player.set_volume(gain);
                 }
             }
-            file_preview::DoorAudioEventKind::MotionEnded { open } => {
+            preview_model::DoorAudioEventKind::MotionEnded { open } => {
                 self.stop_door_loop(key);
                 let sound = if door.class
                     == gmpublished_backend::scene::map::MapDoorClass::PropDoorRotating
@@ -153,7 +153,7 @@ impl AudioPlayback {
                     self.play_door_one_shot(sound, event.gain);
                 }
             }
-            file_preview::DoorAudioEventKind::Parked => {
+            preview_model::DoorAudioEventKind::Parked => {
                 self.stop_door_loop(key);
             }
         }
@@ -174,7 +174,7 @@ impl AudioPlayback {
         }
     }
 
-    fn start_door_loop(&mut self, key: DoorLoopKey, sound: &file_preview::DoorSound, gain: f32) {
+    fn start_door_loop(&mut self, key: DoorLoopKey, sound: &preview_model::DoorSound, gain: f32) {
         let gain = gain.max(0.0);
         if gain < MIN_DOOR_GAIN {
             return;
@@ -206,7 +206,7 @@ impl AudioPlayback {
         self.door_loops.insert(key, DoorPlayer { player, gain });
     }
 
-    fn play_door_one_shot(&mut self, sound: &file_preview::DoorSound, gain: f32) {
+    fn play_door_one_shot(&mut self, sound: &preview_model::DoorSound, gain: f32) {
         let gain = gain.max(0.0);
         if gain < MIN_DOOR_GAIN {
             return;
@@ -235,7 +235,7 @@ impl AudioPlayback {
         self.door_one_shots.push(DoorPlayer { player, gain });
     }
 
-    fn next_door_sound_wave(&mut self, sound: &file_preview::DoorSound) -> Option<Arc<Vec<u8>>> {
+    fn next_door_sound_wave(&mut self, sound: &preview_model::DoorSound) -> Option<Arc<Vec<u8>>> {
         if sound.waves.is_empty() {
             return None;
         }

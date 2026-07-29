@@ -5,6 +5,8 @@ use super::{
     modal_stack, my_workshop, open_modal_message, prepare_publish, preview_gma,
     schedule_native_open_target, settings, size_analyzer, window, workshop_url,
 };
+#[cfg(feature = "debug")]
+use crate::bridge::tasks::TransactionStatus;
 #[cfg(target_os = "macos")]
 use crate::bridge::ui_error::ResultExt as _;
 
@@ -510,7 +512,7 @@ impl App {
         if matches!(kind, SimulatedToast::Notice) {
             let task = self
                 .ctx
-                .create_task(TaskKind::Notice, crate::bridge::tasks::NOTICE_STATUS);
+                .create_task(TaskKind::Notice, TransactionStatus::Notice);
             task.finished();
             return Task::none();
         }
@@ -518,7 +520,7 @@ impl App {
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let transaction = ctx.begin_transaction();
-            let task = ctx.create_task(TaskKind::OverlayExtract, downloader::EXTRACT_STATUS);
+            let task = ctx.create_task(TaskKind::OverlayExtract, TransactionStatus::Extracting);
             task.total(SIMULATED_TOTAL_BYTES);
             ctx.correlate_backend_transaction(transaction.id(), task);
 
@@ -563,7 +565,7 @@ impl App {
             .ctx
             .library_snapshot()
             .map(|snapshot| self.state.hidden_addons.visible(&snapshot));
-        super::sync_search_installed_addons(&self.ctx.backend().search, snapshot.as_ref());
+        super::sync_search_installed_addons(&self.ctx, snapshot.as_ref());
 
         Task::batch([
             self.my_workshop_thumbnail_demands(),

@@ -21,11 +21,23 @@ use super::{
 };
 use crate::bridge::domain::SteamId;
 
+/// The settings in force and the paths they resolve to.
+///
+/// One value under one lock because they are one fact: `AppPaths` is derived
+/// from `Settings`, so a reader that took them from separate locks could
+/// observe a pairing that was never authoritative — a freshly saved Garry's
+/// Mod path beside the directory the previous one resolved to. Publishing
+/// both in a single assignment is what makes that unrepresentable.
+#[derive(Debug)]
+struct RuntimeConfiguration {
+    settings: Settings,
+    paths: AppPaths,
+}
+
 #[derive(Debug)]
 pub struct BackendServices {
     pub(super) backend: Arc<Backend>,
-    settings: Mutex<Settings>,
-    paths: Mutex<AppPaths>,
+    configuration: Mutex<RuntimeConfiguration>,
     persist_appdata_settings: bool,
     persist_ui_settings: bool,
     ui_settings_file: PathBuf,
@@ -149,8 +161,7 @@ impl BackendServices {
 
         Self {
             backend,
-            settings: Mutex::new(settings),
-            paths: Mutex::new(paths),
+            configuration: Mutex::new(RuntimeConfiguration { settings, paths }),
             persist_appdata_settings: config.persist_appdata_settings,
             persist_ui_settings: config.persist_ui_settings,
             ui_settings_file,
@@ -242,29 +253,77 @@ impl BackendServices {
         self.backend.transactions.begin()
     }
 
+    /// Republishes the installed-addon and installed-file search corpora.
+    ///
+    /// Both halves in one call because they describe one library: a caller
+    /// that refreshed only the addons would leave file search answering from
+    /// the previous snapshot.
+    pub(crate) fn sync_installed_addon_search(
+        &self,
+        addons: Vec<gmpublished_backend::search::SearchItem>,
+        files: Vec<gmpublished_backend::search::SearchItem>,
+    ) {
+        self.backend.search.sync_installed_addons(addons);
+        self.backend.search.sync_installed_addon_files(files);
+    }
+
+    /// Extracts every entry of an opened preview archive.
+    pub(crate) fn extract_preview_archive(
+        &self,
+        archive: &super::super::gma::PreviewArchive,
+        destination: super::super::gma::ExtractDestination,
+        options: &super::super::gma::PreviewExtractOptions,
+        transaction: &transactions::Transaction,
+    ) -> Result<PathBuf, super::super::gma::GmaError> {
+        archive.extract_all_with_transaction(destination, options, transaction, &self.backend)
+    }
+
+    /// Extracts one entry of an opened preview archive to the temp directory.
+    pub(crate) fn extract_preview_archive_entry(
+        &self,
+        archive: &super::super::gma::PreviewArchive,
+        entry_path: &str,
+        transaction: &transactions::Transaction,
+    ) -> Result<PathBuf, super::super::gma::GmaError> {
+        archive.extract_entry_with_transaction(entry_path, transaction, &self.backend)
+    }
+
+    /// Stops every background service this process owns, for app exit.
+    ///
+    /// Transactions are cancelled before Steam is shut down so a job still
+    /// running gets the chance to stop at its own next checkpoint rather than
+    /// being abandoned mid-write. Returns how many were cancelled.
+    pub(crate) fn shutdown(&self) -> usize {
+        let cancelled = self.backend.transactions.cancel_all();
+        self.backend.steam.shutdown();
+        cancelled
+    }
+
     pub(crate) fn whitelist_snapshot(&self) -> Arc<Vec<String>> {
         self.backend.whitelist.snapshot()
     }
 
     pub(crate) fn settings_snapshot(&self) -> Settings {
-        self.settings.lock().clone()
+        self.configuration.lock().settings.clone()
     }
 
     pub(crate) fn paths(&self) -> AppPaths {
-        self.paths.lock().clone()
+        self.configuration.lock().paths.clone()
     }
 
     pub(crate) fn settings_and_paths_snapshot(&self) -> (Settings, AppPaths) {
-        (self.settings_snapshot(), self.paths())
+        let configuration = self.configuration.lock();
+        (configuration.settings.clone(), configuration.paths.clone())
     }
 
     /// The configured Garry's Mod path and the one that actually resolved.
     /// The pair is what tells "never set up" apart from "set up and since
     /// broken", so both halves travel together.
     pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        let configuration = self.configuration.lock();
         (
-            self.settings.lock().backend.gmod.clone(),
-            self.paths.lock().gmod_dir.clone(),
+            configuration.settings.backend.gmod.clone(),
+            configuration.paths.gmod_dir.clone(),
         )
     }
 
@@ -273,21 +332,25 @@ impl BackendServices {
     /// found. Blocking, and may wait several seconds on Steam.
     pub(crate) fn rediscover_gmod_dir(&self) -> Option<PathBuf> {
         let discovered = self.backend.app_data.discover_gmod_dir(&self.backend.steam);
-        self.paths.lock().gmod_dir.clone_from(&discovered);
+        self.configuration
+            .lock()
+            .paths
+            .gmod_dir
+            .clone_from(&discovered);
         discovered
     }
 
     /// Mutates a copy of the current settings, persists it, and only then
-    /// publishes it as live state. The settings lock is held for the whole
-    /// mutate-persist-publish sequence, so a slower concurrent save can
+    /// publishes it as live state. The configuration lock is held for the
+    /// whole mutate-persist-publish sequence, so a slower concurrent save can
     /// never land after (and overwrite) a faster later one, and a failed
     /// persist never leaves an unsaved draft installed as live state.
     pub(crate) fn update_settings_snapshot(
         &self,
         update: impl FnOnce(&mut Settings),
     ) -> Result<(), SettingsPersistError> {
-        let mut guard = self.settings.lock();
-        let mut settings = guard.clone();
+        let mut guard = self.configuration.lock();
+        let mut settings = guard.settings.clone();
         update(&mut settings);
         let ui = UiSettings::from_settings(&settings);
         let backend_settings = settings.to_backend();
@@ -298,13 +361,11 @@ impl BackendServices {
                 .update_settings(backend_settings, &self.backend.steam)?;
             let (settings, paths) =
                 appdata_snapshot_from_backend(self.backend.app_data.snapshot(), &ui);
-            *guard = settings;
-            *self.paths.lock() = paths;
+            *guard = RuntimeConfiguration { settings, paths };
         } else {
             self.persist_ui_settings(&ui)?;
             let paths = AppPaths::resolve_with_defaults(&settings, fallback_paths(&settings));
-            *guard = settings;
-            *self.paths.lock() = paths;
+            *guard = RuntimeConfiguration { settings, paths };
         }
         drop(guard);
         Ok(())
@@ -313,7 +374,7 @@ impl BackendServices {
     /// Same held-lock discipline as [`Self::update_settings_snapshot`]: the
     /// default settings are only published once they're confirmed persisted.
     pub(crate) fn reset_settings(&self) -> Result<Settings, SettingsPersistError> {
-        let mut guard = self.settings.lock();
+        let mut guard = self.configuration.lock();
         self.persist_ui_settings(&UiSettings::default())?;
         if self.persist_appdata_settings {
             self.backend
@@ -323,15 +384,19 @@ impl BackendServices {
                 self.backend.app_data.snapshot(),
                 &UiSettings::default(),
             );
-            *guard = settings.clone();
-            *self.paths.lock() = paths;
+            *guard = RuntimeConfiguration {
+                settings: settings.clone(),
+                paths,
+            };
             drop(guard);
             Ok(settings)
         } else {
-            *guard = Settings::default();
-            let paths = AppPaths::resolve_with_defaults(&guard, fallback_paths(&guard));
-            *self.paths.lock() = paths;
-            let settings = guard.clone();
+            let settings = Settings::default();
+            let paths = AppPaths::resolve_with_defaults(&settings, fallback_paths(&settings));
+            *guard = RuntimeConfiguration {
+                settings: settings.clone(),
+                paths,
+            };
             drop(guard);
             Ok(settings)
         }
@@ -342,8 +407,8 @@ impl BackendServices {
         snapshot: BackendAppDataSnapshot,
     ) -> (Settings, AppPaths) {
         let ui = {
-            let settings = self.settings.lock();
-            UiSettings::from_settings(&settings)
+            let configuration = self.configuration.lock();
+            UiSettings::from_settings(&configuration.settings)
         };
         self.apply_appdata_snapshot_with_ui(snapshot, &ui)
     }
@@ -354,8 +419,10 @@ impl BackendServices {
         ui: &UiSettings,
     ) -> (Settings, AppPaths) {
         let (settings, paths) = appdata_snapshot_from_backend(snapshot, ui);
-        *self.settings.lock() = settings.clone();
-        *self.paths.lock() = paths.clone();
+        *self.configuration.lock() = RuntimeConfiguration {
+            settings: settings.clone(),
+            paths: paths.clone(),
+        };
         (settings, paths)
     }
 
@@ -704,8 +771,9 @@ impl BackendServices {
     }
 
     fn record_published_local_path(&self, id: PublishedFileId, content_source_path: PathBuf) {
-        self.settings
+        self.configuration
             .lock()
+            .settings
             .backend
             .my_workshop_local_paths
             .insert(id.into(), content_source_path.clone());

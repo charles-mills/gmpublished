@@ -4,10 +4,10 @@ use super::{
     AppPaths, AppWorkerRuntime, Arc, BACKEND_EVENT_QUEUE_CAPACITY, BackendAppDataSnapshot,
     BackendEventSinkRegistration, BackendEventStreamFactory, BackendRuntimeEvent,
     BackendRuntimeEventEffects, BackendServices, BackendTaskCancelResult, BackendTaskSource,
-    BackendTransactionTasks, DOWNLOAD_STATUS_DOWNLOADING, EXTRACT_STATUS, LibraryRefresh,
-    LibraryRefreshReason, LibrarySnapshot, NativeOpenTarget, PathBuf, RunBlockingError,
-    ScheduleError, Settings, StatusKey, Subscription, Task, TaskEvent, TaskEventStreamFactory,
-    TaskHandle, TaskId, TaskKind, Tasks, UiError, WorkerPoolSpawner, fmt,
+    BackendTransactionTasks, LibraryRefresh, LibraryRefreshReason, LibrarySnapshot,
+    NativeOpenTarget, PathBuf, RunBlockingError, ScheduleError, Settings, Subscription, Task,
+    TaskEvent, TaskEventStreamFactory, TaskHandle, TaskId, TaskKind, Tasks, TransactionStatus,
+    UiError, WorkerPoolSpawner, fmt,
     install_backend_event_sink_by_default, mpsc, oneshot, show_native_open_error_dialog,
 };
 use gmpublished_backend::transactions::TransactionId;
@@ -167,11 +167,61 @@ impl BackendContext {
         self.services.begin_transaction()
     }
 
-    /// Broad accessor for the few call sites (GMA extraction) that
-    /// legitimately need several backend pieces together (whitelist,
-    /// app_data, steam) rather than one narrow service.
-    pub(crate) fn backend(&self) -> &Arc<gmpublished_backend::Backend> {
+    /// The whole backend, for this module's own tests.
+    ///
+    /// No production caller: reaching a service through here would bypass
+    /// [`BackendServices`], so what the app can ask the backend for stays
+    /// enumerable as the capability methods below rather than being whatever
+    /// any call site happens to reach for.
+    #[cfg(test)]
+    pub(super) fn backend(&self) -> &Arc<gmpublished_backend::Backend> {
         &self.services.backend
+    }
+
+    /// The search corpus itself, for tests asserting that a library refresh
+    /// reached it. Production syncs through [`Self::sync_installed_addon_search`]
+    /// and queries through `search_quick`.
+    #[cfg(test)]
+    pub(crate) fn search_for_test(&self) -> &gmpublished_backend::search::Search {
+        &self.services.backend.search
+    }
+
+    /// Republishes the installed-addon and installed-file search corpora.
+    pub(crate) fn sync_installed_addon_search(
+        &self,
+        addons: Vec<gmpublished_backend::search::SearchItem>,
+        files: Vec<gmpublished_backend::search::SearchItem>,
+    ) {
+        self.services.sync_installed_addon_search(addons, files);
+    }
+
+    /// Extracts every entry of an opened preview archive.
+    pub(crate) fn extract_preview_archive(
+        &self,
+        archive: &super::super::gma::PreviewArchive,
+        destination: super::super::gma::ExtractDestination,
+        options: &super::super::gma::PreviewExtractOptions,
+        transaction: &gmpublished_backend::Transaction,
+    ) -> Result<PathBuf, super::super::gma::GmaError> {
+        self.services
+            .extract_preview_archive(archive, destination, options, transaction)
+    }
+
+    /// Extracts one entry of an opened preview archive to the temp directory.
+    pub(crate) fn extract_preview_archive_entry(
+        &self,
+        archive: &super::super::gma::PreviewArchive,
+        entry_path: &str,
+        transaction: &gmpublished_backend::Transaction,
+    ) -> Result<PathBuf, super::super::gma::GmaError> {
+        self.services
+            .extract_preview_archive_entry(archive, entry_path, transaction)
+    }
+
+    /// Stops every background service this process owns, for app exit.
+    /// Returns how many in-flight transactions were cancelled.
+    pub(crate) fn shutdown(&self) -> usize {
+        self.services.shutdown()
     }
 
     pub(crate) fn library_snapshot(&self) -> Option<LibrarySnapshot> {
@@ -244,7 +294,7 @@ impl BackendContext {
         )
     }
 
-    pub(crate) fn create_task(&self, kind: TaskKind, status: impl Into<StatusKey>) -> TaskHandle {
+    pub(crate) fn create_task(&self, kind: TaskKind, status: TransactionStatus) -> TaskHandle {
         self.tasks.create(kind, status)
     }
 
@@ -278,7 +328,7 @@ impl BackendContext {
                     } else {
                         TaskKind::Download
                     },
-                    DOWNLOAD_STATUS_DOWNLOADING,
+                    TransactionStatus::Downloading,
                 );
                 self.transaction_tasks.correlate(
                     *transaction_id,
@@ -304,7 +354,7 @@ impl BackendContext {
                     } else {
                         TaskKind::Extract
                     },
-                    EXTRACT_STATUS,
+                    TransactionStatus::Extracting,
                 );
                 let effects = self.transaction_tasks.correlate(
                     *transaction_id,

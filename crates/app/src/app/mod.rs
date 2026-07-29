@@ -136,11 +136,10 @@ impl Drop for App {
     /// to its destination. Cancelling gives every such job the chance to stop
     /// at its own next checkpoint instead.
     fn drop(&mut self) {
-        let cancelled = self.ctx.backend().transactions.cancel_all();
+        let cancelled = self.ctx.shutdown();
         if cancelled > 0 {
             log::info!("cancelled {cancelled} in-flight transaction(s) on quit");
         }
-        self.ctx.backend().steam.shutdown();
     }
 }
 
@@ -362,16 +361,11 @@ pub enum GlobalShortcut {
     NavigateRoute(shell::Route),
 }
 
-fn sync_search_installed_addons(
-    search: &gmpublished_backend::search::Search,
-    snapshot: Option<&LibrarySnapshot>,
-) {
-    let items = snapshot.map_or_else(Vec::new, search_items_from_library);
-    search.sync_installed_addons(items);
-    {
-        let file_items = snapshot.map_or_else(Vec::new, search_file_items_from_library);
-        search.sync_installed_addon_files(file_items);
-    }
+fn sync_search_installed_addons(ctx: &BackendContext, snapshot: Option<&LibrarySnapshot>) {
+    ctx.sync_installed_addon_search(
+        snapshot.map_or_else(Vec::new, search_items_from_library),
+        snapshot.map_or_else(Vec::new, search_file_items_from_library),
+    );
 }
 
 #[allow(clippy::needless_pass_by_value)] // Required by iced's `listen_raw` callback signature.
@@ -560,7 +554,7 @@ impl App {
                             LibraryRefreshReason::Startup,
                             Ok(Some(snapshot.clone())),
                         ));
-                    sync_search_installed_addons(&self.ctx.backend().search, Some(&snapshot));
+                    sync_search_installed_addons(&self.ctx, Some(&snapshot));
                     Task::batch([installed, analyzer])
                 });
         let startup_route = self.state.shell.route();
@@ -1522,7 +1516,7 @@ impl App {
             .as_ref()
             .map(|snapshot| self.state.hidden_addons.visible(snapshot));
 
-        sync_search_installed_addons(&self.ctx.backend().search, visible_snapshot.as_ref());
+        sync_search_installed_addons(&self.ctx, visible_snapshot.as_ref());
 
         let warm_library = visible_snapshot
             .as_ref()

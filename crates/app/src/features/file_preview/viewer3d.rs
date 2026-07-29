@@ -9,7 +9,7 @@ use iced::wgpu;
 use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
-use super::model::ModelVertex;
+use crate::media::preview_model::ModelVertex;
 use crate::bridge::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
 use gmpublished_backend::math::{
     self, add, cross, distance, distance_squared, dot, length_squared, normalize_or_zero,
@@ -19,7 +19,7 @@ use gmpublished_backend::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDi
 use vformats::vtf::BcFormat;
 
 use super::Message;
-use super::model::{
+use crate::media::preview_model::{
     DetailSprite, DoorAudioEvent, DoorAudioEventKind, DoorInstance, DoorSound, MapFog,
     MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket, MapWalkCollision, MaterialSlot,
     MeshData, ModelPreview, OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, SKYBOX_FACE_COUNT, Skybox,

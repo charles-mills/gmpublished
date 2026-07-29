@@ -1,14 +1,15 @@
 use std::sync::Arc;
+use super::super::state::{FlyPose, MovementMode, OrbitPose};
 
 use super::*;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
-use crate::features::file_preview::model::{
+use crate::media::preview_model::{
     InfoReason, PreviewContent, PreviewData, RelatedPreviewKind, RelatedPreviewTarget,
 };
 use crate::generation::Generation;
 use crate::test_support::GmaFixtureBuilder;
 
-fn request() -> crate::features::file_preview::PreviewRequest {
+fn request() -> crate::media::preview_model::PreviewRequest {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Fixture")
             .entry("data/blob.bin", vec![1, 2, 3])
@@ -16,7 +17,7 @@ fn request() -> crate::features::file_preview::PreviewRequest {
     )
     .expect("fixture archive should load");
 
-    crate::features::file_preview::PreviewRequest {
+    crate::media::preview_model::PreviewRequest {
         request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: "data/blob.bin".to_owned(),
@@ -32,8 +33,8 @@ fn request_from_archive(
     entry_path: &str,
     size_bytes: u64,
     crc32: u32,
-) -> crate::features::file_preview::PreviewRequest {
-    crate::features::file_preview::PreviewRequest {
+) -> crate::media::preview_model::PreviewRequest {
+    crate::media::preview_model::PreviewRequest {
         request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(archive),
         entry_path: entry_path.to_owned(),
@@ -214,13 +215,13 @@ fn phy_debug_toggle_defaults_off_and_round_trips_without_effects() {
 fn pose_messages_update_state_without_effects() {
     let mut state = State::default();
     let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
+    let fly_pose = FlyPose {
         position: [1.0, 2.0, 3.0],
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
     };
-    let orbit_pose = crate::features::file_preview::state::OrbitPose {
+    let orbit_pose = OrbitPose {
         yaw: 0.5,
         pitch: 0.25,
         distance: 3.0,
@@ -231,7 +232,7 @@ fn pose_messages_update_state_without_effects() {
             &mut state,
             Message::FlyCameraChanged {
                 pose: fly_pose,
-                mode: crate::features::file_preview::state::MovementMode::Walk,
+                mode: MovementMode::Walk,
             },
         )
         .is_empty()
@@ -241,7 +242,7 @@ fn pose_messages_update_state_without_effects() {
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(
         state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
+        Some(MovementMode::Walk)
     );
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
@@ -250,7 +251,7 @@ fn pose_messages_update_state_without_effects() {
 fn fly_speed_changed_updates_pose_and_readout() {
     let mut state = State::default();
     let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
+    let fly_pose = FlyPose {
         position: [1.0, 2.0, 3.0],
         yaw: 0.25,
         pitch: -0.5,
@@ -262,7 +263,7 @@ fn fly_speed_changed_updates_pose_and_readout() {
             &mut state,
             Message::FlySpeedChanged {
                 pose: fly_pose,
-                mode: crate::features::file_preview::state::MovementMode::Fly,
+                mode: MovementMode::Fly,
             },
         )
         .is_empty()
@@ -271,7 +272,7 @@ fn fly_speed_changed_updates_pose_and_readout() {
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(
         state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Fly)
+        Some(MovementMode::Fly)
     );
     assert_eq!(state.fly_speed_readout(), Some(2.0));
 }
@@ -284,14 +285,14 @@ fn movement_mode_selected_requests_shader_mode_change() {
     assert!(
         update(
             &mut state,
-            Message::MovementModeSelected(crate::features::file_preview::state::MovementMode::Walk)
+            Message::MovementModeSelected(MovementMode::Walk)
         )
         .is_empty()
     );
 
     assert_eq!(
         state.requested_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
+        Some(MovementMode::Walk)
     );
     assert_eq!(state.fly_movement_mode(), None);
 }
@@ -300,7 +301,7 @@ fn movement_mode_selected_requests_shader_mode_change() {
 fn movement_mode_selected_is_noop_for_active_mode() {
     let mut state = State::default();
     let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
+    let fly_pose = FlyPose {
         position: [1.0, 2.0, 3.0],
         yaw: 0.25,
         pitch: -0.5,
@@ -308,13 +309,13 @@ fn movement_mode_selected_is_noop_for_active_mode() {
     };
     state.set_fly_camera(
         fly_pose,
-        crate::features::file_preview::state::MovementMode::Walk,
+        MovementMode::Walk,
     );
 
     assert!(
         update(
             &mut state,
-            Message::MovementModeSelected(crate::features::file_preview::state::MovementMode::Walk)
+            Message::MovementModeSelected(MovementMode::Walk)
         )
         .is_empty()
     );
@@ -322,7 +323,7 @@ fn movement_mode_selected_is_noop_for_active_mode() {
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(
         state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
+        Some(MovementMode::Walk)
     );
     assert_eq!(state.requested_movement_mode(), None);
 }
@@ -331,20 +332,20 @@ fn movement_mode_selected_is_noop_for_active_mode() {
 fn expanded_round_trip_preserves_viewer_poses() {
     let mut state = State::default();
     let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
+    let fly_pose = FlyPose {
         position: [1.0, 2.0, 3.0],
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
     };
-    let orbit_pose = crate::features::file_preview::state::OrbitPose {
+    let orbit_pose = OrbitPose {
         yaw: 0.5,
         pitch: 0.25,
         distance: 3.0,
     };
     state.set_fly_camera(
         fly_pose,
-        crate::features::file_preview::state::MovementMode::Walk,
+        MovementMode::Walk,
     );
     state.set_orbit_pose(orbit_pose);
 
@@ -353,7 +354,7 @@ fn expanded_round_trip_preserves_viewer_poses() {
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(
         state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
+        Some(MovementMode::Walk)
     );
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 
@@ -365,7 +366,7 @@ fn expanded_round_trip_preserves_viewer_poses() {
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(
         state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
+        Some(MovementMode::Walk)
     );
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }

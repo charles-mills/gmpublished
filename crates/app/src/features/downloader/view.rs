@@ -1,4 +1,5 @@
 use crate::i18n::Arg;
+use crate::bridge::tasks::TransactionStatus;
 use std::time::Instant;
 
 use iced::widget::{
@@ -16,7 +17,7 @@ use crate::{
     widgets::tooltip as tooltip_widget,
 };
 
-use super::jobs::{DownloaderJob, EXTRACT_STATUS, JobProgress, Section};
+use super::jobs::{DownloaderJob, JobProgress, Section};
 use super::{Message, State};
 
 const JOB_ROW_HEIGHT: f32 = 44.0;
@@ -651,11 +652,13 @@ fn job_title_color(job: &DownloaderJob, tokens: &Tokens) -> Color {
 
 fn progress_label(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
     match job.progress() {
-        JobProgress::Running { ratio, status_key } if status_key == EXTRACT_STATUS => {
+        JobProgress::Running { ratio, status_key }
+            if *status_key == TransactionStatus::Extracting =>
+        {
             let total = format_bytes(job.total_bytes(), i18n);
             let done = format_bytes((job.total_bytes() as f64 * ratio) as u64, i18n);
             i18n.trn(
-                status_key,
+                status_key.translation_key(),
                 &[
                     ("percent", Arg::Number(&format!("{:.0}", ratio * 100.0))),
                     ("done", Arg::Text(done.as_str())),
@@ -685,7 +688,7 @@ fn speed_text(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
     let JobProgress::Running { ratio, status_key } = job.progress() else {
         return String::new();
     };
-    if status_key == EXTRACT_STATUS {
+    if *status_key == TransactionStatus::Extracting {
         return String::new();
     }
 

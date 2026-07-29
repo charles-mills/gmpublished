@@ -392,7 +392,7 @@ fn apply_transaction_event_to_task(
             AppliedEvent::ongoing(actions)
         }
         TransactionRuntimeEvent::Status { status, .. } => {
-            task.handle.status(status.clone());
+            task.handle.status(*status);
             AppliedEvent::ongoing(Vec::new())
         }
         TransactionRuntimeEvent::Progress { progress, .. } => {

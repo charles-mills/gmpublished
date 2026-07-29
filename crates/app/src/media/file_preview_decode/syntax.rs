@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use iced::Color;
 
-use crate::features::file_preview::{CodeLine, CodeSpan};
+use crate::media::preview_model::{CodeLine, CodeSpan};
 use crate::theme::{ThemeVariant, Tokens};
 
 pub(super) fn glua_highlighted_lines(source_lines: &[String], tokens: &Tokens) -> Vec<CodeLine> {

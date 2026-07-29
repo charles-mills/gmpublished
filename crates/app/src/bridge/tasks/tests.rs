@@ -82,7 +82,7 @@ fn task_event_forwarder_delivers_on_its_own_thread() {
 
     let (tasks, receiver) = Tasks::channel();
     let factory = TaskEventStreamFactory::new(Some(receiver));
-    let handle = tasks.create(TaskKind::Search, "searching");
+    let handle = tasks.create(TaskKind::Search, TransactionStatus::Searching);
     let id = handle.id();
 
     // The forwarder is spawned the first time the stream is polled; it
@@ -97,7 +97,7 @@ fn task_event_forwarder_delivers_on_its_own_thread() {
         update.into_update(),
         TaskUpdate::Started {
             kind: TaskKind::Search,
-            status: StatusKey::from("searching"),
+            status: TransactionStatus::Searching,
         }
     );
 }
@@ -105,7 +105,7 @@ fn task_event_forwarder_delivers_on_its_own_thread() {
 #[test]
 fn task_handles_emit_started_progress_and_terminal_updates() {
     let (tasks, receiver) = Tasks::channel();
-    let task = tasks.create(TaskKind::Download, DOWNLOAD_STATUS_DOWNLOADING);
+    let task = tasks.create(TaskKind::Download, TransactionStatus::Downloading);
     let id = task.id();
 
     task.total(2_048);
@@ -119,7 +119,7 @@ fn task_handles_emit_started_progress_and_terminal_updates() {
                 id,
                 TaskUpdate::Started {
                     kind: TaskKind::Download,
-                    status: StatusKey::from(DOWNLOAD_STATUS_DOWNLOADING),
+                    status: TransactionStatus::Downloading,
                 },
             ),
             (id, TaskUpdate::Total(2_048)),
@@ -137,7 +137,7 @@ fn coalesced_updates_observe_last_values_and_accumulate_incremental_progress() {
     update.observe(
         TaskUpdate::Started {
             kind: TaskKind::Publish,
-            status: StatusKey::from("PUBLISH_PREPARING"),
+            status: TransactionStatus::PublishPreparingConfig,
         },
         0.0,
     );
@@ -145,17 +145,17 @@ fn coalesced_updates_observe_last_values_and_accumulate_incremental_progress() {
     update.observe(TaskUpdate::Total(2_000), 0.0);
     update.observe(TaskUpdate::Progress(0.10), 0.0);
     update.observe(TaskUpdate::ProgressIncr(0.20), 0.0);
-    update.observe(TaskUpdate::Status(StatusKey::from("PUBLISH_PACKING")), 0.0);
+    update.observe(TaskUpdate::Status(TransactionStatus::PublishPacking), 0.0);
     update.observe(TaskUpdate::Finished, 0.0);
 
     assert_eq!(
         update.started,
         Some(CoalescedTaskStart {
             kind: TaskKind::Publish,
-            status: StatusKey::from("PUBLISH_PREPARING"),
+            status: TransactionStatus::PublishPreparingConfig,
         })
     );
-    assert_eq!(update.status, Some(StatusKey::from("PUBLISH_PACKING")));
+    assert_eq!(update.status, Some(TransactionStatus::PublishPacking));
     assert!((update.progress.expect("coalesced progress") - 0.30).abs() < f64::EPSILON);
     assert_eq!(update.total_bytes, Some(2_000));
     assert_eq!(update.terminal, Some(CoalescedTaskTerminal::Finished));
@@ -176,7 +176,7 @@ fn backend_context_exposes_settings_snapshot_and_task_cancellation() {
     assert_eq!(paths.temp_dir, paths.default_temp_dir);
 
     // Not yet correlated with a backend transaction: nothing can cancel it.
-    let handle = ctx.create_task(TaskKind::Search, "working");
+    let handle = ctx.create_task(TaskKind::Search, TransactionStatus::Searching);
     let id = handle.id();
     assert!(!ctx.cancel_task(id));
     handle.finished();
@@ -394,7 +394,7 @@ fn backend_context_forwards_installed_backend_events() {
         .emit(gmpublished_backend::events::BackendEvent::Transaction(
             gmpublished_backend::events::TransactionEvent::Status {
                 id: TransactionId::from_raw(42),
-                status: "packing".to_owned(),
+                status: TransactionStatus::PublishPacking,
             },
         ));
 
@@ -435,7 +435,7 @@ fn backend_context_forwards_installed_backend_events() {
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
         BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Status {
             id: TransactionId::from_raw(42),
-            status: "packing".to_owned(),
+            status: TransactionStatus::PublishPacking,
         })
     );
 }
@@ -553,7 +553,7 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
                 id: TransactionId::from_raw(500),
-                status: "locating".to_owned(),
+                status: TransactionStatus::Locating,
             },
         ))
         .handled_event()
@@ -621,10 +621,10 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
         TaskUpdate::Started {
             kind: TaskKind::Extract,
             status,
-        } if status.key == EXTRACT_STATUS
+        } if *status == TransactionStatus::Extracting
     )));
     assert!(updates.iter().any(|(_, update)| {
-        matches!(update, TaskUpdate::Status(status) if status.key == DOWNLOAD_STATUS_LOCATING)
+        matches!(update, TaskUpdate::Status(status) if *status == TransactionStatus::Locating)
     }));
     assert!(
         updates
@@ -684,7 +684,7 @@ fn direct_correlated_backend_transaction_error_removes_task() {
         .task_events
         .take_receiver()
         .expect("task event receiver");
-    let task = ctx.create_task(TaskKind::Extract, EXTRACT_STATUS);
+    let task = ctx.create_task(TaskKind::Extract, TransactionStatus::Extracting);
     ctx.correlate_backend_transaction(TransactionId::from_raw(502), task);
 
     assert!(ctx.error_backend_transaction_task(
@@ -724,7 +724,7 @@ fn uncorrelated_backend_transaction_events_remain_noops() {
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
                 id: TransactionId::from_raw(999),
-                status: "packing".to_owned(),
+                status: TransactionStatus::PublishPacking,
             },
         ))
         .handled_event()
@@ -929,7 +929,7 @@ fn cancelling_correlated_backend_task_aborts_registered_transaction() {
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
                 id: transaction.id(),
-                status: "downloading".to_owned(),
+                status: TransactionStatus::Downloading,
             },
         ))
         .handled_event()
@@ -962,7 +962,7 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Status {
             id: TransactionId::from_raw(630),
-            status: DOWNLOAD_STATUS_LOCATING.to_owned(),
+            status: TransactionStatus::Locating,
         },
     ));
     assert!(effects.handled_event());
@@ -991,7 +991,7 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
         .collect();
     assert!(updates.iter().any(|update| matches!(
         update,
-        TaskUpdate::Status(status) if status.key == DOWNLOAD_STATUS_LOCATING
+        TaskUpdate::Status(status) if *status == TransactionStatus::Locating
     )));
 }
 
@@ -1005,7 +1005,7 @@ fn extraction_pre_start_buffer_is_globally_bounded() {
                 id: TransactionId::from_raw(
                     10_000 + u32::try_from(offset).expect("test offset fits u32"),
                 ),
-                status: DOWNLOAD_STATUS_LOCATING.to_owned(),
+                status: TransactionStatus::Locating,
             },
         ));
         assert!(effects.handled_event());
@@ -1019,7 +1019,7 @@ fn extraction_pre_start_buffer_is_globally_bounded() {
         let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
                 id: noisy,
-                status: DOWNLOAD_STATUS_LOCATING.to_owned(),
+                status: TransactionStatus::Locating,
             },
         ));
         assert!(effects.handled_event());
@@ -1041,6 +1041,40 @@ fn extraction_pre_start_buffer_is_globally_bounded() {
             .all(|events| events.len() <= MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION)
     );
     drop(pending);
+}
+
+/// `game_paths` reports the configured Garry's Mod path beside the one that
+/// actually resolved, and callers tell "never set up" from "set up and since
+/// broken" by comparing them. That only works if the pair comes from one
+/// authoritative snapshot — read from two locks, a reader racing a save could
+/// see a new setting beside the old resolution and call a working install
+/// broken.
+#[test]
+fn a_settings_save_publishes_the_configured_and_resolved_game_paths_together() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let gmod_dir = temp.path().join("GarrysMod");
+    std::fs::create_dir_all(&gmod_dir).expect("gmod dir");
+    let services = BackendServices::for_test();
+
+    assert_eq!(services.game_paths(), (None, None));
+
+    services
+        .update_settings_snapshot(|settings| {
+            settings.backend.gmod = Some(gmod_dir.clone());
+        })
+        .expect("settings should persist");
+
+    let (configured, resolved) = services.game_paths();
+    assert_eq!(configured.as_deref(), Some(gmod_dir.as_path()));
+    assert_eq!(
+        resolved.as_deref(),
+        Some(gmod_dir.as_path()),
+        "the resolved path must reflect the settings published in the same write"
+    );
+    // The same pairing, whichever accessor a caller reaches for.
+    let (settings, paths) = services.settings_and_paths_snapshot();
+    assert_eq!(settings.backend.gmod, configured);
+    assert_eq!(paths.gmod_dir, resolved);
 }
 
 #[test]
@@ -1226,13 +1260,13 @@ fn publish_finished_transaction_retires_correlated_task() {
         .task_events
         .take_receiver()
         .expect("task event receiver");
-    let task = ctx.create_task(TaskKind::Publish, "PUBLISH_STARTING");
+    let task = ctx.create_task(TaskKind::Publish, TransactionStatus::PublishStarting);
     let task_id = ctx.correlate_backend_transaction(TransactionId::from_raw(909), task);
 
     ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Status {
             id: TransactionId::from_raw(909),
-            status: "PUBLISH_PACKING".to_owned(),
+            status: TransactionStatus::PublishPacking,
         },
     ));
     ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
@@ -1254,7 +1288,7 @@ fn publish_finished_transaction_retires_correlated_task() {
         *id == task_id
             && matches!(
                 update,
-                TaskUpdate::Status(status) if status.key == "PUBLISH_PACKING"
+                TaskUpdate::Status(status) if *status == TransactionStatus::PublishPacking
             )
     }));
     assert!(updates.iter().any(|(id, update)| {
@@ -1539,7 +1573,7 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
         .task_events
         .take_receiver()
         .expect("task event receiver");
-    let task = ctx.create_task(TaskKind::Download, "queued");
+    let task = ctx.create_task(TaskKind::Download, TransactionStatus::Downloading);
     ctx.correlate_backend_transaction(TransactionId::from_raw(701), task);
 
     for payload in [
@@ -1612,7 +1646,7 @@ fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events(
     let gma = GmaFile::open(&gma_path).expect("fixture gma");
     let view = gma.view().expect("fixture view");
     let transaction = ctx.begin_transaction();
-    let task = ctx.create_task(TaskKind::Extract, EXTRACT_STATUS);
+    let task = ctx.create_task(TaskKind::Extract, TransactionStatus::Extracting);
     ctx.correlate_backend_transaction(transaction.id(), task);
 
     let extract_dir = temp.path().join("extract");
@@ -1683,34 +1717,31 @@ fn write_raw_gma(path: &PathBuf, entries: &[(&str, &[u8])]) {
     std::fs::write(path, bytes).expect("write raw gma");
 }
 
-/// `status_text`'s fallback arm feeds the status key straight to Fluent, so a
-/// status without its own arm doubles as a message id. Missing an entry puts
-/// the raw wire string in front of the user.
+/// `status_text`'s fallback arm feeds the status's translation key straight to
+/// Fluent, so a status without its own arm doubles as a message id. Missing an
+/// entry puts the raw wire string in front of the user.
 ///
-/// Enumerated from the backend's list plus this crate's own constants rather
-/// than hand-listed. That only holds while every production `create_task`
-/// passes a constant — a bare string literal there is invisible here.
+/// Walks [`TransactionStatus::ALL`], which is the whole set by construction —
+/// a status cannot reach a task without being a variant, so unlike a list of
+/// string constants there is nothing this can fail to know about.
 #[test]
 fn statuses_used_as_translation_keys_have_catalog_entries() {
     let i18n = crate::i18n::I18n::for_locale(Some("en"));
-    let dedicated_arms = [PUBLISH_PACKING_STATUS, PUBLISH_PROCESSING_ICON_STATUS];
+    // These two render through an arm of their own, against a message that
+    // takes byte-progress placeholders rather than their plain label.
+    let dedicated_arms = [
+        TransactionStatus::PublishPacking,
+        TransactionStatus::PublishProcessingIcon,
+    ];
 
-    for status in gmpublished_backend::transactions::status::ALL
-        .iter()
-        .copied()
-        .chain([
-            DOWNLOAD_STATUS_DOWNLOADING,
-            EXTRACT_STATUS,
-            SEARCH_STATUS,
-            NOTICE_STATUS,
-        ])
-    {
+    for status in TransactionStatus::ALL.iter().copied() {
         if dedicated_arms.contains(&status) {
             continue;
         }
+        let key = status.translation_key();
         assert_ne!(
-            i18n.tr(status),
-            status,
+            i18n.tr(key),
+            key,
             "{status} reaches Fluent as a message id and has no catalog entry"
         );
     }

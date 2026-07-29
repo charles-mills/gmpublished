@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use crate::media::preview_model;
 
 use iced::Task;
 
@@ -67,7 +68,7 @@ impl App {
 
     pub(super) fn file_preview_door_audio_event_task(
         &mut self,
-        event: file_preview::DoorAudioEvent,
+        event: preview_model::DoorAudioEvent,
     ) -> Task<RootMessage> {
         let Some(door) = self.current_preview_door_for_audio(event) else {
             return Task::none();
@@ -101,14 +102,14 @@ impl App {
 
     fn current_preview_door_for_audio(
         &self,
-        event: file_preview::DoorAudioEvent,
-    ) -> Option<&file_preview::DoorInstance> {
+        event: preview_model::DoorAudioEvent,
+    ) -> Option<&preview_model::DoorInstance> {
         let data = self.state.file_preview.current()?;
         let expected_content_id = data.content_id();
         if event.content_id != expected_content_id {
             return None;
         }
-        let file_preview::PreviewContent::Map { scene, .. } = &data.content else {
+        let preview_model::PreviewContent::Map { scene, .. } = &data.content else {
             return None;
         };
         scene.doors.get(event.door_index)

@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::features::file_preview::model::{MeshData, ModelData, ModelVertex};
+use crate::media::preview_model::{MeshData, ModelData, ModelVertex};
 use cosmic_text::{
     Align, Attrs, Buffer, Color as TextColor, FontSystem, Metrics, PlatformFallback, Shaping,
     SwashCache, fontdb,
@@ -34,7 +34,7 @@ use crate::bridge::materials::{
     ContentSourceTier, DecodedTextureBudget, MaterialResolver, RenderMode,
     ResolvedMaterialTextures, ResolvedPrimaryMaterial, ResolvedSoundReference, srgb_byte_to_linear,
 };
-use crate::features::file_preview::{
+use crate::media::preview_model::{
     DetailSprite, DoorInstance, DoorSound, DoorSoundSourceTier, DoorSoundWave, DoorSounds,
     InfoReason, LightmapSlot, MAX_PREVIEW_LINES, MapFog, MapSkyCamera, MapSpawn, MapStats,
     MaterialSlot, ModelPreview, ModelStats, OverlayPrimitive, OverlayVertex,
@@ -50,7 +50,7 @@ mod routing;
 mod syntax;
 
 #[cfg(test)]
-use crate::features::file_preview::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
+use crate::media::preview_model::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
 #[cfg(test)]
 use map_preview::{
     LoadedPropModel, LoadedPropPhysics, MaterialTable, PropBakeSkipStats, PropModelAsset,

@@ -286,19 +286,19 @@ mod uniform_layout_tests {
         for (name, source) in [
             (
                 "model_viewer.wgsl",
-                crate::features::file_preview::viewer3d::MODEL_SHADER_SOURCE,
+                super::super::super::MODEL_SHADER_SOURCE,
             ),
             (
                 "water.wgsl",
-                crate::features::file_preview::viewer3d::WATER_SHADER_SOURCE,
+                super::super::super::WATER_SHADER_SOURCE,
             ),
             (
                 "detail.wgsl",
-                crate::features::file_preview::viewer3d::DETAIL_SHADER_SOURCE,
+                super::super::super::DETAIL_SHADER_SOURCE,
             ),
             (
                 "sky.wgsl",
-                crate::features::file_preview::viewer3d::SKY_SHADER_SOURCE,
+                super::super::super::SKY_SHADER_SOURCE,
             ),
         ] {
             assert_eq!(
@@ -355,7 +355,7 @@ mod tests {
     use iced::Point;
 
     use super::{FlyCamera, MapFog, Rectangle, Uniforms, average_srgb_rgba};
-    use crate::features::file_preview::viewer3d::test_support::empty_preview;
+    use super::super::super::test_support::empty_preview;
 
     #[test]
     fn sky_tint_averages_known_2x2_texture() {

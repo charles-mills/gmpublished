@@ -2,7 +2,6 @@
 
 mod effect;
 mod message;
-pub mod model;
 mod orbit;
 mod particles3d;
 mod state;
@@ -12,19 +11,7 @@ mod viewer3d;
 
 pub use effect::Effect;
 use iced::{Subscription, time};
-pub use message::{Message, PreviewLoadError};
-pub use model::PreviewLoadStage;
-pub use model::{
-    CodeLine, CodeSpan, InfoReason, MAX_PREVIEW_LINES, PreviewContent, PreviewData, PreviewRequest,
-    RelatedPreviewKind, RelatedPreviewTarget,
-};
-pub use model::{
-    DetailSprite, DoorAudioEvent, DoorAudioEventKind, DoorInstance, DoorSound, DoorSoundSourceTier,
-    DoorSoundWave, DoorSounds, LightmapSlot, MapFog, MapSkyCamera, MapSpawn, MapStats,
-    MaterialSlot, ModelPreview, ModelStats, OverlayPrimitive, OverlayVertex,
-    PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot, ParticlePreview, ParticleSystemInfo, Skybox,
-    SkyboxFace, normalize_particle_material,
-};
+pub use message::Message;
 pub use state::State;
 pub use update::update;
 pub use view::pane;

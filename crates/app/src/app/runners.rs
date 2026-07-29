@@ -7,6 +7,7 @@ use super::{
     WorkshopDownloadSuccess, downloader, gma, iced_mpsc, installed_addons, prepare_publish,
     preview_gma, search, size_analyzer, steam_session, tasks,
 };
+use crate::bridge::tasks::TransactionStatus;
 use crate::generation::Generation;
 use gmpublished_backend::transactions::TransactionId;
 
@@ -270,8 +271,7 @@ pub(super) fn run_local_gma_extraction(
 
     let transaction = ctx.begin_transaction();
     ctx.correlate_backend_transaction(transaction.id(), task);
-    let result =
-        archive.extract_all_with_transaction(destination, options, &transaction, ctx.backend());
+    let result = ctx.extract_preview_archive(&archive, destination, options, &transaction);
     if let Err(error) = &result {
         let _handled = ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
@@ -324,9 +324,7 @@ pub(super) fn run_preview_gma_entry_extraction(
     };
 
     let transaction = create_preview_gma_extract_transaction(ctx, size_bytes);
-    let result = request
-        .archive
-        .extract_entry_with_transaction(&path, &transaction, ctx.backend());
+    let result = ctx.extract_preview_archive_entry(&request.archive, &path, &transaction);
     if let Err(error) = &result {
         ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
@@ -343,12 +341,7 @@ pub(super) fn run_preview_gma_archive_extraction(
     let total_bytes = request.intent.total_bytes();
     let subject = request.request_id.to_string();
     let transaction = create_preview_gma_extract_transaction(ctx, total_bytes);
-    let result = request.archive.extract_all_with_transaction(
-        destination,
-        options,
-        &transaction,
-        ctx.backend(),
-    );
+    let result = ctx.extract_preview_archive(&request.archive, destination, options, &transaction);
     if let Err(error) = &result {
         ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
@@ -376,7 +369,7 @@ pub(super) fn create_preview_gma_extract_task(
 }
 
 fn create_extract_task(ctx: &BackendContext, kind: TaskKind, total_bytes: u64) -> TaskHandle {
-    let task = ctx.create_task(kind, downloader::EXTRACT_STATUS);
+    let task = ctx.create_task(kind, TransactionStatus::Extracting);
     if total_bytes > 0 {
         task.total(total_bytes);
     }

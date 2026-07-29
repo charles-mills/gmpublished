@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use crate::bridge::tasks::TransactionStatus;
 
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{
@@ -135,7 +136,7 @@ pub struct PublishSubmitRequestEnvelope {
 }
 
 impl PublishSubmitRequestEnvelope {
-    pub(crate) const fn initial_status(&self) -> &'static str {
+    pub(crate) const fn initial_status(&self) -> TransactionStatus {
         self.request.initial_status()
     }
 }
@@ -239,7 +240,7 @@ pub fn run_publish_submit(
     task: TaskHandle,
     request: PublishSubmitRequest,
 ) -> Result<PublishSubmitResult, UiError> {
-    task.status(crate::bridge::tasks::PUBLISH_STARTING_STATUS);
+    task.status(TransactionStatus::PublishStarting);
     if let Err(error) = connect_steam(services) {
         task.error(error.clone());
         return Err(error);
@@ -274,7 +275,7 @@ pub fn run_publish_icon_submit(
     task: TaskHandle,
     request: &PublishIconSubmitRequestEnvelope,
 ) -> Result<PublishIconSubmitResult, UiError> {
-    task.status(crate::bridge::tasks::PUBLISH_PROCESSING_ICON_STATUS);
+    task.status(TransactionStatus::PublishProcessingIcon);
     if let Err(error) = connect_steam(services) {
         task.error(error.clone());
         return Err(error);

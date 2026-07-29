@@ -4,6 +4,7 @@ use super::{
     WORKSHOP_LEGAL_URL, flatten_blocking_ui_result, modal_stack, prepare_publish, sounds,
     steam_session, workshop_url,
 };
+use crate::bridge::tasks::TransactionStatus;
 use crate::bridge::ui_error::ResultExt as _;
 use crate::features::file_preview;
 use gmpublished_backend::error_key::keys;
@@ -441,7 +442,7 @@ impl<'a> PublishRunner<'a> {
         let generation = request.generation;
         let task = self.ports.ctx.create_task(
             TaskKind::Publish,
-            crate::bridge::tasks::PUBLISH_PROCESSING_ICON_STATUS,
+            TransactionStatus::PublishProcessingIcon,
         );
         let ctx = self.ports.ctx.clone();
         self.ports

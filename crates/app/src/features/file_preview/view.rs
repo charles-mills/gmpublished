@@ -17,10 +17,10 @@ use crate::{
     },
 };
 
-use super::model::{
+use crate::media::preview_model::{
     CodeLine, InfoReason, PreviewContent, PreviewData, PreviewRequest, RelatedPreviewKind,
 };
-use super::model::{MapStats, ModelPreview, ParticlePreview};
+use crate::media::preview_model::{MapStats, ModelPreview, ParticlePreview};
 use super::state::MovementMode;
 use super::{Message, State};
 use gmpublished_backend::particles::SupportLevel;
@@ -1083,9 +1083,9 @@ fn coverage_row<'a>(
 struct MapPreviewParts<'a> {
     scene: &'a std::sync::Arc<ModelPreview>,
     stats: MapStats,
-    fog: Option<super::model::MapFog>,
-    sky_camera: Option<super::model::MapSkyCamera>,
-    spawn: Option<super::model::MapSpawn>,
+    fog: Option<crate::media::preview_model::MapFog>,
+    sky_camera: Option<crate::media::preview_model::MapSkyCamera>,
+    spawn: Option<crate::media::preview_model::MapSpawn>,
 }
 
 fn map_preview<'a>(
@@ -1325,7 +1325,7 @@ fn scene_supports_walk(scene: &ModelPreview) -> bool {
         .is_some_and(|collision| !collision.is_empty())
 }
 
-fn active_movement_mode(state: &State, spawn: Option<super::model::MapSpawn>) -> MovementMode {
+fn active_movement_mode(state: &State, spawn: Option<crate::media::preview_model::MapSpawn>) -> MovementMode {
     state.fly_movement_mode().unwrap_or_else(|| {
         if spawn.is_some() {
             MovementMode::Walk

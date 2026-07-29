@@ -2,6 +2,7 @@ use gmpublished_backend::error_key::keys;
 
 use crate::bridge::ui_error::UiError;
 use std::path::{Path, PathBuf};
+use crate::bridge::tasks::TransactionStatus;
 
 use super::domain::PublishedFileId;
 
@@ -66,10 +67,10 @@ pub struct PublishSubmitRequest {
 }
 
 impl PublishSubmitRequest {
-    pub(crate) const fn initial_status(&self) -> &'static str {
+    pub(crate) const fn initial_status(&self) -> TransactionStatus {
         match &self.preview {
-            Some(PublishSubmitPreview::Selected(_)) => super::tasks::PUBLISH_PROCESSING_ICON_STATUS,
-            Some(PublishSubmitPreview::Default(_)) | None => super::tasks::PUBLISH_PACKING_STATUS,
+            Some(PublishSubmitPreview::Selected(_)) => TransactionStatus::PublishProcessingIcon,
+            Some(PublishSubmitPreview::Default(_)) | None => TransactionStatus::PublishPacking,
         }
     }
 }

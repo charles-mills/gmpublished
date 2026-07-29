@@ -97,23 +97,12 @@ const TASK_EVENTS_ID: u64 = 1;
 const BACKEND_EVENTS_ID: u64 = 2;
 const BACKEND_EVENT_QUEUE_CAPACITY: usize = 256;
 
-/// Statuses this crate both produces and compares.
+/// Every status a task can report, whichever crate raised it.
 ///
-/// The ones the backend emits live in `gmpublished_backend::transactions::status`
-/// and are re-exported below, so a status is spelled out in exactly one place
-/// no matter which crate emits it.
-pub const DOWNLOAD_STATUS_DOWNLOADING: &str = "downloading";
-pub const EXTRACT_STATUS: &str = "extracting_progress";
-pub const SEARCH_STATUS: &str = "searching";
-/// Status for the simulated notice toast. Only the `debug` menu raises it, but
-/// it is still a Fluent key, so the catalog test enumerates it either way.
-#[cfg(any(test, feature = "debug"))]
-pub const NOTICE_STATUS: &str = "context-menu-debug-toast-notice";
-pub use gmpublished_backend::transactions::status::{
-    LOCATING as DOWNLOAD_STATUS_LOCATING, PUBLISH_PACKING as PUBLISH_PACKING_STATUS,
-    PUBLISH_PROCESSING_ICON as PUBLISH_PROCESSING_ICON_STATUS,
-    PUBLISH_STARTING as PUBLISH_STARTING_STATUS,
-};
+/// Re-exported rather than redeclared: the statuses this crate produces for
+/// its own work and the ones it receives from backend transactions land in the
+/// same overlay, so they are one closed set with one spelling.
+pub use gmpublished_backend::transactions::TransactionStatus;
 const TRANSACTION_PROGRESS_SCALE: f64 = 10_000.0;
 const MAX_PENDING_PRE_START_TRANSACTIONS: usize = 128;
 const MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION: usize = 8;

@@ -1,14 +1,36 @@
+//! What a decoded file preview *is*: the geometry, materials, lighting, audio
+//! and text a preview entry turns into.
+//!
+//! Sits below both sides that touch it. `media::file_preview_decode` produces
+//! these values and `features::file_preview` renders them, so the shape
+//! belongs to neither — a decoder that imported the feature, or a feature that
+//! owned the decoder's output type, would point the dependency the wrong way.
+
 use std::sync::Arc;
 
 use iced::widget::image;
 
-use crate::bridge::archive::PreviewArchiveSource;
+use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
+use crate::bridge::tasks::ScheduleError;
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::generation::Generation;
 pub use gmpublished_backend::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
     MapVisibilityBucket, MapWalkCollision,
 };
+/// Why loading a preview entry failed. Variants carry the actual producer
+/// error so its `Display` reaches the user verbatim; only the wire boundary
+/// (this type's `Display`) is rendered.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PreviewLoadError {
+    /// The blocking worker pool rejected the load job before it could run.
+    #[error(transparent)]
+    Schedule(#[from] ScheduleError),
+    /// Reading the entry's bytes out of the archive failed.
+    #[error(transparent)]
+    Archive(#[from] PreviewArchiveSourceError),
+}
+
 /// GPU-ready preview vertex: models and map geometry share one
 /// 14-float layout. `vformats` loads lean position/normal/uv vertices;
 /// the extra lanes are the app's (prop lighting bakes into `color`,

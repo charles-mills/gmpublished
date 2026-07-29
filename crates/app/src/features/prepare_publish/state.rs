@@ -22,7 +22,7 @@ use crate::media::{
 };
 
 use crate::bridge::archive::PreviewArchiveSource;
-use crate::features::file_preview::PreviewRequest;
+use crate::media::preview_model::PreviewRequest;
 use crate::util::paths::path_to_display;
 use crate::widgets::file_browser::{Row as FileBrowserRow, State as FileBrowserState};
 

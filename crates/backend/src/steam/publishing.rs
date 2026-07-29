@@ -1,4 +1,4 @@
-use crate::transactions::status;
+use crate::transactions::TransactionStatus;
 use crate::{
     GMOD_APP_ID, Transaction,
     appdata::AppData,
@@ -230,14 +230,16 @@ fn publish_tags(mut tags: Vec<String>, addon_type: String) -> Vec<String> {
     tags
 }
 
-fn publish_update_status_key(processed: steamworks::UpdateStatus) -> Option<&'static str> {
+fn publish_update_status(processed: steamworks::UpdateStatus) -> Option<TransactionStatus> {
     Some(match processed {
         steamworks::UpdateStatus::Invalid => return None,
-        steamworks::UpdateStatus::PreparingConfig => status::PUBLISH_PREPARING_CONFIG,
-        steamworks::UpdateStatus::PreparingContent => status::PUBLISH_PREPARING_CONTENT,
-        steamworks::UpdateStatus::UploadingContent => status::PUBLISH_UPLOADING_CONTENT,
-        steamworks::UpdateStatus::UploadingPreviewFile => status::PUBLISH_UPLOADING_PREVIEW_FILE,
-        steamworks::UpdateStatus::CommittingChanges => status::PUBLISH_COMMITTING_CHANGES,
+        steamworks::UpdateStatus::PreparingConfig => TransactionStatus::PublishPreparingConfig,
+        steamworks::UpdateStatus::PreparingContent => TransactionStatus::PublishPreparingContent,
+        steamworks::UpdateStatus::UploadingContent => TransactionStatus::PublishUploadingContent,
+        steamworks::UpdateStatus::UploadingPreviewFile => {
+            TransactionStatus::PublishUploadingPreviewFile
+        }
+        steamworks::UpdateStatus::CommittingChanges => TransactionStatus::PublishCommittingChanges,
     })
 }
 
@@ -263,7 +265,7 @@ fn pump_publish_progress(
             return Err(PublishError::Cancelled);
         }
         let (processed, progress, total) = update_handle.progress();
-        if let Some(status) = publish_update_status_key(processed) {
+        if let Some(status) = publish_update_status(processed) {
             transaction.status(status);
         }
         if total == 0 || last_processed != Some(processed) {
@@ -703,7 +705,7 @@ pub fn submit_with_transaction(
     // `WorkshopUpdateType` construction below, where each branch knows which).
     let custom_icon = match icon_path {
         Some(icon_path) => {
-            transaction.status(crate::transactions::status::PUBLISH_PROCESSING_ICON);
+            transaction.status(crate::transactions::TransactionStatus::PublishProcessingIcon);
 
             match WorkshopIcon::new(icon_path, upscale) {
                 Ok(icon) => Some(icon),
@@ -713,7 +715,7 @@ pub fn submit_with_transaction(
         None => None,
     };
 
-    transaction.status(crate::transactions::status::PUBLISH_PACKING);
+    transaction.status(crate::transactions::TransactionStatus::PublishPacking);
 
     let publish_dir = publish_temp_dir(app_data, settings.as_ref());
     if let Err(error) = std::fs::create_dir_all(&publish_dir) {
@@ -754,7 +756,7 @@ pub fn submit_with_transaction(
         Err(error) => return emit_publish_error(transaction, error),
     };
 
-    transaction.status(crate::transactions::status::PUBLISH_STARTING);
+    transaction.status(crate::transactions::TransactionStatus::PublishStarting);
 
     // Everything above runs without Steam; the client is required only from
     // here, so validation failures stay reachable offline.
@@ -1333,28 +1335,28 @@ mod tests {
             "Uploaded with [url=https://github.com/charles-mills/gmpublished]gmpublished[/url]"
         );
         assert_eq!(
-            publish_update_status_key(steamworks::UpdateStatus::Invalid),
+            publish_update_status(steamworks::UpdateStatus::Invalid),
             None
         );
         assert_eq!(
-            publish_update_status_key(steamworks::UpdateStatus::PreparingConfig),
-            Some("PUBLISH_PREPARING_CONFIG")
+            publish_update_status(steamworks::UpdateStatus::PreparingConfig),
+            Some(TransactionStatus::PublishPreparingConfig)
         );
         assert_eq!(
-            publish_update_status_key(steamworks::UpdateStatus::PreparingContent),
-            Some("PUBLISH_PREPARING_CONTENT")
+            publish_update_status(steamworks::UpdateStatus::PreparingContent),
+            Some(TransactionStatus::PublishPreparingContent)
         );
         assert_eq!(
-            publish_update_status_key(steamworks::UpdateStatus::UploadingContent),
-            Some("PUBLISH_UPLOADING_CONTENT")
+            publish_update_status(steamworks::UpdateStatus::UploadingContent),
+            Some(TransactionStatus::PublishUploadingContent)
         );
         assert_eq!(
-            publish_update_status_key(steamworks::UpdateStatus::UploadingPreviewFile),
-            Some("PUBLISH_UPLOADING_PREVIEW_FILE")
+            publish_update_status(steamworks::UpdateStatus::UploadingPreviewFile),
+            Some(TransactionStatus::PublishUploadingPreviewFile)
         );
         assert_eq!(
-            publish_update_status_key(steamworks::UpdateStatus::CommittingChanges),
-            Some("PUBLISH_COMMITTING_CHANGES")
+            publish_update_status(steamworks::UpdateStatus::CommittingChanges),
+            Some(TransactionStatus::PublishCommittingChanges)
         );
     }
 
@@ -1459,7 +1461,8 @@ mod tests {
                 event,
                 crate::events::BackendEvent::Transaction(
                     crate::events::TransactionEvent::Status { id, status }
-                ) if *id == transaction_id && status == "PUBLISH_PROCESSING_ICON"
+                ) if *id == transaction_id
+                    && *status == TransactionStatus::PublishProcessingIcon
             )));
             assert!(events.iter().any(|event| matches!(
                 event,

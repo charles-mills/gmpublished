@@ -2,8 +2,9 @@ use std::time::{Duration, Instant};
 
 use iced::widget::pane_grid;
 
-use super::message::PreviewLoadError;
-use super::model::{PreviewContent, PreviewData, PreviewLoadStage, PreviewRequest};
+use crate::media::preview_model::{
+    PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest,
+};
 use crate::generation::Generation;
 use crate::spinner_clock::SpinnerClock;
 use crate::widgets::split_pane;
@@ -229,7 +230,7 @@ impl State {
         self.request.as_ref()
     }
 
-    pub(crate) fn related_preview(&self) -> Option<&super::model::RelatedPreviewTarget> {
+    pub(crate) fn related_preview(&self) -> Option<&crate::media::preview_model::RelatedPreviewTarget> {
         self.current.as_ref()?.related_preview.as_ref()
     }
 
@@ -515,7 +516,7 @@ impl State {
         }
     }
 
-    pub(crate) fn current_model(&self) -> Option<&std::sync::Arc<super::model::ModelPreview>> {
+    pub(crate) fn current_model(&self) -> Option<&std::sync::Arc<crate::media::preview_model::ModelPreview>> {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => Some(model),
             _ => None,

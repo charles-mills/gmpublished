@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::bridge::domain::{PublishedFileId, WorkshopMetadata};
 use crate::bridge::tasks::{
-    SharedTaskUpdate, StatusKey, TaskId, TaskKind, TaskUpdate, WorkshopDownloadTaskKind,
+    SharedTaskUpdate, TaskId, TaskKind, TaskUpdate, TransactionStatus, WorkshopDownloadTaskKind,
 };
 use crate::bridge::ui_error::UiError;
 use gmpublished_backend::error_key::keys;
@@ -127,7 +127,7 @@ fn workshop_snapshot_tasks_never_create_downloader_rows() {
     for update_message in [
         TaskUpdate::Started {
             kind: TaskKind::WorkshopSnapshot,
-            status: StatusKey::new("downloading"),
+            status: TransactionStatus::Downloading,
         },
         TaskUpdate::Progress(0.5),
         TaskUpdate::Finished,
@@ -251,7 +251,7 @@ fn task_events_update_running_row_progress() {
             (task_id, SharedTaskUpdate::new(TaskUpdate::Progress(0.5))),
             (
                 task_id,
-                SharedTaskUpdate::new(TaskUpdate::Status(StatusKey::from("decompressing"))),
+                SharedTaskUpdate::new(TaskUpdate::Status(TransactionStatus::Decompressing)),
             ),
         ]),
     );
@@ -263,7 +263,7 @@ fn task_events_update_running_row_progress() {
     assert!(matches!(
         job.progress(),
         JobProgress::Running { ratio, status_key }
-            if *ratio == 0.5 && status_key == "decompressing"
+            if *ratio == 0.5 && *status_key == TransactionStatus::Decompressing
     ));
 }
 

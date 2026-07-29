@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use crate::media::preview_model;
+use crate::bridge::tasks::TransactionStatus;
 
 use crate::i18n::Arg;
 
@@ -338,7 +340,7 @@ fn downloader_executor_submission_schedules_worker_task() {
 #[test]
 fn downloader_executor_cancels_requested_tasks() {
     let mut app = App::new_for_test();
-    let handle = app.ctx.create_task(TaskKind::Download, "working");
+    let handle = app.ctx.create_task(TaskKind::Download, TransactionStatus::Downloading);
     let task_id = handle.id();
     let transaction = app.ctx.begin_transaction();
     app.ctx
@@ -500,7 +502,7 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
     let transaction = app.ctx.begin_transaction();
     let task = app
         .ctx
-        .create_task(TaskKind::Extract, "extracting_progress");
+        .create_task(TaskKind::Extract, TransactionStatus::Extracting);
     let task_id = task.id();
     app.ctx
         .correlate_backend_transaction(transaction.id(), task);
@@ -510,11 +512,11 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
     assert!(app.ctx.cancel_task(task_id));
     assert!(transaction.aborted());
 
-    let result = archive.extract_all_with_transaction(
+    let result = app.ctx.extract_preview_archive(
+        &archive,
         ExtractDestination::Temp,
         &PreviewExtractOptions::default(),
         &transaction,
-        app.ctx.backend(),
     );
 
     assert!(matches!(result, Err(GmaError::Cancelled)));
@@ -768,7 +770,7 @@ fn search_executor_cancels_requested_task() {
     let mut app = App::new_for_test();
     let handle = app
         .ctx
-        .create_task(TaskKind::Search, crate::bridge::tasks::SEARCH_STATUS);
+        .create_task(TaskKind::Search, TransactionStatus::Searching);
     let task_id = handle.id();
     let transaction = app.ctx.begin_transaction();
     app.ctx
@@ -1368,9 +1370,9 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
         .request()
         .expect("preview request should be active")
         .clone();
-    let data = file_preview::PreviewData::from_request(
+    let data = preview_model::PreviewData::from_request(
         &request,
-        file_preview::PreviewContent::Audio {
+        preview_model::PreviewContent::Audio {
             bytes: Arc::new(vec![1, 2, 3]),
             duration_secs: Some(4.0),
         },
@@ -2143,7 +2145,7 @@ fn download_count_format_mutation_updates_runtime_formatter() {
 #[test]
 fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
     let mut app = App::new_for_test();
-    app.ctx.backend().search.clear();
+    app.ctx.search_for_test().clear();
     let snapshot = LibrarySnapshot {
         addons: Arc::from(
             vec![installed_addon_for_library(
@@ -2170,8 +2172,7 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
     assert_eq!(app.state.installed_addons.row_count(), 1);
     let result = app
         .ctx
-        .backend()
-        .search
+        .search_for_test()
         .quick_search("root-needle".to_owned());
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].item.label(), "Root Fanout Addon");
@@ -2716,14 +2717,14 @@ fn preview_author_request() -> preview_gma::AuthorRequest {
     }
 }
 
-fn file_preview_request() -> file_preview::PreviewRequest {
+fn file_preview_request() -> preview_model::PreviewRequest {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Preview")
             .entry("lua/autorun/init.lua", b"print('ok')\n".to_vec())
             .build(),
     )
     .expect("fixture archive should load");
-    file_preview::PreviewRequest {
+    preview_model::PreviewRequest {
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: "lua/autorun/init.lua".to_owned(),

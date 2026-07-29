@@ -4,9 +4,7 @@ use iced::widget::text::{Shaping as TextShaping, Wrapping};
 use iced::widget::{Space, button, column, container, row, stack, svg, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Size, Vector, alignment};
 
-use crate::bridge::tasks::{
-    EXTRACT_STATUS, PUBLISH_PACKING_STATUS, PUBLISH_PROCESSING_ICON_STATUS, TaskKind,
-};
+use crate::bridge::tasks::{TaskKind, TransactionStatus};
 use crate::format::format_bytes;
 use crate::i18n::{Arg, I18n, translated_error};
 use crate::theme::{Rgba, Tokens, ViewCtx};
@@ -185,7 +183,7 @@ fn toast_label(toast: &Toast, i18n: &I18n) -> String {
         Outcome::Finished { .. } => match toast.kind() {
             // Notices carry their message in the status key and finish at
             // birth, so the label stays the message rather than "Done".
-            TaskKind::Notice => i18n.tr(&toast.status().key),
+            TaskKind::Notice => i18n.tr(toast.status().translation_key()),
             _ => i18n.tr("downloader-status-finished"),
         },
         Outcome::Pending => status_text(toast, i18n),
@@ -193,16 +191,15 @@ fn toast_label(toast: &Toast, i18n: &I18n) -> String {
 }
 
 fn status_text(toast: &Toast, i18n: &I18n) -> String {
-    let key = toast.status().key.as_str();
-    match key {
-        // Byte-progress statuses share the downloader's formatting; the
-        // publish keys keep their upstream wire names but map onto the
-        // existing translated entries.
-        PUBLISH_PACKING_STATUS | EXTRACT_STATUS => {
-            let ftl_key = if key == PUBLISH_PACKING_STATUS {
-                "publish-packing"
-            } else {
-                key
+    let status = toast.status();
+    match status {
+        // Byte-progress statuses share the downloader's formatting, which
+        // needs a message taking percent/done/total placeholders rather than
+        // the plain label this status renders as elsewhere.
+        TransactionStatus::PublishPacking | TransactionStatus::Extracting => {
+            let ftl_key = match status {
+                TransactionStatus::PublishPacking => "publish-packing",
+                _ => status.translation_key(),
             };
             let total = format_bytes(toast.total_bytes(), i18n);
             let done = format_bytes((toast.total_bytes() as f64 * toast.progress()) as u64, i18n);
@@ -218,8 +215,8 @@ fn status_text(toast: &Toast, i18n: &I18n) -> String {
                 ],
             )
         }
-        PUBLISH_PROCESSING_ICON_STATUS => i18n.tr("publish-processing-icon"),
-        key => i18n.tr(key),
+        TransactionStatus::PublishProcessingIcon => i18n.tr("publish-processing-icon"),
+        status => i18n.tr(status.translation_key()),
     }
 }
 

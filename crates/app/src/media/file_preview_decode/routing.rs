@@ -1,5 +1,5 @@
 use crate::bridge::archive::PreviewArchiveSource;
-use crate::features::file_preview::{PreviewRequest, RelatedPreviewKind, RelatedPreviewTarget};
+use crate::media::preview_model::{PreviewRequest, RelatedPreviewKind, RelatedPreviewTarget};
 
 /// What an entry path says the entry is, before the archive is consulted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

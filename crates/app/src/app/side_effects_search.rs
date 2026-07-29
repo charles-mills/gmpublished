@@ -3,6 +3,7 @@ use super::{
     TaskKind, flatten_blocking_ui_result, prepare_publish, preview_gma, run_search_full, search,
     send_root_message, spawn_blocking_detached_or_warn, steam_session, stream, workshop_url,
 };
+use crate::bridge::tasks::TransactionStatus;
 use crate::bridge::ui_error::ResultExt as _;
 
 use crate::generation::Generation;
@@ -87,7 +88,7 @@ impl App {
     pub(super) fn search_full_task(&mut self) -> Task<RootMessage> {
         let task = self
             .ctx
-            .create_task(TaskKind::Search, crate::bridge::tasks::SEARCH_STATUS);
+            .create_task(TaskKind::Search, TransactionStatus::Searching);
         let Some(start) = self.state.search.begin_full_search(task.id()) else {
             task.error(gmpublished_backend::error_key::keys::CANCELLED);
             return Task::none();

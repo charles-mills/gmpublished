@@ -1,4 +1,4 @@
-use crate::features::file_preview::PreviewRequest;
+use crate::media::preview_model::PreviewRequest;
 
 use super::model::{
     ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation,

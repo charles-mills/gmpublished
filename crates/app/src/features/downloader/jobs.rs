@@ -14,8 +14,8 @@ use crate::bridge::domain::{
     PublishedFileId, WorkshopDownloadResult, WorkshopDownloadSuccess, WorkshopMetadata,
 };
 use crate::bridge::tasks::{
-    CoalescedTaskTerminal, CoalescedTaskUpdate, DOWNLOAD_STATUS_DOWNLOADING,
-    DOWNLOAD_STATUS_LOCATING, TaskEvent, TaskId, TaskKind, TaskUpdate, WorkshopDownloadTaskKind,
+    CoalescedTaskTerminal, CoalescedTaskUpdate, TaskEvent, TaskId, TaskKind, TaskUpdate,
+    TransactionStatus, WorkshopDownloadTaskKind,
 };
 use crate::bridge::ui_error::UiError;
 use crate::theme::motion;
@@ -29,7 +29,6 @@ fn smoothed_ratio(initial: f32) -> motion::Presence<f32> {
     motion::Presence::new(initial, PROGRESS_SMOOTH_DURATION, Easing::EaseOut)
 }
 const MAX_PENDING_TASK_UPDATES: usize = 128;
-pub use crate::bridge::tasks::EXTRACT_STATUS;
 
 /// A downloader row's identity: positive for rows keyed off a real
 /// [`TaskId`], negative for synthetic rows (already-finished or errored
@@ -131,7 +130,7 @@ impl DownloaderJob {
         id: RowId,
         task_id: TaskId,
         workshop_id: PublishedFileId,
-        status_key: impl Into<String>,
+        status_key: TransactionStatus,
         started_at: Instant,
     ) -> Self {
         Self {
@@ -142,7 +141,7 @@ impl DownloaderJob {
             total_bytes: 0,
             progress: JobProgress::Running {
                 ratio: 0.0,
-                status_key: status_key.into(),
+                status_key,
             },
             started_at: Some(started_at),
             open_path: None,
@@ -189,7 +188,7 @@ impl DownloaderJob {
             total_bytes,
             progress: JobProgress::Running {
                 ratio: 0.0,
-                status_key: EXTRACT_STATUS.to_owned(),
+                status_key: TransactionStatus::Extracting,
             },
             started_at: Some(started_at),
             open_path: None,
@@ -299,7 +298,7 @@ impl DownloaderJob {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobProgress {
-    Running { ratio: f64, status_key: String },
+    Running { ratio: f64, status_key: TransactionStatus },
     Finished,
     Error(UiError),
 }
@@ -483,7 +482,7 @@ impl Jobs {
                 job.total_bytes = 0;
                 job.progress = JobProgress::Running {
                     ratio: 0.0,
-                    status_key: status.key,
+                    status_key: status,
                 };
                 if job.started_at.is_none() {
                     job.started_at = Some(now);
@@ -497,7 +496,7 @@ impl Jobs {
                 let JobProgress::Running { status_key, .. } = &mut job.progress else {
                     return false;
                 };
-                *status_key = status.key;
+                *status_key = status;
                 true
             }
             TaskUpdate::Progress(progress) => {
@@ -592,7 +591,7 @@ impl Jobs {
                     row_id,
                     task_id,
                     item_id,
-                    DOWNLOAD_STATUS_DOWNLOADING,
+                    TransactionStatus::Downloading,
                     now,
                 );
             }
@@ -604,7 +603,7 @@ impl Jobs {
                     row_id,
                     task_id,
                     item_id,
-                    DOWNLOAD_STATUS_LOCATING,
+                    TransactionStatus::Locating,
                     now,
                 );
             }
@@ -617,7 +616,7 @@ impl Jobs {
         row_id: RowId,
         task_id: TaskId,
         item_id: PublishedFileId,
-        status_key: &'static str,
+        status_key: TransactionStatus,
         now: Instant,
     ) {
         let existing = self.row_index_for_workshop(section, item_id);
@@ -630,7 +629,7 @@ impl Jobs {
                 job.task_id = Some(task_id);
                 job.progress = JobProgress::Running {
                     ratio: 0.0,
-                    status_key: status_key.to_owned(),
+                    status_key,
                 };
                 job.started_at = Some(now);
                 job.open_path = None;
@@ -1042,7 +1041,7 @@ impl Jobs {
                 job.total_bytes = 0;
                 job.progress = JobProgress::Running {
                     ratio: 0.0,
-                    status_key: started.status.key,
+                    status_key: started.status,
                 };
                 if job.started_at.is_none() {
                     job.started_at = Some(now);
@@ -1052,7 +1051,7 @@ impl Jobs {
             if let Some(status) = update.status
                 && let JobProgress::Running { status_key, .. } = &mut job.progress
             {
-                *status_key = status.key;
+                *status_key = status;
             }
 
             if let Some(total_bytes) = update.total_bytes {

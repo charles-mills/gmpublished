@@ -6,7 +6,7 @@ mod update;
 mod view;
 
 pub use effect::Effect;
-pub use jobs::{DownloaderEvent, EXTRACT_STATUS, LocalExtractionOutcome};
+pub use jobs::{DownloaderEvent, LocalExtractionOutcome};
 // Only app-level tests construct row-scoped messages from outside the module.
 #[cfg(test)]
 pub use jobs::Section;

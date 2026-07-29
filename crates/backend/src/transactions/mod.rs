@@ -1,45 +1,5 @@
 mod payload;
 
-/// Status strings a transaction reports over the wire.
-///
-/// Shared between the crate that emits one and the crate that compares it, so
-/// the two spellings cannot drift apart. `crates/app` re-exports these
-/// alongside the statuses it produces itself.
-pub mod status {
-    pub const LOCATING: &str = "locating";
-    pub const DECOMPRESSING: &str = "decompressing";
-    pub const READING_METADATA: &str = "reading_metadata";
-    pub const PUBLISH_STARTING: &str = "PUBLISH_STARTING";
-    pub const PUBLISH_PROCESSING_ICON: &str = "PUBLISH_PROCESSING_ICON";
-    pub const PUBLISH_PACKING: &str = "PUBLISH_PACKING";
-    pub const PUBLISH_PREPARING_CONFIG: &str = "PUBLISH_PREPARING_CONFIG";
-    pub const PUBLISH_PREPARING_CONTENT: &str = "PUBLISH_PREPARING_CONTENT";
-    pub const PUBLISH_UPLOADING_CONTENT: &str = "PUBLISH_UPLOADING_CONTENT";
-    pub const PUBLISH_UPLOADING_PREVIEW_FILE: &str = "PUBLISH_UPLOADING_PREVIEW_FILE";
-    pub const PUBLISH_COMMITTING_CHANGES: &str = "PUBLISH_COMMITTING_CHANGES";
-
-    /// Every status this module declares.
-    ///
-    /// The app renders a status by looking its string up as a translation key
-    /// and walks this to check each one has an entry, so a status must be
-    /// declared here rather than passed to `Transaction::status` as a literal
-    /// — a literal is invisible to that guard and reaches the user as raw wire
-    /// text.
-    pub const ALL: &[&str] = &[
-        LOCATING,
-        DECOMPRESSING,
-        READING_METADATA,
-        PUBLISH_STARTING,
-        PUBLISH_PROCESSING_ICON,
-        PUBLISH_PACKING,
-        PUBLISH_PREPARING_CONFIG,
-        PUBLISH_PREPARING_CONTENT,
-        PUBLISH_UPLOADING_CONTENT,
-        PUBLISH_UPLOADING_PREVIEW_FILE,
-        PUBLISH_COMMITTING_CHANGES,
-    ];
-}
-
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::fmt;
@@ -52,6 +12,95 @@ use crate::error_key::{ErrorKey, HasErrorKey};
 use crate::events::{BackendEvent, BackendEventSink, TransactionEvent};
 
 pub use self::payload::TransactionPayload;
+
+/// What a long-running operation is currently doing, as the UI names it.
+///
+/// A closed set rather than free text: the app renders a status by looking its
+/// [`translation_key`](Self::translation_key) up in the Fluent catalogs, so a
+/// value with no entry reaches the user as raw wire text. Being an enum is
+/// what makes that unrepresentable — an undeclared status is a compile error
+/// rather than something a catalog-coverage test has to notice afterwards.
+///
+/// The keys are frozen. Renaming a variant is free; changing what
+/// `translation_key` returns silently breaks localization in twelve catalogs.
+/// Their inconsistent shape (`locating` beside `PUBLISH_STARTING`) is part of
+/// what is frozen.
+///
+/// Covers both sides of the bridge. The backend raises most of these from
+/// inside a transaction; the app raises [`Self::Downloading`],
+/// [`Self::Extracting`], [`Self::Searching`] and [`Self::Notice`] for work it
+/// runs itself, and both arrive at the same task overlay.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TransactionStatus {
+    Locating,
+    Decompressing,
+    ReadingMetadata,
+    Downloading,
+    Extracting,
+    Searching,
+    PublishStarting,
+    PublishProcessingIcon,
+    PublishPacking,
+    PublishPreparingConfig,
+    PublishPreparingContent,
+    PublishUploadingContent,
+    PublishUploadingPreviewFile,
+    PublishCommittingChanges,
+    /// Raised only by the developer context menu, but still a catalog key, so
+    /// the coverage test enumerates it either way.
+    Notice,
+}
+
+impl TransactionStatus {
+    /// Every status, for the catalog-coverage test to walk. Kept exhaustive by
+    /// [`Self::translation_key`]'s match rather than by review: a new variant
+    /// fails to compile until it is spelled there.
+    pub const ALL: &'static [Self] = &[
+        Self::Locating,
+        Self::Decompressing,
+        Self::ReadingMetadata,
+        Self::Downloading,
+        Self::Extracting,
+        Self::Searching,
+        Self::PublishStarting,
+        Self::PublishProcessingIcon,
+        Self::PublishPacking,
+        Self::PublishPreparingConfig,
+        Self::PublishPreparingContent,
+        Self::PublishUploadingContent,
+        Self::PublishUploadingPreviewFile,
+        Self::PublishCommittingChanges,
+        Self::Notice,
+    ];
+
+    /// The Fluent message id this status renders as. Frozen — see the type doc.
+    #[must_use]
+    pub const fn translation_key(self) -> &'static str {
+        match self {
+            Self::Locating => "locating",
+            Self::Decompressing => "decompressing",
+            Self::ReadingMetadata => "reading_metadata",
+            Self::Downloading => "downloading",
+            Self::Extracting => "extracting_progress",
+            Self::Searching => "searching",
+            Self::PublishStarting => "PUBLISH_STARTING",
+            Self::PublishProcessingIcon => "PUBLISH_PROCESSING_ICON",
+            Self::PublishPacking => "PUBLISH_PACKING",
+            Self::PublishPreparingConfig => "PUBLISH_PREPARING_CONFIG",
+            Self::PublishPreparingContent => "PUBLISH_PREPARING_CONTENT",
+            Self::PublishUploadingContent => "PUBLISH_UPLOADING_CONTENT",
+            Self::PublishUploadingPreviewFile => "PUBLISH_UPLOADING_PREVIEW_FILE",
+            Self::PublishCommittingChanges => "PUBLISH_COMMITTING_CHANGES",
+            Self::Notice => "context-menu-debug-toast-notice",
+        }
+    }
+}
+
+impl fmt::Display for TransactionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.translation_key())
+    }
+}
 
 /// A failed transaction's identity on the event wire: a stable [`ErrorKey`]
 /// plus optional contextual payload (a path, an entry name, an upstream
@@ -339,10 +388,10 @@ impl TransactionInner {
         });
     }
 
-    fn status<S: Into<String>>(&self, status: S) {
+    fn status(&self, status: TransactionStatus) {
         self.emit(TransactionEvent::Status {
             id: self.id,
-            status: status.into(),
+            status,
         });
     }
 
@@ -440,7 +489,7 @@ impl Transaction {
         self.0.data(payload);
     }
 
-    pub fn status<S: Into<String>>(&self, status: S) {
+    pub fn status(&self, status: TransactionStatus) {
         self.0.status(status);
     }
 
@@ -505,7 +554,7 @@ mod tests {
 
     use super::{
         State, TransactionId, TransactionInner, TransactionRef, Transactions, TransactionsShared,
-        progress_as_int,
+        TransactionStatus, progress_as_int,
     };
 
     use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};
@@ -581,14 +630,14 @@ mod tests {
         };
         transaction.emit(TransactionEvent::Status {
             id: transaction.id,
-            status: "packing".to_owned(),
+            status: TransactionStatus::PublishPacking,
         });
 
         assert_eq!(
             collector.drain(),
             vec![BackendEvent::Transaction(TransactionEvent::Status {
                 id: transaction.id,
-                status: "packing".to_owned(),
+                status: TransactionStatus::PublishPacking,
             })]
         );
     }

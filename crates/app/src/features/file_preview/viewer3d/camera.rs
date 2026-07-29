@@ -2357,13 +2357,13 @@ mod tests {
     fn orbit_camera_without_pose_uses_default_framing() {
         let mut camera = Camera {
             content_id: None,
-            orbit: crate::features::file_preview::orbit::Orbit::from_pose(
+            orbit: super::super::super::orbit::Orbit::from_pose(
                 OrbitPose {
                     yaw: 9.0,
                     pitch: -9.0,
                     distance: 4.0,
                 },
-                crate::features::file_preview::orbit::ZoomFloor::SolidMesh,
+                super::super::super::orbit::ZoomFloor::SolidMesh,
             ),
             drag_from: Some(Point::new(1.0, 2.0)),
         };

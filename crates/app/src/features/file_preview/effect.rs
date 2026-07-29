@@ -1,5 +1,5 @@
-use super::model::DoorAudioEvent;
-use super::model::PreviewRequest;
+use crate::media::preview_model::DoorAudioEvent;
+use crate::media::preview_model::PreviewRequest;
 use std::sync::Arc;
 
 /// Outward consequences of a File Preview state transition.

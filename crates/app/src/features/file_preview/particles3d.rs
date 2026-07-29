@@ -20,7 +20,7 @@ use gmpublished_backend::particles::{
 };
 
 use super::Message;
-use super::model::ParticlePreview;
+use crate::media::preview_model::ParticlePreview;
 use super::state::OrbitPose;
 use super::viewer3d::SOURCE_UP;
 use super::viewer3d::{look_at, mat_mul, perspective};

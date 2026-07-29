@@ -2,26 +2,12 @@ use std::time::Instant;
 
 use iced::widget::pane_grid;
 
-use super::model::DoorAudioEvent;
-use super::model::{PreviewData, PreviewLoadStage, PreviewRequest};
+use crate::media::preview_model::{
+    DoorAudioEvent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest,
+};
 use super::state::{FlyPose, MovementMode, OrbitPose};
-use crate::bridge::archive::PreviewArchiveSourceError;
-use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
 use gmpublished_backend::particles::ControlPointIndex;
-
-/// Why loading a preview entry failed. Variants carry the actual producer
-/// error so its `Display` reaches the user verbatim; only the wire boundary
-/// (this type's `Display`) is rendered.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum PreviewLoadError {
-    /// The blocking worker pool rejected the load job before it could run.
-    #[error(transparent)]
-    Schedule(#[from] ScheduleError),
-    /// Reading the entry's bytes out of the archive failed.
-    #[error(transparent)]
-    Archive(#[from] PreviewArchiveSourceError),
-}
 
 /// Facts emitted by the in-archive file preview modal.
 #[derive(Clone, Debug, PartialEq)]

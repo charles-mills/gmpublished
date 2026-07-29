@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use crate::WorkshopId;
 
 use crate::appdata::AppDataSnapshot;
-pub use crate::transactions::{TransactionError, TransactionId, TransactionPayload};
+pub use crate::transactions::{
+    TransactionError, TransactionId, TransactionPayload, TransactionStatus,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
@@ -54,7 +56,7 @@ pub enum TransactionEvent {
     },
     Status {
         id: TransactionId,
-        status: String,
+        status: TransactionStatus,
     },
     Progress {
         id: TransactionId,

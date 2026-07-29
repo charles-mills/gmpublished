@@ -3,9 +3,9 @@ use std::sync::Arc;
 use super::*;
 use crate::bridge::materials::RenderMode;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
-use crate::features::file_preview::model::ModelVertex;
-use crate::features::file_preview::model::{InfoReason, PreviewContent};
-use crate::features::file_preview::model::{
+use crate::media::preview_model::ModelVertex;
+use crate::media::preview_model::{InfoReason, PreviewContent};
+use crate::media::preview_model::{
     MapFog, MapStats, MaterialSlot, MeshData, ModelPreview, ModelStats,
 };
 use crate::generation::Generation;
@@ -270,7 +270,7 @@ fn truncated_code_loaded_state_is_preserved() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Code {
-            lines: vec![vec![super::super::model::CodeSpan {
+            lines: vec![vec![crate::media::preview_model::CodeSpan {
                 text: "print('ok')".to_owned(),
                 color: None,
             }]],

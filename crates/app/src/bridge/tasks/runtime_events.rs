@@ -2,8 +2,9 @@ use gmpublished_backend::events::BackendEventSink;
 
 use super::{
     Arc, BackendAppDataSnapshot, BackendDownloadStartedEvent, BackendExtractionStartedEvent,
-    BackendSinkEvent, BackendTransactionEvent, DOWNLOAD_STATUS_LOCATING, Duration, PathBuf,
-    PublishedFileId, SyncSender, TaskId, TransactionError, TransactionPayload, TrySendError,
+    BackendSinkEvent, BackendTransactionEvent, Duration, PathBuf,
+    PublishedFileId, SyncSender, TaskId, TransactionError, TransactionPayload, TransactionStatus,
+    TrySendError,
     UiError, WorkshopDownloadTaskKind, fmt, mpsc,
 };
 use gmpublished_backend::transactions::TransactionId;
@@ -251,7 +252,7 @@ pub enum TransactionRuntimeEvent {
     },
     Status {
         id: TransactionId,
-        status: String,
+        status: TransactionStatus,
     },
     Progress {
         id: TransactionId,
@@ -350,7 +351,7 @@ impl TransactionRuntimeEvent {
     pub(super) fn is_bufferable_pre_start(&self) -> bool {
         matches!(
             self,
-            Self::Status { status, .. } if status == DOWNLOAD_STATUS_LOCATING
+            Self::Status { status, .. } if *status == TransactionStatus::Locating
         )
     }
 }

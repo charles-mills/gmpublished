@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use gmpublished_backend::error_key::keys;
 
-use crate::bridge::tasks::{StatusKey, TaskEvent, TaskId, TaskKind, TaskUpdate};
+use crate::bridge::tasks::{TaskEvent, TaskId, TaskKind, TaskUpdate, TransactionStatus};
 use crate::bridge::ui_error::UiError;
 use crate::theme::{Tokens, motion};
 
@@ -28,7 +28,7 @@ pub enum Outcome {
 pub struct Toast {
     task_id: TaskId,
     kind: TaskKind,
-    status: StatusKey,
+    status: TransactionStatus,
     progress: f64,
     total_bytes: u64,
     started_at: Instant,
@@ -38,7 +38,7 @@ pub struct Toast {
 }
 
 impl Toast {
-    fn new(task_id: TaskId, kind: TaskKind, status: StatusKey, now: Instant) -> Self {
+    fn new(task_id: TaskId, kind: TaskKind, status: TransactionStatus, now: Instant) -> Self {
         let mut presence = motion::boolean(
             false,
             Tokens::dark().motion.overlay_toast_duration(),
@@ -66,8 +66,8 @@ impl Toast {
         &self.kind
     }
 
-    pub(crate) const fn status(&self) -> &StatusKey {
-        &self.status
+    pub(crate) const fn status(&self) -> TransactionStatus {
+        self.status
     }
 
     pub(crate) const fn progress(&self) -> f64 {
@@ -234,11 +234,8 @@ mod tests {
 
     use super::*;
 
-    fn started(kind: TaskKind, status: &str) -> TaskUpdate {
-        TaskUpdate::Started {
-            kind,
-            status: StatusKey::new(status),
-        }
+    fn started(kind: TaskKind, status: TransactionStatus) -> TaskUpdate {
+        TaskUpdate::Started { kind, status }
     }
 
     fn event(id: u64, update: TaskUpdate) -> TaskEvent {
@@ -252,15 +249,15 @@ mod tests {
 
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, "PUBLISH_PACKING")),
-                event(2, started(TaskKind::Download, "downloading")),
-                event(3, started(TaskKind::Extract, "extracting_progress")),
+                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
+                event(2, started(TaskKind::Download, TransactionStatus::Downloading)),
+                event(3, started(TaskKind::Extract, TransactionStatus::Extracting)),
                 event(
                     4,
-                    started(TaskKind::Search, crate::bridge::tasks::SEARCH_STATUS),
+                    started(TaskKind::Search, TransactionStatus::Searching),
                 ),
-                event(5, started(TaskKind::OverlayExtract, "extracting_progress")),
-                event(6, started(TaskKind::Notice, "debug-simulated-notice")),
+                event(5, started(TaskKind::OverlayExtract, TransactionStatus::Extracting)),
+                event(6, started(TaskKind::Notice, TransactionStatus::Notice)),
             ],
             now,
         );
@@ -292,12 +289,12 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, "PUBLISH_PACKING")),
+                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
                 event(1, TaskUpdate::Total(1000)),
                 event(1, TaskUpdate::Progress(0.4)),
                 event(
                     1,
-                    TaskUpdate::Status(StatusKey::new("PUBLISH_UPLOADING_CONTENT")),
+                    TaskUpdate::Status(TransactionStatus::PublishUploadingContent),
                 ),
             ],
             now,
@@ -306,7 +303,7 @@ mod tests {
         let toast = &state.toasts()[0];
         assert_eq!(toast.total_bytes(), 1000);
         assert!((toast.progress() - 0.4).abs() < f64::EPSILON);
-        assert_eq!(toast.status().key, "PUBLISH_UPLOADING_CONTENT");
+        assert_eq!(toast.status(), TransactionStatus::PublishUploadingContent);
         assert!(toast.cancellable());
     }
 
@@ -316,7 +313,7 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, "PUBLISH_PACKING")),
+                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
                 event(1, TaskUpdate::Finished),
             ],
             now,
@@ -348,7 +345,7 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::OverlayExtract, "extracting_progress")),
+                event(1, started(TaskKind::OverlayExtract, TransactionStatus::Extracting)),
                 event(1, TaskUpdate::Error(UiError::new(keys::IO_ERROR))),
             ],
             now,
@@ -366,7 +363,7 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, "PUBLISH_PACKING")),
+                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
                 event(1, TaskUpdate::Abandoned),
             ],
             now,

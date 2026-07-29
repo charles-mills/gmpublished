@@ -21,7 +21,7 @@ use crate::media::{
 use crate::widgets::file_browser::{Row as FileBrowserRowData, State as FileBrowserState};
 use crate::widgets::split_pane;
 
-use crate::features::file_preview::PreviewRequest;
+use crate::media::preview_model::PreviewRequest;
 
 use crate::bridge::domain::PublishedFileId;
 

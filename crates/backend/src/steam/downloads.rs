@@ -291,7 +291,7 @@ impl Downloads {
             let _temp_guard = temp_guard;
 
             let transaction = downloads.transactions.begin();
-            transaction.status(crate::transactions::status::LOCATING);
+            transaction.status(crate::transactions::TransactionStatus::Locating);
 
             // Installed workshop content keeps its .gma on disk after
             // extraction, so the started event advertises it as a
@@ -332,7 +332,7 @@ impl Downloads {
                 if let Ok(gma) = open_on_disk(folder.clone()) {
                     gma
                 } else {
-                    transaction.status(crate::transactions::status::DECOMPRESSING);
+                    transaction.status(crate::transactions::TransactionStatus::Decompressing);
                     match GmaFile::decompress(
                         folder,
                         &transaction,
@@ -352,7 +352,7 @@ impl Downloads {
 
             gma.id = Some(item);
 
-            transaction.status(crate::transactions::status::READING_METADATA);
+            transaction.status(crate::transactions::TransactionStatus::ReadingMetadata);
             transaction.data(crate::transactions::TransactionPayload::ByteSize {
                 source: Some(gma.metadata.title().to_owned()),
                 bytes: gma.size,

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::model::{AuthorRequest, MetadataRequest, OpenRequest};
-use crate::features::file_preview::PreviewRequest;
+use crate::media::preview_model::PreviewRequest;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {

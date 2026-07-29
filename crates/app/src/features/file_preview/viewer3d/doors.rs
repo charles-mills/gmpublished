@@ -411,7 +411,7 @@ mod tests {
         FlyCamera, FlyPose, MapVisibilityBucket, MapWalkCollision, ModelPreview, MovementMode,
     };
     use super::*;
-    use crate::features::file_preview::model::DoorSounds;
+    use crate::media::preview_model::DoorSounds;
 
     fn door_scene(doors: Vec<DoorInstance>) -> ModelPreview {
         let mut scene = empty_preview([-128.0, -128.0, -128.0], [256.0, 128.0, 128.0]);

@@ -1,6 +1,6 @@
 //! Fixtures shared by the viewer's test modules.
 
-use super::super::model::ModelStats;
+use crate::media::preview_model::ModelStats;
 use super::ModelPreview;
 
 pub(super) fn empty_preview(bounds_min: [f32; 3], bounds_max: [f32; 3]) -> ModelPreview {
