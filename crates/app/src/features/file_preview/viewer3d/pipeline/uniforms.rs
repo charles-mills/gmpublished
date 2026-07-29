@@ -309,6 +309,25 @@ mod uniform_layout_tests {
         }
     }
 
+    /// Every `.wgsl` in this feature declares `Uniforms` with these seven
+    /// members at these offsets, and the bind-group layout pins the buffer to
+    /// this size. Nothing can check the WGSL side from Rust, so this pins the
+    /// Rust side exactly: a reorder or an inserted member fails here, and the
+    /// fix is to mirror it in `model_viewer.wgsl`, `detail.wgsl`, `sky.wgsl`
+    /// and `water.wgsl`.
+    #[test]
+    fn uniforms_layout_matches_the_shaders() {
+        assert_eq!(size_of::<Uniforms>(), 160);
+        assert_eq!(align_of::<Uniforms>(), 4);
+        assert_eq!(std::mem::offset_of!(Uniforms, view_proj), 0);
+        assert_eq!(std::mem::offset_of!(Uniforms, light), 64);
+        assert_eq!(std::mem::offset_of!(Uniforms, camera_position), 80);
+        assert_eq!(std::mem::offset_of!(Uniforms, fog_color), 96);
+        assert_eq!(std::mem::offset_of!(Uniforms, fog_params), 112);
+        assert_eq!(std::mem::offset_of!(Uniforms, water_time_sky_tint), 128);
+        assert_eq!(std::mem::offset_of!(Uniforms, water_depth_params), 144);
+    }
+
     /// Byte size of the `Uniforms` struct a WGSL source declares, by summing
     /// its members. `None` if it declares none, or uses a member type this
     /// does not know — either is a reason to look rather than pass.
@@ -328,5 +347,61 @@ mod uniform_layout_tests {
             };
         }
         Some(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced::Point;
+
+    use super::{FlyCamera, MapFog, Rectangle, Uniforms, average_srgb_rgba};
+    use crate::features::file_preview::viewer3d::test_support::empty_preview;
+
+    #[test]
+    fn sky_tint_averages_known_2x2_texture() {
+        let rgba = [
+            0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 255, 0, 0, 255, 255,
+        ];
+
+        let tint = average_srgb_rgba(&rgba, 2, 2).expect("valid texture");
+
+        assert!((tint[0] - 0.5).abs() < 1e-6);
+        assert!((tint[1] - 0.25).abs() < 1e-6);
+        assert!((tint[2] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn submerged_fly_uniforms_override_map_fog() {
+        let scene = empty_preview([-128.0; 3], [128.0; 3]);
+        let camera = FlyCamera::default();
+        let map_fog = MapFog {
+            color_linear: [0.8, 0.7, 0.6],
+            start: 512.0,
+            end: 8192.0,
+            max_density: 0.5,
+        };
+
+        let above = Uniforms::for_fly(
+            &scene,
+            &camera,
+            Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0)),
+            Some(map_fog),
+            12.0,
+            false,
+        );
+        let submerged = Uniforms::for_fly(
+            &scene,
+            &camera,
+            Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0)),
+            Some(map_fog),
+            12.0,
+            true,
+        );
+
+        assert_eq!(above.fog_color, [0.8, 0.7, 0.6, 0.0]);
+        assert_eq!(above.fog_params, [512.0, 8192.0, 0.5, 1.0]);
+        assert_eq!(above.water_time_sky_tint[0], 12.0);
+        assert_eq!(submerged.fog_color, [0.03, 0.10, 0.10, 0.0]);
+        assert_eq!(submerged.fog_params, [0.0, 2048.0, 1.0, 1.0]);
     }
 }

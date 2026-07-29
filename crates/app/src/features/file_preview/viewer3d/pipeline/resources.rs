@@ -892,3 +892,55 @@ pub fn skybox_face_corners(face: SkyboxFace) -> [[f32; 3]; 4] {
         ],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SkyboxFace, skybox_face_corners};
+
+    #[test]
+    fn skybox_face_corners_match_source_2d_skybox_convention() {
+        // Data source: Valve Developer Community "Skybox (2D)" suffixes,
+        // with face orientation from noclip.website's SourceEngine SkyboxRenderer.
+        assert_eq!(
+            SkyboxFace::ALL.map(skybox_face_corners),
+            [
+                [
+                    [1.0, 1.0, -1.0],
+                    [1.0, 1.0, 1.0],
+                    [1.0, -1.0, 1.0],
+                    [1.0, -1.0, -1.0],
+                ],
+                [
+                    [-1.0, -1.0, -1.0],
+                    [-1.0, -1.0, 1.0],
+                    [-1.0, 1.0, 1.0],
+                    [-1.0, 1.0, -1.0],
+                ],
+                [
+                    [-1.0, 1.0, -1.0],
+                    [-1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                    [1.0, 1.0, -1.0],
+                ],
+                [
+                    [1.0, -1.0, -1.0],
+                    [1.0, -1.0, 1.0],
+                    [-1.0, -1.0, 1.0],
+                    [-1.0, -1.0, -1.0],
+                ],
+                [
+                    [1.0, 1.0, 1.0],
+                    [-1.0, 1.0, 1.0],
+                    [-1.0, -1.0, 1.0],
+                    [1.0, -1.0, 1.0],
+                ],
+                [
+                    [-1.0, 1.0, -1.0],
+                    [1.0, 1.0, -1.0],
+                    [1.0, -1.0, -1.0],
+                    [-1.0, -1.0, -1.0],
+                ],
+            ]
+        );
+    }
+}

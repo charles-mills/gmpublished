@@ -363,3 +363,29 @@ pub const fn solid_rgba<const N: usize>(color: [u8; 4]) -> [u8; N] {
     }
     rgba
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CHECKERBOARD_MIP_RGBA, checkerboard_mip_levels};
+
+    #[test]
+    fn checkerboard_fallback_has_prepared_gamma_correct_mips() {
+        let levels = checkerboard_mip_levels();
+
+        assert_eq!(
+            levels
+                .iter()
+                .map(|level| (level.width, level.height))
+                .collect::<Vec<_>>(),
+            vec![(8, 8), (4, 4), (2, 2), (1, 1)]
+        );
+        for level in &levels[1..] {
+            assert!(
+                level
+                    .rgba
+                    .chunks_exact(4)
+                    .all(|pixel| pixel == CHECKERBOARD_MIP_RGBA)
+            );
+        }
+    }
+}

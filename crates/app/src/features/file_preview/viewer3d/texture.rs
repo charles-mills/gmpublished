@@ -382,3 +382,73 @@ pub(super) fn texture_rgba_offset(x: u32, y: u32, width: u32) -> Option<usize> {
     let pixel = y.checked_mul(width)?.checked_add(x)?;
     usize::try_from(pixel.checked_mul(4)?).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use vformats::vtf::VtfFormat;
+
+    use super::*;
+    use crate::test_support::fixture_vtf_bytes;
+
+    #[test]
+    fn software_bc_decoder_matches_vtf_decode_for_solid_blocks() {
+        let fixtures = [
+            (
+                BcFormat::Bc1,
+                VtfFormat::Dxt1,
+                solid_bc1_color_block(0xf800),
+            ),
+            (
+                BcFormat::Bc2,
+                VtfFormat::Dxt3,
+                solid_bc2_color_block(0x07e0, 0x0f),
+            ),
+            (
+                BcFormat::Bc3,
+                VtfFormat::Dxt5,
+                solid_bc3_color_block(0x001f, 255),
+            ),
+        ];
+
+        for (format, image_format, block) in fixtures {
+            let bytes = bc_vtf_bytes(4, 4, image_format, &block);
+            let decoded = crate::bridge::materials::decode_vtf_rgba(&bytes).expect("vtf decode");
+            let software = decode_bc_texture(format, decoded.width, decoded.height, &block)
+                .expect("BC decode");
+
+            assert_eq!(software.len(), decoded.rgba.len());
+            for (actual, expected) in software.iter().zip(decoded.rgba.iter()) {
+                assert!(
+                    actual.abs_diff(*expected) <= 8,
+                    "format {format:?}: {actual} != {expected}"
+                );
+            }
+        }
+    }
+
+    fn solid_bc1_color_block(color: u16) -> Vec<u8> {
+        let mut block = vec![0_u8; 8];
+        block[0..2].copy_from_slice(&color.to_le_bytes());
+        block
+    }
+
+    fn solid_bc2_color_block(color: u16, alpha_nibble: u8) -> Vec<u8> {
+        let mut block = vec![0_u8; 16];
+        let alpha_byte = (alpha_nibble & 0x0f) | ((alpha_nibble & 0x0f) << 4);
+        block[0..8].fill(alpha_byte);
+        block[8..10].copy_from_slice(&color.to_le_bytes());
+        block
+    }
+
+    fn solid_bc3_color_block(color: u16, alpha: u8) -> Vec<u8> {
+        let mut block = vec![0_u8; 16];
+        block[0] = alpha;
+        block[1] = 0;
+        block[8..10].copy_from_slice(&color.to_le_bytes());
+        block
+    }
+
+    fn bc_vtf_bytes(width: u16, height: u16, format: VtfFormat, block: &[u8]) -> Vec<u8> {
+        fixture_vtf_bytes(width, height, format, &[block])
+    }
+}

@@ -372,3 +372,447 @@ pub(super) fn remapped_material_slot(
         .map_or(material_index, |&remapped| usize::from(remapped));
     slot.min(material_count.saturating_sub(1))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mesh_plan_source(mesh_index: usize, map_skybox: bool, centroid: [f32; 3]) -> MeshPlanSource {
+        MeshPlanSource {
+            mesh_index,
+            scene_mesh_index: mesh_index,
+            material_index: 0,
+            bodygroup: 0,
+            bodygroup_choice: 0,
+            centroid,
+            map_skybox,
+            door_index: None,
+            door_visibility: None,
+        }
+    }
+
+    fn overlay_plan_source(
+        overlay_index: usize,
+        map_skybox: bool,
+        centroid: [f32; 3],
+    ) -> OverlayPlanSource {
+        OverlayPlanSource {
+            overlay_index,
+            material_index: 0,
+            centroid,
+            map_skybox,
+        }
+    }
+
+    #[test]
+    fn water_meshes_are_partitioned_and_sorted_back_to_front() {
+        let meshes = [
+            mesh_plan_source(0, false, [1.0, 0.0, 0.0]),
+            MeshPlanSource {
+                mesh_index: 1,
+                material_index: 1,
+                centroid: [2.0, 0.0, 0.0],
+                ..mesh_plan_source(1, false, [2.0, 0.0, 0.0])
+            },
+            MeshPlanSource {
+                mesh_index: 2,
+                material_index: 1,
+                centroid: [4.0, 0.0, 0.0],
+                ..mesh_plan_source(2, false, [4.0, 0.0, 0.0])
+            },
+            MeshPlanSource {
+                mesh_index: 3,
+                material_index: 2,
+                centroid: [3.0, 0.0, 0.0],
+                ..mesh_plan_source(3, false, [3.0, 0.0, 0.0])
+            },
+        ];
+        let render_modes = [
+            RenderMode::Opaque,
+            RenderMode::Translucent,
+            RenderMode::Translucent,
+        ];
+        let water_fallbacks = [false, true, false];
+
+        let plans = prepare_draw_plans_from_sources(
+            DrawPlanSourceSlices {
+                meshes: &meshes,
+                overlays: &[],
+                materials: DrawPlanMaterials {
+                    render_modes: &render_modes,
+                    water_fallbacks: &water_fallbacks,
+                    material_count: 3,
+                },
+            },
+            DrawPlanRequest {
+                content_id: 7,
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0; 4],
+                map_skybox_visible: false,
+                map_skybox_content_present: false,
+                map_skybox_camera_position: None,
+                visibility_plan: None,
+            },
+        );
+
+        assert_eq!(
+            plans
+                .world
+                .opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            plans
+                .world
+                .water
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            plans
+                .world
+                .translucent
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+    }
+
+    #[test]
+    fn map_skybox_disabled_omits_skybox_sets_from_draw_plans() {
+        let meshes = [
+            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
+            mesh_plan_source(1, true, [10.0, 0.0, 0.0]),
+        ];
+        let overlays = [overlay_plan_source(0, true, [12.0, 0.0, 0.0])];
+        let render_modes = [RenderMode::Opaque];
+        let plans = prepare_draw_plans_from_sources(
+            DrawPlanSourceSlices {
+                meshes: &meshes,
+                overlays: &overlays,
+                materials: DrawPlanMaterials {
+                    render_modes: &render_modes,
+                    water_fallbacks: &[],
+                    material_count: 1,
+                },
+            },
+            DrawPlanRequest {
+                content_id: 7,
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0, 0.0, 0.0, 0.0],
+                map_skybox_visible: false,
+                map_skybox_content_present: true,
+                map_skybox_camera_position: Some([1.0, 0.0, 0.0, 0.0]),
+                visibility_plan: None,
+            },
+        );
+
+        assert_eq!(plans.content_id, 7);
+        assert_eq!(
+            plans
+                .world
+                .opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert!(plans.world.overlay_opaque.is_empty());
+        assert!(plans.map_skybox.is_none());
+    }
+
+    #[test]
+    fn missing_sky_camera_omits_composite_plan() {
+        let meshes = [mesh_plan_source(0, true, [10.0, 0.0, 0.0])];
+        let render_modes = [RenderMode::Opaque];
+        let plans = prepare_draw_plans_from_sources(
+            DrawPlanSourceSlices {
+                meshes: &meshes,
+                overlays: &[],
+                materials: DrawPlanMaterials {
+                    render_modes: &render_modes,
+                    water_fallbacks: &[],
+                    material_count: 1,
+                },
+            },
+            DrawPlanRequest {
+                content_id: 7,
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0, 0.0, 0.0, 0.0],
+                map_skybox_visible: true,
+                map_skybox_content_present: true,
+                map_skybox_camera_position: None,
+                visibility_plan: None,
+            },
+        );
+
+        assert!(plans.world.opaque.is_empty());
+        assert!(plans.map_skybox.is_none());
+    }
+
+    #[test]
+    fn empty_skybox_partition_omits_composite_plan() {
+        let meshes = [mesh_plan_source(0, false, [0.0, 0.0, 0.0])];
+        let render_modes = [RenderMode::Opaque];
+        let plans = prepare_draw_plans_from_sources(
+            DrawPlanSourceSlices {
+                meshes: &meshes,
+                overlays: &[],
+                materials: DrawPlanMaterials {
+                    render_modes: &render_modes,
+                    water_fallbacks: &[],
+                    material_count: 1,
+                },
+            },
+            DrawPlanRequest {
+                content_id: 7,
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0, 0.0, 0.0, 0.0],
+                map_skybox_visible: true,
+                map_skybox_content_present: false,
+                map_skybox_camera_position: Some([1.0, 0.0, 0.0, 0.0]),
+                visibility_plan: None,
+            },
+        );
+
+        assert_eq!(plans.world.opaque.len(), 1);
+        assert!(plans.map_skybox.is_none());
+    }
+
+    #[test]
+    fn visibility_plan_filters_world_meshes_but_off_path_draws_everything() {
+        let meshes = [
+            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
+            mesh_plan_source(1, false, [10.0, 0.0, 0.0]),
+        ];
+        let render_modes = [RenderMode::Opaque];
+        let visibility = WorldVisibilityPlan {
+            mesh_indices: vec![vec![0, 1, 2], Vec::new()],
+            overlay_visible: Vec::new(),
+            detail_sprite_visible: Vec::new(),
+            visible_clusters: vec![true],
+            visible_cluster_count: 1,
+        };
+
+        let off = prepare_draw_plans_from_sources(
+            DrawPlanSourceSlices {
+                meshes: &meshes,
+                overlays: &[],
+                materials: DrawPlanMaterials {
+                    render_modes: &render_modes,
+                    water_fallbacks: &[],
+                    material_count: 1,
+                },
+            },
+            DrawPlanRequest {
+                content_id: 7,
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0, 0.0, 0.0, 0.0],
+                map_skybox_visible: false,
+                map_skybox_content_present: false,
+                map_skybox_camera_position: None,
+                visibility_plan: None,
+            },
+        );
+        let on = prepare_draw_plans_from_sources(
+            DrawPlanSourceSlices {
+                meshes: &meshes,
+                overlays: &[],
+                materials: DrawPlanMaterials {
+                    render_modes: &render_modes,
+                    water_fallbacks: &[],
+                    material_count: 1,
+                },
+            },
+            DrawPlanRequest {
+                content_id: 7,
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0, 0.0, 0.0, 0.0],
+                map_skybox_visible: false,
+                map_skybox_content_present: false,
+                map_skybox_camera_position: None,
+                visibility_plan: Some(&visibility),
+            },
+        );
+
+        assert_eq!(
+            off.world
+                .opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            on.world
+                .opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn visibility_plan_lookup_uses_scene_index_not_upload_index() {
+        // Empty-index meshes are dropped at upload, so upload position and
+        // scene position diverge; the plan is keyed by scene position.
+        // Scene mesh 1 was dropped: the surviving upload slot 1 holds scene
+        // mesh 2, whose plan entry is visible while scene mesh 1's is not.
+        let meshes = [
+            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
+            MeshPlanSource {
+                mesh_index: 1,
+                scene_mesh_index: 2,
+                material_index: 0,
+                bodygroup: 0,
+                bodygroup_choice: 0,
+                centroid: [10.0, 0.0, 0.0],
+                map_skybox: false,
+                door_index: None,
+                door_visibility: None,
+            },
+        ];
+        let render_modes = [RenderMode::Opaque];
+        let visibility = WorldVisibilityPlan {
+            mesh_indices: vec![vec![0, 1, 2], Vec::new(), vec![3, 4, 5]],
+            overlay_visible: Vec::new(),
+            detail_sprite_visible: Vec::new(),
+            visible_clusters: vec![true],
+            visible_cluster_count: 1,
+        };
+
+        let on = prepare_draw_plans_from_sources(
+            DrawPlanSourceSlices {
+                meshes: &meshes,
+                overlays: &[],
+                materials: DrawPlanMaterials {
+                    render_modes: &render_modes,
+                    water_fallbacks: &[],
+                    material_count: 1,
+                },
+            },
+            DrawPlanRequest {
+                content_id: 7,
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0, 0.0, 0.0, 0.0],
+                map_skybox_visible: false,
+                map_skybox_content_present: false,
+                map_skybox_camera_position: None,
+                visibility_plan: Some(&visibility),
+            },
+        );
+
+        assert_eq!(
+            on.world
+                .opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn visibility_plan_filters_door_meshes_by_bucket_not_scene_index() {
+        let meshes = [
+            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
+            MeshPlanSource {
+                mesh_index: 1,
+                scene_mesh_index: usize::MAX,
+                material_index: 0,
+                bodygroup: 0,
+                bodygroup_choice: 0,
+                centroid: [10.0, 0.0, 0.0],
+                map_skybox: false,
+                door_index: Some(0),
+                door_visibility: Some(MapVisibilityBucket::Cluster(1)),
+            },
+        ];
+        let render_modes = [RenderMode::Opaque];
+        let hidden = WorldVisibilityPlan {
+            mesh_indices: vec![vec![0, 1, 2]],
+            overlay_visible: Vec::new(),
+            detail_sprite_visible: Vec::new(),
+            visible_clusters: vec![true, false],
+            visible_cluster_count: 1,
+        };
+        let visible = WorldVisibilityPlan {
+            visible_clusters: vec![true, true],
+            visible_cluster_count: 2,
+            ..hidden.clone()
+        };
+
+        let plan = |visibility_plan| {
+            prepare_draw_plans_from_sources(
+                DrawPlanSourceSlices {
+                    meshes: &meshes,
+                    overlays: &[],
+                    materials: DrawPlanMaterials {
+                        render_modes: &render_modes,
+                        water_fallbacks: &[],
+                        material_count: 1,
+                    },
+                },
+                DrawPlanRequest {
+                    content_id: 7,
+                    selection: DrawPlanSelection {
+                        skin_remap: &[],
+                        bodygroup_choices: &[],
+                    },
+                    camera_position: [0.0, 0.0, 0.0, 0.0],
+                    map_skybox_visible: false,
+                    map_skybox_content_present: false,
+                    map_skybox_camera_position: None,
+                    visibility_plan: Some(visibility_plan),
+                },
+            )
+        };
+
+        assert_eq!(
+            plan(&hidden)
+                .world
+                .opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            plan(&visible)
+                .world
+                .opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+}

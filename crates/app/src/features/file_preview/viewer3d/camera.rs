@@ -1697,7 +1697,8 @@ impl shader::Program<Message> for FlyViewer {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlyCamera, LAND_BOB_DURATION, MovementMode, WalkHull, WaterLevel};
+    use super::super::test_support::empty_preview;
+    use super::*;
 
     /// Three sites leave walk mode, and a field missed by one of them is
     /// silent: dropping `walk_bob_phase` carries the previous walk's head-bob
@@ -1738,5 +1739,675 @@ mod tests {
         assert!(camera.duck_view_animation.is_none());
         assert!(!camera.duck_reconcile_requested);
         assert_eq!(camera.move_factor, 0.0);
+    }
+    fn floor_scene() -> ModelPreview {
+        let mut scene = empty_preview([0.0; 3], [1024.0; 3]);
+        scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
+            [-4096.0, -4096.0, -64.0],
+            [4096.0, 4096.0, 0.0],
+        ));
+        scene
+    }
+
+    fn deep_water_scene() -> ModelPreview {
+        let mut scene = empty_preview([-512.0, -512.0, -320.0], [512.0, 512.0, 256.0]);
+        scene.walk_collision = Some(
+            MapWalkCollision::solid_box_for_tests(
+                [-4096.0, -4096.0, -320.0],
+                [4096.0, 4096.0, -256.0],
+            )
+            .with_water_box_for_tests([-4096.0, -4096.0, -256.0], [4096.0, 4096.0, 100.0]),
+        );
+        scene
+    }
+
+    fn walk_camera(position: [f32; 3], grounded: bool) -> FlyCamera {
+        FlyCamera {
+            content_id: Some(1),
+            position: Some(position),
+            mode: MovementMode::Walk,
+            grounded,
+            ..FlyCamera::default()
+        }
+    }
+
+    fn horizontal_distance_from(position: [f32; 3], origin: [f32; 3]) -> f32 {
+        ((position[0] - origin[0]).powi(2) + (position[1] - origin[1]).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn walk_standing_on_the_floor_can_move_and_jump() {
+        let scene = floor_scene();
+
+        // Resting contact: hull bottom a hair above the floor plane — the
+        // state every landing converges to (hit traces back the mover off
+        // by the plane epsilon, so a grounded player rests at that
+        // separation, never at mathematically exact contact).
+        let mut camera = walk_camera([512.0, 512.0, 64.1], true);
+
+        camera.held.forward = true;
+        for _ in 0..30 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+        }
+        let after_walk = camera.position.expect("position retained");
+        let walked = horizontal_distance_from(after_walk, [512.0, 512.0, 64.1]);
+        assert!(
+            walked > 30.0,
+            "half a second of held-forward must actually move the player, moved {walked}"
+        );
+        assert!(camera.grounded, "walking on flat ground must stay grounded");
+
+        camera.held.forward = false;
+        camera.request_jump();
+        let ground_z = after_walk[2];
+        let mut apex = ground_z;
+        let mut left_ground = false;
+        for _ in 0..120 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+            let z = camera.position.expect("position retained")[2];
+            apex = apex.max(z);
+            left_ground |= !camera.grounded;
+        }
+        assert!(left_ground, "jump must leave the ground");
+        assert!(
+            apex > ground_z + 20.0,
+            "jump apex should clear ~45 units, got {}",
+            apex - ground_z
+        );
+        assert!(camera.grounded, "jump must land again within two seconds");
+    }
+
+    #[test]
+    fn walk_falling_into_deep_water_stops_falling() {
+        let scene = deep_water_scene();
+        let mut camera = walk_camera([0.0, 0.0, 180.0], false);
+
+        for _ in 0..180 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+        }
+
+        assert!(camera.water.is_swimming());
+        assert!(!camera.grounded);
+        assert!(camera.position.expect("swimmer position")[2] > 40.0);
+        assert!(camera.walk_velocity[2].abs() < 0.1);
+    }
+
+    #[test]
+    fn walk_swimming_forward_uses_view_pitch() {
+        let scene = deep_water_scene();
+        let mut camera = walk_camera([0.0, 0.0, 64.0], false);
+        camera.pitch = -0.6;
+        camera.held.forward = true;
+
+        for _ in 0..60 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+        }
+
+        let position = camera.position.expect("swimmer position");
+        assert!(
+            position[0] > 50.0,
+            "forward swim should advance: {position:?}"
+        );
+        assert!(
+            position[2] < 20.0,
+            "downward pitch should dive: {position:?}"
+        );
+        assert!(camera.submerged());
+    }
+
+    #[test]
+    fn walk_motionless_floating_swimmer_goes_idle_within_two_seconds() {
+        let scene = deep_water_scene();
+        let mut camera = walk_camera([0.0, 0.0, 64.0], false);
+        camera.walk_velocity = [120.0, 0.0, -30.0];
+
+        for _ in 0..120 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+            if !camera.needs_movement_tick() {
+                break;
+            }
+        }
+
+        assert!(camera.water.is_swimming());
+        assert_eq!(camera.walk_velocity, [0.0; 3]);
+        assert!(!camera.needs_movement_tick());
+    }
+
+    #[test]
+    fn walk_swimming_exit_assist_climbs_pool_ledge() {
+        let mut scene = empty_preview([-256.0, -256.0, -128.0], [256.0, 256.0, 160.0]);
+        scene.walk_collision = Some(
+            MapWalkCollision::solid_box_for_tests(
+                [-4096.0, -4096.0, -128.0],
+                [4096.0, 4096.0, -64.0],
+            )
+            .with_solid_box_for_tests([48.0, -128.0, -64.0], [256.0, 128.0, 82.0])
+            .with_water_box_for_tests([-256.0, -128.0, -64.0], [48.0, 128.0, 64.0]),
+        );
+        let mut camera = walk_camera([0.0, 0.0, 68.0], false);
+        camera.held.forward = true;
+
+        for _ in 0..240 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+            if camera.grounded && camera.position.is_some_and(|position| position[2] > 145.0) {
+                break;
+            }
+        }
+
+        let position = camera.position.expect("walker position");
+        assert!(
+            camera.grounded,
+            "exit assist should finish grounded: {camera:?}"
+        );
+        assert!(
+            position[0] > 32.0,
+            "exit assist should clear the ledge: {position:?}"
+        );
+        assert!(
+            position[2] > 145.0,
+            "hull should stand on the ledge: {position:?}"
+        );
+    }
+
+    #[test]
+    fn walk_entering_water_suppresses_land_bob() {
+        let scene = deep_water_scene();
+        let mut camera = walk_camera([0.0, 0.0, 64.0], false);
+        camera.walk_velocity[2] = -240.0;
+        camera.land_bob_elapsed = 0.05;
+        camera.land_bob_amplitude = LAND_BOB_AMPLITUDE;
+
+        let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+
+        assert!(camera.water.is_swimming());
+        assert_eq!(camera.land_bob_amplitude, 0.0);
+        assert_eq!(camera.view_bob_offset(), 0.0);
+    }
+
+    #[test]
+    fn walk_sprint_covers_more_ground_than_walking() {
+        let scene = floor_scene();
+        let run = |sprint: bool| {
+            let mut camera = walk_camera([512.0, 512.0, 64.1], true);
+            camera.held.forward = true;
+            camera.held.fast = sprint;
+            for _ in 0..60 {
+                let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+            }
+            let position = camera.position.expect("position retained");
+            horizontal_distance_from(position, [512.0, 512.0, 64.1])
+        };
+        let walked = run(false);
+        let sprinted = run(true);
+        assert!(
+            sprinted > walked * 1.4,
+            "shift must sprint: walked {walked}, sprinted {sprinted}"
+        );
+    }
+
+    #[test]
+    fn walk_toggle_at_exact_floor_contact_unsticks_and_walks() {
+        let scene = floor_scene();
+
+        // Mappers place info_player_start exactly on the floor, so the
+        // hull starts at mathematically exact contact — the trace calls
+        // that solid even though the embed check does not. Toggling walk
+        // here must unstick and produce a mover that actually moves.
+        let mut camera = FlyCamera {
+            content_id: Some(1),
+            position: Some([512.0, 512.0, 64.0]),
+            ..FlyCamera::default()
+        };
+        camera.toggle_walk(&scene);
+        assert_eq!(camera.mode, MovementMode::Walk, "toggle must engage walk");
+
+        camera.held.forward = true;
+        for _ in 0..90 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+        }
+        assert!(camera.grounded, "must settle onto the floor");
+        let position = camera.position.expect("position retained");
+        let walked = horizontal_distance_from(position, [512.0, 512.0, 64.0]);
+        assert!(
+            walked > 30.0,
+            "held-forward from an exact-contact spawn must move, moved {walked}"
+        );
+    }
+
+    #[test]
+    fn walk_crouch_enters_low_gap_and_refuses_blocked_unduck() {
+        let mut scene = empty_preview([-128.0, -128.0, 0.0], [256.0, 128.0, 128.0]);
+        scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
+            [80.0, -64.0, 40.0],
+            [160.0, 64.0, 128.0],
+        ));
+        let collision = scene.walk_collision.as_ref().expect("collision fixture");
+
+        let mut standing = walk_camera([0.0, 0.0, PLAYER_START_EYE_NUDGE], true);
+        standing.move_walk_delta(collision, [140.0, 0.0, 0.0], true);
+        assert!(
+            standing.position.expect("standing position")[0] < 70.0,
+            "standing hull must not enter a 40-unit gap"
+        );
+
+        let mut camera = walk_camera([0.0, 0.0, PLAYER_START_EYE_NUDGE], true);
+        camera.held.duck = true;
+        camera.reconcile_duck_state(collision);
+        assert_eq!(camera.walk_hull, WalkHull::Ducked);
+        assert_eq!(
+            camera.position.expect("ducked position")[2],
+            WALK_DUCK_EYE_HEIGHT
+        );
+
+        camera.move_walk_delta(collision, [140.0, 0.0, 0.0], true);
+        let under_ceiling = camera.position.expect("under ceiling");
+        assert!(
+            under_ceiling[0] > 120.0,
+            "ducked hull must pass under the 40-unit ceiling"
+        );
+
+        camera.held.duck = false;
+        camera.reconcile_duck_state(collision);
+        assert_eq!(camera.walk_hull, WalkHull::Ducked);
+        assert_eq!(
+            camera.position.expect("blocked unduck keeps eye")[2],
+            under_ceiling[2],
+            "blocked unduck must leave the physics eye low"
+        );
+
+        camera.move_walk_delta(collision, [100.0, 0.0, 0.0], true);
+        camera.reconcile_duck_state(collision);
+        assert_eq!(camera.walk_hull, WalkHull::Standing);
+        assert!(
+            (camera.position.expect("standing again")[2] - PLAYER_START_EYE_NUDGE).abs() < 1.0e-4,
+            "unduck outside the ceiling must restore standing eye height"
+        );
+    }
+
+    #[test]
+    fn walk_step_rejects_zero_horizontal_progress_at_backed_off_wall_contact() {
+        let collision =
+            MapWalkCollision::solid_box_for_tests([80.0, -64.0, 0.0], [120.0, 64.0, 128.0]);
+        let mut camera = walk_camera(
+            [
+                80.0 - WALK_HULL_HALF_EXTENTS[0] - 0.03125,
+                0.0,
+                PLAYER_START_EYE_NUDGE,
+            ],
+            true,
+        );
+        let start = camera.position.expect("walk position");
+
+        assert!(
+            !camera.try_step(&collision, start, [120.0, 0.0, 0.0]),
+            "a step attempt that cannot move forward must fall back to slide/clip handling"
+        );
+        assert_eq!(camera.position, Some(start));
+    }
+
+    #[test]
+    fn walk_crouch_jump_pulls_feet_up_to_clear_obstacle() {
+        let mut scene = empty_preview([-128.0, -128.0, 0.0], [256.0, 128.0, 128.0]);
+        scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
+            [60.0, -32.0, 0.0],
+            [90.0, 32.0, 64.0],
+        ));
+        let collision = scene.walk_collision.as_ref().expect("collision fixture");
+
+        let mut jumper = walk_camera([0.0, 0.0, PLAYER_START_EYE_NUDGE], true);
+        jumper.request_jump();
+        for _ in 0..24 {
+            jumper.integrate_walk_step(collision, 1.0 / 60.0);
+            if jumper.walk_velocity[2] <= 0.0 {
+                break;
+            }
+        }
+        let apex = jumper.position.expect("jump apex");
+        assert!(apex[2] > 100.0, "jump fixture should reach obstacle height");
+
+        let mut standing = walk_camera(apex, false);
+        standing.move_walk_delta(collision, [140.0, 0.0, 0.0], false);
+        assert!(
+            standing.position.expect("standing air move")[0] < 50.0,
+            "standing jump must hit the obstacle"
+        );
+
+        let mut ducked = walk_camera(apex, false);
+        ducked.held.duck = true;
+        ducked.reconcile_duck_state(collision);
+        assert_eq!(
+            ducked.position.expect("air duck keeps eye"),
+            apex,
+            "air duck must shrink toward the eye, not lower it"
+        );
+        assert_eq!(ducked.walk_hull, WalkHull::Ducked);
+
+        ducked.move_walk_delta(collision, [140.0, 0.0, 0.0], false);
+        assert!(
+            ducked.position.expect("ducked air move")[0] > 120.0,
+            "ducked jump must pull feet above the obstacle"
+        );
+    }
+
+    #[test]
+    fn walk_ducked_speed_is_one_third_and_overrides_sprint() {
+        let scene = floor_scene();
+        let run = |duck: bool, sprint: bool| {
+            let mut camera = walk_camera([512.0, 512.0, 64.1], true);
+            camera.held.forward = true;
+            camera.held.duck = duck;
+            camera.held.fast = sprint;
+            for _ in 0..60 {
+                let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+            }
+            horizontal_distance_from(
+                camera.position.expect("position retained"),
+                [512.0, 512.0, 64.1],
+            )
+        };
+
+        let walked = run(false, false);
+        let ducked = run(true, false);
+        let duck_sprinted = run(true, true);
+        assert!(
+            ((ducked / walked) - (1.0 / 3.0)).abs() < 0.03,
+            "ducked speed must be one third of walk: walked {walked}, ducked {ducked}"
+        );
+        assert!(
+            (duck_sprinted - ducked).abs() < 0.5,
+            "duck must override sprint: ducked {ducked}, duck+sprint {duck_sprinted}"
+        );
+    }
+
+    #[test]
+    fn walk_duck_view_animation_terminates_and_goes_idle() {
+        let scene = floor_scene();
+        let mut camera = walk_camera([512.0, 512.0, 64.1], true);
+        camera.held.duck = true;
+        camera.duck_reconcile_requested = true;
+
+        assert!(camera.needs_movement_tick());
+        for _ in 0..20 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+        }
+
+        assert_eq!(camera.walk_hull, WalkHull::Ducked);
+        assert!(
+            !camera.duck_view_transition_active(),
+            "duck view interpolation must finish after >0.2s"
+        );
+        assert!(
+            !camera.needs_movement_tick(),
+            "settled crouch with no movement must not keep the tick loop alive"
+        );
+    }
+
+    #[test]
+    fn default_walk_entry_settles_grounded_and_goes_idle() {
+        let scene = floor_scene();
+        let spawn = MapSpawn {
+            origin: [512.0, 512.0, 0.0],
+            angles: [0.0, 90.0, 0.0],
+        };
+        let mut camera = FlyCamera::default();
+
+        camera.ensure_spawn(&scene, Some(spawn), 7, None, None);
+
+        assert_eq!(camera.mode, MovementMode::Walk);
+        assert!(!camera.grounded, "default walk entry starts airborne");
+        for _ in 0..240 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+            if !camera.needs_movement_tick() {
+                break;
+            }
+        }
+        assert_eq!(camera.mode, MovementMode::Walk);
+        assert!(camera.grounded, "spawned walker must settle to ground");
+        assert!(
+            !camera.needs_movement_tick(),
+            "settled default-walk spawn must reach idle"
+        );
+    }
+
+    #[test]
+    fn restored_walk_mode_reenters_walk_from_pose() {
+        let scene = floor_scene();
+        let pose = FlyPose {
+            position: [512.0, 512.0, 128.0],
+            yaw: 0.5,
+            pitch: -0.25,
+            speed: 1.75,
+        };
+        let mut camera = FlyCamera::default();
+
+        camera.ensure_spawn(&scene, None, 7, Some(pose), Some(MovementMode::Walk));
+
+        assert_eq!(camera.pose(), Some(pose));
+        assert_eq!(camera.mode, MovementMode::Walk);
+        assert!(
+            !camera.grounded,
+            "walk restore must resume gravity from pose"
+        );
+    }
+
+    #[test]
+    fn restored_fly_mode_keeps_fly_pose() {
+        let scene = floor_scene();
+        let pose = FlyPose {
+            position: [512.0, 512.0, 128.0],
+            yaw: 0.5,
+            pitch: -0.25,
+            speed: 1.75,
+        };
+        let mut camera = FlyCamera::default();
+
+        camera.ensure_spawn(&scene, None, 7, Some(pose), Some(MovementMode::Fly));
+
+        assert_eq!(camera.pose(), Some(pose));
+        assert_eq!(camera.mode, MovementMode::Fly);
+    }
+
+    #[test]
+    fn absent_mode_with_legacy_pose_defaults_to_walk_at_spawn() {
+        let scene = floor_scene();
+        let legacy_pose = FlyPose {
+            position: [128.0, 256.0, 384.0],
+            yaw: 0.5,
+            pitch: -0.25,
+            speed: 2.0,
+        };
+        let spawn = MapSpawn {
+            origin: [512.0, 512.0, 0.0],
+            angles: [0.0, 90.0, 0.0],
+        };
+        let mut camera = FlyCamera::default();
+
+        camera.ensure_spawn(&scene, Some(spawn), 7, Some(legacy_pose), None);
+
+        let pose = camera.pose().expect("spawn should initialize camera");
+        assert_eq!(camera.mode, MovementMode::Walk);
+        assert_eq!(
+            [pose.position[0], pose.position[1]],
+            [512.0, 512.0],
+            "legacy pose-only state must not suppress spawn walk default"
+        );
+        assert_ne!(pose.position, legacy_pose.position);
+        assert!((pose.yaw - 90.0_f32.to_radians()).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn direct_mode_selection_matches_v_toggle_selector() {
+        let scene = floor_scene();
+        let pose = FlyPose {
+            position: [512.0, 512.0, 128.0],
+            yaw: 0.5,
+            pitch: -0.25,
+            speed: 1.75,
+        };
+
+        let mut via_toggle = FlyCamera::default();
+        via_toggle.ensure_spawn(&scene, None, 7, Some(pose), Some(MovementMode::Fly));
+        assert!(via_toggle.toggle_walk(&scene));
+
+        let mut via_select = FlyCamera::default();
+        via_select.ensure_spawn(&scene, None, 7, Some(pose), Some(MovementMode::Fly));
+        assert!(via_select.select_mode(&scene, MovementMode::Walk));
+
+        assert_eq!(via_toggle.mode, via_select.mode);
+        assert_eq!(via_toggle.pose(), via_select.pose());
+        assert_eq!(via_toggle.grounded, via_select.grounded);
+        assert_eq!(
+            via_toggle.needs_movement_tick(),
+            via_select.needs_movement_tick()
+        );
+    }
+
+    #[test]
+    fn default_walk_entry_falls_back_without_spawn_or_collision() {
+        let scene = floor_scene();
+        let mut camera = FlyCamera::default();
+        camera.ensure_spawn(&scene, None, 7, None, None);
+        assert_eq!(camera.mode, MovementMode::Fly);
+
+        let no_collision = empty_preview([0.0; 3], [1024.0; 3]);
+        let spawn = MapSpawn {
+            origin: [512.0, 512.0, 0.0],
+            angles: [0.0; 3],
+        };
+        let mut camera = FlyCamera::default();
+        camera.ensure_spawn(&no_collision, Some(spawn), 7, None, None);
+        assert_eq!(camera.mode, MovementMode::Fly);
+    }
+
+    #[test]
+    fn default_walk_entry_falls_back_when_spawn_remains_solid() {
+        let mut scene = empty_preview([-1024.0; 3], [1024.0; 3]);
+        scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
+            [-1024.0, -1024.0, -1024.0],
+            [1024.0, 1024.0, 1024.0],
+        ));
+        let spawn = MapSpawn {
+            origin: [0.0; 3],
+            angles: [0.0; 3],
+        };
+        let mut camera = FlyCamera::default();
+
+        camera.ensure_spawn(&scene, Some(spawn), 7, None, None);
+
+        assert_eq!(camera.mode, MovementMode::Fly);
+        assert_eq!(
+            camera.position.expect("fly fallback position"),
+            [0.0, 0.0, PLAYER_START_EYE_NUDGE]
+        );
+    }
+
+    #[test]
+    fn walk_falling_into_the_void_reverts_to_fly_and_goes_idle() {
+        let mut scene = empty_preview([0.0; 3], [1024.0; 3]);
+        // Non-empty collision (walk mode refuses to engage otherwise), but
+        // nothing anywhere near the camera — an endless fall.
+        scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
+            [4000.0, 4000.0, 0.0],
+            [4100.0, 4100.0, 100.0],
+        ));
+
+        let mut camera = FlyCamera {
+            content_id: Some(1),
+            position: Some([512.0, 512.0, 2048.0]),
+            mode: MovementMode::Walk,
+            ..FlyCamera::default()
+        };
+
+        assert!(camera.needs_movement_tick(), "airborne walker must tick");
+        for _ in 0..600 {
+            let _ = camera.integrate(&scene, 1, 1.0 / 60.0);
+            if camera.mode == MovementMode::Fly {
+                break;
+            }
+        }
+        assert_eq!(
+            camera.mode,
+            MovementMode::Fly,
+            "endless fall must hand the camera back to fly"
+        );
+        assert!(
+            !camera.needs_movement_tick(),
+            "after the void failsafe the redraw loop must go idle"
+        );
+        let position = camera.position.expect("position retained");
+        assert!(position[2].is_finite());
+    }
+
+    #[test]
+    fn orbit_camera_fresh_state_seeds_from_pose() {
+        let mut camera = Camera::default();
+        let pose = OrbitPose {
+            yaw: 1.25,
+            pitch: -0.75,
+            distance: 3.5,
+        };
+
+        camera.ensure_spawn(7, Some(pose));
+
+        assert_eq!(camera.content_id, Some(7));
+        assert_eq!(camera.pose(), pose);
+    }
+
+    #[test]
+    fn orbit_camera_without_pose_uses_default_framing() {
+        let mut camera = Camera {
+            content_id: None,
+            orbit: crate::features::file_preview::orbit::Orbit::from_pose(
+                OrbitPose {
+                    yaw: 9.0,
+                    pitch: -9.0,
+                    distance: 4.0,
+                },
+                crate::features::file_preview::orbit::ZoomFloor::SolidMesh,
+            ),
+            drag_from: Some(Point::new(1.0, 2.0)),
+        };
+
+        camera.ensure_spawn(7, None);
+
+        assert_eq!(camera.content_id, Some(7));
+        assert_eq!(camera.pose(), OrbitPose::default());
+        assert_eq!(camera.drag_from, None);
+    }
+
+    #[test]
+    fn fly_camera_fresh_state_seeds_from_pose() {
+        let scene = empty_preview([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0]);
+        let mut camera = FlyCamera::default();
+        let pose = FlyPose {
+            position: [3.0, 4.0, 5.0],
+            yaw: 1.25,
+            pitch: -0.75,
+            speed: 3.5,
+        };
+
+        camera.ensure_spawn(&scene, None, 7, Some(pose), Some(MovementMode::Fly));
+
+        assert_eq!(camera.content_id, Some(7));
+        assert_eq!(camera.pose(), Some(pose));
+    }
+
+    #[test]
+    fn fly_camera_without_pose_uses_map_spawn() {
+        let scene = empty_preview([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0]);
+        let mut camera = FlyCamera::default();
+        let spawn = MapSpawn {
+            origin: [1.0, 2.0, 3.0],
+            angles: [10.0, 90.0, 0.0],
+        };
+
+        camera.ensure_spawn(&scene, Some(spawn), 7, None, None);
+
+        let pose = camera.pose().expect("spawn should initialize fly pose");
+        assert_eq!(camera.content_id, Some(7));
+        assert_eq!(pose.position, [1.0, 2.0, 3.0 + PLAYER_START_EYE_NUDGE]);
+        assert!((pose.yaw - 90.0_f32.to_radians()).abs() < 1e-6);
+        assert!((pose.pitch - -10.0_f32.to_radians()).abs() < 1e-6);
+        assert_eq!(pose.speed, 1.0);
     }
 }

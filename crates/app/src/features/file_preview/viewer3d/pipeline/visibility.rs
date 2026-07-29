@@ -137,3 +137,46 @@ pub fn upload_visible_detail_sprites(
         vertex_count,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{VisibilityClusterState, VisibilityClusterTracker};
+
+    #[test]
+    fn visibility_tracker_rebuilds_only_when_cluster_changes() {
+        let mut tracker = VisibilityClusterTracker::default();
+        let mut probes = 0_u32;
+
+        assert_eq!(
+            tracker.update(true, [0.0, 0.0, 0.0], |_| {
+                probes = probes.saturating_add(1);
+                Some(3)
+            }),
+            Some(VisibilityClusterState::Cluster(3))
+        );
+        assert_eq!(tracker.rebuild_count, 1);
+        assert_eq!(
+            tracker.update(true, [1.0, 0.0, 0.0], |_| {
+                probes = probes.saturating_add(1);
+                Some(3)
+            }),
+            None
+        );
+        assert_eq!(tracker.rebuild_count, 1);
+        assert_eq!(
+            tracker.update(true, [1.0, 0.0, 0.0], |_| {
+                panic!("leaf lookup should not run without movement")
+            }),
+            None
+        );
+        assert_eq!(
+            tracker.update(true, [2.0, 0.0, 0.0], |_| {
+                probes = probes.saturating_add(1);
+                Some(4)
+            }),
+            Some(VisibilityClusterState::Cluster(4))
+        );
+        assert_eq!(tracker.rebuild_count, 2);
+        assert_eq!(probes, 3);
+    }
+}

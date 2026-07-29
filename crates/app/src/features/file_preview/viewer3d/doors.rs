@@ -403,3 +403,258 @@ pub(super) fn expand_bounds(
         ],
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::empty_preview;
+    use super::super::{
+        FlyCamera, FlyPose, MapVisibilityBucket, MapWalkCollision, ModelPreview, MovementMode,
+    };
+    use super::*;
+    use crate::features::file_preview::model::DoorSounds;
+
+    fn door_scene(doors: Vec<DoorInstance>) -> ModelPreview {
+        let mut scene = empty_preview([-128.0, -128.0, -128.0], [256.0, 128.0, 128.0]);
+        scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
+            [1000.0, 1000.0, 1000.0],
+            [1100.0, 1100.0, 1100.0],
+        ));
+        scene.doors = doors;
+        scene
+    }
+
+    fn test_linear_door(origin: [f32; 3], distance: f32) -> DoorInstance {
+        DoorInstance {
+            class: MapDoorClass::FuncDoor,
+            origin,
+            angles: [0.0; 3],
+            local_bounds_min: [0.0, -16.0, -32.0],
+            local_bounds_max: [8.0, 16.0, 32.0],
+            visibility: MapVisibilityBucket::Always,
+            initial_progress: 0.0,
+            // Stays open: the auto-close tests opt in explicitly.
+            auto_close_after: None,
+            motion: MapDoorMotion::Linear {
+                direction: [1.0, 0.0, 0.0],
+                distance,
+                speed: 100.0,
+            },
+            sounds: DoorSounds::default(),
+            meshes: Vec::new(),
+        }
+    }
+
+    fn test_door_sound(reference: &str) -> DoorSound {
+        DoorSound {
+            reference: reference.to_owned(),
+            sound_level: 75.0,
+            volume: 1.0,
+            waves: Vec::new(),
+        }
+    }
+
+    fn walk_camera_for_scene(scene: &ModelPreview, position: [f32; 3], yaw: f32) -> FlyCamera {
+        let mut camera = FlyCamera::default();
+        camera.ensure_spawn(
+            scene,
+            None,
+            1,
+            Some(FlyPose {
+                position,
+                yaw,
+                pitch: 0.0,
+                speed: 1.0,
+            }),
+            Some(MovementMode::Fly),
+        );
+        camera.mode = MovementMode::Walk;
+        camera.grounded = true;
+        camera
+    }
+
+    #[test]
+    fn door_toggle_reverses_mid_transition_and_then_goes_idle() {
+        let scene = door_scene(vec![test_linear_door([40.0, 0.0, 64.0], 100.0)]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+
+        assert!(matches!(
+            camera.toggle_nearest_door(&scene, 1),
+            Some(DoorAudioEvent {
+                kind: DoorAudioEventKind::MoveStarted,
+                ..
+            })
+        ));
+        assert_eq!(camera.doors[0].motion, DoorMotion::Moving);
+        let events = camera.integrate_doors(&scene, 1, 0.25);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.kind,
+                DoorAudioEventKind::MoveLoopVolumeChanged | DoorAudioEventKind::MotionEnded { .. }
+            )
+        }));
+        assert!(camera.doors[0].progress > 0.24 && camera.doors[0].progress < 0.26);
+        assert_eq!(camera.doors[0].target, DoorTarget::Open);
+
+        assert!(camera.toggle_nearest_door(&scene, 1).is_some());
+        assert_eq!(camera.doors[0].target, DoorTarget::Closed);
+        let _ = camera.integrate_doors(&scene, 1, 0.10);
+        assert!(
+            camera.doors[0].progress < 0.25,
+            "closing after a mid-transition toggle must reverse from the current pose"
+        );
+        for _ in 0..60 {
+            let _ = camera.integrate_doors(&scene, 1, 1.0 / 60.0);
+        }
+
+        assert_eq!(camera.doors[0].progress, 0.0);
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
+        assert!(
+            !camera.needs_movement_tick(),
+            "a settled door must not keep the redraw loop alive"
+        );
+    }
+
+    #[test]
+    fn an_opened_door_closes_itself_after_its_auto_close_delay() {
+        let mut door = test_linear_door([40.0, 0.0, 64.0], 100.0);
+        door.auto_close_after = Some(0.5);
+        let scene = door_scene(vec![door]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+
+        assert!(camera.toggle_nearest_door(&scene, 1).is_some());
+        let _ = camera.integrate_doors(&scene, 1, 2.0);
+        assert_eq!(camera.doors[0].progress, 1.0);
+        assert!(
+            matches!(camera.doors[0].motion, DoorMotion::HoldingOpen { .. }),
+            "an opened door with a wait holds before closing: {:?}",
+            camera.doors[0].motion
+        );
+        assert!(
+            camera.needs_movement_tick(),
+            "the hold needs frames or its timer never advances"
+        );
+
+        // Part-way through the hold nothing has moved yet.
+        let _ = camera.integrate_doors(&scene, 1, 0.3);
+        assert_eq!(camera.doors[0].progress, 1.0);
+
+        let events = camera.integrate_doors(&scene, 1, 0.3);
+        assert_eq!(camera.doors[0].target, DoorTarget::Closed);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == DoorAudioEventKind::MoveStarted),
+            "closing on its own sounds like any other close: {events:?}"
+        );
+
+        for _ in 0..120 {
+            let _ = camera.integrate_doors(&scene, 1, 1.0 / 60.0);
+        }
+        assert_eq!(camera.doors[0].progress, 0.0);
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
+    }
+
+    #[test]
+    fn a_door_with_no_auto_close_delay_stays_open() {
+        let scene = door_scene(vec![test_linear_door([40.0, 0.0, 64.0], 100.0)]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+
+        assert!(camera.toggle_nearest_door(&scene, 1).is_some());
+        let _ = camera.integrate_doors(&scene, 1, 2.0);
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
+
+        let _ = camera.integrate_doors(&scene, 1, 60.0);
+        assert_eq!(camera.doors[0].progress, 1.0);
+    }
+
+    #[test]
+    fn door_endpoint_goes_idle_and_emits_stop_event() {
+        let mut door = test_linear_door([40.0, 0.0, 64.0], 100.0);
+        door.sounds.stop_sound = Some(test_door_sound("doors/door1_stop.wav"));
+        let scene = door_scene(vec![door]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+
+        assert!(camera.toggle_nearest_door(&scene, 1).is_some());
+        assert_eq!(camera.doors[0].motion, DoorMotion::Moving);
+
+        let events = camera.integrate_doors(&scene, 1, 2.0);
+
+        assert_eq!(camera.doors[0].progress, 1.0);
+        assert_eq!(camera.doors[0].motion, DoorMotion::Idle);
+        assert!(events.iter().any(|event| {
+            event.door_index == 0
+                && event.gain > 0.0
+                && event.kind == (DoorAudioEventKind::MotionEnded { open: true })
+        }));
+    }
+
+    #[test]
+    fn blocked_closing_door_parks_and_emits_parked_event() {
+        let scene = door_scene(vec![test_linear_door([40.0, 0.0, 64.0], 100.0)]);
+        let mut camera = walk_camera_for_scene(&scene, [50.0, 0.0, 64.0], 0.0);
+        camera.doors[0].progress = 0.2;
+        camera.doors[0].target = DoorTarget::Closed;
+        camera.doors[0].motion = DoorMotion::Moving;
+        (camera.doors[0].bounds_min, camera.doors[0].bounds_max) =
+            door_world_bounds(&scene.doors[0], 0.2, DoorSwing::Positive);
+
+        let events = camera.integrate_doors(&scene, 1, 1.0 / 60.0);
+
+        assert_eq!(camera.doors[0].motion, DoorMotion::BlockedClosing);
+        assert!(
+            events
+                .iter()
+                .any(|event| { event.door_index == 0 && event.kind == DoorAudioEventKind::Parked })
+        );
+    }
+
+    #[test]
+    fn use_ray_picks_nearest_door_and_ignores_doors_beyond_reach() {
+        let scene = door_scene(vec![
+            test_linear_door([70.0, 0.0, 64.0], 32.0),
+            test_linear_door([40.0, 0.0, 64.0], 32.0),
+        ]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+
+        assert!(camera.toggle_nearest_door(&scene, 1).is_some());
+        assert_eq!(camera.doors[0].target, DoorTarget::Closed);
+        assert_eq!(camera.doors[1].target, DoorTarget::Open);
+        assert_eq!(camera.doors[1].motion, DoorMotion::Moving);
+
+        let far_scene = door_scene(vec![test_linear_door([90.0, 0.0, 64.0], 32.0)]);
+        let mut far_camera = walk_camera_for_scene(&far_scene, [0.0, 0.0, 64.0], 0.0);
+        assert!(
+            far_camera.toggle_nearest_door(&far_scene, 1).is_none(),
+            "use reach is capped at 80 Source units"
+        );
+        assert_eq!(far_camera.doors[0].target, DoorTarget::Closed);
+    }
+
+    #[test]
+    fn walk_trace_hits_door_at_current_mid_swing_pose() {
+        let scene = door_scene(vec![test_linear_door([40.0, 0.0, 64.0], 40.0)]);
+        let mut camera = walk_camera_for_scene(&scene, [0.0, 0.0, 64.0], 0.0);
+        camera.doors[0].progress = 0.5;
+        (camera.doors[0].bounds_min, camera.doors[0].bounds_max) =
+            door_world_bounds(&scene.doors[0], 0.5, DoorSwing::Positive);
+        let collision = scene.walk_collision.as_ref().expect("collision fixture");
+
+        let hit = camera.trace_aabb(collision, [50.0, 0.0, 64.0], [80.0, 0.0, 64.0], [1.0; 3]);
+
+        assert!(!hit.start_solid);
+        assert!(hit.fraction > 0.29 && hit.fraction < 0.31, "{hit:?}");
+        assert_eq!(hit.normal, [-1.0, 0.0, 0.0]);
+        assert!((hit.end_position[0] - 59.0).abs() < 1.0e-4, "{hit:?}");
+    }
+
+    #[test]
+    fn source_sound_gain_matches_documented_three_point_falloff() {
+        let near = source_sound_gain(64.0, 75.0);
+        let mid = source_sound_gain(750.0, 75.0);
+        let far = source_sound_gain(1500.0, 75.0);
+
+        assert_eq!(near, 1.0);
+        assert!(mid > 0.0 && mid < near);
+        assert_eq!(far, 0.0);
+    }
+}

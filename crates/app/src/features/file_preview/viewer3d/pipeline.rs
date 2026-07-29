@@ -28,16 +28,8 @@ mod uniforms;
 mod upload;
 mod visibility;
 
-#[cfg(test)]
-pub use materials::checkerboard_mip_levels;
-#[cfg(test)]
-pub use resources::skybox_face_corners;
 pub use uniforms::Uniforms;
-#[cfg(test)]
-pub use uniforms::average_srgb_rgba;
 pub use upload::UploadedModel;
-#[cfg(test)]
-pub use visibility::{VisibilityClusterState, VisibilityClusterTracker};
 
 use draw::{
     configure_scene_pass, draw_phy_debug_meshes, draw_scene_plan, draw_scene_plan_opaque,
@@ -476,7 +468,14 @@ impl shader::Pipeline for ModelPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawItem, DrawPlan, FrameLayout, frame_layout};
+    use iced::Point;
+
+    use super::super::test_support::empty_preview;
+    use super::{
+        Arc, Camera, DrawItem, DrawPlan, FrameLayout, MaterialSlot, MeshData, ModelPipeline,
+        ModelPrimitive, ModelVertex, Rectangle, RenderMode, Uniforms, Viewport, frame_layout,
+        shader, wgpu,
+    };
 
     #[test]
     fn frame_layout_splits_only_for_world_water() {
@@ -498,5 +497,247 @@ mod tests {
         );
         // Without the refractive pipeline, water stays on the single-pass path.
         assert_eq!(frame_layout(Some(&plan), false), FrameLayout::SinglePass);
+    }
+    /// Fragment shading must not flicker per pixel on meshes with a constant
+    /// white vertex color. Regression test for the `all(input.color ==
+    /// vec3(1.0))` exact float compare in `model_viewer.wgsl`: attribute
+    /// interpolation is not required to reproduce 1.0 exactly per fragment,
+    /// and on NVIDIA hardware the compare flickered pixel-by-pixel between
+    /// the ambient/diffuse and vertex-color-modulate branches, rendering
+    /// every textured surface as salt-and-pepper noise. Renders an angled
+    /// quad with constant color/UV through the real ModelPipeline and
+    /// asserts the interior shades uniformly. (Only catches the regression
+    /// on GPUs with inexact constant interpolation; exact GPUs pass either
+    /// way.)
+    #[test]
+    fn constant_white_vertex_color_shades_uniformly() {
+        const WIDTH: u32 = 512;
+        const HEIGHT: u32 = 384;
+
+        // GL only: naga's GLSL backend cannot translate the refractive water
+        // shader's `textureLoad` on a depth texture, so ModelPipeline::new
+        // panics on driverless machines (CI) that fall back to GL. Restrict
+        // to the primary backends and take the skip path instead.
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..wgpu::InstanceDescriptor::default()
+        });
+        let Ok(adapter) = futures::executor::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        ) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let (device, queue) =
+            futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("test.uniform_shading"),
+                ..wgpu::DeviceDescriptor::default()
+            }))
+            .expect("device");
+
+        // Desk-top-like angled quad: constant white color, constant UV, so
+        // every fragment must shade identically.
+        let vertex = |x: f32, y: f32| ModelVertex {
+            position: [x, y, 20.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.25, 0.25],
+            lightmap_uv: [0.0; 2],
+            color: [1.0; 3],
+            blend_alpha: 0.0,
+        };
+        let mesh = MeshData {
+            vertices: vec![
+                vertex(-48.0, -24.0),
+                vertex(48.0, -24.0),
+                vertex(48.0, 24.0),
+                vertex(-48.0, 24.0),
+            ],
+            // Both windings so the quad is visible regardless of which side
+            // the default orbit camera ends up on.
+            indices: vec![0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0],
+            material_index: 0,
+            bodygroup: 0,
+            bodygroup_choice: 0,
+        };
+        let mut preview = empty_preview([-48.0, -24.0, 0.0], [48.0, 24.0, 38.0]);
+        preview.meshes = vec![mesh];
+        preview.materials = vec![MaterialSlot {
+            name: "test".to_owned(),
+            texture: None,
+            texture2: None,
+            force_opaque: true,
+            render_mode: RenderMode::Opaque,
+        }];
+        let preview = Arc::new(preview);
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(WIDTH as f32, HEIGHT as f32));
+        let clip_bounds = Rectangle::<u32> {
+            x: 0,
+            y: 0,
+            width: WIDTH,
+            height: HEIGHT,
+        };
+        let viewport = Viewport::with_physical_size(iced::Size::new(WIDTH, HEIGHT), 1.0);
+        let mut camera = Camera::default();
+        camera.ensure_spawn(1, None);
+        let primitive = ModelPrimitive {
+            skin_remap: vec![0],
+            bodygroup_choices: Vec::new(),
+            map_skybox_visible: false,
+            visibility_culling: false,
+            phy_debug_visible: false,
+            uniforms: Uniforms::for_model(&preview, &camera, bounds),
+            submerged: false,
+            map_skybox_uniforms: None,
+            sky_uniforms: None,
+            door_poses: Vec::new(),
+            model: preview,
+            content_id: 1,
+        };
+        let mut pipeline_state = <ModelPipeline as shader::Pipeline>::new(&device, &queue, format);
+        shader::Primitive::prepare(
+            &primitive,
+            &mut pipeline_state,
+            &device,
+            &queue,
+            &bounds,
+            &viewport,
+        );
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test.uniform_shading.target"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("test.uniform_shading.clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        shader::Primitive::render(
+            &primitive,
+            &pipeline_state,
+            &mut encoder,
+            &target_view,
+            &clip_bounds,
+        );
+        let padded_row = (WIDTH * 4).div_ceil(256) * 256;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.uniform_shading.readback"),
+            size: u64::from(padded_row) * u64::from(HEIGHT),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        receiver
+            .recv()
+            .expect("map_async callback")
+            .expect("map readback");
+        let mapped = readback.slice(..).get_mapped_range();
+        let mut pixels = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
+        for y in 0..HEIGHT {
+            let start = (y * padded_row) as usize;
+            pixels.extend_from_slice(&mapped[start..start + (WIDTH * 4) as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+
+        // Quad pixels are whatever isn't the blue clear color; erode by
+        // requiring the 4-neighborhood to also be quad so edge antialiasing
+        // and silhouette pixels don't count.
+        let is_quad = |x: u32, y: u32| {
+            let offset = ((y * WIDTH + x) * 4) as usize;
+            let pixel = &pixels[offset..offset + 4];
+            !(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 255)
+        };
+        let mut min_rgb = [u8::MAX; 3];
+        let mut max_rgb = [u8::MIN; 3];
+        let mut interior = 0_usize;
+        for y in 1..HEIGHT - 1 {
+            for x in 1..WIDTH - 1 {
+                if !(is_quad(x, y)
+                    && is_quad(x - 1, y)
+                    && is_quad(x + 1, y)
+                    && is_quad(x, y - 1)
+                    && is_quad(x, y + 1))
+                {
+                    continue;
+                }
+                interior += 1;
+                let offset = ((y * WIDTH + x) * 4) as usize;
+                for channel in 0..3 {
+                    let value = pixels[offset + channel];
+                    min_rgb[channel] = min_rgb[channel].min(value);
+                    max_rgb[channel] = max_rgb[channel].max(value);
+                }
+            }
+        }
+        assert!(
+            interior > 1000,
+            "quad did not render (interior={interior}); harness is broken"
+        );
+        let spread: Vec<u8> = (0..3)
+            .map(|channel| max_rgb[channel].saturating_sub(min_rgb[channel]))
+            .collect();
+        assert!(
+            spread.iter().all(|&value| value <= 2),
+            "shading is not uniform across the quad: rgb spread {spread:?} over {interior} pixels \
+             (min {min_rgb:?}, max {max_rgb:?}) — fragment branches are flickering per pixel"
+        );
     }
 }
