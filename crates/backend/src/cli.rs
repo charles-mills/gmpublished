@@ -48,9 +48,6 @@ pub fn run() -> Option<Result<(), CliError>> {
     }
     HEADLESS.store(true, std::sync::atomic::Ordering::Release);
 
-    // CLI mode prints product output directly; remove any host-installed backend panic hook.
-    let _ = std::panic::take_hook();
-
     let matches = command().get_matches();
 
     #[cfg(debug_assertions)]

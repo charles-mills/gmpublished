@@ -14,6 +14,7 @@ pub mod error_key;
 pub use error_key::{ErrorKey, HasErrorKey};
 
 pub(crate) mod logging;
+pub use logging::log_panic;
 pub use logging::shutdown as shutdown_logging;
 
 pub const GMOD_APP_ID: steamworks::AppId = steamworks::AppId(4000);

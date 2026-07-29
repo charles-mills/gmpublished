@@ -1,4 +1,5 @@
 use std::{
+    backtrace::Backtrace,
     collections::VecDeque,
     fs::{File, OpenOptions},
     io::Write,
@@ -39,9 +40,9 @@ struct BackendLogger;
 static LOGGER: BackendLogger = BackendLogger;
 static LEVEL_CONFIG: OnceLock<LevelConfig> = OnceLock::new();
 static FILE_SINK_READY: AtomicBool = AtomicBool::new(false);
-// Process-wide by necessity: `panic::set_hook` installs one global hook that
-// has no way to receive a `&Backend`. Set once, by whichever `Backend`
-// finishes construction first (`enable_file_sink`).
+// Process-wide by necessity: [`log_panic`] is reached from the process panic
+// hook, which has no way to receive a `&Backend`. Set once, by whichever
+// `Backend` finishes construction first (`enable_file_sink`).
 static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
 static LOG_SINK: OnceLock<LogSink> = OnceLock::new();
 /// Lines the queue or the pending bound refused, reported into the log so a
@@ -297,9 +298,14 @@ pub(crate) fn enable_file_sink(logs_dir: PathBuf) {
     FILE_SINK_READY.store(true, Ordering::Release);
 }
 
-/// Idempotent: `log::set_logger`/`panic::set_hook` are one-shot process
-/// resources, so a second `Backend` built in the same process (tests, or a
-/// hypothetical re-init) reuses the first one's install rather than erroring.
+/// Idempotent: `log::set_logger` is a one-shot process resource, so a second
+/// `Backend` built in the same process (tests, or a hypothetical re-init)
+/// reuses the first one's install rather than erroring.
+///
+/// Deliberately does not install a panic hook. The process hook is a single
+/// global slot with no way to chain onto an existing owner, so it belongs to
+/// the executable; this module only offers [`log_panic`] for that owner to
+/// call. See `gmpublished::install_panic_log_hook`.
 pub(crate) fn install() -> Result<(), log::SetLoggerError> {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
@@ -320,7 +326,6 @@ pub(crate) fn install() -> Result<(), log::SetLoggerError> {
     let config = configured_level_config();
     let _ = LEVEL_CONFIG.set(config);
     log::set_max_level(config.global);
-    std::panic::set_hook(Box::new(panic));
     let _ = INSTALLED.set(());
     Ok(())
 }
@@ -415,22 +420,29 @@ fn open_log_file() -> Option<File> {
         .ok()
 }
 
-fn panic(panic: &PanicHookInfo<'_>) {
-    let backtrace = std::backtrace::Backtrace::force_capture();
-
-    let panic_log = format!("\n\n!!!!!!!!!!!!! PANIC !!!!!!!!!!!!!\n{panic}\n{backtrace}\n");
-    // Write synchronously: with `panic = "abort"` the process dies before the
-    // async writer thread would drain a channel send. Only touch the log file
-    // once appdata is up — resolving the logs dir during an appdata-init panic
-    // would re-enter the lazy static.
-    if FILE_SINK_READY.load(Ordering::Acquire)
-        && let Some(mut file) = open_log_file()
-    {
-        let _ = writeln!(file, "{panic_log}");
-        let _ = file.sync_data();
+/// Records a panic in the backend log file, for the process hook owner to call.
+///
+/// Writes nothing anywhere else: the owner captured `backtrace` and is
+/// responsible for stderr, so echoing here would double every panic report.
+/// A no-op until the file sink is up — the logs directory is not known until
+/// appdata loads, and resolving it during an appdata-init panic would re-enter
+/// the very state that failed.
+///
+/// The write is synchronous. Under `panic = "abort"` the process dies before
+/// the async writer thread would drain a channel send.
+pub fn log_panic(panic: &PanicHookInfo<'_>, backtrace: &Backtrace) {
+    if !FILE_SINK_READY.load(Ordering::Acquire) {
+        return;
     }
+    let Some(mut file) = open_log_file() else {
+        return;
+    };
 
-    std::eprintln!("{panic}\n{backtrace}");
+    let _ = writeln!(
+        file,
+        "\n\n!!!!!!!!!!!!! PANIC !!!!!!!!!!!!!\n{panic}\n{backtrace}\n"
+    );
+    let _ = file.sync_data();
 }
 
 #[cfg(test)]
