@@ -1,3 +1,4 @@
+use crate::bridge::tasks::TransactionStatus;
 use std::{
     collections::HashSet,
     fs,
@@ -5,7 +6,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use crate::bridge::tasks::TransactionStatus;
 
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{

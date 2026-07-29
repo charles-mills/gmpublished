@@ -7,6 +7,7 @@
 //! layer here is deliberately generic; the PCF layer extracts only the
 //! particle schema.
 
+use crate::math::Vec3;
 use std::collections::HashMap;
 
 use thiserror::Error;
@@ -39,9 +40,9 @@ pub enum PcfValue {
     Time(f32),
     Color([u8; 4]),
     Vector2([f32; 2]),
-    Vector3([f32; 3]),
+    Vector3(Vec3),
     Vector4([f32; 4]),
-    Angle([f32; 3]),
+    Angle(Vec3),
     Quaternion([f32; 4]),
     Matrix(Box<[f32; 16]>),
     Array(Vec<Self>),
@@ -98,7 +99,7 @@ impl PcfAttributes {
         }
     }
 
-    pub fn get_vector3(&self, name: &str) -> Option<[f32; 3]> {
+    pub fn get_vector3(&self, name: &str) -> Option<Vec3> {
         match self.get(name)? {
             PcfValue::Vector3(value) | PcfValue::Angle(value) => Some(*value),
             _ => None,
@@ -558,9 +559,9 @@ fn read_scalar(
             PcfValue::Color([rgba[0], rgba[1], rgba[2], rgba[3]])
         }
         DmxType::Vector2 => PcfValue::Vector2(reader.f32s()?),
-        DmxType::Vector3 => PcfValue::Vector3(reader.f32s()?),
+        DmxType::Vector3 => PcfValue::Vector3(Vec3::from(reader.f32s()?)),
         DmxType::Vector4 => PcfValue::Vector4(reader.f32s()?),
-        DmxType::Angle => PcfValue::Angle(reader.f32s()?),
+        DmxType::Angle => PcfValue::Angle(Vec3::from(reader.f32s()?)),
         DmxType::Quaternion => PcfValue::Quaternion(reader.f32s()?),
         DmxType::Matrix => PcfValue::Matrix(Box::new(reader.f32s()?)),
         // Handled by `read_value`: an element is a reference, not a scalar.

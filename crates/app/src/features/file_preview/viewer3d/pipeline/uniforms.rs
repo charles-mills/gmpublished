@@ -4,9 +4,10 @@
 
 use super::{
     AMBIENT, Camera, FOV_Y, FlyCamera, MapFog, MapSkyCamera, ModelPreview, Rectangle, RenderMode,
-    ResolvedTexture, SOURCE_UP, Skybox, add, decode_bc_texture, half_extent, look_at, mat_mul, mid,
+    ResolvedTexture, SOURCE_UP, Skybox, decode_bc_texture, half_extent, look_at, mat_mul, mid,
     perspective, skybox_eye,
 };
+use gmpublished_backend::math::Vec3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -49,7 +50,7 @@ impl Uniforms {
         submerged: bool,
     ) -> Self {
         let frame = FlyCameraFrame::new(scene, camera, bounds);
-        let target = add(frame.eye, frame.forward);
+        let target = frame.eye + frame.forward;
         let view = look_at(frame.eye, target, SOURCE_UP);
         let (fog_color, fog_params) = if submerged {
             let color = scene_water_fog_color(scene);
@@ -83,7 +84,7 @@ impl Uniforms {
 
     pub fn for_fly_sky(scene: &ModelPreview, camera: &FlyCamera, bounds: Rectangle) -> Self {
         let frame = FlyCameraFrame::new(scene, camera, bounds);
-        let target = add(frame.eye, frame.forward);
+        let target = frame.eye + frame.forward;
         let mut view = look_at(frame.eye, target, SOURCE_UP);
         view[3][0] = 0.0;
         view[3][1] = 0.0;
@@ -109,7 +110,7 @@ impl Uniforms {
     ) -> Self {
         let frame = FlyCameraFrame::new(scene, camera, bounds);
         let eye = skybox_eye(frame.eye, sky_camera.origin, sky_camera.scale);
-        let view = look_at(eye, add(eye, frame.forward), SOURCE_UP);
+        let view = look_at(eye, eye + frame.forward, SOURCE_UP);
 
         Self {
             view_proj: mat_mul(frame.proj, view),
@@ -142,7 +143,7 @@ impl Uniforms {
             center[2] + distance * camera.orbit.pitch().sin(),
         ];
         // Source models are Z-up.
-        let view = look_at(eye, center, SOURCE_UP);
+        let view = look_at(Vec3::from(eye), center, SOURCE_UP);
         let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
         let proj = perspective(FOV_Y, aspect, radius * 0.01, radius * 20.0 + distance);
 
@@ -160,8 +161,8 @@ impl Uniforms {
 
 #[derive(Clone, Copy, Debug)]
 pub struct FlyCameraFrame {
-    pub eye: [f32; 3],
-    pub forward: [f32; 3],
+    pub eye: Vec3,
+    pub forward: Vec3,
     pub proj: [[f32; 4]; 4],
     pub near: f32,
     pub far: f32,
@@ -173,14 +174,12 @@ impl FlyCameraFrame {
         let eye = camera.position.map_or_else(
             || mid(scene.bounds_min, scene.bounds_max),
             |position| {
-                add(
-                    position,
-                    [
+                position
+                    + Vec3::from([
                         0.0,
                         0.0,
                         camera.view_bob_offset() + camera.duck_view_offset(),
-                    ],
-                )
+                    ])
             },
         );
         let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
@@ -196,9 +195,9 @@ impl FlyCameraFrame {
     }
 }
 
-pub const DEFAULT_SKY_TINT: [f32; 3] = [0.12, 0.18, 0.24];
+pub const DEFAULT_SKY_TINT: Vec3 = Vec3::new(0.12, 0.18, 0.24);
 
-fn scene_water_fog_color(scene: &ModelPreview) -> [f32; 3] {
+fn scene_water_fog_color(scene: &ModelPreview) -> Vec3 {
     scene
         .materials
         .iter()
@@ -208,11 +207,11 @@ fn scene_water_fog_color(scene: &ModelPreview) -> [f32; 3] {
         .unwrap_or(crate::bridge::materials::DEFAULT_WATER_FOG_LINEAR)
 }
 
-pub fn scene_sky_tint(skybox: Option<&Skybox>) -> [f32; 3] {
+pub fn scene_sky_tint(skybox: Option<&Skybox>) -> Vec3 {
     let Some(skybox) = skybox else {
         return DEFAULT_SKY_TINT;
     };
-    let mut sum = [0.0; 3];
+    let mut sum = Vec3::splat(0.0);
     let mut count = 0_u32;
     for color in skybox
         .faces
@@ -233,7 +232,7 @@ pub fn scene_sky_tint(skybox: Option<&Skybox>) -> [f32; 3] {
     }
 }
 
-fn texture_smallest_mip_average(texture: &ResolvedTexture) -> Option<[f32; 3]> {
+fn texture_smallest_mip_average(texture: &ResolvedTexture) -> Option<Vec3> {
     if let Some((format, mips)) = texture.bc_payload() {
         let mip = mips.last()?;
         let rgba = decode_bc_texture(format, mip.width, mip.height, &mip.data)?;
@@ -243,14 +242,14 @@ fn texture_smallest_mip_average(texture: &ResolvedTexture) -> Option<[f32; 3]> {
     average_srgb_rgba(mip.rgba, mip.width, mip.height)
 }
 
-pub fn average_srgb_rgba(rgba: &[u8], width: u32, height: u32) -> Option<[f32; 3]> {
+pub fn average_srgb_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Vec3> {
     let pixel_count = usize::try_from(width)
         .ok()?
         .checked_mul(usize::try_from(height).ok()?)?;
     if pixel_count == 0 || rgba.len() < pixel_count.checked_mul(4)? {
         return None;
     }
-    let mut sum = [0.0; 3];
+    let mut sum = Vec3::splat(0.0);
     for pixel in rgba.chunks_exact(4).take(pixel_count) {
         for channel in 0..3 {
             sum[channel] += srgb_channel_to_linear(pixel[channel]);
@@ -288,18 +287,9 @@ mod uniform_layout_tests {
                 "model_viewer.wgsl",
                 super::super::super::MODEL_SHADER_SOURCE,
             ),
-            (
-                "water.wgsl",
-                super::super::super::WATER_SHADER_SOURCE,
-            ),
-            (
-                "detail.wgsl",
-                super::super::super::DETAIL_SHADER_SOURCE,
-            ),
-            (
-                "sky.wgsl",
-                super::super::super::SKY_SHADER_SOURCE,
-            ),
+            ("water.wgsl", super::super::super::WATER_SHADER_SOURCE),
+            ("detail.wgsl", super::super::super::DETAIL_SHADER_SOURCE),
+            ("sky.wgsl", super::super::super::SKY_SHADER_SOURCE),
         ] {
             assert_eq!(
                 declared_uniform_size(source),
@@ -354,8 +344,8 @@ mod uniform_layout_tests {
 mod tests {
     use iced::Point;
 
-    use super::{FlyCamera, MapFog, Rectangle, Uniforms, average_srgb_rgba};
     use super::super::super::test_support::empty_preview;
+    use super::{FlyCamera, MapFog, Rectangle, Uniforms, Vec3, average_srgb_rgba};
 
     #[test]
     fn sky_tint_averages_known_2x2_texture() {
@@ -372,10 +362,10 @@ mod tests {
 
     #[test]
     fn submerged_fly_uniforms_override_map_fog() {
-        let scene = empty_preview([-128.0; 3], [128.0; 3]);
+        let scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
         let camera = FlyCamera::default();
         let map_fog = MapFog {
-            color_linear: [0.8, 0.7, 0.6],
+            color_linear: Vec3::new(0.8, 0.7, 0.6),
             start: 512.0,
             end: 8192.0,
             max_density: 0.5,

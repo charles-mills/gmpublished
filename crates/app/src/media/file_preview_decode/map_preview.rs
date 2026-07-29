@@ -17,6 +17,7 @@ use super::{
     SkipReason, StaticPropPlacement, catch_asset_decode, entry_stem, info_preview_data,
     load_model_catching_panic, load_model_companions, srgb_byte_to_linear,
 };
+use gmpublished_backend::math::Vec3;
 use rayon::prelude::*;
 use std::sync::LazyLock;
 
@@ -421,7 +422,7 @@ pub(super) fn duration_ms(duration: Duration) -> u128 {
 
 pub(super) fn map_fog_to_preview(fog: gmpublished_backend::scene::map::MapFog) -> MapFog {
     MapFog {
-        color_linear: fog.color_srgb.map(srgb_byte_to_linear),
+        color_linear: Vec3::from(fog.color_srgb.map(srgb_byte_to_linear)),
         start: fog.start,
         end: fog.end,
         max_density: fog.max_density,
@@ -762,8 +763,8 @@ pub(super) struct PropPlacementLighting {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct PropSunLighting {
-    pub(super) direction_to_sun: [f32; 3],
-    pub(super) color_linear: [f32; 3],
+    pub(super) direction_to_sun: Vec3,
+    pub(super) color_linear: Vec3,
     pub(super) visible: bool,
 }
 
@@ -774,18 +775,16 @@ pub(super) struct StaticPropLightingInputs<'a> {
     pub(super) walk_collision: Option<&'a MapWalkCollision>,
 }
 
-const PROP_LIGHT_SAMPLE_OFFSET: [f32; 3] = [0.0, 0.0, 16.0];
+const PROP_LIGHT_SAMPLE_OFFSET: Vec3 = Vec3::new(0.0, 0.0, 16.0);
 const PROP_LIGHT_LINEAR_CLAMP: f32 = 2.0;
 
 impl PropPlacementLighting {
-    pub(super) fn evaluate(self, normal: [f32; 3]) -> [f32; 3] {
-        let normal = normalize_or_zero(normal);
+    pub(super) fn evaluate(self, normal: Vec3) -> Vec3 {
+        let normal = normal.normalize_or_zero();
         let mut color = self.ambient_cube.evaluate(normal);
         if let Some(sun) = self.sun.filter(|sun| sun.visible) {
-            let amount = dot(normal, sun.direction_to_sun).max(0.0);
-            for (channel, value) in color.iter_mut().enumerate() {
-                *value += sun.color_linear[channel] * amount;
-            }
+            let amount = normal.dot(sun.direction_to_sun).max(0.0);
+            color += sun.color_linear * amount;
         }
         // No separate skylight term: the ambient cube already integrates sky
         // bounce (the engine likewise skips sky-ambient world lights for
@@ -805,7 +804,7 @@ pub(super) fn prop_placement_lighting(
             sun: None,
         };
     };
-    let ray_start = add(placement.origin, PROP_LIGHT_SAMPLE_OFFSET);
+    let ray_start = placement.origin + PROP_LIGHT_SAMPLE_OFFSET;
     let sun = environment_lighting.sun.map(|sun| PropSunLighting {
         direction_to_sun: sun.direction_to_sun,
         color_linear: sun.color_linear,
@@ -870,7 +869,7 @@ pub(super) fn refresh_entity_prop_aabb_visibility(
 pub(super) fn prop_model_world_bounds(
     placement: &StaticPropPlacement,
     model: &ModelData,
-) -> Option<([f32; 3], [f32; 3])> {
+) -> Option<(Vec3, Vec3)> {
     let mut positions = model
         .meshes
         .iter()
@@ -1802,7 +1801,7 @@ impl PhyDebugMeshBuilder {
     pub(super) fn push_loaded_phy(
         &mut self,
         physics: &LoadedPhy,
-        mut transform: impl FnMut([f32; 3]) -> [f32; 3],
+        mut transform: impl FnMut(Vec3) -> Vec3,
     ) -> bool {
         for ledge in &physics.ledges {
             for &triangle in &ledge.triangles {
@@ -1820,20 +1819,19 @@ impl PhyDebugMeshBuilder {
         &mut self,
         ledge: &ConvexLedge,
         triangle: [usize; 3],
-        transform: &mut impl FnMut([f32; 3]) -> [f32; 3],
+        transform: &mut impl FnMut(Vec3) -> Vec3,
     ) {
         let Some(points) = triangle_points(ledge, triangle) else {
             return;
         };
         let positions = points.map(transform);
-        if !positions.iter().flatten().all(|value| value.is_finite()) {
+        if !positions.iter().all(|position| position.is_finite()) {
             return;
         }
-        let normal = normalize_or_zero(cross(
-            sub(positions[1], positions[0]),
-            sub(positions[2], positions[0]),
-        ));
-        if !normal.iter().all(|value| value.is_finite()) || dot(normal, normal) <= f32::EPSILON {
+        let normal = (positions[1] - positions[0])
+            .cross(positions[2] - positions[0])
+            .normalize_or_zero();
+        if !normal.is_finite() || normal.dot(normal) <= f32::EPSILON {
             return;
         }
         let Some(base) = u32::try_from(self.vertices.len()).ok() else {
@@ -1863,11 +1861,11 @@ impl PhyDebugMeshBuilder {
     }
 }
 
-pub(super) fn triangle_points(ledge: &ConvexLedge, triangle: [usize; 3]) -> Option<[[f32; 3]; 3]> {
+pub(super) fn triangle_points(ledge: &ConvexLedge, triangle: [usize; 3]) -> Option<[Vec3; 3]> {
     Some([
-        *ledge.vertices.get(triangle[0])?,
-        *ledge.vertices.get(triangle[1])?,
-        *ledge.vertices.get(triangle[2])?,
+        Vec3::from(*ledge.vertices.get(triangle[0])?),
+        Vec3::from(*ledge.vertices.get(triangle[1])?),
+        Vec3::from(*ledge.vertices.get(triangle[2])?),
     ])
 }
 
@@ -1979,7 +1977,7 @@ pub(super) fn load_prop_model(
                 .ledges
                 .iter()
                 .map(|ledge| ConvexHull {
-                    vertices: ledge.vertices.clone(),
+                    vertices: ledge.vertices.iter().copied().map(Vec3::from).collect(),
                     triangles: ledge.triangles.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -2182,24 +2180,13 @@ pub(super) fn prop_skin_table(model: &ModelData, skin: i32) -> Option<&[u16]> {
         .map(Vec::as_slice)
 }
 
-pub(super) fn transform_prop_position(
-    position: [f32; 3],
-    placement: &StaticPropPlacement,
-) -> [f32; 3] {
-    add(
-        rotate_prop_vector(scale_vector(position, placement.scale), placement.angles),
-        placement.origin,
-    )
+pub(super) fn transform_prop_position(position: Vec3, placement: &StaticPropPlacement) -> Vec3 {
+    (position * placement.scale).rotate_source(placement.angles) + placement.origin
 }
 
-pub(super) fn transform_prop_normal(normal: [f32; 3], placement: &StaticPropPlacement) -> [f32; 3] {
-    normalize_or_zero(rotate_prop_vector(normal, placement.angles))
+pub(super) fn transform_prop_normal(normal: Vec3, placement: &StaticPropPlacement) -> Vec3 {
+    normal.rotate_source(placement.angles).normalize_or_zero()
 }
-
-pub(super) use gmpublished_backend::math::{
-    add, cross, dot, normalize_or_zero, rotate_source_vector as rotate_prop_vector,
-    scale as scale_vector, sub,
-};
 
 pub(super) fn map_mesh_to_model_mesh(
     mesh: &gmpublished_backend::scene::map::MapMesh,
@@ -2215,7 +2202,7 @@ pub(super) fn map_mesh_to_model_mesh(
                 normal: vertex.normal,
                 uv: normalize_map_uv(vertex.tex_s, vertex.tex_t, width, height),
                 lightmap_uv: vertex.lightmap_uv,
-                color: [1.0; 3],
+                color: Vec3::splat(1.0),
                 blend_alpha: vertex.blend_alpha,
             })
             .collect(),
@@ -2226,7 +2213,7 @@ pub(super) fn map_mesh_to_model_mesh(
     }
 }
 
-pub(super) fn bounds_from_model_meshes(meshes: &[MeshData]) -> Option<([f32; 3], [f32; 3])> {
+pub(super) fn bounds_from_model_meshes(meshes: &[MeshData]) -> Option<(Vec3, Vec3)> {
     let mut positions = meshes
         .iter()
         .flat_map(|mesh| mesh.vertices.iter())

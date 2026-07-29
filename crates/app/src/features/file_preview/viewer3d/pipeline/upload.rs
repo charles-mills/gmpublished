@@ -2,6 +2,7 @@
 //! overlay, and skybox buffers plus material bind groups, and the cache
 //! that keeps an upload alive only while its preview still draws.
 
+use gmpublished_backend::math::Vec3;
 use std::collections::HashMap;
 
 use super::materials::{MaterialTextureViews, MaterialUploadMode, WHITE_RGBA};
@@ -229,7 +230,7 @@ pub struct UploadedModel {
     pub material_water_fallbacks: Vec<bool>,
     pub _material_uniforms: Vec<wgpu::Buffer>,
     pub skybox: Option<UploadedSkybox>,
-    pub sky_tint: [f32; 3],
+    pub sky_tint: Vec3,
     pub visibility: UploadedVisibility,
 }
 
@@ -263,7 +264,7 @@ impl UploadedModel {
         queue: &wgpu::Queue,
         scene: &ModelPreview,
         enabled: bool,
-        camera_position: [f32; 3],
+        camera_position: Vec3,
     ) {
         let Some(visibility) = scene.visibility.as_ref() else {
             if self
@@ -382,7 +383,7 @@ pub struct UploadedMesh {
     // empty-index meshes are dropped at upload, and WorldVisibilityPlan is
     // keyed by the unfiltered scene order.
     pub scene_mesh_index: usize,
-    pub centroid: [f32; 3],
+    pub centroid: Vec3,
     pub material_index: usize,
     pub bodygroup: usize,
     pub bodygroup_choice: usize,
@@ -407,7 +408,7 @@ pub struct UploadedDetailSprites {
 pub struct UploadedOverlay {
     pub vertices: wgpu::Buffer,
     pub vertex_count: u32,
-    pub centroid: [f32; 3],
+    pub centroid: Vec3,
     pub material_index: usize,
     pub map_skybox: bool,
 }
@@ -567,7 +568,7 @@ pub fn push_detail_sprite_vertices(bytes: &mut Vec<u8>, sprite: &DetailSprite) {
         ([right, bottom], [tex_right, tex_bottom]),
         ([left, bottom], [tex_left, tex_bottom]),
     ] {
-        push_f32s(bytes, &sprite.origin);
+        push_f32s(bytes, sprite.origin.as_array());
         push_f32s(bytes, &corner);
         push_f32s(bytes, &uv);
     }
@@ -612,14 +613,14 @@ pub fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
             normal: vertex.normal,
             uv: vertex.uv,
             lightmap_uv: [0.0, 0.0],
-            color: [1.0, 1.0, 1.0],
+            color: Vec3::new(1.0, 1.0, 1.0),
             blend_alpha: 0.0,
         }
     })
 }
 
-pub fn overlay_centroid(overlay: &OverlayPrimitive) -> [f32; 3] {
-    let mut centroid = [0.0_f32; 3];
+pub fn overlay_centroid(overlay: &OverlayPrimitive) -> Vec3 {
+    let mut centroid = Vec3::ZERO;
     for vertex in overlay.vertices {
         for (axis, component) in vertex.position.into_iter().enumerate() {
             centroid[axis] += component;
@@ -634,16 +635,16 @@ pub fn push_f32s(bytes: &mut Vec<u8>, values: &[f32]) {
     }
 }
 
-pub fn mesh_centroid(vertices: &[ModelVertex]) -> [f32; 3] {
+pub fn mesh_centroid(vertices: &[ModelVertex]) -> Vec3 {
     if vertices.is_empty() {
-        return [0.0; 3];
+        return Vec3::splat(0.0);
     }
-    let mut sum = [0.0_f32; 3];
+    let mut sum = Vec3::ZERO;
     for vertex in vertices {
         sum[0] += vertex.position[0];
         sum[1] += vertex.position[1];
         sum[2] += vertex.position[2];
     }
     let scale = 1.0 / vertices.len() as f32;
-    [sum[0] * scale, sum[1] * scale, sum[2] * scale]
+    Vec3::new(sum[0] * scale, sum[1] * scale, sum[2] * scale)
 }

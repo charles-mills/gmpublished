@@ -1555,6 +1555,7 @@ name = "gmpublished-backend"
 version = "0.2.3"
 dependencies = [
  "arc-swap",
+ "bytemuck",
  "clap",
  "crc32fast",
  "dirs",

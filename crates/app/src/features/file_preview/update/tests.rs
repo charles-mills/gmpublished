@@ -1,12 +1,13 @@
-use std::sync::Arc;
 use super::super::state::{FlyPose, MovementMode, OrbitPose};
+use gmpublished_backend::math::Vec3;
+use std::sync::Arc;
 
 use super::*;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
+use crate::generation::Generation;
 use crate::media::preview_model::{
     InfoReason, PreviewContent, PreviewData, RelatedPreviewKind, RelatedPreviewTarget,
 };
-use crate::generation::Generation;
 use crate::test_support::GmaFixtureBuilder;
 
 fn request() -> crate::media::preview_model::PreviewRequest {
@@ -216,7 +217,7 @@ fn pose_messages_update_state_without_effects() {
     let mut state = State::default();
     let _request = state.begin_open(request());
     let fly_pose = FlyPose {
-        position: [1.0, 2.0, 3.0],
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
@@ -240,10 +241,7 @@ fn pose_messages_update_state_without_effects() {
     assert!(update(&mut state, Message::OrbitPoseChanged(orbit_pose)).is_empty());
 
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(MovementMode::Walk)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
 
@@ -252,7 +250,7 @@ fn fly_speed_changed_updates_pose_and_readout() {
     let mut state = State::default();
     let _request = state.begin_open(request());
     let fly_pose = FlyPose {
-        position: [1.0, 2.0, 3.0],
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
@@ -270,10 +268,7 @@ fn fly_speed_changed_updates_pose_and_readout() {
     );
 
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(MovementMode::Fly)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Fly));
     assert_eq!(state.fly_speed_readout(), Some(2.0));
 }
 
@@ -290,10 +285,7 @@ fn movement_mode_selected_requests_shader_mode_change() {
         .is_empty()
     );
 
-    assert_eq!(
-        state.requested_movement_mode(),
-        Some(MovementMode::Walk)
-    );
+    assert_eq!(state.requested_movement_mode(), Some(MovementMode::Walk));
     assert_eq!(state.fly_movement_mode(), None);
 }
 
@@ -302,15 +294,12 @@ fn movement_mode_selected_is_noop_for_active_mode() {
     let mut state = State::default();
     let _request = state.begin_open(request());
     let fly_pose = FlyPose {
-        position: [1.0, 2.0, 3.0],
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
     };
-    state.set_fly_camera(
-        fly_pose,
-        MovementMode::Walk,
-    );
+    state.set_fly_camera(fly_pose, MovementMode::Walk);
 
     assert!(
         update(
@@ -321,10 +310,7 @@ fn movement_mode_selected_is_noop_for_active_mode() {
     );
 
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(MovementMode::Walk)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
     assert_eq!(state.requested_movement_mode(), None);
 }
 
@@ -333,7 +319,7 @@ fn expanded_round_trip_preserves_viewer_poses() {
     let mut state = State::default();
     let _request = state.begin_open(request());
     let fly_pose = FlyPose {
-        position: [1.0, 2.0, 3.0],
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
@@ -343,19 +329,13 @@ fn expanded_round_trip_preserves_viewer_poses() {
         pitch: 0.25,
         distance: 3.0,
     };
-    state.set_fly_camera(
-        fly_pose,
-        MovementMode::Walk,
-    );
+    state.set_fly_camera(fly_pose, MovementMode::Walk);
     state.set_orbit_pose(orbit_pose);
 
     assert!(update(&mut state, Message::ExpandToggled).is_empty());
     assert!(state.expanded());
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(MovementMode::Walk)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 
     assert_eq!(
@@ -364,10 +344,7 @@ fn expanded_round_trip_preserves_viewer_poses() {
     );
     assert!(!state.expanded());
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(MovementMode::Walk)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
 

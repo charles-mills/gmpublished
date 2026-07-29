@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crate::media::preview_model;
+use std::sync::Arc;
 
 use iced::Task;
 

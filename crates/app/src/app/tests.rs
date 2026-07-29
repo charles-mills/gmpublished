@@ -1,10 +1,10 @@
+use crate::bridge::tasks::TransactionStatus;
+use crate::media::preview_model;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
-use crate::media::preview_model;
-use crate::bridge::tasks::TransactionStatus;
 
 use crate::i18n::Arg;
 
@@ -340,7 +340,9 @@ fn downloader_executor_submission_schedules_worker_task() {
 #[test]
 fn downloader_executor_cancels_requested_tasks() {
     let mut app = App::new_for_test();
-    let handle = app.ctx.create_task(TaskKind::Download, TransactionStatus::Downloading);
+    let handle = app
+        .ctx
+        .create_task(TaskKind::Download, TransactionStatus::Downloading);
     let task_id = handle.id();
     let transaction = app.ctx.begin_transaction();
     app.ctx

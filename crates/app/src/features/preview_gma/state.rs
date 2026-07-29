@@ -157,10 +157,7 @@ impl State {
         self.workshop_link_url().is_some()
     }
 
-    pub(crate) fn set_download_count_formatter(
-        &mut self,
-        formatter: DownloadCountFormatter,
-    ) {
+    pub(crate) fn set_download_count_formatter(&mut self, formatter: DownloadCountFormatter) {
         if self.download_count_formatter == formatter {
             return;
         }

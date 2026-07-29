@@ -249,14 +249,20 @@ mod tests {
 
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
-                event(2, started(TaskKind::Download, TransactionStatus::Downloading)),
-                event(3, started(TaskKind::Extract, TransactionStatus::Extracting)),
                 event(
-                    4,
-                    started(TaskKind::Search, TransactionStatus::Searching),
+                    1,
+                    started(TaskKind::Publish, TransactionStatus::PublishPacking),
                 ),
-                event(5, started(TaskKind::OverlayExtract, TransactionStatus::Extracting)),
+                event(
+                    2,
+                    started(TaskKind::Download, TransactionStatus::Downloading),
+                ),
+                event(3, started(TaskKind::Extract, TransactionStatus::Extracting)),
+                event(4, started(TaskKind::Search, TransactionStatus::Searching)),
+                event(
+                    5,
+                    started(TaskKind::OverlayExtract, TransactionStatus::Extracting),
+                ),
                 event(6, started(TaskKind::Notice, TransactionStatus::Notice)),
             ],
             now,
@@ -289,7 +295,10 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
+                event(
+                    1,
+                    started(TaskKind::Publish, TransactionStatus::PublishPacking),
+                ),
                 event(1, TaskUpdate::Total(1000)),
                 event(1, TaskUpdate::Progress(0.4)),
                 event(
@@ -313,7 +322,10 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
+                event(
+                    1,
+                    started(TaskKind::Publish, TransactionStatus::PublishPacking),
+                ),
                 event(1, TaskUpdate::Finished),
             ],
             now,
@@ -345,7 +357,10 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::OverlayExtract, TransactionStatus::Extracting)),
+                event(
+                    1,
+                    started(TaskKind::OverlayExtract, TransactionStatus::Extracting),
+                ),
                 event(1, TaskUpdate::Error(UiError::new(keys::IO_ERROR))),
             ],
             now,
@@ -363,7 +378,10 @@ mod tests {
         let now = Instant::now();
         state.apply_task_events(
             vec![
-                event(1, started(TaskKind::Publish, TransactionStatus::PublishPacking)),
+                event(
+                    1,
+                    started(TaskKind::Publish, TransactionStatus::PublishPacking),
+                ),
                 event(1, TaskUpdate::Abandoned),
             ],
             now,

@@ -1,10 +1,10 @@
 use super::{
     BTreeSet, BrushIndex, BrushSide, HashMap, MapBounds, MapBsp, MapLeaf, MapNode, MapPlane,
     MapPropVisibility, NodeChild, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT, PROP_AABB_MAX_LEAVES,
-    add, cluster_in_range, contents_flags, cross, displacement_vertices, dot, dot_abs,
-    length_squared, lerp, mul, sub, texture_flags, vector_is_finite_nonzero, walk_to_leaf,
+    cluster_in_range, contents_flags, displacement_vertices, texture_flags,
+    vector_is_finite_nonzero, walk_to_leaf,
 };
-use crate::math::{normalize, normalize_or_zero};
+use crate::math::Vec3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapWalkCollision {
@@ -23,16 +23,16 @@ pub struct WaterVolume {
 /// Deliberately independent of `.phy`/IVP parser details.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvexHull {
-    pub vertices: Vec<[f32; 3]>,
+    pub vertices: Vec<Vec3>,
     pub triangles: Vec<[usize; 3]>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct MapWalkPropCollisionSource<'a> {
     pub ledges: &'a [ConvexHull],
-    pub origin: [f32; 3],
+    pub origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
-    pub angles: [f32; 3],
+    pub angles: Vec3,
     pub scale: f32,
 }
 
@@ -44,17 +44,17 @@ pub struct MapWalkPropModel {
 #[derive(Debug, Clone, Copy)]
 pub struct MapWalkPropModelPlacement<'a> {
     pub model: &'a MapWalkPropModel,
-    pub origin: [f32; 3],
+    pub origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
-    pub angles: [f32; 3],
+    pub angles: Vec3,
     pub scale: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct MapWalkBrush {
     pub(super) planes: Vec<MapWalkBrushPlane>,
-    pub(super) bounds_min: [f32; 3],
-    pub(super) bounds_max: [f32; 3],
+    pub(super) bounds_min: Vec3,
+    pub(super) bounds_max: Vec3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,15 +66,15 @@ pub(super) struct MapWalkBrushPlane {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct MapWalkDisplacement {
     pub(super) triangles: Vec<MapWalkTriangle>,
-    pub(super) bounds_min: [f32; 3],
-    pub(super) bounds_max: [f32; 3],
+    pub(super) bounds_min: Vec3,
+    pub(super) bounds_max: Vec3,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct MapWalkPropLocalBrush {
     pub(super) planes: Vec<MapPlane>,
-    pub(super) bounds_min: [f32; 3],
-    pub(super) bounds_max: [f32; 3],
+    pub(super) bounds_min: Vec3,
+    pub(super) bounds_max: Vec3,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -91,10 +91,10 @@ pub(super) struct MapWalkPropGrid {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct MapWalkTriangle {
-    pub(super) vertices: [[f32; 3]; 3],
-    pub(super) normal: [f32; 3],
-    pub(super) bounds_min: [f32; 3],
-    pub(super) bounds_max: [f32; 3],
+    pub(super) vertices: [Vec3; 3],
+    pub(super) normal: Vec3,
+    pub(super) bounds_min: Vec3,
+    pub(super) bounds_max: Vec3,
 }
 
 impl MapWalkBrush {
@@ -136,15 +136,15 @@ impl MapWalkTriangle {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapTrace {
     pub fraction: f32,
-    pub end_position: [f32; 3],
-    pub normal: [f32; 3],
+    pub end_position: Vec3,
+    pub normal: Vec3,
     pub start_solid: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TraceCandidate {
     pub(super) fraction: f32,
-    pub(super) normal: [f32; 3],
+    pub(super) normal: Vec3,
     pub(super) start_solid: bool,
 }
 
@@ -203,7 +203,7 @@ impl MapWalkCollision {
     /// box, so downstream crates can exercise walk movement without baking
     /// a real BSP.
     #[cfg(feature = "test-support")]
-    pub fn solid_box_for_tests(min: [f32; 3], max: [f32; 3]) -> Self {
+    pub fn solid_box_for_tests(min: Vec3, max: Vec3) -> Self {
         let planes = [
             ([1.0, 0.0, 0.0], max[0]),
             ([-1.0, 0.0, 0.0], -min[0]),
@@ -213,7 +213,10 @@ impl MapWalkCollision {
             ([0.0, 0.0, -1.0], -min[2]),
         ]
         .into_iter()
-        .map(|(normal, dist)| MapPlane { normal, dist })
+        .map(|(normal, dist)| MapPlane {
+            normal: Vec3::from(normal),
+            dist,
+        })
         .collect();
         Self {
             brushes: vec![
@@ -228,7 +231,7 @@ impl MapWalkCollision {
 
     #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn with_solid_box_for_tests(mut self, min: [f32; 3], max: [f32; 3]) -> Self {
+    pub fn with_solid_box_for_tests(mut self, min: Vec3, max: Vec3) -> Self {
         self.brushes
             .push(axis_aligned_box_brush(min, max, contents_flags::SOLID));
         self
@@ -236,7 +239,7 @@ impl MapWalkCollision {
 
     #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn with_water_box_for_tests(mut self, min: [f32; 3], max: [f32; 3]) -> Self {
+    pub fn with_water_box_for_tests(mut self, min: Vec3, max: Vec3) -> Self {
         self.water_brushes
             .push(axis_aligned_box_brush(min, max, contents_flags::WATER));
         self
@@ -283,14 +286,17 @@ impl MapWalkCollision {
         self.props.memory_bytes()
     }
 
-    pub fn ray_hits_sky(&self, start: [f32; 3], direction: [f32; 3]) -> bool {
+    pub fn ray_hits_sky(&self, start: Vec3, direction: Vec3) -> bool {
         if !self.has_sky_sides() {
             return false;
         }
-        let Some(direction) = normalize(direction).filter(|d| vector_is_finite_nonzero(*d)) else {
+        let Some(direction) = direction
+            .normalize()
+            .filter(|d| vector_is_finite_nonzero(*d))
+        else {
             return false;
         };
-        let end = add(start, mul(direction, SKY_TRACE_DISTANCE));
+        let end = start + (direction * SKY_TRACE_DISTANCE);
         let ray_bounds = bounds_from_points([start, end]).unwrap_or(MapBounds {
             min: start,
             max: end,
@@ -319,10 +325,10 @@ impl MapWalkCollision {
             .any(|plane| plane.is_sky)
     }
 
-    pub fn trace_aabb(&self, start: [f32; 3], end: [f32; 3], half_extents: [f32; 3]) -> MapTrace {
+    pub fn trace_aabb(&self, start: Vec3, end: Vec3, half_extents: Vec3) -> MapTrace {
         let mut best = TraceCandidate {
             fraction: 1.0,
-            normal: [0.0; 3],
+            normal: Vec3::splat(0.0),
             start_solid: false,
         };
         let sweep = swept_bounds(start, end, half_extents);
@@ -368,13 +374,13 @@ impl MapWalkCollision {
 
         MapTrace {
             fraction: best.fraction.clamp(0.0, 1.0),
-            end_position: lerp(start, end, best.fraction.clamp(0.0, 1.0)),
+            end_position: start.lerp(end, best.fraction.clamp(0.0, 1.0)),
             normal: best.normal,
             start_solid: best.start_solid,
         }
     }
 
-    pub fn aabb_embedded(&self, center: [f32; 3], half_extents: [f32; 3]) -> bool {
+    pub fn aabb_embedded(&self, center: Vec3, half_extents: Vec3) -> bool {
         self.brushes
             .iter()
             .any(|brush| brush_contains_aabb_center(brush, center, half_extents))
@@ -387,17 +393,17 @@ impl MapWalkCollision {
     /// info_player_start), and `trace_aabb` refuses to move a hull that
     /// starts there. Unstick logic must use THIS predicate; checking only
     /// `aabb_embedded` leaves "not embedded yet untraceable" deadlocks.
-    pub fn aabb_trace_solid(&self, center: [f32; 3], half_extents: [f32; 3]) -> bool {
+    pub fn aabb_trace_solid(&self, center: Vec3, half_extents: Vec3) -> bool {
         self.trace_aabb(center, center, half_extents).start_solid
     }
 
-    pub fn water_at(&self, point: [f32; 3]) -> Option<WaterVolume> {
+    pub fn water_at(&self, point: Vec3) -> Option<WaterVolume> {
         self.water_brushes
             .iter()
             .filter(|brush| bounds_contains_point(brush.bounds(), point))
             .filter(|brush| {
                 brush.planes.iter().all(|side| {
-                    dot(point, side.plane.normal) - side.plane.dist <= TRACE_INSIDE_EPSILON
+                    point.dot(side.plane.normal) - side.plane.dist <= TRACE_INSIDE_EPSILON
                 })
             })
             .filter_map(|brush| {
@@ -463,7 +469,7 @@ pub(super) fn walk_brushes_from_bsp(
             .iter()
             .filter_map(|side| {
                 let plane = bsp.planes.get(usize::from(side.plane))?;
-                let normal = normalize_or_zero(plane.normal);
+                let normal = Vec3::from(plane.normal).normalize_or_zero();
                 vector_is_finite_nonzero(normal).then_some(MapWalkBrushPlane {
                     plane: MapPlane {
                         normal,
@@ -533,7 +539,7 @@ pub(super) fn walk_brush_from_brush_planes(
 }
 
 #[cfg(feature = "test-support")]
-fn axis_aligned_box_brush(min: [f32; 3], max: [f32; 3], flags: i32) -> MapWalkBrush {
+fn axis_aligned_box_brush(min: Vec3, max: Vec3, flags: i32) -> MapWalkBrush {
     let planes = [
         ([1.0, 0.0, 0.0], max[0]),
         ([-1.0, 0.0, 0.0], -min[0]),
@@ -543,7 +549,10 @@ fn axis_aligned_box_brush(min: [f32; 3], max: [f32; 3], flags: i32) -> MapWalkBr
         ([0.0, 0.0, -1.0], -min[2]),
     ]
     .into_iter()
-    .map(|(normal, dist)| MapPlane { normal, dist })
+    .map(|(normal, dist)| MapPlane {
+        normal: Vec3::from(normal),
+        dist,
+    })
     .collect();
     walk_brush_from_planes(planes, flags).expect("axis-aligned box brush is always valid")
 }
@@ -791,10 +800,12 @@ pub(super) fn prop_planes_from_hull(
     if hull.vertices.len() < 4 || hull.triangles.is_empty() {
         return None;
     }
-    let centroid = mul(
-        hull.vertices.iter().copied().fold([0.0; 3], add),
-        1.0 / hull.vertices.len() as f32,
-    );
+    let centroid = (hull
+        .vertices
+        .iter()
+        .copied()
+        .fold(Vec3::ZERO, |sum, vertex| sum + vertex))
+        * (1.0 / hull.vertices.len() as f32);
     let mut planes = Vec::new();
     for triangle in &hull.triangles {
         let vertices = [
@@ -802,19 +813,18 @@ pub(super) fn prop_planes_from_hull(
             *hull.vertices.get(triangle[1])?,
             *hull.vertices.get(triangle[2])?,
         ];
-        let normal = normalize_or_zero(cross(
-            sub(vertices[1], vertices[0]),
-            sub(vertices[2], vertices[0]),
-        ));
+        let normal = (vertices[1] - vertices[0])
+            .cross(vertices[2] - vertices[0])
+            .normalize_or_zero();
         if !vector_is_finite_nonzero(normal) {
             continue;
         }
         let mut plane = MapPlane {
             normal,
-            dist: dot(vertices[0], normal),
+            dist: vertices[0].dot(normal),
         };
-        if dot(centroid, plane.normal) - plane.dist > 0.0 {
-            plane.normal = mul(plane.normal, -1.0);
+        if centroid.dot(plane.normal) - plane.dist > 0.0 {
+            plane.normal *= -1.0;
             plane.dist = -plane.dist;
         }
         push_unique_prop_plane(&mut planes, plane);
@@ -843,7 +853,13 @@ pub(super) fn add_prop_bevel_planes(hull: &ConvexHull, planes: &mut Vec<MapPlane
         ([0.0, 0.0, 1.0], bounds_max[2]),
         ([0.0, 0.0, -1.0], -bounds_min[2]),
     ] {
-        push_unique_prop_plane(planes, MapPlane { normal, dist });
+        push_unique_prop_plane(
+            planes,
+            MapPlane {
+                normal: Vec3::from(normal),
+                dist,
+            },
+        );
     }
 
     // QBSP-style hull expansion needs more than face planes for swept AABBs:
@@ -870,20 +886,20 @@ pub(super) fn add_prop_bevel_planes(hull: &ConvexHull, planes: &mut Vec<MapPlane
         let Some(right) = hull.vertices.get(right).copied() else {
             continue;
         };
-        let edge = sub(right, left);
+        let edge = right - left;
         if !vector_is_finite_nonzero(edge) {
             continue;
         }
         for axis in axes {
-            let normal = normalize_or_zero(cross(edge, axis));
+            let normal = edge.cross(Vec3::from(axis)).normalize_or_zero();
             if !vector_is_finite_nonzero(normal) {
                 continue;
             }
-            for normal in [normal, mul(normal, -1.0)] {
+            for normal in [normal, (normal * -1.0)] {
                 let dist = hull
                     .vertices
                     .iter()
-                    .map(|vertex| dot(*vertex, normal))
+                    .map(|vertex| (*vertex).dot(normal))
                     .fold(f32::NEG_INFINITY, f32::max);
                 if dist.is_finite() {
                     push_unique_prop_plane(planes, MapPlane { normal, dist });
@@ -909,37 +925,32 @@ pub(super) fn push_unique_prop_plane(planes: &mut Vec<MapPlane>, plane: MapPlane
 
 pub(super) fn transform_prop_plane(
     plane: MapPlane,
-    origin: [f32; 3],
-    angles: [f32; 3],
+    origin: Vec3,
+    angles: Vec3,
     scale: f32,
 ) -> Option<MapPlane> {
-    let normal = normalize_or_zero(rotate_prop_vector(plane.normal, angles));
+    let normal = (plane.normal.rotate_source(angles)).normalize_or_zero();
     if !vector_is_finite_nonzero(normal) {
         return None;
     }
-    let dist = plane.dist * scale + dot(origin, normal);
+    let dist = plane.dist * scale + origin.dot(normal);
     dist.is_finite().then_some(MapPlane { normal, dist })
 }
 
-pub(super) fn transform_prop_point(
-    point: [f32; 3],
-    origin: [f32; 3],
-    angles: [f32; 3],
-    scale: f32,
-) -> [f32; 3] {
-    add(rotate_prop_vector(mul(point, scale), angles), origin)
+pub(super) fn transform_prop_point(point: Vec3, origin: Vec3, angles: Vec3, scale: f32) -> Vec3 {
+    ((point * scale).rotate_source(angles)) + origin
 }
 
-pub(super) fn prop_bounds_corners(bounds: MapBounds) -> [[f32; 3]; 8] {
+pub(super) fn prop_bounds_corners(bounds: MapBounds) -> [Vec3; 8] {
     let MapBounds { min, max } = bounds;
     [
         min,
-        [max[0], min[1], min[2]],
-        [min[0], max[1], min[2]],
-        [min[0], min[1], max[2]],
-        [max[0], max[1], min[2]],
-        [max[0], min[1], max[2]],
-        [min[0], max[1], max[2]],
+        Vec3::new(max[0], min[1], min[2]),
+        Vec3::new(min[0], max[1], min[2]),
+        Vec3::new(min[0], min[1], max[2]),
+        Vec3::new(max[0], max[1], min[2]),
+        Vec3::new(max[0], min[1], max[2]),
+        Vec3::new(min[0], max[1], max[2]),
         max,
     ]
 }
@@ -982,16 +993,16 @@ pub(super) fn prop_grid_cell_count(min_cell: [i32; 3], max_cell: [i32; 3]) -> Op
     Some(count)
 }
 
-pub(super) use crate::math::rotate_source_vector as rotate_prop_vector;
-
 impl MapWalkTriangle {
-    pub(super) fn new(vertices: [[f32; 3]; 3]) -> Option<Self> {
-        let normal = normalize_or_zero(cross(
-            sub(vertices[1], vertices[0]),
-            sub(vertices[2], vertices[0]),
-        ));
+    pub(super) fn new(vertices: [Vec3; 3]) -> Option<Self> {
+        let normal = (vertices[1] - vertices[0])
+            .cross(vertices[2] - vertices[0])
+            .normalize_or_zero();
         if !vector_is_finite_nonzero(normal)
-            || !vertices.iter().flatten().all(|value| value.is_finite())
+            || !vertices
+                .iter()
+                .flat_map(|vertex| vertex.to_array())
+                .all(f32::is_finite)
         {
             return None;
         }
@@ -1010,20 +1021,20 @@ impl MapWalkTriangle {
 
 pub(super) fn trace_brush_aabb(
     brush: &MapWalkBrush,
-    start: [f32; 3],
-    end: [f32; 3],
-    half_extents: [f32; 3],
+    start: Vec3,
+    end: Vec3,
+    half_extents: Vec3,
 ) -> Option<TraceCandidate> {
     let mut enter_fraction = -1.0_f32;
     let mut leave_fraction = 1.0_f32;
-    let mut enter_normal = [0.0; 3];
+    let mut enter_normal = Vec3::ZERO;
     let mut starts_outside = false;
 
     for side in &brush.planes {
         let plane = side.plane;
-        let expanded_dist = plane.dist + dot_abs(plane.normal, half_extents);
-        let start_dist = dot(start, plane.normal) - expanded_dist;
-        let end_dist = dot(end, plane.normal) - expanded_dist;
+        let expanded_dist = plane.dist + plane.normal.dot_abs(half_extents);
+        let start_dist = start.dot(plane.normal) - expanded_dist;
+        let end_dist = end.dot(plane.normal) - expanded_dist;
 
         // Quake semantics: ANY positive distance counts as starting
         // outside. Hit traces back the mover off to exactly
@@ -1064,7 +1075,7 @@ pub(super) fn trace_brush_aabb(
     if !starts_outside {
         return Some(TraceCandidate {
             fraction: 0.0,
-            normal: [0.0; 3],
+            normal: Vec3::splat(0.0),
             start_solid: true,
         });
     }
@@ -1080,11 +1091,7 @@ pub(super) fn trace_brush_aabb(
     })
 }
 
-pub(super) fn trace_brush_ray(
-    brush: &MapWalkBrush,
-    start: [f32; 3],
-    end: [f32; 3],
-) -> Option<MapRayHit> {
+pub(super) fn trace_brush_ray(brush: &MapWalkBrush, start: Vec3, end: Vec3) -> Option<MapRayHit> {
     let mut enter_fraction = -1.0_f32;
     let mut leave_fraction = 1.0_f32;
     let mut enter_is_sky = false;
@@ -1092,8 +1099,8 @@ pub(super) fn trace_brush_ray(
 
     for side in &brush.planes {
         let plane = side.plane;
-        let start_dist = dot(start, plane.normal) - plane.dist;
-        let end_dist = dot(end, plane.normal) - plane.dist;
+        let start_dist = start.dot(plane.normal) - plane.dist;
+        let end_dist = end.dot(plane.normal) - plane.dist;
 
         if start_dist > 0.0 {
             starts_outside = true;
@@ -1140,58 +1147,62 @@ pub(super) fn trace_brush_ray(
 
 pub(super) fn brush_contains_aabb_center(
     brush: &MapWalkBrush,
-    center: [f32; 3],
-    half_extents: [f32; 3],
+    center: Vec3,
+    half_extents: Vec3,
 ) -> bool {
     bounds_contains_point(expand_bounds(brush.bounds(), half_extents), center)
         && brush.planes.iter().all(|side| {
             let plane = side.plane;
-            let expanded_dist = plane.dist + dot_abs(plane.normal, half_extents);
-            dot(center, plane.normal) - expanded_dist < -TRACE_INSIDE_EPSILON
+            let expanded_dist = plane.dist + plane.normal.dot_abs(half_extents);
+            center.dot(plane.normal) - expanded_dist < -TRACE_INSIDE_EPSILON
         })
 }
 
 pub(super) fn trace_triangle_aabb(
     triangle: &MapWalkTriangle,
-    start: [f32; 3],
-    end: [f32; 3],
-    half_extents: [f32; 3],
+    start: Vec3,
+    end: Vec3,
+    half_extents: Vec3,
 ) -> Option<TraceCandidate> {
-    let velocity = sub(end, start);
-    if length_squared(velocity) <= TRACE_AXIS_EPSILON {
+    let velocity = end - start;
+    if velocity.length_squared() <= TRACE_AXIS_EPSILON {
         return None;
     }
 
     let mut enter_fraction = 0.0_f32;
     let mut leave_fraction = 1.0_f32;
-    let mut hit_normal = [0.0; 3];
+    let mut hit_normal = Vec3::ZERO;
     let mut start_overlaps = true;
 
     let edges = [
-        sub(triangle.vertices[1], triangle.vertices[0]),
-        sub(triangle.vertices[2], triangle.vertices[1]),
-        sub(triangle.vertices[0], triangle.vertices[2]),
+        ((triangle.vertices[1]) - (triangle.vertices[0])),
+        ((triangle.vertices[2]) - (triangle.vertices[1])),
+        ((triangle.vertices[0]) - (triangle.vertices[2])),
     ];
-    let box_axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let box_axes = [
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+    ];
     let mut axes = Vec::with_capacity(13);
     axes.extend_from_slice(&box_axes);
     axes.push(triangle.normal);
     for edge in edges {
         for axis in box_axes {
-            axes.push(cross(edge, axis));
+            axes.push(edge.cross(axis));
         }
     }
 
     for axis in axes {
-        let Some(axis) = normalize(axis).filter(|a| vector_is_finite_nonzero(*a)) else {
+        let Some(axis) = axis.normalize().filter(|a| vector_is_finite_nonzero(*a)) else {
             continue;
         };
-        let center_projection = dot(start, axis);
-        let radius = dot_abs(axis, half_extents);
+        let center_projection = start.dot(axis);
+        let radius = axis.dot_abs(half_extents);
         let a_min = center_projection - radius;
         let a_max = center_projection + radius;
         let (b_min, b_max) = project_triangle(triangle, axis);
-        let velocity_projection = dot(velocity, axis);
+        let velocity_projection = velocity.dot(axis);
         let overlaps_at_start = intervals_overlap(a_min, a_max, b_min, b_max);
         start_overlaps &= overlaps_at_start;
 
@@ -1206,7 +1217,7 @@ pub(super) fn trace_triangle_aabb(
             (
                 (b_min - a_max) / velocity_projection,
                 (b_max - a_min) / velocity_projection,
-                mul(axis, -1.0),
+                (axis * -1.0),
             )
         } else {
             (
@@ -1235,7 +1246,7 @@ pub(super) fn trace_triangle_aabb(
     // strictly separated: an exact-contact endpoint makes the NEXT trace
     // start overlapping on every axis, which this sweep reports as "no
     // hit" — the mover would sink through the terrain it is standing on.
-    let backoff = TRACE_PLANE_EPSILON / length_squared(velocity).sqrt();
+    let backoff = TRACE_PLANE_EPSILON / velocity.length_squared().sqrt();
     Some(TraceCandidate {
         fraction: (enter_fraction - backoff).max(0.0),
         normal: hit_normal,
@@ -1256,7 +1267,7 @@ pub(super) fn brush_bounds_from_planes(planes: &[MapPlane]) -> Option<MapBounds>
                 };
                 if planes
                     .iter()
-                    .all(|plane| dot(point, plane.normal) - plane.dist <= TRACE_INSIDE_EPSILON)
+                    .all(|plane| point.dot(plane.normal) - plane.dist <= TRACE_INSIDE_EPSILON)
                 {
                     points.push(point);
                 }
@@ -1270,42 +1281,40 @@ pub(super) fn plane_intersection(
     first: MapPlane,
     second: MapPlane,
     third: MapPlane,
-) -> Option<[f32; 3]> {
-    let second_cross_third = cross(second.normal, third.normal);
-    let denominator = dot(first.normal, second_cross_third);
+) -> Option<Vec3> {
+    let second_cross_third = second.normal.cross(third.normal);
+    let denominator = first.normal.dot(second_cross_third);
     if denominator.abs() <= TRACE_AXIS_EPSILON {
         return None;
     }
-    let numerator = add(
-        add(
-            mul(second_cross_third, first.dist),
-            mul(cross(third.normal, first.normal), second.dist),
-        ),
-        mul(cross(first.normal, second.normal), third.dist),
-    );
-    let point = mul(numerator, 1.0 / denominator);
-    point.iter().all(|value| value.is_finite()).then_some(point)
+    let numerator = second_cross_third * first.dist
+        + third.normal.cross(first.normal) * second.dist
+        + first.normal.cross(second.normal) * third.dist;
+    let point = numerator / denominator;
+    point
+        .to_array()
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(point)
 }
 
 pub(super) fn bounds_from_triangles(triangles: &[MapWalkTriangle]) -> Option<MapBounds> {
     bounds_from_points_iter(triangles.iter().flat_map(|triangle| triangle.vertices))
 }
 
-pub(super) fn bounds_from_points<const N: usize>(points: [[f32; 3]; N]) -> Option<MapBounds> {
+pub(super) fn bounds_from_points<const N: usize>(points: [Vec3; N]) -> Option<MapBounds> {
     bounds_from_points_iter(points.into_iter())
 }
 
-pub(super) fn bounds_from_points_iter(
-    mut points: impl Iterator<Item = [f32; 3]>,
-) -> Option<MapBounds> {
+pub(super) fn bounds_from_points_iter(mut points: impl Iterator<Item = Vec3>) -> Option<MapBounds> {
     let first = points.next()?;
-    if !first.iter().all(|value| value.is_finite()) {
+    if !first.is_finite() {
         return None;
     }
     let mut min = first;
     let mut max = first;
     for point in points {
-        if !point.iter().all(|value| value.is_finite()) {
+        if !point.is_finite() {
             return None;
         }
         for axis in 0..3 {
@@ -1318,14 +1327,14 @@ pub(super) fn bounds_from_points_iter(
 
 #[derive(Debug, Default)]
 pub(super) struct BoundsBuilder {
-    pub(super) min: [f32; 3],
-    pub(super) max: [f32; 3],
+    pub(super) min: Vec3,
+    pub(super) max: Vec3,
     pub(super) has_points: bool,
 }
 
 impl BoundsBuilder {
-    pub(super) fn push(&mut self, point: [f32; 3]) {
-        if !point.iter().all(|value| value.is_finite()) {
+    pub(super) fn push(&mut self, point: Vec3) {
+        if !point.is_finite() {
             return;
         }
         if !self.has_points {
@@ -1334,7 +1343,7 @@ impl BoundsBuilder {
             self.has_points = true;
             return;
         }
-        for (axis, value) in point.iter().copied().enumerate() {
+        for (axis, value) in point.into_iter().enumerate() {
             self.min[axis] = self.min[axis].min(value);
             self.max[axis] = self.max[axis].max(value);
         }
@@ -1348,16 +1357,23 @@ impl BoundsBuilder {
     }
 }
 
-pub(super) fn swept_bounds(start: [f32; 3], end: [f32; 3], half_extents: [f32; 3]) -> MapBounds {
+pub(super) fn swept_bounds(start: Vec3, end: Vec3, half_extents: Vec3) -> MapBounds {
     let min = std::array::from_fn(|axis| start[axis].min(end[axis]) - half_extents[axis]);
     let max = std::array::from_fn(|axis| start[axis].max(end[axis]) + half_extents[axis]);
-    MapBounds { min, max }
+    MapBounds {
+        min: Vec3::from(min),
+        max: Vec3::from(max),
+    }
 }
 
-pub(super) fn expand_bounds(bounds: MapBounds, half_extents: [f32; 3]) -> MapBounds {
+pub(super) fn expand_bounds(bounds: MapBounds, half_extents: Vec3) -> MapBounds {
     MapBounds {
-        min: std::array::from_fn(|axis| bounds.min[axis] - half_extents[axis]),
-        max: std::array::from_fn(|axis| bounds.max[axis] + half_extents[axis]),
+        min: Vec3::from(std::array::from_fn(|axis| {
+            bounds.min[axis] - half_extents[axis]
+        })),
+        max: Vec3::from(std::array::from_fn(|axis| {
+            bounds.max[axis] + half_extents[axis]
+        })),
     }
 }
 
@@ -1365,7 +1381,7 @@ pub(super) fn bounds_intersect(left: MapBounds, right: MapBounds) -> bool {
     (0..3).all(|axis| left.min[axis] <= right.max[axis] && left.max[axis] >= right.min[axis])
 }
 
-pub(super) fn bounds_contains_point(bounds: MapBounds, point: [f32; 3]) -> bool {
+pub(super) fn bounds_contains_point(bounds: MapBounds, point: Vec3) -> bool {
     (0..3).all(|axis| point[axis] >= bounds.min[axis] && point[axis] <= bounds.max[axis])
 }
 
@@ -1382,15 +1398,18 @@ pub(super) fn bsp_world_bounds(bsp: &MapBsp) -> Option<MapBounds> {
         min.iter()
             .chain(max.iter())
             .all(|value| value.is_finite())
-            .then_some(MapBounds { min, max })
+            .then_some(MapBounds {
+                min: Vec3::from(min),
+                max: Vec3::from(max),
+            })
     })
 }
 
-pub(super) fn project_triangle(triangle: &MapWalkTriangle, axis: [f32; 3]) -> (f32, f32) {
-    let mut min = dot(triangle.vertices[0], axis);
+pub(super) fn project_triangle(triangle: &MapWalkTriangle, axis: Vec3) -> (f32, f32) {
+    let mut min = (triangle.vertices[0]).dot(axis);
     let mut max = min;
     for vertex in triangle.vertices.iter().copied().skip(1) {
-        let projection = dot(vertex, axis);
+        let projection = vertex.dot(axis);
         min = min.min(projection);
         max = max.max(projection);
     }
@@ -1415,7 +1434,7 @@ impl MapLeafLocator {
                 .planes
                 .iter()
                 .map(|plane| MapPlane {
-                    normal: plane.normal,
+                    normal: Vec3::from(plane.normal),
                     dist: plane.dist,
                 })
                 .collect(),
@@ -1439,7 +1458,7 @@ impl MapLeafLocator {
         }
     }
 
-    pub(super) fn leaf_at(&self, point: [f32; 3]) -> Option<usize> {
+    pub(super) fn leaf_at(&self, point: Vec3) -> Option<usize> {
         walk_to_leaf(
             point,
             self.nodes.len(),
@@ -1457,8 +1476,8 @@ impl MapLeafLocator {
 
     pub(super) fn clusters_for_aabb(
         &self,
-        bounds_min: [f32; 3],
-        bounds_max: [f32; 3],
+        bounds_min: Vec3,
+        bounds_max: Vec3,
         cluster_count: u32,
     ) -> MapPropVisibility {
         let Some(MapBounds {
@@ -1561,10 +1580,7 @@ impl MapLeafLocator {
     }
 }
 
-pub(super) fn normalized_prop_aabb(
-    bounds_min: [f32; 3],
-    bounds_max: [f32; 3],
-) -> Option<MapBounds> {
+pub(super) fn normalized_prop_aabb(bounds_min: Vec3, bounds_max: Vec3) -> Option<MapBounds> {
     let mut min = [0.0; 3];
     let mut max = [0.0; 3];
     for axis in 0..3 {
@@ -1574,7 +1590,10 @@ pub(super) fn normalized_prop_aabb(
         min[axis] = bounds_min[axis].min(bounds_max[axis]);
         max[axis] = bounds_min[axis].max(bounds_max[axis]);
     }
-    (min != max).then_some(MapBounds { min, max })
+    (min != max).then_some(MapBounds {
+        min: Vec3::from(min),
+        max: Vec3::from(max),
+    })
 }
 
 /// Which side(s) of a plane an AABB occupies.
@@ -1599,11 +1618,7 @@ impl PlaneSide {
     }
 }
 
-pub(super) fn aabb_plane_side(
-    bounds_min: [f32; 3],
-    bounds_max: [f32; 3],
-    plane: MapPlane,
-) -> PlaneSide {
+pub(super) fn aabb_plane_side(bounds_min: Vec3, bounds_max: Vec3, plane: MapPlane) -> PlaneSide {
     let center = [
         (bounds_min[0] + bounds_max[0]) * 0.5,
         (bounds_min[1] + bounds_max[1]) * 0.5,
@@ -1614,7 +1629,7 @@ pub(super) fn aabb_plane_side(
         (bounds_max[1] - bounds_min[1]) * 0.5,
         (bounds_max[2] - bounds_min[2]) * 0.5,
     ];
-    let distance = dot(center, plane.normal) - plane.dist;
+    let distance = Vec3::from(center).dot(plane.normal) - plane.dist;
     let radius = half[0] * plane.normal[0].abs()
         + half[1] * plane.normal[1].abs()
         + half[2] * plane.normal[2].abs();

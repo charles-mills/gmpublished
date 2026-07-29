@@ -1,9 +1,10 @@
 use super::{
     BTreeMap, BspError, ColorRgbExp, DispInfo, Face, HashMap, MapBsp, MapFaceVisibility,
     MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapVertex, PendingLightmapBlock,
-    TexInfo, add, brush_lightmap_uv, displacement_lightmap_uv, extract_face_lightmap,
-    is_preview_material_visible, length_squared, mul, normalize_material_name, sub, texture_flags,
+    TexInfo, brush_lightmap_uv, displacement_lightmap_uv, extract_face_lightmap,
+    is_preview_material_visible, normalize_material_name, texture_flags,
 };
+use crate::math::Vec3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct BuildMesh {
@@ -102,7 +103,7 @@ pub(super) struct BuildVertex {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct DisplacementBuildVertex {
-    pub(super) position: [f32; 3],
+    pub(super) position: Vec3,
     pub(super) column: usize,
     pub(super) row: usize,
     pub(super) steps: usize,
@@ -111,7 +112,7 @@ pub(super) struct DisplacementBuildVertex {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct DisplacementGridVertex {
-    pub(super) position: [f32; 3],
+    pub(super) position: Vec3,
     pub(super) alpha: f32,
 }
 
@@ -202,7 +203,7 @@ pub(super) fn append_brush_face(
     bsp: &MapBsp,
     face: &Face,
     texinfo: &TexInfo,
-    normal: [f32; 3],
+    normal: Vec3,
     mesh: &mut BuildMesh,
     lightmap_block: Option<usize>,
 ) -> Result<(), BspError> {
@@ -232,7 +233,7 @@ pub(super) fn append_displacement(
     face: &Face,
     displacement: &DispInfo,
     texinfo: &TexInfo,
-    normal: [f32; 3],
+    normal: Vec3,
     mesh: &mut BuildMesh,
     lightmap_block: Option<usize>,
 ) -> Result<(), BspError> {
@@ -257,8 +258,8 @@ pub(super) fn append_displacement(
 }
 
 pub(super) fn map_vertex(
-    position: [f32; 3],
-    normal: [f32; 3],
+    position: Vec3,
+    normal: Vec3,
     texinfo: &TexInfo,
     lightmap_uv: [f32; 2],
     blend_alpha: f32,
@@ -273,7 +274,7 @@ pub(super) fn map_vertex(
     }
 }
 
-pub(super) fn texture_coord(position: [f32; 3], transform: [f32; 4]) -> f32 {
+pub(super) fn texture_coord(position: Vec3, transform: [f32; 4]) -> f32 {
     position[0] * transform[0]
         + position[1] * transform[1]
         + position[2] * transform[2]
@@ -351,17 +352,17 @@ pub(super) fn displacement_grid(
     let corner_positions = displacement_corner_positions(bsp, face, displacement)?;
     let step_scale = 1.0 / steps.max(1) as f32;
     let edge_intervals = [
-        mul(sub(corner_positions[1], corner_positions[0]), step_scale),
-        mul(sub(corner_positions[2], corner_positions[3]), step_scale),
+        ((corner_positions[1] - corner_positions[0]) * step_scale),
+        ((corner_positions[2] - corner_positions[3]) * step_scale),
     ];
     let base_positions = (0..=steps).flat_map(move |column| {
         (0..=steps).map(move |row| {
             let edge_positions = [
-                add(corner_positions[0], mul(edge_intervals[0], column as f32)),
-                add(corner_positions[3], mul(edge_intervals[1], column as f32)),
+                (corner_positions[0] + (edge_intervals[0] * (column as f32))),
+                (corner_positions[3] + (edge_intervals[1] * (column as f32))),
             ];
-            let segment_interval = mul(sub(edge_positions[1], edge_positions[0]), step_scale);
-            add(edge_positions[0], mul(segment_interval, row as f32))
+            let segment_interval = (edge_positions[1] - edge_positions[0]) * step_scale;
+            edge_positions[0] + (segment_interval * (row as f32))
         })
     });
 
@@ -369,9 +370,9 @@ pub(super) fn displacement_grid(
         .displacement_vertices(displacement)
         .zip(base_positions)
         .map(|(displacement_vertex, base_position)| {
-            let offset = mul(displacement_vertex.vector, displacement_vertex.dist);
+            let offset = Vec3::from(displacement_vertex.vector) * displacement_vertex.dist;
             DisplacementGridVertex {
-                position: add(base_position, offset),
+                position: (base_position + offset),
                 alpha: displacement_blend_alpha(displacement_vertex.alpha),
             }
         })
@@ -386,9 +387,9 @@ pub(super) fn displacement_corner_positions(
     bsp: &MapBsp,
     face: &Face,
     displacement: &DispInfo,
-) -> Result<[[f32; 3]; 4], BspError> {
+) -> Result<[Vec3; 4], BspError> {
     let vertices = bsp.face_vertex_positions(face);
-    let mut corners: [[f32; 3]; 4] =
+    let mut corners: [Vec3; 4] =
         vertices
             .as_slice()
             .try_into()
@@ -400,7 +401,9 @@ pub(super) fn displacement_corner_positions(
         .iter()
         .enumerate()
         .min_by(|(_, left), (_, right)| {
-            length_squared(sub(**left, start)).total_cmp(&length_squared(sub(**right, start)))
+            ((**left) - Vec3::from(start))
+                .length_squared()
+                .total_cmp(&((**right) - Vec3::from(start)).length_squared())
         })
         .map_or(0, |(index, _)| index);
     corners.rotate_left(start_index);
@@ -421,15 +424,15 @@ pub(super) fn fan_indices(vertex_count: usize) -> Result<Vec<u32>, BspError> {
     Ok(indices)
 }
 
-fn face_normal(bsp: &MapBsp, face: &Face) -> [f32; 3] {
+fn face_normal(bsp: &MapBsp, face: &Face) -> Vec3 {
     let normal = bsp.face_plane_normal(face);
     if face.side == 0 {
         normal
     } else {
-        [-normal[0], -normal[1], -normal[2]]
+        Vec3::new(-normal[0], -normal[1], -normal[2])
     }
 }
 
-fn is_water_underside_face(texinfo: &TexInfo, normal: [f32; 3]) -> bool {
+fn is_water_underside_face(texinfo: &TexInfo, normal: Vec3) -> bool {
     texinfo.flags & texture_flags::WARP != 0 && normal[2] < 0.0
 }

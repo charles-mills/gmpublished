@@ -2,6 +2,7 @@
 //! modal. Damage-driven: redraws happen only on orbit/zoom input, so an idle
 //! open viewer costs zero CPU/GPU.
 
+use gmpublished_backend::math::Vec3;
 use std::sync::Arc;
 
 use iced::mouse;
@@ -9,23 +10,19 @@ use iced::wgpu;
 use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
-use crate::media::preview_model::ModelVertex;
 use crate::bridge::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
-use gmpublished_backend::math::{
-    self, add, cross, distance, distance_squared, dot, length_squared, normalize_or_zero,
-    scale as mul, sub,
-};
+use crate::media::preview_model::ModelVertex;
 use gmpublished_backend::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDirection};
 use vformats::vtf::BcFormat;
 
 use super::Message;
+use super::state::{FlyPose, MovementMode, OrbitPose};
 use crate::media::preview_model::{
     DetailSprite, DoorAudioEvent, DoorAudioEventKind, DoorInstance, DoorSound, MapFog,
-    MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket, MapWalkCollision, MaterialSlot,
-    MeshData, ModelPreview, OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, SKYBOX_FACE_COUNT, Skybox,
-    SkyboxFace, WorldVisibilityPlan,
+    MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket, MaterialSlot, MeshData, ModelPreview,
+    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, SKYBOX_FACE_COUNT, Skybox, SkyboxFace,
+    WorldVisibilityPlan,
 };
-use super::state::{FlyPose, MovementMode, OrbitPose};
 
 mod camera;
 mod doors;
@@ -37,10 +34,9 @@ mod texture;
 
 pub(super) use camera::{Camera, FlyCamera, FlyViewer, Viewer3d};
 use doors::{
-    DOOR_PROGRESS_EPSILON, DOOR_USE_REACH, DoorMotion, DoorRenderPose, DoorRuntime, DoorTarget,
-    bounds_intersect, choose_door_swing, door_audio_event, door_progress_step, door_sound_gain,
-    door_uses_move_loop, door_world_bounds, endpoint_sound, expand_bounds, initial_door_swing,
-    ray_aabb_distance, trace_aabb_against_aabb, transform_door_vertices,
+    DOOR_PROGRESS_EPSILON, DoorMotion, DoorRenderPose, DoorRuntime, DoorTarget, bounds_intersect,
+    door_world_bounds, expand_bounds, initial_door_swing, trace_aabb_against_aabb,
+    transform_door_vertices,
 };
 use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem, prepare_draw_plans};
 use pipeline::ModelPrimitive;
@@ -114,56 +110,61 @@ const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_a
     2 => Float32x2,
 ];
 
-fn mid(min: [f32; 3], max: [f32; 3]) -> [f32; 3] {
-    [
+fn mid(min: Vec3, max: Vec3) -> Vec3 {
+    Vec3::new(
         (min[0] + max[0]) * 0.5,
         (min[1] + max[1]) * 0.5,
         (min[2] + max[2]) * 0.5,
-    ]
+    )
 }
 
-fn half_extent(min: [f32; 3], max: [f32; 3]) -> f32 {
+fn half_extent(min: Vec3, max: Vec3) -> f32 {
     let dx = (max[0] - min[0]) * 0.5;
     let dy = (max[1] - min[1]) * 0.5;
     let dz = (max[2] - min[2]) * 0.5;
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn skybox_eye(world_eye: [f32; 3], sky_origin: [f32; 3], sky_scale: f32) -> [f32; 3] {
+fn skybox_eye(world_eye: Vec3, sky_origin: Vec3, sky_scale: f32) -> Vec3 {
     let scale = if sky_scale.is_finite() && sky_scale > 0.0 {
         sky_scale
     } else {
         16.0
     };
-    [
+    Vec3::new(
         sky_origin[0] + world_eye[0] / scale,
         sky_origin[1] + world_eye[1] / scale,
         sky_origin[2] + world_eye[2] / scale,
-    ]
+    )
 }
 
 /// A direction, falling back to Source's world up.
 ///
 /// The camera-basis convention: a `look_at` needs three usable axes, and a
 /// zero vector there produces a NaN view matrix rather than a degenerate one.
-fn normalize(v: [f32; 3]) -> [f32; 3] {
-    math::normalize(v).unwrap_or(SOURCE_UP)
+/// A direction, treating a degenerate vector as straight up.
+///
+/// Distinct from [`Vec3::normalize`], which reports the degenerate case: the
+/// viewer's camera basis needs *a* usable axis more than it needs to know
+/// there wasn't one.
+fn normalize_or_up(v: Vec3) -> Vec3 {
+    v.normalize().unwrap_or(SOURCE_UP)
 }
 
 /// Source's world up. The engine is Z-up, so this is +Z rather than the +Y
 /// most renderers default to.
-pub(super) const SOURCE_UP: [f32; 3] = [0.0, 0.0, 1.0];
+pub(super) const SOURCE_UP: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 /// Right-handed look-at, column-major.
-pub(super) fn look_at(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
-    let f = normalize(sub(center, eye));
-    let s = normalize(cross(f, up));
-    let u = cross(s, f);
+pub(super) fn look_at(eye: Vec3, center: Vec3, up: Vec3) -> [[f32; 4]; 4] {
+    let f = normalize_or_up(center - eye);
+    let s = normalize_or_up(f.cross(up));
+    let u = s.cross(f);
     [
         [s[0], u[0], -f[0], 0.0],
         [s[1], u[1], -f[1], 0.0],
         [s[2], u[2], -f[2], 0.0],
-        [-dot(s, eye), -dot(u, eye), dot(f, eye), 1.0],
+        [-s.dot(eye), -u.dot(eye), f.dot(eye), 1.0],
     ]
 }
 
@@ -211,7 +212,11 @@ mod tests {
 
     #[test]
     fn look_at_puts_eye_at_origin() {
-        let view = look_at([5.0, 0.0, 0.0], [0.0, 0.0, 0.0], SOURCE_UP);
+        let view = look_at(
+            Vec3::new(5.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            SOURCE_UP,
+        );
         // Transforming the eye position must land on the origin.
         let x = view[0][0] * 5.0 + view[3][0];
         let y = view[0][1] * 5.0 + view[3][1];
@@ -222,20 +227,28 @@ mod tests {
     #[test]
     fn skybox_eye_moves_world_eye_into_skybox_space() {
         assert_eq!(
-            skybox_eye([160.0, -32.0, 48.0], [10.0, 20.0, 30.0], 16.0),
-            [20.0, 18.0, 33.0]
+            skybox_eye(
+                Vec3::new(160.0, -32.0, 48.0),
+                Vec3::new(10.0, 20.0, 30.0),
+                16.0
+            ),
+            Vec3::new(20.0, 18.0, 33.0)
         );
         assert_eq!(
-            skybox_eye([160.0, -32.0, 48.0], [10.0, 20.0, 30.0], 8.0),
-            [30.0, 16.0, 36.0]
+            skybox_eye(
+                Vec3::new(160.0, -32.0, 48.0),
+                Vec3::new(10.0, 20.0, 30.0),
+                8.0
+            ),
+            Vec3::new(30.0, 16.0, 36.0)
         );
     }
 
     #[test]
     fn skybox_eye_uses_default_scale_for_invalid_input() {
         assert_eq!(
-            skybox_eye([160.0, 0.0, 0.0], [1.0, 2.0, 3.0], 0.0),
-            [11.0, 2.0, 3.0]
+            skybox_eye(Vec3::new(160.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 3.0), 0.0),
+            Vec3::new(11.0, 2.0, 3.0)
         );
     }
 }

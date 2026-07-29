@@ -4,6 +4,7 @@ use super::{
     Overlay, Plane, StaticProp, StaticProps, TexData, TexInfo, Visibility, bsp, fmt, pakfile_error,
     texture_flags,
 };
+use crate::math::Vec3;
 
 /// `SURF_TRIGGER`/`SURF_HINT`/`SURF_SKIP` (`bspfile.h`): not in
 /// [`texture_flags`] because they're rarely needed, but
@@ -69,7 +70,7 @@ impl MapEntity {
 /// [`bsp::parse`] into owned storage (no borrow of the source bytes) so
 /// it can be threaded through the whole `load_map` pipeline by reference.
 pub(super) struct MapBsp {
-    pub(super) vertices: Vec<[f32; 3]>,
+    pub(super) vertices: Vec<Vec3>,
     pub(super) planes: Vec<Plane>,
     pub(super) edges: Vec<[u16; 2]>,
     pub(super) surfedges: Vec<i32>,
@@ -127,7 +128,7 @@ impl MapBsp {
             && raw_len(ids::LEAF_AMBIENT_INDEX_HDR) > 0;
 
         macro_rules! par_decode {
-            ($( $slot:ident = $decode:expr ; )+) => {
+            ($( $slot:ident = $decode:expr; )+) => {
                 $( let mut $slot = None; )+
                 rayon::scope(|s| {
                     $( s.spawn(|_| $slot = Some($decode)); )+
@@ -209,7 +210,7 @@ impl MapBsp {
             overlays: overlays.map_err(decode_error)?,
             static_props: static_props.map_err(decode_error)?,
             detail_props: detail_props.map_err(decode_error)?,
-            vertices,
+            vertices: vertices.into_iter().map(Vec3::from).collect(),
             faces,
             edges,
             surfedges,
@@ -254,7 +255,7 @@ impl MapBsp {
     /// vbsp's own tolerance (a `Handle` there assumes validated indices,
     /// but the fallible pieces this crate cannot pre-validate degrade the
     /// same way its `Option`-returning lookups already did downstream).
-    pub(super) fn face_vertex_positions(&self, face: &Face) -> Vec<[f32; 3]> {
+    pub(super) fn face_vertex_positions(&self, face: &Face) -> Vec<Vec3> {
         self.face_vertex_indices(face)
             .filter_map(|index| self.vertices.get(usize::from(index)).copied())
             .collect()
@@ -280,10 +281,10 @@ impl MapBsp {
 
     /// The plane normal for `face`'s own side (not yet flipped for
     /// `face.side`; see the free function `face_normal`).
-    pub(super) fn face_plane_normal(&self, face: &Face) -> [f32; 3] {
+    pub(super) fn face_plane_normal(&self, face: &Face) -> Vec3 {
         self.planes
             .get(usize::from(face.plane))
-            .map_or([0.0; 3], |plane| plane.normal)
+            .map_or(Vec3::ZERO, |plane| Vec3::from(plane.normal))
     }
 
     /// vbsp `Handle<Face>::is_visible`: false for sky, 2D-sky, trigger,
@@ -405,7 +406,7 @@ impl MapBsp {
     }
 
     /// Find the leaf containing `point` (see [`walk_to_leaf`]).
-    pub(super) fn leaf_at(&self, point: [f32; 3]) -> Option<usize> {
+    pub(super) fn leaf_at(&self, point: Vec3) -> Option<usize> {
         walk_to_leaf(
             point,
             self.nodes.len(),
@@ -416,7 +417,7 @@ impl MapBsp {
             },
             |index| {
                 let plane = self.planes.get(usize::try_from(index).ok()?)?;
-                Some((plane.normal, plane.dist))
+                Some((Vec3::from(plane.normal), plane.dist))
             },
         )
     }
@@ -439,10 +440,10 @@ impl MapBsp {
 /// means a node repeated, and `None` (leaf unknown) is the same answer
 /// callers already handle for an out-of-range index.
 pub(super) fn walk_to_leaf(
-    point: [f32; 3],
+    point: Vec3,
     node_count: usize,
     node: impl Fn(usize) -> Option<(i32, [i32; 2])>,
-    plane: impl Fn(i32) -> Option<([f32; 3], f32)>,
+    plane: impl Fn(i32) -> Option<(Vec3, f32)>,
 ) -> Option<usize> {
     let mut current_index = 0usize;
     for _ in 0..node_count {
@@ -598,7 +599,7 @@ impl BrushIndex {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct MapPlane {
-    pub(super) normal: [f32; 3],
+    pub(super) normal: Vec3,
     pub(super) dist: f32,
 }
 

@@ -1,12 +1,13 @@
 use super::{MapEntity, normalize_material_name, normalize_skyname};
+use crate::math::Vec3;
 
 const DEFAULT_DETAIL_MATERIAL: &str = "detail/detailsprites";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapPlayerStart {
-    pub origin: [f32; 3],
+    pub origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
-    pub angles: [f32; 3],
+    pub angles: Vec3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,7 +20,7 @@ pub struct MapFog {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapSkyCamera {
-    pub origin: [f32; 3],
+    pub origin: Vec3,
     pub scale: f32,
     pub fog: Option<MapFog>,
 }
@@ -44,7 +45,7 @@ pub(super) fn info_player_start(entities: &[MapEntity]) -> Option<MapPlayerStart
                     .prop("angles")
                     .and_then(parse_entity_vec3)
                     .or_else(|| entity.prop("angle").and_then(parse_entity_yaw_angle))
-                    .unwrap_or([0.0; 3]),
+                    .unwrap_or(Vec3::splat(0.0)),
             })
         })
 }
@@ -123,16 +124,16 @@ fn parse_map_fog(
     (fog.end > fog.start).then_some(fog)
 }
 
-pub(super) fn parse_entity_vec3(value: &str) -> Option<[f32; 3]> {
+pub(super) fn parse_entity_vec3(value: &str) -> Option<Vec3> {
     let mut components = value.split_ascii_whitespace().map(parse_entity_float);
     let x = components.next()??;
     let y = components.next()??;
     let z = components.next()??;
-    components.next().is_none().then_some([x, y, z])
+    components.next().is_none().then_some(Vec3::new(x, y, z))
 }
 
-fn parse_entity_yaw_angle(value: &str) -> Option<[f32; 3]> {
-    Some([0.0, parse_entity_float(value)?, 0.0])
+fn parse_entity_yaw_angle(value: &str) -> Option<Vec3> {
+    Some(Vec3::new(0.0, parse_entity_float(value)?, 0.0))
 }
 
 pub(super) fn parse_entity_float(value: &str) -> Option<f32> {

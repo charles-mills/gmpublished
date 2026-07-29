@@ -1,9 +1,10 @@
 //! Fixtures shared by the viewer's test modules.
 
-use crate::media::preview_model::ModelStats;
 use super::ModelPreview;
+use crate::media::preview_model::ModelStats;
+use gmpublished_backend::math::Vec3;
 
-pub(super) fn empty_preview(bounds_min: [f32; 3], bounds_max: [f32; 3]) -> ModelPreview {
+pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPreview {
     ModelPreview {
         meshes: Vec::new(),
         mesh_visibility: Vec::new(),
@@ -33,4 +34,49 @@ pub(super) fn empty_preview(bounds_min: [f32; 3], bounds_max: [f32; 3]) -> Model
         visibility: None,
         walk_collision: None,
     }
+}
+
+use super::super::state::MovementMode;
+use super::camera::FlyCamera;
+use gmpublished_backend::scene::map::MapWalkCollision;
+
+pub(super) fn floor_scene() -> ModelPreview {
+    let mut scene = empty_preview(Vec3::splat(0.0), Vec3::splat(1024.0));
+    scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
+        Vec3::new(-4096.0, -4096.0, -64.0),
+        Vec3::new(4096.0, 4096.0, 0.0),
+    ));
+    scene
+}
+
+pub(super) fn deep_water_scene() -> ModelPreview {
+    let mut scene = empty_preview(
+        Vec3::new(-512.0, -512.0, -320.0),
+        Vec3::new(512.0, 512.0, 256.0),
+    );
+    scene.walk_collision = Some(
+        MapWalkCollision::solid_box_for_tests(
+            Vec3::new(-4096.0, -4096.0, -320.0),
+            Vec3::new(4096.0, 4096.0, -256.0),
+        )
+        .with_water_box_for_tests(
+            Vec3::new(-4096.0, -4096.0, -256.0),
+            Vec3::new(4096.0, 4096.0, 100.0),
+        ),
+    );
+    scene
+}
+
+pub(super) fn walk_camera(position: Vec3, grounded: bool) -> FlyCamera {
+    FlyCamera {
+        content_id: Some(1),
+        position: Some(position),
+        mode: MovementMode::Walk,
+        grounded,
+        ..FlyCamera::default()
+    }
+}
+
+pub(super) fn horizontal_distance_from(position: Vec3, origin: Vec3) -> f32 {
+    ((position[0] - origin[0]).powi(2) + (position[1] - origin[1]).powi(2)).sqrt()
 }

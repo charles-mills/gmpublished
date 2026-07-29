@@ -553,8 +553,8 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicU8};
 
     use super::{
-        State, TransactionId, TransactionInner, TransactionRef, Transactions, TransactionsShared,
-        TransactionStatus, progress_as_int,
+        State, TransactionId, TransactionInner, TransactionRef, TransactionStatus, Transactions,
+        TransactionsShared, progress_as_int,
     };
 
     use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};

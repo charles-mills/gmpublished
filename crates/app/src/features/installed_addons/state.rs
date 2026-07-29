@@ -246,10 +246,7 @@ impl State {
         self.pane.clear_animation_clock();
     }
 
-    pub(crate) fn set_download_count_formatter(
-        &mut self,
-        formatter: DownloadCountFormatter,
-    ) {
+    pub(crate) fn set_download_count_formatter(&mut self, formatter: DownloadCountFormatter) {
         if self.pane.formatter() == formatter {
             return;
         }

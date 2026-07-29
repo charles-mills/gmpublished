@@ -5,6 +5,7 @@
 //! translation of what comes back into application messages — nothing here
 //! touches the message loop.
 
+use gmpublished_backend::math::Vec3;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     panic::{self, AssertUnwindSafe},
@@ -92,7 +93,7 @@ const MAP_PROP_TRIANGLE_CAP: usize = 7_000_000;
 const PHY_DEBUG_TRIANGLE_CAP: usize = 1_000_000;
 const MAP_DETAIL_SPRITE_PLACEMENT_CAP: usize = 65_536;
 const SKYBOX_FACE_DIMENSION_CAP: u32 = 2048;
-const PHY_DEBUG_VERTEX_COLOR: [f32; 3] = [0.5, 0.5, 0.5];
+const PHY_DEBUG_VERTEX_COLOR: Vec3 = Vec3::new(0.5, 0.5, 0.5);
 
 /// Decodes one preview, reporting progress through `on_stage`.
 ///

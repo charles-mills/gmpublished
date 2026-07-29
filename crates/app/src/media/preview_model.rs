@@ -6,13 +6,14 @@
 //! belongs to neither — a decoder that imported the feature, or a feature that
 //! owned the decoder's output type, would point the dependency the wrong way.
 
+use gmpublished_backend::math::Vec3;
 use std::sync::Arc;
 
 use iced::widget::image;
 
 use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
-use crate::bridge::tasks::ScheduleError;
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
+use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
 pub use gmpublished_backend::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
@@ -38,22 +39,22 @@ pub enum PreviewLoadError {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
+    pub position: Vec3,
+    pub normal: Vec3,
     pub uv: [f32; 2],
     pub lightmap_uv: [f32; 2],
-    pub color: [f32; 3],
+    pub color: Vec3,
     pub blend_alpha: f32,
 }
 
 impl From<&vformats::mdl::ModelVertex> for ModelVertex {
     fn from(vertex: &vformats::mdl::ModelVertex) -> Self {
         Self {
-            position: vertex.position,
-            normal: vertex.normal,
+            position: Vec3::from(vertex.position),
+            normal: Vec3::from(vertex.normal),
             uv: vertex.uv,
             lightmap_uv: [0.0; 2],
-            color: [1.0; 3],
+            color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         }
     }
@@ -89,8 +90,8 @@ pub struct ModelData {
     pub material_dirs: Vec<String>,
     pub skin_tables: Vec<Vec<u16>>,
     pub bodygroups: Vec<usize>,
-    pub bounds_min: [f32; 3],
-    pub bounds_max: [f32; 3],
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
     pub bone_count: u32,
     pub sequence_count: u32,
     pub vertex_count: u32,
@@ -105,8 +106,8 @@ impl From<vformats::mdl::ModelData> for ModelData {
             material_dirs: model.material_dirs,
             skin_tables: model.skin_tables,
             bodygroups: model.bodygroups,
-            bounds_min: model.bounds_min,
-            bounds_max: model.bounds_max,
+            bounds_min: Vec3::from(model.bounds_min),
+            bounds_max: Vec3::from(model.bounds_max),
             bone_count: model.bone_count,
             sequence_count: model.sequence_count,
             vertex_count: model.vertex_count,
@@ -263,8 +264,8 @@ pub struct ModelPreview {
     /// Choice count per bodygroup, in bodypart order.
     pub(crate) bodygroups: Vec<usize>,
     pub(crate) stats: ModelStats,
-    pub(crate) bounds_min: [f32; 3],
-    pub(crate) bounds_max: [f32; 3],
+    pub(crate) bounds_min: Vec3,
+    pub(crate) bounds_max: Vec3,
     pub(crate) visibility: Option<MapVisibility>,
     pub(crate) walk_collision: Option<MapWalkCollision>,
 }
@@ -272,11 +273,11 @@ pub struct ModelPreview {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DoorInstance {
     pub(crate) class: MapDoorClass,
-    pub(crate) origin: [f32; 3],
+    pub(crate) origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
-    pub(crate) angles: [f32; 3],
-    pub(crate) local_bounds_min: [f32; 3],
-    pub(crate) local_bounds_max: [f32; 3],
+    pub(crate) angles: Vec3,
+    pub(crate) local_bounds_min: Vec3,
+    pub(crate) local_bounds_max: Vec3,
     pub(crate) visibility: MapVisibilityBucket,
     pub(crate) initial_progress: f32,
     /// Seconds an opened door waits before closing itself, or `None` for a
@@ -492,7 +493,7 @@ pub struct LightmapSlot {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetailSprite {
-    pub(crate) origin: [f32; 3],
+    pub(crate) origin: Vec3,
     pub(crate) upper_left: [f32; 2],
     pub(crate) lower_right: [f32; 2],
     pub(crate) tex_upper_left: [f32; 2],
@@ -510,8 +511,8 @@ pub struct OverlayPrimitive {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlayVertex {
-    pub(crate) position: [f32; 3],
-    pub(crate) normal: [f32; 3],
+    pub(crate) position: Vec3,
+    pub(crate) normal: Vec3,
     pub(crate) uv: [f32; 2],
 }
 
@@ -592,7 +593,7 @@ pub struct MapStats {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapFog {
-    pub(crate) color_linear: [f32; 3],
+    pub(crate) color_linear: Vec3,
     pub(crate) start: f32,
     pub(crate) end: f32,
     pub(crate) max_density: f32,
@@ -600,16 +601,16 @@ pub struct MapFog {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapSkyCamera {
-    pub(crate) origin: [f32; 3],
+    pub(crate) origin: Vec3,
     pub(crate) scale: f32,
     pub(crate) fog: Option<MapFog>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapSpawn {
-    pub(crate) origin: [f32; 3],
+    pub(crate) origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
-    pub(crate) angles: [f32; 3],
+    pub(crate) angles: Vec3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -671,11 +672,11 @@ mod tests {
 
     fn vertex(x: f32) -> ModelVertex {
         ModelVertex {
-            position: [x, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
+            position: Vec3::new(x, 0.0, 0.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
-            color: [1.0; 3],
+            color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         }
     }
@@ -728,7 +729,7 @@ mod tests {
             lightmap: None,
             skybox: None,
             detail_sprites: vec![DetailSprite {
-                origin: [0.0; 3],
+                origin: Vec3::splat(0.0),
                 upper_left: [0.0; 2],
                 lower_right: [1.0; 2],
                 tex_upper_left: [0.0; 2],
@@ -739,8 +740,8 @@ mod tests {
             map_skybox_detail_sprites: Vec::new(),
             overlays: vec![OverlayPrimitive {
                 vertices: [OverlayVertex {
-                    position: [0.0; 3],
-                    normal: [0.0, 0.0, 1.0],
+                    position: Vec3::splat(0.0),
+                    normal: Vec3::new(0.0, 0.0, 1.0),
                     uv: [0.0; 2],
                 }; 4],
                 material_index: 0,
@@ -760,8 +761,8 @@ mod tests {
                 material_count: 2,
                 resolved_material_count: 0,
             },
-            bounds_min: [0.0; 3],
-            bounds_max: [2.0, 0.0, 0.0],
+            bounds_min: Vec3::splat(0.0),
+            bounds_max: Vec3::new(2.0, 0.0, 0.0),
             visibility: None,
             walk_collision: None,
         }

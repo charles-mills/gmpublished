@@ -1,5 +1,5 @@
-use crate::i18n::Arg;
 use crate::bridge::tasks::TransactionStatus;
+use crate::i18n::Arg;
 use std::time::Instant;
 
 use iced::widget::{

@@ -1,7 +1,8 @@
 use super::{
     ControlPointIndex, CoverageEntry, PcfAttributes, PcfFunction, PcfSystem, SupportLevel,
-    color_to_rgb, length,
+    color_to_rgb,
 };
+use crate::math::Vec3;
 
 // --- Scalar/vector field ids (Source particle attribute indices) ---------
 
@@ -84,8 +85,8 @@ pub(super) enum Initializer {
         exponent: f32,
     },
     ColorRandom {
-        color1: [f32; 3],
-        color2: [f32; 3],
+        color1: Vec3,
+        color2: Vec3,
     },
     RadiusRandom {
         min: f32,
@@ -112,23 +113,23 @@ pub(super) enum Initializer {
         control_point: ControlPointIndex,
         distance_min: f32,
         distance_max: f32,
-        bias: [f32; 3],
+        bias: Vec3,
         speed_min: f32,
         speed_max: f32,
         speed_exponent: f32,
-        local_speed_min: [f32; 3],
-        local_speed_max: [f32; 3],
+        local_speed_min: Vec3,
+        local_speed_max: Vec3,
     },
     PositionOffsetRandom {
         control_point: ControlPointIndex,
-        offset_min: [f32; 3],
-        offset_max: [f32; 3],
+        offset_min: Vec3,
+        offset_max: Vec3,
         proportional_to_radius: bool,
     },
     PositionWarpRandom {
         control_point: ControlPointIndex,
-        warp_min: [f32; 3],
-        warp_max: [f32; 3],
+        warp_min: Vec3,
+        warp_max: Vec3,
     },
     PositionAlongPath {
         start_control_point: ControlPointIndex,
@@ -148,12 +149,12 @@ pub(super) enum Initializer {
     VelocityRandom {
         speed_min: f32,
         speed_max: f32,
-        local_min: [f32; 3],
-        local_max: [f32; 3],
+        local_min: Vec3,
+        local_max: Vec3,
     },
     VelocityNoise {
-        output_min: [f32; 3],
-        output_max: [f32; 3],
+        output_min: Vec3,
+        output_max: Vec3,
         spatial_scale: f32,
         time_scale: f32,
     },
@@ -217,7 +218,7 @@ pub(super) enum Operator {
         scale_bias: f32,
     },
     ColorFade {
-        target: [f32; 3],
+        target: Vec3,
         start_time: f32,
         end_time: f32,
         ease: bool,
@@ -228,7 +229,7 @@ pub(super) enum Operator {
     },
     RotationBasic,
     MovementBasic {
-        gravity: [f32; 3],
+        gravity: Vec3,
         drag: f32,
     },
     MovementLockToControlPoint {
@@ -246,18 +247,18 @@ pub(super) enum Operator {
     },
     OscillateVector {
         field: VectorField,
-        rate_min: [f32; 3],
-        rate_max: [f32; 3],
-        frequency_min: [f32; 3],
-        frequency_max: [f32; 3],
+        rate_min: Vec3,
+        rate_max: Vec3,
+        frequency_min: Vec3,
+        frequency_max: Vec3,
         proportional: bool,
         multiplier: f32,
         start_phase: f32,
     },
     NoiseVector {
         field: VectorField,
-        output_min: [f32; 3],
-        output_max: [f32; 3],
+        output_min: Vec3,
+        output_max: Vec3,
         coordinate_scale: f32,
     },
     RemapNoiseToScalar {
@@ -271,7 +272,7 @@ pub(super) enum Operator {
         control_point: ControlPointIndex,
         min_distance: f32,
         max_distance: f32,
-        offset: [f32; 3],
+        offset: Vec3,
     },
     ConstrainDistanceToPath {
         start_control_point: ControlPointIndex,
@@ -280,7 +281,7 @@ pub(super) enum Operator {
     },
     SetControlPointPositions {
         base_control_point: ControlPointIndex,
-        points: Vec<(ControlPointIndex, [f32; 3])>,
+        points: Vec<(ControlPointIndex, Vec3)>,
     },
     SetChildControlPointsFromParticles {
         first_control_point: ControlPointIndex,
@@ -292,8 +293,8 @@ pub(super) enum Operator {
 #[derive(Debug, Clone)]
 pub(super) enum Force {
     Random {
-        min: [f32; 3],
-        max: [f32; 3],
+        min: Vec3,
+        max: Vec3,
     },
     PullTowardsControlPoint {
         control_point: ControlPointIndex,
@@ -301,7 +302,7 @@ pub(super) enum Force {
         falloff_power: f32,
     },
     TwistAroundAxis {
-        axis: [f32; 3],
+        axis: Vec3,
         amount: f32,
         control_point: ControlPointIndex,
     },
@@ -363,7 +364,7 @@ pub struct CompiledSystem {
     pub(super) material: String,
     pub(super) max_particles: usize,
     pub(super) initial_particles: u32,
-    pub(super) constant_color: [f32; 3],
+    pub(super) constant_color: Vec3,
     pub(super) constant_alpha: f32,
     pub(super) constant_radius: f32,
     pub(super) constant_rotation: f32,
@@ -454,7 +455,7 @@ impl SystemCompiler {
         attrs.get_float(name).unwrap_or(default)
     }
 
-    fn vec3(attrs: &PcfAttributes, name: &str, default: [f32; 3]) -> [f32; 3] {
+    fn vec3(attrs: &PcfAttributes, name: &str, default: Vec3) -> Vec3 {
         attrs.get_vector3(name).unwrap_or(default)
     }
 }
@@ -517,11 +518,11 @@ pub(super) fn compile_system(
     let color = attrs.get_color("color").unwrap_or([255, 255, 255, 255]);
     // Framing: declared bounding box, spawn-sphere reach, and a nod to how
     // far the fastest sphere-spawned particles travel in half a second.
-    let bbox_min = SystemCompiler::vec3(attrs, "bounding_box_min", [-10.0; 3]);
-    let bbox_max = SystemCompiler::vec3(attrs, "bounding_box_max", [10.0; 3]);
+    let bbox_min = SystemCompiler::vec3(attrs, "bounding_box_min", Vec3::splat(-10.0));
+    let bbox_max = SystemCompiler::vec3(attrs, "bounding_box_max", Vec3::splat(10.0));
     let bbox_extent = bbox_min
-        .iter()
-        .chain(bbox_max.iter())
+        .into_iter()
+        .chain(bbox_max)
         .fold(0.0_f32, |acc, value| acc.max(value.abs()));
     let spawn_reach = initializers
         .iter()
@@ -535,7 +536,7 @@ pub(super) fn compile_system(
                 offset_min,
                 offset_max,
                 ..
-            } => length(*offset_min).max(length(*offset_max)),
+            } => offset_min.length().max(offset_max.length()),
             _ => 0.0,
         })
         .fold(0.0_f32, f32::max);
@@ -680,19 +681,19 @@ pub(super) fn compile_initializer(
                 control_point: compiler.control_point(attrs, &["control_point_number"]),
                 distance_min: SystemCompiler::float(attrs, "distance_min", 0.0),
                 distance_max: SystemCompiler::float(attrs, "distance_max", 0.0),
-                bias: SystemCompiler::vec3(attrs, "distance_bias", [1.0, 1.0, 1.0]),
+                bias: SystemCompiler::vec3(attrs, "distance_bias", Vec3::new(1.0, 1.0, 1.0)),
                 speed_min: SystemCompiler::float(attrs, "speed_min", 0.0),
                 speed_max: SystemCompiler::float(attrs, "speed_max", 0.0),
                 speed_exponent: SystemCompiler::float(attrs, "speed_random_exponent", 1.0),
                 local_speed_min: SystemCompiler::vec3(
                     attrs,
                     "speed_in_local_coordinate_system_min",
-                    [0.0; 3],
+                    Vec3::splat(0.0),
                 ),
                 local_speed_max: SystemCompiler::vec3(
                     attrs,
                     "speed_in_local_coordinate_system_max",
-                    [0.0; 3],
+                    Vec3::splat(0.0),
                 ),
             },
             SupportLevel::Full,
@@ -700,8 +701,8 @@ pub(super) fn compile_initializer(
         "position offset random" | "position modify offset random" => (
             Initializer::PositionOffsetRandom {
                 control_point: compiler.control_point(attrs, &["control_point_number"]),
-                offset_min: SystemCompiler::vec3(attrs, "offset min", [0.0; 3]),
-                offset_max: SystemCompiler::vec3(attrs, "offset max", [0.0; 3]),
+                offset_min: SystemCompiler::vec3(attrs, "offset min", Vec3::splat(0.0)),
+                offset_max: SystemCompiler::vec3(attrs, "offset max", Vec3::splat(0.0)),
                 proportional_to_radius: attrs
                     .get_bool("offset proportional to radius 0/1")
                     .unwrap_or(false),
@@ -712,8 +713,8 @@ pub(super) fn compile_initializer(
             Initializer::PositionWarpRandom {
                 control_point: compiler
                     .control_point(attrs, &["control point number", "control_point_number"]),
-                warp_min: SystemCompiler::vec3(attrs, "warp min", [1.0; 3]),
-                warp_max: SystemCompiler::vec3(attrs, "warp max", [1.0; 3]),
+                warp_min: SystemCompiler::vec3(attrs, "warp min", Vec3::splat(1.0)),
+                warp_max: SystemCompiler::vec3(attrs, "warp max", Vec3::splat(1.0)),
             },
             SupportLevel::Approximate,
         ),
@@ -755,20 +756,20 @@ pub(super) fn compile_initializer(
                 local_min: SystemCompiler::vec3(
                     attrs,
                     "speed_in_local_coordinate_system_min",
-                    [0.0; 3],
+                    Vec3::splat(0.0),
                 ),
                 local_max: SystemCompiler::vec3(
                     attrs,
                     "speed_in_local_coordinate_system_max",
-                    [0.0; 3],
+                    Vec3::splat(0.0),
                 ),
             },
             SupportLevel::Full,
         ),
         "velocity noise" => (
             Initializer::VelocityNoise {
-                output_min: SystemCompiler::vec3(attrs, "output minimum", [0.0; 3]),
-                output_max: SystemCompiler::vec3(attrs, "output maximum", [0.0; 3]),
+                output_min: SystemCompiler::vec3(attrs, "output minimum", Vec3::splat(0.0)),
+                output_max: SystemCompiler::vec3(attrs, "output maximum", Vec3::splat(0.0)),
                 spatial_scale: SystemCompiler::float(attrs, "Spatial Noise Coordinate Scale", 0.01),
                 time_scale: SystemCompiler::float(attrs, "Time Noise Coordinate Scale", 1.0),
             },
@@ -924,7 +925,7 @@ pub(super) fn compile_operator(
         "rotation basic" => (Operator::RotationBasic, SupportLevel::Full),
         "movement basic" | "basic movement" => (
             Operator::MovementBasic {
-                gravity: SystemCompiler::vec3(attrs, "gravity", [0.0; 3]),
+                gravity: SystemCompiler::vec3(attrs, "gravity", Vec3::splat(0.0)),
                 drag: SystemCompiler::float(attrs, "drag", 0.0),
             },
             SupportLevel::Full,
@@ -966,17 +967,17 @@ pub(super) fn compile_operator(
             (
                 Operator::OscillateVector {
                     field,
-                    rate_min: SystemCompiler::vec3(attrs, "oscillation rate min", [0.0; 3]),
-                    rate_max: SystemCompiler::vec3(attrs, "oscillation rate max", [0.0; 3]),
+                    rate_min: SystemCompiler::vec3(attrs, "oscillation rate min", Vec3::splat(0.0)),
+                    rate_max: SystemCompiler::vec3(attrs, "oscillation rate max", Vec3::splat(0.0)),
                     frequency_min: SystemCompiler::vec3(
                         attrs,
                         "oscillation frequency min",
-                        [1.0; 3],
+                        Vec3::splat(1.0),
                     ),
                     frequency_max: SystemCompiler::vec3(
                         attrs,
                         "oscillation frequency max",
-                        [1.0; 3],
+                        Vec3::splat(1.0),
                     ),
                     proportional: attrs.get_bool("proportional 0/1").unwrap_or(true),
                     multiplier: SystemCompiler::float(attrs, "oscillation multiplier", 2.0),
@@ -994,8 +995,8 @@ pub(super) fn compile_operator(
             (
                 Operator::NoiseVector {
                     field,
-                    output_min: SystemCompiler::vec3(attrs, "output minimum", [0.0; 3]),
-                    output_max: SystemCompiler::vec3(attrs, "output maximum", [0.0; 3]),
+                    output_min: SystemCompiler::vec3(attrs, "output minimum", Vec3::splat(0.0)),
+                    output_max: SystemCompiler::vec3(attrs, "output maximum", Vec3::splat(0.0)),
                     coordinate_scale: SystemCompiler::float(attrs, "noise coordinate scale", 1.0),
                 },
                 SupportLevel::Approximate,
@@ -1037,7 +1038,7 @@ pub(super) fn compile_operator(
                 ),
             ] {
                 let index = compiler.control_point(attrs, &[number_key]);
-                let location = SystemCompiler::vec3(attrs, location_key, [0.0; 3]);
+                let location = SystemCompiler::vec3(attrs, location_key, Vec3::splat(0.0));
                 points.push((index, location));
             }
             (
@@ -1101,8 +1102,8 @@ pub(super) fn compile_force(
     let (force, level) = match name.as_str() {
         "random force" => (
             Force::Random {
-                min: SystemCompiler::vec3(attrs, "min force", [0.0; 3]),
-                max: SystemCompiler::vec3(attrs, "max force", [0.0; 3]),
+                min: SystemCompiler::vec3(attrs, "min force", Vec3::splat(0.0)),
+                max: SystemCompiler::vec3(attrs, "max force", Vec3::splat(0.0)),
             },
             SupportLevel::Full,
         ),
@@ -1116,7 +1117,7 @@ pub(super) fn compile_force(
         ),
         "twist around axis" => (
             Force::TwistAroundAxis {
-                axis: SystemCompiler::vec3(attrs, "twist axis", [0.0, 0.0, 1.0]),
+                axis: SystemCompiler::vec3(attrs, "twist axis", Vec3::new(0.0, 0.0, 1.0)),
                 amount: SystemCompiler::float(attrs, "amount of force", 0.0),
                 control_point: compiler.control_point(attrs, &["control point number"]),
             },
@@ -1144,7 +1145,7 @@ pub(super) fn compile_constraint(
                 control_point: compiler.control_point(attrs, &["control point number"]),
                 min_distance: SystemCompiler::float(attrs, "minimum distance", 0.0),
                 max_distance: SystemCompiler::float(attrs, "maximum distance", 0.0),
-                offset: SystemCompiler::vec3(attrs, "offset of center", [0.0; 3]),
+                offset: SystemCompiler::vec3(attrs, "offset of center", Vec3::splat(0.0)),
             },
             SupportLevel::Full,
         ),

@@ -1,5 +1,6 @@
 use super::pipeline::UploadedModel;
-use super::{MapVisibilityBucket, RenderMode, WorldVisibilityPlan, distance_squared};
+use super::{MapVisibilityBucket, RenderMode, WorldVisibilityPlan};
+use gmpublished_backend::math::Vec3;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawPlans {
@@ -40,7 +41,7 @@ pub(super) struct MeshPlanSource {
     pub(super) material_index: usize,
     pub(super) bodygroup: usize,
     pub(super) bodygroup_choice: usize,
-    pub(super) centroid: [f32; 3],
+    pub(super) centroid: Vec3,
     pub(super) map_skybox: bool,
     pub(super) door_index: Option<usize>,
     pub(super) door_visibility: Option<MapVisibilityBucket>,
@@ -50,7 +51,7 @@ pub(super) struct MeshPlanSource {
 pub(super) struct OverlayPlanSource {
     pub(super) overlay_index: usize,
     pub(super) material_index: usize,
-    pub(super) centroid: [f32; 3],
+    pub(super) centroid: Vec3,
     pub(super) map_skybox: bool,
 }
 
@@ -292,7 +293,7 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         let item = DrawItem {
             mesh_index: mesh.mesh_index,
             material_slot,
-            distance_squared: distance_squared(mesh.centroid, camera),
+            distance_squared: mesh.centroid.distance_squared(Vec3::from(camera)),
         };
         if context
             .materials
@@ -333,7 +334,7 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         let item = OverlayDrawItem {
             overlay_index: overlay.overlay_index,
             material_slot,
-            distance_squared: distance_squared(overlay.centroid, camera),
+            distance_squared: overlay.centroid.distance_squared(Vec3::from(camera)),
         };
         match render_mode {
             RenderMode::Opaque | RenderMode::Cutout => plan.overlay_opaque.push(item),
@@ -377,7 +378,7 @@ pub(super) fn remapped_material_slot(
 mod tests {
     use super::*;
 
-    fn mesh_plan_source(mesh_index: usize, map_skybox: bool, centroid: [f32; 3]) -> MeshPlanSource {
+    fn mesh_plan_source(mesh_index: usize, map_skybox: bool, centroid: Vec3) -> MeshPlanSource {
         MeshPlanSource {
             mesh_index,
             scene_mesh_index: mesh_index,
@@ -394,7 +395,7 @@ mod tests {
     fn overlay_plan_source(
         overlay_index: usize,
         map_skybox: bool,
-        centroid: [f32; 3],
+        centroid: Vec3,
     ) -> OverlayPlanSource {
         OverlayPlanSource {
             overlay_index,
@@ -407,24 +408,24 @@ mod tests {
     #[test]
     fn water_meshes_are_partitioned_and_sorted_back_to_front() {
         let meshes = [
-            mesh_plan_source(0, false, [1.0, 0.0, 0.0]),
+            mesh_plan_source(0, false, Vec3::new(1.0, 0.0, 0.0)),
             MeshPlanSource {
                 mesh_index: 1,
                 material_index: 1,
-                centroid: [2.0, 0.0, 0.0],
-                ..mesh_plan_source(1, false, [2.0, 0.0, 0.0])
+                centroid: Vec3::new(2.0, 0.0, 0.0),
+                ..mesh_plan_source(1, false, Vec3::new(2.0, 0.0, 0.0))
             },
             MeshPlanSource {
                 mesh_index: 2,
                 material_index: 1,
-                centroid: [4.0, 0.0, 0.0],
-                ..mesh_plan_source(2, false, [4.0, 0.0, 0.0])
+                centroid: Vec3::new(4.0, 0.0, 0.0),
+                ..mesh_plan_source(2, false, Vec3::new(4.0, 0.0, 0.0))
             },
             MeshPlanSource {
                 mesh_index: 3,
                 material_index: 2,
-                centroid: [3.0, 0.0, 0.0],
-                ..mesh_plan_source(3, false, [3.0, 0.0, 0.0])
+                centroid: Vec3::new(3.0, 0.0, 0.0),
+                ..mesh_plan_source(3, false, Vec3::new(3.0, 0.0, 0.0))
             },
         ];
         let render_modes = [
@@ -490,10 +491,10 @@ mod tests {
     #[test]
     fn map_skybox_disabled_omits_skybox_sets_from_draw_plans() {
         let meshes = [
-            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
-            mesh_plan_source(1, true, [10.0, 0.0, 0.0]),
+            mesh_plan_source(0, false, Vec3::new(0.0, 0.0, 0.0)),
+            mesh_plan_source(1, true, Vec3::new(10.0, 0.0, 0.0)),
         ];
-        let overlays = [overlay_plan_source(0, true, [12.0, 0.0, 0.0])];
+        let overlays = [overlay_plan_source(0, true, Vec3::new(12.0, 0.0, 0.0))];
         let render_modes = [RenderMode::Opaque];
         let plans = prepare_draw_plans_from_sources(
             DrawPlanSourceSlices {
@@ -535,7 +536,7 @@ mod tests {
 
     #[test]
     fn missing_sky_camera_omits_composite_plan() {
-        let meshes = [mesh_plan_source(0, true, [10.0, 0.0, 0.0])];
+        let meshes = [mesh_plan_source(0, true, Vec3::new(10.0, 0.0, 0.0))];
         let render_modes = [RenderMode::Opaque];
         let plans = prepare_draw_plans_from_sources(
             DrawPlanSourceSlices {
@@ -567,7 +568,7 @@ mod tests {
 
     #[test]
     fn empty_skybox_partition_omits_composite_plan() {
-        let meshes = [mesh_plan_source(0, false, [0.0, 0.0, 0.0])];
+        let meshes = [mesh_plan_source(0, false, Vec3::new(0.0, 0.0, 0.0))];
         let render_modes = [RenderMode::Opaque];
         let plans = prepare_draw_plans_from_sources(
             DrawPlanSourceSlices {
@@ -600,8 +601,8 @@ mod tests {
     #[test]
     fn visibility_plan_filters_world_meshes_but_off_path_draws_everything() {
         let meshes = [
-            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
-            mesh_plan_source(1, false, [10.0, 0.0, 0.0]),
+            mesh_plan_source(0, false, Vec3::new(0.0, 0.0, 0.0)),
+            mesh_plan_source(1, false, Vec3::new(10.0, 0.0, 0.0)),
         ];
         let render_modes = [RenderMode::Opaque];
         let visibility = WorldVisibilityPlan {
@@ -684,14 +685,14 @@ mod tests {
         // Scene mesh 1 was dropped: the surviving upload slot 1 holds scene
         // mesh 2, whose plan entry is visible while scene mesh 1's is not.
         let meshes = [
-            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
+            mesh_plan_source(0, false, Vec3::new(0.0, 0.0, 0.0)),
             MeshPlanSource {
                 mesh_index: 1,
                 scene_mesh_index: 2,
                 material_index: 0,
                 bodygroup: 0,
                 bodygroup_choice: 0,
-                centroid: [10.0, 0.0, 0.0],
+                centroid: Vec3::new(10.0, 0.0, 0.0),
                 map_skybox: false,
                 door_index: None,
                 door_visibility: None,
@@ -743,14 +744,14 @@ mod tests {
     #[test]
     fn visibility_plan_filters_door_meshes_by_bucket_not_scene_index() {
         let meshes = [
-            mesh_plan_source(0, false, [0.0, 0.0, 0.0]),
+            mesh_plan_source(0, false, Vec3::new(0.0, 0.0, 0.0)),
             MeshPlanSource {
                 mesh_index: 1,
                 scene_mesh_index: usize::MAX,
                 material_index: 0,
                 bodygroup: 0,
                 bodygroup_choice: 0,
-                centroid: [10.0, 0.0, 0.0],
+                centroid: Vec3::new(10.0, 0.0, 0.0),
                 map_skybox: false,
                 door_index: Some(0),
                 door_visibility: Some(MapVisibilityBucket::Cluster(1)),

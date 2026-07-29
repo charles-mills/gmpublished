@@ -1,3 +1,4 @@
+use gmpublished_backend::math::Vec3;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs, io,
@@ -50,7 +51,7 @@ const MAX_LEGACY_BIN_FETCH_BYTES: u64 = 1024 * 1024 * 1024;
 /// Source's fallback water fog tint, in linear space. Shared with the render
 /// pipeline: a material without `$fogcolor` and the shader's own default have
 /// to agree, or water changes colour when a map omits the keyvalue.
-pub const DEFAULT_WATER_FOG_LINEAR: [f32; 3] = [0.03, 0.10, 0.10];
+pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
 const GMA_MAGIC: &[u8; 4] = b"GMAD";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1266,7 +1267,7 @@ fn water_fog_rgba(value: Option<&str>) -> [u8; 4] {
     ]
 }
 
-fn parse_water_fog_color(value: &str) -> Option<[f32; 3]> {
+fn parse_water_fog_color(value: &str) -> Option<Vec3> {
     let trimmed = value.trim();
     let (inner, scale) = if let Some(inner) = bracketed_value(trimmed, '[', ']') {
         (inner, 1.0)
@@ -1286,7 +1287,7 @@ fn parse_water_fog_color(value: &str) -> Option<[f32; 3]> {
     [red, green, blue]
         .into_iter()
         .all(f32::is_finite)
-        .then_some([red, green, blue])
+        .then_some(Vec3::new(red, green, blue))
 }
 
 fn bracketed_value(value: &str, open: char, close: char) -> Option<&str> {

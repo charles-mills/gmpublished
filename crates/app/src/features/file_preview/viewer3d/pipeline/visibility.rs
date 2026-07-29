@@ -4,6 +4,7 @@
 
 use super::upload::UploadedDetailSprites;
 use super::{DETAIL_VERTEX_FLOAT_COUNT, WorldVisibilityPlan, wgpu};
+use gmpublished_backend::math::Vec3;
 
 #[derive(Debug)]
 pub struct UploadedVisibleIndices {
@@ -42,15 +43,15 @@ impl VisibilityClusterTracker {
     pub fn update(
         &mut self,
         enabled: bool,
-        camera_position: [f32; 3],
-        mut cluster_at: impl FnMut([f32; 3]) -> Option<i16>,
+        camera_position: Vec3,
+        mut cluster_at: impl FnMut(Vec3) -> Option<i16>,
     ) -> Option<VisibilityClusterState> {
         if !enabled {
             self.last_camera_position = None;
             return self.set_state(VisibilityClusterState::Disabled);
         }
 
-        let position_key = camera_position.map(f32::to_bits);
+        let position_key = camera_position.to_array().map(f32::to_bits);
         if self.last_camera_position == Some(position_key) {
             return None;
         }
@@ -140,7 +141,7 @@ pub fn upload_visible_detail_sprites(
 
 #[cfg(test)]
 mod tests {
-    use super::{VisibilityClusterState, VisibilityClusterTracker};
+    use super::{Vec3, VisibilityClusterState, VisibilityClusterTracker};
 
     #[test]
     fn visibility_tracker_rebuilds_only_when_cluster_changes() {
@@ -148,7 +149,7 @@ mod tests {
         let mut probes = 0_u32;
 
         assert_eq!(
-            tracker.update(true, [0.0, 0.0, 0.0], |_| {
+            tracker.update(true, Vec3::new(0.0, 0.0, 0.0), |_| {
                 probes = probes.saturating_add(1);
                 Some(3)
             }),
@@ -156,7 +157,7 @@ mod tests {
         );
         assert_eq!(tracker.rebuild_count, 1);
         assert_eq!(
-            tracker.update(true, [1.0, 0.0, 0.0], |_| {
+            tracker.update(true, Vec3::new(1.0, 0.0, 0.0), |_| {
                 probes = probes.saturating_add(1);
                 Some(3)
             }),
@@ -164,13 +165,13 @@ mod tests {
         );
         assert_eq!(tracker.rebuild_count, 1);
         assert_eq!(
-            tracker.update(true, [1.0, 0.0, 0.0], |_| {
+            tracker.update(true, Vec3::new(1.0, 0.0, 0.0), |_| {
                 panic!("leaf lookup should not run without movement")
             }),
             None
         );
         assert_eq!(
-            tracker.update(true, [2.0, 0.0, 0.0], |_| {
+            tracker.update(true, Vec3::new(2.0, 0.0, 0.0), |_| {
                 probes = probes.saturating_add(1);
                 Some(4)
             }),

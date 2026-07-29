@@ -14,11 +14,12 @@ use super::{
     MaterialSlot, MeshData, ModelPreview, ModelVertex, OverlayDrawItem, OverlayPrimitive,
     PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA, Rectangle, RenderMode, ResolvedBcMip, ResolvedTexture,
     SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SOURCE_UP, Skybox, SkyboxFace,
-    TextureUploadLevel, Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan, add, bc_mip_is_valid,
+    TextureUploadLevel, Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan, bc_mip_is_valid,
     bc_texture_format, decode_bc_texture, half_extent, initial_door_swing, look_at, mat_mul, mid,
     perspective, prepare_draw_plans, shader, skybox_eye, transform_door_vertices, wgpu,
     write_bc_texture_level, write_texture_level,
 };
+use gmpublished_backend::math::Vec3;
 
 mod draw;
 mod materials;
@@ -114,11 +115,11 @@ impl shader::Primitive for ModelPrimitive {
                 queue,
                 &self.model,
                 self.visibility_culling,
-                [
+                Vec3::new(
                     self.uniforms.camera_position[0],
                     self.uniforms.camera_position[1],
                     self.uniforms.camera_position[2],
-                ],
+                ),
             );
             let draw_plans = prepare_draw_plans(
                 self.content_id,
@@ -151,7 +152,7 @@ impl shader::Primitive for ModelPrimitive {
             .map_or(DEFAULT_SKY_TINT, |upload| upload.sky_tint);
         let with_sky_tint = |mut uniforms: Uniforms| {
             uniforms.water_time_sky_tint[0] = self.uniforms.water_time_sky_tint[0];
-            uniforms.water_time_sky_tint[1..].copy_from_slice(&sky_tint);
+            uniforms.water_time_sky_tint[1..].copy_from_slice(sky_tint.as_array());
             if self.submerged {
                 uniforms.fog_color = self.uniforms.fog_color;
                 uniforms.fog_params = self.uniforms.fog_params;
@@ -473,7 +474,7 @@ mod tests {
     use super::super::test_support::empty_preview;
     use super::{
         Arc, Camera, DrawItem, DrawPlan, FrameLayout, MaterialSlot, MeshData, ModelPipeline,
-        ModelPrimitive, ModelVertex, Rectangle, RenderMode, Uniforms, Viewport, frame_layout,
+        ModelPrimitive, ModelVertex, Rectangle, RenderMode, Uniforms, Vec3, Viewport, frame_layout,
         shader, wgpu,
     };
 
@@ -538,11 +539,11 @@ mod tests {
         // Desk-top-like angled quad: constant white color, constant UV, so
         // every fragment must shade identically.
         let vertex = |x: f32, y: f32| ModelVertex {
-            position: [x, y, 20.0],
-            normal: [0.0, 0.0, 1.0],
+            position: Vec3::new(x, y, 20.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.25, 0.25],
             lightmap_uv: [0.0; 2],
-            color: [1.0; 3],
+            color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         };
         let mesh = MeshData {
@@ -559,7 +560,7 @@ mod tests {
             bodygroup: 0,
             bodygroup_choice: 0,
         };
-        let mut preview = empty_preview([-48.0, -24.0, 0.0], [48.0, 24.0, 38.0]);
+        let mut preview = empty_preview(Vec3::new(-48.0, -24.0, 0.0), Vec3::new(48.0, 24.0, 38.0));
         preview.meshes = vec![mesh];
         preview.materials = vec![MaterialSlot {
             name: "test".to_owned(),

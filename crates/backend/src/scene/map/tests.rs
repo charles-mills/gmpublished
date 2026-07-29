@@ -6,26 +6,26 @@ fn overlay_quad_uses_packed_u_basis_and_v_flip_flag() {
         id: 7,
         uv_points: [
             // xy = corner (-8, -4); z components 0..2 pack BasisU = +Y.
-            [-8.0, -4.0, 0.0],
-            [-8.0, 4.0, 1.0],
-            [8.0, 4.0, 0.0],
+            Vec3::new(-8.0, -4.0, 0.0),
+            Vec3::new(-8.0, 4.0, 1.0),
+            Vec3::new(8.0, 4.0, 0.0),
             // z here is the V-flip flag (0 = unflipped).
-            [8.0, -4.0, 0.0],
+            Vec3::new(8.0, -4.0, 0.0),
         ],
-        origin: [100.0, 200.0, 300.0],
-        basis_normal: [1.0, 0.0, 0.0],
+        origin: Vec3::new(100.0, 200.0, 300.0),
+        basis_normal: Vec3::new(1.0, 0.0, 0.0),
     };
 
     // Unflipped: V = normal x U = X x Y = +Z.
     let quad = overlay_quad_positions(overlay).expect("valid overlay");
-    assert_eq!(quad[0], [100.0, 200.0 - 8.0, 300.0 - 4.0]);
-    assert_eq!(quad[2], [100.0, 200.0 + 8.0, 300.0 + 4.0]);
+    assert_eq!(quad[0], Vec3::new(100.0, 200.0 - 8.0, 300.0 - 4.0));
+    assert_eq!(quad[2], Vec3::new(100.0, 200.0 + 8.0, 300.0 + 4.0));
 
     // Flip flag set: V becomes -Z; a decode that ignored the flag (or the
     // packing itself) cannot produce this corner.
     overlay.uv_points[3][2] = 1.0;
     let flipped = overlay_quad_positions(overlay).expect("valid overlay");
-    assert_eq!(flipped[0], [100.0, 200.0 - 8.0, 300.0 + 4.0]);
+    assert_eq!(flipped[0], Vec3::new(100.0, 200.0 - 8.0, 300.0 + 4.0));
 
     // Degenerate packed basis (all z zero) is skipped, not guessed at.
     overlay.uv_points[1][2] = 0.0;
@@ -33,6 +33,7 @@ fn overlay_quad_uses_packed_u_basis_and_v_flip_flag() {
     assert!(overlay_quad_positions(overlay).is_none());
 }
 use super::*;
+use crate::math::Vec3;
 
 #[test]
 fn filters_source_tool_and_sky_materials() {
@@ -64,7 +65,7 @@ fn fan_indices_triangulate_convex_faces() {
 fn raw_texture_coords_are_texel_space() {
     let transform = [2.0, 3.0, 4.0, 5.0];
 
-    assert_eq!(texture_coord([7.0, 11.0, 13.0], transform), 104.0);
+    assert_eq!(texture_coord(Vec3::new(7.0, 11.0, 13.0), transform), 104.0);
 }
 
 #[test]
@@ -119,36 +120,39 @@ fn ambient_decode_uses_color_rgb_exp32_to_vector_scale() {
 
 #[test]
 fn ambient_cube_weights_source_sides_by_facing_normal() {
-    let mut colors = [[0.0_f32; 3]; 6];
-    colors[4] = [0.0, 1.0, 0.0];
+    let mut colors = [Vec3::ZERO; 6];
+    colors[4] = Vec3::new(0.0, 1.0, 0.0);
     let cube = AmbientCube { colors };
 
-    assert_eq!(cube.evaluate([0.0, 0.0, 1.0]), [0.0, 1.0, 0.0]);
-    assert_eq!(cube.evaluate([0.0, 0.0, -1.0]), [0.0; 3]);
+    assert_eq!(
+        cube.evaluate(Vec3::new(0.0, 0.0, 1.0)),
+        Vec3::new(0.0, 1.0, 0.0)
+    );
+    assert_eq!(cube.evaluate(Vec3::new(0.0, 0.0, -1.0)), Vec3::splat(0.0));
 }
 
 #[test]
 fn ambient_lookup_selects_nearest_sample_in_leaf() {
     let red = AmbientCube {
-        colors: [[1.0, 0.0, 0.0]; 6],
+        colors: [Vec3::new(1.0, 0.0, 0.0); 6],
     };
     let green = AmbientCube {
-        colors: [[0.0, 1.0, 0.0]; 6],
+        colors: [Vec3::new(0.0, 1.0, 0.0); 6],
     };
     let ambient = test_ambient_lighting(vec![
         MapAmbientSample {
-            position: [0.0; 3],
+            position: Vec3::splat(0.0),
             cube: red,
             cluster: 7,
         },
         MapAmbientSample {
-            position: [10.0, 0.0, 0.0],
+            position: Vec3::new(10.0, 0.0, 0.0),
             cube: green,
             cluster: 7,
         },
     ]);
 
-    assert_eq!(ambient.cube_at([9.0, 0.0, 0.0]), green);
+    assert_eq!(ambient.cube_at(Vec3::new(9.0, 0.0, 0.0)), green);
 }
 
 #[test]
@@ -156,13 +160,13 @@ fn load_map_uses_white_ambient_when_lumps_are_absent() {
     let map = load_map(&bsp_fixture(None)).expect("fixture bsp should load");
 
     assert_eq!(map.ambient.source(), AmbientLightSource::Neutral);
-    assert_eq!(map.ambient.cube_at([0.0; 3]), AmbientCube::WHITE);
+    assert_eq!(map.ambient.cube_at(Vec3::splat(0.0)), AmbientCube::WHITE);
 }
 
 #[test]
 fn lightmap_uv_math_uses_face_min_size_and_half_luxel_bias() {
     let uv = brush_lightmap_uv_from_transforms(
-        [10.0, 20.0, 30.0],
+        Vec3::new(10.0, 20.0, 30.0),
         [0.5, 0.0, 0.0, 2.0],
         [0.0, 0.25, 0.0, 1.0],
         [3, 4],
@@ -204,7 +208,7 @@ fn displacement_tessellation_matches_base_face_fan_winding() {
     for column in 0..side {
         for row in 0..side {
             grid.push(DisplacementGridVertex {
-                position: [column as f32, row as f32, 0.0],
+                position: Vec3::new(column as f32, row as f32, 0.0),
                 alpha: 0.0,
             });
         }
@@ -226,67 +230,70 @@ fn displacement_tessellation_matches_base_face_fan_winding() {
 
 #[test]
 fn walk_trace_hits_solid_brush_head_on_with_expanded_hull() {
-    let collision = box_collision([10.0, -16.0, -16.0], [20.0, 16.0, 16.0]);
-    let hit = collision.trace_aabb([0.0; 3], [30.0, 0.0, 0.0], [1.0; 3]);
+    let collision = box_collision(Vec3::new(10.0, -16.0, -16.0), Vec3::new(20.0, 16.0, 16.0));
+    let hit = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::splat(1.0));
 
     assert!(!hit.start_solid);
     assert!(hit.fraction > 0.29 && hit.fraction < 0.30, "{hit:?}");
     assert!((hit.end_position[0] - 8.96875).abs() < 1.0e-4);
-    assert_eq!(hit.normal, [-1.0, 0.0, 0.0]);
+    assert_eq!(hit.normal, Vec3::new(-1.0, 0.0, 0.0));
 }
 
 #[test]
 fn walk_trace_glancing_hit_supplies_slide_plane_normal() {
-    let collision = box_collision([10.0, -16.0, -16.0], [20.0, 16.0, 16.0]);
-    let start = [0.0; 3];
-    let end = [30.0, 10.0, 0.0];
-    let hit = collision.trace_aabb(start, end, [1.0; 3]);
-    let delta = sub(end, start);
-    let slide = sub(delta, mul(hit.normal, dot(delta, hit.normal)));
+    let collision = box_collision(Vec3::new(10.0, -16.0, -16.0), Vec3::new(20.0, 16.0, 16.0));
+    let start = Vec3::ZERO;
+    let end = Vec3::new(30.0, 10.0, 0.0);
+    let hit = collision.trace_aabb(start, end, Vec3::splat(1.0));
+    let delta = end - start;
+    let slide = delta - hit.normal * delta.dot(hit.normal);
 
-    assert_eq!(hit.normal, [-1.0, 0.0, 0.0]);
+    assert_eq!(hit.normal, Vec3::new(-1.0, 0.0, 0.0));
     assert!(slide[0].abs() < 1.0e-5, "{slide:?}");
     assert!(slide[1] > 9.9, "{slide:?}");
 }
 
 #[test]
 fn walk_trace_low_ledge_clears_after_step_height_lift() {
-    let collision = box_collision([10.0, -16.0, -8.0], [20.0, 16.0, 6.0]);
-    let half_extents = [1.0, 1.0, 8.0];
-    let start = [0.0, 0.0, 8.0];
-    let end = [30.0, 0.0, 8.0];
+    let collision = box_collision(Vec3::new(10.0, -16.0, -8.0), Vec3::new(20.0, 16.0, 6.0));
+    let half_extents = Vec3::new(1.0, 1.0, 8.0);
+    let start = Vec3::new(0.0, 0.0, 8.0);
+    let end = Vec3::new(30.0, 0.0, 8.0);
 
     let blocked = collision.trace_aabb(start, end, half_extents);
     let lifted = collision.trace_aabb(
-        add(start, [0.0, 0.0, 18.0]),
-        add(end, [0.0, 0.0, 18.0]),
+        start + (Vec3::new(0.0, 0.0, 18.0)),
+        end + (Vec3::new(0.0, 0.0, 18.0)),
         half_extents,
     );
 
     assert!(blocked.fraction < 1.0, "{blocked:?}");
-    assert_eq!(blocked.normal, [-1.0, 0.0, 0.0]);
+    assert_eq!(blocked.normal, Vec3::new(-1.0, 0.0, 0.0));
     assert_eq!(lifted.fraction, 1.0);
 }
 
 #[test]
 fn prop_trace_blocks_and_resting_contact_uses_same_solidity_predicate() {
-    let ledge = box_ledge([10.0, -16.0, -16.0], [20.0, 16.0, 16.0]);
+    let ledge = box_ledge(Vec3::new(10.0, -16.0, -16.0), Vec3::new(20.0, 16.0, 16.0));
     let collision = empty_walk_collision().with_prop_collisions([MapWalkPropCollisionSource {
         ledges: std::slice::from_ref(&ledge),
-        origin: [0.0; 3],
-        angles: [0.0; 3],
+        origin: Vec3::splat(0.0),
+        angles: Vec3::splat(0.0),
         scale: 1.0,
     }]);
 
-    let hit = collision.trace_aabb([0.0; 3], [30.0, 0.0, 0.0], [1.0; 3]);
+    let hit = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::splat(1.0));
     assert_eq!(collision.prop_hull_count(), 1);
     assert!(!hit.start_solid);
     assert!(hit.fraction > 0.29 && hit.fraction < 0.30, "{hit:?}");
-    assert_eq!(hit.normal, [-1.0, 0.0, 0.0]);
+    assert_eq!(hit.normal, Vec3::new(-1.0, 0.0, 0.0));
 
-    let half_extents = [1.0, 1.0, 1.0];
-    assert!(!collision.aabb_trace_solid([15.0, 0.0, 17.0 + TRACE_PLANE_EPSILON], half_extents));
-    assert!(collision.aabb_trace_solid([15.0, 0.0, 16.5], half_extents));
+    let half_extents = Vec3::new(1.0, 1.0, 1.0);
+    assert!(!collision.aabb_trace_solid(
+        Vec3::new(15.0, 0.0, 17.0 + TRACE_PLANE_EPSILON),
+        half_extents
+    ));
+    assert!(collision.aabb_trace_solid(Vec3::new(15.0, 0.0, 16.5), half_extents));
 }
 
 #[test]
@@ -302,8 +309,8 @@ fn prop_bevel_planes_prevent_wedge_corner_misclassification() {
     };
     let with_source = MapWalkPropModelPlacement {
         model: &with_model,
-        origin: [0.0; 3],
-        angles: [0.0; 3],
+        origin: Vec3::splat(0.0),
+        angles: Vec3::splat(0.0),
         scale: 1.0,
     };
     let face_source = MapWalkPropModelPlacement {
@@ -314,22 +321,22 @@ fn prop_bevel_planes_prevent_wedge_corner_misclassification() {
         prop_brush_from_local(&with_model.brushes[0], with_source).expect("beveled wedge");
     let face_only =
         prop_brush_from_local(&face_model.brushes[0], face_source).expect("face-only wedge");
-    let half_extents = [8.0, 8.0, 8.0];
+    let half_extents = Vec3::new(8.0, 8.0, 8.0);
     let directions = [
-        [96.0, 96.0, 0.0],
-        [96.0, 0.0, 96.0],
-        [0.0, 96.0, 96.0],
-        [96.0, 96.0, 96.0],
-        [-96.0, 96.0, 0.0],
-        [96.0, -96.0, 0.0],
+        Vec3::new(96.0, 96.0, 0.0),
+        Vec3::new(96.0, 0.0, 96.0),
+        Vec3::new(0.0, 96.0, 96.0),
+        Vec3::new(96.0, 96.0, 96.0),
+        Vec3::new(-96.0, 96.0, 0.0),
+        Vec3::new(96.0, -96.0, 0.0),
     ];
     let mut repro = None;
     'search: for x in (-32..=80).step_by(8) {
         for y in (-32..=80).step_by(8) {
             for z in (-32..=80).step_by(8) {
-                let start = [x as f32, y as f32, z as f32];
+                let start = Vec3::new(x as f32, y as f32, z as f32);
                 for direction in directions {
-                    let end = add(start, direction);
+                    let end = start + direction;
                     let beveled = trace_brush_aabb(&with_bevels, start, end, half_extents);
                     let plain = trace_brush_aabb(&face_only, start, end, half_extents);
                     if beveled.is_none() && plain.is_some() {
@@ -354,7 +361,7 @@ fn prop_bevel_planes_prevent_wedge_corner_misclassification() {
 #[test]
 fn walk_trace_playerclip_brush_blocks() {
     let brush = walk_brush_from_planes(
-        box_planes([10.0, -16.0, -16.0], [20.0, 16.0, 16.0]),
+        box_planes(Vec3::new(10.0, -16.0, -16.0), Vec3::new(20.0, 16.0, 16.0)),
         contents_flags::PLAYERCLIP,
     )
     .expect("playerclip brush should enter walk collision");
@@ -365,16 +372,16 @@ fn walk_trace_playerclip_brush_blocks() {
         props: MapWalkPropCollision::default(),
     };
 
-    let hit = collision.trace_aabb([0.0; 3], [30.0, 0.0, 0.0], [1.0; 3]);
+    let hit = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::splat(1.0));
 
     assert!(hit.fraction < 1.0, "{hit:?}");
-    assert_eq!(hit.normal, [-1.0, 0.0, 0.0]);
+    assert_eq!(hit.normal, Vec3::new(-1.0, 0.0, 0.0));
 }
 
 #[test]
 fn walk_trace_water_only_brush_does_not_block() {
     let water = walk_brush_from_planes(
-        box_planes([10.0, -16.0, -16.0], [20.0, 16.0, 16.0]),
+        box_planes(Vec3::new(10.0, -16.0, -16.0), Vec3::new(20.0, 16.0, 16.0)),
         contents_flags::WATER,
     )
     .expect("water brush should enter volume collision");
@@ -385,7 +392,7 @@ fn walk_trace_water_only_brush_does_not_block() {
         props: MapWalkPropCollision::default(),
     };
 
-    let hit = collision.trace_aabb([0.0; 3], [30.0, 0.0, 0.0], [1.0; 3]);
+    let hit = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::splat(1.0));
 
     assert_eq!(hit.fraction, 1.0);
     assert!(!hit.start_solid);
@@ -394,28 +401,32 @@ fn walk_trace_water_only_brush_does_not_block() {
 #[test]
 fn water_at_reports_inside_outside_and_surface_height() {
     let collision = MapWalkCollision::empty()
-        .with_water_box_for_tests([-32.0, -24.0, -16.0], [32.0, 24.0, 48.0]);
+        .with_water_box_for_tests(Vec3::new(-32.0, -24.0, -16.0), Vec3::new(32.0, 24.0, 48.0));
 
     assert_eq!(
-        collision.water_at([4.0, -3.0, 12.0]),
+        collision.water_at(Vec3::new(4.0, -3.0, 12.0)),
         Some(WaterVolume { surface_z: 48.0 })
     );
-    assert_eq!(collision.water_at([40.0, 0.0, 12.0]), None);
-    assert_eq!(collision.water_at([0.0, 0.0, 49.0]), None);
+    assert_eq!(collision.water_at(Vec3::new(40.0, 0.0, 12.0)), None);
+    assert_eq!(collision.water_at(Vec3::new(0.0, 0.0, 49.0)), None);
 }
 
 #[test]
 fn water_at_uses_highest_surface_for_stacked_volumes() {
     let collision = MapWalkCollision::empty()
-        .with_water_box_for_tests([-32.0; 3], [32.0, 32.0, 24.0])
-        .with_water_box_for_tests([-16.0, -16.0, -8.0], [16.0, 16.0, 48.0]);
+        .with_water_box_for_tests(Vec3::splat(-32.0), Vec3::new(32.0, 32.0, 24.0))
+        .with_water_box_for_tests(Vec3::new(-16.0, -16.0, -8.0), Vec3::new(16.0, 16.0, 48.0));
 
     assert_eq!(
-        collision.water_at([0.0; 3]),
+        collision.water_at(Vec3::splat(0.0)),
         Some(WaterVolume { surface_z: 48.0 })
     );
     assert!(
-        walk_brush_from_planes(box_planes([-1.0; 3], [1.0; 3]), contents_flags::SLIME).is_some()
+        walk_brush_from_planes(
+            box_planes(Vec3::splat(-1.0), Vec3::splat(1.0)),
+            contents_flags::SLIME
+        )
+        .is_some()
     );
 }
 
@@ -452,36 +463,39 @@ fn brush_side_sky_flag_accepts_sky_texinfo_and_ignores_plain_or_bevel_sides() {
 fn point_ray_reports_sky_only_for_first_sky_side_or_sky_escape() {
     let sky_ceiling = MapWalkCollision {
         brushes: vec![box_brush_with_sky_side(
-            [-16.0, -16.0, 10.0],
-            [16.0, 16.0, 20.0],
+            Vec3::new(-16.0, -16.0, 10.0),
+            Vec3::new(16.0, 16.0, 20.0),
             5,
         )],
         water_brushes: Vec::new(),
         displacements: Vec::new(),
         props: MapWalkPropCollision::default(),
     };
-    assert!(sky_ceiling.ray_hits_sky([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
-    assert!(sky_ceiling.ray_hits_sky([64.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
+    assert!(sky_ceiling.ray_hits_sky(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
+    assert!(sky_ceiling.ray_hits_sky(Vec3::new(64.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
 
     let plain_ceiling = MapWalkCollision {
         brushes: vec![box_brush_with_sky_side(
-            [-16.0, -16.0, 10.0],
-            [16.0, 16.0, 20.0],
+            Vec3::new(-16.0, -16.0, 10.0),
+            Vec3::new(16.0, 16.0, 20.0),
             usize::MAX,
         )],
         water_brushes: Vec::new(),
         displacements: Vec::new(),
         props: MapWalkPropCollision::default(),
     };
-    assert!(!plain_ceiling.ray_hits_sky([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
-    assert!(!plain_ceiling.ray_hits_sky([64.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
+    assert!(!plain_ceiling.ray_hits_sky(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
+    assert!(!plain_ceiling.ray_hits_sky(Vec3::new(64.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
 }
 
 #[test]
 fn walk_trace_displacement_triangle_hits_from_above() {
-    let triangle =
-        MapWalkTriangle::new([[-64.0, -64.0, 0.0], [64.0, -64.0, 0.0], [-64.0, 64.0, 0.0]])
-            .expect("valid triangle");
+    let triangle = MapWalkTriangle::new([
+        Vec3::new(-64.0, -64.0, 0.0),
+        Vec3::new(64.0, -64.0, 0.0),
+        Vec3::new(-64.0, 64.0, 0.0),
+    ])
+    .expect("valid triangle");
     let collision = MapWalkCollision {
         brushes: Vec::new(),
         water_brushes: Vec::new(),
@@ -493,7 +507,11 @@ fn walk_trace_displacement_triangle_hits_from_above() {
         props: MapWalkPropCollision::default(),
     };
 
-    let hit = collision.trace_aabb([0.0, 0.0, 100.0], [0.0, 0.0, -20.0], [16.0, 16.0, 36.0]);
+    let hit = collision.trace_aabb(
+        Vec3::new(0.0, 0.0, 100.0),
+        Vec3::new(0.0, 0.0, -20.0),
+        Vec3::new(16.0, 16.0, 36.0),
+    );
 
     assert!(!hit.start_solid);
     assert!(hit.fraction > 0.53 && hit.fraction < 0.54, "{hit:?}");
@@ -610,26 +628,26 @@ fn light_environment_parses_direction_light_and_ambient() {
     let lighting = map_environment_lighting(&entities).expect("light_environment");
     let sun = lighting.sun.expect("sun term");
 
-    assert_vec3_close(sun.direction_to_sun, [0.0, -0.866_025_4, 0.5]);
+    assert_vec3_close(sun.direction_to_sun, Vec3::new(0.0, -0.866_025_4, 0.5));
     // VRAD LightForString semantics: linear = (c/255)^2.2 * (intensity/255).
     let expected_channel = |channel: f32, intensity: f32| -> f32 {
         (channel / 255.0_f32).powf(2.2) * (intensity / 255.0)
     };
     assert_vec3_close(
         sun.color_linear,
-        [
+        Vec3::new(
             expected_channel(255.0, 128.0),
             expected_channel(128.0, 128.0),
             0.0,
-        ],
+        ),
     );
     assert_vec3_close(
         lighting.skylight_linear.expect("skylight"),
-        [
+        Vec3::new(
             expected_channel(64.0, 64.0),
             expected_channel(128.0, 64.0),
             expected_channel(255.0, 64.0),
-        ],
+        ),
     );
 }
 
@@ -652,19 +670,19 @@ fn light_environment_accepts_bright_intensity_and_three_component_light() {
 
     assert_vec3_close(
         sun.color_linear,
-        [
+        Vec3::new(
             400.0 / 255.0,
             (241.0 / 255.0_f32).powf(2.2) * (400.0 / 255.0),
             (224.0 / 255.0_f32).powf(2.2) * (400.0 / 255.0),
-        ],
+        ),
     );
     assert_vec3_close(
         lighting.skylight_linear.expect("three-component ambient"),
-        [
+        Vec3::new(
             (160.0 / 255.0_f32).powf(2.2),
             (180.0 / 255.0_f32).powf(2.2),
             (200.0 / 255.0_f32).powf(2.2),
-        ],
+        ),
     );
 }
 
@@ -690,7 +708,7 @@ fn light_environment_missing_or_malformed_keys_drop_only_that_term() {
     assert_eq!(lighting.sun, None);
     assert_vec3_close(
         lighting.skylight_linear.expect("valid ambient survives"),
-        [0.0, (128.0 / 255.0_f32).powf(2.2), 1.0],
+        Vec3::new(0.0, (128.0 / 255.0_f32).powf(2.2), 1.0),
     );
 }
 
@@ -715,8 +733,8 @@ fn load_map_extracts_first_info_player_start() {
     assert_eq!(
         map.player_start,
         Some(MapPlayerStart {
-            origin: [128.0, -64.0, 32.0],
-            angles: [5.0, 90.0, 0.0],
+            origin: Vec3::new(128.0, -64.0, 32.0),
+            angles: Vec3::new(5.0, 90.0, 0.0),
         })
     );
 }
@@ -736,8 +754,8 @@ fn load_map_omits_invalid_info_player_start_and_accepts_legacy_angle() {
     assert_eq!(
         legacy.player_start,
         Some(MapPlayerStart {
-            origin: [1.0, 2.0, 3.0],
-            angles: [0.0, 270.0, 0.0],
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            angles: Vec3::new(0.0, 270.0, 0.0),
         })
     );
 }
@@ -893,7 +911,7 @@ fn load_map_extracts_sky_camera_origin_scale_and_fog() {
     assert_eq!(
         map.sky_camera,
         Some(MapSkyCamera {
-            origin: [10.0, 20.0, 30.0],
+            origin: Vec3::new(10.0, 20.0, 30.0),
             scale: 8.0,
             fog: Some(MapFog {
                 color_srgb: [32, 64, 128],
@@ -974,8 +992,8 @@ fn load_map_extracts_static_prop_placements_from_game_lump_fixture() {
         map.static_props,
         vec![StaticPropPlacement {
             model_path: "models/props_c17/oildrum001.mdl".to_owned(),
-            origin: [10.0, 20.0, 30.0],
-            angles: [1.0, 90.0, 3.0],
+            origin: Vec3::new(10.0, 20.0, 30.0),
+            angles: Vec3::new(1.0, 90.0, 3.0),
             skin: 2,
             scale: 1.0,
             solid: MapPropSolid::None,
@@ -1034,14 +1052,14 @@ fn load_map_extracts_supported_entity_prop_classnames() {
     assert_eq!(map.stats.entity_prop_count, 5);
     assert_eq!(entity_props.len(), 5);
     assert_eq!(entity_props[0].model_path, "models/entity/dynamic.mdl");
-    assert_eq!(entity_props[0].origin, [1.0, 2.0, 3.0]);
-    assert_eq!(entity_props[0].angles, [10.0, 20.0, 30.0]);
+    assert_eq!(entity_props[0].origin, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(entity_props[0].angles, Vec3::new(10.0, 20.0, 30.0));
     assert_eq!(entity_props[0].skin, 4);
     assert_eq!(entity_props[0].scale, 2.5);
     assert_eq!(entity_props[0].solid, MapPropSolid::None);
     assert_eq!(entity_props[1].skin, 0);
     assert_eq!(entity_props[1].scale, 1.0);
-    assert_eq!(entity_props[4].angles, [14.0, 24.0, 34.0]);
+    assert_eq!(entity_props[4].angles, Vec3::new(14.0, 24.0, 34.0));
     assert!(
         entity_props
             .iter()
@@ -1101,8 +1119,8 @@ fn load_map_degrades_entity_prop_fields_per_entity() {
     assert_eq!(map.stats.entity_prop_count, 1);
     assert_eq!(entity_props.len(), 1);
     assert_eq!(entity_props[0].model_path, "models/entity/defaults.mdl");
-    assert_eq!(entity_props[0].origin, [1.0, 2.0, 3.0]);
-    assert_eq!(entity_props[0].angles, [0.0; 3]);
+    assert_eq!(entity_props[0].origin, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(entity_props[0].angles, Vec3::splat(0.0));
     assert_eq!(entity_props[0].skin, 0);
     assert_eq!(entity_props[0].scale, 1.0);
 }
@@ -1163,7 +1181,7 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
 
     let linear = &doors[0];
     assert_eq!(linear.class, MapDoorClass::FuncDoor);
-    assert_eq!(linear.origin, [32.0, 0.0, 0.0]);
+    assert_eq!(linear.origin, Vec3::new(32.0, 0.0, 0.0));
     assert_eq!(linear.auto_close_after, Some(3.0));
     assert_eq!(linear.initial_progress, 0.0);
     match linear.motion {
@@ -1172,7 +1190,7 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
             distance,
             speed,
         } => {
-            assert_vec3_close(direction, [0.0, 1.0, 0.0]);
+            assert_vec3_close(direction, Vec3::new(0.0, 1.0, 0.0));
             assert!((distance - 34.0).abs() < 1.0e-4);
             assert_eq!(speed, 100.0);
         }
@@ -1194,7 +1212,7 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
             distance,
             speed,
         } => {
-            assert_vec3_close(direction, [-1.0, 0.0, 0.0]);
+            assert_vec3_close(direction, Vec3::new(-1.0, 0.0, 0.0));
             assert_eq!(distance, 24.0);
             assert_eq!(speed, 100.0);
         }
@@ -1212,7 +1230,7 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
             speed,
             open_direction,
         } => {
-            assert_eq!(angle_delta, [0.0, 0.0, -45.0]);
+            assert_eq!(angle_delta, Vec3::new(0.0, 0.0, -45.0));
             assert_eq!(degrees, 45.0);
             assert_eq!(speed, 30.0);
             assert_eq!(open_direction, MapDoorOpenDirection::Both);
@@ -1224,8 +1242,8 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
 
     let prop = &doors[3];
     assert_eq!(prop.class, MapDoorClass::PropDoorRotating);
-    assert_eq!(prop.origin, [128.0, 0.0, 0.0]);
-    assert_eq!(prop.angles, [0.0, 90.0, 0.0]);
+    assert_eq!(prop.origin, Vec3::new(128.0, 0.0, 0.0));
+    assert_eq!(prop.angles, Vec3::new(0.0, 90.0, 0.0));
     assert_eq!(prop.auto_close_after, None);
     match prop.motion {
         MapDoorMotion::Rotating {
@@ -1234,7 +1252,7 @@ fn door_keyvalues_parse_all_supported_classes_and_degrade_per_field() {
             speed,
             open_direction,
         } => {
-            assert_eq!(angle_delta, [0.0, 90.0, 0.0]);
+            assert_eq!(angle_delta, Vec3::new(0.0, 90.0, 0.0));
             assert_eq!(degrees, 90.0);
             assert_eq!(speed, 100.0);
             assert_eq!(open_direction, MapDoorOpenDirection::Forward);
@@ -1251,9 +1269,12 @@ fn linear_door_distance_uses_bmodel_bounds_direction_and_lip() {
     let bsp = read_fixture_bsp(&bytes);
     let model = &bsp.models[1];
 
-    assert!((linear_door_distance(model, [0.0, 1.0, 0.0], 4.0) - 34.0).abs() < 1.0e-4);
-    assert!((linear_door_distance(model, [1.0, 0.0, 0.0], 1.0) - 13.0).abs() < 1.0e-4);
-    assert_eq!(linear_door_distance(model, [0.0, 0.0, 1.0], 100.0), 0.0);
+    assert!((linear_door_distance(model, Vec3::new(0.0, 1.0, 0.0), 4.0) - 34.0).abs() < 1.0e-4);
+    assert!((linear_door_distance(model, Vec3::new(1.0, 0.0, 0.0), 1.0) - 13.0).abs() < 1.0e-4);
+    assert_eq!(
+        linear_door_distance(model, Vec3::new(0.0, 0.0, 1.0), 100.0),
+        0.0
+    );
 }
 
 #[test]
@@ -1384,7 +1405,7 @@ fn load_map_partitions_entity_props_by_containing_leaf() {
 
 #[test]
 fn load_map_reattributes_world_faces_inside_skybox_completion_aabb() {
-    let map = load_map(&skybox_completion_bsp_fixture([-32.0, 0.0, 0.0]))
+    let map = load_map(&skybox_completion_bsp_fixture(Vec3::new(-32.0, 0.0, 0.0)))
         .expect("fixture bsp should load");
 
     assert_eq!(map.skybox_partition.completion_reattributed_face_count, 1);
@@ -1408,7 +1429,7 @@ fn load_map_reattributes_world_faces_inside_skybox_completion_aabb() {
 
 #[test]
 fn load_map_skybox_completion_spawn_overlap_guard_keeps_world_faces() {
-    let map = load_map(&skybox_completion_bsp_fixture([-32.0, 256.0, 0.0]))
+    let map = load_map(&skybox_completion_bsp_fixture(Vec3::new(-32.0, 256.0, 0.0)))
         .expect("fixture bsp should load");
 
     assert_eq!(map.skybox_partition.completion_reattributed_face_count, 0);
@@ -1449,8 +1470,8 @@ fn load_map_exposes_visibility_rows_and_world_cluster_ranges() {
 
     assert_eq!(map.stats.cluster_count, 2);
     assert_eq!(visibility.cluster_count(), 2);
-    assert_eq!(visibility.cluster_at([-32.0, 0.0, 0.0]), Some(0));
-    assert_eq!(visibility.cluster_at([32.0, 0.0, 0.0]), Some(1));
+    assert_eq!(visibility.cluster_at(Vec3::new(-32.0, 0.0, 0.0)), Some(0));
+    assert_eq!(visibility.cluster_at(Vec3::new(32.0, 0.0, 0.0)), Some(1));
     assert_eq!(
         visibility.visible_clusters(0).expect("cluster 0 row"),
         vec![true, false]
@@ -1488,15 +1509,15 @@ fn visibility_aabb_walk_collects_clusters_on_both_sides_of_split() {
     let visibility = map.visibility.as_ref().expect("fixture vis data");
 
     assert_eq!(
-        visibility.clusters_for_aabb([-48.0, -8.0, -8.0], [-16.0, 8.0, 8.0]),
+        visibility.clusters_for_aabb(Vec3::new(-48.0, -8.0, -8.0), Vec3::new(-16.0, 8.0, 8.0)),
         MapPropVisibility::Clusters(vec![0])
     );
     assert_eq!(
-        visibility.clusters_for_aabb([-8.0, -8.0, -8.0], [8.0, 8.0, 8.0]),
+        visibility.clusters_for_aabb(Vec3::new(-8.0, -8.0, -8.0), Vec3::new(8.0, 8.0, 8.0)),
         MapPropVisibility::Clusters(vec![0, 1])
     );
     assert_eq!(
-        visibility.clusters_for_aabb([0.0; 3], [0.0; 3]),
+        visibility.clusters_for_aabb(Vec3::ZERO, Vec3::ZERO),
         MapPropVisibility::Always
     );
 }
@@ -1562,7 +1583,7 @@ fn block(width: usize, height: usize) -> PendingLightmapBlock {
     }
 }
 
-fn box_collision(min: [f32; 3], max: [f32; 3]) -> MapWalkCollision {
+fn box_collision(min: Vec3, max: Vec3) -> MapWalkCollision {
     MapWalkCollision::solid_box_for_tests(min, max)
 }
 
@@ -1575,17 +1596,17 @@ fn empty_walk_collision() -> MapWalkCollision {
     }
 }
 
-fn box_ledge(min: [f32; 3], max: [f32; 3]) -> ConvexHull {
+fn box_ledge(min: Vec3, max: Vec3) -> ConvexHull {
     ConvexHull {
         vertices: vec![
-            [min[0], min[1], min[2]],
-            [max[0], min[1], min[2]],
-            [min[0], max[1], min[2]],
-            [max[0], max[1], min[2]],
-            [min[0], min[1], max[2]],
-            [max[0], min[1], max[2]],
-            [min[0], max[1], max[2]],
-            [max[0], max[1], max[2]],
+            Vec3::new(min[0], min[1], min[2]),
+            Vec3::new(max[0], min[1], min[2]),
+            Vec3::new(min[0], max[1], min[2]),
+            Vec3::new(max[0], max[1], min[2]),
+            Vec3::new(min[0], min[1], max[2]),
+            Vec3::new(max[0], min[1], max[2]),
+            Vec3::new(min[0], max[1], max[2]),
+            Vec3::new(max[0], max[1], max[2]),
         ],
         triangles: vec![
             [0, 2, 1],
@@ -1607,12 +1628,12 @@ fn box_ledge(min: [f32; 3], max: [f32; 3]) -> ConvexHull {
 fn wedge_ledge() -> ConvexHull {
     ConvexHull {
         vertices: vec![
-            [0.0, 0.0, 0.0],
-            [64.0, 0.0, 0.0],
-            [0.0, 64.0, 0.0],
-            [0.0, 0.0, 64.0],
-            [64.0, 0.0, 64.0],
-            [0.0, 64.0, 64.0],
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(64.0, 0.0, 0.0),
+            Vec3::new(0.0, 64.0, 0.0),
+            Vec3::new(0.0, 0.0, 64.0),
+            Vec3::new(64.0, 0.0, 64.0),
+            Vec3::new(0.0, 64.0, 64.0),
         ],
         triangles: vec![
             [0, 2, 1],
@@ -1627,36 +1648,36 @@ fn wedge_ledge() -> ConvexHull {
     }
 }
 
-fn box_planes(min: [f32; 3], max: [f32; 3]) -> Vec<MapPlane> {
+fn box_planes(min: Vec3, max: Vec3) -> Vec<MapPlane> {
     vec![
         MapPlane {
-            normal: [1.0, 0.0, 0.0],
+            normal: Vec3::new(1.0, 0.0, 0.0),
             dist: max[0],
         },
         MapPlane {
-            normal: [-1.0, 0.0, 0.0],
+            normal: Vec3::new(-1.0, 0.0, 0.0),
             dist: -min[0],
         },
         MapPlane {
-            normal: [0.0, 1.0, 0.0],
+            normal: Vec3::new(0.0, 1.0, 0.0),
             dist: max[1],
         },
         MapPlane {
-            normal: [0.0, -1.0, 0.0],
+            normal: Vec3::new(0.0, -1.0, 0.0),
             dist: -min[1],
         },
         MapPlane {
-            normal: [0.0, 0.0, 1.0],
+            normal: Vec3::new(0.0, 0.0, 1.0),
             dist: max[2],
         },
         MapPlane {
-            normal: [0.0, 0.0, -1.0],
+            normal: Vec3::new(0.0, 0.0, -1.0),
             dist: -min[2],
         },
     ]
 }
 
-fn box_brush_with_sky_side(min: [f32; 3], max: [f32; 3], sky_side_index: usize) -> MapWalkBrush {
+fn box_brush_with_sky_side(min: Vec3, max: Vec3, sky_side_index: usize) -> MapWalkBrush {
     let planes = box_planes(min, max)
         .into_iter()
         .enumerate()
@@ -1668,7 +1689,7 @@ fn box_brush_with_sky_side(min: [f32; 3], max: [f32; 3], sky_side_index: usize) 
     walk_brush_from_brush_planes(planes, contents_flags::SOLID).expect("box brush should be valid")
 }
 
-fn assert_vec3_close(actual: [f32; 3], expected: [f32; 3]) {
+fn assert_vec3_close(actual: Vec3, expected: Vec3) {
     for (actual, expected) in actual.into_iter().zip(expected) {
         assert!(
             (actual - expected).abs() < 1.0e-4,
@@ -1708,8 +1729,8 @@ fn skybox_partition_bsp_fixture_with_extra_entities(
     append_lump(&mut bytes, ENTITIES_LUMP_INDEX, entities.as_bytes(), 0);
 
     let mut planes = Vec::new();
-    push_plane(&mut planes, [1.0, 0.0, 0.0]);
-    push_plane(&mut planes, [0.0, 0.0, 1.0]);
+    push_plane(&mut planes, Vec3::new(1.0, 0.0, 0.0));
+    push_plane(&mut planes, Vec3::new(0.0, 0.0, 1.0));
     append_lump(&mut bytes, PLANES_LUMP_INDEX, &planes, 0);
 
     let mut texture_data = Vec::new();
@@ -1719,12 +1740,12 @@ fn skybox_partition_bsp_fixture_with_extra_entities(
 
     let mut vertices = Vec::new();
     for position in [
-        [-64.0, -32.0, 0.0],
-        [-16.0, -32.0, 0.0],
-        [-64.0, 32.0, 0.0],
-        [16.0, -32.0, 0.0],
-        [64.0, -32.0, 0.0],
-        [16.0, 32.0, 0.0],
+        Vec3::new(-64.0, -32.0, 0.0),
+        Vec3::new(-16.0, -32.0, 0.0),
+        Vec3::new(-64.0, 32.0, 0.0),
+        Vec3::new(16.0, -32.0, 0.0),
+        Vec3::new(64.0, -32.0, 0.0),
+        Vec3::new(16.0, 32.0, 0.0),
     ] {
         push_vec3(&mut vertices, position);
     }
@@ -1771,9 +1792,9 @@ fn skybox_partition_bsp_fixture_with_extra_entities(
     append_lump(&mut bytes, SURFACE_EDGES_LUMP_INDEX, &surface_edges, 0);
 
     let mut models = Vec::new();
-    push_vec3(&mut models, [-64.0, -32.0, 0.0]);
-    push_vec3(&mut models, [64.0, 32.0, 0.0]);
-    push_vec3(&mut models, [0.0, 0.0, 0.0]);
+    push_vec3(&mut models, Vec3::new(-64.0, -32.0, 0.0));
+    push_vec3(&mut models, Vec3::new(64.0, 32.0, 0.0));
+    push_vec3(&mut models, Vec3::new(0.0, 0.0, 0.0));
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&2_i32.to_le_bytes());
@@ -1825,8 +1846,8 @@ fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
     );
 
     let mut planes = Vec::new();
-    push_plane(&mut planes, [1.0, 0.0, 0.0]);
-    push_plane(&mut planes, [0.0, 0.0, 1.0]);
+    push_plane(&mut planes, Vec3::new(1.0, 0.0, 0.0));
+    push_plane(&mut planes, Vec3::new(0.0, 0.0, 1.0));
     append_lump(&mut bytes, PLANES_LUMP_INDEX, &planes, 0);
 
     let mut texture_data = Vec::new();
@@ -1837,12 +1858,12 @@ fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
 
     let mut vertices = Vec::new();
     for position in [
-        [-64.0, -32.0, 0.0],
-        [-16.0, -32.0, 0.0],
-        [-64.0, 32.0, 0.0],
-        [16.0, -32.0, 0.0],
-        [64.0, -32.0, 0.0],
-        [16.0, 32.0, 0.0],
+        Vec3::new(-64.0, -32.0, 0.0),
+        Vec3::new(-16.0, -32.0, 0.0),
+        Vec3::new(-64.0, 32.0, 0.0),
+        Vec3::new(16.0, -32.0, 0.0),
+        Vec3::new(64.0, -32.0, 0.0),
+        Vec3::new(16.0, 32.0, 0.0),
     ] {
         push_vec3(&mut vertices, position);
     }
@@ -1886,9 +1907,9 @@ fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
     append_lump(&mut bytes, SURFACE_EDGES_LUMP_INDEX, &surface_edges, 0);
 
     let mut models = Vec::new();
-    push_vec3(&mut models, [-64.0, -32.0, 0.0]);
-    push_vec3(&mut models, [64.0, 32.0, 0.0]);
-    push_vec3(&mut models, [0.0, 0.0, 0.0]);
+    push_vec3(&mut models, Vec3::new(-64.0, -32.0, 0.0));
+    push_vec3(&mut models, Vec3::new(64.0, 32.0, 0.0));
+    push_vec3(&mut models, Vec3::new(0.0, 0.0, 0.0));
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&2_i32.to_le_bytes());
@@ -1899,7 +1920,7 @@ fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
     leaf_faces.extend_from_slice(&1_u16.to_le_bytes());
     append_lump(&mut bytes, LEAF_FACES_LUMP_INDEX, &leaf_faces, 0);
 
-    let prop_data = static_prop_game_lump_data_with([10.0, 20.0, 30.0], &[1, 2]);
+    let prop_data = static_prop_game_lump_data_with(Vec3::new(10.0, 20.0, 30.0), &[1, 2]);
     append_sprp_game_lump(&mut bytes, &prop_data);
 
     let pakfile_offset = bytes.len();
@@ -1929,7 +1950,7 @@ fn in_solid_static_prop_bsp_fixture() -> Vec<u8> {
     bytes
 }
 
-fn skybox_completion_bsp_fixture(spawn_origin: [f32; 3]) -> Vec<u8> {
+fn skybox_completion_bsp_fixture(spawn_origin: Vec3) -> Vec<u8> {
     let mut bytes = bsp_fixture_header();
 
     let entities = format!(
@@ -1943,8 +1964,8 @@ fn skybox_completion_bsp_fixture(spawn_origin: [f32; 3]) -> Vec<u8> {
     append_lump(&mut bytes, ENTITIES_LUMP_INDEX, entities.as_bytes(), 0);
 
     let mut planes = Vec::new();
-    push_plane(&mut planes, [1.0, 0.0, 0.0]);
-    push_plane(&mut planes, [0.0, 0.0, 1.0]);
+    push_plane(&mut planes, Vec3::new(1.0, 0.0, 0.0));
+    push_plane(&mut planes, Vec3::new(0.0, 0.0, 1.0));
     append_lump(&mut bytes, PLANES_LUMP_INDEX, &planes, 0);
 
     let mut texture_data = Vec::new();
@@ -1955,15 +1976,15 @@ fn skybox_completion_bsp_fixture(spawn_origin: [f32; 3]) -> Vec<u8> {
 
     let mut vertices = Vec::new();
     for position in [
-        [-144.0, -32.0, 0.0],
-        [-96.0, -32.0, 0.0],
-        [-144.0, 32.0, 0.0],
-        [-48.0, 240.0, 0.0],
-        [-16.0, 240.0, 0.0],
-        [-48.0, 280.0, 0.0],
-        [-44.0, 248.0, 0.0],
-        [-20.0, 248.0, 0.0],
-        [-44.0, 272.0, 0.0],
+        Vec3::new(-144.0, -32.0, 0.0),
+        Vec3::new(-96.0, -32.0, 0.0),
+        Vec3::new(-144.0, 32.0, 0.0),
+        Vec3::new(-48.0, 240.0, 0.0),
+        Vec3::new(-16.0, 240.0, 0.0),
+        Vec3::new(-48.0, 280.0, 0.0),
+        Vec3::new(-44.0, 248.0, 0.0),
+        Vec3::new(-20.0, 248.0, 0.0),
+        Vec3::new(-44.0, 272.0, 0.0),
     ] {
         push_vec3(&mut vertices, position);
     }
@@ -2009,9 +2030,9 @@ fn skybox_completion_bsp_fixture(spawn_origin: [f32; 3]) -> Vec<u8> {
     append_lump(&mut bytes, SURFACE_EDGES_LUMP_INDEX, &surface_edges, 0);
 
     let mut models = Vec::new();
-    push_vec3(&mut models, [-160.0, -64.0, -128.0]);
-    push_vec3(&mut models, [96.0, 384.0, 128.0]);
-    push_vec3(&mut models, [0.0, 0.0, 0.0]);
+    push_vec3(&mut models, Vec3::new(-160.0, -64.0, -128.0));
+    push_vec3(&mut models, Vec3::new(96.0, 384.0, 128.0));
+    push_vec3(&mut models, Vec3::new(0.0, 0.0, 0.0));
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&3_i32.to_le_bytes());
@@ -2129,7 +2150,7 @@ fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
     append_lump(&mut bytes, ENTITIES_LUMP_INDEX, entities.as_bytes(), 0);
 
     let mut planes = Vec::new();
-    push_plane(&mut planes, [0.0, 0.0, 1.0]);
+    push_plane(&mut planes, Vec3::new(0.0, 0.0, 1.0));
     append_lump(&mut bytes, PLANES_LUMP_INDEX, &planes, 0);
 
     let mut texture_data = Vec::new();
@@ -2138,15 +2159,15 @@ fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
 
     let mut vertices = Vec::new();
     for position in [
-        [0.0, 0.0, 0.0],
-        [16.0, 0.0, 0.0],
-        [0.0, 16.0, 0.0],
-        [32.0, 0.0, 0.0],
-        [48.0, 0.0, 0.0],
-        [32.0, 16.0, 0.0],
-        [64.0, 0.0, 0.0],
-        [80.0, 0.0, 0.0],
-        [64.0, 16.0, 0.0],
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(16.0, 0.0, 0.0),
+        Vec3::new(0.0, 16.0, 0.0),
+        Vec3::new(32.0, 0.0, 0.0),
+        Vec3::new(48.0, 0.0, 0.0),
+        Vec3::new(32.0, 16.0, 0.0),
+        Vec3::new(64.0, 0.0, 0.0),
+        Vec3::new(80.0, 0.0, 0.0),
+        Vec3::new(64.0, 16.0, 0.0),
     ] {
         push_vec3(&mut vertices, position);
     }
@@ -2191,27 +2212,27 @@ fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
     let mut models = Vec::new();
     push_model(
         &mut models,
-        [0.0, 0.0, 0.0],
-        [16.0, 16.0, 0.0],
-        [0.0; 3],
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(16.0, 16.0, 0.0),
+        Vec3::ZERO,
         0,
         0,
         1,
     );
     push_model(
         &mut models,
-        [32.0, 0.0, 0.0],
-        [48.0, 40.0, 80.0],
-        [32.0, 0.0, 0.0],
+        Vec3::new(32.0, 0.0, 0.0),
+        Vec3::new(48.0, 40.0, 80.0),
+        Vec3::new(32.0, 0.0, 0.0),
         0,
         1,
         1,
     );
     push_model(
         &mut models,
-        [64.0, 0.0, 0.0],
-        [80.0, 16.0, 0.0],
-        [64.0, 0.0, 0.0],
+        Vec3::new(64.0, 0.0, 0.0),
+        Vec3::new(80.0, 16.0, 0.0),
+        Vec3::new(64.0, 0.0, 0.0),
         0,
         2,
         1,
@@ -2262,8 +2283,8 @@ fn water_underside_bsp_fixture() -> Vec<u8> {
     let mut bytes = bsp_fixture_header();
 
     let mut planes = Vec::new();
-    push_plane(&mut planes, [0.0, 0.0, -1.0]);
-    push_plane(&mut planes, [0.0, 0.0, 1.0]);
+    push_plane(&mut planes, Vec3::new(0.0, 0.0, -1.0));
+    push_plane(&mut planes, Vec3::new(0.0, 0.0, 1.0));
     append_lump(&mut bytes, PLANES_LUMP_INDEX, &planes, 0);
 
     let mut texture_data = Vec::new();
@@ -2274,15 +2295,15 @@ fn water_underside_bsp_fixture() -> Vec<u8> {
 
     let mut vertices = Vec::new();
     for position in [
-        [0.0, 0.0, 0.0],
-        [64.0, 0.0, 0.0],
-        [0.0, 64.0, 0.0],
-        [0.0, 0.0, 16.0],
-        [64.0, 0.0, 16.0],
-        [0.0, 64.0, 16.0],
-        [0.0, 0.0, 32.0],
-        [64.0, 0.0, 32.0],
-        [0.0, 64.0, 32.0],
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(64.0, 0.0, 0.0),
+        Vec3::new(0.0, 64.0, 0.0),
+        Vec3::new(0.0, 0.0, 16.0),
+        Vec3::new(64.0, 0.0, 16.0),
+        Vec3::new(0.0, 64.0, 16.0),
+        Vec3::new(0.0, 0.0, 32.0),
+        Vec3::new(64.0, 0.0, 32.0),
+        Vec3::new(0.0, 64.0, 32.0),
     ] {
         push_vec3(&mut vertices, position);
     }
@@ -2324,9 +2345,9 @@ fn water_underside_bsp_fixture() -> Vec<u8> {
     append_lump(&mut bytes, SURFACE_EDGES_LUMP_INDEX, &surface_edges, 0);
 
     let mut models = Vec::new();
-    push_vec3(&mut models, [0.0, 0.0, 0.0]);
-    push_vec3(&mut models, [64.0, 64.0, 32.0]);
-    push_vec3(&mut models, [0.0, 0.0, 0.0]);
+    push_vec3(&mut models, Vec3::new(0.0, 0.0, 0.0));
+    push_vec3(&mut models, Vec3::new(64.0, 64.0, 32.0));
+    push_vec3(&mut models, Vec3::new(0.0, 0.0, 0.0));
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&0_i32.to_le_bytes());
     models.extend_from_slice(&3_i32.to_le_bytes());
@@ -2379,7 +2400,7 @@ fn bsp_fixture(entities: Option<&str>) -> Vec<u8> {
     }
 
     let mut plane = Vec::new();
-    push_plane(&mut plane, [0.0, 0.0, 1.0]);
+    push_plane(&mut plane, Vec3::new(0.0, 0.0, 1.0));
     append_lump(&mut bytes, PLANES_LUMP_INDEX, &plane, 0);
 
     let mut node = Vec::new();
@@ -2442,14 +2463,14 @@ fn append_lump(bytes: &mut Vec<u8>, lump_index: usize, data: &[u8], version: u32
     write_lump_entry(bytes, lump_index, offset, data.len(), version);
 }
 
-fn push_plane(bytes: &mut Vec<u8>, normal: [f32; 3]) {
+fn push_plane(bytes: &mut Vec<u8>, normal: Vec3) {
     push_vec3(bytes, normal);
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
     bytes.extend_from_slice(&0_i32.to_le_bytes());
 }
 
 fn push_texture_data(bytes: &mut Vec<u8>, name_string_table_id: i32) {
-    push_vec3(bytes, [1.0, 1.0, 1.0]);
+    push_vec3(bytes, Vec3::new(1.0, 1.0, 1.0));
     bytes.extend_from_slice(&name_string_table_id.to_le_bytes());
     bytes.extend_from_slice(&512_i32.to_le_bytes());
     bytes.extend_from_slice(&512_i32.to_le_bytes());
@@ -2502,9 +2523,9 @@ fn push_face(
 
 fn push_model(
     bytes: &mut Vec<u8>,
-    mins: [f32; 3],
-    maxs: [f32; 3],
-    origin: [f32; 3],
+    mins: Vec3,
+    maxs: Vec3,
+    origin: Vec3,
     head_node: i32,
     first_face: i32,
     face_count: i32,
@@ -2523,10 +2544,10 @@ fn push_edge(bytes: &mut Vec<u8>, start: u16, end: u16) {
 }
 
 fn static_prop_game_lump_data() -> Vec<u8> {
-    static_prop_game_lump_data_with([10.0, 20.0, 30.0], &[0, 1])
+    static_prop_game_lump_data_with(Vec3::new(10.0, 20.0, 30.0), &[0, 1])
 }
 
-fn static_prop_game_lump_data_with(origin: [f32; 3], leaves: &[u16]) -> Vec<u8> {
+fn static_prop_game_lump_data_with(origin: Vec3, leaves: &[u16]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&1_i32.to_le_bytes());
     let mut name = [0_u8; 128];
@@ -2539,7 +2560,7 @@ fn static_prop_game_lump_data_with(origin: [f32; 3], leaves: &[u16]) -> Vec<u8> 
     }
     bytes.extend_from_slice(&1_i32.to_le_bytes());
     push_vec3(&mut bytes, origin);
-    push_vec3(&mut bytes, [1.0, 90.0, 3.0]);
+    push_vec3(&mut bytes, Vec3::new(1.0, 90.0, 3.0));
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&(leaves.len() as u16).to_le_bytes());
@@ -2548,7 +2569,7 @@ fn static_prop_game_lump_data_with(origin: [f32; 3], leaves: &[u16]) -> Vec<u8> 
     bytes.extend_from_slice(&2_i32.to_le_bytes());
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
-    push_vec3(&mut bytes, [0.0; 3]);
+    push_vec3(&mut bytes, Vec3::splat(0.0));
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
@@ -2566,7 +2587,7 @@ fn empty_static_prop_game_lump_data() -> Vec<u8> {
     bytes
 }
 
-fn push_vec3(bytes: &mut Vec<u8>, values: [f32; 3]) {
+fn push_vec3(bytes: &mut Vec<u8>, values: Vec3) {
     for value in values {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -2630,7 +2651,7 @@ fn test_ambient_lighting(samples: Vec<MapAmbientSample>) -> MapAmbientLighting {
         source: AmbientLightSource::Ldr,
         locator: MapLeafLocator {
             planes: vec![MapPlane {
-                normal: [0.0, 0.0, 1.0],
+                normal: Vec3::new(0.0, 0.0, 1.0),
                 dist: 0.0,
             }],
             nodes: vec![MapNode {
@@ -2666,14 +2687,14 @@ fn a_cyclic_node_graph_terminates_instead_of_spinning() {
         // 0 -> 1 -> 0, both children non-negative so the walk never reaches
         // the `next < 0` leaf exit.
         let result = super::walk_to_leaf(
-            [1.0, 0.0, 0.0],
+            Vec3::new(1.0, 0.0, 0.0),
             2,
             |index| match index {
                 0 => Some((0, [1, 1])),
                 1 => Some((0, [0, 0])),
                 _ => None,
             },
-            |_| Some(([1.0, 0.0, 0.0], 0.0)),
+            |_| Some((Vec3::new(1.0, 0.0, 0.0), 0.0)),
         );
         let _ = tx.send(result);
     });
@@ -2695,7 +2716,7 @@ fn an_acyclic_walk_still_reaches_its_leaf_at_full_depth() {
     // iteration bound must not cut this short.
 
     let leaf = super::walk_to_leaf(
-        [1.0, 0.0, 0.0],
+        Vec3::new(1.0, 0.0, 0.0),
         DEPTH,
         |index| {
             (index < DEPTH).then(|| {
@@ -2707,7 +2728,7 @@ fn an_acyclic_walk_still_reaches_its_leaf_at_full_depth() {
                 (0, [front, front])
             })
         },
-        |_| Some(([1.0, 0.0, 0.0], 0.0)),
+        |_| Some((Vec3::new(1.0, 0.0, 0.0), 0.0)),
     );
 
     assert_eq!(leaf, Some(0));
@@ -2747,14 +2768,17 @@ fn node_children_decode_by_sign() {
 fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
     let vertex = |position| MapVertex {
         position,
-        normal: [0.0, 0.0, 1.0],
+        normal: Vec3::new(0.0, 0.0, 1.0),
         tex_s: 0.0,
         tex_t: 0.0,
         lightmap_uv: [0.0; 2],
         blend_alpha: 0.0,
     };
     let mesh = MapMesh {
-        vertices: vec![vertex([f32::NAN; 3]), vertex([f32::INFINITY; 3])],
+        vertices: vec![
+            vertex(Vec3::splat(f32::NAN)),
+            vertex(Vec3::splat(f32::INFINITY)),
+        ],
         indices: Vec::new(),
         material_index: 0,
         visibility: MapMeshVisibility::default(),
@@ -2762,8 +2786,8 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
 
     let bounds = bounds_from_meshes(std::slice::from_ref(&mesh));
 
-    assert_eq!(bounds.min, [0.0; 3]);
-    assert_eq!(bounds.max, [0.0; 3]);
+    assert_eq!(bounds.min, Vec3::splat(0.0));
+    assert_eq!(bounds.max, Vec3::splat(0.0));
 }
 
 /// `BuildMeshVisibility::push` trusts `always_visible` alone to decide whether a

@@ -298,7 +298,10 @@ impl DownloaderJob {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobProgress {
-    Running { ratio: f64, status_key: TransactionStatus },
+    Running {
+        ratio: f64,
+        status_key: TransactionStatus,
+    },
     Finished,
     Error(UiError),
 }

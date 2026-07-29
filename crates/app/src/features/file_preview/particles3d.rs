@@ -5,6 +5,7 @@
 //! pose and control point positions round-trip through feature state so they
 //! survive expand/collapse rebuilds.
 
+use gmpublished_backend::math::Vec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,25 +21,25 @@ use gmpublished_backend::particles::{
 };
 
 use super::Message;
-use crate::media::preview_model::ParticlePreview;
 use super::state::OrbitPose;
 use super::viewer3d::SOURCE_UP;
 use super::viewer3d::{look_at, mat_mul, perspective};
 use crate::bridge::materials::ResolvedTexture;
+use crate::media::preview_model::ParticlePreview;
 
 const SHADER_SOURCE: &str = include_str!("particles.wgsl");
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 /// Fallback frame delta when a drag needs a velocity hint.
 const DRAG_DT_HINT: f32 = 1.0 / 60.0;
 /// Gizmo colors cycle for control points 1..; CP0 is pinned and undrawn.
-const GIZMO_COLORS: [[f32; 3]; 7] = [
-    [1.0, 0.62, 0.11],
-    [0.20, 0.78, 1.0],
-    [0.86, 0.39, 1.0],
-    [0.35, 1.0, 0.55],
-    [1.0, 0.35, 0.35],
-    [1.0, 0.95, 0.4],
-    [0.55, 0.55, 1.0],
+const GIZMO_COLORS: [Vec3; 7] = [
+    Vec3::new(1.0, 0.62, 0.11),
+    Vec3::new(0.20, 0.78, 1.0),
+    Vec3::new(0.86, 0.39, 1.0),
+    Vec3::new(0.35, 1.0, 0.55),
+    Vec3::new(1.0, 0.35, 0.35),
+    Vec3::new(1.0, 0.95, 0.4),
+    Vec3::new(0.55, 0.55, 1.0),
 ];
 
 pub(super) struct ParticleViewer {
@@ -51,7 +52,7 @@ pub(super) struct ParticleViewer {
     /// Bumped by the restart button; the widget replays from t=0.
     pub(super) restart_epoch: u64,
     pub(super) pose: Option<OrbitPose>,
-    pub(super) control_points: [[f32; 3]; MAX_CONTROL_POINTS],
+    pub(super) control_points: [Vec3; MAX_CONTROL_POINTS],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,43 +150,43 @@ impl SimState {
 // --- Camera --------------------------------------------------------------
 
 struct CameraFrame {
-    eye: [f32; 3],
-    right: [f32; 3],
-    up: [f32; 3],
-    forward: [f32; 3],
+    eye: Vec3,
+    right: Vec3,
+    up: Vec3,
+    forward: Vec3,
     view_proj: [[f32; 4]; 4],
     aspect: f32,
 }
 
-fn v_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+fn v_sub(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3::new(a[0] - b[0], a[1] - b[1], a[2] - b[2])
 }
 
-fn v_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+fn v_add(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3::new(a[0] + b[0], a[1] + b[1], a[2] + b[2])
 }
 
-fn v_scale(a: [f32; 3], s: f32) -> [f32; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
+fn v_scale(a: Vec3, s: f32) -> Vec3 {
+    Vec3::new(a[0] * s, a[1] * s, a[2] * s)
 }
 
-fn v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+fn v_dot(a: Vec3, b: Vec3) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn v_cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
+fn v_cross(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3::new(
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
-    ]
+    )
 }
 
-fn v_length(a: [f32; 3]) -> f32 {
+fn v_length(a: Vec3) -> f32 {
     v_dot(a, a).sqrt()
 }
 
-fn v_normalize(a: [f32; 3]) -> [f32; 3] {
+fn v_normalize(a: Vec3) -> Vec3 {
     let len = v_length(a).max(1e-6);
     v_scale(a, 1.0 / len)
 }
@@ -203,7 +204,7 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
         .engine
         .as_ref()
         .map_or(64.0, ParticleEngine::bounding_radius);
-    let center = [0.0, 0.0, 0.0];
+    let center = Vec3::new(0.0, 0.0, 0.0);
     let distance = radius * 2.2 * state.orbit.distance();
     let eye = [
         center[0] + distance * state.orbit.pitch().cos() * state.orbit.yaw().sin(),
@@ -211,14 +212,14 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
         center[2] + distance * state.orbit.pitch().sin(),
     ];
     // Source is Z-up.
-    let forward = v_normalize(v_sub(center, eye));
+    let forward = v_normalize(v_sub(center, Vec3::from(eye)));
     let right = v_normalize(v_cross(forward, SOURCE_UP));
     let up = v_cross(right, forward);
-    let view = look_at(eye, center, SOURCE_UP);
+    let view = look_at(Vec3::from(eye), center, SOURCE_UP);
     let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
     let proj = perspective(FOV_Y, aspect, radius * 0.01, radius * 20.0 + distance);
     CameraFrame {
-        eye,
+        eye: Vec3::from(eye),
         right,
         up,
         forward,
@@ -228,7 +229,7 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
 }
 
 /// World-space ray through a cursor position inside `bounds`.
-fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> [f32; 3] {
+fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> Vec3 {
     let ndc_x = ((cursor.x - bounds.x) / bounds.width.max(1.0)) * 2.0 - 1.0;
     let ndc_y = 1.0 - ((cursor.y - bounds.y) / bounds.height.max(1.0)) * 2.0;
     let tan_half = (FOV_Y * 0.5).tan();
@@ -242,7 +243,7 @@ fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> [f32; 3]
 }
 
 /// Intersects a cursor ray with the camera-facing plane through `anchor`.
-fn drag_plane_position(frame: &CameraFrame, ray: [f32; 3], anchor: [f32; 3]) -> Option<[f32; 3]> {
+fn drag_plane_position(frame: &CameraFrame, ray: Vec3, anchor: Vec3) -> Option<Vec3> {
     let denominator = v_dot(ray, frame.forward);
     if denominator.abs() < 1e-4 {
         return None;
@@ -251,7 +252,7 @@ fn drag_plane_position(frame: &CameraFrame, ray: [f32; 3], anchor: [f32; 3]) -> 
     (t > 0.0).then(|| v_add(frame.eye, v_scale(ray, t)))
 }
 
-fn gizmo_pick_radius(frame: &CameraFrame, position: [f32; 3]) -> f32 {
+fn gizmo_pick_radius(frame: &CameraFrame, position: Vec3) -> f32 {
     v_length(v_sub(position, frame.eye)) * 0.035
 }
 
@@ -272,7 +273,7 @@ impl ParticleViewer {
         &self,
         state: &SimState,
         frame: &CameraFrame,
-        ray: [f32; 3],
+        ray: Vec3,
     ) -> Option<ControlPointIndex> {
         let engine = state.engine.as_ref()?;
         let mut best: Option<(ControlPointIndex, f32)> = None;
@@ -586,12 +587,12 @@ struct GpuInstance {
 }
 
 impl GpuInstance {
-    fn position(&self) -> [f32; 3] {
-        [
+    fn position(&self) -> Vec3 {
+        Vec3::new(
             self.position_rotation[0],
             self.position_rotation[1],
             self.position_rotation[2],
-        ]
+        )
     }
 
     fn linear_color(particle: &gmpublished_backend::particles::RenderParticle) -> [f32; 4] {

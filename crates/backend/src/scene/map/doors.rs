@@ -1,10 +1,11 @@
 use super::{
     BspError, BspModel, BuildMesh, BuildMeshes, FaceAppendContext, FaceAttributions, MapBounds,
     MapBsp, MapEntity, MapFaceVisibility, MapMesh, MapPropSolid, MapVisibilityBucket, ModelIndex,
-    QAngle, StaticPropPlacement, append_face, bounds_from_points_iter, dot_abs, model_face_range,
-    mul, normalize_entity_prop_model_path, parse_entity_float, parse_entity_i32, parse_entity_vec3,
-    point_visibility_bucket, sub,
+    QAngle, StaticPropPlacement, append_face, bounds_from_points_iter, model_face_range,
+    normalize_entity_prop_model_path, parse_entity_float, parse_entity_i32, parse_entity_vec3,
+    point_visibility_bucket,
 };
+use crate::math::Vec3;
 
 const PROP_DOOR_DEFAULT_MOVE_SOUND: &str = "DoorSound.DefaultMove";
 const PROP_DOOR_DEFAULT_ARRIVE_SOUND: &str = "DoorSound.DefaultArrive";
@@ -35,11 +36,11 @@ pub enum MapDoorOpenDirection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapDoor {
     pub class: MapDoorClass,
-    pub origin: [f32; 3],
+    pub origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
-    pub angles: [f32; 3],
-    pub local_bounds_min: [f32; 3],
-    pub local_bounds_max: [f32; 3],
+    pub angles: Vec3,
+    pub local_bounds_min: Vec3,
+    pub local_bounds_max: Vec3,
     pub visibility: MapVisibilityBucket,
     /// Seconds an opened door waits before closing itself, or `None` for a
     /// door that stays open until triggered again.
@@ -72,12 +73,12 @@ pub enum MapDoorGeometry {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MapDoorMotion {
     Linear {
-        direction: [f32; 3],
+        direction: Vec3,
         distance: f32,
         speed: f32,
     },
     Rotating {
-        angle_delta: [f32; 3],
+        angle_delta: Vec3,
         degrees: f32,
         speed: f32,
         open_direction: MapDoorOpenDirection,
@@ -87,8 +88,8 @@ pub enum MapDoorMotion {
 #[derive(Debug)]
 pub(super) struct PendingMapDoor {
     pub(super) class: MapDoorClass,
-    pub(super) origin: [f32; 3],
-    pub(super) angles: [f32; 3],
+    pub(super) origin: Vec3,
+    pub(super) angles: Vec3,
     pub(super) visibility: MapVisibilityBucket,
     pub(super) auto_close_after: Option<f32>,
     pub(super) initial_progress: f32,
@@ -152,8 +153,8 @@ impl PendingDoorBuild {
                 class: self.door.class,
                 origin: self.door.origin,
                 angles: self.door.angles,
-                local_bounds_min: [0.0; 3],
-                local_bounds_max: [0.0; 3],
+                local_bounds_min: Vec3::splat(0.0),
+                local_bounds_max: Vec3::splat(0.0),
                 visibility: self.door.visibility,
                 auto_close_after: self.door.auto_close_after,
                 initial_progress: self.door.initial_progress,
@@ -165,13 +166,13 @@ impl PendingDoorBuild {
     }
 }
 
-fn build_mesh_to_map_mesh_local(mesh: BuildMesh, origin: [f32; 3]) -> MapMesh {
+fn build_mesh_to_map_mesh_local(mesh: BuildMesh, origin: Vec3) -> MapMesh {
     MapMesh {
         vertices: mesh
             .vertices
             .into_iter()
             .map(|mut vertex| {
-                vertex.vertex.position = sub(vertex.vertex.position, origin);
+                vertex.vertex.position -= origin;
                 vertex.vertex
             })
             .collect(),
@@ -231,7 +232,7 @@ fn pending_linear_brush_door(
         .prop("movedir")
         .or_else(|| entity.prop("angles"))
         .and_then(parse_entity_vec3)
-        .map_or([1.0, 0.0, 0.0], angle_vectors_forward);
+        .map_or(Vec3::new(1.0, 0.0, 0.0), angle_vectors_forward);
     let speed = parse_entity_float_default(entity.prop("speed"), 100.0, class, "speed");
     let lip = parse_entity_float_default(entity.prop("lip"), 0.0, class, "lip");
     let model_distance = linear_door_distance(model, direction, lip);
@@ -260,7 +261,7 @@ fn pending_linear_brush_door(
     Some(PendingMapDoor {
         class,
         origin,
-        angles: [0.0; 3],
+        angles: Vec3::splat(0.0),
         visibility: point_visibility_bucket(bsp, origin, cluster_count),
         auto_close_after: door_auto_close_after(entity, class),
         initial_progress,
@@ -289,14 +290,14 @@ fn pending_rotating_brush_door(
     let angles = entity
         .prop("angles")
         .and_then(parse_entity_vec3)
-        .unwrap_or([0.0; 3]);
+        .unwrap_or(Vec3::splat(0.0));
     let spawnflags = parse_entity_spawnflags(entity);
     let degrees = parse_entity_float_default(entity.prop("distance"), 90.0, class, "distance")
         .abs()
         .max(0.0);
     let mut angle_delta = rotation_axis_delta(spawnflags, degrees);
     if spawnflags & SF_DOOR_ROTATE_BACKWARDS != 0 {
-        angle_delta = mul(angle_delta, -1.0);
+        angle_delta *= -1.0;
     }
     Some(PendingMapDoor {
         class,
@@ -338,7 +339,7 @@ fn pending_prop_door(
     let angles = entity
         .prop("angles")
         .and_then(parse_entity_vec3)
-        .unwrap_or([0.0; 3]);
+        .unwrap_or(Vec3::splat(0.0));
     let skin = entity.prop("skin").and_then(parse_entity_i32).unwrap_or(0);
     let degrees = parse_entity_float_default(entity.prop("distance"), 90.0, class, "distance")
         .abs()
@@ -370,7 +371,7 @@ fn pending_prop_door(
         auto_close_after: prop_door_auto_close_after(entity, class),
         initial_progress: prop_door_initial_progress(entity),
         motion: MapDoorMotion::Rotating {
-            angle_delta: [0.0, degrees, 0.0],
+            angle_delta: Vec3::new(0.0, degrees, 0.0),
             degrees,
             speed: parse_entity_float_default(entity.prop("speed"), 100.0, class, "speed"),
             open_direction,
@@ -474,29 +475,29 @@ fn entity_origin_or_model_origin(
     entity: &MapEntity,
     model: &BspModel,
     class: MapDoorClass,
-) -> [f32; 3] {
+) -> Vec3 {
     if let Some(origin) = entity.prop("origin") {
         if let Some(parsed) = parse_entity_vec3(origin) {
             return parsed;
         }
         log::debug!("bsp {class:?} invalid origin {origin:?}: using bmodel origin");
     }
-    model.origin
+    Vec3::from(model.origin)
 }
 
-pub(super) fn linear_door_distance(model: &BspModel, direction: [f32; 3], lip: f32) -> f32 {
+pub(super) fn linear_door_distance(model: &BspModel, direction: Vec3, lip: f32) -> f32 {
     let mins = model.mins;
     let maxs = model.maxs;
     let size = std::array::from_fn(|axis| (maxs[axis] - mins[axis] - 2.0).max(0.0));
-    (dot_abs(direction, size) - lip).max(0.0)
+    (direction.dot_abs(Vec3::from(size)) - lip).max(0.0)
 }
 
-fn angle_vectors_forward(angles: [f32; 3]) -> [f32; 3] {
+fn angle_vectors_forward(angles: Vec3) -> Vec3 {
     let QAngle { pitch, yaw, .. } = QAngle::from_source_degrees(angles);
     let (sin_pitch, cos_pitch) = pitch.sin_cos();
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
     // Unit by construction: cos²p(cos²y + sin²y) + sin²p == 1.
-    [cos_pitch * cos_yaw, cos_pitch * sin_yaw, -sin_pitch]
+    Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, -sin_pitch)
 }
 
 fn parse_entity_float_default(
@@ -521,16 +522,16 @@ fn parse_entity_spawnflags(entity: &MapEntity) -> u32 {
         .unwrap_or(0)
 }
 
-fn rotation_axis_delta(spawnflags: u32, degrees: f32) -> [f32; 3] {
+fn rotation_axis_delta(spawnflags: u32, degrees: f32) -> Vec3 {
     // Source SDK 2013 CBaseToggle::AxisDir checks roll before pitch; yaw is
     // the default. Preserve that priority so mixed wild flags degrade like
     // the engine instead of inventing a new axis.
     if spawnflags & SF_DOOR_ROTATE_ROLL != 0 {
-        [0.0, 0.0, degrees]
+        Vec3::new(0.0, 0.0, degrees)
     } else if spawnflags & SF_DOOR_ROTATE_PITCH != 0 {
-        [degrees, 0.0, 0.0]
+        Vec3::new(degrees, 0.0, 0.0)
     } else {
-        [0.0, degrees, 0.0]
+        Vec3::new(0.0, degrees, 0.0)
     }
 }
 

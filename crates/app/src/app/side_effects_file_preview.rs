@@ -1,8 +1,8 @@
 use iced::Task;
 
 use super::{App, RootMessage, file_preview, send_root_message, stream};
-use crate::media::preview_model::PreviewRequest;
 use crate::media::file_preview_decode::load_preview;
+use crate::media::preview_model::PreviewRequest;
 
 impl App {
     pub(super) fn apply_file_preview_message(

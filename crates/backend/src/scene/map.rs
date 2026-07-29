@@ -7,10 +7,7 @@
 //! since vformats deliberately leaves scene-assembly concerns like
 //! these to its callers.
 
-use crate::math::{
-    add, cross, distance_squared, dot, dot_abs, length_squared, lerp, normalize_or_zero,
-    scale as mul, sub,
-};
+use crate::math::Vec3;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -371,8 +368,8 @@ fn split_build_meshes(meshes: Vec<BuildMesh>) -> (Vec<BuildMesh>, Vec<BuildMesh>
     (visible, skybox)
 }
 
-fn vector_is_finite_nonzero(vector: [f32; 3]) -> bool {
-    vector.into_iter().all(f32::is_finite) && length_squared(vector) > f32::EPSILON
+fn vector_is_finite_nonzero(vector: Vec3) -> bool {
+    vector.is_finite() && vector.length_squared() > f32::EPSILON
 }
 
 /// Whole-map bounds, tolerating wild content: non-finite vertices are skipped,
@@ -391,8 +388,8 @@ fn bounds_from_meshes(meshes: &[MapMesh]) -> MapBounds {
         bounds.push(position);
     }
     bounds.finish().unwrap_or(MapBounds {
-        min: [0.0; 3],
-        max: [0.0; 3],
+        min: Vec3::splat(0.0),
+        max: Vec3::splat(0.0),
     })
 }
 

@@ -1,11 +1,12 @@
+use gmpublished_backend::math::Vec3;
 use std::time::{Duration, Instant};
 
 use iced::widget::pane_grid;
 
+use crate::generation::Generation;
 use crate::media::preview_model::{
     PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest,
 };
-use crate::generation::Generation;
 use crate::spinner_clock::SpinnerClock;
 use crate::widgets::split_pane;
 use gmpublished_backend::particles::{ControlPointIndex, MAX_CONTROL_POINTS};
@@ -21,7 +22,7 @@ pub(super) enum Pane {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyPose {
-    pub(crate) position: [f32; 3],
+    pub(crate) position: Vec3,
     pub(crate) yaw: f32,
     pub(crate) pitch: f32,
     pub(crate) speed: f32,
@@ -53,7 +54,7 @@ impl Default for OrbitPose {
 
 impl FlyPose {
     fn is_finite(self) -> bool {
-        self.position.iter().all(|value| value.is_finite())
+        self.position.is_finite()
             && self.yaw.is_finite()
             && self.pitch.is_finite()
             && self.speed.is_finite()
@@ -99,17 +100,17 @@ pub struct State {
     particle_playing: bool,
     particle_speed: f32,
     particle_restart_epoch: u64,
-    particle_control_points: [[f32; 3]; MAX_CONTROL_POINTS],
+    particle_control_points: [Vec3; MAX_CONTROL_POINTS],
     inspector_panes: split_pane::State<Pane>,
 }
 
 /// CP0 is the effect origin, pinned at the viewport centre; the rest fan out
 /// along +X so two-point effects (beams, tracers) are visible immediately.
-const fn default_particle_control_points() -> [[f32; 3]; MAX_CONTROL_POINTS] {
-    let mut points = [[0.0; 3]; MAX_CONTROL_POINTS];
+const fn default_particle_control_points() -> [Vec3; MAX_CONTROL_POINTS] {
+    let mut points = [Vec3::splat(0.0); MAX_CONTROL_POINTS];
     let mut index = 1;
     while index < MAX_CONTROL_POINTS {
-        points[index] = [96.0 * index as f32, 0.0, 0.0];
+        points[index] = Vec3::new(96.0 * index as f32, 0.0, 0.0);
         index += 1;
     }
     points
@@ -230,7 +231,9 @@ impl State {
         self.request.as_ref()
     }
 
-    pub(crate) fn related_preview(&self) -> Option<&crate::media::preview_model::RelatedPreviewTarget> {
+    pub(crate) fn related_preview(
+        &self,
+    ) -> Option<&crate::media::preview_model::RelatedPreviewTarget> {
         self.current.as_ref()?.related_preview.as_ref()
     }
 
@@ -516,7 +519,9 @@ impl State {
         }
     }
 
-    pub(crate) fn current_model(&self) -> Option<&std::sync::Arc<crate::media::preview_model::ModelPreview>> {
+    pub(crate) fn current_model(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::media::preview_model::ModelPreview>> {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => Some(model),
             _ => None,
@@ -555,7 +560,7 @@ impl State {
         self.particle_restart_epoch
     }
 
-    pub(crate) const fn particle_control_points(&self) -> [[f32; 3]; MAX_CONTROL_POINTS] {
+    pub(crate) const fn particle_control_points(&self) -> [Vec3; MAX_CONTROL_POINTS] {
         self.particle_control_points
     }
 
@@ -585,12 +590,8 @@ impl State {
         }
     }
 
-    pub(super) fn set_particle_control_point(
-        &mut self,
-        index: ControlPointIndex,
-        position: [f32; 3],
-    ) {
-        if position.iter().all(|component| component.is_finite()) {
+    pub(super) fn set_particle_control_point(&mut self, index: ControlPointIndex, position: Vec3) {
+        if position.is_finite() {
             self.particle_control_points[index.get()] = position;
         }
     }

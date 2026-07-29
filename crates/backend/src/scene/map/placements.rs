@@ -1,11 +1,12 @@
 use super::{
     BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropSolid, MapPropVisibility,
-    MapVisibilityBucket, Overlay, SkyboxPartition, StaticProp, StaticPropPlacement, add,
-    cluster_in_range, cross, is_preview_material_visible, mul, normalize_entity_prop_model_path,
-    normalize_material_name, normalize_or_zero, normalize_static_prop_model_path,
-    parse_entity_bool, parse_entity_float, parse_entity_i32, parse_entity_vec3,
-    point_visibility_bucket, vector_is_finite_nonzero,
+    MapVisibilityBucket, Overlay, SkyboxPartition, StaticProp, StaticPropPlacement,
+    cluster_in_range, is_preview_material_visible, normalize_entity_prop_model_path,
+    normalize_material_name, normalize_static_prop_model_path, parse_entity_bool,
+    parse_entity_float, parse_entity_i32, parse_entity_vec3, point_visibility_bucket,
+    vector_is_finite_nonzero,
 };
+use crate::math::Vec3;
 
 /// `SolidType::Physics` (the vphysics collision mode) in the static prop
 /// game lump's `solid` byte.
@@ -15,7 +16,7 @@ const DETAIL_PROP_TYPE_SPRITE: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapDetailSprite {
-    pub origin: [f32; 3],
+    pub origin: Vec3,
     pub upper_left: [f32; 2],
     pub lower_right: [f32; 2],
     pub tex_upper_left: [f32; 2],
@@ -27,8 +28,8 @@ pub struct MapDetailSprite {
 pub struct MapOverlay {
     pub id: i32,
     pub material_name: String,
-    pub positions: [[f32; 3]; 4],
-    pub normal: [f32; 3],
+    pub positions: [Vec3; 4],
+    pub normal: Vec3,
     pub u: [f32; 2],
     pub v: [f32; 2],
     pub face_count: u16,
@@ -47,8 +48,8 @@ pub(super) fn partitioned_static_prop_placements(
         let visibility = static_prop_leaf_visibility(bsp, prop, cluster_count);
         Some(StaticPropPlacement {
             model_path: normalize_static_prop_model_path(bsp.static_prop_model(prop))?,
-            origin,
-            angles: prop.angles,
+            origin: Vec3::from(origin),
+            angles: Vec3::from(prop.angles),
             skin: prop.skin,
             scale: 1.0,
             solid: static_prop_solid(prop.solid),
@@ -182,10 +183,10 @@ fn entity_prop_placement(
         log::debug!("bsp entity prop {classname} skipped: invalid origin");
         return None;
     };
-    let angles = entity.prop("angles").map_or([0.0; 3], |value| {
+    let angles = entity.prop("angles").map_or(Vec3::ZERO, |value| {
         parse_entity_vec3(value).unwrap_or_else(|| {
             log::debug!("bsp entity prop {classname} angles invalid: defaulting to 0 0 0");
-            [0.0; 3]
+            Vec3::splat(0.0)
         })
     });
     let skin = entity.prop("skin").map_or(0, |value| {
@@ -260,12 +261,12 @@ pub(super) fn partitioned_detail_sprite_placements(
             continue;
         };
         let placement = MapDetailSprite {
-            origin: prop.origin,
+            origin: Vec3::from(prop.origin),
             upper_left: sprite.upper_left,
             lower_right: sprite.lower_right,
             tex_upper_left: sprite.tex_upper_left,
             tex_lower_right: sprite.tex_lower_right,
-            visibility: point_visibility_bucket(bsp, prop.origin, cluster_count),
+            visibility: point_visibility_bucket(bsp, Vec3::from(prop.origin), cluster_count),
         };
         match partition.point_partition(bsp, placement.origin) {
             GeometryPartition::Visible => visible.push(placement),
@@ -296,15 +297,15 @@ pub(super) fn partitioned_map_overlays(
                 id: overlay.id,
                 material_name,
                 positions: overlay_quad_positions(OverlayBasis::from_overlay(overlay))?,
-                normal: normalize_or_zero(overlay.basis_normal),
+                normal: Vec3::from(overlay.basis_normal).normalize_or_zero(),
                 u: overlay.u,
                 v: overlay.v,
                 face_count: overlay.face_count().try_into().unwrap_or(u16::MAX),
-                visibility: point_visibility_bucket(bsp, overlay.origin, cluster_count),
+                visibility: point_visibility_bucket(bsp, Vec3::from(overlay.origin), cluster_count),
             },
         ))
     }) {
-        match partition.point_partition(bsp, overlay.origin) {
+        match partition.point_partition(bsp, Vec3::from(overlay.origin)) {
             GeometryPartition::Visible => visible.push(mapped),
             GeometryPartition::Skybox => skybox.push(mapped),
         }
@@ -319,24 +320,24 @@ pub(super) fn partitioned_map_overlays(
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OverlayBasis {
     pub(super) id: i32,
-    pub(super) basis_normal: [f32; 3],
-    pub(super) uv_points: [[f32; 3]; 4],
-    pub(super) origin: [f32; 3],
+    pub(super) basis_normal: Vec3,
+    pub(super) uv_points: [Vec3; 4],
+    pub(super) origin: Vec3,
 }
 
 impl OverlayBasis {
     pub(super) fn from_overlay(overlay: &Overlay) -> Self {
         Self {
             id: overlay.id,
-            basis_normal: overlay.basis_normal,
-            uv_points: overlay.uv_points,
-            origin: overlay.origin,
+            basis_normal: Vec3::from(overlay.basis_normal),
+            uv_points: overlay.uv_points.map(Vec3::from),
+            origin: Vec3::from(overlay.origin),
         }
     }
 }
 
-pub(super) fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[[f32; 3]; 4]> {
-    let normal = normalize_or_zero(overlay.basis_normal);
+pub(super) fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[Vec3; 4]> {
+    let normal = overlay.basis_normal.normalize_or_zero();
     if !vector_is_finite_nonzero(normal) {
         log::debug!("bsp overlay {} skipped: invalid basis normal", overlay.id);
         return None;
@@ -345,10 +346,10 @@ pub(super) fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[[f32; 3];
     // first three UV points and flags a flipped V basis via
     // uv_points[3].z == 1.0 (source-sdk-2013 utils/vbsp/overlay.cpp:
     // vecUVPoints[i].z = vecBasis[0][i]; [3].z = 1.0 when
-    // cross(normal, basisU) . basisV < 0). The xy pairs are corner
+    // normal.cross(basisU) . basisV < 0). The xy pairs are corner
     // coordinates in that basis — z is NOT a normal offset.
     let uv_points = overlay.uv_points;
-    let u_axis = normalize_or_zero([uv_points[0][2], uv_points[1][2], uv_points[2][2]]);
+    let u_axis = Vec3::new(uv_points[0][2], uv_points[1][2], uv_points[2][2]).normalize_or_zero();
     if !vector_is_finite_nonzero(u_axis) {
         log::debug!(
             "bsp overlay {} skipped: degenerate packed U basis",
@@ -356,12 +357,12 @@ pub(super) fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[[f32; 3];
         );
         return None;
     }
-    let mut v_axis = normalize_or_zero(cross(normal, u_axis));
+    let mut v_axis = normal.cross(u_axis).normalize_or_zero();
     if uv_points[3][2] == 1.0 {
-        v_axis = mul(v_axis, -1.0);
+        v_axis *= -1.0;
     }
     let origin = overlay.origin;
     // Preview simplification: render one quad from the overlay plane points
     // and do not clip it back to the referenced faces.
-    Some(uv_points.map(|point| add(origin, add(mul(u_axis, point[0]), mul(v_axis, point[1])))))
+    Some(uv_points.map(|point| origin + ((u_axis * point[0]) + (v_axis * point[1]))))
 }

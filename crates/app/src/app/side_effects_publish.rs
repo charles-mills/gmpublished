@@ -440,10 +440,10 @@ impl<'a> PublishRunner<'a> {
         request: prepare_publish::PublishIconSubmitRequestEnvelope,
     ) -> Task<RootMessage> {
         let generation = request.generation;
-        let task = self.ports.ctx.create_task(
-            TaskKind::Publish,
-            TransactionStatus::PublishProcessingIcon,
-        );
+        let task = self
+            .ports
+            .ctx
+            .create_task(TaskKind::Publish, TransactionStatus::PublishProcessingIcon);
         let ctx = self.ports.ctx.clone();
         self.ports
             .ctx

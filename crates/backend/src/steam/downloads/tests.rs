@@ -136,10 +136,7 @@ fn assert_extraction_started(
     )));
 }
 
-fn statuses_for(
-    events: &[BackendEvent],
-    transaction_id: TransactionId,
-) -> Vec<TransactionStatus> {
+fn statuses_for(events: &[BackendEvent], transaction_id: TransactionId) -> Vec<TransactionStatus> {
     events
         .iter()
         .filter_map(|event| match event {
@@ -187,7 +184,10 @@ fn installed_folder_without_gma_emits_download_missing_error() {
             let (transaction_id, events) =
                 wait_for_installed_extract_terminal(&collector, fixture.item);
             assert_extraction_started(&events, transaction_id, fixture.item, None);
-            assert_eq!(statuses_for(&events, transaction_id), vec![TransactionStatus::Locating]);
+            assert_eq!(
+                statuses_for(&events, transaction_id),
+                vec![TransactionStatus::Locating]
+            );
             assert_download_missing_error(&events, transaction_id);
             assert!(
                 !fixture
@@ -224,7 +224,10 @@ fn installed_folder_with_single_gma_extracts_and_finishes_without_live_steam_cli
             assert_extraction_started(&events, transaction_id, fixture.item, Some(&installed_gma));
             assert_eq!(
                 statuses_for(&events, transaction_id),
-                vec![TransactionStatus::Locating, TransactionStatus::ReadingMetadata]
+                vec![
+                    TransactionStatus::Locating,
+                    TransactionStatus::ReadingMetadata
+                ]
             );
             assert!(events.iter().any(|event| matches!(
                 event,
@@ -292,7 +295,10 @@ fn installed_folder_with_multiple_gma_files_emits_download_missing_error() {
             let (transaction_id, events) =
                 wait_for_installed_extract_terminal(&collector, fixture.item);
             assert_extraction_started(&events, transaction_id, fixture.item, None);
-            assert_eq!(statuses_for(&events, transaction_id), vec![TransactionStatus::Locating]);
+            assert_eq!(
+                statuses_for(&events, transaction_id),
+                vec![TransactionStatus::Locating]
+            );
             assert_download_missing_error(&events, transaction_id);
             assert!(
                 !fixture

@@ -1,26 +1,26 @@
+use crate::math::Vec3;
 use crate::scene::QAngle;
 
 use super::{
     BuildMesh, ColorRgbExp, Face, LeafAmbientIndex, LeafAmbientSample, MapBsp, MapEntity, MapLeaf,
-    MapLeafLocator, TexInfo, distance_squared, mul, parse_entity_float, parse_entity_vec3,
-    texture_coord, vector_is_finite_nonzero,
+    MapLeafLocator, TexInfo, parse_entity_float, parse_entity_vec3, texture_coord,
+    vector_is_finite_nonzero,
 };
-use crate::math::normalize_or_zero;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AmbientCube {
-    pub colors: [[f32; 3]; 6],
+    pub colors: [Vec3; 6],
 }
 
 impl AmbientCube {
     pub const WHITE: Self = Self {
-        colors: [[1.0, 1.0, 1.0]; 6],
+        colors: [Vec3::new(1.0, 1.0, 1.0); 6],
     };
 
-    pub fn evaluate(self, normal: [f32; 3]) -> [f32; 3] {
-        let normal = normalize_or_zero(normal);
+    pub fn evaluate(self, normal: Vec3) -> Vec3 {
+        let normal = normal.normalize_or_zero();
         let mut color = [0.0_f32; 3];
-        for (axis, component) in normal.into_iter().enumerate() {
+        for (axis, component) in normal.to_array().into_iter().enumerate() {
             let side = if component >= 0.0 {
                 axis * 2
             } else {
@@ -31,20 +31,20 @@ impl AmbientCube {
             color[1] += self.colors[side][1] * weight;
             color[2] += self.colors[side][2] * weight;
         }
-        color
+        Vec3::from(color)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapSunLighting {
-    pub direction_to_sun: [f32; 3],
-    pub color_linear: [f32; 3],
+    pub direction_to_sun: Vec3,
+    pub color_linear: Vec3,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MapEnvironmentLighting {
     pub sun: Option<MapSunLighting>,
-    pub skylight_linear: Option<[f32; 3]>,
+    pub skylight_linear: Option<Vec3>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -76,7 +76,7 @@ impl MapAmbientLighting {
         self.source
     }
 
-    pub fn cube_at(&self, position: [f32; 3]) -> AmbientCube {
+    pub fn cube_at(&self, position: Vec3) -> AmbientCube {
         if self.source == AmbientLightSource::Neutral {
             log::debug!("map ambient fallback white: no LDR/HDR leaf ambient samples");
             return AmbientCube::WHITE;
@@ -109,7 +109,7 @@ impl MapAmbientLighting {
     pub(super) fn nearest_leaf_sample(
         &self,
         leaf_index: usize,
-        position: [f32; 3],
+        position: Vec3,
     ) -> Option<AmbientCube> {
         let range = self.leaf_sample_ranges.get(leaf_index).copied()?;
         self.nearest_sample_in_range(range, position)
@@ -118,14 +118,15 @@ impl MapAmbientLighting {
     pub(super) fn nearest_cluster_sample(
         &self,
         cluster: i16,
-        position: [f32; 3],
+        position: Vec3,
     ) -> Option<AmbientCube> {
         self.samples
             .iter()
             .filter(|sample| sample.cluster == cluster)
             .min_by(|left, right| {
-                distance_squared(left.position, position)
-                    .total_cmp(&distance_squared(right.position, position))
+                left.position
+                    .distance_squared(position)
+                    .total_cmp(&right.position.distance_squared(position))
             })
             .map(|sample| sample.cube)
     }
@@ -133,7 +134,7 @@ impl MapAmbientLighting {
     pub(super) fn nearest_sample_in_range(
         &self,
         range: AmbientSampleRange,
-        position: [f32; 3],
+        position: Vec3,
     ) -> Option<AmbientCube> {
         self.samples
             .get(range.start..range.end())
@@ -141,8 +142,9 @@ impl MapAmbientLighting {
                 samples
                     .iter()
                     .min_by(|left, right| {
-                        distance_squared(left.position, position)
-                            .total_cmp(&distance_squared(right.position, position))
+                        left.position
+                            .distance_squared(position)
+                            .total_cmp(&right.position.distance_squared(position))
                     })
                     .map(|sample| sample.cube)
             })
@@ -151,7 +153,7 @@ impl MapAmbientLighting {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct MapAmbientSample {
-    pub(super) position: [f32; 3],
+    pub(super) position: Vec3,
     pub(super) cube: AmbientCube,
     pub(super) cluster: i16,
 }
@@ -274,12 +276,12 @@ pub(super) fn ambient_lighting_is_usable(ambient: &LeafAmbientLightingRef<'_>) -
     !ambient.samples.is_empty() && !ambient.index.is_empty()
 }
 
-pub(super) fn ambient_sample_position(position: [u8; 3], leaf: &MapLeaf) -> [f32; 3] {
-    std::array::from_fn(|axis| {
+pub(super) fn ambient_sample_position(position: [u8; 3], leaf: &MapLeaf) -> Vec3 {
+    Vec3::from(std::array::from_fn(|axis| {
         let min = f32::from(leaf.mins[axis]);
         let max = f32::from(leaf.maxs[axis]);
         min + (max - min) * (f32::from(position[axis]) / 255.0)
-    })
+    }))
 }
 
 pub(super) fn ambient_cube(cube: [ColorRgbExp; 6]) -> AmbientCube {
@@ -292,13 +294,13 @@ pub(super) fn ambient_cube(cube: [ColorRgbExp; 6]) -> AmbientCube {
 // 255 * TexLightToLinear, i.e. byte * 2^exp WITHOUT the /255 that lightmap
 // samples get. Using the lightmap formula here renders every prop roughly
 // 255x too dark.
-pub(super) fn decode_ambient_sample_linear(sample: ColorRgbExp) -> [f32; 3] {
+pub(super) fn decode_ambient_sample_linear(sample: ColorRgbExp) -> Vec3 {
     let scale = 2.0_f32.powi(i32::from(sample.exponent));
-    [
+    Vec3::new(
         f32::from(sample.r) * scale,
         f32::from(sample.g) * scale,
         f32::from(sample.b) * scale,
-    ]
+    )
 }
 
 pub(super) fn map_environment_lighting(entities: &[MapEntity]) -> Option<MapEnvironmentLighting> {
@@ -337,7 +339,7 @@ pub(super) fn map_environment_lighting(entities: &[MapEntity]) -> Option<MapEnvi
     })
 }
 
-pub(super) fn parse_light_environment_direction(entity: &MapEntity) -> Option<[f32; 3]> {
+pub(super) fn parse_light_environment_direction(entity: &MapEntity) -> Option<Vec3> {
     let angles = entity
         .prop("angles")
         .and_then(parse_entity_vec3)
@@ -349,15 +351,16 @@ pub(super) fn parse_light_environment_direction(entity: &MapEntity) -> Option<[f
         .and_then(parse_entity_float)
         .map(f32::to_radians)
         .or_else(|| angles.map(|angles| angles.pitch))?;
-    let travel_direction = normalize_or_zero([
+    let travel_direction = Vec3::new(
         pitch.cos() * yaw.cos(),
         pitch.cos() * yaw.sin(),
         pitch.sin(),
-    ]);
-    vector_is_finite_nonzero(travel_direction).then_some(mul(travel_direction, -1.0))
+    )
+    .normalize_or_zero();
+    vector_is_finite_nonzero(travel_direction).then_some(travel_direction * -1.0)
 }
 
-pub(super) fn parse_entity_rgb_intensity_linear(value: &str) -> Option<[f32; 3]> {
+pub(super) fn parse_entity_rgb_intensity_linear(value: &str) -> Option<Vec3> {
     let mut components = value.split_ascii_whitespace().map(parse_entity_float);
     let red = components.next()??;
     let green = components.next()??;
@@ -383,11 +386,11 @@ pub(super) fn parse_entity_rgb_intensity_linear(value: &str) -> Option<[f32; 3]>
     // VRAD converts the gamma-space RGB keyvalue to linear with pow 2.2 before
     // scaling — matching it keeps this consistent with the linear color path.
     let scale = intensity / 255.0;
-    Some([
+    Some(Vec3::new(
         (red / 255.0).powf(2.2) * scale,
         (green / 255.0).powf(2.2) * scale,
         (blue / 255.0).powf(2.2) * scale,
-    ])
+    ))
 }
 
 pub(super) fn selected_lightmap_samples(
@@ -443,13 +446,13 @@ pub(super) fn decode_light_sample(sample: ColorRgbExp) -> [u8; 4] {
     ]
 }
 
-pub(super) fn decode_light_sample_linear(sample: ColorRgbExp) -> [f32; 3] {
+pub(super) fn decode_light_sample_linear(sample: ColorRgbExp) -> Vec3 {
     let scale = 2.0_f32.powi(i32::from(sample.exponent)) / 255.0;
-    [
+    Vec3::new(
         f32::from(sample.r) * scale,
         f32::from(sample.g) * scale,
         f32::from(sample.b) * scale,
-    ]
+    )
 }
 
 pub(super) fn linear_to_srgb_byte(linear: f32) -> u8 {
@@ -462,7 +465,7 @@ pub(super) fn linear_to_srgb_byte(linear: f32) -> u8 {
     (srgb * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-pub(super) fn brush_lightmap_uv(position: [f32; 3], texinfo: &TexInfo, face: &Face) -> [f32; 2] {
+pub(super) fn brush_lightmap_uv(position: Vec3, texinfo: &TexInfo, face: &Face) -> [f32; 2] {
     brush_lightmap_uv_from_transforms(
         position,
         texinfo.lightmap_vecs[0],
@@ -473,7 +476,7 @@ pub(super) fn brush_lightmap_uv(position: [f32; 3], texinfo: &TexInfo, face: &Fa
 }
 
 pub(super) fn brush_lightmap_uv_from_transforms(
-    position: [f32; 3],
+    position: Vec3,
     light_map_scale: [f32; 4],
     light_map_transform: [f32; 4],
     light_map_texture_min: [i32; 2],

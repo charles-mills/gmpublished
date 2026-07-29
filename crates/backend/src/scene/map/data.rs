@@ -2,6 +2,7 @@ use super::{
     LightmapAtlas, MapAmbientLighting, MapDetailSprite, MapDoor, MapEnvironmentLighting, MapFog,
     MapOverlay, MapPakFile, MapPlayerStart, MapSkyCamera, MapVisibility, MapWalkCollision,
 };
+use crate::math::Vec3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapData {
@@ -24,8 +25,8 @@ pub struct MapData {
     pub sky_camera: Option<MapSkyCamera>,
     pub skybox_completion_bounds: Option<MapBounds>,
     pub lightmap: Option<LightmapAtlas>,
-    pub bounds_min: [f32; 3],
-    pub bounds_max: [f32; 3],
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
     pub stats: MapStatsRaw,
     pub skybox_partition: MapSkyboxPartitionStats,
     pub visibility: Option<MapVisibility>,
@@ -96,11 +97,11 @@ impl From<MapVisibilityBucket> for MapPropVisibility {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    /// Raw Source texel-space S coordinate: dot(position, s_axis) + s_offset.
+    pub position: Vec3,
+    pub normal: Vec3,
+    /// Raw Source texel-space S coordinate: position.dot(s_axis) + s_offset.
     pub tex_s: f32,
-    /// Raw Source texel-space T coordinate: dot(position, t_axis) + t_offset.
+    /// Raw Source texel-space T coordinate: position.dot(t_axis) + t_offset.
     pub tex_t: f32,
     pub lightmap_uv: [f32; 2],
     pub blend_alpha: f32,
@@ -109,8 +110,8 @@ pub struct MapVertex {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaticPropPlacement {
     pub model_path: String,
-    pub origin: [f32; 3],
-    pub angles: [f32; 3],
+    pub origin: Vec3,
+    pub angles: Vec3,
     pub skin: i32,
     pub scale: f32,
     pub solid: MapPropSolid,
@@ -131,8 +132,8 @@ impl MapPropSolid {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapBounds {
-    pub min: [f32; 3],
-    pub max: [f32; 3],
+    pub min: Vec3,
+    pub max: Vec3,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

@@ -7,8 +7,8 @@ use super::{
     BackendTransactionTasks, LibraryRefresh, LibraryRefreshReason, LibrarySnapshot,
     NativeOpenTarget, PathBuf, RunBlockingError, ScheduleError, Settings, Subscription, Task,
     TaskEvent, TaskEventStreamFactory, TaskHandle, TaskId, TaskKind, Tasks, TransactionStatus,
-    UiError, WorkerPoolSpawner, fmt,
-    install_backend_event_sink_by_default, mpsc, oneshot, show_native_open_error_dialog,
+    UiError, WorkerPoolSpawner, fmt, install_backend_event_sink_by_default, mpsc, oneshot,
+    show_native_open_error_dialog,
 };
 use gmpublished_backend::transactions::TransactionId;
 

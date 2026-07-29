@@ -4,6 +4,7 @@ use super::{
     SKYBOX_COMPLETION_MAX_WORLD_VOLUME_FRACTION, Visibility, bounds_contains_point, bounds_volume,
     bsp_world_bounds, expand_bounds, normalize_static_prop_model_path,
 };
+use crate::math::Vec3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapVisibility {
@@ -30,7 +31,7 @@ impl MapVisibility {
         self.cluster_count
     }
 
-    pub fn cluster_at(&self, point: [f32; 3]) -> Option<i16> {
+    pub fn cluster_at(&self, point: Vec3) -> Option<i16> {
         let leaf = self.locator.leaf_at(point)?;
         let cluster = self.locator.leaves.get(leaf)?.cluster;
         (cluster >= 0 && cluster_in_range(cluster, self.cluster_count)).then_some(cluster)
@@ -43,11 +44,7 @@ impl MapVisibility {
         self.vis.pvs(usize::try_from(cluster).ok()?)
     }
 
-    pub fn clusters_for_aabb(
-        &self,
-        bounds_min: [f32; 3],
-        bounds_max: [f32; 3],
-    ) -> MapPropVisibility {
+    pub fn clusters_for_aabb(&self, bounds_min: Vec3, bounds_max: Vec3) -> MapPropVisibility {
         self.locator
             .clusters_for_aabb(bounds_min, bounds_max, self.cluster_count)
     }
@@ -142,14 +139,14 @@ impl SkyboxPartition {
         })
     }
 
-    pub(super) fn point_partition(&self, bsp: &MapBsp, point: [f32; 3]) -> GeometryPartition {
+    pub(super) fn point_partition(&self, bsp: &MapBsp, point: Vec3) -> GeometryPartition {
         if self.completion_contains_point(point) {
             return GeometryPartition::Skybox;
         }
         self.flood_point_partition(bsp, point)
     }
 
-    pub(super) fn flood_point_partition(&self, bsp: &MapBsp, point: [f32; 3]) -> GeometryPartition {
+    pub(super) fn flood_point_partition(&self, bsp: &MapBsp, point: Vec3) -> GeometryPartition {
         let Some(cluster) = point_cluster(bsp, point) else {
             return GeometryPartition::Visible;
         };
@@ -194,7 +191,7 @@ impl SkyboxPartition {
         );
     }
 
-    pub(super) fn completion_contains_point(&self, point: [f32; 3]) -> bool {
+    pub(super) fn completion_contains_point(&self, point: Vec3) -> bool {
         self.completion_bounds()
             .is_some_and(|bounds| bounds_contains_point(bounds, point))
     }
@@ -401,7 +398,8 @@ fn derive_completion_bounds(
 ) -> Option<MapBounds> {
     let seed_bounds =
         seed_completion_bounds(bsp, face_attributions, camera_reachable, sky_reachable)?;
-    let completion_bounds = expand_bounds(seed_bounds, [SKYBOX_COMPLETION_AABB_EXPANSION; 3]);
+    let completion_bounds =
+        expand_bounds(seed_bounds, Vec3::splat(SKYBOX_COMPLETION_AABB_EXPANSION));
     if player_start.is_some_and(|start| bounds_contains_point(completion_bounds, start.origin)) {
         log::debug!("bsp skybox completion disabled: completion AABB contains player spawn");
         return None;
@@ -447,13 +445,14 @@ fn seed_completion_bounds(
     }
     for prop in bsp.static_props_iter() {
         let origin = prop.origin;
-        let partition = point_cluster(bsp, origin).map_or(GeometryPartition::Visible, |cluster| {
-            cluster_partition(cluster, camera_reachable, sky_reachable)
-        });
+        let partition = point_cluster(bsp, Vec3::from(origin))
+            .map_or(GeometryPartition::Visible, |cluster| {
+                cluster_partition(cluster, camera_reachable, sky_reachable)
+            });
         if normalize_static_prop_model_path(bsp.static_prop_model(prop)).is_some()
             && partition == GeometryPartition::Skybox
         {
-            bounds.push(origin);
+            bounds.push(Vec3::from(origin));
         }
     }
     bounds.finish()
@@ -490,7 +489,7 @@ pub(super) fn camera_seed_cluster(
         })
 }
 
-pub(super) fn point_cluster(bsp: &MapBsp, point: [f32; 3]) -> Option<i16> {
+pub(super) fn point_cluster(bsp: &MapBsp, point: Vec3) -> Option<i16> {
     let leaf_index = bsp.leaf_at(point)?;
     let cluster = bsp.leaves.get(leaf_index)?.cluster;
     (cluster >= 0).then_some(cluster)
@@ -514,7 +513,7 @@ pub(super) fn model_face_range(
 
 pub(super) fn point_visibility_bucket(
     bsp: &MapBsp,
-    point: [f32; 3],
+    point: Vec3,
     cluster_count: u32,
 ) -> MapVisibilityBucket {
     point_cluster(bsp, point).map_or(MapVisibilityBucket::Always, |cluster| {

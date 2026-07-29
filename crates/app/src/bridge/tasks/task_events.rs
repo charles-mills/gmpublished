@@ -98,7 +98,10 @@ pub enum WorkshopDownloadTaskKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaskUpdate {
-    Started { kind: TaskKind, status: TransactionStatus },
+    Started {
+        kind: TaskKind,
+        status: TransactionStatus,
+    },
     Status(TransactionStatus),
     Progress(f64),
     ProgressIncr(f64),
@@ -294,11 +297,7 @@ impl Tasks {
         )
     }
 
-    pub(crate) fn create(
-        &self,
-        kind: TaskKind,
-        initial_status: TransactionStatus,
-    ) -> TaskHandle {
+    pub(crate) fn create(&self, kind: TaskKind, initial_status: TransactionStatus) -> TaskHandle {
         let id = TaskId::from_raw(self.next_id.fetch_add(1, Ordering::Relaxed));
 
         let handle = TaskHandle {

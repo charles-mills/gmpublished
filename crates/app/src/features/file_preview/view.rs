@@ -1,4 +1,5 @@
 use crate::i18n::Arg;
+use gmpublished_backend::math::Vec3;
 use iced::widget::{
     Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
     sensor, stack, svg, text,
@@ -17,12 +18,12 @@ use crate::{
     },
 };
 
+use super::state::MovementMode;
+use super::{Message, State};
 use crate::media::preview_model::{
     CodeLine, InfoReason, PreviewContent, PreviewData, PreviewRequest, RelatedPreviewKind,
 };
 use crate::media::preview_model::{MapStats, ModelPreview, ParticlePreview};
-use super::state::MovementMode;
-use super::{Message, State};
 use gmpublished_backend::particles::SupportLevel;
 
 fn count_text(count: impl std::fmt::Display) -> String {
@@ -1325,7 +1326,10 @@ fn scene_supports_walk(scene: &ModelPreview) -> bool {
         .is_some_and(|collision| !collision.is_empty())
 }
 
-fn active_movement_mode(state: &State, spawn: Option<crate::media::preview_model::MapSpawn>) -> MovementMode {
+fn active_movement_mode(
+    state: &State,
+    spawn: Option<crate::media::preview_model::MapSpawn>,
+) -> MovementMode {
     state.fly_movement_mode().unwrap_or_else(|| {
         if spawn.is_some() {
             MovementMode::Walk
@@ -1472,7 +1476,7 @@ fn phy_debug_checkbox<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Mes
         .into()
 }
 
-fn format_model_bounds(bounds: [f32; 3]) -> String {
+fn format_model_bounds(bounds: Vec3) -> String {
     format!("{:.2}, {:.2}, {:.2}", bounds[0], bounds[1], bounds[2])
 }
 

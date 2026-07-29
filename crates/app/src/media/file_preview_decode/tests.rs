@@ -1,3 +1,4 @@
+use gmpublished_backend::math::Vec3;
 use std::sync::Arc;
 
 use vformats::vtf::VtfFormat;
@@ -874,18 +875,18 @@ fn parallel_material_resolution_respects_atomic_texture_budget() {
 fn prop_transform_applies_source_yaw_around_z_before_translation() {
     let placement = prop_placement(
         "models/test/chair.mdl",
-        [10.0, 20.0, 30.0],
-        [0.0, 90.0, 0.0],
+        Vec3::new(10.0, 20.0, 30.0),
+        Vec3::new(0.0, 90.0, 0.0),
         0,
     );
 
     assert_vec3_close(
-        transform_prop_position([1.0, 0.0, 0.0], &placement),
-        [10.0, 21.0, 30.0],
+        transform_prop_position(Vec3::new(1.0, 0.0, 0.0), &placement),
+        Vec3::new(10.0, 21.0, 30.0),
     );
     assert_vec3_close(
-        transform_prop_normal([1.0, 0.0, 0.0], &placement),
-        [0.0, 1.0, 0.0],
+        transform_prop_normal(Vec3::new(1.0, 0.0, 0.0), &placement),
+        Vec3::new(0.0, 1.0, 0.0),
     );
 }
 
@@ -893,19 +894,19 @@ fn prop_transform_applies_source_yaw_around_z_before_translation() {
 fn prop_transform_scales_positions_before_rotation_without_scaling_normals() {
     let mut placement = prop_placement(
         "models/test/chair.mdl",
-        [10.0, 20.0, 30.0],
-        [0.0, 90.0, 0.0],
+        Vec3::new(10.0, 20.0, 30.0),
+        Vec3::new(0.0, 90.0, 0.0),
         0,
     );
     placement.scale = 2.0;
 
     assert_vec3_close(
-        transform_prop_position([1.0, 0.0, 0.0], &placement),
-        [10.0, 22.0, 30.0],
+        transform_prop_position(Vec3::new(1.0, 0.0, 0.0), &placement),
+        Vec3::new(10.0, 22.0, 30.0),
     );
     assert_vec3_close(
-        transform_prop_normal([1.0, 0.0, 0.0], &placement),
-        [0.0, 1.0, 0.0],
+        transform_prop_normal(Vec3::new(1.0, 0.0, 0.0), &placement),
+        Vec3::new(0.0, 1.0, 0.0),
     );
 }
 
@@ -915,24 +916,24 @@ fn prop_transform_composes_roll_before_yaw() {
     // to +Y. The reversed composition would produce +Z instead.
     let placement = prop_placement(
         "models/test/chair.mdl",
-        [0.0, 0.0, 0.0],
-        [0.0, 90.0, 90.0],
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 90.0, 90.0),
         0,
     );
 
     assert_vec3_close(
-        transform_prop_normal([1.0, 0.0, 0.0], &placement),
-        [0.0, 1.0, 0.0],
+        transform_prop_normal(Vec3::new(1.0, 0.0, 0.0), &placement),
+        Vec3::new(0.0, 1.0, 0.0),
     );
 }
 
 #[test]
 fn prop_lighting_adds_visible_sun_in_linear_space() {
     let lighting = PropPlacementLighting {
-        ambient_cube: test_ambient_cube([0.1, 0.1, 0.1]),
+        ambient_cube: test_ambient_cube(Vec3::new(0.1, 0.1, 0.1)),
         sun: Some(PropSunLighting {
-            direction_to_sun: [0.0, 0.0, 1.0],
-            color_linear: [0.5, 0.25, 0.0],
+            direction_to_sun: Vec3::new(0.0, 0.0, 1.0),
+            color_linear: Vec3::new(0.5, 0.25, 0.0),
             visible: true,
         }),
     };
@@ -940,23 +941,35 @@ fn prop_lighting_adds_visible_sun_in_linear_space() {
     // Up-facing vertex: ambient + full sun. Down-facing: ambient only —
     // there is deliberately no separate skylight term (the ambient cube
     // already integrates sky bounce).
-    assert_vec3_close(lighting.evaluate([0.0, 0.0, 1.0]), [0.6, 0.35, 0.1]);
-    assert_vec3_close(lighting.evaluate([0.0, 0.0, -1.0]), [0.1, 0.1, 0.1]);
+    assert_vec3_close(
+        lighting.evaluate(Vec3::new(0.0, 0.0, 1.0)),
+        Vec3::new(0.6, 0.35, 0.1),
+    );
+    assert_vec3_close(
+        lighting.evaluate(Vec3::new(0.0, 0.0, -1.0)),
+        Vec3::new(0.1, 0.1, 0.1),
+    );
 }
 
 #[test]
 fn prop_lighting_keeps_shadowed_vertices_ambient_only() {
     let lighting = PropPlacementLighting {
-        ambient_cube: test_ambient_cube([0.25, 0.2, 0.15]),
+        ambient_cube: test_ambient_cube(Vec3::new(0.25, 0.2, 0.15)),
         sun: Some(PropSunLighting {
-            direction_to_sun: [0.0, 0.0, 1.0],
-            color_linear: [1.0, 1.0, 1.0],
+            direction_to_sun: Vec3::new(0.0, 0.0, 1.0),
+            color_linear: Vec3::new(1.0, 1.0, 1.0),
             visible: false,
         }),
     };
 
-    assert_vec3_close(lighting.evaluate([0.0, 0.0, 1.0]), [0.25, 0.2, 0.15]);
-    assert_vec3_close(lighting.evaluate([1.0, 0.0, 0.0]), [0.25, 0.2, 0.15]);
+    assert_vec3_close(
+        lighting.evaluate(Vec3::new(0.0, 0.0, 1.0)),
+        Vec3::new(0.25, 0.2, 0.15),
+    );
+    assert_vec3_close(
+        lighting.evaluate(Vec3::new(1.0, 0.0, 0.0)),
+        Vec3::new(0.25, 0.2, 0.15),
+    );
 }
 
 #[test]
@@ -964,8 +977,8 @@ fn prop_bake_applies_skin_table_to_material_slot() {
     let asset = test_prop_asset(1, vec![10, 11]);
     let placement = prop_placement(
         "models/test/chair.mdl",
-        [10.0, 20.0, 30.0],
-        [0.0, 90.0, 0.0],
+        Vec3::new(10.0, 20.0, 30.0),
+        Vec3::new(0.0, 90.0, 0.0),
         1,
     );
     let mut meshes = BTreeMap::new();
@@ -982,7 +995,7 @@ fn prop_bake_applies_skin_table_to_material_slot() {
 
     let mesh = meshes.get(&11).expect("skin remapped material");
     assert_eq!(mesh.indices, vec![0, 1, 2]);
-    assert_vec3_close(mesh.vertices[0].position, [10.0, 21.0, 30.0]);
+    assert_vec3_close(mesh.vertices[0].position, Vec3::new(10.0, 21.0, 30.0));
     assert_eq!(mesh.vertices[0].lightmap_uv, [0.0; 2]);
     assert_eq!(mesh.vertices[0].blend_alpha, 0.0);
 }
@@ -990,7 +1003,12 @@ fn prop_bake_applies_skin_table_to_material_slot() {
 #[test]
 fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
     let asset = test_prop_asset(1, vec![0, 1]);
-    let mut placement = prop_placement("models/test/scaled_entity.mdl", [0.0; 3], [0.0; 3], 0);
+    let mut placement = prop_placement(
+        "models/test/scaled_entity.mdl",
+        Vec3::splat(0.0),
+        Vec3::splat(0.0),
+        0,
+    );
     placement.scale = 2.0;
     let mut meshes = BTreeMap::new();
 
@@ -1013,8 +1031,8 @@ fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
             max[axis] = max[axis].max(vertex.position[axis]);
         }
     }
-    assert_vec3_close(min, [0.0, 0.0, 0.0]);
-    assert_vec3_close(max, [2.0, 2.0, 2.0]);
+    assert_vec3_close(Vec3::from(min), Vec3::new(0.0, 0.0, 0.0));
+    assert_vec3_close(Vec3::from(max), Vec3::new(2.0, 2.0, 2.0));
 }
 
 #[test]
@@ -1054,22 +1072,27 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     );
     let door = gmpublished_backend::scene::map::MapDoor {
         class: gmpublished_backend::scene::map::MapDoorClass::PropDoorRotating,
-        origin: [0.0; 3],
-        angles: [0.0; 3],
-        local_bounds_min: [0.0; 3],
-        local_bounds_max: [0.0; 3],
+        origin: Vec3::splat(0.0),
+        angles: Vec3::splat(0.0),
+        local_bounds_min: Vec3::splat(0.0),
+        local_bounds_max: Vec3::splat(0.0),
         visibility: MapVisibilityBucket::Always,
         auto_close_after: Some(0.0),
         initial_progress: 0.0,
         motion: gmpublished_backend::scene::map::MapDoorMotion::Rotating {
-            angle_delta: [0.0, 90.0, 0.0],
+            angle_delta: Vec3::new(0.0, 90.0, 0.0),
             degrees: 90.0,
             speed: 100.0,
             open_direction: gmpublished_backend::scene::map::MapDoorOpenDirection::Both,
         },
         sounds: gmpublished_backend::scene::map::MapDoorSounds::default(),
         geometry: MapDoorGeometry::Prop {
-            placement: prop_placement("models/test/door.mdl", [0.0; 3], [0.0; 3], 1),
+            placement: prop_placement(
+                "models/test/door.mdl",
+                Vec3::splat(0.0),
+                Vec3::splat(0.0),
+                1,
+            ),
         },
     };
 
@@ -1110,9 +1133,24 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
 #[test]
 fn prop_bake_counts_placement_cap_overflow_as_skipped() {
     let placements = vec![
-        prop_placement("models/test/chair.mdl", [0.0; 3], [0.0; 3], 0),
-        prop_placement("models/test/chair.mdl", [1.0; 3], [0.0; 3], 0),
-        prop_placement("models/test/chair.mdl", [2.0; 3], [0.0; 3], 0),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::splat(0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::splat(1.0),
+            Vec3::splat(0.0),
+            0,
+        ),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::splat(2.0),
+            Vec3::splat(0.0),
+            0,
+        ),
     ];
     let asset = Arc::new(test_prop_asset(1, vec![0, 1]));
 
@@ -1143,9 +1181,24 @@ fn prop_bake_counts_placement_cap_overflow_as_skipped() {
 #[test]
 fn prop_bake_counts_triangle_cap_remaining_as_skipped() {
     let placements = vec![
-        prop_placement("models/test/chair.mdl", [0.0; 3], [0.0; 3], 0),
-        prop_placement("models/test/chair.mdl", [1.0; 3], [0.0; 3], 0),
-        prop_placement("models/test/chair.mdl", [2.0; 3], [0.0; 3], 0),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::splat(0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::splat(1.0),
+            Vec3::splat(0.0),
+            0,
+        ),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::splat(2.0),
+            Vec3::splat(0.0),
+            0,
+        ),
     ];
     let asset = Arc::new(test_prop_asset(2, vec![0, 1]));
 
@@ -1179,8 +1232,8 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
         .map(|index| {
             prop_placement_with_visibility(
                 "models/test/chair.mdl",
-                [index as f32, index as f32 * 2.0, 0.0],
-                [0.0, index as f32 * 15.0, 0.0],
+                Vec3::new(index as f32, index as f32 * 2.0, 0.0),
+                Vec3::new(0.0, index as f32 * 15.0, 0.0),
                 0,
                 MapVisibilityBucket::Always,
             )
@@ -1195,8 +1248,8 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
         };
         prop_placement_with_visibility(
             "models/test/entity_chair.mdl",
-            [placement_index as f32, placement_index as f32 * 2.0, 0.0],
-            [0.0, placement_index as f32 * 15.0, 0.0],
+            Vec3::new(placement_index as f32, placement_index as f32 * 2.0, 0.0),
+            Vec3::new(0.0, placement_index as f32 * 15.0, 0.0),
             0,
             visibility,
         )
@@ -1210,7 +1263,9 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
     let mut asset = test_prop_asset(2, vec![10, 11]);
     {
         let model = Arc::get_mut(&mut asset.model).expect("fresh model arc");
-        model.meshes[0].vertices.push(model_vertex([1.0, 1.0, 0.0]));
+        model.meshes[0]
+            .vertices
+            .push(model_vertex(Vec3::new(1.0, 1.0, 0.0)));
         model.meshes[0].indices = vec![0, 1, 2, 1, 3, 2];
         model.vertex_count = 4;
         model.triangle_count = 2;
@@ -1255,7 +1310,7 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
                 + mesh.indices.len() * size_of::<u32>())
             .sum::<usize>()
     );
-    assert_ne!(parallel.meshes[0].vertices[0].color, [1.0; 3]);
+    assert_ne!(parallel.meshes[0].vertices[0].color, Vec3::splat(1.0));
     assert!(parallel.mesh_visibility[0].clusters.iter().any(
         |cluster| cluster.cluster == 7 && cluster.ranges.iter().all(|range| range.start >= 24)
     ));
@@ -1267,8 +1322,18 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
 #[test]
 fn sprp_only_prop_bake_is_unchanged_when_entity_prop_list_is_empty() {
     let sprp_props = vec![
-        prop_placement("models/test/chair.mdl", [0.0; 3], [0.0; 3], 0),
-        prop_placement("models/test/chair.mdl", [8.0, 0.0, 0.0], [0.0; 3], 0),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::splat(0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
+        prop_placement(
+            "models/test/chair.mdl",
+            Vec3::new(8.0, 0.0, 0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
     ];
     let entity_props: Vec<StaticPropPlacement> = Vec::new();
     let mut combined = sprp_props.clone();
@@ -1331,9 +1396,19 @@ fn pre_resolved_prop_materials_match_direct_prop_resolution() {
     )
     .expect("fixture archive should load");
     let placements = vec![
-        prop_placement("models/test/a.mdl", [0.0; 3], [0.0; 3], 0),
-        prop_placement("models/test/b.mdl", [2.0, 0.0, 0.0], [0.0; 3], 0),
-        prop_placement("models/test/a.mdl", [4.0, 0.0, 0.0], [0.0; 3], 0),
+        prop_placement("models/test/a.mdl", Vec3::splat(0.0), Vec3::splat(0.0), 0),
+        prop_placement(
+            "models/test/b.mdl",
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
+        prop_placement(
+            "models/test/a.mdl",
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
     ];
     let loaded_model_cache = HashMap::from([
         (
@@ -1426,9 +1501,19 @@ fn prop_materials_share_one_slot_per_directory_qualified_name() {
     )
     .expect("fixture archive should load");
     let placements = vec![
-        prop_placement("models/test/a.mdl", [0.0; 3], [0.0; 3], 0),
-        prop_placement("models/test/b.mdl", [2.0, 0.0, 0.0], [0.0; 3], 0),
-        prop_placement("models/test/c.mdl", [4.0, 0.0, 0.0], [0.0; 3], 0),
+        prop_placement("models/test/a.mdl", Vec3::splat(0.0), Vec3::splat(0.0), 0),
+        prop_placement(
+            "models/test/b.mdl",
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
+        prop_placement(
+            "models/test/c.mdl",
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::splat(0.0),
+            0,
+        ),
     ];
     let loaded_model_cache = HashMap::from([
         (
@@ -1499,8 +1584,8 @@ fn missing_static_prop_model_is_skipped_and_counted() {
     let result = bake_static_props(
         &[prop_placement(
             "models/test/missing.mdl",
-            [0.0; 3],
-            [0.0; 3],
+            Vec3::splat(0.0),
+            Vec3::splat(0.0),
             0,
         )],
         &resolver,
@@ -1571,12 +1656,7 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
     assert_eq!(names[19], "missing_19");
 }
 
-fn prop_placement(
-    model_path: &str,
-    origin: [f32; 3],
-    angles: [f32; 3],
-    skin: i32,
-) -> StaticPropPlacement {
+fn prop_placement(model_path: &str, origin: Vec3, angles: Vec3, skin: i32) -> StaticPropPlacement {
     prop_placement_with_visibility(
         model_path,
         origin,
@@ -1588,8 +1668,8 @@ fn prop_placement(
 
 fn prop_placement_with_visibility(
     model_path: &str,
-    origin: [f32; 3],
-    angles: [f32; 3],
+    origin: Vec3,
+    angles: Vec3,
     skin: i32,
     visibility: impl Into<MapPropVisibility>,
 ) -> StaticPropPlacement {
@@ -1609,9 +1689,9 @@ fn test_prop_asset(default_triangle_count: usize, material_indices: Vec<usize>) 
         model: Arc::new(ModelData {
             meshes: vec![MeshData {
                 vertices: vec![
-                    model_vertex([1.0, 0.0, 0.0]),
-                    model_vertex([0.0, 1.0, 0.0]),
-                    model_vertex([0.0, 0.0, 1.0]),
+                    model_vertex(Vec3::new(1.0, 0.0, 0.0)),
+                    model_vertex(Vec3::new(0.0, 1.0, 0.0)),
+                    model_vertex(Vec3::new(0.0, 0.0, 1.0)),
                 ],
                 indices: vec![0, 1, 2],
                 material_index: 0,
@@ -1622,8 +1702,8 @@ fn test_prop_asset(default_triangle_count: usize, material_indices: Vec<usize>) 
             material_dirs: Vec::new(),
             skin_tables: vec![vec![0, 1], vec![1, 0]],
             bodygroups: vec![1],
-            bounds_min: [0.0; 3],
-            bounds_max: [1.0; 3],
+            bounds_min: Vec3::splat(0.0),
+            bounds_max: Vec3::splat(1.0),
             bone_count: 0,
             sequence_count: 0,
             vertex_count: 3,
@@ -1644,9 +1724,9 @@ fn test_loaded_prop_model(
         model: Arc::new(ModelData {
             meshes: vec![MeshData {
                 vertices: vec![
-                    model_vertex([1.0, 0.0, 0.0]),
-                    model_vertex([0.0, 1.0, 0.0]),
-                    model_vertex([0.0, 0.0, 1.0]),
+                    model_vertex(Vec3::new(1.0, 0.0, 0.0)),
+                    model_vertex(Vec3::new(0.0, 1.0, 0.0)),
+                    model_vertex(Vec3::new(0.0, 0.0, 1.0)),
                 ],
                 indices: vec![0, 1, 2],
                 material_index: mesh_material_index,
@@ -1667,8 +1747,8 @@ fn test_loaded_prop_model(
                     .collect(),
             ],
             bodygroups: vec![1],
-            bounds_min: [0.0; 3],
-            bounds_max: [1.0; 3],
+            bounds_min: Vec3::splat(0.0),
+            bounds_max: Vec3::splat(1.0),
             bone_count: 0,
             sequence_count: 0,
             vertex_count: 3,
@@ -1680,22 +1760,22 @@ fn test_loaded_prop_model(
     }
 }
 
-fn model_vertex(position: [f32; 3]) -> ModelVertex {
+fn model_vertex(position: Vec3) -> ModelVertex {
     ModelVertex {
         position,
-        normal: [1.0, 0.0, 0.0],
+        normal: Vec3::new(1.0, 0.0, 0.0),
         uv: [0.25, 0.75],
         lightmap_uv: [0.5, 0.5],
-        color: [1.0; 3],
+        color: Vec3::splat(1.0),
         blend_alpha: 1.0,
     }
 }
 
-fn test_ambient_cube(color: [f32; 3]) -> AmbientCube {
+fn test_ambient_cube(color: Vec3) -> AmbientCube {
     AmbientCube { colors: [color; 6] }
 }
 
-fn assert_vec3_close(actual: [f32; 3], expected: [f32; 3]) {
+fn assert_vec3_close(actual: Vec3, expected: Vec3) {
     for (actual, expected) in actual.into_iter().zip(expected) {
         assert!(
             (actual - expected).abs() < 1e-4,
@@ -1720,7 +1800,7 @@ fn static_prop_bsp_fixture_bytes() -> Vec<u8> {
     bytes.resize(HEADER_LEN + LUMP_COUNT * LUMP_ENTRY_LEN, 0);
 
     let planes_offset = bytes.len();
-    push_bsp_vec3(&mut bytes, [0.0, 0.0, 1.0]);
+    push_bsp_vec3(&mut bytes, Vec3::new(0.0, 0.0, 1.0));
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
     bytes.extend_from_slice(&0_i32.to_le_bytes());
     write_bsp_lump_entry(&mut bytes, PLANES_LUMP_INDEX, planes_offset, 20, 0);
@@ -1813,8 +1893,8 @@ fn static_prop_game_lump_data() -> Vec<u8> {
     bytes.extend_from_slice(&name);
     bytes.extend_from_slice(&0_i32.to_le_bytes());
     bytes.extend_from_slice(&1_i32.to_le_bytes());
-    push_bsp_vec3(&mut bytes, [10.0, 20.0, 30.0]);
-    push_bsp_vec3(&mut bytes, [1.0, 90.0, 3.0]);
+    push_bsp_vec3(&mut bytes, Vec3::new(10.0, 20.0, 30.0));
+    push_bsp_vec3(&mut bytes, Vec3::new(1.0, 90.0, 3.0));
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
@@ -1823,7 +1903,7 @@ fn static_prop_game_lump_data() -> Vec<u8> {
     bytes.extend_from_slice(&2_i32.to_le_bytes());
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
-    push_bsp_vec3(&mut bytes, [0.0; 3]);
+    push_bsp_vec3(&mut bytes, Vec3::splat(0.0));
     bytes.extend_from_slice(&0.0_f32.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
     bytes.extend_from_slice(&0_u16.to_le_bytes());
@@ -1833,7 +1913,7 @@ fn static_prop_game_lump_data() -> Vec<u8> {
     bytes
 }
 
-fn push_bsp_vec3(bytes: &mut Vec<u8>, values: [f32; 3]) {
+fn push_bsp_vec3(bytes: &mut Vec<u8>, values: Vec3) {
     for value in values {
         bytes.extend_from_slice(&value.to_le_bytes());
     }

@@ -19,7 +19,12 @@ mod compiler;
 pub use compiler::{CompiledSystem, RendererInfo, RendererKind};
 use compiler::{Emitter, Force, Initializer, Operator, ScalarField, VectorField, compile_system};
 
-use crate::math::{add, length, lerp as lerp3, scale, simple_spline, sub};
+use crate::math::{Vec3, simple_spline};
+
+/// Scalar linear interpolation, for the noise field's per-component blend.
+fn scalar_lerp(start: f32, end: f32, fraction: f32) -> f32 {
+    fraction.mul_add(end - start, start)
+}
 
 /// Canonical material identity shared by particle loading, compilation, and
 /// per-frame rendering.
@@ -163,12 +168,12 @@ impl Rng {
         min + (max - min) * t
     }
 
-    fn range_vec(&mut self, min: [f32; 3], max: [f32; 3]) -> [f32; 3] {
-        [
+    fn range_vec(&mut self, min: Vec3, max: Vec3) -> Vec3 {
+        Vec3::new(
             self.range(min[0], max[0]),
             self.range(min[1], max[1]),
             self.range(min[2], max[2]),
-        ]
+        )
     }
 
     fn range_int(&mut self, min: i32, max: i32) -> i32 {
@@ -179,19 +184,19 @@ impl Rng {
     }
 
     /// Uniform direction, componentwise-scaled by `bias` then renormalized.
-    fn biased_unit_vector(&mut self, bias: [f32; 3]) -> [f32; 3] {
+    fn biased_unit_vector(&mut self, bias: Vec3) -> Vec3 {
         for _ in 0..16 {
-            let v = [
+            let v = Vec3::new(
                 self.range(-1.0, 1.0) * bias[0],
                 self.range(-1.0, 1.0) * bias[1],
                 self.range(-1.0, 1.0) * bias[2],
-            ];
+            );
             let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             if len > 1e-4 && len <= 1.0 {
-                return [v[0] / len, v[1] / len, v[2] / len];
+                return Vec3::new(v[0] / len, v[1] / len, v[2] / len);
             }
         }
-        [0.0, 0.0, 1.0]
+        Vec3::new(0.0, 0.0, 1.0)
     }
 }
 
@@ -228,27 +233,27 @@ fn value_noise(x: f32, y: f32, z: f32, w: f32) -> f32 {
     );
     // Bilinear over (x, w) at the two (y, z) corners kept nearest; a full
     // 4D lattice is overkill for a visual wobble source.
-    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let _lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let corner = |dx: i32, dw: i32| {
         let a = cell(ix + dx, iy, iz, iw + dw);
         let b = cell(ix + dx, iy + 1, iz + 1, iw + dw);
-        lerp(a, b, (ty + tz) * 0.5)
+        scalar_lerp(a, b, (ty + tz) * 0.5)
     };
-    lerp(
-        lerp(corner(0, 0), corner(1, 0), tx),
-        lerp(corner(0, 1), corner(1, 1), tx),
+    scalar_lerp(
+        scalar_lerp(corner(0, 0), corner(1, 0), tx),
+        scalar_lerp(corner(0, 1), corner(1, 1), tx),
         tw,
     )
 }
 
 // --- Small vector helpers ------------------------------------------------
 
-fn color_to_rgb(color: [u8; 4]) -> [f32; 3] {
-    [
+fn color_to_rgb(color: [u8; 4]) -> Vec3 {
+    Vec3::new(
         f32::from(color[0]) / 255.0,
         f32::from(color[1]) / 255.0,
         f32::from(color[2]) / 255.0,
-    ]
+    )
 }
 
 /// Source's bias curve (0.5 = identity).
@@ -295,8 +300,8 @@ macro_rules! particle_set {
 }
 
 particle_set! {
-    position: [f32; 3],
-    velocity: [f32; 3],
+    position: Vec3,
+    velocity: Vec3,
     /// System time at spawn, already shifted by any pre-age.
     creation_time: f32,
     lifetime: f32,
@@ -304,8 +309,8 @@ particle_set! {
     radius: f32,
     alpha_initial: f32,
     alpha: f32,
-    color_initial: [f32; 3],
-    color: [f32; 3],
+    color_initial: Vec3,
+    color: Vec3,
     rotation: f32,
     rotation_speed: f32,
     sequence: i32,
@@ -349,13 +354,13 @@ struct Instance {
 /// Read-only view of one live particle for rendering.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderParticle {
-    pub position: [f32; 3],
-    pub velocity: [f32; 3],
+    pub position: Vec3,
+    pub velocity: Vec3,
     pub radius: f32,
     /// Roll in radians.
     pub rotation: f32,
     /// sRGB color and opacity, 0..1.
-    pub color: [f32; 3],
+    pub color: Vec3,
     pub alpha: f32,
     pub sequence: i32,
     pub trail_length: f32,
@@ -413,8 +418,8 @@ impl Iterator for RenderParticles<'_> {
 pub struct ParticleEngine {
     systems: Vec<CompiledSystem>,
     instances: Vec<Instance>,
-    control_points: [[f32; 3]; MAX_CONTROL_POINTS],
-    control_point_velocity: [[f32; 3]; MAX_CONTROL_POINTS],
+    control_points: [Vec3; MAX_CONTROL_POINTS],
+    control_point_velocity: [Vec3; MAX_CONTROL_POINTS],
     time: f32,
     seed: u64,
     emitters_alive: bool,
@@ -457,8 +462,8 @@ impl ParticleEngine {
         let mut engine = Self {
             systems,
             instances: Vec::new(),
-            control_points: [[0.0; 3]; MAX_CONTROL_POINTS],
-            control_point_velocity: [[0.0; 3]; MAX_CONTROL_POINTS],
+            control_points: [Vec3::splat(0.0); MAX_CONTROL_POINTS],
+            control_point_velocity: [Vec3::splat(0.0); MAX_CONTROL_POINTS],
             time: 0.0,
             seed,
             emitters_alive: true,
@@ -536,7 +541,7 @@ impl ParticleEngine {
             .map(|system| system.bounding_radius)
             .fold(24.0_f32, f32::max);
         let control_point_reach = (0..=self.highest_control_point())
-            .map(|index| length(self.control_points[index]))
+            .map(|index| (self.control_points[index]).length())
             .fold(0.0_f32, f32::max);
         system_radius + control_point_reach
     }
@@ -552,11 +557,11 @@ impl ParticleEngine {
     }
 
     #[must_use]
-    pub fn control_point(&self, index: ControlPointIndex) -> [f32; 3] {
+    pub fn control_point(&self, index: ControlPointIndex) -> Vec3 {
         self.control_points[index.get()]
     }
 
-    pub fn set_control_point(&mut self, index: ControlPointIndex, position: [f32; 3]) {
+    pub fn set_control_point(&mut self, index: ControlPointIndex, position: Vec3) {
         self.control_points[index.get()] = position;
     }
 
@@ -618,23 +623,18 @@ impl ParticleEngine {
             remaining -= sub;
         }
         for velocity in &mut self.control_point_velocity {
-            *velocity = [0.0; 3];
+            *velocity = Vec3::splat(0.0);
         }
     }
 
     /// Reports control point motion since the last step so operators that
     /// track a moving control point respond to gizmo drags.
-    pub fn drag_control_point(
-        &mut self,
-        index: ControlPointIndex,
-        position: [f32; 3],
-        dt_hint: f32,
-    ) {
+    pub fn drag_control_point(&mut self, index: ControlPointIndex, position: Vec3, dt_hint: f32) {
         let index = index.get();
         let previous = self.control_points[index];
         self.control_points[index] = position;
         if dt_hint > 1e-4 {
-            self.control_point_velocity[index] = scale(sub(position, previous), 1.0 / dt_hint);
+            self.control_point_velocity[index] = (position - previous) * (1.0 / dt_hint);
         }
     }
 
@@ -682,7 +682,7 @@ impl ParticleEngine {
     fn run_control_point_operators(&mut self, instance_index: usize, _local_time: f32) {
         let system = self.instances[instance_index].system;
         let operators = &self.systems[system].operators;
-        let mut writes: Vec<(ControlPointIndex, [f32; 3])> = Vec::new();
+        let mut writes: Vec<(ControlPointIndex, Vec3)> = Vec::new();
         for operator in operators {
             match operator {
                 Operator::SetControlPointPositions {
@@ -691,7 +691,7 @@ impl ParticleEngine {
                 } => {
                     let base = self.control_points[base_control_point.get()];
                     for (index, location) in points {
-                        writes.push((*index, add(base, *location)));
+                        writes.push((*index, (base + (*location))));
                     }
                 }
                 Operator::SetChildControlPointsFromParticles {
@@ -817,7 +817,7 @@ impl ParticleEngine {
         let compiled = &self.systems[system];
 
         let mut position = self.control_points[0];
-        let mut velocity = [0.0_f32; 3];
+        let mut velocity = Vec3::ZERO;
         let mut lifetime = f32::MAX;
         let mut radius = compiled.constant_radius;
         let mut alpha = compiled.constant_alpha;
@@ -844,7 +844,7 @@ impl ParticleEngine {
                     alpha = rng.range_exp(*min, *max, *exponent).clamp(0.0, 1.0);
                 }
                 Initializer::ColorRandom { color1, color2 } => {
-                    color = lerp3(*color1, *color2, rng.unit());
+                    color = color1.lerp(*color2, rng.unit());
                 }
                 Initializer::RadiusRandom { min, max, exponent } => {
                     radius = rng.range_exp(*min, *max, *exponent);
@@ -886,13 +886,10 @@ impl ParticleEngine {
                 } => {
                     let direction = rng.biased_unit_vector(*bias);
                     let distance = rng.range(*distance_min, *distance_max);
-                    position = add(
-                        control_points[control_point.get()],
-                        scale(direction, distance),
-                    );
+                    position = control_points[control_point.get()] + (direction * distance);
                     let speed = rng.range_exp(*speed_min, *speed_max, *speed_exponent);
-                    velocity = add(velocity, scale(direction, speed));
-                    velocity = add(velocity, rng.range_vec(*local_speed_min, *local_speed_max));
+                    velocity += direction * speed;
+                    velocity += rng.range_vec(*local_speed_min, *local_speed_max);
                 }
                 Initializer::PositionOffsetRandom {
                     control_point,
@@ -902,12 +899,12 @@ impl ParticleEngine {
                 } => {
                     let mut offset = rng.range_vec(*offset_min, *offset_max);
                     if *proportional_to_radius {
-                        offset = scale(offset, radius);
+                        offset *= radius;
                     }
                     // Offsets apply on top of wherever an earlier position
                     // initializer put the particle.
                     let _ = control_point;
-                    position = add(position, offset);
+                    position += offset;
                 }
                 Initializer::PositionWarpRandom {
                     control_point,
@@ -916,15 +913,13 @@ impl ParticleEngine {
                 } => {
                     let warp = rng.range_vec(*warp_min, *warp_max);
                     let center = control_points[control_point.get()];
-                    let offset = sub(position, center);
-                    position = add(
-                        center,
-                        [
+                    let offset = position - center;
+                    position = center
+                        + Vec3::new(
                             offset[0] * warp[0],
                             offset[1] * warp[1],
                             offset[2] * warp[2],
-                        ],
-                    );
+                        );
                 }
                 Initializer::PositionAlongPath {
                     start_control_point,
@@ -934,11 +929,8 @@ impl ParticleEngine {
                     let t = sequential_count
                         .as_ref()
                         .map_or_else(|| rng.unit(), |count| (spawn_index as f32 % count) / count);
-                    position = lerp3(
-                        control_points[start_control_point.get()],
-                        control_points[end_control_point.get()],
-                        t,
-                    );
+                    position = control_points[start_control_point.get()]
+                        .lerp(control_points[end_control_point.get()], t);
                 }
                 Initializer::PositionFromParentParticles {
                     inherited_velocity_scale,
@@ -948,10 +940,8 @@ impl ParticleEngine {
                         if parent_particles.len() > 0 {
                             let pick = (rng.next_u32() as usize) % parent_particles.len();
                             position = parent_particles.position[pick];
-                            velocity = add(
-                                velocity,
-                                scale(parent_particles.velocity[pick], *inherited_velocity_scale),
-                            );
+                            velocity +=
+                                (parent_particles.velocity[pick]) * (*inherited_velocity_scale);
                         }
                     }
                 }
@@ -965,15 +955,15 @@ impl ParticleEngine {
                     let start = position;
                     let mut end = control_points[end_control_point.get()];
                     if *end_spread > 0.0 {
-                        end = add(end, rng.range_vec([-*end_spread; 3], [*end_spread; 3]));
+                        end += rng.range_vec(Vec3::splat(-*end_spread), Vec3::splat(*end_spread));
                     }
-                    let path = sub(end, start);
-                    let distance = length(path);
+                    let path = end - start;
+                    let distance = path.length();
                     if distance > 1e-4 {
-                        let direction = scale(path, 1.0 / distance);
-                        position = add(start, scale(direction, *start_offset));
+                        let direction = path * (1.0 / distance);
+                        position = start + (direction * (*start_offset));
                         let speed = rng.range(*speed_min, *speed_max);
-                        velocity = add(velocity, scale(direction, speed));
+                        velocity += direction * speed;
                         // Cap the lifetime so the particle dies on arrival.
                         if speed > 1e-4 {
                             lifetime = lifetime.min(distance / speed);
@@ -986,10 +976,10 @@ impl ParticleEngine {
                     local_min,
                     local_max,
                 } => {
-                    let direction = rng.biased_unit_vector([1.0; 3]);
+                    let direction = rng.biased_unit_vector(Vec3::splat(1.0));
                     let speed = rng.range(*speed_min, *speed_max);
-                    velocity = add(velocity, scale(direction, speed));
-                    velocity = add(velocity, rng.range_vec(*local_min, *local_max));
+                    velocity += direction * speed;
+                    velocity += rng.range_vec(*local_min, *local_max);
                 }
                 Initializer::VelocityNoise {
                     output_min,
@@ -1006,14 +996,11 @@ impl ParticleEngine {
                         ) * 0.5
                             + 0.5
                     };
-                    let noise = [sample(0.0), sample(37.2), sample(91.7)];
-                    velocity = add(
-                        velocity,
-                        [
-                            output_min[0] + (output_max[0] - output_min[0]) * noise[0],
-                            output_min[1] + (output_max[1] - output_min[1]) * noise[1],
-                            output_min[2] + (output_max[2] - output_min[2]) * noise[2],
-                        ],
+                    let noise = Vec3::new(sample(0.0), sample(37.2), sample(91.7));
+                    velocity += Vec3::new(
+                        output_min[0] + (output_max[0] - output_min[0]) * noise[0],
+                        output_min[1] + (output_max[1] - output_min[1]) * noise[1],
+                        output_min[2] + (output_max[2] - output_min[2]) * noise[2],
                     );
                 }
                 Initializer::SequenceRandom { min, max, second } => {
@@ -1123,10 +1110,10 @@ impl ParticleEngine {
                         falloff_power,
                     } => {
                         let target = control_points[control_point.get()];
-                        let delta = sub(target, particles.position[index]);
-                        let distance = length(delta).max(1.0);
+                        let delta = target - (particles.position[index]);
+                        let distance = delta.length().max(1.0);
                         let strength = amount / distance.powf(*falloff_power - 1.0);
-                        scale(delta, strength / distance)
+                        delta * (strength / distance)
                     }
                     Force::TwistAroundAxis {
                         axis,
@@ -1134,18 +1121,13 @@ impl ParticleEngine {
                         control_point,
                     } => {
                         let center = control_points[control_point.get()];
-                        let offset = sub(particles.position[index], center);
-                        // Tangent = axis x offset.
-                        let tangent = [
-                            axis[1] * offset[2] - axis[2] * offset[1],
-                            axis[2] * offset[0] - axis[0] * offset[2],
-                            axis[0] * offset[1] - axis[1] * offset[0],
-                        ];
-                        let len = length(tangent).max(1e-4);
-                        scale(tangent, amount / len)
+                        let offset = (particles.position[index]) - center;
+                        let tangent = axis.cross(offset);
+                        let len = tangent.length().max(1e-4);
+                        tangent * (amount / len)
                     }
                 };
-                particles.velocity[index] = add(particles.velocity[index], scale(acceleration, dt));
+                particles.velocity[index] += acceleration * dt;
             }
         }
 
@@ -1156,20 +1138,18 @@ impl ParticleEngine {
                 // Source applies drag per 30Hz tick; normalize to dt.
                 let drag_factor = (1.0 - drag.clamp(0.0, 1.0)).powf(dt * 30.0);
                 for index in 0..particles.len() {
-                    let velocity = add(particles.velocity[index], scale(*gravity, dt));
-                    let velocity = scale(velocity, drag_factor);
+                    let velocity = (particles.velocity[index]) + ((*gravity) * dt);
+                    let velocity = velocity * drag_factor;
                     particles.velocity[index] = velocity;
-                    particles.position[index] = add(particles.position[index], scale(velocity, dt));
+                    particles.position[index] += velocity * dt;
                 }
             }
         }
         if !has_movement && !compiled.forces.is_empty() {
             // Forces without a movement operator still need integration.
             for index in 0..particles.len() {
-                particles.position[index] = add(
-                    particles.position[index],
-                    scale(particles.velocity[index], dt),
-                );
+                particles.position[index] =
+                    (particles.position[index]) + ((particles.velocity[index]) * dt);
             }
         }
 
@@ -1299,7 +1279,7 @@ impl ParticleEngine {
                             progress = simple_spline(progress);
                         }
                         particles.color[index] =
-                            lerp3(particles.color_initial[index], *target, progress);
+                            particles.color_initial[index].lerp(*target, progress);
                     }
                 }
                 Operator::RotationSpin {
@@ -1320,10 +1300,10 @@ impl ParticleEngine {
                     }
                 }
                 Operator::MovementLockToControlPoint { control_point } => {
-                    let delta = scale(control_point_velocity[control_point.get()], dt);
-                    if length(delta) > 0.0 {
+                    let delta = control_point_velocity[control_point.get()] * dt;
+                    if delta.length() > 0.0 {
                         for index in 0..particles.len() {
-                            particles.position[index] = add(particles.position[index], delta);
+                            particles.position[index] += delta;
                         }
                     }
                 }
@@ -1372,8 +1352,9 @@ impl ParticleEngine {
                             age
                         };
                         let spawn = particles.spawn_index[index];
-                        let mut delta = [0.0_f32; 3];
-                        for (axis, value) in delta.iter_mut().enumerate() {
+                        let mut delta = Vec3::ZERO;
+                        for axis in 0..3 {
+                            let value = &mut delta[axis];
                             let salt = 0x50 + axis as u32;
                             let rate =
                                 deterministic_range(spawn, salt, rate_min[axis], rate_max[axis]);
@@ -1390,7 +1371,7 @@ impl ParticleEngine {
                         }
                         match field {
                             VectorField::Position => {
-                                particles.position[index] = add(particles.position[index], delta);
+                                particles.position[index] += delta;
                             }
                             VectorField::Tint => {
                                 let color = &mut particles.color[index];
@@ -1419,25 +1400,24 @@ impl ParticleEngine {
                                 + 0.5
                         };
                         let noise = [sample(0.0), sample(51.3), sample(117.9)];
-                        let value = [
+                        let value = Vec3::new(
                             output_min[0] + (output_max[0] - output_min[0]) * noise[0],
                             output_min[1] + (output_max[1] - output_min[1]) * noise[1],
                             output_min[2] + (output_max[2] - output_min[2]) * noise[2],
-                        ];
+                        );
                         match field {
                             // Position noise is applied as drift regardless
                             // of Source's set-vs-add flag; visually close and
                             // stable under variable dt.
                             VectorField::Position => {
-                                particles.position[index] =
-                                    add(particles.position[index], scale(value, dt));
+                                particles.position[index] += value * dt;
                             }
                             VectorField::Tint => {
-                                particles.color[index] = [
+                                particles.color[index] = Vec3::new(
                                     value[0].clamp(0.0, 1.0),
                                     value[1].clamp(0.0, 1.0),
                                     value[2].clamp(0.0, 1.0),
-                                ];
+                                );
                             }
                         }
                     }
@@ -1468,18 +1448,17 @@ impl ParticleEngine {
                     max_distance,
                     offset,
                 } => {
-                    let center = add(control_points[control_point.get()], *offset);
+                    let center = control_points[control_point.get()] + (*offset);
                     for index in 0..particles.len() {
-                        let delta = sub(particles.position[index], center);
-                        let distance = length(delta);
+                        let delta = (particles.position[index]) - center;
+                        let distance = delta.length();
                         if distance < 1e-4 {
                             continue;
                         }
                         let clamped =
                             distance.clamp(*min_distance, max_distance.max(*min_distance));
                         if (clamped - distance).abs() > 1e-4 {
-                            particles.position[index] =
-                                add(center, scale(delta, clamped / distance));
+                            particles.position[index] = center + (delta * (clamped / distance));
                         }
                     }
                 }
@@ -1490,10 +1469,10 @@ impl ParticleEngine {
                 } => {
                     let start = control_points[start_control_point.get()];
                     let end = control_points[end_control_point.get()];
-                    let axis = sub(end, start);
+                    let axis = end - start;
                     let axis_length_sq = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
                     for index in 0..particles.len() {
-                        let rel = sub(particles.position[index], start);
+                        let rel = (particles.position[index]) - start;
                         let t = if axis_length_sq > 1e-6 {
                             ((rel[0] * axis[0] + rel[1] * axis[1] + rel[2] * axis[2])
                                 / axis_length_sq)
@@ -1501,12 +1480,12 @@ impl ParticleEngine {
                         } else {
                             0.0
                         };
-                        let closest = add(start, scale(axis, t));
-                        let delta = sub(particles.position[index], closest);
-                        let distance = length(delta);
+                        let closest = start + (axis * t);
+                        let delta = (particles.position[index]) - closest;
+                        let distance = delta.length();
                         if distance > *max_distance && distance > 1e-4 {
                             particles.position[index] =
-                                add(closest, scale(delta, max_distance / distance));
+                                closest + (delta * (max_distance / distance));
                         }
                     }
                 }
@@ -1791,7 +1770,7 @@ mod tests {
         let mut system = basic_system();
         system.operators.push(function(
             "Movement Basic",
-            &[("gravity", PcfValue::Vector3([0.0, 0.0, -100.0]))],
+            &[("gravity", PcfValue::Vector3(Vec3::new(0.0, 0.0, -100.0)))],
         ));
         system.emitters = vec![function(
             "emit_instantaneously",
@@ -1941,7 +1920,7 @@ mod tests {
             &[("distance_max", PcfValue::Float(0.0))],
         ));
         let mut engine = engine_for(vec![system]);
-        engine.set_control_point(ControlPointIndex::clamped(0), [100.0, 0.0, 0.0]);
+        engine.set_control_point(ControlPointIndex::clamped(0), Vec3::new(100.0, 0.0, 0.0));
         engine.step(0.2);
         let particle = engine.render_instances()[0].particles[0];
         assert!((particle.position[0] - 100.0).abs() < 1.0);

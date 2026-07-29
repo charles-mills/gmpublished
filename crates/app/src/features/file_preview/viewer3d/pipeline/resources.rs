@@ -9,6 +9,7 @@ use super::{
     MATERIAL_ANISOTROPY_CLAMP, MODEL_VERTEX_ATTRIBUTES, MSAA_SAMPLE_COUNT, ModelVertex,
     SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SkyboxFace, WATER_SHADER_SOURCE, wgpu,
 };
+use gmpublished_backend::math::Vec3;
 
 #[derive(Debug)]
 pub struct RenderResources {
@@ -852,50 +853,50 @@ fn skybox_vertex_bytes() -> Vec<u8> {
 // "Skybox (2D)" page; the Source-space corner data below follows
 // noclip.website's SourceEngine SkyboxRenderer vertex table:
 // https://github.com/magcius/noclip.website/blob/main/src/SourceEngine/Main.ts
-pub fn skybox_face_corners(face: SkyboxFace) -> [[f32; 3]; 4] {
+pub fn skybox_face_corners(face: SkyboxFace) -> [Vec3; 4] {
     match face {
         SkyboxFace::Rt => [
-            [1.0, 1.0, -1.0],
-            [1.0, 1.0, 1.0],
-            [1.0, -1.0, 1.0],
-            [1.0, -1.0, -1.0],
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, -1.0),
         ],
         SkyboxFace::Lf => [
-            [-1.0, -1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-            [-1.0, 1.0, 1.0],
-            [-1.0, 1.0, -1.0],
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
         ],
         SkyboxFace::Bk => [
-            [-1.0, 1.0, -1.0],
-            [-1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [1.0, 1.0, -1.0],
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(1.0, 1.0, -1.0),
         ],
         SkyboxFace::Ft => [
-            [1.0, -1.0, -1.0],
-            [1.0, -1.0, 1.0],
-            [-1.0, -1.0, 1.0],
-            [-1.0, -1.0, -1.0],
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(-1.0, -1.0, -1.0),
         ],
         SkyboxFace::Up => [
-            [1.0, 1.0, 1.0],
-            [-1.0, 1.0, 1.0],
-            [-1.0, -1.0, 1.0],
-            [1.0, -1.0, 1.0],
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, 1.0),
         ],
         SkyboxFace::Dn => [
-            [-1.0, 1.0, -1.0],
-            [1.0, 1.0, -1.0],
-            [1.0, -1.0, -1.0],
-            [-1.0, -1.0, -1.0],
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(-1.0, -1.0, -1.0),
         ],
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SkyboxFace, skybox_face_corners};
+    use super::{SkyboxFace, Vec3, skybox_face_corners};
 
     #[test]
     fn skybox_face_corners_match_source_2d_skybox_convention() {
@@ -905,40 +906,40 @@ mod tests {
             SkyboxFace::ALL.map(skybox_face_corners),
             [
                 [
-                    [1.0, 1.0, -1.0],
-                    [1.0, 1.0, 1.0],
-                    [1.0, -1.0, 1.0],
-                    [1.0, -1.0, -1.0],
+                    Vec3::new(1.0, 1.0, -1.0),
+                    Vec3::new(1.0, 1.0, 1.0),
+                    Vec3::new(1.0, -1.0, 1.0),
+                    Vec3::new(1.0, -1.0, -1.0),
                 ],
                 [
-                    [-1.0, -1.0, -1.0],
-                    [-1.0, -1.0, 1.0],
-                    [-1.0, 1.0, 1.0],
-                    [-1.0, 1.0, -1.0],
+                    Vec3::new(-1.0, -1.0, -1.0),
+                    Vec3::new(-1.0, -1.0, 1.0),
+                    Vec3::new(-1.0, 1.0, 1.0),
+                    Vec3::new(-1.0, 1.0, -1.0),
                 ],
                 [
-                    [-1.0, 1.0, -1.0],
-                    [-1.0, 1.0, 1.0],
-                    [1.0, 1.0, 1.0],
-                    [1.0, 1.0, -1.0],
+                    Vec3::new(-1.0, 1.0, -1.0),
+                    Vec3::new(-1.0, 1.0, 1.0),
+                    Vec3::new(1.0, 1.0, 1.0),
+                    Vec3::new(1.0, 1.0, -1.0),
                 ],
                 [
-                    [1.0, -1.0, -1.0],
-                    [1.0, -1.0, 1.0],
-                    [-1.0, -1.0, 1.0],
-                    [-1.0, -1.0, -1.0],
+                    Vec3::new(1.0, -1.0, -1.0),
+                    Vec3::new(1.0, -1.0, 1.0),
+                    Vec3::new(-1.0, -1.0, 1.0),
+                    Vec3::new(-1.0, -1.0, -1.0),
                 ],
                 [
-                    [1.0, 1.0, 1.0],
-                    [-1.0, 1.0, 1.0],
-                    [-1.0, -1.0, 1.0],
-                    [1.0, -1.0, 1.0],
+                    Vec3::new(1.0, 1.0, 1.0),
+                    Vec3::new(-1.0, 1.0, 1.0),
+                    Vec3::new(-1.0, -1.0, 1.0),
+                    Vec3::new(1.0, -1.0, 1.0),
                 ],
                 [
-                    [-1.0, 1.0, -1.0],
-                    [1.0, 1.0, -1.0],
-                    [1.0, -1.0, -1.0],
-                    [-1.0, -1.0, -1.0],
+                    Vec3::new(-1.0, 1.0, -1.0),
+                    Vec3::new(1.0, 1.0, -1.0),
+                    Vec3::new(1.0, -1.0, -1.0),
+                    Vec3::new(-1.0, -1.0, -1.0),
                 ],
             ]
         );

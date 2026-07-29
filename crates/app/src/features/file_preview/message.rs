@@ -1,12 +1,13 @@
+use gmpublished_backend::math::Vec3;
 use std::time::Instant;
 
 use iced::widget::pane_grid;
 
+use super::state::{FlyPose, MovementMode, OrbitPose};
+use crate::generation::Generation;
 use crate::media::preview_model::{
     DoorAudioEvent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest,
 };
-use super::state::{FlyPose, MovementMode, OrbitPose};
-use crate::generation::Generation;
 use gmpublished_backend::particles::ControlPointIndex;
 
 /// Facts emitted by the in-archive file preview modal.
@@ -56,7 +57,7 @@ pub enum Message {
     ParticleSpeedSelected(f32),
     ParticleControlPointChanged {
         index: ControlPointIndex,
-        position: [f32; 3],
+        position: Vec3,
     },
     InspectorResized {
         split: pane_grid::Split,

@@ -52,8 +52,13 @@ mod layering_tests {
             }
         }
 
-        let media = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("media");
-        assert!(media.is_dir(), "the media directory must be walked, not silently skipped");
+        let media = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("media");
+        assert!(
+            media.is_dir(),
+            "the media directory must be walked, not silently skipped"
+        );
 
         let mut offenders = Vec::new();
         walk(&media, &media.join("mod.rs"), &mut offenders);

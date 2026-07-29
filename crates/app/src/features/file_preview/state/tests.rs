@@ -3,12 +3,12 @@ use std::sync::Arc;
 use super::*;
 use crate::bridge::materials::RenderMode;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
+use crate::generation::Generation;
 use crate::media::preview_model::ModelVertex;
 use crate::media::preview_model::{InfoReason, PreviewContent};
 use crate::media::preview_model::{
     MapFog, MapStats, MaterialSlot, MeshData, ModelPreview, ModelStats,
 };
-use crate::generation::Generation;
 use crate::test_support::GmaFixtureBuilder;
 
 fn archive() -> Arc<PreviewArchiveSource> {
@@ -120,7 +120,7 @@ fn begin_open_clears_viewer_poses() {
     let mut state = State::default();
     let _request = state.begin_open(request("maps/test.bsp"));
     state.set_fly_pose(FlyPose {
-        position: [1.0, 2.0, 3.0],
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
@@ -223,7 +223,7 @@ fn close_clears_viewer_poses() {
     let mut state = State::default();
     let _request = state.begin_open(request("maps/test.bsp"));
     state.set_fly_pose(FlyPose {
-        position: [1.0, 2.0, 3.0],
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
@@ -298,11 +298,11 @@ fn model_loaded_state_round_trips_through_apply_loaded() {
         PreviewContent::Model(Arc::new(ModelPreview {
             meshes: vec![MeshData {
                 vertices: vec![ModelVertex {
-                    position: [0.0, 1.0, 2.0],
-                    normal: [0.0, 0.0, 1.0],
+                    position: Vec3::new(0.0, 1.0, 2.0),
+                    normal: Vec3::new(0.0, 0.0, 1.0),
                     uv: [0.5, 0.75],
                     lightmap_uv: [0.0; 2],
-                    color: [1.0; 3],
+                    color: Vec3::splat(1.0),
                     blend_alpha: 0.0,
                 }],
                 indices: vec![0],
@@ -338,8 +338,8 @@ fn model_loaded_state_round_trips_through_apply_loaded() {
                 material_count: 1,
                 resolved_material_count: 0,
             },
-            bounds_min: [0.0, 1.0, 2.0],
-            bounds_max: [0.0, 1.0, 2.0],
+            bounds_min: Vec3::new(0.0, 1.0, 2.0),
+            bounds_max: Vec3::new(0.0, 1.0, 2.0),
             visibility: None,
             walk_collision: None,
         })),
@@ -359,11 +359,11 @@ fn map_loaded_state_round_trips_through_apply_loaded() {
     let scene = Arc::new(ModelPreview {
         meshes: vec![MeshData {
             vertices: vec![ModelVertex {
-                position: [0.0, 1.0, 2.0],
-                normal: [0.0, 0.0, 1.0],
+                position: Vec3::new(0.0, 1.0, 2.0),
+                normal: Vec3::new(0.0, 0.0, 1.0),
                 uv: [0.5, 0.75],
                 lightmap_uv: [0.0; 2],
-                color: [1.0; 3],
+                color: Vec3::splat(1.0),
                 blend_alpha: 0.0,
             }],
             indices: vec![0],
@@ -399,8 +399,8 @@ fn map_loaded_state_round_trips_through_apply_loaded() {
             material_count: 1,
             resolved_material_count: 0,
         },
-        bounds_min: [0.0, 1.0, 2.0],
-        bounds_max: [0.0, 1.0, 2.0],
+        bounds_min: Vec3::new(0.0, 1.0, 2.0),
+        bounds_max: Vec3::new(0.0, 1.0, 2.0),
         visibility: None,
         walk_collision: None,
     });
@@ -409,7 +409,7 @@ fn map_loaded_state_round_trips_through_apply_loaded() {
         PreviewContent::Map {
             scene,
             fog: Some(MapFog {
-                color_linear: [0.25, 0.5, 1.0],
+                color_linear: Vec3::new(0.25, 0.5, 1.0),
                 start: 256.0,
                 end: 2048.0,
                 max_density: 0.75,
@@ -481,8 +481,8 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
             material_count: 0,
             resolved_material_count: 0,
         },
-        bounds_min: [0.0; 3],
-        bounds_max: [0.0; 3],
+        bounds_min: Vec3::splat(0.0),
+        bounds_max: Vec3::splat(0.0),
         visibility: None,
         walk_collision: None,
     });
@@ -555,8 +555,8 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
             material_count: 0,
             resolved_material_count: 0,
         },
-        bounds_min: [0.0; 3],
-        bounds_max: [0.0; 3],
+        bounds_min: Vec3::splat(0.0),
+        bounds_max: Vec3::splat(0.0),
         visibility: None,
         walk_collision: None,
     });
@@ -631,8 +631,8 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
                 material_count: 0,
                 resolved_material_count: 0,
             },
-            bounds_min: [0.0; 3],
-            bounds_max: [0.0; 3],
+            bounds_min: Vec3::splat(0.0),
+            bounds_max: Vec3::splat(0.0),
             visibility: None,
             walk_collision: None,
         })),
