@@ -278,7 +278,7 @@ impl<'a> PublishRunner<'a> {
 
     pub(super) fn upscale_default(&self) -> bool {
         let (settings, _paths) = self.ports.ctx.settings_and_paths_snapshot();
-        settings.upscale_addon_icon
+        settings.backend.upscale_addon_icon
     }
 
     pub(super) fn workshop_snapshot(&self, workshop_id: PublishedFileId) -> (u64, PathBuf) {
@@ -395,7 +395,7 @@ impl<'a> PublishRunner<'a> {
     pub(super) fn submit_context_task(&self) -> Task<RootMessage> {
         let (settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
         let context = prepare_publish::PublishSubmitContext {
-            ignore_globs: settings.ignore_globs,
+            ignore_globs: settings.backend.ignore_globs,
             temp_dir: paths.temp_dir,
         };
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::workshop_id::workshop_id;
 use std::fs;
 
 use crate::events::{BackendEvent, TransactionEvent, TransactionPayload};
@@ -6,7 +7,7 @@ use crate::events::{BackendEvent, TransactionEvent, TransactionPayload};
 fn gma_for_search(
     path: PathBuf,
     title: &str,
-    id: Option<PublishedFileId>,
+    id: Option<WorkshopId>,
     modified: Option<u64>,
 ) -> GmaFile {
     GmaFile {
@@ -28,7 +29,7 @@ fn gma_for_search(
 #[test]
 fn search_item_new_sorts_terms_and_tracks_max_length() {
     let item = SearchItem::new(
-        SearchItemSource::MyWorkshop(PublishedFileId(99)),
+        SearchItemSource::MyWorkshop(workshop_id(99)),
         "Medium".to_string(),
         vec![
             "longest-term".to_string(),
@@ -58,7 +59,7 @@ fn gma_search_item_uses_metadata_terms_id_and_canonical_path() {
     let gma = gma_for_search(
         gma_path.clone(),
         "Search Fixture",
-        Some(PublishedFileId(123)),
+        Some(workshop_id(123)),
         Some(55),
     );
 
@@ -73,7 +74,7 @@ fn gma_search_item_uses_metadata_terms_id_and_canonical_path() {
     match item.source {
         SearchItemSource::InstalledAddons(path, id) => {
             assert_eq!(path, dunce::canonicalize(gma_path).expect("canonical path"));
-            assert_eq!(id, Some(PublishedFileId(123)));
+            assert_eq!(id, Some(workshop_id(123)));
         }
         _ => panic!("expected installed addon source"),
     }
@@ -85,13 +86,13 @@ fn search_add_bulk_indexes_installed_addons_and_deduplicates_workshop_ids() {
     let first = gma_for_search(
         dir.path().join("first.gma"),
         "First",
-        Some(PublishedFileId(77)),
+        Some(workshop_id(77)),
         Some(1),
     );
     let second = gma_for_search(
         dir.path().join("second.gma"),
         "Second",
-        Some(PublishedFileId(77)),
+        Some(workshop_id(77)),
         Some(2),
     );
     let local_only = gma_for_search(dir.path().join("local.gma"), "Local", None, Some(3));
@@ -106,7 +107,7 @@ fn search_add_bulk_indexes_installed_addons_and_deduplicates_workshop_ids() {
         search
             .installed_addons
             .read()
-            .contains_key(&PublishedFileId(77))
+            .contains_key(&workshop_id(77))
     );
 }
 
@@ -191,7 +192,7 @@ fn sync_installed_addon_files_searches_file_scope_only() {
     let riverden = FileSearchAddon::new(
         PathBuf::from("/tmp/riverden.gma"),
         "Riverden Addon".to_owned(),
-        Some(66),
+        Some(workshop_id(66)),
     );
     search.sync_installed_addon_files(vec![
         SearchItem::new_installed_addon_file(
@@ -264,7 +265,7 @@ fn dirty_sorts_once_then_singular_adds_replace_by_identity() {
 
 #[derive(Clone)]
 struct SearchFixture {
-    id: PublishedFileId,
+    id: WorkshopId,
     label: String,
     terms: Vec<String>,
     timestamp: u64,
@@ -288,7 +289,7 @@ fn search_fixture(
     timestamp: u64,
 ) -> SearchFixture {
     SearchFixture {
-        id: PublishedFileId(id),
+        id: workshop_id(id),
         label: label.into(),
         terms: terms.into_iter().map(Into::into).collect(),
         timestamp,
@@ -355,7 +356,7 @@ fn search_quick_caps_results_reports_has_more_and_orders_by_score() {
 #[test]
 fn full_search_emits_progress_data_and_finished_transaction_events() {
     let collector = crate::events::BackendEventCollector::default();
-    let transactions = crate::transactions::Transactions::new(Arc::new(collector.clone()), false);
+    let transactions = crate::transactions::Transactions::new(Arc::new(collector.clone()));
     let search = Search::new();
     search.add_bulk(&[
         search_fixture(701, "Needle One", ["servercontent"], 1),
@@ -399,9 +400,9 @@ fn full_search_emits_progress_data_and_finished_transaction_events() {
 #[test]
 fn eq_matches_ord_across_a_matrix_of_key_components() {
     let sources = [
-        SearchItemSource::MyWorkshop(PublishedFileId(1)),
-        SearchItemSource::MyWorkshop(PublishedFileId(2)),
-        SearchItemSource::WorkshopItem(PublishedFileId(1)),
+        SearchItemSource::MyWorkshop(workshop_id(1)),
+        SearchItemSource::MyWorkshop(workshop_id(2)),
+        SearchItemSource::WorkshopItem(workshop_id(1)),
     ];
     let timestamps = [10_u64, 20_u64];
     let labels = ["abc", "abcde"];
@@ -437,18 +438,18 @@ fn refresh_installed_addon_labels_replaces_stale_label_everywhere() {
     search.add(&gma_for_search(
         PathBuf::from("/tmp/refresh.gma"),
         "Old Title",
-        Some(PublishedFileId(77)),
+        Some(workshop_id(77)),
         Some(1),
     ));
 
-    let mut fresh = WorkshopItem::from(PublishedFileId(77));
+    let mut fresh = WorkshopItem::from(workshop_id(77));
     fresh.title = "New Title".to_owned();
     search.refresh_installed_addon_labels(&[fresh]);
 
     let installed = search
         .installed_addons
         .read()
-        .get(&PublishedFileId(77))
+        .get(&workshop_id(77))
         .cloned()
         .expect("installed addon entry");
     assert_eq!(installed.label(), "New Title");

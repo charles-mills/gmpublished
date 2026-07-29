@@ -21,7 +21,7 @@ fn fixture_state(count: usize) -> State {
 
     State {
         generation: Generation::from_raw(1),
-        rows: Some(rows),
+        library: Library::Scanned(rows),
         workshop_index,
         ..State::default()
     }
@@ -30,13 +30,12 @@ fn fixture_state(count: usize) -> State {
 fn visible_fixture_state(count: usize) -> State {
     let mut state = fixture_state(count);
     state.route_visible = true;
-    state.load_status = LoadStatus::Ready;
     state.sync_grid_items();
     let _ = addon_grid::update(
         state.grid_mut(),
         addon_grid::Message::ViewportResized(200, 160),
     );
-    let visible = state.grid.visible_item_range();
+    let visible = state.grid().visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible.clone(), state.rows().len());
     assert!(!visible.is_empty(), "fixture must expose visible rows");
     assert!(!after.is_empty(), "fixture must expose an after-window");
@@ -66,30 +65,26 @@ fn patch_batch(start: u64, count: u64) -> Vec<MetadataPatch> {
 fn settings_refresh_resets_visible_projection_loudly() {
     let mut state = fixture_state(3);
     state.route_visible = true;
-    state.load_status = LoadStatus::Ready;
 
     state.refresh_started(LibraryRefreshReason::SettingsChanged);
 
-    assert_eq!(state.load_status, LoadStatus::Loading);
-    assert!(state.rows.is_none());
+    assert_eq!(state.library, Library::Scanning);
 }
 
 #[test]
 fn settings_refresh_invalidates_hidden_projection_without_loading() {
     let mut state = fixture_state(3);
     state.route_visible = false;
-    state.load_status = LoadStatus::Ready;
 
     state.refresh_started(LibraryRefreshReason::SettingsChanged);
 
-    assert_eq!(state.load_status, LoadStatus::Idle);
-    assert!(state.rows.is_none());
+    assert_eq!(state.library, Library::Unscanned);
 }
 
 #[test]
 fn visible_metadata_request_includes_after_window_before_beyond_rows() {
     let mut state = visible_fixture_state(80);
-    let visible = state.grid.visible_item_range();
+    let visible = state.grid().visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible.clone(), state.rows().len());
 
     let (_, ids) = state
@@ -111,7 +106,7 @@ fn visible_metadata_request_includes_after_window_before_beyond_rows() {
 #[test]
 fn visible_metadata_request_dedups_prefetch_window_against_known_ids() {
     let mut state = visible_fixture_state(80);
-    let visible = state.grid.visible_item_range();
+    let visible = state.grid().visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible, state.rows().len());
     // Row `i` carries id `i + 1` (see `fixture_state`).
     let in_flight = PublishedFileId::fixture(after.start as u64 + 1);
@@ -221,7 +216,7 @@ fn duplicate_workshop_ids_both_receive_patch() {
     let workshop_index = build_workshop_index(&rows);
     let mut state = State {
         generation: Generation::from_raw(1),
-        rows: Some(rows),
+        library: Library::Scanned(rows),
         workshop_index,
         ..State::default()
     };
@@ -248,19 +243,20 @@ fn duplicate_workshop_ids_both_receive_patch() {
 fn settled_visible_state(count: usize) -> State {
     let mut state = fixture_state(count);
     state.route_visible = true;
-    state.load_status = LoadStatus::Ready;
     state
 }
 
 #[test]
 fn disk_change_swaps_quietly_and_carries_unchanged_rows() {
     let mut state = settled_visible_state(2);
-    let rows = state.rows.as_mut().expect("fixture rows");
+    let Library::Scanned(rows) = &mut state.library else {
+        panic!("the fixture library is scanned");
+    };
     rows[0] = rows[0].clone().with_ready_animation_for_test();
     rows[1] = rows[1].clone().with_ready_animation_for_test();
 
     state.refresh_started(LibraryRefreshReason::DiskChanged);
-    assert_eq!(state.load_status, LoadStatus::Ready, "no loading flash");
+    assert!(state.library.is_scanned(), "no loading flash");
     assert_eq!(state.rows().len(), 2, "grid keeps rows mid-scan");
 
     let fresh = vec![
@@ -274,7 +270,7 @@ fn disk_change_swaps_quietly_and_carries_unchanged_rows() {
 
     assert!(state.rows()[0].thumbnail_ready_for_test());
     assert!(!state.rows()[1].thumbnail_ready_for_test());
-    assert_eq!(state.load_status, LoadStatus::Ready);
+    assert!(state.library.is_scanned());
 }
 
 #[test]
@@ -313,7 +309,6 @@ fn quiet_apply_replaces_the_full_row_set() {
 #[test]
 fn disk_snapshot_while_hidden_updates_projection_without_thumbnail_work() {
     let mut state = fixture_state(3);
-    state.load_status = LoadStatus::Ready;
 
     state.refresh_started(LibraryRefreshReason::DiskChanged);
     state.apply_snapshot(
@@ -326,7 +321,7 @@ fn disk_snapshot_while_hidden_updates_projection_without_thumbnail_work() {
     );
 
     assert_eq!(state.rows().len(), 1);
-    assert_eq!(state.load_status, LoadStatus::Ready);
+    assert!(state.library.is_scanned());
     assert!(state.thumbnail_demands().demands.is_empty());
 }
 
@@ -344,8 +339,7 @@ fn quiet_error_keeps_current_rows_on_screen() {
     );
 
     assert_eq!(state.rows().len(), 2);
-    assert_eq!(state.load_status, LoadStatus::Ready);
-    assert!(state.rows.is_some());
+    assert!(state.library.is_scanned());
 }
 
 #[test]

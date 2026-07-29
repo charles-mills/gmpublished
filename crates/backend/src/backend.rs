@@ -5,10 +5,10 @@
 //! constructor parameters or fields set here rather than reaching for each
 //! other.
 //!
-//! Not yet true of process globals: four `LazyLock` rayon pools
+//! Process globals are the exception: four `LazyLock` rayon pools
 //! (`steam::downloads`, `gma::write`, `gma::extract`) and two `AtomicU64`
-//! counters are still statics, and none of them observes shutdown. See
-//! CODE_REVIEW.md §33a.
+//! counters are statics rather than services, and none of them observes
+//! shutdown.
 
 use std::{
     fmt,
@@ -29,11 +29,13 @@ use crate::{
     transactions::Transactions,
 };
 
-/// Configures one `Backend` instance: the event sink it delivers to, whether
-/// it runs in CLI mode (transaction events suppressed — no UI is
-/// listening), and environment-path overrides for tests.
+/// Configures one `Backend` instance: the event sink it delivers to and
+/// environment-path overrides for tests.
+///
+/// A caller that wants no events delivered — the headless CLI extraction path
+/// — says so by passing [`NullEventSink`], rather than by a mode flag the
+/// services below would each have to know about.
 pub struct BackendConfig {
-    pub cli_mode: bool,
     pub event_sink: Arc<dyn BackendEventSink>,
     /// Overrides the OS-derived settings/temp/user-data/downloads roots.
     /// Production leaves this `None`; tests pass a private tempdir so
@@ -61,7 +63,6 @@ pub enum BackgroundServices {
 impl Default for BackendConfig {
     fn default() -> Self {
         Self {
-            cli_mode: false,
             event_sink: Arc::new(NullEventSink),
             data_root: None,
             background_services: BackgroundServices::Enabled,
@@ -77,7 +78,6 @@ impl BackendConfig {
     #[must_use]
     pub fn for_test(data_root: &std::path::Path) -> Self {
         Self {
-            cli_mode: false,
             event_sink: Arc::new(NullEventSink),
             data_root: Some(data_root.to_path_buf()),
             background_services: BackgroundServices::Disabled,
@@ -156,7 +156,6 @@ impl Backend {
     /// [`Self::start_background_services`].
     pub fn init(config: BackendConfig) -> Result<Arc<Self>, BackendInitError> {
         let BackendConfig {
-            cli_mode,
             event_sink,
             data_root,
             background_services,
@@ -174,7 +173,7 @@ impl Backend {
                 AppDataPaths::for_test_root(root)
             });
 
-        let transactions = Transactions::new(event_sink, cli_mode);
+        let transactions = Transactions::new(event_sink);
 
         log::info!("initializing appdata");
         let app_data = initialize_stage("appdata", || {

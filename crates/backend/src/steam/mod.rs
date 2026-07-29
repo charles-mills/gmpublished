@@ -6,7 +6,7 @@ use std::{
         mpsc,
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use parking_lot::{Mutex, RwLock};
@@ -14,9 +14,17 @@ use steamworks::{
     Callback, CallbackHandle, Client, SteamServersConnected, SteamServersDisconnected,
 };
 
-/// Steam's own id types, re-exported so the app builds them at its boundary
-/// rather than passing raw integers through this crate's API.
-pub use steamworks::{PublishedFileId, SteamId};
+use crate::WorkshopId;
+use crate::util::threads::join_all_within;
+
+/// Steam's own account id, re-exported so the app builds one at its boundary
+/// rather than passing a raw integer through this crate's API.
+///
+/// `steamworks::PublishedFileId` is deliberately *not* re-exported:
+/// [`crate::WorkshopId`] is this crate's workshop-item id, and it refuses the
+/// zero that the steamworks type accepts. Re-exporting the looser type beside
+/// it would leave the boundary open at the one place it exists to close.
+pub use steamworks::SteamId;
 
 use crate::appdata::AppData;
 use crate::events::BackendEvent;
@@ -127,9 +135,9 @@ pub struct Steam {
     /// The slot persona waits ([`Self::fetch_user`]) contend for.
     persona_slot: callback_slot::CallbackSlot,
 
-    workshop_dedup: Mutex<HashSet<PublishedFileId>>,
-    workshop_queue_tx: mpsc::Sender<Vec<PublishedFileId>>,
-    workshop_queue_rx: Mutex<mpsc::Receiver<Vec<PublishedFileId>>>,
+    workshop_dedup: Mutex<HashSet<WorkshopId>>,
+    workshop_queue_tx: mpsc::Sender<Vec<WorkshopId>>,
+    workshop_queue_rx: Mutex<mpsc::Receiver<Vec<WorkshopId>>>,
 
     transactions: Transactions,
 }
@@ -384,45 +392,7 @@ impl Steam {
         // Bind before iterating: holding the `threads` guard across the join
         // would block anything still trying to register a thread.
         let handles = std::mem::take(&mut *self.threads.lock());
-        join_all_within(handles, SHUTDOWN_JOIN_TIMEOUT);
-    }
-}
-
-/// Joins every handle concurrently, giving up (and logging) once `timeout`
-/// has elapsed overall. The joins themselves still complete eventually on
-/// detached helper threads; giving up here just stops a thread that ignored
-/// the shutdown signal from blocking whoever called us (process exit).
-fn join_all_within(handles: Vec<JoinHandle<()>>, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    let expected = handles.len();
-
-    let (done_tx, done_rx) = mpsc::channel();
-    for handle in handles {
-        let done_tx = done_tx.clone();
-        std::thread::spawn(move || {
-            let _ = handle.join();
-            let _ = done_tx.send(());
-        });
-    }
-    // Otherwise the receiver below never sees a disconnect.
-    drop(done_tx);
-
-    let mut exited = 0;
-    while exited < expected {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        if done_rx.recv_timeout(remaining).is_err() {
-            break;
-        }
-        exited += 1;
-    }
-
-    if exited < expected {
-        log::warn!(
-            "[Steam] {} background thread(s) did not exit within {timeout:?} of shutdown; detaching them",
-            expected - exited
-        );
+        join_all_within(handles, SHUTDOWN_JOIN_TIMEOUT, "Steam");
     }
 }
 
@@ -462,16 +432,14 @@ mod tests {
     fn test_steam() -> Arc<super::Steam> {
         Arc::new(super::Steam::new(crate::transactions::Transactions::new(
             Arc::new(crate::events::NullEventSink),
-            false,
         )))
     }
 
     #[test]
     fn client_before_connect_errs_instead_of_panicking() {
-        let steam = super::Steam::new(crate::transactions::Transactions::new(
-            Arc::new(crate::events::NullEventSink),
-            false,
-        ));
+        let steam = super::Steam::new(crate::transactions::Transactions::new(Arc::new(
+            crate::events::NullEventSink,
+        )));
 
         assert_eq!(
             steam.client().err(),
@@ -520,7 +488,6 @@ mod tests {
     fn shutdown_signals_and_joins_a_fake_thread_within_the_bound() {
         let steam = Arc::new(super::Steam::new(crate::transactions::Transactions::new(
             Arc::new(crate::events::NullEventSink),
-            false,
         )));
 
         // Mirrors the shape of the real background threads: owns an

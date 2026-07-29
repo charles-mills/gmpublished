@@ -8,22 +8,28 @@ pub const WORKSHOP_LEGAL_URL: &str = "https://steamcommunity.com/workshop/worksh
 
 /// Zero is never a valid Steam Workshop id (the backend already treats it
 /// as "no id"); the inner `NonZeroU64` makes that invariant unrepresentable.
+///
+/// The UI-side spelling of [`gmpublished_backend::WorkshopId`], which carries
+/// the same invariant — so crossing the bridge is a total conversion in both
+/// directions and neither side has to assert anything about the other.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PublishedFileId(NonZeroU64);
+
+impl From<gmpublished_backend::WorkshopId> for PublishedFileId {
+    fn from(id: gmpublished_backend::WorkshopId) -> Self {
+        Self(id.get_nonzero())
+    }
+}
+
+impl From<PublishedFileId> for gmpublished_backend::WorkshopId {
+    fn from(id: PublishedFileId) -> Self {
+        Self::from(id.0)
+    }
+}
 
 impl PublishedFileId {
     pub(crate) fn new(id: u64) -> Option<Self> {
         NonZeroU64::new(id).map(Self)
-    }
-
-    /// A workshop id arriving from the backend.
-    ///
-    /// The backend's id type is a plain `u64` wrapper, so this is the boundary
-    /// that enforces nonzero — every backend parse path (`ws_id_from_file_name`,
-    /// the Web API item lists) filters zero out, and this is what happens if
-    /// one is ever added that does not.
-    pub(crate) fn from_backend(id: gmpublished_backend::appdata::SettingsPublishedFileId) -> Self {
-        Self::new(id.0).expect("a zero workshop id reached the bridge unfiltered")
     }
 
     pub(crate) const fn get(self) -> u64 {

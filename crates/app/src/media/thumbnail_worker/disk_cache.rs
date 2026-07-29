@@ -377,25 +377,25 @@ pub fn write_source_bytes(cache: &WorkerDiskCache, url: &str, bytes: &[u8]) {
 ///
 /// An animated entry's payload is `LazyGifPreview::encoded_bytes`, which is the
 /// `Arc<[u8]>` the preview was decoded from: byte-for-byte the stream already
-/// sitting in the source tier. Writing it again stored the same GIF twice under
-/// one disk budget, so an animated addon cost double and evicted twice as much
-/// of everything else.
+/// sitting in the source tier. Writing it here would store the same GIF twice
+/// under one disk budget, so an animated addon would cost double and evict
+/// twice as much of everything else.
 ///
 /// Almost nothing is lost by skipping it. A derived GIF entry is not a
 /// *derivation* — unlike a resized still it is size-independent, so its read
-/// path did exactly the work the source path does: `decode_lazy_gif_preview`
-/// over the same bytes.
+/// path would do exactly the work the source path already does:
+/// `decode_lazy_gif_preview` over the same bytes.
 ///
-/// The one real cost is the ThumbHash, which the derived entry persisted and
-/// which `finish_fresh_decode` now recomputes per cold load. Measured at
+/// The one real cost is the ThumbHash, which a derived entry would persist and
+/// which `finish_fresh_decode` instead recomputes per cold load. Measured at
 /// **327 µs** for a 256² first frame (`probe_thumbhash_encode_cost`) — an order
 /// of magnitude more than it looks like it should be, so it is worth naming
 /// rather than waving at. It is paid on a media-pool thread, never the main
 /// one, next to a GIF decode already costing milliseconds. Halving the disk
 /// footprint of every animated addon is worth 0.3 ms of background work.
 ///
-/// The reader still understands `CACHE_FORMAT_GIF`, so caches written before
-/// this change keep loading rather than being discarded on upgrade.
+/// The reader still understands `CACHE_FORMAT_GIF`, so a cache that does hold
+/// animated derived entries keeps loading rather than being discarded.
 pub fn write_disk_cache(cache: &WorkerDiskCache, key: &ThumbnailKey, thumbnail: &Thumbnail) {
     if thumbnail.animation().is_some() {
         return;

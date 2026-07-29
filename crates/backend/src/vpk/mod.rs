@@ -3,7 +3,6 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use crate::util::main_thread_forbidden;
@@ -12,10 +11,10 @@ use thiserror::Error;
 const VPK_VERSION_1_HEADER_SIZE: u64 = 12;
 const VPK_VERSION_2_HEADER_SIZE: u64 = 28;
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, Eq, PartialEq, Error)]
 pub enum VpkError {
     #[error("VPK I/O failed")]
-    IOError(#[source] Option<Arc<std::io::Error>>),
+    IOError(#[source] crate::IoFailure),
     #[error("the VPK is malformed")]
     FormatError,
     #[error("the VPK header is not recognisable")]
@@ -28,16 +27,9 @@ pub enum VpkError {
     MissingArchive,
 }
 
-impl PartialEq for VpkError {
-    fn eq(&self, other: &Self) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other)
-    }
-}
-impl Eq for VpkError {}
-
 impl From<std::io::Error> for VpkError {
     fn from(error: std::io::Error) -> Self {
-        Self::IOError(Some(Arc::new(error)))
+        Self::IOError(error.into())
     }
 }
 
@@ -56,7 +48,7 @@ impl crate::error_key::HasErrorKey for VpkError {
 
     fn error_detail(&self) -> Option<String> {
         match self {
-            Self::IOError(Some(source)) => Some(source.to_string()),
+            Self::IOError(source) => Some(source.to_string()),
             _ => None,
         }
     }
@@ -210,7 +202,7 @@ impl VpkFile {
             if err.kind() == std::io::ErrorKind::NotFound {
                 VpkError::MissingArchive
             } else {
-                VpkError::IOError(Some(Arc::new(err)))
+                VpkError::IOError((&err).into())
             }
         })
     }

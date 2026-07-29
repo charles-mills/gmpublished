@@ -362,9 +362,9 @@ impl Manager {
                 // the worker.)
                 //
                 // The question is asked of the *source* tier, not the derived
-                // key. Warm no longer writes derived entries, so a derived-key
-                // check is absent by construction and would re-enqueue the
-                // entire library on every session after the first.
+                // key. Warm writes no derived entries, so a derived-key check
+                // could never hit — it would re-enqueue the entire library on
+                // every session after the first.
                 if let Some(url) = key.source_url()
                     && self
                         .disk_cache
@@ -2089,9 +2089,6 @@ mod tests {
     /// looks unchanged, so it keeps serving at prefetch priority for as long as
     /// it stays on screen. Nothing in the delivered results looks wrong; the
     /// card is just slow.
-    ///
-    /// Covered directly here: this behaviour was once guarded only by a
-    /// benchmark harness's count-determinism, which no longer exists.
     #[test]
     fn a_row_promoted_to_visible_is_re_offered_at_its_new_priority() {
         let mut manager = Manager::new(Config::default());
@@ -2226,9 +2223,9 @@ mod tests {
         );
     }
 
-    /// Warm's skip has to ask the *source* tier. It once asked the derived key,
-    /// which warm no longer writes — so every session after the first
-    /// re-enqueued the entire library.
+    /// Warm's skip has to ask the *source* tier. Asking the derived key could
+    /// never hit — warm writes no derived entries — so every session after the
+    /// first would re-enqueue the entire library.
     #[test]
     fn warm_skips_a_url_whose_source_is_already_banked() {
         let root = crate::test_support::TestDir::new("warm-skip-source-tier");

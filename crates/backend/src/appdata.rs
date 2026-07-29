@@ -7,14 +7,13 @@ use std::{
 use crate::gma::{ExtractDestination, ExtractionOverwriteMode};
 
 use crate::GMOD_APP_ID;
+use crate::WorkshopId;
 use crate::events::BackendEvent;
 use crate::steam::Steam;
 use crate::transactions::Transactions;
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-pub use steamworks::PublishedFileId as SettingsPublishedFileId;
-use steamworks::PublishedFileId;
 
 /// Environment-derived roots `AppData` resolves paths against. Production
 /// builds derive these from `dirs`/`std::env`; tests supply a private
@@ -142,7 +141,8 @@ pub struct Settings {
 
     pub ignore_globs: Vec<String>,
 
-    pub my_workshop_local_paths: HashMap<PublishedFileId, PathBuf>,
+    #[serde(deserialize_with = "deserialize_workshop_local_paths")]
+    pub my_workshop_local_paths: HashMap<WorkshopId, PathBuf>,
     pub upscale_addon_icon: bool,
 
     pub language: Option<String>,
@@ -193,6 +193,36 @@ fn serialize_current_schema<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_u32(SETTINGS_SCHEMA)
+}
+
+/// Reads the map through raw ids and drops any key of zero, rather than
+/// letting [`WorkshopId`]'s own rejection abort the parse.
+///
+/// A settings file is loaded as a whole: a single unusable key failing the
+/// field would fail `Settings`, and the caller's recovery from that is to
+/// replace every setting the user has with defaults. Dropping the one entry
+/// that names no item costs a path this build could not have used anyway.
+fn deserialize_workshop_local_paths<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<WorkshopId, PathBuf>, D::Error> {
+    let raw = HashMap::<u64, PathBuf>::deserialize(deserializer)?;
+
+    let total = raw.len();
+    let kept: HashMap<WorkshopId, PathBuf> = raw
+        .into_iter()
+        .filter_map(|(id, path)| Some((WorkshopId::new(id)?, path)))
+        .collect();
+
+    // The next save rewrites the file without them, so this line is the only
+    // trace a dropped key leaves.
+    if kept.len() < total {
+        log::warn!(
+            "settings held {} workshop local path(s) under an id of zero, which names no item; dropping them",
+            total - kept.len()
+        );
+    }
+
+    Ok(kept)
 }
 
 impl Default for Settings {
@@ -637,7 +667,7 @@ impl AppData {
 
     pub(crate) fn record_published_local_path(
         &self,
-        published_file_id: PublishedFileId,
+        published_file_id: WorkshopId,
         content_path_src: &Path,
     ) {
         self.settings.rcu(|settings| {

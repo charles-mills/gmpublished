@@ -7,7 +7,7 @@ use crate::theme::ViewCtx;
 use crate::widgets::addon_grid;
 use crate::widgets::route_state::{self, Glyph, RouteState, Tone};
 
-use super::state::LoadStatus;
+use super::state::PageStatus;
 use super::{Message, State};
 
 /// Identifies this route's grid across route switches; see `addon_grid::view`.
@@ -16,7 +16,7 @@ pub const GRID_KEY: &str = "my-workshop-grid";
 pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     // Connected, and the account simply has nothing published: same panel as
     // every other blank surface, quiet glyph, no call to action.
-    if matches!(state.load_status(), LoadStatus::Empty) {
+    if state.is_loaded_and_empty() {
         return route_state::view(
             RouteState::new(
                 Glyph::Icon(assets::icons::package_open()),
@@ -80,12 +80,11 @@ fn partial_count_line(state: &State, i18n: &I18n) -> Option<String> {
 }
 
 fn status_line(state: &State, i18n: &I18n) -> Option<String> {
-    match state.load_status() {
-        LoadStatus::Idle | LoadStatus::Ready => None,
+    match state.page_status() {
+        PageStatus::Idle | PageStatus::Loaded => None,
         // Empty is handled by the panel in `view`, not this header line.
-        LoadStatus::Loading => Some(i18n.tr("my-workshop-loading")),
-        LoadStatus::Empty => None,
-        LoadStatus::Error(error) => Some(i18n.trn(
+        PageStatus::LoadingFirstPage => Some(i18n.tr("my-workshop-loading")),
+        PageStatus::Failed(error) => Some(i18n.trn(
             "my-workshop-error",
             &[("error", Arg::Text(translated_error(i18n, error).as_str()))],
         )),

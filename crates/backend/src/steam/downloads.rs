@@ -13,7 +13,9 @@ use std::{
     time::Duration,
 };
 
-use steamworks::{ItemState, PublishedFileId, QueryResults, UGC};
+use steamworks::{ItemState, QueryResults, UGC};
+
+use crate::WorkshopId;
 
 use crate::util::thread_pool;
 use crate::{
@@ -42,7 +44,7 @@ const HTTP_PROGRESS_STEP: f64 = 0.01;
 
 #[derive(Debug)]
 struct DownloadInner {
-    item: PublishedFileId,
+    item: WorkshopId,
     transaction: crate::transactions::Transaction,
     sent_total: AtomicBool,
     extract_destination: ExtractDestination,
@@ -63,23 +65,23 @@ type Download = Arc<DownloadInner>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WorkshopDownloadQueryItem {
-    Item(PublishedFileId),
-    Collection { children: Vec<PublishedFileId> },
+    Item(WorkshopId),
+    Collection { children: Vec<WorkshopId> },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WorkshopDownloadAction {
-    FetchWorkshopItems(Vec<PublishedFileId>),
-    QueueDownload(PublishedFileId),
-    MissingItem(PublishedFileId),
+    FetchWorkshopItems(Vec<WorkshopId>),
+    QueueDownload(WorkshopId),
+    MissingItem(WorkshopId),
 }
 
 struct PossibleCollectionsState {
-    queue: Vec<PublishedFileId>,
-    downloaded: HashSet<PublishedFileId>,
+    queue: Vec<WorkshopId>,
+    downloaded: HashSet<WorkshopId>,
 }
 impl PossibleCollectionsState {
-    fn new(queue: Vec<PublishedFileId>) -> Self {
+    fn new(queue: Vec<WorkshopId>) -> Self {
         Self {
             downloaded: HashSet::from_iter(queue.iter().copied()),
             queue,
@@ -87,8 +89,8 @@ impl PossibleCollectionsState {
     }
 
     fn split_initial(
-        ids: &mut Vec<PublishedFileId>,
-        workshop_cache: Option<&HashSet<PublishedFileId>>,
+        ids: &mut Vec<WorkshopId>,
+        workshop_cache: Option<&HashSet<WorkshopId>>,
     ) -> Self {
         Self::new(if let Some(workshop_cache) = workshop_cache {
             let mut possible_collections = Vec::with_capacity(ids.len());
@@ -106,7 +108,7 @@ impl PossibleCollectionsState {
         })
     }
 
-    fn next_query(&mut self, connected: bool) -> Option<Vec<PublishedFileId>> {
+    fn next_query(&mut self, connected: bool) -> Option<Vec<WorkshopId>> {
         if self.queue.is_empty() || !connected {
             None
         } else {
@@ -116,7 +118,7 @@ impl PossibleCollectionsState {
 
     fn apply_query_results(
         &mut self,
-        query: &[PublishedFileId],
+        query: &[WorkshopId],
         results: impl IntoIterator<Item = Option<WorkshopDownloadQueryItem>>,
     ) -> Vec<WorkshopDownloadAction> {
         let mut actions = Vec::new();
@@ -268,7 +270,7 @@ impl Downloads {
     fn extract(
         self: &Arc<Self>,
         folder: PathBuf,
-        item: PublishedFileId,
+        item: WorkshopId,
         extract_destination: ExtractDestination,
         request_id: Option<u64>,
     ) {
@@ -278,7 +280,7 @@ impl Downloads {
     fn extract_with_cleanup(
         self: &Arc<Self>,
         folder: PathBuf,
-        item: PublishedFileId,
+        item: WorkshopId,
         extract_destination: ExtractDestination,
         request_id: Option<u64>,
         temp_guard: Option<tempfile::TempPath>,
@@ -378,16 +380,16 @@ impl Downloads {
         ugc: &UGC,
         pending: &mut MutexGuard<Vec<Arc<DownloadInner>>>,
         extract_destination: &Arc<ExtractDestination>,
-        item: PublishedFileId,
+        item: WorkshopId,
         token: BatchToken,
     ) {
         if self.batch_cancelled(token) {
             return;
         }
 
-        let state = ugc.item_state(item);
+        let state = ugc.item_state(item.into());
         if state.intersects(ItemState::INSTALLED) && !state.intersects(ItemState::NEEDS_UPDATE) {
-            if let Some(info) = ugc.item_install_info(item) {
+            if let Some(info) = ugc.item_install_info(item.into()) {
                 self.extract(
                     PathBuf::from(info.folder),
                     item,
@@ -427,7 +429,7 @@ impl Downloads {
     }
 
     /// Emits the failed-download row shown when Steam does not know an item.
-    fn missing_item(&self, item: PublishedFileId, token: BatchToken) {
+    fn missing_item(&self, item: WorkshopId, token: BatchToken) {
         if self.batch_cancelled(token) {
             return;
         }
@@ -442,13 +444,13 @@ impl Downloads {
         transaction.error(crate::error_key::keys::ITEM_NOT_FOUND);
     }
 
-    pub fn download(self: &Arc<Self>, ids: impl IntoIterator<Item = PublishedFileId>) {
+    pub fn download(self: &Arc<Self>, ids: impl IntoIterator<Item = WorkshopId>) {
         self.download_many(ids, self.app_data.extract_destination_snapshot(), None);
     }
 
     pub fn download_one_to(
         self: &Arc<Self>,
-        item: PublishedFileId,
+        item: WorkshopId,
         extract_destination: ExtractDestination,
         request_id: u64,
     ) {
@@ -457,11 +459,11 @@ impl Downloads {
 
     fn download_many(
         self: &Arc<Self>,
-        ids: impl IntoIterator<Item = PublishedFileId>,
+        ids: impl IntoIterator<Item = WorkshopId>,
         extract_destination: ExtractDestination,
         request_id: Option<u64>,
     ) {
-        let ids: Vec<PublishedFileId> = ids.into_iter().collect();
+        let ids: Vec<WorkshopId> = ids.into_iter().collect();
         if ids.is_empty() {
             return;
         }
@@ -528,10 +530,10 @@ impl Downloads {
                 continue;
             }
 
-            let state = ugc.item_state(detail.id);
+            let state = ugc.item_state(detail.id.into());
             let extract_installed = state.intersects(ItemState::INSTALLED)
                 && !state.intersects(ItemState::NEEDS_UPDATE)
-                && ugc.item_install_info(detail.id).is_some();
+                && ugc.item_install_info(detail.id.into()).is_some();
 
             match detail.file_url {
                 Some(url) if !extract_installed => {
@@ -562,7 +564,7 @@ impl Downloads {
 
     fn queue_http_download(
         self: &Arc<Self>,
-        item: PublishedFileId,
+        item: WorkshopId,
         url: String,
         file_size: u64,
         extract_destination: &Arc<ExtractDestination>,
@@ -705,7 +707,7 @@ impl Downloads {
     #[expect(clippy::significant_drop_tightening)]
     fn download_via_steamworks(
         self: &Arc<Self>,
-        mut ids: Vec<PublishedFileId>,
+        mut ids: Vec<WorkshopId>,
         extract_destination: &Arc<ExtractDestination>,
         token: BatchToken,
     ) {
@@ -735,8 +737,13 @@ impl Downloads {
                 .expect("this loop only reaches here when next_query() saw connected() true")
                 .client()
                 .ugc()
-                .query_items(possible_collections_query.clone())
-            {
+                .query_items(
+                    possible_collections_query
+                        .iter()
+                        .copied()
+                        .map(Into::into)
+                        .collect(),
+                ) {
                 Ok(query) => query,
                 Err(error) => {
                     // Steam refused to create the query; surface it as a failed
@@ -793,12 +800,19 @@ impl Downloads {
                                                         "Steam returned a collection with unreadable children (result index {i}); treating it as empty"
                                                     );
                                                     Vec::new()
-                                                }),
+                                                })
+                                                .into_iter()
+                                                // A child of zero names no
+                                                // item; Steam should not send
+                                                // one, and there is nothing to
+                                                // download if it does.
+                                                .filter_map(|child| WorkshopId::try_from(child).ok())
+                                                .collect(),
                                         })
                                     } else {
-                                        Some(WorkshopDownloadQueryItem::Item(
-                                            item.published_file_id,
-                                        ))
+                                        WorkshopId::try_from(item.published_file_id)
+                                            .ok()
+                                            .map(WorkshopDownloadQueryItem::Item)
                                     }
                                 } else {
                                     None
@@ -897,9 +911,9 @@ impl Downloads {
         let _cb = interface.register_callback(move |result: steamworks::DownloadItemResult| {
             if result.app_id == GMOD_APP_ID {
                 let mut in_progress = in_progress_ref.0.lock();
-                let matched = in_progress
-                    .as_ref()
-                    .is_some_and(|download| download.item == result.published_file_id);
+                let matched = in_progress.as_ref().is_some_and(|download| {
+                    Ok(download.item) == WorkshopId::try_from(result.published_file_id)
+                });
                 if let Some(download) = matched.then(|| in_progress.take()).flatten() {
                     if let Some(error) = result.error {
                         log::error!("ISteamUGC Download ERROR: {:?}", download.item);
@@ -974,7 +988,10 @@ impl Downloads {
                     continue;
                 }
 
-                let download_started = interface.client().ugc().download_item(download.item, true);
+                let download_started = interface
+                    .client()
+                    .ugc()
+                    .download_item(download.item.into(), true);
                 if !download_started {
                     download
                         .transaction
@@ -996,7 +1013,7 @@ impl Downloads {
                     return false;
                 }
 
-                if let Some((current, total)) = ugc.item_download_info(download.item)
+                if let Some((current, total)) = ugc.item_download_info(download.item.into())
                     && total > 0
                 {
                     if !download
@@ -1030,14 +1047,14 @@ impl Downloads {
 
 pub fn queue_workshop_downloads(
     downloads: &Arc<Downloads>,
-    ids: impl IntoIterator<Item = PublishedFileId>,
+    ids: impl IntoIterator<Item = WorkshopId>,
 ) {
     downloads.download(ids);
 }
 
 pub fn queue_workshop_download_to(
     downloads: &Arc<Downloads>,
-    item: PublishedFileId,
+    item: WorkshopId,
     destination: ExtractDestination,
     request_id: u64,
 ) {

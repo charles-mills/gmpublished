@@ -17,7 +17,7 @@ pub use model::{
 /// Only the route's own view reads the load status in anger; the app-level
 /// reconnect test needs to name it too. Same shape as the `Row` export above.
 #[cfg(test)]
-pub use state::LoadStatus;
+pub use state::PageStatus;
 pub use state::State;
 pub use update::update;
 pub use view::{GRID_KEY, view};

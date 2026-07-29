@@ -375,7 +375,7 @@ fn apply_transaction_event_to_task(
         TransactionRuntimeEvent::Data { payload, .. } => {
             let mut actions = match payload {
                 TransactionPayload::WorkshopItem(item_id) => {
-                    task.set_workshop_item_id(PublishedFileId::from_backend(*item_id))
+                    task.set_workshop_item_id(PublishedFileId::from(*item_id))
                 }
                 _ => Vec::new(),
             };

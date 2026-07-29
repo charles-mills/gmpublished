@@ -1,5 +1,6 @@
 pub(crate) mod panic;
 pub mod path;
+pub mod threads;
 
 mod macros;
 pub(crate) use macros::NUM_THREADS;

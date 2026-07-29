@@ -3,21 +3,21 @@ use std::{
     time::SystemTime,
 };
 
+use crate::WorkshopId;
 use serde::{Deserialize, Serialize};
-use steamworks::PublishedFileId;
 use thiserror::Error;
 
 const GMA_HEADER: &[u8; 4] = b"GMAD";
 
 /// Zero is never a real Steam Workshop id; treat it as "no id" wherever a
 /// digit-suffix or folder-name parse can produce it.
-pub(crate) fn nonzero_workshop_id(id: u64) -> Option<PublishedFileId> {
-    (id != 0).then_some(PublishedFileId(id))
+pub(crate) fn nonzero_workshop_id(id: u64) -> Option<WorkshopId> {
+    WorkshopId::new(id)
 }
 
 /// Recovers a workshop id from a GMA file's name: `ds_`-prefixed folder ids,
 /// bare numeric names, or a trailing digit suffix on a descriptive name.
-pub fn ws_id_from_file_name<S: AsRef<str>>(file_name: S) -> Option<PublishedFileId> {
+pub fn ws_id_from_file_name<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
     let file_name = file_name.as_ref();
     let file_name = file_name.strip_prefix("ds_").unwrap_or(file_name);
 
@@ -31,7 +31,7 @@ pub fn ws_id_from_file_name<S: AsRef<str>>(file_name: S) -> Option<PublishedFile
 // Deliberate divergence from upstream, which computes `(id + digit) * 10`
 // per step and so returns the id multiplied by 10 for `name_123`-style
 // suffixes (the pure-numeric fast path in ws_id_from_file_name hides this).
-fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<PublishedFileId> {
+fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
     let file_name = file_name.as_ref();
     let start = file_name
         .as_bytes()
@@ -45,10 +45,10 @@ fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<PublishedFileId> 
         .and_then(nonzero_workshop_id)
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, Eq, PartialEq, Error)]
 pub enum GmaError {
     #[error("GMA I/O failed")]
-    IOError(#[source] Option<std::sync::Arc<std::io::Error>>),
+    IOError(#[source] crate::IoFailure),
     #[error("the GMA is malformed")]
     FormatError,
     #[error("the GMA header is not recognisable")]
@@ -75,10 +75,19 @@ pub enum GmaError {
     /// destination was already taken.
     #[error("the extraction destination is unavailable")]
     DestinationUnavailable,
+    /// A filesystem operation failed while packing, and the path it failed on
+    /// is the reportable part.
+    ///
+    /// Carried on the error rather than emitted alongside it: reporting is
+    /// derived from the error the caller receives, so a path cannot reach the
+    /// user through one route while the error it belongs to travels another
+    /// and arrives empty.
+    #[error("packing failed on {}", path.display())]
+    PathIo { path: PathBuf },
 }
 impl From<std::io::Error> for GmaError {
     fn from(error: std::io::Error) -> Self {
-        Self::IOError(Some(std::sync::Arc::new(error)))
+        Self::IOError(error.into())
     }
 }
 impl crate::error_key::HasErrorKey for GmaError {
@@ -93,12 +102,14 @@ impl crate::error_key::HasErrorKey for GmaError {
             Self::Cancelled => keys::CANCELLED,
             Self::ExtractionFailed { .. } => keys::GMA_EXTRACTION_FAILED,
             Self::DestinationUnavailable => keys::GMA_DESTINATION_UNAVAILABLE,
+            Self::PathIo { .. } => keys::PATH_IO_ERROR,
         }
     }
 
     fn error_detail(&self) -> Option<String> {
         match self {
-            Self::IOError(Some(source)) => Some(source.to_string()),
+            Self::IOError(source) => Some(source.to_string()),
+            Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::ExtractionFailed {
                 extracted,
                 failed,
@@ -245,7 +256,7 @@ pub struct GmaFile {
     pub path: PathBuf,
     pub size: u64,
 
-    pub id: Option<PublishedFileId>,
+    pub id: Option<WorkshopId>,
 
     pub metadata: GmaMetadata,
 
@@ -275,7 +286,7 @@ impl GmaFile {
         read::GmaView::mmap(path.as_ref())?.handle(path)
     }
 
-    pub fn set_ws_id(&mut self, id: PublishedFileId) {
+    pub fn set_ws_id(&mut self, id: WorkshopId) {
         self.id = Some(id);
         self.extracted_name = self.derive_extracted_name();
     }
@@ -315,7 +326,7 @@ impl GmaFile {
         }
 
         if let Some(id) = self.id {
-            let id_str = id.0.to_string();
+            let id_str = id.get().to_string();
             if !underscored {
                 extracted_name.reserve(id_str.len() + 1);
                 extracted_name.push('_');
@@ -342,7 +353,7 @@ impl GmaFile {
 }
 
 /// The workshop id a `.gma`'s own file name carries, if any.
-fn id_from_path(path: &Path) -> Option<PublishedFileId> {
+fn id_from_path(path: &Path) -> Option<WorkshopId> {
     ws_id_from_file_name(path.file_stem()?.to_string_lossy())
 }
 
@@ -367,31 +378,19 @@ mod tests {
         assert_eq!(super::ws_id_from_file_name("ds_0"), None);
         assert_eq!(super::ws_id_from_file_name("addon_0"), None);
         assert_eq!(super::ws_id_from_file_name("00"), None);
-        assert_eq!(
-            super::ws_id_from_file_name("123"),
-            Some(steamworks::PublishedFileId(123))
-        );
+        assert_eq!(super::ws_id_from_file_name("123"), WorkshopId::new(123));
     }
 
     use super::*;
 
     #[test]
     fn ws_id_from_file_name_fixes_the_upstream_suffix_off_by_ten() {
-        assert_eq!(ws_id_from_file_name("12345"), Some(PublishedFileId(12345)));
-        assert_eq!(
-            ws_id_from_file_name("ds_12345"),
-            Some(PublishedFileId(12345))
-        );
+        assert_eq!(ws_id_from_file_name("12345"), WorkshopId::new(12345));
+        assert_eq!(ws_id_from_file_name("ds_12345"), WorkshopId::new(12345));
         // Upstream returns 123450 here (its call sites divide by 10 to
         // compensate); we parse the suffix correctly instead.
-        assert_eq!(
-            ws_id_from_file_name("addon_12345"),
-            Some(PublishedFileId(12345))
-        );
-        assert_eq!(
-            extract_suffix_ws_id("addon_12345"),
-            Some(PublishedFileId(12345))
-        );
+        assert_eq!(ws_id_from_file_name("addon_12345"), WorkshopId::new(12345));
+        assert_eq!(extract_suffix_ws_id("addon_12345"), WorkshopId::new(12345));
         assert_eq!(ws_id_from_file_name("addon_without_digits"), None);
     }
 }

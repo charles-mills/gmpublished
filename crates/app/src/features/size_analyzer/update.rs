@@ -1,4 +1,5 @@
 use super::{Effect, Message, State};
+use crate::widgets::grid_rows::CardId;
 
 /// Applies a Size Analyzer route message and returns outward effects as plain data.
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
@@ -59,7 +60,7 @@ fn apply_message(state: &mut State, message: Message) -> Vec<Effect> {
             .map_or_else(Vec::new, |menu| vec![Effect::ContextMenuRequested(menu)]),
         Message::TreemapPressed => state.preview_target().map_or_else(Vec::new, |target| {
             vec![Effect::AddonDragPressed {
-                card_id: target.path.display().to_string(),
+                card_id: CardId::from(target.path.display().to_string()),
                 workshop_id: target.workshop_id,
             }]
         }),
@@ -76,6 +77,7 @@ fn append_preview_url_effect(effects: &mut Vec<Effect>, state: &mut State) {
 
 #[cfg(test)]
 mod tests {
+    use crate::widgets::grid_rows::CardId;
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
@@ -282,7 +284,7 @@ mod tests {
         assert_eq!(
             update(&mut state, Message::TreemapPressed),
             vec![Effect::AddonDragPressed {
-                card_id: "tool-a.gma".to_owned(),
+                card_id: CardId::from("tool-a.gma"),
                 workshop_id: Some(PublishedFileId::fixture(123)),
             }]
         );

@@ -620,9 +620,9 @@ mod tests {
     }
 
     /// Every `ErrorKey` the UI can surface must derive a Fluent key that
-    /// exists, or `translated_error` silently degrades to `err-unknown`. That
-    /// is exactly what a prose key value like `ErrorKey("Garry's Mod path is
-    /// not configured")` used to do.
+    /// exists, or `translated_error` silently degrades to `err-unknown` —
+    /// which is what a prose key value like `ErrorKey("Garry's Mod path is
+    /// not configured")` would do.
     #[test]
     fn error_keys_resolve_to_their_own_message_not_the_fallback() {
         use gmpublished_backend::error_key::keys;

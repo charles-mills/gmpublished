@@ -7,7 +7,7 @@ use crate::theme::ViewCtx;
 use crate::widgets::addon_grid;
 use crate::widgets::route_state::{self, Glyph, RouteState, Tone};
 
-use super::state::LoadStatus;
+use super::state::Library;
 use super::{Message, State};
 
 /// Identifies this route's grid across route switches; see `addon_grid::view`.
@@ -17,7 +17,7 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     // A found-but-empty library is the same shape of surface as a missing
     // prerequisite, so it uses the same panel — the difference is the glyph
     // (no strike) and the tone (nothing is wrong, there is just nothing here).
-    if matches!(state.load_status(), LoadStatus::Empty) {
+    if matches!(state.library(), Library::Scanned(rows) if rows.is_empty()) {
         return route_state::view(
             RouteState::new(
                 Glyph::Icon(assets::icons::package_open()),
@@ -60,12 +60,12 @@ fn header_line<'a>(state: &State, ctx: ViewCtx<'a>) -> Option<Element<'a, Messag
 }
 
 fn status_line(state: &State, i18n: &I18n) -> Option<String> {
-    match state.load_status() {
-        LoadStatus::Idle | LoadStatus::Ready => None,
-        // Empty is handled by the panel in `view`, not this header line.
-        LoadStatus::Loading => Some(i18n.tr("installed-addons-loading")),
-        LoadStatus::Empty => None,
-        LoadStatus::Error(error) => Some(i18n.trn(
+    match state.library() {
+        // A completed scan says everything it needs to through the grid, or —
+        // when it found nothing — through the panel in `view`.
+        Library::Unscanned | Library::Scanned(_) => None,
+        Library::Scanning => Some(i18n.tr("installed-addons-loading")),
+        Library::Failed(error) => Some(i18n.trn(
             "installed-addons-error",
             &[("error", Arg::Text(translated_error(i18n, error).as_str()))],
         )),

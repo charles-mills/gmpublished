@@ -168,7 +168,7 @@ pub fn verify_content_path(
         request.display_path,
         request.path,
         ContentCollectionPolicy::Publish {
-            ignore_globs: &settings.ignore_globs,
+            ignore_globs: &settings.backend.ignore_globs,
             whitelist: &ctx.whitelist_snapshot(),
         },
     )
@@ -201,15 +201,24 @@ pub fn apply_ignore_pattern_mutation(
     if let Err(error) = ctx.update_settings_snapshot(|settings| match mutation {
         IgnorePatternMutation::Add(pattern) => {
             let pattern = pattern.trim();
-            if !pattern.is_empty() && !settings.ignore_globs.iter().any(|glob| glob == pattern) {
-                settings.ignore_globs.push(pattern.to_owned());
+            if !pattern.is_empty()
+                && !settings
+                    .backend
+                    .ignore_globs
+                    .iter()
+                    .any(|glob| glob == pattern)
+            {
+                settings.backend.ignore_globs.push(pattern.to_owned());
                 changed = true;
             }
         }
         IgnorePatternMutation::Remove(pattern) => {
-            let before = settings.ignore_globs.len();
-            settings.ignore_globs.retain(|glob| glob != &pattern);
-            changed = settings.ignore_globs.len() != before;
+            let before = settings.backend.ignore_globs.len();
+            settings
+                .backend
+                .ignore_globs
+                .retain(|glob| glob != &pattern);
+            changed = settings.backend.ignore_globs.len() != before;
         }
     }) {
         save_error = Some(error.to_string());
@@ -303,14 +312,21 @@ pub fn run_publish_icon_submit(
 pub fn ignored_patterns_from_settings(settings: &Settings) -> Vec<IgnoredPattern> {
     let mut patterns = Vec::with_capacity(
         settings
+            .backend
             .ignore_globs
             .len()
             .saturating_add(whitelist::DEFAULT_IGNORE.len()),
     );
-    patterns.extend(settings.ignore_globs.iter().map(|pattern| IgnoredPattern {
-        pattern: pattern.clone(),
-        default_pattern: false,
-    }));
+    patterns.extend(
+        settings
+            .backend
+            .ignore_globs
+            .iter()
+            .map(|pattern| IgnoredPattern {
+                pattern: pattern.clone(),
+                default_pattern: false,
+            }),
+    );
     let mut default_patterns = whitelist::DEFAULT_IGNORE.to_vec();
     default_patterns.sort_unstable();
     patterns.extend(default_patterns.into_iter().map(|pattern| IgnoredPattern {
@@ -700,10 +716,8 @@ mod tests {
 
     #[test]
     fn ignored_patterns_keep_user_order_then_defaults_alphabetical() {
-        let settings = Settings {
-            ignore_globs: vec!["zzz/*".to_owned(), "aaa.txt".to_owned()],
-            ..Settings::default()
-        };
+        let mut settings = Settings::default();
+        settings.backend.ignore_globs = vec!["zzz/*".to_owned(), "aaa.txt".to_owned()];
 
         let patterns = ignored_patterns_from_settings(&settings);
 

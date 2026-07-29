@@ -169,13 +169,7 @@ impl GmaFile {
             crc_offset: u64,
         }
 
-        let path_io_error = |transaction: &Transaction, path: PathBuf| {
-            transaction.error(crate::transactions::TransactionError::detailed(
-                crate::error_key::keys::PATH_IO_ERROR,
-                crate::transactions::detail_from_serialize(path),
-            ));
-            GmaError::IOError(None)
-        };
+        let path_io_error = |path: PathBuf| GmaError::PathIo { path };
 
         let mut file_list: BTreeMap<String, Pending> = BTreeMap::new();
         {
@@ -191,7 +185,7 @@ impl GmaFile {
                         let path = err
                             .path()
                             .map_or_else(|| src_path.to_path_buf(), Path::to_path_buf);
-                        return Err(path_io_error(transaction, path));
+                        return Err(path_io_error(path));
                     }
                 };
                 if !entry.file_type().is_file() {
@@ -204,7 +198,7 @@ impl GmaFile {
                     .ok()
                     .and_then(relative_entry_name)
                 else {
-                    return Err(path_io_error(transaction, entry.into_path()));
+                    return Err(path_io_error(entry.into_path()));
                 };
 
                 if whitelist::is_whitelisted_in(&whitelist_snapshot, &relative_path) {
@@ -217,7 +211,7 @@ impl GmaFile {
                     // ignored/non-whitelisted file must not fail the create.
                     let size = match entry.metadata() {
                         Ok(metadata) => metadata.len(),
-                        Err(_) => return Err(path_io_error(transaction, entry.into_path())),
+                        Err(_) => return Err(path_io_error(entry.into_path())),
                     };
                     file_list.insert(
                         relative_path,
@@ -271,7 +265,7 @@ impl GmaFile {
 
             if pending.size > BATCH_FILE_MAX {
                 let Ok(mut reader) = File::open(&pending.path) else {
-                    return Err(path_io_error(transaction, pending.path.clone()));
+                    return Err(path_io_error(pending.path.clone()));
                 };
 
                 let mut crc32 = crc32fast::Hasher::new();
@@ -291,11 +285,11 @@ impl GmaFile {
                             written += n as u64;
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(_) => return Err(path_io_error(transaction, pending.path.clone())),
+                        Err(_) => return Err(path_io_error(pending.path.clone())),
                     }
                 }
                 if written != pending.size {
-                    return Err(path_io_error(transaction, pending.path.clone()));
+                    return Err(path_io_error(pending.path.clone()));
                 }
 
                 crcs.push(crc32.finalize());
@@ -340,7 +334,7 @@ impl GmaFile {
                             written_files += 1.;
                             transaction.progress(written_files / total);
                         }
-                        Err(path) => return Err(path_io_error(transaction, path)),
+                        Err(path) => return Err(path_io_error(path)),
                     }
                 }
                 i = batch_end;
@@ -393,7 +387,7 @@ mod tests {
         let destination = tempfile::tempdir().expect("tempdir");
         let gma_path = destination.path().join("cancelled.gma");
 
-        let transactions = Transactions::new(Arc::new(BackendEventCollector::default()), false);
+        let transactions = Transactions::new(Arc::new(BackendEventCollector::default()));
         let transaction = transactions.begin();
         assert!(transaction.cancel());
 

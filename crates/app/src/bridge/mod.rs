@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -21,11 +20,9 @@ pub mod tasks;
 pub mod ui_error;
 pub mod vpk;
 
-use self::domain::PublishedFileId;
 pub use self::gma::{ExtractDestination, ExtractionOverwriteMode};
 pub use gmpublished_backend::appdata::{
-    AppDataSnapshot as BackendAppDataSnapshot, Settings as BackendSettings,
-    SettingsPublishedFileId, TitlebarPreference,
+    AppDataSnapshot as BackendAppDataSnapshot, Settings as BackendSettings, TitlebarPreference,
 };
 
 const MAX_DESTINATIONS: usize = 20;
@@ -53,9 +50,9 @@ impl Default for UiSettings {
 impl UiSettings {
     pub(crate) fn from_settings(settings: &Settings) -> Self {
         Self {
-            play_gifs_by_default: settings.play_gifs_by_default,
-            download_count_format: settings.download_count_format,
-            theme_preset: settings.theme_preset,
+            play_gifs_by_default: settings.ui.play_gifs_by_default,
+            download_count_format: settings.ui.download_count_format,
+            theme_preset: settings.ui.theme_preset,
         }
     }
 
@@ -174,116 +171,47 @@ where
     Ok(serde_json::from_value(value).ok())
 }
 
-#[derive(Clone, Debug, PartialEq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each bool is an independent user preference toggle, not exclusive states"
-)]
+/// The two settings files the app reads as one value.
+///
+/// Composed rather than flattened. Mirroring [`BackendSettings`] field by
+/// field would mean a new backend setting needs a field here and a line in
+/// each direction of the conversion — and a forgotten line still compiles,
+/// silently dropping the value on the next save. Holding the backend's own
+/// struct leaves nothing to keep in step.
+///
+/// Which half a setting lives in is which file it persists to, so
+/// `settings.backend` / `settings.ui` at a call site is information, not noise.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
-    pub(crate) temp: Option<PathBuf>,
-    pub(crate) gmod: Option<PathBuf>,
-    pub(crate) user_data: Option<PathBuf>,
-    pub(crate) downloads: Option<PathBuf>,
-    pub(crate) sounds: bool,
-    pub(crate) play_gifs_by_default: bool,
-    pub(crate) window_size: (f64, f64),
-    pub(crate) window_maximized: bool,
-    pub(crate) titlebar: TitlebarPreference,
-    pub(crate) extract_destination: ExtractDestination,
-    pub(crate) destinations: Vec<PathBuf>,
-    pub(crate) create_folder_on_extract: bool,
-    pub(crate) ignore_globs: Vec<String>,
-    pub(crate) my_workshop_local_paths: HashMap<PublishedFileId, PathBuf>,
-    pub(crate) upscale_addon_icon: bool,
-    pub(crate) language: Option<String>,
-    pub(crate) download_count_format: DownloadCountFormat,
-    pub(crate) theme_preset: ThemePreset,
-    pub(crate) extract_overwrite_mode: ExtractionOverwriteMode,
-    pub(crate) color_neutral: u32,
-    pub(crate) color_error: u32,
-    pub(crate) color_success: u32,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self::from_backend(BackendSettings::default(), &UiSettings::default())
-    }
+    pub(crate) backend: BackendSettings,
+    pub(crate) ui: UiSettings,
 }
 
 impl Settings {
     pub(crate) fn from_backend(backend: BackendSettings, ui: &UiSettings) -> Self {
         Self {
-            temp: backend.temp,
-            gmod: backend.gmod,
-            user_data: backend.user_data,
-            downloads: backend.downloads,
-            sounds: backend.sounds,
-            play_gifs_by_default: ui.play_gifs_by_default,
-            window_size: backend.window_size,
-            window_maximized: backend.window_maximized,
-            titlebar: backend.titlebar,
-            extract_destination: backend.extract_destination,
-            destinations: backend.destinations,
-            create_folder_on_extract: backend.create_folder_on_extract,
-            ignore_globs: backend.ignore_globs,
-            my_workshop_local_paths: backend
-                .my_workshop_local_paths
-                .into_iter()
-                .filter_map(|(id, path)| Some((PublishedFileId::new(id.0)?, path)))
-                .collect(),
-            upscale_addon_icon: backend.upscale_addon_icon,
-            language: backend.language,
-            download_count_format: ui.download_count_format,
-            theme_preset: ui.theme_preset,
-            extract_overwrite_mode: backend.extract_overwrite_mode,
-            color_neutral: backend.color_neutral,
-            color_error: backend.color_error,
-            color_success: backend.color_success,
+            backend,
+            ui: ui.clone(),
         }
     }
 
     pub(crate) fn to_backend(&self) -> BackendSettings {
-        BackendSettings {
-            schema: gmpublished_backend::appdata::SETTINGS_SCHEMA,
-            temp: self.temp.clone(),
-            gmod: self.gmod.clone(),
-            user_data: self.user_data.clone(),
-            downloads: self.downloads.clone(),
-            sounds: self.sounds,
-            window_size: self.window_size,
-            window_maximized: self.window_maximized,
-            titlebar: self.titlebar,
-            extract_destination: self.extract_destination.clone(),
-            destinations: self.destinations.clone(),
-            create_folder_on_extract: self.create_folder_on_extract,
-            ignore_globs: self.ignore_globs.clone(),
-            my_workshop_local_paths: self
-                .my_workshop_local_paths
-                .iter()
-                .map(|(id, path)| (SettingsPublishedFileId(id.get()), path.clone()))
-                .collect(),
-            upscale_addon_icon: self.upscale_addon_icon,
-            language: self.language.clone(),
-            extract_overwrite_mode: self.extract_overwrite_mode.clone(),
-            color_neutral: self.color_neutral,
-            color_error: self.color_error,
-            color_success: self.color_success,
-        }
+        self.backend.clone()
     }
 
     pub(crate) fn apply_ui_settings(&mut self, ui: &UiSettings) {
-        self.play_gifs_by_default = ui.play_gifs_by_default;
-        self.download_count_format = ui.download_count_format;
-        self.theme_preset = ui.theme_preset;
+        self.ui = ui.clone();
     }
 
     pub(crate) fn sanitize(&mut self, paths: &AppPaths) {
-        self.destinations
+        self.backend
+            .destinations
             .retain(|dir| dir.is_absolute() && dir.is_dir());
-        self.my_workshop_local_paths
+        self.backend
+            .my_workshop_local_paths
             .retain(|_, dir| dir.is_absolute() && dir.is_dir());
-        self.extract_destination = self.sanitized_extract_destination(paths);
-        self.destinations.truncate(MAX_DESTINATIONS);
+        self.backend.extract_destination = self.sanitized_extract_destination(paths);
+        self.backend.destinations.truncate(MAX_DESTINATIONS);
     }
 
     /// The `extract_destination` `sanitize` would settle on, without
@@ -291,19 +219,19 @@ impl Settings {
     /// mutable (or cloned) `Settings` — for read-only callers such as a
     /// status label that only care about the resolved destination.
     pub(crate) fn sanitized_extract_destination(&self, paths: &AppPaths) -> ExtractDestination {
-        match &self.extract_destination {
+        match &self.backend.extract_destination {
             ExtractDestination::Directory(path) => {
-                if self.create_folder_on_extract || !path.is_dir() {
+                if self.backend.create_folder_on_extract || !path.is_dir() {
                     ExtractDestination::NamedDirectory(path.to_owned())
                 } else {
-                    self.extract_destination.clone()
+                    self.backend.extract_destination.clone()
                 }
             }
             ExtractDestination::NamedDirectory(path) => {
-                if !self.create_folder_on_extract || !path.is_dir() {
+                if !self.backend.create_folder_on_extract || !path.is_dir() {
                     ExtractDestination::Directory(path.to_owned())
                 } else {
-                    self.extract_destination.clone()
+                    self.backend.extract_destination.clone()
                 }
             }
             ExtractDestination::Downloads if paths.downloads_dir.is_none() => {
@@ -312,7 +240,7 @@ impl Settings {
             ExtractDestination::Addons if paths.gmod_dir.is_none() => ExtractDestination::default(),
             ExtractDestination::Downloads
             | ExtractDestination::Addons
-            | ExtractDestination::Temp => self.extract_destination.clone(),
+            | ExtractDestination::Temp => self.backend.extract_destination.clone(),
         }
     }
 }
@@ -352,14 +280,14 @@ impl AppPaths {
     }
 
     pub(crate) fn resolve_with_defaults(settings: &Settings, mut defaults: Self) -> Self {
-        defaults.temp_dir =
-            valid_dir(settings.temp.as_ref()).unwrap_or_else(|| defaults.default_temp_dir.clone());
-        defaults.user_data_dir = valid_dir(settings.user_data.as_ref())
+        defaults.temp_dir = valid_dir(settings.backend.temp.as_ref())
+            .unwrap_or_else(|| defaults.default_temp_dir.clone());
+        defaults.user_data_dir = valid_dir(settings.backend.user_data.as_ref())
             .unwrap_or_else(|| defaults.default_user_data_dir.clone());
-        defaults.downloads_dir = valid_dir(settings.downloads.as_ref())
+        defaults.downloads_dir = valid_dir(settings.backend.downloads.as_ref())
             .or_else(|| defaults.default_downloads_dir.clone());
         let default_gmod_dir = defaults.gmod_dir.take();
-        defaults.gmod_dir = valid_dir(settings.gmod.as_ref())
+        defaults.gmod_dir = valid_dir(settings.backend.gmod.as_ref())
             .or_else(|| default_gmod_dir.and_then(|path| path.is_dir().then_some(path)));
         defaults
     }
@@ -487,6 +415,46 @@ impl DownloadCountFormat {
 mod tests {
     use super::*;
 
+    /// Crossing the bridge must lose nothing. Holding the backend's own struct
+    /// is what guarantees it: there is no per-field list to fall out of step
+    /// with, so a setting added to `BackendSettings` needs no change here and
+    /// cannot be dropped on the next save.
+    #[test]
+    fn backend_settings_survive_a_round_trip_through_the_bridge() {
+        let mut backend = BackendSettings {
+            gmod: Some(PathBuf::from("/games/gmod")),
+            ignore_globs: vec!["materials/private/*".to_owned()],
+            destinations: vec![PathBuf::from("/extract/here")],
+            color_neutral: 0x00AA_BBCC,
+            ..BackendSettings::default()
+        };
+        backend.my_workshop_local_paths.insert(
+            gmpublished_backend::WorkshopId::new(4321).expect("fixture ids are nonzero"),
+            PathBuf::from("/addons/mine"),
+        );
+
+        let settings = Settings::from_backend(backend.clone(), &UiSettings::default());
+
+        assert_eq!(settings.to_backend(), backend);
+    }
+
+    /// The UI half is replaced wholesale for the same reason.
+    #[test]
+    fn applying_ui_settings_replaces_every_ui_field_and_no_backend_field() {
+        let backend = BackendSettings::default();
+        let mut settings = Settings::from_backend(backend.clone(), &UiSettings::default());
+        let ui = UiSettings {
+            play_gifs_by_default: false,
+            download_count_format: DownloadCountFormat::default(),
+            theme_preset: ThemePreset::Light,
+        };
+
+        settings.apply_ui_settings(&ui);
+
+        assert_eq!(settings.ui, ui);
+        assert_eq!(settings.to_backend(), backend);
+    }
+
     #[test]
     fn ui_settings_file_path_stays_next_to_upstream_settings() {
         assert_eq!(
@@ -590,7 +558,7 @@ mod tests {
             &UiSettings::default(),
         );
 
-        assert!(settings.gmod.is_none());
+        assert!(settings.backend.gmod.is_none());
         assert_eq!(paths.gmod_dir, Some(gmod_dir));
     }
 
@@ -622,12 +590,13 @@ mod tests {
             &UiSettings::default(),
         );
 
-        assert!(settings.downloads.is_none());
+        assert!(settings.backend.downloads.is_none());
         assert_eq!(paths.default_downloads_dir, Some(downloads_dir.clone()));
         assert_eq!(paths.downloads_dir, Some(downloads_dir.clone()));
 
         let mut settings_with_invalid_override = settings;
-        settings_with_invalid_override.downloads = Some(temp.path().join("missing-downloads"));
+        settings_with_invalid_override.backend.downloads =
+            Some(temp.path().join("missing-downloads"));
         let resolved = AppPaths::resolve_with_defaults(&settings_with_invalid_override, paths);
         assert_eq!(resolved.downloads_dir, Some(downloads_dir));
     }

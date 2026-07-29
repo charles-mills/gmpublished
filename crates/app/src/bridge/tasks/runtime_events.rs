@@ -314,7 +314,7 @@ impl From<BackendExtractionStartedEvent> for BackendRuntimeEvent {
             transaction_id: event.transaction_id,
             source_path: event.source_path,
             file_name: event.file_name,
-            workshop_id: event.workshop_id.map(PublishedFileId::from_backend),
+            workshop_id: event.workshop_id.map(PublishedFileId::from),
             request_id: event.request_id,
         }
     }

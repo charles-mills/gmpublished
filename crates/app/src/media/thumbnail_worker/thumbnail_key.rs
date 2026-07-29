@@ -108,8 +108,7 @@ impl ThumbnailKey {
 
     #[must_use]
     pub(crate) fn with_max_edge_and_mode(&self, max_edge: u32, mode: ThumbnailMode) -> Self {
-        // Cloning the source is an `Arc` bump for URLs, so this no longer
-        // copies the string.
+        // Cloning the source is an `Arc` bump for URLs, not a string copy.
         Self::build(self.source.clone(), max_edge, mode)
     }
 

@@ -22,7 +22,7 @@ impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("tempdir");
         let collector = BackendEventCollector::default();
-        let transactions = Transactions::new(Arc::new(collector.clone()), false);
+        let transactions = Transactions::new(Arc::new(collector.clone()));
         let app_data = AppData::load(
             AppDataPaths::for_test_root(temp.path()),
             transactions.clone(),
@@ -609,7 +609,7 @@ fn addon_json_exists_before_finished_event_fires() {
     });
 
     let app_temp = tempfile::tempdir().expect("appdata tempdir");
-    let transactions = Transactions::new(sink, false);
+    let transactions = Transactions::new(sink);
     let app_data = AppData::load(
         AppDataPaths::for_test_root(app_temp.path()),
         transactions.clone(),

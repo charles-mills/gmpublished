@@ -169,7 +169,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         let theme_preset = ThemePreset::default();
-        let download_count_format = Settings::default().download_count_format;
+        let download_count_format = Settings::default().ui.download_count_format;
         let system_scheme = SystemColorScheme::Dark;
         let accent_inputs = theme::AccentInputs::for_preset(theme_preset);
         let mut state = Self {
@@ -189,7 +189,7 @@ impl Default for State {
             prerequisites: prerequisites::State::default(),
             modal_stack: modal_stack::State::default(),
             tasks_overlay: tasks_overlay::State::default(),
-            chrome_strategy: shell::ChromeStrategy::resolve(Settings::default().titlebar),
+            chrome_strategy: shell::ChromeStrategy::resolve(Settings::default().backend.titlebar),
             theme_preset,
             download_count_format,
             system_scheme,
@@ -228,13 +228,13 @@ impl State {
     }
 
     fn apply_runtime_settings(&mut self, settings: &Settings) {
-        self.theme_preset = settings.theme_preset;
+        self.theme_preset = settings.ui.theme_preset;
         self.accent_inputs = settings::accent_inputs_from_settings(settings);
         self.tokens = resolve_tokens(self.theme_preset, self.system_scheme, self.accent_inputs);
-        self.chrome_strategy = shell::ChromeStrategy::resolve(settings.titlebar);
-        self.download_count_format = settings.download_count_format;
-        self.apply_runtime_language(settings.language.as_deref());
-        self.set_play_gifs_by_default(settings.play_gifs_by_default);
+        self.chrome_strategy = shell::ChromeStrategy::resolve(settings.backend.titlebar);
+        self.download_count_format = settings.ui.download_count_format;
+        self.apply_runtime_language(settings.backend.language.as_deref());
+        self.set_play_gifs_by_default(settings.ui.play_gifs_by_default);
         self.apply_download_count_formatter();
     }
 
@@ -423,7 +423,7 @@ fn search_file_items_from_library(
         let shared = gmpublished_backend::search::FileSearchAddon::new(
             addon.canonical_path.clone(),
             addon.display_title(),
-            addon.workshop_id.map(PublishedFileId::get),
+            addon.workshop_id.map(Into::into),
         );
         items.extend(addon.meta.entries.iter().map(move |entry| {
             gmpublished_backend::search::SearchItem::new_installed_addon_file(

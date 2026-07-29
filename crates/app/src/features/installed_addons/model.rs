@@ -1,4 +1,4 @@
-use std::{ops::Range, path::PathBuf};
+use std::path::PathBuf;
 
 use iced::widget::image;
 
@@ -18,11 +18,13 @@ use crate::widgets::{
     grid_rows::{self, GridRow},
 };
 
-use crate::widgets::grid_rows::{ADDON_THUMBNAIL_MAX_EDGE, RowThumbnail, THUMBNAIL_PLAY_POLICY};
+use crate::widgets::grid_rows::{
+    ADDON_THUMBNAIL_MAX_EDGE, CardId, RowThumbnail, THUMBNAIL_PLAY_POLICY,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
-    id: String,
+    id: CardId,
     title: String,
     path: PathBuf,
     workshop_id: Option<PublishedFileId>,
@@ -39,7 +41,7 @@ pub struct Row {
 impl Row {
     fn from_installed(addon: &InstalledAddon) -> Self {
         Self {
-            id: addon.path.to_string_lossy().into_owned(),
+            id: CardId::from(addon.path.to_string_lossy().into_owned()),
             title: addon.display_title(),
             path: addon.path.clone(),
             workshop_id: addon.workshop_id,
@@ -54,10 +56,6 @@ impl Row {
         }
     }
 
-    pub(crate) fn id(&self) -> &str {
-        &self.id
-    }
-
     pub(crate) const fn workshop_id(&self) -> Option<PublishedFileId> {
         self.workshop_id
     }
@@ -67,7 +65,7 @@ impl Row {
             && self.modified_epoch_seconds == other.modified_epoch_seconds
     }
 
-    pub(crate) fn card_thumbnail(&self, play_gifs_by_default: bool) -> addon_card::Thumbnail {
+    fn card_thumbnail_inner(&self, play_gifs_by_default: bool) -> addon_card::Thumbnail {
         match &self.thumbnail {
             RowThumbnail::Loading => addon_card::Thumbnail::Loading,
             RowThumbnail::Dead => addon_card::Thumbnail::Dead,
@@ -94,7 +92,7 @@ impl Row {
         }
     }
 
-    pub(crate) fn to_grid_item(
+    fn to_grid_item_inner(
         &self,
         play_gifs_by_default: bool,
         formatter: DownloadCountFormatter,
@@ -171,7 +169,7 @@ impl Row {
             position: iced::Point::ORIGIN,
             row_id: self.id.clone(),
             path: self.path.clone(),
-            path_text: self.id.clone(),
+            path_text: self.id.to_string(),
             workshop_id: self.workshop_id,
             workshop_url,
             preview_url: self.preview_url.clone(),
@@ -209,7 +207,7 @@ impl Row {
         delivery: &thumbnail_demand::Delivery,
         current_generation: Generation,
     ) -> bool {
-        if generation != current_generation || delivery.id.as_str() != self.id {
+        if generation != current_generation || delivery.id.as_str() != self.id.as_str() {
             return false;
         }
 
@@ -236,11 +234,16 @@ impl Row {
         true
     }
 
+    /// Whether this row would animate right now, given the user's default.
+    /// The pane reaches the same decision inside `advance_animation`; this
+    /// exposes it for the policy tests below.
+    #[cfg(test)]
     pub(super) fn has_active_animation(&self, play_gifs_by_default: bool) -> bool {
-        self.thumbnail_should_play(play_gifs_by_default) && self.has_animation()
+        self.holds_animation() && self.thumbnail_should_play(play_gifs_by_default)
     }
 
-    pub(super) fn has_animation(&self) -> bool {
+    /// Whether a playable animation exists at all, regardless of policy.
+    pub(super) fn holds_animation(&self) -> bool {
         matches!(
             self.thumbnail,
             RowThumbnail::Ready {
@@ -250,7 +253,7 @@ impl Row {
         )
     }
 
-    pub(super) fn advance_animation(
+    fn advance_animation_inner(
         &mut self,
         elapsed: std::time::Duration,
         play_gifs_by_default: bool,
@@ -281,7 +284,7 @@ impl Row {
     #[cfg(test)]
     pub(crate) fn for_test(id: &str, title: &str, workshop_id: Option<PublishedFileId>) -> Self {
         Self {
-            id: id.to_owned(),
+            id: CardId::from(id),
             title: title.to_owned(),
             path: PathBuf::from(id),
             workshop_id,
@@ -328,6 +331,34 @@ impl Row {
 }
 
 impl GridRow for Row {
+    fn id(&self) -> &CardId {
+        &self.id
+    }
+
+    fn to_grid_item(
+        &self,
+        play_gifs_by_default: bool,
+        formatter: DownloadCountFormatter,
+    ) -> addon_grid::Item {
+        self.to_grid_item_inner(play_gifs_by_default, formatter)
+    }
+
+    fn card_thumbnail(&self, play_gifs_by_default: bool) -> addon_card::Thumbnail {
+        self.card_thumbnail_inner(play_gifs_by_default)
+    }
+
+    fn is_animating(&self, play_gifs_by_default: bool) -> bool {
+        self.holds_animation() && self.thumbnail_should_play(play_gifs_by_default)
+    }
+
+    fn advance_animation(
+        &mut self,
+        elapsed: std::time::Duration,
+        play_gifs_by_default: bool,
+    ) -> bool {
+        self.advance_animation_inner(elapsed, play_gifs_by_default)
+    }
+
     fn thumbnail_demand(
         &self,
         priority: thumbnail_demand::Priority,
@@ -345,7 +376,7 @@ impl GridRow for Row {
         }
 
         Some(thumbnail_demand::Demand {
-            id: thumbnail_demand::DemandId::new(self.id.clone()),
+            id: thumbnail_demand::DemandId::new(self.id.to_string()),
             input: ThumbnailInput::from_url(preview_url),
             logical_max_edge: ADDON_THUMBNAIL_MAX_EDGE,
             priority,
@@ -373,7 +404,7 @@ impl GridRow for Row {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewTarget {
-    pub(crate) row_id: String,
+    pub(crate) row_id: CardId,
     pub(crate) path: PathBuf,
     pub(crate) title: String,
     pub(crate) workshop_id: Option<PublishedFileId>,
@@ -386,7 +417,7 @@ pub struct PreviewTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextMenuRequest {
     pub(crate) position: iced::Point,
-    pub(crate) row_id: String,
+    pub(crate) row_id: CardId,
     pub(crate) path: PathBuf,
     pub(crate) path_text: String,
     pub(crate) workshop_id: Option<PublishedFileId>,
@@ -488,14 +519,6 @@ pub fn refresh_metadata_streaming(
             on_batch(patches);
         }
     })
-}
-
-pub fn thumbnail_demands(
-    rows: &[Row],
-    visible_range: Range<usize>,
-    generation: Generation,
-) -> thumbnail_demand::DemandSet {
-    grid_rows::thumbnail_demands(rows, visible_range, generation, thumbnail_owner())
 }
 
 pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {
@@ -668,7 +691,12 @@ mod tests {
         loading.thumbnail = RowThumbnail::Loading;
         let dead = Row::for_test("/tmp/dead.gma", "Dead", Some(PublishedFileId::fixture(2)));
 
-        let set = thumbnail_demands(&[loading, dead], 0..2, Generation::from_raw(7));
+        let set = grid_rows::thumbnail_demands(
+            &[loading, dead],
+            0..2,
+            Generation::from_raw(7),
+            thumbnail_owner(),
+        );
 
         assert_eq!(set.owner, thumbnail_owner());
         assert_eq!(set.generation, Generation::from_raw(7));

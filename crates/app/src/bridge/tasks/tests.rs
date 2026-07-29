@@ -206,10 +206,10 @@ fn ui_settings_persist_across_service_restart_separately_from_backend_settings()
 
     services
         .update_settings_snapshot(|settings| {
-            settings.sounds = false;
-            settings.play_gifs_by_default = false;
-            settings.download_count_format = DownloadCountFormat::Comma;
-            settings.theme_preset = ThemePreset::Light;
+            settings.backend.sounds = false;
+            settings.ui.play_gifs_by_default = false;
+            settings.ui.download_count_format = DownloadCountFormat::Comma;
+            settings.ui.theme_preset = ThemePreset::Light;
         })
         .expect("settings update");
 
@@ -224,10 +224,13 @@ fn ui_settings_persist_across_service_restart_separately_from_backend_settings()
     let restarted = BackendServices::for_test_with_ui_settings_file(ui_settings_file);
     let settings = restarted.settings_snapshot();
 
-    assert_eq!(settings.sounds, Settings::default().sounds);
-    assert!(!settings.play_gifs_by_default);
-    assert_eq!(settings.download_count_format, DownloadCountFormat::Comma);
-    assert_eq!(settings.theme_preset, ThemePreset::Light);
+    assert_eq!(settings.backend.sounds, Settings::default().backend.sounds);
+    assert!(!settings.ui.play_gifs_by_default);
+    assert_eq!(
+        settings.ui.download_count_format,
+        DownloadCountFormat::Comma
+    );
+    assert_eq!(settings.ui.theme_preset, ThemePreset::Light);
 }
 
 #[test]
@@ -238,9 +241,9 @@ fn resetting_settings_persists_default_ui_settings() {
 
     services
         .update_settings_snapshot(|settings| {
-            settings.play_gifs_by_default = false;
-            settings.download_count_format = DownloadCountFormat::Period;
-            settings.theme_preset = ThemePreset::ClassicSource;
+            settings.ui.play_gifs_by_default = false;
+            settings.ui.download_count_format = DownloadCountFormat::Period;
+            settings.ui.theme_preset = ThemePreset::ClassicSource;
         })
         .expect("non-default UI settings update");
     services.reset_settings().expect("reset settings");
@@ -260,9 +263,9 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
     let services = BackendServices::for_test_with_ui_settings_file(ui_settings_file.clone());
     services
         .update_settings_snapshot(|settings| {
-            settings.play_gifs_by_default = false;
-            settings.download_count_format = DownloadCountFormat::Space;
-            settings.theme_preset = ThemePreset::ClassicSource;
+            settings.ui.play_gifs_by_default = false;
+            settings.ui.download_count_format = DownloadCountFormat::Space;
+            settings.ui.theme_preset = ThemePreset::ClassicSource;
         })
         .expect("UI settings update");
 
@@ -293,12 +296,15 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
         },
     });
 
-    assert!(!settings.sounds);
-    assert_eq!(settings.language.as_deref(), Some("fr"));
+    assert!(!settings.backend.sounds);
+    assert_eq!(settings.backend.language.as_deref(), Some("fr"));
     assert_eq!(paths.temp_dir, temp_dir);
-    assert!(!settings.play_gifs_by_default);
-    assert_eq!(settings.download_count_format, DownloadCountFormat::Space);
-    assert_eq!(settings.theme_preset, ThemePreset::ClassicSource);
+    assert!(!settings.ui.play_gifs_by_default);
+    assert_eq!(
+        settings.ui.download_count_format,
+        DownloadCountFormat::Space
+    );
+    assert_eq!(settings.ui.theme_preset, ThemePreset::ClassicSource);
     assert_eq!(
         UiSettings::load_from_file_or_default(&ui_settings_file),
         UiSettings::from_settings(&settings)
@@ -323,8 +329,8 @@ fn failed_backend_settings_save_leaves_snapshot_and_live_appdata_unchanged() {
         .expect("lock down settings dir");
 
     let result = services.update_settings_snapshot(|settings| {
-        settings.sounds = !settings.sounds;
-        settings.language = Some("unsaved".to_owned());
+        settings.backend.sounds = !settings.backend.sounds;
+        settings.backend.language = Some("unsaved".to_owned());
     });
 
     fs::set_permissions(settings_dir, original_mode).expect("restore settings dir permissions");
@@ -376,7 +382,9 @@ fn backend_context_forwards_installed_backend_events() {
                 transaction_id: TransactionId::from_raw(41),
                 source_path: Some(PathBuf::from("/tmp/addon.gma")),
                 file_name: Some("addon.gma".to_owned()),
-                workshop_id: Some(gmpublished_backend::appdata::SettingsPublishedFileId(123)),
+                workshop_id: Some(
+                    gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
+                ),
                 request_id: None,
             },
         ),
@@ -739,7 +747,7 @@ fn download_start_waits_for_item_payload_before_downloader_action() {
         TransactionRuntimeEvent::Data {
             id: TransactionId::from_raw(610),
             payload: TransactionPayload::WorkshopItem(
-                gmpublished_backend::appdata::SettingsPublishedFileId(123),
+                gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
             ),
         },
     ));
@@ -905,7 +913,7 @@ fn cancelling_correlated_backend_task_aborts_registered_transaction() {
         TransactionRuntimeEvent::Data {
             id: transaction.id(),
             payload: TransactionPayload::WorkshopItem(
-                gmpublished_backend::appdata::SettingsPublishedFileId(123),
+                gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
             ),
         },
     ));
@@ -1168,7 +1176,7 @@ fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
     };
     assert_eq!(
         *id,
-        gmpublished_backend::appdata::SettingsPublishedFileId(987)
+        gmpublished_backend::WorkshopId::new(987).expect("fixture ids are nonzero")
     );
     assert_eq!(changes.as_deref(), Some("Updated icon"));
 }
@@ -1561,7 +1569,8 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
             TransactionRuntimeEvent::Data {
                 id: TransactionId::from_raw(701),
                 payload: TransactionPayload::WorkshopItem(
-                    gmpublished_backend::appdata::SettingsPublishedFileId(76561198000000000)
+                    gmpublished_backend::WorkshopId::new(76561198000000000)
+                        .expect("fixture ids are nonzero")
                 ),
             },
         ))

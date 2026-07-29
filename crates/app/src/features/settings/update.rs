@@ -297,7 +297,7 @@ mod tests {
     fn unchanged_scalar_setting_emits_no_persistence_effect() {
         let mut state = State::default();
         open_settings(&mut state);
-        let enabled = state.settings().sounds;
+        let enabled = state.settings().backend.sounds;
 
         let effects = update(&mut state, Message::SoundsToggled(enabled));
 
@@ -308,7 +308,7 @@ mod tests {
     fn changed_scalar_setting_emits_mutation_effect_and_marks_saving() {
         let mut state = State::default();
         open_settings(&mut state);
-        let enabled = !state.settings().sounds;
+        let enabled = !state.settings().backend.sounds;
 
         let effects = update(&mut state, Message::SoundsToggled(enabled));
 

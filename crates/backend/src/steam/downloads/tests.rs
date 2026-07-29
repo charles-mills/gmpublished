@@ -7,20 +7,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn id(id: u64) -> PublishedFileId {
-    PublishedFileId(id)
-}
+use crate::workshop_id::workshop_id as id;
 
 struct InstalledExtractFixture {
     installed: PathBuf,
     extract_root: PathBuf,
-    item: PublishedFileId,
+    item: WorkshopId,
     expected_extracted: PathBuf,
 }
 
 fn downloads_for_test(temp_root: &Path) -> (Arc<Downloads>, BackendEventCollector) {
     let collector = BackendEventCollector::default();
-    let transactions = Transactions::new(Arc::new(collector.clone()), false);
+    let transactions = Transactions::new(Arc::new(collector.clone()));
     let app_data = Arc::new(AppData::load(
         crate::appdata::AppDataPaths::for_test_root(temp_root),
         transactions.clone(),
@@ -44,7 +42,7 @@ fn with_installed_extract_events<T>(
     test(downloads, collector, fixture)
 }
 
-fn installed_fixture(root: &Path, item: PublishedFileId) -> InstalledExtractFixture {
+fn installed_fixture(root: &Path, item: WorkshopId) -> InstalledExtractFixture {
     let installed = root.join("installed");
     let extract_root = root.join("extract");
     fs::create_dir_all(&installed).expect("installed dir");
@@ -92,7 +90,7 @@ fn write_installed_gma(
 
 fn wait_for_installed_extract_terminal(
     collector: &BackendEventCollector,
-    item: PublishedFileId,
+    item: WorkshopId,
 ) -> (TransactionId, Vec<BackendEvent>) {
     let started = Instant::now();
     loop {
@@ -125,7 +123,7 @@ TransactionEvent::Error { id, .. })
 fn assert_extraction_started(
     events: &[BackendEvent],
     transaction_id: TransactionId,
-    item: PublishedFileId,
+    item: WorkshopId,
     source_path: Option<&std::path::Path>,
 ) {
     assert!(events.iter().any(|event| matches!(
@@ -398,14 +396,14 @@ fn disconnected_state_stops_collection_expansion_without_dropping_queue() {
 
 #[test]
 fn pending_batch_append_moves_all_items_in_one_scheduling_batch() {
-    let mut downloading = vec![id(0)];
-    let mut pending = (1..=30).map(id).collect::<Vec<_>>();
+    let mut downloading = vec![id(1)];
+    let mut pending = (2..=31).map(id).collect::<Vec<_>>();
 
     let batch_len = append_pending_batch(&mut downloading, &mut pending);
 
     assert_eq!(batch_len, 30);
     assert!(pending.is_empty());
-    assert_eq!(downloading, (0..=30).map(id).collect::<Vec<_>>());
+    assert_eq!(downloading, (1..=31).map(id).collect::<Vec<_>>());
 }
 
 /// The lost-wakeup regression.

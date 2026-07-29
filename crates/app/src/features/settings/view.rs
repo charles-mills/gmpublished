@@ -234,13 +234,13 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     let mut content = column![
         switch_row(
             i18n.tr("settings-general-sounds"),
-            state.settings().sounds,
+            state.settings().backend.sounds,
             Message::SoundsToggled,
             &tokens,
         ),
         switch_row(
             i18n.tr("settings-general-play-gifs-by-default"),
-            state.settings().play_gifs_by_default,
+            state.settings().ui.play_gifs_by_default,
             Message::PlayGifsByDefaultToggled,
             &tokens,
         ),
@@ -250,7 +250,7 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     {
         content = content.push(switch_row(
             i18n.tr("settings-system-titlebar"),
-            state.settings().titlebar == crate::bridge::TitlebarPreference::System,
+            state.settings().backend.titlebar == crate::bridge::TitlebarPreference::System,
             Message::SystemTitlebarToggled,
             &tokens,
         ));

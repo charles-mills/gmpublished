@@ -86,7 +86,7 @@ impl App {
         self.ctx
             .run_blocking_ui("prerequisites-set-gmod-dir", move |app| {
                 app.update_settings_snapshot(|settings| {
-                    settings.gmod = Some(path);
+                    settings.backend.gmod = Some(path);
                 })
                 .map(|()| app.paths().gmod_dir)
                 .ui_err()

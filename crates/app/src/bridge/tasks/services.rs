@@ -263,7 +263,7 @@ impl BackendServices {
     /// broken", so both halves travel together.
     pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
         (
-            self.settings.lock().gmod.clone(),
+            self.settings.lock().backend.gmod.clone(),
             self.paths.lock().gmod_dir.clone(),
         )
     }
@@ -579,9 +579,7 @@ impl BackendServices {
 
         downloads::queue_workshop_downloads(
             &self.backend.downloads,
-            item_ids
-                .into_iter()
-                .map(|id| gmpublished_backend::appdata::SettingsPublishedFileId(id.get())),
+            item_ids.into_iter().map(Into::into),
         );
         Ok(())
     }
@@ -598,7 +596,7 @@ impl BackendServices {
 
         downloads::queue_workshop_download_to(
             &self.backend.downloads,
-            gmpublished_backend::appdata::SettingsPublishedFileId(item_id.get()),
+            item_id.into(),
             destination,
             request_id,
         );
@@ -626,7 +624,7 @@ impl BackendServices {
         )
         .ui_err()?;
         let outcome = PublishSubmitOutcome {
-            published_file_id: PublishedFileId::from_backend(outcome.published_file_id),
+            published_file_id: PublishedFileId::from(outcome.published_file_id),
             legal_agreement_required: outcome.legal_agreement_required,
         };
         self.record_published_local_path(outcome.published_file_id, content_source_path);
@@ -646,7 +644,7 @@ impl BackendServices {
         let icon = steam_publishing::WorkshopIcon::new(icon_source_path, upscale).ui_err()?;
         steam
             .update_icon(
-                gmpublished_backend::appdata::SettingsPublishedFileId(workshop_id.get()),
+                workshop_id.into(),
                 icon,
                 transaction,
                 &self.backend.app_data,
@@ -708,11 +706,12 @@ impl BackendServices {
     fn record_published_local_path(&self, id: PublishedFileId, content_source_path: PathBuf) {
         self.settings
             .lock()
+            .backend
             .my_workshop_local_paths
-            .insert(id, content_source_path.clone());
+            .insert(id.into(), content_source_path.clone());
         steam_publishing::record_published_local_path(
             &self.backend.app_data,
-            gmpublished_backend::appdata::SettingsPublishedFileId(id.get()),
+            id.into(),
             content_source_path,
         );
     }
@@ -968,13 +967,11 @@ fn build_default_backend(
 }
 
 /// The backend's id types, built at the one place the app hands ids across.
-fn backend_workshop_id(id: PublishedFileId) -> gmpublished_backend::steam::PublishedFileId {
-    gmpublished_backend::steam::PublishedFileId(id.get())
+fn backend_workshop_id(id: PublishedFileId) -> gmpublished_backend::WorkshopId {
+    id.into()
 }
 
-fn backend_workshop_ids(
-    ids: &[PublishedFileId],
-) -> Vec<gmpublished_backend::steam::PublishedFileId> {
+fn backend_workshop_ids(ids: &[PublishedFileId]) -> Vec<gmpublished_backend::WorkshopId> {
     ids.iter().copied().map(backend_workshop_id).collect()
 }
 

@@ -57,7 +57,7 @@ struct FolderEntry {
     disk_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, Eq, PartialEq, Error)]
 pub enum PreviewArchiveSourceError {
     #[error(transparent)]
     Gma(#[from] GmaError),

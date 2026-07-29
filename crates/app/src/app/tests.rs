@@ -54,6 +54,7 @@ use super::{
 };
 use crate::bridge::ui_error::UiError;
 use crate::generation::Generation;
+use crate::widgets::grid_rows::CardId;
 
 fn assert_task_scheduled(task: &Task<RootMessage>) {
     assert!(task.units() > 0, "expected a scheduled task");
@@ -375,7 +376,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
             crate::bridge::tasks::TransactionRuntimeEvent::Data {
                 id: transaction.id(),
                 payload: gmpublished_backend::events::TransactionPayload::WorkshopItem(
-                    gmpublished_backend::appdata::SettingsPublishedFileId(123),
+                    gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
                 ),
             },
         ))
@@ -909,8 +910,7 @@ fn my_workshop_executor_context_menu_sets_target_and_schedules_open() {
 ///
 /// That is all these four check. Observing the demand itself needs a laid-out
 /// grid: `thumbnail_demands` reads `visible_item_range`, which is empty until
-/// a layout pass, and the harness has no way to simulate one. Recorded in
-/// CODE_REVIEW.md rather than papered over.
+/// a layout pass, and the harness has no way to simulate one.
 #[test]
 fn my_workshop_executor_thumbnail_demands_schedules_no_task() {
     let mut app = App::new_for_test();
@@ -929,7 +929,7 @@ fn my_workshop_executor_drag_press_updates_drag_state() {
 
     let task = app.batch_effects(
         vec![my_workshop::Effect::AddonDragPressed {
-            card_id: "123".to_owned(),
+            card_id: CardId::from("123"),
             workshop_id: Some(PublishedFileId::fixture(123)),
         }],
         App::run_my_workshop_effect,
@@ -944,7 +944,7 @@ fn my_workshop_executor_drag_release_finishes_drag() {
     let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::MyWorkshop,
-        "123".to_owned(),
+        CardId::from("123"),
         Some(PublishedFileId::fixture(123)),
         None,
     );
@@ -1055,7 +1055,7 @@ fn installed_addons_executor_drag_press_updates_drag_state() {
 
     let task = app.batch_effects(
         vec![installed_addons::Effect::AddonDragPressed {
-            card_id: "/tmp/drag.gma".to_owned(),
+            card_id: CardId::from("/tmp/drag.gma"),
             workshop_id: Some(PublishedFileId::fixture(123)),
         }],
         App::run_installed_addons_effect,
@@ -1070,7 +1070,7 @@ fn installed_addons_executor_drag_release_finishes_drag() {
     let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::InstalledAddons,
-        "/tmp/drag.gma".to_owned(),
+        CardId::from("/tmp/drag.gma"),
         Some(PublishedFileId::fixture(123)),
         None,
     );
@@ -1152,7 +1152,7 @@ fn size_analyzer_executor_drag_press_updates_drag_state() {
 
     let task = app.batch_effects(
         vec![size_analyzer::Effect::AddonDragPressed {
-            card_id: "/tmp/size-drag.gma".to_owned(),
+            card_id: CardId::from("/tmp/size-drag.gma"),
             workshop_id: Some(PublishedFileId::fixture(123)),
         }],
         App::run_size_analyzer_effect,
@@ -1167,7 +1167,7 @@ fn size_analyzer_executor_drag_release_finishes_drag() {
     let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::SizeAnalyzer,
-        "/tmp/size-drag.gma".to_owned(),
+        CardId::from("/tmp/size-drag.gma"),
         Some(PublishedFileId::fixture(123)),
         None,
     );
@@ -1900,7 +1900,7 @@ fn addon_drag_state_preserves_click_when_released_before_drag_threshold() {
 
     drag.press(
         AddonDragSource::MyWorkshop,
-        "42".to_owned(),
+        CardId::from("42"),
         Some(PublishedFileId::fixture(42)),
         None,
     );
@@ -1910,7 +1910,7 @@ fn addon_drag_state_preserves_click_when_released_before_drag_threshold() {
         drag.release(false),
         Some(AddonDragOutcome::Click {
             source: AddonDragSource::MyWorkshop,
-            card_id: "42".to_owned(),
+            card_id: CardId::from("42"),
         })
     );
     assert!(!drag.is_active());
@@ -1922,7 +1922,7 @@ fn addon_drag_state_promotes_after_threshold_and_drops_on_target() {
 
     drag.press(
         AddonDragSource::InstalledAddons,
-        "/tmp/a.gma".to_owned(),
+        CardId::from("/tmp/a.gma"),
         Some(PublishedFileId::fixture(99)),
         None,
     );
@@ -1949,7 +1949,7 @@ fn addon_drag_state_keeps_captured_thumbnail_while_dragging() {
 
     drag.press(
         AddonDragSource::MyWorkshop,
-        "42".to_owned(),
+        CardId::from("42"),
         Some(PublishedFileId::fixture(42)),
         Some(thumbnail.clone()),
     );
@@ -1965,7 +1965,7 @@ fn addon_drag_state_cancels_active_drag_released_outside_target() {
 
     drag.press(
         AddonDragSource::MyWorkshop,
-        "42".to_owned(),
+        CardId::from("42"),
         Some(PublishedFileId::fixture(42)),
         None,
     );
@@ -1982,7 +1982,7 @@ fn addon_drag_state_preserves_size_analyzer_local_cell_click() {
 
     drag.press(
         AddonDragSource::SizeAnalyzer,
-        "/tmp/local.gma".to_owned(),
+        CardId::from("/tmp/local.gma"),
         None,
         None,
     );
@@ -1994,7 +1994,7 @@ fn addon_drag_state_preserves_size_analyzer_local_cell_click() {
         drag.release(false),
         Some(AddonDragOutcome::Click {
             source: AddonDragSource::SizeAnalyzer,
-            card_id: "/tmp/local.gma".to_owned(),
+            card_id: CardId::from("/tmp/local.gma"),
         })
     );
     assert!(!drag.is_active());
@@ -2005,7 +2005,7 @@ fn addon_drag_update_events_promote_and_finish_drag() {
     let mut app = App::new_for_test();
     app.state.addon_drag.press(
         AddonDragSource::MyWorkshop,
-        "42".to_owned(),
+        CardId::from("42"),
         Some(PublishedFileId::fixture(42)),
         None,
     );
@@ -2097,9 +2097,9 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
     let root = tempfile::tempdir().expect("tempdir");
     app.ctx
         .update_settings_snapshot_for_test(|settings| {
-            settings.play_gifs_by_default = false;
-            settings.download_count_format = DownloadCountFormat::Period;
-            settings.theme_preset = ThemePreset::ClassicSource;
+            settings.ui.play_gifs_by_default = false;
+            settings.ui.download_count_format = DownloadCountFormat::Period;
+            settings.ui.theme_preset = ThemePreset::ClassicSource;
         })
         .expect("ui-only settings update");
     let settings = BackendSettings {
@@ -2114,12 +2114,15 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
     ));
     let (settings, paths) = app.ctx.settings_and_paths_snapshot();
 
-    assert!(!settings.sounds);
-    assert_eq!(settings.language.as_deref(), Some("en-US"));
+    assert!(!settings.backend.sounds);
+    assert_eq!(settings.backend.language.as_deref(), Some("en-US"));
     assert_eq!(paths.temp_dir, root.path().join("temp"));
-    assert!(!settings.play_gifs_by_default);
-    assert_eq!(settings.download_count_format, DownloadCountFormat::Period);
-    assert_eq!(settings.theme_preset, ThemePreset::ClassicSource);
+    assert!(!settings.ui.play_gifs_by_default);
+    assert_eq!(
+        settings.ui.download_count_format,
+        DownloadCountFormat::Period
+    );
+    assert_eq!(settings.ui.theme_preset, ThemePreset::ClassicSource);
     assert_eq!(app.state.steam_session.status(), initial_steam_status);
 }
 
@@ -2733,7 +2736,7 @@ fn file_preview_request() -> file_preview::PreviewRequest {
 
 fn installed_preview_target() -> installed_addons::PreviewTarget {
     installed_addons::PreviewTarget {
-        row_id: "/tmp/installed-preview.gma".to_owned(),
+        row_id: CardId::from("/tmp/installed-preview.gma"),
         path: PathBuf::from("/tmp/installed-preview.gma"),
         title: "Installed Preview".to_owned(),
         workshop_id: Some(PublishedFileId::fixture(123)),
@@ -2747,7 +2750,7 @@ fn installed_preview_target() -> installed_addons::PreviewTarget {
 fn installed_context_menu_request() -> installed_addons::ContextMenuRequest {
     installed_addons::ContextMenuRequest {
         position: Point::new(12.0, 24.0),
-        row_id: "/tmp/installed-context.gma".to_owned(),
+        row_id: CardId::from("/tmp/installed-context.gma"),
         path: PathBuf::from("/tmp/installed-context.gma"),
         path_text: "/tmp/installed-context.gma".to_owned(),
         workshop_id: Some(PublishedFileId::fixture(123)),
@@ -2762,7 +2765,7 @@ fn installed_context_menu_request() -> installed_addons::ContextMenuRequest {
 fn my_workshop_context_menu_request() -> my_workshop::ContextMenuRequest {
     my_workshop::ContextMenuRequest {
         position: Point::new(12.0, 24.0),
-        row_id: "123".to_owned(),
+        row_id: CardId::from("123"),
         workshop_id: PublishedFileId::fixture(123),
         workshop_url: workshop_url::workshop_item_url(PublishedFileId::fixture(123)),
         preview_url: Some("https://example.invalid/my-workshop.jpg".to_owned()),
@@ -2954,8 +2957,8 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
         ),
     ));
     assert!(matches!(
-        app.state.my_workshop.load_status(),
-        my_workshop::LoadStatus::Error(_)
+        app.state.my_workshop.page_status(),
+        my_workshop::PageStatus::Failed(_)
     ));
 
     let _task = app.update(RootMessage::SteamSession(
@@ -2964,8 +2967,8 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
 
     assert!(
         !matches!(
-            app.state.my_workshop.load_status(),
-            my_workshop::LoadStatus::Error(_)
+            app.state.my_workshop.page_status(),
+            my_workshop::PageStatus::Failed(_)
         ),
         "the stale Steam failure survived the reconnect that resolved it"
     );

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, sync::Arc, time::Instant};
+use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, time::Instant};
 
 use iced::advanced::graphics::text::Paragraph as IcedParagraph;
 use iced::advanced::text::Paragraph as _;
@@ -15,6 +15,7 @@ use crate::assets;
 use crate::theme::{self, Tokens, motion};
 use crate::widgets::context_area::context_area;
 use crate::widgets::download_count_icon::download_count_icon;
+use crate::widgets::grid_rows::CardId;
 use crate::widgets::star_rating::star_rating;
 
 const PUBLISH_NEW_FALLBACK: &str = "Publish new";
@@ -54,7 +55,7 @@ pub struct SubscriptionRoll {
 
 #[derive(Clone, Debug)]
 pub struct Data {
-    id: Arc<str>,
+    id: CardId,
     kind: Kind,
     title: String,
     subscriptions: String,
@@ -98,9 +99,9 @@ impl PartialEq for Data {
 }
 
 impl Data {
-    pub(crate) fn addon(id: impl Into<String>, title: impl Into<String>) -> Self {
+    pub(crate) fn addon(id: CardId, title: impl Into<String>) -> Self {
         Self {
-            id: Arc::from(id.into()),
+            id,
             kind: Kind::Addon,
             title: title.into(),
             subscriptions: "0".to_owned(),
@@ -118,14 +119,14 @@ impl Data {
         }
     }
 
-    pub(crate) fn publish_new(id: impl Into<String>, title: impl Into<String>) -> Self {
+    pub(crate) fn publish_new(id: CardId, title: impl Into<String>) -> Self {
         Self {
             kind: Kind::PublishNew,
             ..Self::addon(id, title)
         }
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub(crate) const fn id(&self) -> &CardId {
         &self.id
     }
 
@@ -269,9 +270,9 @@ impl Data {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
-    Pressed(Arc<str>),
-    Released(Arc<str>),
-    ContextRequested(Arc<str>, Point),
+    Pressed(CardId),
+    Released(CardId),
+    ContextRequested(CardId, Point),
 }
 
 #[cfg(test)]
@@ -893,6 +894,7 @@ fn preview_style(tokens: &Tokens) -> container_widget::Style {
 
 #[cfg(test)]
 mod tests {
+    use crate::widgets::grid_rows::CardId;
     use iced::widget::image;
 
     use super::{
@@ -903,7 +905,7 @@ mod tests {
 
     #[test]
     fn publish_new_uses_fallback_title_when_empty() {
-        let card = Data::publish_new("publish", "");
+        let card = Data::publish_new(CardId::from("publish"), "");
 
         assert_eq!(card.display_title(), "Publish new");
         assert_eq!(card.kind, Kind::PublishNew);
@@ -911,7 +913,7 @@ mod tests {
 
     #[test]
     fn hover_state_is_explicit_card_data() {
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
 
         assert!(!card.is_hovered());
         card.set_hovered(true);
@@ -922,7 +924,7 @@ mod tests {
     #[test]
     fn hover_animation_tracks_target_state() {
         let started = std::time::Instant::now();
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
 
         card.set_hovered_at(true, started);
 
@@ -948,9 +950,9 @@ mod tests {
     #[test]
     fn motion_state_can_be_preserved_across_rebuilt_cards() {
         let started = std::time::Instant::now();
-        let mut previous = Data::addon("1", "Old");
+        let mut previous = Data::addon(CardId::from("1"), "Old");
         previous.set_hovered_at(true, started);
-        let mut next = Data::addon("1", "New");
+        let mut next = Data::addon(CardId::from("1"), "New");
 
         next.preserve_motion_from(&previous);
 
@@ -960,7 +962,7 @@ mod tests {
 
     #[test]
     fn subscriptions_fall_back_to_raw_count() {
-        let card = Data::addon("1", "Addon").with_subscriptions("", 42);
+        let card = Data::addon(CardId::from("1"), "Addon").with_subscriptions("", 42);
 
         assert_eq!(card.subscriptions_label(), "42");
     }
@@ -969,12 +971,12 @@ mod tests {
     fn arriving_pixels_fade_in_over_the_stand_in() {
         let placeholder = image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]);
         let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
-        let mut card =
-            Data::addon("1", "Addon").with_thumbnail(Thumbnail::Placeholder(placeholder.clone()));
+        let mut card = Data::addon(CardId::from("1"), "Addon")
+            .with_thumbnail(Thumbnail::Placeholder(placeholder.clone()));
 
         // Building a card straight to Ready is not an arrival.
         assert!(
-            !Data::addon("2", "Cached")
+            !Data::addon(CardId::from("2"), "Cached")
                 .with_thumbnail(Thumbnail::Ready(sharp.clone()))
                 .needs_motion_ticks()
         );
@@ -998,7 +1000,7 @@ mod tests {
     #[test]
     fn rehydrated_pixels_snap_back_without_replaying_the_reveal() {
         let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
         card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
         card.tick_motion(std::time::Instant::now() + std::time::Duration::from_millis(300));
         assert!(!card.needs_motion_ticks());
@@ -1013,9 +1015,11 @@ mod tests {
         assert_eq!(card.reveal_progress(std::time::Instant::now()), 1.0);
 
         // The same holds when the release and the return straddle a rebuild.
-        let mut released = Data::addon("1", "Addon").with_thumbnail(Thumbnail::Loading);
+        let mut released =
+            Data::addon(CardId::from("1"), "Addon").with_thumbnail(Thumbnail::Loading);
         released.preserve_motion_from(&card);
-        let mut returned = Data::addon("1", "Addon").with_thumbnail(Thumbnail::Ready(sharp));
+        let mut returned =
+            Data::addon(CardId::from("1"), "Addon").with_thumbnail(Thumbnail::Ready(sharp));
         returned.preserve_motion_from(&released);
 
         assert!(!returned.needs_motion_ticks());
@@ -1026,7 +1030,7 @@ mod tests {
     fn a_reveal_cut_short_by_a_release_does_not_resume_on_return() {
         let started = std::time::Instant::now();
         let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
         card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
 
         // Released mid-fade, before any tick retires the crossfade.
@@ -1074,7 +1078,7 @@ mod tests {
         assert!(measured >= line);
         assert!(measured <= tokens.dims.card_title_height);
 
-        let preferred = preferred_height(&Data::addon("1", "Short"), 200.0, &tokens);
+        let preferred = preferred_height(&Data::addon(CardId::from("1"), "Short"), 200.0, &tokens);
         assert!(preferred.is_finite());
     }
 }

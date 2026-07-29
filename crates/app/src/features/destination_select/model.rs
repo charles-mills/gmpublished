@@ -96,16 +96,16 @@ impl ResolvedDestinations {
 }
 
 pub fn apply_persist_request(settings: &mut Settings, request: DestinationPersistRequest) {
-    settings.create_folder_on_extract = request.create_folder;
-    settings.extract_destination = request.destination;
+    settings.backend.create_folder_on_extract = request.create_folder;
+    settings.backend.extract_destination = request.destination;
 
     if let Some(path) = request.history_path {
-        push_history_destination(&mut settings.destinations, path);
+        push_history_destination(&mut settings.backend.destinations, path);
     }
 }
 
 /// Formats the current extract destination for display (e.g. the downloader's
-/// "set destination" row). Reads `settings.extract_destination` through the
+/// "set destination" row). Reads `settings.backend.extract_destination` through the
 /// same sanitization `sanitize` applies, without cloning the whole
 /// `Settings` (its history list and per-workshop overrides are irrelevant
 /// here).
@@ -212,11 +212,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let first = temp.path().join("first");
         let second = temp.path().join("second");
-        let mut settings = Settings {
-            destinations: vec![first.clone()],
-            create_folder_on_extract: false,
-            ..Settings::default()
-        };
+        let mut settings = Settings::default();
+        settings.backend.destinations = vec![first.clone()];
+        settings.backend.create_folder_on_extract = false;
 
         apply_persist_request(
             &mut settings,
@@ -227,11 +225,11 @@ mod tests {
             },
         );
 
-        assert!(settings.create_folder_on_extract);
+        assert!(settings.backend.create_folder_on_extract);
         assert_eq!(
-            settings.extract_destination,
+            settings.backend.extract_destination,
             ExtractDestination::NamedDirectory(second.clone())
         );
-        assert_eq!(settings.destinations, vec![second, first]);
+        assert_eq!(settings.backend.destinations, vec![second, first]);
     }
 }

@@ -1,7 +1,10 @@
+use gmpublished_backend::threads::join_all_within;
+
 use super::{
     Arc, AssertUnwindSafe, AtomicBool, BLOCKING_FALLBACK_THREADS, BLOCKING_MAX_THREADS,
     BLOCKING_MIN_THREADS, BLOCKING_QUEUE_CAPACITY, Error, JoinHandle, MEDIA_THREADS, Mutex,
-    NonZeroUsize, Ordering, SyncSender, TrySendError, catch_unwind, mpsc, thread,
+    NonZeroUsize, Ordering, SyncSender, TrySendError, WORKER_SHUTDOWN_JOIN_TIMEOUT, catch_unwind,
+    mpsc, thread,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
@@ -259,7 +262,7 @@ impl WorkerPool {
                 Ok(worker) => workers.push(worker),
                 Err(source) => {
                     drop(sender);
-                    join_started_workers(workers);
+                    join_workers_within_bound(name, workers);
                     return Err(WorkerPoolInitError {
                         thread_name,
                         source,
@@ -330,7 +333,7 @@ impl Drop for WorkerPool {
         // Dropped before the join, because a worker only sees the channel
         // disconnect once the last sender is gone.
         drop(sender);
-        join_started_workers(workers);
+        join_workers_within_bound(self.name, workers);
     }
 }
 
@@ -371,10 +374,89 @@ pub(super) fn run_envelope(envelope: JobEnvelope) {
     }
 }
 
-pub(super) fn join_started_workers(workers: Vec<JoinHandle<()>>) {
-    for worker in workers {
-        if worker.join().is_err() {
-            log::error!("backend worker panicked during shutdown");
+/// Joins `workers` within [`WORKER_SHUTDOWN_JOIN_TIMEOUT`].
+///
+/// A job already running never observes the pool's shutdown flag — that is
+/// checked once, before the job starts ([`run_envelope`]) — so a pack, bake or
+/// extraction in flight would otherwise hold process exit for as long as it
+/// takes to finish. The bound trades a worker's remaining work for a window
+/// that closes.
+fn join_workers_within_bound(pool: &'static str, workers: Vec<JoinHandle<()>>) {
+    join_all_within(workers, WORKER_SHUTDOWN_JOIN_TIMEOUT, pool);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Barrier, time::Instant};
+
+    use super::{Arc, WORKER_SHUTDOWN_JOIN_TIMEOUT, WorkerPool, thread};
+
+    /// A job already running never observes the shutdown flag, so dropping the
+    /// pool has to give up on it. Without a bound this waits out the job, which
+    /// on a large pack or bake means the window is gone and the process is
+    /// still alive.
+    #[test]
+    fn dropping_a_pool_mid_job_returns_within_the_join_bound() {
+        let pool =
+            WorkerPool::start("test", "gmpublished-test-join", 1, 4).expect("pool should start");
+
+        let running = Arc::new(Barrier::new(2));
+        let job_running = Arc::clone(&running);
+        pool.submit(
+            "blocking-job",
+            Box::new(move || {
+                job_running.wait();
+                thread::sleep(WORKER_SHUTDOWN_JOIN_TIMEOUT * 6);
+            }),
+        )
+        .expect("submit should be accepted");
+
+        // Only meaningful once the job is actually executing: a job still in
+        // the queue is skipped by the shutdown check and joins immediately.
+        running.wait();
+
+        let before = Instant::now();
+        drop(pool);
+        let elapsed = before.elapsed();
+
+        assert!(
+            elapsed < WORKER_SHUTDOWN_JOIN_TIMEOUT * 4,
+            "drop blocked for {elapsed:?}, which is not bounded by {WORKER_SHUTDOWN_JOIN_TIMEOUT:?}"
+        );
+    }
+
+    /// The bound is shared, not per-thread: N stuck workers must still cost one
+    /// timeout in total.
+    #[test]
+    fn the_join_bound_is_shared_across_workers_not_paid_per_worker() {
+        const WORKERS: usize = 4;
+
+        let pool = WorkerPool::start("test", "gmpublished-test-join-shared", WORKERS, WORKERS)
+            .expect("pool should start");
+
+        let running = Arc::new(Barrier::new(WORKERS + 1));
+        for _ in 0..WORKERS {
+            let job_running = Arc::clone(&running);
+            pool.submit(
+                "blocking-job",
+                Box::new(move || {
+                    job_running.wait();
+                    thread::sleep(WORKER_SHUTDOWN_JOIN_TIMEOUT * 6);
+                }),
+            )
+            .expect("submit should be accepted");
         }
+        running.wait();
+
+        let before = Instant::now();
+        drop(pool);
+        let elapsed = before.elapsed();
+
+        // One bound plus scheduler slack — not `* WORKERS`, which is exactly
+        // the regression this test exists to catch.
+        assert!(
+            elapsed < WORKER_SHUTDOWN_JOIN_TIMEOUT * 2,
+            "drop blocked for {elapsed:?}; {WORKERS} stuck workers should still cost one bound"
+        );
     }
 }

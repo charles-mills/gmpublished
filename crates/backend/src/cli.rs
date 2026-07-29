@@ -116,8 +116,9 @@ fn run_extraction(request: ExtractionRequest) -> Result<(), CliError> {
     // whitelist fetch happens synchronously below (matching the blocking
     // fetch the whitelist's first use always performed) with the built-in
     // list as the failure fallback.
+    // The default `NullEventSink` is what makes this headless: nothing is
+    // listening for transaction progress, so nothing is emitted to.
     let backend = Backend::init(BackendConfig {
-        cli_mode: true,
         background_services: crate::BackgroundServices::Disabled,
         ..BackendConfig::default()
     });

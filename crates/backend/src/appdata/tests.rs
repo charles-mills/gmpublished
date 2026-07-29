@@ -1,10 +1,11 @@
 use super::*;
 use crate::events::BackendEventCollector;
+use crate::workshop_id::workshop_id;
 use std::{fs, sync::Arc};
 
 fn test_app_data(temp: &tempfile::TempDir) -> AppData {
     let paths = AppDataPaths::for_test_root(temp.path());
-    let transactions = Transactions::new(Arc::new(BackendEventCollector::default()), false);
+    let transactions = Transactions::new(Arc::new(BackendEventCollector::default()));
     AppData::load(paths, transactions)
 }
 
@@ -19,7 +20,6 @@ fn test_app_data_with_transactions(
 fn test_steam() -> Steam {
     Steam::new(Transactions::new(
         Arc::new(BackendEventCollector::default()),
-        false,
     ))
 }
 
@@ -67,7 +67,7 @@ fn settings_load_falls_back_to_legacy_gmpublisher_path_read_only() {
 fn appdata_send_emits_typed_snapshot_without_window() {
     let temp = tempfile::tempdir().expect("tempdir");
     let collector = BackendEventCollector::default();
-    let transactions = Transactions::new(Arc::new(collector.clone()), false);
+    let transactions = Transactions::new(Arc::new(collector.clone()));
     let app_data = test_app_data_with_transactions(&temp, transactions);
 
     let temp_dir = temp.path().join("temp");
@@ -118,7 +118,7 @@ fn steam_init_appdata_send_skips_when_gmod_configured() {
     fs::create_dir_all(&gmod_dir).expect("gmod dir");
 
     let collector = BackendEventCollector::default();
-    let transactions = Transactions::new(Arc::new(collector.clone()), false);
+    let transactions = Transactions::new(Arc::new(collector.clone()));
     let app_data = test_app_data_with_transactions(&temp, transactions);
     app_data.mutate_settings(|settings| {
         settings.gmod = Some(gmod_dir.clone());
@@ -137,7 +137,7 @@ fn steam_init_appdata_send_skips_when_gmod_configured() {
 fn update_settings_saves_and_emits_appdata_snapshot() {
     let temp = tempfile::tempdir().expect("tempdir");
     let collector = BackendEventCollector::default();
-    let transactions = Transactions::new(Arc::new(collector.clone()), false);
+    let transactions = Transactions::new(Arc::new(collector.clone()));
     let app_data = test_app_data_with_transactions(&temp, transactions);
     let steam = test_steam();
 
@@ -364,10 +364,10 @@ fn appdata_sanitize_retains_valid_paths_and_normalizes_extract_destination() {
     };
     settings
         .my_workshop_local_paths
-        .insert(PublishedFileId(10), valid_b.clone());
+        .insert(workshop_id(10), valid_b.clone());
     settings
         .my_workshop_local_paths
-        .insert(PublishedFileId(20), missing);
+        .insert(workshop_id(20), missing);
     settings.destinations.extend((0..25).map(|idx| {
         let path = temp.path().join(format!("extra-{idx}"));
         fs::create_dir_all(&path).expect("extra destination");
@@ -384,13 +384,13 @@ fn appdata_sanitize_retains_valid_paths_and_normalizes_extract_destination() {
     );
     assert_eq!(settings.destinations.len(), 20);
     assert_eq!(
-        settings.my_workshop_local_paths.get(&PublishedFileId(10)),
+        settings.my_workshop_local_paths.get(&workshop_id(10)),
         Some(&valid_b)
     );
     assert!(
         !settings
             .my_workshop_local_paths
-            .contains_key(&PublishedFileId(20))
+            .contains_key(&workshop_id(20))
     );
     assert!(
         matches!(&settings.extract_destination, ExtractDestination::NamedDirectory(path) if path == &valid_a)
@@ -511,6 +511,47 @@ fn unreadable_settings_are_preserved_before_defaults_replace_them() {
     assert!(
         !paths.settings_file.exists(),
         "the unreadable file is moved, not copied"
+    );
+}
+
+/// Workshop ids are stored as bare integer keys, and the typed id must not
+/// change that: settings files are read and written by builds either side of
+/// this one, so the shape has to stay legible to all of them.
+#[test]
+fn workshop_local_paths_round_trip_as_bare_integer_keys() {
+    let mut settings = Settings::default();
+    settings
+        .my_workshop_local_paths
+        .insert(workshop_id(12345), PathBuf::from("/addons/mine"));
+
+    let json = serde_json::to_value(&settings).expect("settings serialize");
+    assert_eq!(
+        json["my_workshop_local_paths"],
+        serde_json::json!({ "12345": "/addons/mine" })
+    );
+
+    let reloaded: Settings = serde_json::from_value(json).expect("settings deserialize");
+    assert_eq!(
+        reloaded.my_workshop_local_paths.get(&workshop_id(12345)),
+        Some(&PathBuf::from("/addons/mine"))
+    );
+}
+
+/// A stored id of zero names no item. It must drop that one entry rather than
+/// fail the field — failing it fails `Settings`, whose recovery is to replace
+/// every setting the user has with defaults.
+#[test]
+fn a_stored_workshop_id_of_zero_drops_its_entry_without_failing_the_file() {
+    let json = serde_json::json!({
+        "my_workshop_local_paths": { "0": "/addons/nowhere", "7": "/addons/real" }
+    });
+
+    let settings: Settings = serde_json::from_value(json).expect("settings should still load");
+
+    assert_eq!(settings.my_workshop_local_paths.len(), 1);
+    assert_eq!(
+        settings.my_workshop_local_paths.get(&workshop_id(7)),
+        Some(&PathBuf::from("/addons/real"))
     );
 }
 

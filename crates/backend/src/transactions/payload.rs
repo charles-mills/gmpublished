@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use steamworks::PublishedFileId;
+use crate::WorkshopId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransactionPayload {
     None,
-    WorkshopItem(PublishedFileId),
+    WorkshopItem(WorkshopId),
     TotalBytes(u64),
     ByteSize { source: Option<String>, bytes: u64 },
     ExtractedPath(PathBuf),

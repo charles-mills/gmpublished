@@ -88,6 +88,11 @@ const BLOCKING_MAX_THREADS: usize = 8;
 const BLOCKING_FALLBACK_THREADS: usize = 4;
 const MEDIA_THREADS: usize = 16;
 const BLOCKING_QUEUE_CAPACITY: usize = 256;
+/// Bound on a worker pool's shutdown join, shared across its threads rather
+/// than applied per-thread. Matched to `steam::SHUTDOWN_JOIN_TIMEOUT`: both are
+/// paid on the same process-exit path, so they add up, and neither is worth
+/// making the user wait on.
+const WORKER_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 const TASK_EVENTS_ID: u64 = 1;
 const BACKEND_EVENTS_ID: u64 = 2;
 const BACKEND_EVENT_QUEUE_CAPACITY: usize = 256;

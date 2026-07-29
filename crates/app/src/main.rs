@@ -57,7 +57,13 @@ static PANIC_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn main() -> ExitCode {
-    match run() {
+    let outcome = run();
+    // Both exit paths converge here — GUI and headless CLI alike — so this is
+    // the one place that can guarantee queued file logs reach disk. Anything
+    // logged past this point still reaches stderr.
+    gmpublished_backend::shutdown_logging();
+
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error}");
@@ -103,7 +109,8 @@ fn run() -> Result<(), RunError> {
     #[cfg(target_os = "macos")]
     platform_open::install();
 
-    let chrome_strategy = features::shell::ChromeStrategy::resolve(startup_settings.titlebar);
+    let chrome_strategy =
+        features::shell::ChromeStrategy::resolve(startup_settings.backend.titlebar);
 
     let application = iced::application(move || App::new(ctx.clone()), App::update, App::view);
     let application = assets::fonts::bundled_fonts()
@@ -189,10 +196,9 @@ fn panic_log_path() -> PathBuf {
 fn resolved_panic_log_path() -> PathBuf {
     let app_data = gmpublished_backend::appdata::AppData::load(
         gmpublished_backend::appdata::AppDataPaths::production(),
-        gmpublished_backend::transactions::Transactions::new(
-            std::sync::Arc::new(gmpublished_backend::events::NullEventSink),
-            false,
-        ),
+        gmpublished_backend::transactions::Transactions::new(std::sync::Arc::new(
+            gmpublished_backend::events::NullEventSink,
+        )),
     );
     app_data.temp_dir().join("logs").join(PANIC_LOG_FILE_NAME)
 }

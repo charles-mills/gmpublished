@@ -253,25 +253,25 @@ pub enum SettingsMutation {
 
 pub fn apply_settings_mutation(settings: &mut Settings, mutation: SettingsMutation) {
     match mutation {
-        SettingsMutation::Sounds(enabled) => settings.sounds = enabled,
+        SettingsMutation::Sounds(enabled) => settings.backend.sounds = enabled,
         SettingsMutation::PlayGifsByDefault(enabled) => {
-            settings.play_gifs_by_default = enabled;
+            settings.ui.play_gifs_by_default = enabled;
         }
-        SettingsMutation::Titlebar(preference) => settings.titlebar = preference,
-        SettingsMutation::Language(language) => settings.language = language,
-        SettingsMutation::DownloadCountFormat(format) => settings.download_count_format = format,
+        SettingsMutation::Titlebar(preference) => settings.backend.titlebar = preference,
+        SettingsMutation::Language(language) => settings.backend.language = language,
+        SettingsMutation::DownloadCountFormat(format) => settings.ui.download_count_format = format,
         SettingsMutation::Theme {
             preset,
             neutral,
             success,
             error,
         } => {
-            settings.theme_preset = preset;
-            settings.color_neutral = neutral;
-            settings.color_success = success;
-            settings.color_error = error;
+            settings.ui.theme_preset = preset;
+            settings.backend.color_neutral = neutral;
+            settings.backend.color_success = success;
+            settings.backend.color_error = error;
         }
-        SettingsMutation::OverwriteMode(mode) => settings.extract_overwrite_mode = mode,
+        SettingsMutation::OverwriteMode(mode) => settings.backend.extract_overwrite_mode = mode,
         SettingsMutation::Path { kind, path } => set_path_setting(settings, kind, path),
         SettingsMutation::Color { kind, rgb } => set_color_setting(settings, kind, rgb),
     }
@@ -282,23 +282,27 @@ pub fn apply_settings_mutation(settings: &mut Settings, mutation: SettingsMutati
 /// whole `Settings` to diff it afterward.
 fn mutation_changes(settings: &Settings, mutation: &SettingsMutation) -> bool {
     match mutation {
-        SettingsMutation::Sounds(enabled) => settings.sounds != *enabled,
-        SettingsMutation::PlayGifsByDefault(enabled) => settings.play_gifs_by_default != *enabled,
-        SettingsMutation::Titlebar(preference) => settings.titlebar != *preference,
-        SettingsMutation::Language(language) => &settings.language != language,
-        SettingsMutation::DownloadCountFormat(format) => settings.download_count_format != *format,
+        SettingsMutation::Sounds(enabled) => settings.backend.sounds != *enabled,
+        SettingsMutation::PlayGifsByDefault(enabled) => {
+            settings.ui.play_gifs_by_default != *enabled
+        }
+        SettingsMutation::Titlebar(preference) => settings.backend.titlebar != *preference,
+        SettingsMutation::Language(language) => &settings.backend.language != language,
+        SettingsMutation::DownloadCountFormat(format) => {
+            settings.ui.download_count_format != *format
+        }
         SettingsMutation::Theme {
             preset,
             neutral,
             success,
             error,
         } => {
-            settings.theme_preset != *preset
-                || settings.color_neutral != *neutral
-                || settings.color_success != *success
-                || settings.color_error != *error
+            settings.ui.theme_preset != *preset
+                || settings.backend.color_neutral != *neutral
+                || settings.backend.color_success != *success
+                || settings.backend.color_error != *error
         }
-        SettingsMutation::OverwriteMode(mode) => settings.extract_overwrite_mode != *mode,
+        SettingsMutation::OverwriteMode(mode) => settings.backend.extract_overwrite_mode != *mode,
         SettingsMutation::Path { kind, path } => {
             path_setting_value(settings, *kind) != path.as_deref()
         }
@@ -308,10 +312,10 @@ fn mutation_changes(settings: &Settings, mutation: &SettingsMutation) -> bool {
 
 fn path_setting_value(settings: &Settings, kind: PathSetting) -> Option<&Path> {
     match kind {
-        PathSetting::Gmod => settings.gmod.as_deref(),
-        PathSetting::Downloads => settings.downloads.as_deref(),
-        PathSetting::UserData => settings.user_data.as_deref(),
-        PathSetting::Temp => settings.temp.as_deref(),
+        PathSetting::Gmod => settings.backend.gmod.as_deref(),
+        PathSetting::Downloads => settings.backend.downloads.as_deref(),
+        PathSetting::UserData => settings.backend.user_data.as_deref(),
+        PathSetting::Temp => settings.backend.temp.as_deref(),
     }
 }
 
@@ -476,19 +480,19 @@ impl State {
 
     /// `None` is "follow the system language".
     pub(crate) fn language(&self) -> Option<&str> {
-        self.settings.language.as_deref()
+        self.settings.backend.language.as_deref()
     }
 
     pub(crate) const fn theme_preset(&self) -> ThemePreset {
-        self.settings.theme_preset
+        self.settings.ui.theme_preset
     }
 
     pub(crate) const fn download_count_format(&self) -> DownloadCountFormat {
-        self.settings.download_count_format
+        self.settings.ui.download_count_format
     }
 
     pub(crate) fn overwrite_mode(&self) -> ExtractionOverwriteMode {
-        self.settings.extract_overwrite_mode.clone()
+        self.settings.backend.extract_overwrite_mode.clone()
     }
 
     pub(crate) fn set_path_text(&mut self, kind: PathSetting, value: String) {
@@ -827,10 +831,10 @@ impl PathFields {
     fn from_settings(settings: &Settings) -> Self {
         Self(PathSetting::ALL.map(|kind| PathField {
             text: option_path_to_display(match kind {
-                PathSetting::Gmod => settings.gmod.as_ref(),
-                PathSetting::Downloads => settings.downloads.as_ref(),
-                PathSetting::UserData => settings.user_data.as_ref(),
-                PathSetting::Temp => settings.temp.as_ref(),
+                PathSetting::Gmod => settings.backend.gmod.as_ref(),
+                PathSetting::Downloads => settings.backend.downloads.as_ref(),
+                PathSetting::UserData => settings.backend.user_data.as_ref(),
+                PathSetting::Temp => settings.backend.temp.as_ref(),
             }),
             error: None,
         }))
@@ -968,10 +972,10 @@ fn validate_path_choice(kind: PathSetting, path: Option<&Path>) -> Result<(), Pa
 
 fn set_path_setting(settings: &mut Settings, kind: PathSetting, path: Option<PathBuf>) {
     match kind {
-        PathSetting::Gmod => settings.gmod = path,
-        PathSetting::Downloads => settings.downloads = path,
-        PathSetting::UserData => settings.user_data = path,
-        PathSetting::Temp => settings.temp = path,
+        PathSetting::Gmod => settings.backend.gmod = path,
+        PathSetting::Downloads => settings.backend.downloads = path,
+        PathSetting::UserData => settings.backend.user_data = path,
+        PathSetting::Temp => settings.backend.temp = path,
     }
 }
 
@@ -986,17 +990,17 @@ fn path_setting_runtime_path(paths: &AppPaths, kind: PathSetting) -> Option<Path
 
 fn set_color_setting(settings: &mut Settings, kind: ColorSetting, rgb: u32) {
     match kind {
-        ColorSetting::Neutral => settings.color_neutral = rgb,
-        ColorSetting::Success => settings.color_success = rgb,
-        ColorSetting::Error => settings.color_error = rgb,
+        ColorSetting::Neutral => settings.backend.color_neutral = rgb,
+        ColorSetting::Success => settings.backend.color_success = rgb,
+        ColorSetting::Error => settings.backend.color_error = rgb,
     }
 }
 
 fn get_color_setting(settings: &Settings, kind: ColorSetting) -> u32 {
     match kind {
-        ColorSetting::Neutral => settings.color_neutral,
-        ColorSetting::Success => settings.color_success,
-        ColorSetting::Error => settings.color_error,
+        ColorSetting::Neutral => settings.backend.color_neutral,
+        ColorSetting::Success => settings.backend.color_success,
+        ColorSetting::Error => settings.backend.color_error,
     }
 }
 
@@ -1038,9 +1042,9 @@ fn option_path_to_display(path: Option<&PathBuf>) -> String {
 
 pub fn accent_inputs_from_settings(settings: &Settings) -> AccentInputs {
     AccentInputs {
-        neutral: settings.color_neutral,
-        success: settings.color_success,
-        error: settings.color_error,
+        neutral: settings.backend.color_neutral,
+        success: settings.backend.color_success,
+        error: settings.backend.color_error,
     }
 }
 
@@ -1055,7 +1059,7 @@ mod tests {
     #[test]
     fn theme_options_are_auto_first_and_persist_auto_preference() {
         let mut state = State::default();
-        state.settings.theme_preset = ThemePreset::Dark;
+        state.settings.ui.theme_preset = ThemePreset::Dark;
 
         let mutation = state
             .theme_mutation(ThemePreset::Auto)
@@ -1076,14 +1080,14 @@ mod tests {
     #[test]
     fn language_default_maps_to_none() {
         let mut state = State::default();
-        state.settings.language = Some("fr".to_owned());
+        state.settings.backend.language = Some("fr".to_owned());
 
         let mutation = state
             .language_mutation(None)
             .expect("default should update explicit language");
 
         assert_eq!(mutation, SettingsMutation::Language(None));
-        assert_eq!(state.settings.language, None);
+        assert_eq!(state.settings.backend.language, None);
     }
 
     #[test]
@@ -1113,7 +1117,7 @@ mod tests {
             mutation,
             SettingsMutation::Titlebar(TitlebarPreference::System)
         );
-        assert_eq!(state.settings.titlebar, TitlebarPreference::System);
+        assert_eq!(state.settings.backend.titlebar, TitlebarPreference::System);
     }
 
     #[test]
@@ -1159,7 +1163,7 @@ mod tests {
     #[test]
     fn path_validation_accepts_blank_as_default_override() {
         let mut state = State::default();
-        state.settings.downloads = Some(PathBuf::from("/tmp/downloads"));
+        state.settings.backend.downloads = Some(PathBuf::from("/tmp/downloads"));
         state.path_fields = PathFields::from_settings(&state.settings);
         state.set_path_text(PathSetting::Downloads, String::new());
 

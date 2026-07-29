@@ -3,6 +3,9 @@ use steamworks::{Friend, SteamId};
 use super::ConnectedSteam;
 use crate::util::main_thread_forbidden;
 
+/// Edge length of the avatar `Friend::medium_avatar` returns.
+const AVATAR_EDGE: u32 = 64;
+
 #[derive(Clone, Debug)]
 pub struct SteamUser {
     pub steamid: SteamId,
@@ -17,9 +20,12 @@ impl From<Friend> for SteamUser {
         Self {
             steamid: friend.id(),
             name: friend.name(),
-            avatar: friend
-                .medium_avatar()
-                .map(|buf| crate::rgba_image::RgbaImage::new(buf, 64, 64)),
+            // A buffer that is not a 64x64 RGBA avatar reads as no avatar: the
+            // UI already renders a placeholder for that, and it is the only
+            // honest thing to do with bytes whose shape is unknown.
+            avatar: friend.medium_avatar().and_then(|buf| {
+                crate::rgba_image::RgbaImage::try_new(buf, AVATAR_EDGE, AVATAR_EDGE)
+            }),
             dead: false,
         }
     }

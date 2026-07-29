@@ -13,7 +13,7 @@ use gmpublished_backend::particles::ControlPointIndex;
 /// Why loading a preview entry failed. Variants carry the actual producer
 /// error so its `Display` reaches the user verbatim; only the wire boundary
 /// (this type's `Display`) is rendered.
-#[derive(Clone, Debug, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreviewLoadError {
     /// The blocking worker pool rejected the load job before it could run.
     #[error(transparent)]
@@ -21,14 +21,6 @@ pub enum PreviewLoadError {
     /// Reading the entry's bytes out of the archive failed.
     #[error(transparent)]
     Archive(#[from] PreviewArchiveSourceError),
-}
-
-// `GmaError::IOError` carries an `Option<Arc<io::Error>>`, which has no
-// `PartialEq`, so derive isn't available; compare the rendered text instead.
-impl PartialEq for PreviewLoadError {
-    fn eq(&self, other: &Self) -> bool {
-        self.to_string() == other.to_string()
-    }
 }
 
 /// Facts emitted by the in-archive file preview modal.

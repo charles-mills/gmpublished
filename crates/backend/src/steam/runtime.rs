@@ -179,10 +179,7 @@ mod tests {
     use crate::{events::NullEventSink, transactions::Transactions};
 
     fn test_steam() -> Arc<Steam> {
-        Arc::new(Steam::new(Transactions::new(
-            Arc::new(NullEventSink),
-            false,
-        )))
+        Arc::new(Steam::new(Transactions::new(Arc::new(NullEventSink))))
     }
 
     #[test]

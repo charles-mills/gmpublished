@@ -191,15 +191,15 @@ pub fn run_thumbnail_request(
 /// The whole of a background-warm job: get this URL's bytes into the source
 /// tier, and stop.
 ///
-/// Warm used to run the full interactive pipeline — fetch, decode, resize,
-/// write a derived entry, hand back a `Thumbnail` — for a tile nothing was
-/// going to paint. Two things were wrong with that. The decode and resize were
+/// Warm deliberately stops short of the full interactive pipeline (decode,
+/// resize, write a derived entry, hand back a `Thumbnail`) because it is
+/// warming a tile nothing is going to paint. A decode and resize here would be
 /// spent on a size chosen by the warm pass rather than by whatever eventually
-/// asks (a DPI change, or a different card size, invalidates every one of
-/// them), and the derived entry it wrote sat in the same disk budget as the
-/// source it was derived from, evicting real sources to store a guess.
+/// asks — a DPI change, or a different card size, invalidates every one of
+/// them — and the derived entry would sit in the same disk budget as the
+/// source it came from, evicting real sources to store a guess.
 ///
-/// What it costs: the first interactive request for a warmed URL now pays a
+/// What that costs: the first interactive request for a warmed URL pays a
 /// local decode (measured at 2.7 ms for a 512x512 JPEG, 11.5 ms for
 /// 1920x1080) instead of a disk read. What it buys: no network, which is the
 /// term that actually dominates.
@@ -383,10 +383,10 @@ mod tests {
         assert!(read_disk_cache(&cache, &key, 32).is_some());
     }
 
-    /// Animations no longer get a derived entry, so the source tier is the only
-    /// thing keeping them off the network. This is the test that says dropping
-    /// the duplicate lost nothing: the animation still replays, still carries a
-    /// ThumbHash, and still costs no fetch.
+    /// Animations get no derived entry, so the source tier is the only thing
+    /// keeping them off the network. This is the test that says storing no
+    /// duplicate costs nothing: the animation replays, carries a ThumbHash,
+    /// and needs no fetch.
     #[test]
     fn an_animation_replays_from_the_source_tier_with_no_derived_entry() {
         let root = crate::test_support::TestDir::new("animation-source-only");

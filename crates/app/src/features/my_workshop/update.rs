@@ -123,6 +123,7 @@ fn stats_refresh_effects(state: &mut State) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use crate::generation::Generation;
+    use crate::widgets::grid_rows::CardId;
     use std::collections::HashMap;
 
     use super::super::model::{PUBLISH_NEW_ROW_ID, PageResult, PreparePublishTarget, Row};
@@ -244,9 +245,9 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::Grid(addon_grid::Message::CardClicked(
-                PUBLISH_NEW_ROW_ID.to_owned(),
-            )),
+            Message::Grid(addon_grid::Message::CardClicked(CardId::from(
+                PUBLISH_NEW_ROW_ID,
+            ))),
         );
 
         assert_eq!(
@@ -262,7 +263,7 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::Grid(addon_grid::Message::CardClicked("42".to_owned())),
+            Message::Grid(addon_grid::Message::CardClicked(CardId::from("42"))),
         );
 
         match effects.as_slice() {
@@ -282,7 +283,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::Grid(addon_grid::Message::CardContextRequested(
-                "42".to_owned(),
+                CardId::from("42"),
                 iced::Point::new(10.0, 20.0),
             )),
         );
@@ -326,7 +327,7 @@ mod tests {
         assert!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardClicked("missing".to_owned())),
+                Message::Grid(addon_grid::Message::CardClicked(CardId::from("missing"))),
             )
             .is_empty()
         );
@@ -334,7 +335,7 @@ mod tests {
             update(
                 &mut state,
                 Message::Grid(addon_grid::Message::CardContextRequested(
-                    "missing".to_owned(),
+                    CardId::from("missing"),
                     iced::Point::ORIGIN,
                 )),
             )
@@ -409,17 +410,17 @@ mod tests {
         assert_eq!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardPressed("42".to_owned())),
+                Message::Grid(addon_grid::Message::CardPressed(CardId::from("42"))),
             ),
             vec![Effect::AddonDragPressed {
-                card_id: "42".to_owned(),
+                card_id: CardId::from("42"),
                 workshop_id: Some(PublishedFileId::fixture(42)),
             }]
         );
         assert_eq!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardReleased("42".to_owned())),
+                Message::Grid(addon_grid::Message::CardReleased(CardId::from("42"))),
             ),
             vec![Effect::AddonDragReleased]
         );
@@ -442,7 +443,10 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::Grid(addon_grid::Message::CardHoverChanged("42".to_owned(), true)),
+            Message::Grid(addon_grid::Message::CardHoverChanged(
+                CardId::from("42"),
+                true,
+            )),
         );
 
         assert!(state.has_active_animations());

@@ -97,10 +97,6 @@ struct TransactionsShared {
     registry: RwLock<Vec<TransactionRef>>,
     id: AtomicU32,
     sink: Arc<dyn BackendEventSink>,
-    /// Whether this `Transactions` was built for the CLI-only extraction
-    /// path: transaction events are suppressed there (no UI is listening),
-    /// mirroring the desktop app's opposite default.
-    cli_mode: bool,
 }
 
 /// Owns transaction bookkeeping (id allocation, the live-transaction
@@ -120,20 +116,18 @@ impl std::fmt::Debug for Transactions {
 
 impl Transactions {
     #[must_use]
-    pub fn new(sink: Arc<dyn BackendEventSink>, cli_mode: bool) -> Self {
+    pub fn new(sink: Arc<dyn BackendEventSink>) -> Self {
         Self {
             shared: Arc::new(TransactionsShared {
                 registry: RwLock::new(Vec::new()),
                 id: AtomicU32::new(0),
                 sink,
-                cli_mode,
             }),
         }
     }
 
     /// Emits a plain (non-transaction) backend event, e.g. `SteamConnected`
-    /// or `AppDataUpdated`. Never suppressed by CLI mode: only transaction
-    /// progress/status/error events are cli-gated.
+    /// or `AppDataUpdated`.
     pub fn emit(&self, event: BackendEvent) {
         self.shared.sink.emit(event);
     }
@@ -288,14 +282,6 @@ struct TransactionInner {
 }
 impl TransactionInner {
     fn emit(&self, event: TransactionEvent) {
-        if self.shared.cli_mode {
-            return;
-        }
-
-        self.emit_desktop(event);
-    }
-
-    fn emit_desktop(&self, event: TransactionEvent) {
         self.shared.sink.emit(BackendEvent::Transaction(event));
     }
 
@@ -505,7 +491,6 @@ mod tests {
             registry: parking_lot::RwLock::new(Vec::new()),
             id: std::sync::atomic::AtomicU32::new(0),
             sink: Arc::new(sink),
-            cli_mode: false,
         })
     }
 
@@ -514,7 +499,7 @@ mod tests {
     /// so a concurrent lookup can legitimately observe one.
     #[test]
     fn find_returns_none_for_an_entry_that_cannot_upgrade() {
-        let transactions = Transactions::new(Arc::new(crate::events::NullEventSink), false);
+        let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));
         let id = TransactionId::from_raw(9);
         transactions.shared.registry.write().push(TransactionRef {
             id,
@@ -542,7 +527,7 @@ mod tests {
             state: AtomicU8::new(State::Running as u8),
             shared: shared_for_test(collector.clone()),
         };
-        transaction.emit_desktop(TransactionEvent::Status {
+        transaction.emit(TransactionEvent::Status {
             id: transaction.id,
             status: "packing".to_owned(),
         });
@@ -558,8 +543,7 @@ mod tests {
 
     #[test]
     fn cancel_transaction_by_id_aborts_registered_transaction() {
-        let transactions =
-            super::Transactions::new(Arc::new(BackendEventCollector::default()), false);
+        let transactions = super::Transactions::new(Arc::new(BackendEventCollector::default()));
         let transaction = transactions.begin();
 
         assert!(transactions.cancel_by_id(transaction.id()));
@@ -571,8 +555,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Tried to error an already-finished transaction")]
     fn erroring_an_already_finished_transaction_is_flagged_as_misuse() {
-        let transactions =
-            super::Transactions::new(Arc::new(BackendEventCollector::default()), false);
+        let transactions = super::Transactions::new(Arc::new(BackendEventCollector::default()));
         let transaction = transactions.begin();
 
         transaction.finished(super::TransactionPayload::None);

@@ -276,7 +276,7 @@ impl App {
         self.ctx
             .run_blocking("destination-create-folder-save", move |app| {
                 app.update_settings_snapshot(|settings| {
-                    settings.create_folder_on_extract = enabled;
+                    settings.backend.create_folder_on_extract = enabled;
                 })
                 .map(|()| {
                     Box::new(destination_select::SettingsSnapshot::new(

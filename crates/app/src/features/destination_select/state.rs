@@ -109,7 +109,7 @@ impl State {
     }
 
     pub(crate) const fn create_folder(&self) -> bool {
-        self.settings.create_folder_on_extract
+        self.settings.backend.create_folder_on_extract
     }
 
     pub(crate) fn confirm_label_key(&self) -> &'static str {
@@ -124,7 +124,7 @@ impl State {
     }
 
     pub(crate) fn history(&self) -> &[PathBuf] {
-        &self.settings.destinations
+        &self.settings.backend.destinations
     }
 
     pub(crate) fn is_history_selected(&self, path: &Path) -> bool {
@@ -172,7 +172,8 @@ impl State {
             let append = match &self.selection {
                 DestinationSelection::Root(_) => true,
                 DestinationSelection::Custom(_) => {
-                    self.settings.create_folder_on_extract || self.context.force_create_folder
+                    self.settings.backend.create_folder_on_extract
+                        || self.context.force_create_folder
                 }
                 DestinationSelection::None => false,
             };
@@ -189,7 +190,7 @@ impl State {
     pub(crate) fn initial_browse_directory(&self) -> PathBuf {
         self.selected_path()
             .map(Path::to_path_buf)
-            .or_else(|| self.settings.destinations.first().cloned())
+            .or_else(|| self.settings.backend.destinations.first().cloned())
             .unwrap_or_else(fallback_current_dir)
     }
 
@@ -262,7 +263,7 @@ impl State {
     }
 
     pub(crate) fn set_create_folder(&mut self, enabled: bool) {
-        self.settings.create_folder_on_extract = enabled;
+        self.settings.backend.create_folder_on_extract = enabled;
         self.error = None;
     }
 
@@ -288,7 +289,7 @@ impl State {
     pub(crate) fn persist_request(&self) -> Option<DestinationPersistRequest> {
         let destination = model::selection_to_extract_destination(
             &self.selection,
-            self.settings.create_folder_on_extract || self.context.force_create_folder,
+            self.settings.backend.create_folder_on_extract || self.context.force_create_folder,
         )?;
         let history_path = match &self.selection {
             DestinationSelection::Custom(path) => Some(path.clone()),
@@ -297,7 +298,7 @@ impl State {
 
         Some(DestinationPersistRequest {
             destination,
-            create_folder: self.settings.create_folder_on_extract,
+            create_folder: self.settings.backend.create_folder_on_extract,
             history_path,
         })
     }
@@ -491,10 +492,8 @@ mod tests {
         fs::create_dir(&first).expect("first dir");
         fs::create_dir(&second).expect("second dir");
         let SettingsSnapshot { settings, paths } = snapshot_with_roots(&temp);
-        let settings = Settings {
-            destinations: vec![first.clone(), second.clone()],
-            ..settings
-        };
+        let mut settings = settings;
+        settings.backend.destinations = vec![first.clone(), second.clone()];
         let mut state = State::default();
         state.open(
             SettingsSnapshot::new(settings, paths),

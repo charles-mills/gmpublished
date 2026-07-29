@@ -29,7 +29,7 @@ pub(super) fn publish_submission_from_app_request(
         PublishSubmitMode::New => steam_publishing::PublishSubmissionMode::Create,
         PublishSubmitMode::Update { workshop_id } => {
             steam_publishing::PublishSubmissionMode::Update {
-                id: gmpublished_backend::appdata::SettingsPublishedFileId(workshop_id.get()),
+                id: workshop_id.into(),
                 changes: request.changelog,
             }
         }
@@ -115,7 +115,7 @@ pub(super) fn search_item_source_from_backend(
         // its `nonzero_workshop_id` helper), so every id it hands us
         // converts cleanly.
         gmpublished_backend::search::SearchItemSource::InstalledAddons(path, id) => {
-            SearchItemSource::InstalledAddons(path.clone(), id.map(PublishedFileId::from_backend))
+            SearchItemSource::InstalledAddons(path.clone(), id.map(PublishedFileId::from))
         }
         gmpublished_backend::search::SearchItemSource::InstalledAddonFile {
             addon,
@@ -125,16 +125,16 @@ pub(super) fn search_item_source_from_backend(
         } => SearchItemSource::InstalledAddonFile {
             addon_path: addon.path.clone(),
             addon_title: addon.title.clone(),
-            workshop_id: addon.workshop_id.map(PublishedFileId::from_backend),
+            workshop_id: addon.workshop_id.map(PublishedFileId::from),
             entry_path: entry_path.clone(),
             size_bytes: *size_bytes,
             crc32: *crc32,
         },
         gmpublished_backend::search::SearchItemSource::MyWorkshop(id) => {
-            SearchItemSource::MyWorkshop(PublishedFileId::from_backend(*id))
+            SearchItemSource::MyWorkshop(PublishedFileId::from(*id))
         }
         gmpublished_backend::search::SearchItemSource::WorkshopItem(id) => {
-            SearchItemSource::WorkshopItem(PublishedFileId::from_backend(*id))
+            SearchItemSource::WorkshopItem(PublishedFileId::from(*id))
         }
     }
 }
@@ -162,7 +162,7 @@ pub(super) fn steam_user_from_workshop_backend(user: steam_users::SteamUser) -> 
 
 pub(super) fn workshop_item_from_backend(item: gmpublished_backend::WorkshopItem) -> WorkshopItem {
     WorkshopItem {
-        id: PublishedFileId::from_backend(item.id),
+        id: PublishedFileId::from(item.id),
         title: item.title,
         owner: item.owner.map(steam_user_from_workshop_backend),
         steamid: item.steamid.map(|steamid| SteamId::new(steamid.raw())),

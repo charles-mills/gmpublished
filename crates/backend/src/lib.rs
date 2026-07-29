@@ -14,12 +14,14 @@ pub mod error_key;
 pub use error_key::{ErrorKey, HasErrorKey};
 
 pub(crate) mod logging;
+pub use logging::shutdown as shutdown_logging;
 
 pub const GMOD_APP_ID: steamworks::AppId = steamworks::AppId(4000);
 
 pub(crate) mod util;
 pub use util::panic::payload_message as panic_payload_message;
 pub use util::path;
+pub use util::threads;
 pub(crate) use util::{stream_bytes, write_nt_string};
 
 pub type ArcBytes = std::sync::Arc<[u8]>;
@@ -29,6 +31,12 @@ pub use transactions::Transaction;
 
 pub mod rgba_image;
 pub use rgba_image::RgbaImage;
+
+pub mod workshop_id;
+pub use workshop_id::WorkshopId;
+
+pub mod io_failure;
+pub use io_failure::IoFailure;
 
 pub mod events;
 

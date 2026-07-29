@@ -141,6 +141,7 @@ mod tests {
     use crate::bridge::library::LibraryRefreshReason;
     use crate::generation::Generation;
     use crate::widgets::addon_grid;
+    use crate::widgets::grid_rows::CardId;
 
     use super::super::model::{MetadataResolution, Row};
     use super::{Effect, Message, State, update};
@@ -287,7 +288,9 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::Grid(addon_grid::Message::CardClicked("/tmp/one.gma".to_owned())),
+            Message::Grid(addon_grid::Message::CardClicked(CardId::from(
+                "/tmp/one.gma",
+            ))),
         );
         assert!(matches!(
             effects.as_slice(),
@@ -299,7 +302,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::Grid(addon_grid::Message::CardContextRequested(
-                "/tmp/one.gma".to_owned(),
+                CardId::from("/tmp/one.gma"),
                 iced::Point::new(10.0, 20.0),
             )),
         );
@@ -318,7 +321,7 @@ mod tests {
         assert!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardClicked("missing".to_owned())),
+                Message::Grid(addon_grid::Message::CardClicked(CardId::from("missing"))),
             )
             .is_empty()
         );
@@ -326,7 +329,7 @@ mod tests {
             update(
                 &mut state,
                 Message::Grid(addon_grid::Message::CardContextRequested(
-                    "missing".to_owned(),
+                    CardId::from("missing"),
                     iced::Point::ORIGIN,
                 )),
             )
@@ -349,17 +352,21 @@ mod tests {
         assert_eq!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardPressed("/tmp/one.gma".to_owned())),
+                Message::Grid(addon_grid::Message::CardPressed(CardId::from(
+                    "/tmp/one.gma"
+                ))),
             ),
             vec![Effect::AddonDragPressed {
-                card_id: "/tmp/one.gma".to_owned(),
+                card_id: CardId::from("/tmp/one.gma"),
                 workshop_id: Some(PublishedFileId::fixture(1)),
             }]
         );
         assert_eq!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardReleased("/tmp/one.gma".to_owned())),
+                Message::Grid(addon_grid::Message::CardReleased(CardId::from(
+                    "/tmp/one.gma"
+                ))),
             ),
             vec![Effect::AddonDragReleased]
         );
@@ -391,7 +398,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::Grid(addon_grid::Message::CardHoverChanged(
-                "/tmp/animated.gma".to_owned(),
+                CardId::from("/tmp/animated.gma"),
                 true,
             )),
         );

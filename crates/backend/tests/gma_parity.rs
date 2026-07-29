@@ -5,9 +5,10 @@ use std::{
 };
 
 use gmpublished_backend::{
-    GmaFile, GmaMetadata,
+    GmaError, GmaFile, GmaMetadata,
     appdata::{AppData, AppDataPaths},
-    events::{BackendEvent, BackendEventCollector, NullEventSink, TransactionEvent},
+    error_key::HasErrorKey,
+    events::{BackendEventCollector, NullEventSink},
     gma::extract::{ExtractOptions, Whitelist},
     gma::{self, ExtractDestination, read::GmaView, whitelist::AddonWhitelist},
     steam::Steam,
@@ -25,14 +26,13 @@ struct Fixture {
     steam: Steam,
     whitelist: AddonWhitelist,
     transactions: Transactions,
-    collector: BackendEventCollector,
     _temp: TempDir,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let transactions = Transactions::new(Arc::new(NullEventSink), false);
+        let transactions = Transactions::new(Arc::new(NullEventSink));
         let app_data = AppData::load(
             AppDataPaths::for_test_root(temp.path()),
             transactions.clone(),
@@ -42,18 +42,21 @@ impl Fixture {
             steam: Steam::new(transactions.clone()),
             whitelist: AddonWhitelist::new(),
             transactions,
-            collector: BackendEventCollector::default(),
             _temp: temp,
         }
     }
 
-    /// Same as [`Self::new`], but transaction events go to `collector`
-    /// instead of a null sink, for tests that need to inspect an emitted
-    /// error's key/detail.
+    /// Same as [`Self::new`], but with a live event sink attached, so a test
+    /// exercising a transaction path runs against real emission rather than a
+    /// null sink.
+    ///
+    /// The collector is not retained: packing reports failure by *returning*
+    /// an error, and the tests below assert on that. Emission is the publish
+    /// layer's job and is covered where it happens.
     fn with_collected_events() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let collector = BackendEventCollector::default();
-        let transactions = Transactions::new(Arc::new(collector.clone()), false);
+        let transactions = Transactions::new(Arc::new(collector));
         let app_data = AppData::load(
             AppDataPaths::for_test_root(temp.path()),
             transactions.clone(),
@@ -63,7 +66,6 @@ impl Fixture {
             steam: Steam::new(transactions.clone()),
             whitelist: AddonWhitelist::new(),
             transactions,
-            collector,
             _temp: temp,
         }
     }
@@ -367,7 +369,6 @@ fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
     };
 
     let transaction = fixture.transactions.begin();
-    let transaction_id = transaction.id();
     let result = gma.create(&source, &transaction, &fixture.whitelist);
     transaction.cancel();
 
@@ -375,17 +376,22 @@ fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
     // whether the assertions below pass.
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
-    assert!(result.is_err());
     assert!(!gma_path.exists());
 
-    let events = fixture.collector.drain();
+    // The path travels on the error, not alongside it: whoever receives this
+    // can report it, and a caller that reports nothing loses nothing that was
+    // already reported behind its back.
+    let error = result.expect_err("an unreadable directory must fail the pack");
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Transaction(TransactionEvent::Error { id, error })
-                if *id == transaction_id && error.key.as_str() == "ERR_PATH_IO_ERROR"
-        )),
-        "expected a path-naming error for the unreadable directory, got {events:?}"
+        matches!(&error, GmaError::PathIo { path } if path.starts_with(&source)),
+        "expected a path-naming error for the unreadable directory, got {error:?}"
+    );
+    assert_eq!(error.error_key().as_str(), "ERR_PATH_IO_ERROR");
+    assert!(
+        error
+            .error_detail()
+            .is_some_and(|detail| detail.contains("locked")),
+        "the failing path must survive into the reportable detail"
     );
 }
 
@@ -419,22 +425,17 @@ fn gma_create_non_utf8_entry_name_errors_naming_the_path() {
     };
 
     let transaction = fixture.transactions.begin();
-    let transaction_id = transaction.id;
     let result = gma.create(&source, &transaction, &fixture.whitelist);
     transaction.cancel();
 
-    assert!(result.is_err());
     assert!(!gma_path.exists());
 
-    let events = fixture.collector.drain();
+    let error = result.expect_err("a non-UTF8 entry name must fail the pack");
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Transaction(TransactionEvent::Error { id, error })
-                if *id == transaction_id && error.key.as_str() == "ERR_PATH_IO_ERROR"
-        )),
-        "expected a path-naming error for the non-UTF8 entry, got {events:?}"
+        matches!(&error, GmaError::PathIo { path } if path.starts_with(&source)),
+        "expected a path-naming error for the non-UTF8 entry, got {error:?}"
     );
+    assert_eq!(error.error_key().as_str(), "ERR_PATH_IO_ERROR");
 }
 
 #[test]

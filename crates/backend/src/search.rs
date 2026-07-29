@@ -8,10 +8,10 @@ use std::{
     },
 };
 
+use crate::WorkshopId;
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 use serde::{Serialize, ser::SerializeTuple};
-use steamworks::PublishedFileId;
 
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
@@ -103,7 +103,7 @@ pub enum SearchScope {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "source", content = "association")]
 pub enum SearchItemSource {
-    InstalledAddons(PathBuf, Option<PublishedFileId>),
+    InstalledAddons(PathBuf, Option<WorkshopId>),
     InstalledAddonFile {
         #[serde(serialize_with = "serialize_shared_addon")]
         addon: Arc<FileSearchAddon>,
@@ -111,8 +111,8 @@ pub enum SearchItemSource {
         size_bytes: u64,
         crc32: u32,
     },
-    MyWorkshop(PublishedFileId),
-    WorkshopItem(PublishedFileId),
+    MyWorkshop(WorkshopId),
+    WorkshopItem(WorkshopId),
 }
 
 /// Shared per-addon identity for file search items: a library has ~10³
@@ -125,18 +125,22 @@ pub struct FileSearchAddon {
     /// Canonicalized addon path (see [`SearchItem::new_installed_addon`]).
     pub path: PathBuf,
     pub title: String,
-    pub workshop_id: Option<PublishedFileId>,
+    pub workshop_id: Option<WorkshopId>,
     /// The workshop id formatted once, so id queries can match file items
     /// without a per-file copy.
     pub id_str: Option<Box<str>>,
 }
 
 impl FileSearchAddon {
-    pub fn new(path: PathBuf, title: String, workshop_id: Option<u64>) -> Arc<Self> {
+    /// Takes the id already refined, so the searchable text and the typed id
+    /// cannot describe different addons — a raw `Some(0)` would otherwise
+    /// leave `workshop_id: None` beside an `id_str` of `"0"` that file search
+    /// happily matches on.
+    pub fn new(path: PathBuf, title: String, workshop_id: Option<WorkshopId>) -> Arc<Self> {
         Arc::new(Self {
             path,
             title,
-            workshop_id: workshop_id.map(PublishedFileId),
+            workshop_id,
             id_str: workshop_id.map(|id| id.to_string().into_boxed_str()),
         })
     }
@@ -203,8 +207,8 @@ fn source_order_key(
         SearchItemSource::InstalledAddonFile {
             addon, entry_path, ..
         } => (1, Some(addon.path.as_path()), Some(entry_path.as_str()), 0),
-        SearchItemSource::MyWorkshop(id) => (2, None, None, id.0),
-        SearchItemSource::WorkshopItem(id) => (3, None, None, id.0),
+        SearchItemSource::MyWorkshop(id) => (2, None, None, id.get()),
+        SearchItemSource::WorkshopItem(id) => (3, None, None, id.get()),
     }
 }
 
@@ -267,7 +271,7 @@ impl SearchItem {
         timestamp: D,
     ) -> Self {
         Self::new(
-            SearchItemSource::InstalledAddons(path, workshop_id.map(PublishedFileId)),
+            SearchItemSource::InstalledAddons(path, workshop_id.and_then(WorkshopId::new)),
             label,
             terms,
             timestamp,
@@ -325,7 +329,7 @@ impl Searchable for WorkshopItem {
     fn search_item(&self) -> Option<SearchItem> {
         let mut terms = self.tags.clone();
 
-        terms.push(self.id.0.to_string());
+        terms.push(self.id.get().to_string());
 
         if let Some(steamid) = &self.steamid {
             terms.push(steamid.raw().to_string());
@@ -349,7 +353,7 @@ impl Searchable for GmaFile {
         let label = self.metadata.title().to_owned();
 
         if let Some(id) = self.id {
-            terms.push(id.0.to_string());
+            terms.push(id.get().to_string());
         }
 
         Some(SearchItem::new(
@@ -376,7 +380,7 @@ pub struct Search {
     dirty: AtomicBool,
     items: RwLock<Vec<Arc<SearchItem>>>,
 
-    pub installed_addons: RwLock<BTreeMap<PublishedFileId, Arc<SearchItem>>>,
+    pub installed_addons: RwLock<BTreeMap<WorkshopId, Arc<SearchItem>>>,
 }
 impl Default for Search {
     fn default() -> Self {

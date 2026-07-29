@@ -421,9 +421,9 @@ fn atlas_budget_edge_cap(frame_count: usize, budget_bytes: usize) -> GifPreviewR
 /// goes.
 ///
 /// The bucket starts are materialised rather than inverted on the fly. The
-/// inverse of `floor(bucket * frame_count / MAX)` is a ceiling division that is
-/// easy to get subtly wrong — an earlier version of this kept 2 frames out of
-/// 70 — and the table is at most `MAX` entries.
+/// inverse of `floor(bucket * frame_count / MAX)` is a ceiling division whose
+/// off-by-one failure mode is silent and severe — it keeps a handful of frames
+/// out of dozens — and the table is at most `MAX` entries.
 struct Decimation {
     /// First frame index of each bucket, ascending. Empty when no decimation
     /// applies.

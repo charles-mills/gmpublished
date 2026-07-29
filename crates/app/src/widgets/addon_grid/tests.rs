@@ -5,6 +5,7 @@ use super::{
 use crate::generation::Generation;
 use crate::theme::{self, ThemeVariant, Tokens};
 use crate::widgets::addon_card;
+use crate::widgets::grid_rows::CardId;
 use iced::Point;
 
 fn items(heights: &[f32]) -> Vec<Item> {
@@ -13,7 +14,7 @@ fn items(heights: &[f32]) -> Vec<Item> {
         .enumerate()
         .map(|(index, height)| {
             Item::new(addon_card::Data::addon(
-                format!("id-{index}"),
+                CardId::from(format!("id-{index}")),
                 format!("Addon {index}"),
             ))
             .with_preferred_height(*height)
@@ -183,9 +184,9 @@ fn rows_use_addon_card_preferred_height() {
     let tokens = Tokens::dark();
     let card_width = 200.0;
     let items = vec![
-        Item::new(addon_card::Data::addon("short", "Short")),
+        Item::new(addon_card::Data::addon(CardId::from("short"), "Short")),
         Item::new(addon_card::Data::addon(
-            "long",
+            CardId::from("long"),
             "A long title that needs more height than the short sibling",
         )),
     ];
@@ -212,7 +213,10 @@ fn rows_use_addon_card_preferred_height() {
 fn cursor_hover_updates_grid_owned_item_state() {
     let mut state = State::default();
     let _ = apply(&mut state, Message::ViewportResized(500, 500));
-    let _ = state.set_items(vec![Item::new(addon_card::Data::addon("id-0", "Addon"))]);
+    let _ = state.set_items(vec![Item::new(addon_card::Data::addon(
+        CardId::from("id-0"),
+        "Addon",
+    ))]);
     let cursor = card_center(&state, 0);
 
     assert_eq!(
@@ -286,7 +290,10 @@ fn scroll_reconcile_moves_hover_with_stationary_cursor_and_clears_misses() {
 fn cursor_left_clears_hover() {
     let mut state = State::default();
     let _ = apply(&mut state, Message::ViewportResized(500, 500));
-    let _ = state.set_items(vec![Item::new(addon_card::Data::addon("id-0", "Addon"))]);
+    let _ = state.set_items(vec![Item::new(addon_card::Data::addon(
+        CardId::from("id-0"),
+        "Addon",
+    ))]);
     let cursor = card_center(&state, 0);
     let _ = apply(&mut state, Message::CursorMoved(cursor));
 
@@ -393,19 +400,24 @@ fn patch_items_resolves_by_id_with_the_index_as_a_hint() {
         // Fresh hint: applied directly.
         (
             0,
-            Item::new(addon_card::Data::addon("id-0", "Patched")).with_preferred_height(100.0),
+            Item::new(addon_card::Data::addon(CardId::from("id-0"), "Patched"))
+                .with_preferred_height(100.0),
         ),
         // Stale hint: the id lives at index 2, not 1 — the patch must land
         // on the item with that id, not the item at the hinted slot.
         (
             1,
-            Item::new(addon_card::Data::addon("id-2", "Patched Elsewhere"))
-                .with_preferred_height(100.0),
+            Item::new(addon_card::Data::addon(
+                CardId::from("id-2"),
+                "Patched Elsewhere",
+            ))
+            .with_preferred_height(100.0),
         ),
         // Unknown id: the item left the grid; the patch is dropped.
         (
             1,
-            Item::new(addon_card::Data::addon("id-9", "Gone")).with_preferred_height(100.0),
+            Item::new(addon_card::Data::addon(CardId::from("id-9"), "Gone"))
+                .with_preferred_height(100.0),
         ),
     ]);
 
@@ -428,7 +440,8 @@ fn patch_items_anchors_scroll_when_heights_above_the_viewport_change() {
     // Row 0 grows by 100 (e.g. a hydrated title re-wrapping taller).
     let messages = state.patch_items(vec![(
         0,
-        Item::new(addon_card::Data::addon("id-0", "Addon 0")).with_preferred_height(200.0),
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "Addon 0"))
+            .with_preferred_height(200.0),
     )]);
 
     assert_eq!(state.scroll_offset, 400.0);
@@ -452,7 +465,8 @@ fn patch_items_does_not_anchor_when_heights_change_below_the_viewport() {
 
     let messages = state.patch_items(vec![(
         9,
-        Item::new(addon_card::Data::addon("id-9", "Addon 9")).with_preferred_height(200.0),
+        Item::new(addon_card::Data::addon(CardId::from("id-9"), "Addon 9"))
+            .with_preferred_height(200.0),
     )]);
 
     assert_eq!(state.scroll_offset, 300.0);
@@ -470,9 +484,9 @@ fn title_measure_memo_is_reused_at_the_same_width_and_ignored_at_another() {
 
     // Duplicate titles share one entry; the override-free Item path measures.
     let _ = state.set_items(vec![
-        Item::new(addon_card::Data::addon("id-0", "Alpha")),
-        Item::new(addon_card::Data::addon("id-1", "Beta")),
-        Item::new(addon_card::Data::addon("id-2", "Alpha")),
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "Alpha")),
+        Item::new(addon_card::Data::addon(CardId::from("id-1"), "Beta")),
+        Item::new(addon_card::Data::addon(CardId::from("id-2"), "Alpha")),
     ]);
     let mut titles = state.title_measures.keys().cloned().collect::<Vec<_>>();
     titles.sort();
@@ -491,8 +505,8 @@ fn title_measure_memo_is_reused_at_the_same_width_and_ignored_at_another() {
     };
     let _ = state.title_measures.insert("Alpha".to_owned(), poisoned);
     let _ = state.set_items(vec![
-        Item::new(addon_card::Data::addon("id-0", "Alpha")),
-        Item::new(addon_card::Data::addon("id-1", "Beta")),
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "Alpha")),
+        Item::new(addon_card::Data::addon(CardId::from("id-1"), "Beta")),
     ]);
     assert!((state.card_heights[0] - (alpha_card_height + 20.0)).abs() < 0.01);
 
@@ -510,8 +524,8 @@ fn title_measure_watermark_skips_shaping_at_wider_widths() {
     let _ = apply(&mut state, Message::ViewportResized(500, 500));
     let long_title = "This Genuinely Long Addon Title Certainly Wraps Onto Several Lines";
     let _ = state.set_items(vec![
-        Item::new(addon_card::Data::addon("id-0", "Alpha")),
-        Item::new(addon_card::Data::addon("id-1", long_title)),
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "Alpha")),
+        Item::new(addon_card::Data::addon(CardId::from("id-1"), long_title)),
     ]);
     assert!(
         state.card_heights[1] > state.card_heights[0],
@@ -544,8 +558,8 @@ fn title_measure_cache_compacts_against_title_churn() {
     }
 
     let _ = state.set_items(vec![
-        Item::new(addon_card::Data::addon("id-0", "Alpha")),
-        Item::new(addon_card::Data::addon("id-1", "Beta")),
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "Alpha")),
+        Item::new(addon_card::Data::addon(CardId::from("id-1"), "Beta")),
     ]);
 
     let mut titles = state.title_measures.keys().cloned().collect::<Vec<_>>();
@@ -558,7 +572,7 @@ fn disabled_card_is_not_hoverable() {
     let mut state = State::default();
     let _ = apply(&mut state, Message::ViewportResized(500, 500));
     let _ = state.set_items(vec![
-        Item::new(addon_card::Data::addon("id-0", "Disabled").with_enabled(false))
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "Disabled").with_enabled(false))
             .with_preferred_height(100.0),
     ]);
     let cursor = card_center(&state, 0);
@@ -573,15 +587,19 @@ fn set_items_keeps_still_valid_hover_without_notifications() {
     let mut state = State::default();
     let _ = apply(&mut state, Message::ViewportResized(500, 500));
     let _ = state.set_items(vec![
-        Item::new(addon_card::Data::addon("id-0", "Old title")).with_preferred_height(100.0),
-        Item::new(addon_card::Data::addon("id-1", "Other")).with_preferred_height(100.0),
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "Old title"))
+            .with_preferred_height(100.0),
+        Item::new(addon_card::Data::addon(CardId::from("id-1"), "Other"))
+            .with_preferred_height(100.0),
     ]);
     let cursor = card_center(&state, 0);
     let _ = apply(&mut state, Message::CursorMoved(cursor));
 
     let messages = state.set_items(vec![
-        Item::new(addon_card::Data::addon("id-0", "New title")).with_preferred_height(100.0),
-        Item::new(addon_card::Data::addon("id-1", "Other")).with_preferred_height(100.0),
+        Item::new(addon_card::Data::addon(CardId::from("id-0"), "New title"))
+            .with_preferred_height(100.0),
+        Item::new(addon_card::Data::addon(CardId::from("id-1"), "Other"))
+            .with_preferred_height(100.0),
     ]);
 
     assert_eq!(hover_messages(messages), Vec::new());
@@ -593,7 +611,10 @@ fn set_items_keeps_still_valid_hover_without_notifications() {
 #[test]
 fn visible_card_motion_reports_hover_transitions() {
     let mut state = State::default();
-    let _ = state.set_items(vec![Item::new(addon_card::Data::addon("id-0", "Addon"))]);
+    let _ = state.set_items(vec![Item::new(addon_card::Data::addon(
+        CardId::from("id-0"),
+        "Addon",
+    ))]);
     let _ = apply(&mut state, Message::ViewportResized(500, 500));
     let started = std::time::Instant::now();
 

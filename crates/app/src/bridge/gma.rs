@@ -276,9 +276,12 @@ impl PreviewArchive {
         let view = GmaView::open(path)?;
         let bundle = view.meta(path)?;
         let mut gma = bundle.handle;
-        if let Some(id) = workshop_id.or_else(|| workshop_id_from_path(path)) {
+        if let Some(id) = workshop_id
+            .or_else(|| workshop_id_from_path(path))
+            .and_then(gmpublished_backend::WorkshopId::new)
+        {
             // Recomputes extracted_name so it includes both title and id.
-            gma.set_ws_id(gmpublished_backend::appdata::SettingsPublishedFileId(id));
+            gma.set_ws_id(id);
         }
         let header = bundle.header;
         let entries = preview_entries_from_backend(bundle.entries);
@@ -403,7 +406,7 @@ pub fn build_preview_extract_request(
 ) -> PreviewExtractRequest {
     settings.sanitize(paths);
     PreviewExtractRequest {
-        destination: settings.extract_destination,
+        destination: settings.backend.extract_destination,
         options: PreviewExtractOptions::default(),
     }
 }
@@ -431,7 +434,8 @@ fn workshop_id_from_path(path: &Path) -> Option<u64> {
 }
 
 pub fn workshop_id_from_filename(file_name: impl AsRef<str>) -> Option<u64> {
-    gmpublished_backend::gma::ws_id_from_file_name(file_name).map(|id| id.0)
+    gmpublished_backend::gma::ws_id_from_file_name(file_name)
+        .map(gmpublished_backend::WorkshopId::get)
 }
 
 #[cfg(test)]

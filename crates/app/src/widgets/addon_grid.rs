@@ -9,6 +9,7 @@ use iced::{Element, Length, Point, Size};
 use crate::generation::Generation;
 use crate::theme::{self, Tokens};
 use crate::widgets::addon_card;
+use crate::widgets::grid_rows::CardId;
 
 pub const DEFAULT_CARD_WIDTH: f32 = 200.0;
 pub const MIN_CARD_WIDTH: f32 = 120.0;
@@ -30,7 +31,7 @@ pub struct State {
     visible_rows: VisibleRowRange,
     last_reported_visible_rows: VisibleRowRange,
     cursor: Option<Point>,
-    hovered_id: Option<String>,
+    hovered_id: Option<CardId>,
     loading: bool,
     has_more_pages: bool,
     next_page_requested: bool,
@@ -74,6 +75,7 @@ impl Default for State {
 }
 
 impl State {
+    #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub(crate) fn set_items(&mut self, items: Vec<Item>) -> Vec<Message> {
         self.set_items_at(items, Instant::now())
     }
@@ -96,6 +98,7 @@ impl State {
     /// lead card offsetting the grid) degrades to a slower lookup instead of
     /// a silently dropped patch. An id that is no longer in the grid at all
     /// is skipped — that item was removed.
+    #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub(crate) fn patch_items(&mut self, updates: Vec<(usize, Item)>) -> Vec<Message> {
         self.patch_items_at(updates, Instant::now())
     }
@@ -146,7 +149,7 @@ impl State {
     pub(crate) fn update_item_thumbnail(
         &mut self,
         index_hint: usize,
-        id: &str,
+        id: &CardId,
         thumbnail: addon_card::Thumbnail,
     ) -> bool {
         let item = match self.items.get_mut(index_hint) {
@@ -191,6 +194,7 @@ impl State {
         }
     }
 
+    #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub(crate) fn set_page_status(&mut self, loading: bool, has_more_pages: bool) -> Vec<Message> {
         self.set_page_status_at(loading, has_more_pages, Instant::now())
     }
@@ -354,7 +358,7 @@ impl State {
     }
 
     fn reconcile_hover(&mut self, now: Instant) -> Vec<Message> {
-        let target_id = self.hover_target_id().map(str::to_owned);
+        let target_id = self.hover_target_id().cloned();
         if target_id == self.hovered_id {
             return Vec::new();
         }
@@ -362,14 +366,14 @@ impl State {
         let previous_id = self.hovered_id.take();
         let mut messages = Vec::new();
         if let Some(previous_id) = previous_id {
-            if let Some(item) = self.items.iter_mut().find(|item| item.id() == previous_id) {
+            if let Some(item) = self.items.iter_mut().find(|item| *item.id() == previous_id) {
                 item.set_hovered(false, now);
             }
             messages.push(Message::CardHoverChanged(previous_id, false));
         }
 
         if let Some(target_id) = target_id {
-            if let Some(item) = self.items.iter_mut().find(|item| item.id() == target_id) {
+            if let Some(item) = self.items.iter_mut().find(|item| *item.id() == target_id) {
                 item.set_hovered(true, now);
             }
             messages.push(Message::CardHoverChanged(target_id.clone(), true));
@@ -379,7 +383,7 @@ impl State {
         messages
     }
 
-    fn hover_target_id(&self) -> Option<&str> {
+    fn hover_target_id(&self) -> Option<&CardId> {
         let cursor = self.cursor?;
         let columns = self.columns.max(1);
         let x = finite_nonnegative(cursor.x);
@@ -435,18 +439,27 @@ fn preserve_hovered_items(previous: &[Item], next: &mut [Item]) {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// What the grid asks of its owner.
+///
+/// The mutators above return these rather than applying them, because two of
+/// them cannot be applied from in here: [`Self::VisibleRangeChanged`] drives
+/// thumbnail demands and metadata windows the grid knows nothing about, and
+/// [`Self::ScrollAnchored`] has to reach the Iced runtime as a *relative*
+/// scroll. Dropping either is therefore a claim that nothing downstream cares
+/// — true only when the grid is empty, or when the caller re-derives both from
+/// state immediately afterwards. Bind the result to a named `_` and say which.
 pub enum Message {
     ColumnsChanged(u32),
     Scrolled(u32),
     ViewportResized(u32, u32),
     VisibleRangeChanged(usize, usize),
-    CardClicked(String),
-    CardPressed(String),
-    CardReleased(String),
-    CardContextRequested(String, Point),
+    CardClicked(CardId),
+    CardPressed(CardId),
+    CardReleased(CardId),
+    CardContextRequested(CardId, Point),
     CursorMoved(Point),
     CursorLeft,
-    CardHoverChanged(String, bool),
+    CardHoverChanged(CardId, bool),
     /// The grid moved its own scroll offset by this delta to keep the first
     /// visible row stationary after item heights changed above it. The owner
     /// must relay it to the runtime as a *relative* `scroll_by` — the
@@ -650,7 +663,7 @@ impl Item {
         &self.card
     }
 
-    fn id(&self) -> &str {
+    fn id(&self) -> &CardId {
         self.card.id()
     }
 
@@ -697,10 +710,10 @@ impl Item {
 
 fn map_card_message(message: addon_card::Message) -> Message {
     match message {
-        addon_card::Message::Pressed(id) => Message::CardPressed(id.as_ref().to_owned()),
-        addon_card::Message::Released(id) => Message::CardReleased(id.as_ref().to_owned()),
+        addon_card::Message::Pressed(id) => Message::CardPressed(id),
+        addon_card::Message::Released(id) => Message::CardReleased(id),
         addon_card::Message::ContextRequested(id, position) => {
-            Message::CardContextRequested(id.as_ref().to_owned(), position)
+            Message::CardContextRequested(id, position)
         }
     }
 }

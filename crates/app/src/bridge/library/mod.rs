@@ -674,7 +674,7 @@ fn modified_epoch_nanos(metadata: &Metadata) -> u128 {
 }
 
 fn workshop_id_from_name(name: &str) -> Option<PublishedFileId> {
-    gmpublished_backend::gma::ws_id_from_file_name(name).map(PublishedFileId::from_backend)
+    gmpublished_backend::gma::ws_id_from_file_name(name).map(PublishedFileId::from)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

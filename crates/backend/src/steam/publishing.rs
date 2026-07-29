@@ -15,7 +15,9 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
-use steamworks::{PublishedFileId, SteamError};
+use steamworks::SteamError;
+
+use crate::WorkshopId;
 use walkdir::WalkDir;
 
 #[cfg(not(target_os = "windows"))]
@@ -243,8 +245,8 @@ fn publish_update_status_key(processed: steamworks::UpdateStatus) -> Option<&'st
 fn pump_publish_progress(
     update_handle: &steamworks::UpdateWatchHandle,
     transaction: &Transaction,
-    result_rx: &mpsc::Receiver<Result<(PublishedFileId, bool), SteamError>>,
-) -> Result<Result<(PublishedFileId, bool), SteamError>, PublishError> {
+    result_rx: &mpsc::Receiver<Result<(steamworks::PublishedFileId, bool), SteamError>>,
+) -> Result<Result<(steamworks::PublishedFileId, bool), SteamError>, PublishError> {
     let mut last_processed = None;
     loop {
         if transaction.aborted() {
@@ -473,19 +475,19 @@ pub struct PublishSubmission {
 /// Whether a submission creates a Workshop item or updates one.
 ///
 /// A changelog only exists for an update, which is why it lives here rather
-/// than beside an `Option<PublishedFileId>` that could disagree with it.
+/// than beside an `Option<WorkshopId>` that could disagree with it.
 #[derive(Debug, Clone)]
 pub enum PublishSubmissionMode {
     Create,
     Update {
-        id: PublishedFileId,
+        id: WorkshopId,
         changes: Option<String>,
     },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct PublishSubmissionOutcome {
-    pub published_file_id: PublishedFileId,
+    pub published_file_id: WorkshopId,
     pub legal_agreement_required: bool,
 }
 
@@ -494,14 +496,14 @@ pub struct PublishSubmissionOutcome {
 /// to be accepted before the item is visible.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct PublishOutcome {
-    pub id: PublishedFileId,
+    pub id: WorkshopId,
     pub legal_agreement_required: bool,
 }
 
 impl ConnectedSteam<'_> {
     pub fn update(
         &self,
-        id: PublishedFileId,
+        id: WorkshopId,
         details: WorkshopUpdateType,
         transaction: &Transaction,
         app_data: &AppData,
@@ -529,7 +531,7 @@ impl ConnectedSteam<'_> {
                     .interface
                     .client()
                     .ugc()
-                    .start_item_update(GMOD_APP_ID, id)
+                    .start_item_update(GMOD_APP_ID, id.into())
                     .content_path(path.as_ref())
                     .title(&title)
                     .preview_path(preview_path.as_ref())
@@ -558,7 +560,7 @@ impl ConnectedSteam<'_> {
                     .interface
                     .client()
                     .ugc()
-                    .start_item_update(GMOD_APP_ID, id);
+                    .start_item_update(GMOD_APP_ID, id.into());
                 let handle = match preview_path.as_ref() {
                     Some(preview_path) => update.preview_path(preview_path.as_ref()),
                     None => update,
@@ -607,7 +609,10 @@ impl ConnectedSteam<'_> {
         // single round trip with nothing to report progress on, so a callback
         // that has not landed by now is not going to.
         let id = match published_rx.recv_timeout(super::CALLBACK_RESULT_TIMEOUT) {
-            Ok(Ok((id, _))) => id,
+            // Steam just created this item, so a zero here means Steam
+            // reported success without publishing anything.
+            Ok(Ok((id, _))) => WorkshopId::try_from(id)
+                .map_err(|_| PublishError::SteamError(SteamError::IOFailure))?,
             Ok(Err(error)) => return Err(PublishError::SteamError(error)),
             Err(_) => return Err(fail_publish_callback_channel(transaction)),
         };
@@ -618,7 +623,7 @@ impl ConnectedSteam<'_> {
                 legal_agreement_required,
             }),
             Err(error) => {
-                self.interface.client().ugc().delete_item(id, |_| {});
+                self.interface.client().ugc().delete_item(id.into(), |_| {});
                 Err(error)
             }
         }
@@ -626,7 +631,7 @@ impl ConnectedSteam<'_> {
 
     pub fn update_icon(
         &self,
-        addon_id: PublishedFileId,
+        addon_id: WorkshopId,
         icon: WorkshopIcon,
         transaction: &Transaction,
         app_data: &AppData,
@@ -638,7 +643,7 @@ impl ConnectedSteam<'_> {
             .interface
             .client()
             .ugc()
-            .start_item_update(GMOD_APP_ID, addon_id)
+            .start_item_update(GMOD_APP_ID, addon_id.into())
             .preview_path(preview_path.as_ref())
             .submit(None, move |result| {
                 let _ = result_tx.send(result);
@@ -845,7 +850,7 @@ fn fail_publish_callback_channel(transaction: &Transaction) -> PublishError {
 )]
 pub fn record_published_local_path(
     app_data: &AppData,
-    published_file_id: PublishedFileId,
+    published_file_id: WorkshopId,
     content_path_src: PathBuf,
 ) {
     app_data.record_published_local_path(published_file_id, &content_path_src);
@@ -942,6 +947,8 @@ pub fn verify_whitelist(
 
 #[cfg(test)]
 mod tests {
+    use crate::workshop_id::workshop_id;
+
     use super::*;
     use crate::appdata::AppDataPaths;
     use crate::events::BackendEventCollector;
@@ -986,7 +993,7 @@ mod tests {
             let temp = tempfile::tempdir().expect("tempdir");
             fs::create_dir_all(temp.path().join("default-temp")).expect("default temp dir");
             let collector = BackendEventCollector::default();
-            let transactions = Transactions::new(Arc::new(collector.clone()), false);
+            let transactions = Transactions::new(Arc::new(collector.clone()));
             let app_data = AppData::load(
                 AppDataPaths::for_test_root(temp.path()),
                 transactions.clone(),
@@ -1417,7 +1424,7 @@ mod tests {
                 addon_type: "tool".to_string(),
                 upscale: false,
                 mode: PublishSubmissionMode::Update {
-                    id: PublishedFileId(123),
+                    id: workshop_id(123),
                     changes: Some("icon check".to_string()),
                 },
                 settings: Some(PublishSettingsSnapshot {

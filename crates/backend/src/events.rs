@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use steamworks::PublishedFileId;
+use crate::WorkshopId;
 
 use crate::appdata::AppDataSnapshot;
 pub use crate::transactions::{TransactionError, TransactionId, TransactionPayload};
@@ -34,7 +34,7 @@ pub struct ExtractionStartedEvent {
     pub transaction_id: TransactionId,
     pub source_path: Option<PathBuf>,
     pub file_name: Option<String>,
-    pub workshop_id: Option<PublishedFileId>,
+    pub workshop_id: Option<WorkshopId>,
     pub request_id: Option<u64>,
 }
 

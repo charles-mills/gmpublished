@@ -147,11 +147,11 @@ impl BackendContext {
     }
 
     pub(crate) fn play_gifs_by_default(&self) -> bool {
-        self.services.settings_snapshot().play_gifs_by_default
+        self.services.settings_snapshot().ui.play_gifs_by_default
     }
 
     pub(crate) fn sounds_enabled(&self) -> bool {
-        self.services.settings_snapshot().sounds
+        self.services.settings_snapshot().backend.sounds
     }
 
     pub(crate) fn settings_and_paths_snapshot(&self) -> (Settings, AppPaths) {
