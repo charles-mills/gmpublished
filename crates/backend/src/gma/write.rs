@@ -8,10 +8,10 @@ use std::{
     io::{BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::LazyLock,
-    sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
 
+use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
 use crate::{GmaFile, transactions::Transaction, write_nt_string};
@@ -31,50 +31,26 @@ const BATCH_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const BATCH_FILE_MAX: u64 = 8 * 1024 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 
-/// A unique path in `final_path`'s own directory, so a pack that never
-/// finishes leaves nothing at `final_path` and two packs to the same
-/// destination never share a file.
-fn unique_temp_path(final_path: &Path) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+/// Creates the file a pack is written into: a uniquely named sibling of
+/// `final_path`, so the destination only ever appears once the pack has
+/// finished and a rename onto it stays within one filesystem.
+///
+/// Exclusive creation and deletion-on-drop both come from [`NamedTempFile`],
+/// which covers every early return in [`GmaFile::create`] — an error, a panic
+/// unwind, a cancelled transaction — without a cleanup call at each exit.
+/// The name is prefixed with the destination's so a leftover from a killed
+/// process still says what it was.
+fn create_temp_file(final_path: &Path) -> Result<NamedTempFile, GmaError> {
+    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = final_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("gmpublisher");
 
-    final_path.with_file_name(format!(".{file_name}.{nanos}.{counter}.tmp"))
-}
-
-/// Deletes the temp file it guards unless [`Self::commit`] was called. Covers
-/// every early return in [`GmaFile::create`] (an error, a panic unwind, a
-/// cancelled transaction) with one mechanism instead of a cleanup call at
-/// each exit point.
-struct TempFileGuard {
-    path: PathBuf,
-    committed: bool,
-}
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            committed: false,
-        }
-    }
-
-    fn commit(mut self) {
-        self.committed = true;
-    }
-}
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    Ok(tempfile::Builder::new()
+        .prefix(&format!(".{file_name}."))
+        .suffix(".tmp")
+        .tempfile_in(parent)?)
 }
 
 /// Converts a path already relative to the source root into the
@@ -108,9 +84,8 @@ impl GmaFile {
         transaction: &Transaction,
         whitelist: &AddonWhitelist,
     ) -> Result<(), GmaError> {
-        let temp_path = unique_temp_path(&self.path);
-        let guard = TempFileGuard::new(temp_path.clone());
-        let mut f = BufWriter::new(File::create(&temp_path)?);
+        let temp = create_temp_file(&self.path)?;
+        let mut f = BufWriter::new(temp.as_file());
 
         let src_path = src_path.as_ref();
 
@@ -352,8 +327,9 @@ impl GmaFile {
         f.get_ref().sync_all()?;
         drop(f);
 
-        fs::rename(&temp_path, &self.path)?;
-        guard.commit();
+        // Renames onto the destination, and gives up its deletion-on-drop only
+        // once that has succeeded.
+        temp.persist(&self.path).map_err(|error| error.error)?;
 
         Ok(())
     }
@@ -430,14 +406,40 @@ mod tests {
         assert_eq!(relative_entry_name(Path::new(bad)), None);
     }
 
+    /// Two packs aimed at one destination must not share a file, and the
+    /// temp file must be a sibling of the destination so the rename that
+    /// commits it cannot cross a filesystem.
     #[test]
-    fn unique_temp_path_is_unique_and_stays_in_the_final_path_s_directory() {
-        let final_path = Path::new("/tmp/example/gmpublisher.gma");
-        let a = unique_temp_path(final_path);
-        let b = unique_temp_path(final_path);
+    fn temp_files_are_distinct_siblings_of_the_destination() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let final_path = dir.path().join("gmpublisher.gma");
 
-        assert_ne!(a, b);
-        assert_eq!(a.parent(), final_path.parent());
-        assert_eq!(b.parent(), final_path.parent());
+        let a = create_temp_file(&final_path).expect("temp file");
+        let b = create_temp_file(&final_path).expect("temp file");
+
+        assert_ne!(a.path(), b.path());
+        assert_eq!(a.path().parent(), final_path.parent());
+        assert_eq!(b.path().parent(), final_path.parent());
+        assert!(!final_path.exists(), "the destination must not appear yet");
+    }
+
+    /// The temp file is deleted on drop, so a pack that fails or is cancelled
+    /// leaves nothing behind next to the addon it was writing.
+    #[test]
+    fn an_uncommitted_temp_file_is_removed_when_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let final_path = dir.path().join("gmpublisher.gma");
+
+        let temp = create_temp_file(&final_path).expect("temp file");
+        let temp_path = temp.path().to_path_buf();
+        assert!(temp_path.exists());
+        drop(temp);
+
+        assert!(!temp_path.exists(), "{}", temp_path.display());
+        assert_eq!(
+            fs::read_dir(dir.path()).expect("read_dir").count(),
+            0,
+            "the destination directory must be left clean"
+        );
     }
 }

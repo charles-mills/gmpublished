@@ -88,7 +88,7 @@ impl SteamRuntime {
         Self::with_options(Some(steam), DEFAULT_CONNECT_TIMEOUT)
     }
 
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn unavailable_for_tests() -> Self {
         Self::with_options(None, Duration::ZERO)

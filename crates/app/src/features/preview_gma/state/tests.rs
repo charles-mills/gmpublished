@@ -448,14 +448,14 @@ fn window_unfocus_pauses_thumbnail_animation() {
     };
     assert!(state.has_active_animation());
 
-    assert!(state.set_window_focused(false));
+    state.set_window_focused(false);
     assert!(!state.has_active_animation());
     // Spinner-driven ticks must not advance the paused GIF.
     let now = Instant::now();
     let _ = state.tick_animation(now);
     assert!(!state.tick_animation(now + std::time::Duration::from_secs(1)));
 
-    assert!(state.set_window_focused(true));
+    state.set_window_focused(true);
     assert!(state.has_active_animation());
 }
 

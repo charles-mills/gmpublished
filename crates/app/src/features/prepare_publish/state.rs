@@ -672,14 +672,13 @@ impl State {
 
     /// GIF playback pauses on the current frame while the window is
     /// unfocused, so the clock subscription can drop to idle.
-    pub(crate) fn set_window_focused(&mut self, focused: bool) -> bool {
+    pub(crate) fn set_window_focused(&mut self, focused: bool) {
         if self.window_focused == focused {
-            return false;
+            return;
         }
 
         self.window_focused = focused;
         self.last_icon_animation_tick = None;
-        true
     }
 
     pub(crate) fn has_active_icon_animation(&self) -> bool {

@@ -58,7 +58,6 @@ pub mod keys {
     pub const GMA_EXTRACTION_FAILED: ErrorKey = ErrorKey::new("ERR_GMA_EXTRACTION_FAILED");
     pub const GMA_DESTINATION_UNAVAILABLE: ErrorKey =
         ErrorKey::new("ERR_GMA_DESTINATION_UNAVAILABLE");
-    // Not ERR_-shaped; the frozen wire value.
 
     pub const VPK_FORMAT_ERROR: ErrorKey = ErrorKey::new("ERR_VPK_FORMAT_ERROR");
     pub const VPK_INVALID_HEADER: ErrorKey = ErrorKey::new("ERR_VPK_INVALID_HEADER");
@@ -86,7 +85,6 @@ pub mod keys {
     pub const SEARCH_EVENT_SINK_DISCONNECTED: ErrorKey =
         ErrorKey::new("ERR_SEARCH_EVENT_SINK_DISCONNECTED");
     pub const SEARCH_DATA_SHAPE: ErrorKey = ErrorKey::new("ERR_SEARCH_DATA_SHAPE");
-    // Not ERR_-shaped; the frozen wire value, interpolated verbatim by its templates.
     pub const GMOD_PATH_MISSING: ErrorKey = ErrorKey::new("ERR_GMOD_PATH_MISSING");
 }
 

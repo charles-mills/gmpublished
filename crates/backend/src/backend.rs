@@ -9,6 +9,14 @@
 //! (`steam::downloads`, `gma::write`, `gma::extract`) and two `AtomicU64`
 //! counters are statics rather than services, and none of them observes
 //! shutdown.
+//!
+//! The whitelist warm-up is the one background thread deliberately left
+//! detached rather than joined at shutdown, because it has nothing to leave
+//! half-finished: it performs one HTTP GET behind a two-second deadline and
+//! publishes the result into an `ArcSwap`, touching no disk and no external
+//! state. Joining it would put that deadline on the exit path to protect a
+//! write that does not exist. It is named so it stays identifiable in a
+//! panic or a thread dump.
 
 use std::{
     fmt,
@@ -225,8 +233,15 @@ impl Backend {
         log::info!("warming GMA whitelist");
         // A plain thread keeps the 12-thread rayon pool lazy; spawning here
         // would build the whole pool at startup for a one-shot warm-up.
+        // Detached on purpose — see the module doc.
         let whitelist = self.whitelist.clone();
-        std::thread::spawn(move || whitelist.refresh_from_remote());
+        if let Err(error) = std::thread::Builder::new()
+            .name("gmpublished-whitelist".to_owned())
+            .spawn(move || whitelist.refresh_from_remote())
+        {
+            // The built-in list stays in force; only the remote refresh is lost.
+            log::warn!("could not start the GMA whitelist warm-up: {error}");
+        }
         true
     }
 }

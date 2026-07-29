@@ -272,7 +272,7 @@ impl TransactionId {
 
     /// Only [`Transactions::begin`] mints these in production; tests need to
     /// name one that never existed.
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub const fn from_raw(id: u32) -> Self {
         Self(id)

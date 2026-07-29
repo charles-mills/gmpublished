@@ -18,6 +18,7 @@ use super::{
     load_model_catching_panic, load_model_companions, srgb_byte_to_linear,
 };
 use rayon::prelude::*;
+use std::sync::LazyLock;
 
 pub(super) fn map_preview_data(
     request: &PreviewRequest,
@@ -363,11 +364,31 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     )
 }
 
-/// Maps `work` over `items` in parallel, preserving order.
+/// The pool every parallel step of a preview decode runs on.
 ///
-/// The preview pool is capped rather than using rayon's global one: these run
-/// on a worker thread while the UI is live, and saturating every core makes
-/// the window stutter during a map load.
+/// Capped rather than rayon's global pool: these run on a worker thread while
+/// the UI is live, and saturating every core makes the window stutter during a
+/// map load. Shared rather than built per call: a decode calls
+/// [`parallel_collect`] several times, and standing a pool up and tearing it
+/// down around each one spawns and joins its whole thread set every time.
+///
+/// `None` when the pool cannot be built, which callers treat as "map serially"
+/// rather than as a failure — a preview that decodes slowly still decodes.
+static PREVIEW_POOL: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(preview_worker_count())
+        .thread_name(|index| format!("gmpublished-preview-{index}"))
+        .build()
+    {
+        Ok(pool) => Some(pool),
+        Err(error) => {
+            log::debug!("preview thread pool unavailable, decoding serially: {error}");
+            None
+        }
+    }
+});
+
+/// Maps `work` over `items` in parallel, preserving order.
 pub(super) fn parallel_collect<T, R, F>(items: &[T], work: F) -> Vec<R>
 where
     T: Sync + Send,
@@ -377,21 +398,21 @@ where
     if items.len() <= 1 {
         return items.iter().map(work).collect();
     }
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(preview_worker_count(items.len()))
-        .build()
-        .map_or_else(
-            |error| {
-                log::debug!("preview thread pool unavailable, mapping serially: {error}");
-                items.iter().map(&work).collect()
-            },
-            |pool| pool.install(|| items.par_iter().map(&work).collect()),
-        )
+
+    PREVIEW_POOL.as_ref().map_or_else(
+        || items.iter().map(&work).collect(),
+        |pool| pool.install(|| items.par_iter().map(&work).collect()),
+    )
 }
 
-pub(super) fn preview_worker_count(item_count: usize) -> usize {
+/// Width of [`PREVIEW_POOL`], and the chunk count for the prop bake's own
+/// scoped threads.
+///
+/// Not a function of the item count: a shared pool leaves surplus threads
+/// parked, so sizing it per batch would only mean rebuilding it per batch.
+pub(super) fn preview_worker_count() -> usize {
     let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
-    item_count.min(parallelism.min(8)).max(1)
+    parallelism.clamp(1, 8)
 }
 
 pub(super) fn duration_ms(duration: Duration) -> u128 {
@@ -1357,7 +1378,10 @@ pub(super) fn bake_selected_prop_placements_parallel(
         return BTreeMap::new();
     }
 
-    let worker_count = preview_worker_count(selected.len());
+    // Bounded by the batch as well as the cap: these are scoped threads, one
+    // per chunk, so asking for more workers than placements would spawn
+    // threads with nothing to chunk to them.
+    let worker_count = preview_worker_count().min(selected.len()).max(1);
     if worker_count == 1 {
         return bake_selected_prop_placements_serial(selected);
     }

@@ -190,50 +190,46 @@ impl State {
         self.route_visible && self.pane.grid().needs_visible_card_ticks()
     }
 
-    pub(crate) fn set_play_gifs_by_default(&mut self, enabled: bool) -> bool {
+    pub(crate) fn set_play_gifs_by_default(&mut self, enabled: bool) {
         if self.pane.play_gifs_by_default() == enabled {
-            return false;
+            return;
         }
 
-        let _changed = self.pane.set_play_gifs_by_default(enabled);
+        self.pane.set_play_gifs_by_default(enabled);
         self.pane.clear_animation_clock();
         self.sync_grid_items();
-        true
     }
 
     /// GIF playback pauses on the current frame while the window is
     /// unfocused, so the clock subscription can drop to idle.
-    pub(crate) fn set_window_focused(&mut self, focused: bool) -> bool {
+    pub(crate) fn set_window_focused(&mut self, focused: bool) {
         if self.pane.window_focused() == focused {
-            return false;
+            return;
         }
 
-        let _changed = self.pane.set_window_focused(focused);
+        self.pane.set_window_focused(focused);
         self.pane.clear_animation_clock();
-        true
     }
 
     pub(crate) fn set_download_count_formatter(
         &mut self,
         formatter: DownloadCountFormatter,
-    ) -> bool {
+    ) {
         if self.pane.formatter() == formatter {
-            return false;
+            return;
         }
 
-        let _changed = self.pane.set_download_count_formatter(formatter);
+        self.pane.set_download_count_formatter(formatter);
         self.sync_grid_items();
-        true
     }
 
-    pub(crate) fn set_publish_new_title(&mut self, title: String) -> bool {
+    pub(crate) fn set_publish_new_title(&mut self, title: String) {
         if self.publish_new_title == title {
-            return false;
+            return;
         }
 
         self.publish_new_title = title;
         self.sync_grid_items();
-        true
     }
 
     pub(crate) fn has_active_count_rolls(&self) -> bool {

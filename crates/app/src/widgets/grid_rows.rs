@@ -282,16 +282,16 @@ impl GridPane {
     }
 
     /// Each returns whether the value changed, so a caller can skip a re-sync.
-    pub fn set_play_gifs_by_default(&mut self, enabled: bool) -> bool {
-        replace_if_changed(&mut self.play_gifs_by_default, enabled)
+    pub fn set_play_gifs_by_default(&mut self, enabled: bool) {
+        self.play_gifs_by_default = enabled;
     }
 
-    pub fn set_window_focused(&mut self, focused: bool) -> bool {
-        replace_if_changed(&mut self.window_focused, focused)
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.window_focused = focused;
     }
 
-    pub fn set_download_count_formatter(&mut self, formatter: DownloadCountFormatter) -> bool {
-        replace_if_changed(&mut self.download_count_formatter, formatter)
+    pub fn set_download_count_formatter(&mut self, formatter: DownloadCountFormatter) {
+        self.download_count_formatter = formatter;
     }
 
     pub fn index_of(&self, id: &CardId) -> Option<usize> {

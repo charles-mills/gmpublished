@@ -14,13 +14,15 @@ name = "gmpublished_backend"
 path = "src/lib.rs"
 
 [features]
-# Gates `scene` (BSP map preview decoding) and its tests. No
-# longer needs an optional dependency: the BSP path runs on `vformats`,
-# which is always available.
+# Gates `scene` (BSP map preview decoding) and its tests. Carries no optional
+# dependency of its own: the BSP path runs on `vformats`, which is always
+# available.
 scene = []
 
-# Surface that exists only for tests to observe: the spill-file probes on
-# `GmaView`, `SteamRuntime::unavailable_for_tests`, and
+# Surface that exists only for tests to reach: probes that observe state no
+# real operation needs (the `GmaView` spill-file pair), constructors for
+# states production never builds (`SteamRuntime::unavailable_for_tests`,
+# `TransactionId::from_raw`, the `MapWalkCollision` box builders), and
 # `events::BackendEventCollector`. Off by default so a reader of the public
 # API cannot mistake them for real operations; the self dev-dependency below
 # turns it on for this crate's own integration tests, and the app crate's

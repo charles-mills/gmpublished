@@ -223,18 +223,18 @@ impl State {
     }
 
     fn set_play_gifs_by_default(&mut self, enabled: bool) {
-        let _ = self.my_workshop.set_play_gifs_by_default(enabled);
-        let _ = self.installed_addons.set_play_gifs_by_default(enabled);
+        self.my_workshop.set_play_gifs_by_default(enabled);
+        self.installed_addons.set_play_gifs_by_default(enabled);
     }
 
     /// GIFs never play while the window is unfocused: every playback site
     /// pauses on its current frame and its clock subscription drops, so a
     /// backgrounded window idles at 0% CPU.
     fn set_window_focused(&mut self, focused: bool) {
-        let _ = self.my_workshop.set_window_focused(focused);
-        let _ = self.installed_addons.set_window_focused(focused);
-        let _ = self.prepare_publish.set_window_focused(focused);
-        let _ = self.preview_gma.set_window_focused(focused);
+        self.my_workshop.set_window_focused(focused);
+        self.installed_addons.set_window_focused(focused);
+        self.prepare_publish.set_window_focused(focused);
+        self.preview_gma.set_window_focused(focused);
     }
 
     fn apply_runtime_settings(&mut self, settings: &Settings) {
@@ -259,8 +259,7 @@ impl State {
     }
 
     fn apply_localized_labels(&mut self) {
-        let _ = self
-            .my_workshop
+        self.my_workshop
             .set_publish_new_title(self.i18n.tr("publish-new"));
     }
 
@@ -273,11 +272,10 @@ impl State {
 
     fn apply_download_count_formatter(&mut self) {
         let formatter = self.download_count_formatter();
-        let _ = self.my_workshop.set_download_count_formatter(formatter);
-        let _ = self
-            .installed_addons
+        self.my_workshop.set_download_count_formatter(formatter);
+        self.installed_addons
             .set_download_count_formatter(formatter);
-        let _ = self.preview_gma.set_download_count_formatter(formatter);
+        self.preview_gma.set_download_count_formatter(formatter);
     }
 
     fn apply_system_theme(&mut self, mode: Mode) {

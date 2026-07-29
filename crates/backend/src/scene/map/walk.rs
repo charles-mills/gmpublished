@@ -202,7 +202,7 @@ impl MapWalkCollision {
     /// Test support: a collision set holding a single solid axis-aligned
     /// box, so downstream crates can exercise walk movement without baking
     /// a real BSP.
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     pub fn solid_box_for_tests(min: [f32; 3], max: [f32; 3]) -> Self {
         let planes = [
             ([1.0, 0.0, 0.0], max[0]),
@@ -226,7 +226,7 @@ impl MapWalkCollision {
         }
     }
 
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_solid_box_for_tests(mut self, min: [f32; 3], max: [f32; 3]) -> Self {
         self.brushes
@@ -234,7 +234,7 @@ impl MapWalkCollision {
         self
     }
 
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_water_box_for_tests(mut self, min: [f32; 3], max: [f32; 3]) -> Self {
         self.water_brushes
@@ -260,7 +260,7 @@ impl MapWalkCollision {
         self
     }
 
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn without_prop_collisions_for_tests(mut self) -> Self {
         self.props = MapWalkPropCollision::default();
@@ -485,6 +485,10 @@ pub(super) fn walk_brushes_from_bsp(
     (brushes, water_brushes)
 }
 
+/// Only the box builders above and the tests that exercise them reach this;
+/// a decoded BSP arrives as brush sides and takes
+/// [`walk_brush_from_brush_planes`] instead.
+#[cfg(feature = "test-support")]
 pub(super) fn walk_brush_from_planes(planes: Vec<MapPlane>, flags: i32) -> Option<MapWalkBrush> {
     walk_brush_from_brush_planes(
         planes
@@ -528,6 +532,7 @@ pub(super) fn walk_brush_from_brush_planes(
     })
 }
 
+#[cfg(feature = "test-support")]
 fn axis_aligned_box_brush(min: [f32; 3], max: [f32; 3], flags: i32) -> MapWalkBrush {
     let planes = [
         ([1.0, 0.0, 0.0], max[0]),

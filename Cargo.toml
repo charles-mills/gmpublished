@@ -62,7 +62,7 @@ match_wildcard_for_single_variants = "warn"
 unnested_or_patterns = "warn"
 derive_partial_eq_without_eq = "warn"
 return_self_not_must_use = "warn"
-# phase B: ownership / signature discipline
+# ownership / signature discipline
 large_types_passed_by_value = "warn"
 needless_pass_by_value = "warn"
 struct_excessive_bools = "warn"

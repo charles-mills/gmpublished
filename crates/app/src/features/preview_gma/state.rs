@@ -160,16 +160,15 @@ impl State {
     pub(crate) fn set_download_count_formatter(
         &mut self,
         formatter: DownloadCountFormatter,
-    ) -> bool {
+    ) {
         if self.download_count_formatter == formatter {
-            return false;
+            return;
         }
 
         self.download_count_formatter = formatter;
         if self.open && self.archive.is_some() {
             self.refresh_details();
         }
-        true
     }
 
     pub(crate) fn can_copy_current_path(&self) -> bool {
@@ -271,14 +270,13 @@ impl State {
 
     /// GIF playback pauses on the current frame while the window is
     /// unfocused, so the clock subscription can drop to idle.
-    pub(crate) fn set_window_focused(&mut self, focused: bool) -> bool {
+    pub(crate) fn set_window_focused(&mut self, focused: bool) {
         if self.window_focused == focused {
-            return false;
+            return;
         }
 
         self.window_focused = focused;
         self.last_animation_tick = None;
-        true
     }
 
     pub(crate) fn has_active_animation(&self) -> bool {

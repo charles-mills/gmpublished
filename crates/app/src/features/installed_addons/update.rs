@@ -429,10 +429,10 @@ mod tests {
         );
         assert!(state.has_active_animations());
 
-        assert!(state.set_window_focused(false));
+        state.set_window_focused(false);
         assert!(!state.has_active_animations());
 
-        assert!(state.set_window_focused(true));
+        state.set_window_focused(true);
         assert!(state.has_active_animations());
     }
 }
