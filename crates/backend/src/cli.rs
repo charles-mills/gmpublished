@@ -97,7 +97,7 @@ fn command() -> Command {
         .group(ArgGroup::new("extract_input").args(["extract", "file"]))
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 struct ExtractionRequest {
     path: PathBuf,
     destination: ExtractDestination,

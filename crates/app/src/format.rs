@@ -50,7 +50,7 @@ fn byte_value_and_unit(bytes: u64, i18n: &I18n) -> (String, &'static str) {
     (formatted, BYTE_UNIT_KEYS[unit_index])
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DownloadCountFormatter {
     separator: Option<char>,
 }

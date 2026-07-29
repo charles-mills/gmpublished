@@ -1,3 +1,12 @@
+//! The publish form's state: what the user has chosen, what has been verified
+//! against the archive on disk, and what is still missing before the Workshop
+//! will accept it.
+//!
+//! Verification is asynchronous and supersedable — a field can be edited while
+//! its previous check is still running — so every verified value carries the
+//! generation it was requested at, and a result for a stale generation is
+//! dropped rather than shown.
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},

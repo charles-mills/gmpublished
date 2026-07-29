@@ -7,7 +7,7 @@ use crate::bridge::tasks::{TaskEvent, TaskId};
 
 use super::jobs::{DownloaderEvent, DownloaderJob, Jobs, RowId, Section};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct State {
     route_visible: bool,
     input_text: String,
@@ -15,19 +15,6 @@ pub struct State {
     destination_label: String,
     jobs: Jobs,
     compact_section: Section,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            route_visible: false,
-            input_text: String::new(),
-            input_error: false,
-            destination_label: String::new(),
-            jobs: Jobs::default(),
-            compact_section: Section::Downloading,
-        }
-    }
 }
 
 impl State {

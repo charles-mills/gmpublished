@@ -4,7 +4,7 @@ use super::{
 };
 use crate::math::Vec3;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapData {
     pub meshes: Vec<MapMesh>,
     pub skybox_meshes: Vec<MapMesh>,
@@ -34,7 +34,7 @@ pub struct MapData {
     pub pakfile: MapPakFile,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapMesh {
     pub vertices: Vec<MapVertex>,
     pub indices: Vec<u32>,
@@ -42,32 +42,32 @@ pub struct MapMesh {
     pub visibility: MapMeshVisibility,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MapMeshVisibility {
     pub always_visible: Vec<MapMeshIndexRange>,
     pub clusters: Vec<MapMeshClusterRanges>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapMeshClusterRanges {
     pub cluster: u32,
     pub ranges: Vec<MapMeshIndexRange>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MapMeshIndexRange {
     pub face: u32,
     pub start: u32,
     pub count: u32,
 }
 
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MapVisibilityBucket {
     Always,
     Cluster(u32),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MapPropVisibility {
     Always,
     Clusters(Vec<u32>),
@@ -95,7 +95,7 @@ impl From<MapVisibilityBucket> for MapPropVisibility {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapVertex {
     pub position: Vec3,
     pub normal: Vec3,
@@ -107,7 +107,7 @@ pub struct MapVertex {
     pub blend_alpha: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StaticPropPlacement {
     pub model_path: String,
     pub origin: Vec3,
@@ -118,7 +118,7 @@ pub struct StaticPropPlacement {
     pub visibility: MapPropVisibility,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MapPropSolid {
     None,
     Physics,
@@ -130,13 +130,13 @@ impl MapPropSolid {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapBounds {
     pub min: Vec3,
     pub max: Vec3,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MapStatsRaw {
     pub face_count: u32,
     pub displacement_count: u32,
@@ -152,7 +152,7 @@ pub struct MapStatsRaw {
     pub version: u32,
 }
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MapSkyboxPartitionStats {
     pub sky_camera_present: bool,
     pub face_count: u32,

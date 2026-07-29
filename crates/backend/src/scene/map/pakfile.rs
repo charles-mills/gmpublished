@@ -5,12 +5,12 @@ pub const MAX_PAKFILE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 /// The embedded pakfile lump's raw bytes. Parsed on demand via
 /// [`ZipReader`] (its reader borrows, so it cannot be cached across
 /// calls the way vbsp's `Packfile` cached an owned `zip::ZipArchive`).
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapPakFile {
     bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapPakFileEntry {
     pub index: usize,
     pub path: String,

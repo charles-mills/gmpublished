@@ -61,7 +61,7 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
 }
 
 /// One renderable preview mesh (see [`ModelVertex`]).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
     pub vertices: Vec<ModelVertex>,
     pub indices: Vec<u32>,
@@ -83,7 +83,7 @@ impl From<&vformats::mdl::MeshData> for MeshData {
 }
 
 /// Loaded model geometry in the app's preview shape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ModelData {
     pub meshes: Vec<MeshData>,
     pub material_names: Vec<String>,
@@ -118,7 +118,7 @@ impl From<vformats::mdl::ModelData> for ModelData {
 
 pub const PHY_DEBUG_MATERIAL_NAME: &str = "__debug/phy_collision";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
     pub(crate) request_id: Generation,
     pub(crate) archive: Arc<PreviewArchiveSource>,
@@ -204,7 +204,7 @@ pub struct ParticlePreview {
     pub(crate) materials: Vec<ParticleMaterialSlot>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParticleSystemInfo {
     pub(crate) name: String,
     /// Deduplicated operator coverage across the system and its children.
@@ -304,7 +304,7 @@ pub struct DoorSound {
     pub(crate) waves: Vec<DoorSoundWave>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoorSoundWave {
     pub(crate) path: String,
     pub(crate) source_tier: DoorSoundSourceTier,
@@ -336,7 +336,7 @@ pub enum DoorAudioEventKind {
     Parked,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorldVisibilityPlan {
     pub(crate) mesh_indices: Vec<Vec<u32>>,
     pub(crate) overlay_visible: Vec<bool>,

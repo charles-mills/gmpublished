@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// Stable, i18n-addressable error code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ErrorKey(&'static str);
 
 impl ErrorKey {

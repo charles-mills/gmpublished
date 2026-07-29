@@ -6,7 +6,7 @@ use gmpublished_backend::transactions::TransactionError;
 /// Value-semantic error carried through Iced messages and feature state:
 /// a stable [`ErrorKey`] plus optional contextual payload. Rich errors (with
 /// sources) are logged where they convert into this type.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiError {
     pub(crate) key: ErrorKey,
     pub(crate) detail: Option<Arc<str>>,

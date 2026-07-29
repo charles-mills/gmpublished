@@ -218,7 +218,7 @@ fn embedded_description(metadata: &GmaMetadata) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct GmaFixtureBuilder {
     title: String,
     entries: Vec<(String, Vec<u8>)>,

@@ -1,3 +1,14 @@
+//! Turns a decoded BSP into the [`PreviewContent::Map`] the viewer draws:
+//! world geometry, static and detail props, overlays, lighting and the walk
+//! collision the camera moves against.
+//!
+//! Preview-quality by design. Props are baked into the world mesh rather than
+//! instanced, lighting is sampled per-placement from the ambient cube instead
+//! of per-pixel, and everything runs under caps (placement, triangle, texture
+//! budget) so a pathological map degrades rather than exhausting memory.
+//!
+//! [`PreviewContent::Map`]: crate::media::preview_model::PreviewContent::Map
+
 use super::materials::{
     resolve_detail_sprites, resolve_map_material_slots_parallel, resolve_map_overlays,
     resolve_skybox, sky_log_status,
@@ -469,7 +480,7 @@ impl PropBakeResult {
 
 /// Wall-clock split of a prop bake: `load` covers model loading and placement
 /// selection, `bake` covers only the mesh transform.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct PropBakeTiming {
     pub(super) load: Duration,
     pub(super) bake: Duration,
@@ -494,7 +505,7 @@ pub(super) struct DoorBakeResult {
     pub(super) prop_material_resolutions: BTreeMap<String, PropDoorMaterialResolution>,
 }
 
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct PropDoorMaterialResolution {
     pub(super) door_count: u32,
     pub(super) used_material_slots: BTreeSet<usize>,
@@ -502,7 +513,7 @@ pub(super) struct PropDoorMaterialResolution {
     pub(super) unresolved_used_material_slots: BTreeSet<usize>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct PropBakeSkipStats {
     pub(super) placement_cap: usize,
     pub(super) triangle_cap: usize,
@@ -563,7 +574,7 @@ pub(super) enum LoadedPropPhysics {
     Unparseable(ReadStats),
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct PropCollisionStats {
     pub(super) solid_placements: usize,
     pub(super) collidable_placements: usize,
@@ -755,13 +766,13 @@ pub(super) struct SelectedPropPlacement<'a> {
     pub(super) lighting: PropPlacementLighting,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PropPlacementLighting {
     pub(super) ambient_cube: AmbientCube,
     pub(super) sun: Option<PropSunLighting>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PropSunLighting {
     pub(super) direction_to_sun: Vec3,
     pub(super) color_linear: Vec3,
@@ -2007,7 +2018,7 @@ pub(super) fn load_prop_physics(phy_path: &str, resolver: &MaterialResolver) -> 
 
 /// A parsed `.phy` flattened to the shape the prop-physics preview
 /// consumes (solid boundaries do not matter to it).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct LoadedPhy {
     pub(super) ledges: Vec<ConvexLedge>,
     pub(super) stats: ReadStats,

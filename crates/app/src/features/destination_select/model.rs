@@ -47,7 +47,7 @@ pub struct DestinationPersistRequest {
     pub(crate) history_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DestinationError {
     InvalidPath,
     SaveFailed(UiError),

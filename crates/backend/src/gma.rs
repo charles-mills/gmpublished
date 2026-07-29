@@ -1,3 +1,11 @@
+//! The GMA container: reading an addon archive, writing one, extracting
+//! entries, and the whitelist that decides what may go in.
+//!
+//! The wire format itself lives in [`vformats::gma`]; this module is the
+//! addon-shaped layer over it — identity (workshop id, extracted name),
+//! the safe-path rules an untrusted archive is held to, and the streaming
+//! read/write paths that keep multi-gigabyte addons off the heap.
+
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
@@ -45,7 +53,7 @@ fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
         .and_then(nonzero_workshop_id)
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum GmaError {
     #[error("GMA I/O failed")]
     IOError(#[source] crate::IoFailure),
@@ -133,7 +141,7 @@ impl crate::error_key::HasErrorKey for GmaError {
 /// field defaulted, untagged matched `Standard` for *any* JSON object, so a
 /// legacy description that happened to be one silently lost its text and
 /// `Legacy` was unreachable. See [`metadata_from_embedded_fields`].
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum GmaMetadata {
     Standard {
@@ -200,7 +208,7 @@ impl GmaMetadata {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GmaHeader {
     pub version: u8,
     pub timestamp: u64,
@@ -214,7 +222,7 @@ impl GmaHeader {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct GmaEntry {
     pub path: String,
     pub size: u64,

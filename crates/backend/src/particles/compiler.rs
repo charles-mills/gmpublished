@@ -1,3 +1,11 @@
+//! Compiles a parsed PCF definition into the fixed-shape system the runtime
+//! simulates: typed initializers, operators and emitters with their attribute
+//! lookups already resolved.
+//!
+//! Source's particle attributes are strings looked up per-frame; doing that
+//! once here is what lets the simulation step be a plain match. Unsupported
+//! operators are dropped at compile time rather than checked per particle.
+
 use super::{
     ControlPointIndex, CoverageEntry, PcfAttributes, PcfFunction, PcfSystem, SupportLevel,
     color_to_rgb,
@@ -6,7 +14,7 @@ use crate::math::Vec3;
 
 // --- Scalar/vector field ids (Source particle attribute indices) ---------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ScalarField {
     LifeDuration,
     Radius,
@@ -30,7 +38,7 @@ impl ScalarField {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum VectorField {
     Position,
     Tint,
@@ -48,7 +56,7 @@ impl VectorField {
 
 // --- Compiled operator types ----------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Emitter {
     Continuously {
         start_time: f32,
@@ -68,7 +76,7 @@ pub(super) enum Emitter {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Initializer {
     LifetimeRandom {
         min: f32,
@@ -186,7 +194,7 @@ pub(super) enum Initializer {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Operator {
     LifespanDecay,
     AlphaFadeIn {
@@ -290,7 +298,7 @@ pub(super) enum Operator {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Force {
     Random {
         min: Vec3,
@@ -308,7 +316,7 @@ pub(super) enum Force {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RendererKind {
     /// Camera-facing sprites; the workhorse.
     AnimatedSprites,
@@ -318,7 +326,7 @@ pub enum RendererKind {
     Rope,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct RendererInfo {
     pub kind: RendererKind,
     /// Trail length is expressed in seconds of motion.
@@ -352,13 +360,13 @@ impl Default for RendererInfo {
 
 // --- Compiled system -------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct CompiledChild {
     pub(super) system: usize,
     pub(super) delay: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CompiledSystem {
     pub(super) name: String,
     pub(super) material: String,

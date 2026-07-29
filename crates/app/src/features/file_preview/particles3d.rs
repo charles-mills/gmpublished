@@ -649,7 +649,7 @@ fn sheet_uv_rect(
     [uv[0], uv[1], uv[2] - uv[0], uv[3] - uv[1]]
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct DrawBatch {
     /// Index into [`ParticlePreview::materials`]; `None` = white fallback.
     texture_slot: Option<usize>,

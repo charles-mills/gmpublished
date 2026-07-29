@@ -1,6 +1,6 @@
 use crate::{GmaFile, WorkshopItem};
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum Addon {
     Installed(GmaFile),
     Workshop(WorkshopItem),

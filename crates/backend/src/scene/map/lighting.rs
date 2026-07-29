@@ -7,7 +7,7 @@ use super::{
     vector_is_finite_nonzero,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AmbientCube {
     pub colors: [Vec3; 6],
 }
@@ -35,26 +35,26 @@ impl AmbientCube {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapSunLighting {
     pub direction_to_sun: Vec3,
     pub color_linear: Vec3,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MapEnvironmentLighting {
     pub sun: Option<MapSunLighting>,
     pub skylight_linear: Option<Vec3>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AmbientLightSource {
     Neutral,
     Ldr,
     Hdr,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapAmbientLighting {
     pub(super) source: AmbientLightSource,
     pub(super) locator: MapLeafLocator,
@@ -151,14 +151,14 @@ impl MapAmbientLighting {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MapAmbientSample {
     pub(super) position: Vec3,
     pub(super) cube: AmbientCube,
     pub(super) cluster: i16,
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct AmbientSampleRange {
     pub(super) start: usize,
     pub(super) count: usize,
@@ -170,7 +170,7 @@ impl AmbientSampleRange {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LightmapAtlas {
     pub rgba: Vec<u8>,
     pub width: u32,
@@ -178,20 +178,20 @@ pub struct LightmapAtlas {
     pub source: LightmapSource,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LightmapSource {
     Ldr,
     Hdr,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingLightmapBlock {
     pub(super) rgba: Vec<u8>,
     pub(super) width: usize,
     pub(super) height: usize,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct AtlasRect {
     pub(super) x: usize,
     pub(super) y: usize,

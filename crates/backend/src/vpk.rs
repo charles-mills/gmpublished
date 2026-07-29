@@ -11,7 +11,7 @@ use thiserror::Error;
 const VPK_VERSION_1_HEADER_SIZE: u64 = 12;
 const VPK_VERSION_2_HEADER_SIZE: u64 = 28;
 
-#[derive(Debug, Clone, Eq, PartialEq, Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum VpkError {
     #[error("VPK I/O failed")]
     IOError(#[source] crate::IoFailure),
@@ -54,7 +54,7 @@ impl crate::error_key::HasErrorKey for VpkError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VpkEntry {
     pub size: u64,
     pub crc: u32,
@@ -63,7 +63,7 @@ pub struct VpkEntry {
     preload: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VpkFile {
     pub path: PathBuf,
     pub version: u8,

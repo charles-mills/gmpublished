@@ -1,3 +1,13 @@
+//! Draws the preview pane: the header and its controls, and the body for
+//! whichever [`PreviewContent`] loaded — image, audio, text, model, map or
+//! particle system.
+//!
+//! Each content kind renders through its own builder rather than one branching
+//! layout, because their chrome genuinely differs: a model gets a viewport and
+//! camera controls, text gets a scrollable gutter, audio gets a transport.
+//!
+//! [`PreviewContent`]: crate::media::preview_model::PreviewContent
+
 use crate::i18n::Arg;
 use gmpublished_backend::math::Vec3;
 use iced::widget::{

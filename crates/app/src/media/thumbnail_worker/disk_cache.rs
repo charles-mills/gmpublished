@@ -1,3 +1,11 @@
+//! The on-disk half of the thumbnail cache: decoded thumbnails keyed by source
+//! URL and size, so a restart does not re-download and re-decode the library.
+//!
+//! Bounded by total bytes and evicted least-recently-used. The index is
+//! rewritten atomically and tolerates entries whose file has vanished, because
+//! the cache directory is in user-writable space and may be cleared behind the
+//! app at any point.
+
 use image::{
     ColorType, ImageEncoder, ImageFormat, ImageReader,
     codecs::png::{CompressionType as PngCompressionType, FilterType as PngFilterType, PngEncoder},

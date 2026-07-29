@@ -1,3 +1,10 @@
+//! Progress reporting for long-running work: a [`Transaction`] is the handle
+//! an operation reports status, progress and completion through, and
+//! [`Transactions`] mints them and routes their events to the app.
+//!
+//! Cancellation is cooperative and one-way: setting the flag is all this
+//! module does, and each operation decides where its own checkpoints are.
+
 mod payload;
 
 use parking_lot::RwLock;
@@ -105,7 +112,7 @@ impl fmt::Display for TransactionStatus {
 /// A failed transaction's identity on the event wire: a stable [`ErrorKey`]
 /// plus optional contextual payload (a path, an entry name, an upstream
 /// error message).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionError {
     pub key: ErrorKey,
     pub detail: Option<Arc<str>>,

@@ -79,7 +79,7 @@ fn best_search_item_score(pattern: &Pattern, query: &str, search_item: &SearchIt
     label_score.into_iter().chain(term_score).max()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuickSearchHit {
     pub score: u32,
     pub item: Arc<SearchItem>,
@@ -99,7 +99,7 @@ pub enum SearchScope {
     Files,
 }
 
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "source", content = "association")]
 pub enum SearchItemSource {

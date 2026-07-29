@@ -3,14 +3,14 @@ use crate::math::Vec3;
 
 const DEFAULT_DETAIL_MATERIAL: &str = "detail/detailsprites";
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapPlayerStart {
     pub origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
     pub angles: Vec3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapFog {
     pub color_srgb: [u8; 3],
     pub start: f32,
@@ -18,7 +18,7 @@ pub struct MapFog {
     pub max_density: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapSkyCamera {
     pub origin: Vec3,
     pub scale: f32,

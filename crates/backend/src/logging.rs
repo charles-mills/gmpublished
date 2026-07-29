@@ -330,7 +330,7 @@ pub(crate) fn install() -> Result<(), log::SetLoggerError> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LevelConfig {
     local: log::LevelFilter,
     external: log::LevelFilter,

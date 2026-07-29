@@ -7,14 +7,14 @@ use thiserror::Error;
 
 use crate::bridge::gma::{GmaError, PreviewArchive};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArchivePreviewEntry<'a> {
     pub(crate) path: &'a str,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreviewArchiveSource {
     Gma(Arc<PreviewArchive>),
     Folder(FolderSource),
@@ -24,13 +24,13 @@ pub enum PreviewArchiveSource {
 /// lowercase/forward-slash form the rest of the preview stack expects;
 /// `disk_paths` maps each back to the real file so reads still resolve on
 /// case-sensitive filesystems.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FolderSource {
     entries: HashMap<FolderPath, FolderEntry>,
     paths: Vec<FolderPath>,
 }
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct FolderPath(Arc<String>);
 
 impl FolderPath {
@@ -51,13 +51,13 @@ impl Borrow<str> for FolderPath {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct FolderEntry {
     size: u64,
     disk_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PreviewArchiveSourceError {
     #[error(transparent)]
     Gma(#[from] GmaError),

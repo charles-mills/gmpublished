@@ -18,7 +18,7 @@ pub use gmpublished_backend::{
 pub const GMA_VERSION: u8 = 3;
 
 /// Safe, already-validated path for one file entry inside a GMA archive.
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ArchiveEntryPath(Arc<String>);
 
 impl ArchiveEntryPath {
@@ -65,7 +65,7 @@ impl From<ArchiveEntryPath> for String {
 }
 
 /// Safe archive directory path used by the archive-browser presentation model.
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ArchiveDirectoryPath(String);
 
 impl ArchiveDirectoryPath {
@@ -146,14 +146,14 @@ impl From<ArchiveDirectoryPath> for String {
 /// non-zero where the backend's does not. These refined nothing.
 pub use gmpublished_backend::{GmaHeader, GmaMetadata};
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GmaMetaEntry {
     pub(crate) path: String,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GmaMeta {
     pub(crate) path: PathBuf,
     pub(crate) header: GmaHeader,
@@ -222,7 +222,7 @@ impl GmaMeta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewEntry {
     pub(crate) path: ArchiveEntryPath,
     pub(crate) size: u64,
@@ -381,13 +381,13 @@ impl PreviewArchive {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewExtractRequest {
     pub(crate) destination: ExtractDestination,
     pub(crate) options: PreviewExtractOptions,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewExtractOptions {
     pub(crate) ignore_whitelist: bool,
 }
@@ -472,7 +472,7 @@ fn is_safe_archive_path_segment(segment: &str) -> bool {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureGmaEntry {
     pub(crate) path: String,
     pub(crate) crc32: u32,
@@ -489,7 +489,7 @@ impl FixtureGmaEntry {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureGmaFile {
     pub(crate) path: Option<PathBuf>,
     pub(crate) header: GmaHeader,

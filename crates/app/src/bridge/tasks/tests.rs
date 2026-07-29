@@ -1,7 +1,16 @@
 use super::*;
 use crate::bridge::domain::SteamId;
 use crate::bridge::{DownloadCountFormat, ThemePreset};
+use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
+use gmpublished_backend::events::{TransactionError, TransactionPayload};
+use gmpublished_backend::steam::SteamRuntimeError;
+use gmpublished_backend::steam::publishing as steam_publishing;
 use gmpublished_backend::transactions::TransactionId;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::mpsc;
 use std::{fs, path::PathBuf};
 
 static BACKEND_EVENT_SINK_TEST_LOCK: Mutex<()> = Mutex::new(());

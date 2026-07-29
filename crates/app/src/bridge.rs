@@ -30,7 +30,7 @@ const UI_SETTINGS_FILE_NAME: &str = "ui-settings.json";
 const UI_SETTINGS_SCHEMA_VERSION: u64 = 1;
 
 /// Iced-only preferences that are not part of the shared backend appdata settings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiSettings {
     pub(crate) play_gifs_by_default: bool,
     pub(crate) download_count_format: DownloadCountFormat,
@@ -148,7 +148,7 @@ impl UiSettings {
 /// a missing key or a value of the wrong type falls back to that field's
 /// default rather than rejecting the whole file (`lenient_field` swallows
 /// per-field type mismatches; `#[serde(default)]` covers absent keys).
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct UiSettingsDto {
     #[serde(default)]
     version: u64,
@@ -252,7 +252,7 @@ pub fn ui_settings_file_for(settings_file: &Path) -> PathBuf {
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppPaths {
     pub(crate) settings_file: PathBuf,
     pub(crate) default_user_data_dir: PathBuf,
@@ -311,7 +311,7 @@ pub fn validate_gmod(path: impl AsRef<Path>) -> bool {
     gmpublished_backend::appdata::validate_gmod(path.as_ref().to_path_buf())
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ThemePreset {
     Dark,
     Light,
@@ -378,7 +378,7 @@ pub const fn effective_theme_preset(
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DownloadCountFormat {
     #[default]
     Automatic,

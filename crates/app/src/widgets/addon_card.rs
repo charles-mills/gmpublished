@@ -1,3 +1,10 @@
+//! One addon tile in a grid: thumbnail, title, and the badges and hover
+//! affordances that vary by which route is showing it.
+//!
+//! Text measurement is cached per card, since a grid re-lays out on every
+//! resize and shaping the same title repeatedly is the expensive part of a
+//! scroll.
+
 use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, time::Instant};
 
 use iced::advanced::graphics::text::Paragraph as IcedParagraph;
@@ -32,7 +39,7 @@ pub enum Kind {
     PublishNew,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Thumbnail {
     Loading,
     Dead,

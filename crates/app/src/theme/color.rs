@@ -3,14 +3,14 @@
 //! No backend contact — it lived under `bridge` only because the theme
 //! preset resolution next to it did.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rgb {
     pub(crate) r: u8,
     pub(crate) g: u8,
     pub(crate) b: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DerivedColor {
     pub(crate) base: Rgb,
     pub(crate) dark: Rgb,

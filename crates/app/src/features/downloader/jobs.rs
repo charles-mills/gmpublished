@@ -44,7 +44,7 @@ impl RowId {
 }
 
 /// A finished download the archive previewer can open in-app.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadPreviewTarget {
     pub(crate) path: PathBuf,
     pub(crate) title: String,
@@ -56,8 +56,9 @@ fn is_gma_file(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("gma"))
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Section {
+    #[default]
     Downloading,
     Extracting,
 }

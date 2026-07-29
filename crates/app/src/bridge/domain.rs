@@ -53,7 +53,7 @@ impl fmt::Display for PublishedFileId {
 
 /// A Steam account id. Mirrors `steamworks::SteamId` on this side of the
 /// bridge so the app does not depend on the steamworks crate.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct SteamId(u64);
 
@@ -783,7 +783,7 @@ pub mod workshop_url {
     const WORKSHOP_ITEM_URL_PREFIX: &str =
         "https://steamcommunity.com/sharedfiles/filedetails/?id=";
 
-    #[derive(Debug, Clone, Eq, PartialEq, Error)]
+    #[derive(Clone, Debug, Eq, Error, PartialEq)]
     pub enum ParseWorkshopIdsError {
         #[error("invalid Workshop id token `{0}`")]
         InvalidToken(String),

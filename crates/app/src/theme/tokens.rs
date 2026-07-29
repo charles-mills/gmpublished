@@ -1,3 +1,11 @@
+//! The design tokens every widget styles from: colours, spacing, dimensions
+//! and motion, resolved once per theme and passed down by value.
+//!
+//! Widgets never compute a colour. A token here is the only place a value is
+//! decided, which is what lets the three presets (and light/dark within them)
+//! stay coherent, and what makes a theme change a single recomputation rather
+//! than a walk of the widget tree.
+
 use crate::bridge::{EffectiveThemePreset, ThemePreset};
 use crate::theme::color as core_theme;
 use iced::Color;

@@ -12,7 +12,7 @@ pub(super) const DOOR_PROGRESS_EPSILON: f32 = 1.0e-4;
 pub(super) const SOURCE_NORM_AUDIBLE_RADIUS: f32 = 1500.0;
 pub(super) const SOURCE_NEAR_FULL_GAIN_RADIUS: f32 = 64.0;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DoorTarget {
     Closed,
     Open,
@@ -42,7 +42,7 @@ impl DoorMotion {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct DoorRuntime {
     pub(super) progress: f32,
     pub(super) target: DoorTarget,

@@ -1,13 +1,24 @@
 use gmpublished_backend::threads::join_all_within;
 
 use super::{
-    Arc, AssertUnwindSafe, AtomicBool, BLOCKING_FALLBACK_THREADS, BLOCKING_MAX_THREADS,
-    BLOCKING_MIN_THREADS, BLOCKING_QUEUE_CAPACITY, Error, JoinHandle, MEDIA_THREADS, Mutex,
-    NonZeroUsize, Ordering, SyncSender, TrySendError, WORKER_SHUTDOWN_JOIN_TIMEOUT, catch_unwind,
-    mpsc, thread,
+    BLOCKING_FALLBACK_THREADS, BLOCKING_MAX_THREADS, BLOCKING_MIN_THREADS, BLOCKING_QUEUE_CAPACITY,
+    MEDIA_THREADS, WORKER_SHUTDOWN_JOIN_TIMEOUT,
 };
+use parking_lot::Mutex;
+use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::TrySendError;
+use std::thread;
+use std::thread::JoinHandle;
+use thiserror::Error;
 
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum RunBlockingError {
     #[error(transparent)]
     Schedule(#[from] ScheduleError),
@@ -128,7 +139,7 @@ pub(super) const fn media_worker_count() -> usize {
 
 pub(super) type RuntimeJob = Box<dyn FnOnce() + Send + 'static>;
 
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ScheduleError {
     #[error("{pool} worker queue is full while scheduling `{job}`")]
     QueueFull { pool: &'static str, job: Arc<str> },

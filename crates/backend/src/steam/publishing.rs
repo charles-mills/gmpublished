@@ -1,3 +1,11 @@
+//! Publishing an addon to the Workshop: packing the content into a GMA,
+//! preparing the icon, and driving the Steam UGC update handle to completion.
+//!
+//! Every stage reports through a [`Transaction`](crate::transactions::Transaction),
+//! because a publish is the longest operation this crate performs and the UI
+//! has to show where it has got to. steamworks owns the upload once the handle
+//! is submitted, so a cancel here stops *waiting*, not transferring.
+
 use crate::transactions::TransactionStatus;
 use crate::{
     GMOD_APP_ID, Transaction,
@@ -460,13 +468,13 @@ pub enum WorkshopUpdateType {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct PublishSettingsSnapshot {
     pub temp: Option<PathBuf>,
     pub ignore_globs: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct PublishSubmission {
     pub content_path_src: PathBuf,
     pub icon_path: Option<PathBuf>,
@@ -484,7 +492,7 @@ pub struct PublishSubmission {
 ///
 /// A changelog only exists for an update, which is why it lives here rather
 /// than beside an `Option<WorkshopId>` that could disagree with it.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum PublishSubmissionMode {
     Create,
     Update {
@@ -493,7 +501,7 @@ pub enum PublishSubmissionMode {
     },
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PublishSubmissionOutcome {
     pub published_file_id: WorkshopId,
     pub legal_agreement_required: bool,
@@ -502,7 +510,7 @@ pub struct PublishSubmissionOutcome {
 /// Outcome of creating a new Workshop item (see [`Steam::publish`]): the
 /// freshly created id alongside whether Steam requires the legal agreement
 /// to be accepted before the item is visible.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PublishOutcome {
     pub id: WorkshopId,
     pub legal_agreement_required: bool,

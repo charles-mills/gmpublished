@@ -1,3 +1,12 @@
+//! The Steam client connection and everything reached through it: workshop
+//! browsing, subscriptions, downloads, publishing and user details.
+//!
+//! steamworks is single-threaded and callback-driven, so [`Steam`] owns the
+//! callback pump and a connect/retry watchdog on their own threads, and every
+//! call that waits on a callback carries a deadline — the library may drop a
+//! callback without ever invoking it, and a caller with no deadline would
+//! block for the life of the process.
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{

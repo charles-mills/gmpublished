@@ -18,7 +18,7 @@ const SF_DOOR_NO_AUTO_RETURN: u32 = 32;
 const SF_DOOR_ROTATE_ROLL: u32 = 64;
 const SF_DOOR_ROTATE_PITCH: u32 = 128;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MapDoorClass {
     FuncDoor,
     FuncMoveLinear,
@@ -26,14 +26,14 @@ pub enum MapDoorClass {
     PropDoorRotating,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MapDoorOpenDirection {
     Both,
     Forward,
     Backward,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapDoor {
     pub class: MapDoorClass,
     pub origin: Vec3,
@@ -51,7 +51,7 @@ pub struct MapDoor {
     pub geometry: MapDoorGeometry,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MapDoorSounds {
     pub move_sound: Option<String>,
     pub stop_sound: Option<String>,
@@ -59,7 +59,7 @@ pub struct MapDoorSounds {
     pub close_sound: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MapDoorGeometry {
     Brush {
         model_index: ModelIndex,
@@ -70,7 +70,7 @@ pub enum MapDoorGeometry {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MapDoorMotion {
     Linear {
         direction: Vec3,

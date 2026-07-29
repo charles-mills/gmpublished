@@ -6,7 +6,7 @@ use super::{
 };
 use crate::math::Vec3;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapVisibility {
     pub(super) cluster_count: u32,
     pub(super) locator: MapLeafLocator,
@@ -53,7 +53,7 @@ impl MapVisibility {
 /// The 2D-skybox flood fill. `Active` carries both reachability rows, which
 /// `from_bsp` only produces together and only for a map that has a
 /// `sky_camera`; every other outcome is `Inactive`, which partitions nothing.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum SkyboxPartition {
     Inactive {
         sky_camera_present: bool,
@@ -65,7 +65,7 @@ pub(super) enum SkyboxPartition {
     },
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FaceAttribution {
     Unknown,
     Skybox,
@@ -220,7 +220,7 @@ impl SkyboxPartition {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct FaceAttributions {
     pub(super) partitions: Vec<GeometryPartition>,
     pub(super) visibility: Vec<MapFaceVisibility>,
@@ -325,7 +325,7 @@ impl FaceAttributions {
 /// An empty `clusters` means the face is drawn unconditionally, so
 /// `always_visible` is always true in that case — [`MapFaceVisibilityBuilder`]
 /// is the only way to produce one, and it establishes that.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MapFaceVisibility {
     pub(super) always_visible: bool,
     pub(super) clusters: Vec<u32>,

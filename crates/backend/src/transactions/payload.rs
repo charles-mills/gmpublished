@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::WorkshopId;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionPayload {
     None,
     WorkshopItem(WorkshopId),

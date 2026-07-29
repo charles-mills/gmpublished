@@ -6,7 +6,7 @@ use super::{
 };
 use crate::math::Vec3;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct BuildMesh {
     pub(super) vertices: Vec<BuildVertex>,
     pub(super) indices: Vec<u32>,
@@ -15,14 +15,14 @@ pub(super) struct BuildMesh {
     pub(super) visibility: BuildMeshVisibility,
 }
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(super) enum GeometryPartition {
     #[default]
     Visible,
     Skybox,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct BuildMeshKey {
     pub(super) material_index: usize,
     pub(super) partition: GeometryPartition,
@@ -67,7 +67,7 @@ impl BuildMeshes {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct BuildMeshVisibility {
     pub(super) always_visible: Vec<MapMeshIndexRange>,
     pub(super) clusters: BTreeMap<u32, Vec<MapMeshIndexRange>>,
@@ -95,13 +95,13 @@ impl BuildMeshVisibility {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct BuildVertex {
     pub(super) vertex: MapVertex,
     pub(super) lightmap_block: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DisplacementBuildVertex {
     pub(super) position: Vec3,
     pub(super) column: usize,
@@ -110,7 +110,7 @@ pub(super) struct DisplacementBuildVertex {
     pub(super) alpha: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DisplacementGridVertex {
     pub(super) position: Vec3,
     pub(super) alpha: f32,

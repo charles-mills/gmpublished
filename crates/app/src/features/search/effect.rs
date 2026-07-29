@@ -4,7 +4,7 @@ use crate::bridge::{
 };
 use crate::generation::Generation;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     PaletteOpened,
     PaletteDismissed,

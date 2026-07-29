@@ -17,7 +17,7 @@ const DAY_SECONDS: i64 = 24 * HOUR_SECONDS;
 const MONTH_SECONDS: i64 = 30 * DAY_SECONDS;
 const YEAR_SECONDS: i64 = 365 * DAY_SECONDS;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Details {
     pub(crate) title: String,
     pub(crate) archive_path: String,
@@ -46,7 +46,7 @@ pub struct MetadataRow {
 }
 
 /// Author row projection: a resolved profile or the Steam2 placeholder.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorDisplay {
     pub(crate) name: String,
     /// `None` renders the anonymous placeholder avatar.

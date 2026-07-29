@@ -37,7 +37,7 @@ impl LibraryRefreshReason {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibrarySnapshot {
     pub(crate) addons: Arc<[InstalledAddon]>,
     pub(crate) epoch: u64,

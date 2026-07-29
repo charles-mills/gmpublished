@@ -1,3 +1,11 @@
+//! The search palette's state: the query, the rows currently shown, and which
+//! one is selected.
+//!
+//! Two result kinds share one list — installed addons and files inside them —
+//! and results arrive from two paths: a debounced quick search answered from
+//! memory, and a full search that runs as a cancellable backend task. Both are
+//! generation-stamped so a slower earlier query cannot overwrite a newer one.
+
 use std::{
     collections::HashSet,
     ops::Range,
@@ -704,7 +712,7 @@ pub enum SelectionAction {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Row {
     id: usize,
     title: String,
@@ -822,7 +830,7 @@ impl Row {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowThumbnail {
     Loading,
     Dead,

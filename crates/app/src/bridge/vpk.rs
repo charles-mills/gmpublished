@@ -4,14 +4,14 @@ use gmpublished_backend::vpk::{VpkEntry, VpkFile};
 
 pub use gmpublished_backend::vpk::VpkError;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VpkArchiveEntry {
     pub(crate) path: String,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VpkArchive {
     file: VpkFile,
     entries: Vec<VpkArchiveEntry>,

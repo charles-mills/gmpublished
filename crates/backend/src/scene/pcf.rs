@@ -29,7 +29,7 @@ pub enum PcfError {
 /// A parsed particle attribute value. DMX arrays that particle definitions
 /// never use in practice are preserved generically so unknown operators can
 /// still be listed by name.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PcfValue {
     Int(i32),
     Float(f32),
@@ -49,7 +49,7 @@ pub enum PcfValue {
 }
 
 /// Attribute bag with Source-style case-insensitive lookup.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PcfAttributes {
     entries: Vec<(String, PcfValue)>,
 }
@@ -130,14 +130,14 @@ impl PcfAttributes {
 
 /// One operator instance: the Source function name ("emit_continuously",
 /// "alpha_fade_out_random", ...) plus its parameter attributes.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PcfFunction {
     pub name: String,
     pub attributes: PcfAttributes,
 }
 
 /// Reference to a child system spawned alongside a parent.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PcfChild {
     pub name: String,
     /// Index into [`PcfFile::systems`] when the child definition lives in the
@@ -146,7 +146,7 @@ pub struct PcfChild {
     pub delay: f32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PcfSystem {
     pub name: String,
     /// Base properties: max_particles, material, radius, color, ...
@@ -172,7 +172,7 @@ impl PcfSystem {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PcfFile {
     pub encoding_version: u32,
     pub format_version: u32,
@@ -186,7 +186,7 @@ pub fn parse_pcf(bytes: &[u8]) -> Result<PcfFile, PcfError> {
 
 // --- DMX binary layer ---------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum DmxValue {
     /// Index into the document element list; `None` for null references.
     Element(Option<u32>),
@@ -194,7 +194,7 @@ enum DmxValue {
     ElementArray(Vec<Option<u32>>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct DmxElement {
     type_name: String,
     name: String,

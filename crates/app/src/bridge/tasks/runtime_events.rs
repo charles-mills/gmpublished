@@ -1,12 +1,21 @@
 use gmpublished_backend::events::BackendEventSink;
 
-use super::{
-    Arc, BackendAppDataSnapshot, BackendDownloadStartedEvent, BackendExtractionStartedEvent,
-    BackendSinkEvent, BackendTransactionEvent, Duration, PathBuf, PublishedFileId, SyncSender,
-    TaskId, TransactionError, TransactionPayload, TransactionStatus, TrySendError, UiError,
-    WorkshopDownloadTaskKind, fmt, mpsc,
-};
+use super::{PublishedFileId, TaskId, TransactionStatus, UiError, WorkshopDownloadTaskKind};
+use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
+use gmpublished_backend::events::BackendEvent as BackendSinkEvent;
+use gmpublished_backend::events::DownloadStartedEvent as BackendDownloadStartedEvent;
+use gmpublished_backend::events::ExtractionStartedEvent as BackendExtractionStartedEvent;
+use gmpublished_backend::events::TransactionError;
+use gmpublished_backend::events::TransactionEvent as BackendTransactionEvent;
+use gmpublished_backend::events::TransactionPayload;
 use gmpublished_backend::transactions::TransactionId;
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::TrySendError;
+use std::time::Duration;
 
 #[cfg(not(test))]
 pub(super) const fn install_backend_event_sink_by_default() -> bool {
@@ -235,7 +244,7 @@ pub enum BackendRuntimeAction {
 /// These values update the task overlay only when a live-service boundary has
 /// explicitly correlated the backend transaction id with an app `TaskId`.
 /// Uncorrelated transaction events remain data-only no-ops.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionRuntimeEvent {
     Finished {
         id: TransactionId,

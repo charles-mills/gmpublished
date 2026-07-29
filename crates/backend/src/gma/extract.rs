@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
 
 /// What to do when a GMA's extraction directory already exists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ExtractionOverwriteMode {
     /// Extracts over the existing directory, replacing files the GMA
     /// contains and leaving everything else in place.
@@ -42,7 +42,7 @@ pub enum ExtractionOverwriteMode {
     Delete,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ExtractDestination {
     #[default]
     Temp,
@@ -98,7 +98,7 @@ impl ExtractDestination {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ExtractionAppDataContext {
     pub(crate) temp_dir: PathBuf,
     pub(crate) downloads_dir: Option<PathBuf>,
@@ -462,13 +462,13 @@ fn verify_no_symlink_ancestors(
 /// Whether an extraction bypasses the addon-content whitelist. `Enforce` is
 /// the safety-relevant default; `Ignore` is opt-in (previews, CLI extraction,
 /// downloads of addons Steam already accepted).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Whitelist {
     Enforce,
     Ignore,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExtractOptions {
     pub open_after: bool,
     pub whitelist: Whitelist,

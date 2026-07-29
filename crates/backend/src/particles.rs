@@ -101,7 +101,7 @@ pub const MAX_TOTAL_PARTICLES: usize = 100_000;
 
 // --- Coverage ------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SupportLevel {
     /// Simulated with Source-equivalent math.
     Full,
@@ -112,7 +112,7 @@ pub enum SupportLevel {
     Unsupported,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoverageEntry {
     pub function: String,
     /// Which operator list the function came from ("emitters", ...).
@@ -123,7 +123,7 @@ pub struct CoverageEntry {
 // --- Deterministic RNG ---------------------------------------------------
 
 /// PCG32; deterministic so a restarted preview replays identically.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct Rng {
     state: u64,
 }
@@ -275,7 +275,7 @@ macro_rules! particle_set {
     ($($(#[$meta:meta])* $field:ident: $ty:ty),+ $(,)?) => {
         /// Structure-of-arrays particle storage; swap-remove keeps steps
         /// O(live).
-        #[derive(Debug, Default, Clone)]
+        #[derive(Clone, Debug, Default)]
         struct ParticleSet {
             $($(#[$meta])* $field: Vec<$ty>,)+
         }
@@ -338,7 +338,7 @@ impl ParticleSet {
 
 // --- Engine ----------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct Instance {
     system: usize,
     /// Engine time at which this instance starts simulating.
@@ -352,7 +352,7 @@ struct Instance {
 }
 
 /// Read-only view of one live particle for rendering.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RenderParticle {
     pub position: Vec3,
     pub velocity: Vec3,

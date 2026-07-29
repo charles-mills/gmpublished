@@ -1,3 +1,13 @@
+//! Resolving a Source material reference to pixels the viewer can bind.
+//!
+//! A `.vmt` names a `.vtf`, which may live in the addon being previewed, a
+//! sibling GMA, the game's own VPKs, or nowhere at all — so resolution is a
+//! search across content sources with a defined precedence, and a miss is a
+//! normal outcome that yields a placeholder rather than an error.
+//!
+//! Decoding is budgeted: textures are downscaled to fit a per-preview byte
+//! ceiling, because a map can reference more texture data than the GPU has.
+
 use gmpublished_backend::math::Vec3;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -338,7 +348,7 @@ pub struct ResolvedSoundReference {
     pub(crate) waves: Vec<ResolvedSoundWave>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedSoundWave {
     pub(crate) path: String,
     pub(crate) source_tier: ContentSourceTier,

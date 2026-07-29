@@ -1,7 +1,7 @@
 use super::Route;
 
 /// Outward consequences of a shell state transition.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     OpenSettings,
     OpenSearchPalette,

@@ -14,7 +14,7 @@ const STATIC_PROP_SOLID_PHYSICS: u8 = 6;
 
 const DETAIL_PROP_TYPE_SPRITE: u8 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapDetailSprite {
     pub origin: Vec3,
     pub upper_left: [f32; 2],
@@ -24,7 +24,7 @@ pub struct MapDetailSprite {
     pub visibility: MapVisibilityBucket,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapOverlay {
     pub id: i32,
     pub material_name: String,
@@ -317,7 +317,7 @@ pub(super) fn partitioned_map_overlays(
 /// [`overlay_quad_positions`] needs, decoupled from
 /// [`vformats::bsp::Overlay`] (whose packed face-table fields are
 /// private) so tests can build fixtures with a plain struct literal.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct OverlayBasis {
     pub(super) id: i32,
     pub(super) basis_normal: Vec3,

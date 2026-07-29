@@ -27,7 +27,7 @@ const BSP_MAGIC: &[u8; 4] = b"VBSP";
 /// lowercase literal keys/values every lookup across `scene::map`
 /// compares against. Lowercasing per-pair after parsing is equivalent: ASCII
 /// case-folding never changes token boundaries or UTF-8 validity.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct MapEntity {
     pairs: Vec<(String, String)>,
 }
@@ -597,19 +597,19 @@ impl BrushIndex {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MapPlane {
     pub(super) normal: Vec3,
     pub(super) dist: f32,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MapNode {
     pub(super) plane_index: i32,
     pub(super) children: [i32; 2],
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MapLeaf {
     pub(super) cluster: i16,
     pub(super) mins: [i16; 3],

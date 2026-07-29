@@ -767,7 +767,7 @@ fn snapshots_content_identical(a: &LibrarySnapshot, b: &LibrarySnapshot) -> bool
 ///
 /// The handle is the same one the grids display, so the GPU uploads each
 /// thumbnail once ever; the treemap references it with zero pixel copies.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThumbnailTile {
     pub(crate) handle: image::Handle,
     pub(crate) width: u32,

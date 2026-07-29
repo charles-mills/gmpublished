@@ -349,20 +349,20 @@ pub(super) fn safe_entry_indices_from_parsed(
 
 /// Everything a single [`GmaView::meta`] parse yields: the identity
 /// handle, the header, and the safe-path entry list in table order.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct GmaMetaBundle {
     pub handle: GmaFile,
     pub header: GmaHeader,
     pub entries: Vec<GmaIndexedEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct GmaIndexBundle {
     pub header: GmaHeader,
     pub entries: Vec<GmaIndexedEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct GmaIndexedEntry {
     pub path: String,
     pub size: u64,

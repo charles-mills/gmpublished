@@ -80,7 +80,7 @@ pub(super) fn model_companion_preview_request(request: &PreviewRequest) -> Optio
     Some(request)
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RedirectedArchiveEntry {
     path: String,
     size: u64,

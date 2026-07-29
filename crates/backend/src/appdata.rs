@@ -1,3 +1,11 @@
+//! Where the app keeps its state on disk, and the settings living there.
+//!
+//! One [`AppData`] owns every derived path (settings file, temp, user data,
+//! downloads) so nothing else has to re-derive them, and it resolves the
+//! Garry's Mod directory — configured, discovered through Steam, or absent.
+//! Every root is overridable, which is what lets tests run against a private
+//! tempdir instead of the developer's real profile.
+
 use std::{
     collections::HashMap,
     fs,
@@ -18,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// Environment-derived roots `AppData` resolves paths against. Production
 /// builds derive these from `dirs`/`std::env`; tests supply a private
 /// tempdir root so parallel tests never share a settings file.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct AppDataPaths {
     pub settings_file: PathBuf,
     /// Upstream gmpublisher's settings file: read once to seed a fresh
@@ -96,14 +104,14 @@ pub fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("gmpublished"))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TitlebarPreference {
     #[default]
     Auto,
     System,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -161,7 +169,7 @@ pub struct AppDataSnapshot {
     pub paths: AppDataPathsSnapshot,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppDataPathsSnapshot {
     pub settings_file: PathBuf,
     pub default_user_data_dir: PathBuf,
@@ -259,7 +267,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SettingsSanitizeContext {
     downloads_dir_available: bool,
     gmod_dir_available: bool,

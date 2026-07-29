@@ -925,10 +925,10 @@ mod tests {
                     walk(&path, out);
                 } else if path.extension().is_some_and(|ext| ext == "rs")
                     // This module's own literals are fixtures for the
-                    // miss-handling tests, not real call sites.
-                    && !path.starts_with(
-                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/i18n"),
-                    )
+                    // miss-handling tests, not real call sites. Matched by
+                    // file name: `i18n` is a file beside its directory, so a
+                    // path prefix would miss it.
+                    && path.file_name() != Some(std::ffi::OsStr::new("i18n.rs"))
                     && let Ok(source) = std::fs::read_to_string(&path)
                 {
                     out.push((path.to_string_lossy().into_owned(), source));

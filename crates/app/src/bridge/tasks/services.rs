@@ -6,20 +6,31 @@ use std::sync::Arc;
 use gmpublished_backend::error_key::keys;
 
 use super::{
-    AppPaths, Backend, BackendAppDataSnapshot, BackendEventSinkRegistration,
-    BackendRuntimeEventSubscription, CachedWorkshopMetadata, HashMap, LibraryRefresh,
-    LibraryRefreshReason, LibrarySnapshot, LibraryStore, Mutex, NativeOpenTarget, PathBuf,
-    PublishSubmitOutcome, PublishSubmitRequest, PublishedFileId, SearchFullBatch,
+    AppPaths, BackendEventSinkRegistration, BackendRuntimeEventSubscription,
+    CachedWorkshopMetadata, LibraryRefresh, LibraryRefreshReason, LibrarySnapshot, LibraryStore,
+    NativeOpenTarget, PublishSubmitOutcome, PublishSubmitRequest, PublishedFileId, SearchFullBatch,
     SearchFullRequest, SearchMode, SearchQuickBatch, SearchQuickRequest, Settings,
-    SettingsPersistError, SteamRuntime, SteamRuntimeError, SteamUser, TransactionPayload, UiError,
-    UiSettings, WorkshopItem, WorkshopMetadata, WorkshopPage, appdata_snapshot_from_backend,
-    clear_directory_contents, downloads, fallback_paths, library, metadata_snapshot, native,
-    publish_submission_from_app_request, search_full_batch_from_transaction_payload,
-    search_quick_batch_from_backend, steam_publishing, steam_user_from_backend,
-    steam_user_from_workshop_backend, steam_users, steam_workshop, subscription_counts_from_items,
-    transactions, ui_settings_file_for, workshop_item_from_backend,
+    SettingsPersistError, SteamUser, UiError, UiSettings, WorkshopItem, WorkshopMetadata,
+    WorkshopPage, appdata_snapshot_from_backend, clear_directory_contents, fallback_paths, library,
+    metadata_snapshot, native, publish_submission_from_app_request,
+    search_full_batch_from_transaction_payload, search_quick_batch_from_backend,
+    steam_user_from_backend, steam_user_from_workshop_backend, subscription_counts_from_items,
+    ui_settings_file_for, workshop_item_from_backend,
 };
 use crate::bridge::domain::SteamId;
+use gmpublished_backend::Backend;
+use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
+use gmpublished_backend::events::TransactionPayload;
+use gmpublished_backend::steam::SteamRuntime;
+use gmpublished_backend::steam::SteamRuntimeError;
+use gmpublished_backend::steam::downloads;
+use gmpublished_backend::steam::publishing as steam_publishing;
+use gmpublished_backend::steam::users as steam_users;
+use gmpublished_backend::steam::workshop as steam_workshop;
+use gmpublished_backend::transactions;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// The settings in force and the paths they resolve to.
 ///

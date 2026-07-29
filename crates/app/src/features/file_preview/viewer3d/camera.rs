@@ -226,7 +226,7 @@ pub struct FlyCamera {
     pub(super) doors: Vec<DoorRuntime>,
 }
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum WalkHull {
     #[default]
     Standing,
@@ -267,7 +267,7 @@ impl WalkHull {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct DuckViewAnimation {
     pub(super) from_height: f32,
     pub(super) elapsed: f32,

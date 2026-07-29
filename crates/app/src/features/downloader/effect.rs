@@ -4,7 +4,7 @@ use super::jobs::DownloadPreviewTarget;
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::tasks::TaskId;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     WorkshopSubmissionAccepted(Vec<PublishedFileId>),
     TaskCancellationRequested(Vec<TaskId>),

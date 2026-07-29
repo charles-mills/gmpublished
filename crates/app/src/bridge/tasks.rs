@@ -4,42 +4,7 @@
 //! extract, publish); this module is the Iced-facing boundary that
 //! schedules app workers and projects typed task events for the UI.
 
-use std::{
-    collections::HashMap,
-    fmt,
-    hash::{Hash, Hasher},
-    num::NonZeroUsize,
-    panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, SyncSender, TrySendError},
-    },
-    thread::{self, JoinHandle},
-    time::Duration,
-};
-
-use iced::futures::channel::{mpsc as iced_mpsc, oneshot};
-use iced::{Subscription, Task, stream};
-use parking_lot::Mutex;
-use thiserror::Error;
-
-use gmpublished_backend::{
-    Backend,
-    appdata::AppDataSnapshot as BackendAppDataSnapshot,
-    events::TransactionPayload,
-    events::{
-        BackendEvent as BackendSinkEvent, DownloadStartedEvent as BackendDownloadStartedEvent,
-        ExtractionStartedEvent as BackendExtractionStartedEvent, TransactionError,
-        TransactionEvent as BackendTransactionEvent,
-    },
-    steam::{
-        SteamAvatarRgba, SteamRuntime, SteamRuntimeError, SteamRuntimeUser, downloads,
-        publishing as steam_publishing, users as steam_users, workshop as steam_workshop,
-    },
-    transactions,
-};
+use std::time::Duration;
 
 use super::{
     AppPaths, Settings, SettingsPersistError, UiSettings, appdata_snapshot_from_backend,
@@ -70,7 +35,7 @@ mod worker_runtime;
 #[cfg(test)]
 mod tests;
 
-pub use context::*;
+pub use context::{BackendContext, fallback_paths};
 use correlation::{BackendTaskCancelResult, BackendTaskSource, BackendTransactionTasks};
 use projections::{
     clear_directory_contents, publish_submission_from_app_request,
@@ -78,10 +43,28 @@ use projections::{
     steam_user_from_backend, steam_user_from_workshop_backend, subscription_counts_from_items,
     workshop_item_from_backend,
 };
-pub use runtime_events::*;
-pub use services::*;
-pub use task_events::*;
-pub use worker_runtime::*;
+use runtime_events::{BackendEventSinkRegistration, install_backend_event_sink_by_default};
+pub use runtime_events::{
+    BackendRuntimeAction, BackendRuntimeEvent, BackendRuntimeEventEffects,
+    BackendRuntimeEventSubscription, TransactionRuntimeEvent,
+};
+pub use services::BackendServices;
+#[cfg(test)]
+use task_events::task_event_stream;
+use task_events::{BackendEventStreamFactory, TaskEventStreamFactory};
+/// Surface no production caller needs, but which tests construct or observe
+/// directly. Gated so a reader of this module's API is not shown machinery
+/// that nothing real reaches for.
+#[cfg(test)]
+pub use task_events::{CoalescedTaskStart, SharedTaskUpdate};
+pub use task_events::{
+    CoalescedTaskTerminal, CoalescedTaskUpdate, TaskEvent, TaskHandle, TaskId, TaskKind,
+    TaskUpdate, Tasks, WorkshopDownloadTaskKind,
+};
+use worker_runtime::{AppWorkerRuntime, WorkerPoolSpawner, show_native_open_error_dialog};
+pub use worker_runtime::{RunBlockingError, ScheduleError};
+#[cfg(test)]
+use worker_runtime::{RuntimeConfig, blocking_worker_count};
 
 const BLOCKING_MIN_THREADS: usize = 2;
 const BLOCKING_MAX_THREADS: usize = 8;

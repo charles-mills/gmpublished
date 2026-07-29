@@ -201,7 +201,7 @@ mod apple_event {
         sender: Box<dyn Fn(Vec<PathBuf>)>,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) struct MacDocumentOpenError {
         operation: &'static str,
         status: OSErr,

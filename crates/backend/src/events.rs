@@ -40,7 +40,7 @@ pub struct ExtractionStartedEvent {
     pub request_id: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionEvent {
     Finished {
         id: TransactionId,

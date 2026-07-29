@@ -1,3 +1,11 @@
+//! Collision the preview's walk mode moves against: brush hulls, displacement
+//! triangles and prop hulls, plus the swept-AABB traces over them.
+//!
+//! Brushes are expanded by the player's half-extents rather than the trace
+//! being swept as a box, which is what lets a hit be found by the same
+//! plane-clipping the engine uses. Preview-quality throughout: enough to walk
+//! a map and be stopped by the right surfaces, not a physics engine.
+
 use super::{
     BTreeSet, BrushIndex, BrushSide, HashMap, MapBounds, MapBsp, MapLeaf, MapNode, MapPlane,
     MapPropVisibility, NodeChild, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT, PROP_AABB_MAX_LEAVES,
@@ -6,7 +14,7 @@ use super::{
 };
 use crate::math::Vec3;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapWalkCollision {
     pub(super) brushes: Vec<MapWalkBrush>,
     pub(super) water_brushes: Vec<MapWalkBrush>,
@@ -14,20 +22,20 @@ pub struct MapWalkCollision {
     pub(super) props: MapWalkPropCollision,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaterVolume {
     pub surface_z: f32,
 }
 
 /// A convex collision hull: vertices plus triangle indices into them.
 /// Deliberately independent of `.phy`/IVP parser details.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConvexHull {
     pub vertices: Vec<Vec3>,
     pub triangles: Vec<[usize; 3]>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MapWalkPropCollisionSource<'a> {
     pub ledges: &'a [ConvexHull],
     pub origin: Vec3,
@@ -36,12 +44,12 @@ pub struct MapWalkPropCollisionSource<'a> {
     pub scale: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapWalkPropModel {
     pub(super) brushes: Vec<MapWalkPropLocalBrush>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MapWalkPropModelPlacement<'a> {
     pub model: &'a MapWalkPropModel,
     pub origin: Vec3,
@@ -50,46 +58,46 @@ pub struct MapWalkPropModelPlacement<'a> {
     pub scale: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct MapWalkBrush {
     pub(super) planes: Vec<MapWalkBrushPlane>,
     pub(super) bounds_min: Vec3,
     pub(super) bounds_max: Vec3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MapWalkBrushPlane {
     pub(super) plane: MapPlane,
     pub(super) is_sky: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct MapWalkDisplacement {
     pub(super) triangles: Vec<MapWalkTriangle>,
     pub(super) bounds_min: Vec3,
     pub(super) bounds_max: Vec3,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct MapWalkPropLocalBrush {
     pub(super) planes: Vec<MapPlane>,
     pub(super) bounds_min: Vec3,
     pub(super) bounds_max: Vec3,
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct MapWalkPropCollision {
     pub(super) brushes: Vec<MapWalkBrush>,
     pub(super) grid: MapWalkPropGrid,
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct MapWalkPropGrid {
     pub(super) cells: HashMap<[i32; 3], Vec<usize>>,
     pub(super) overflow: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MapWalkTriangle {
     pub(super) vertices: [Vec3; 3],
     pub(super) normal: Vec3,
@@ -133,7 +141,7 @@ impl MapWalkTriangle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapTrace {
     pub fraction: f32,
     pub end_position: Vec3,
@@ -141,14 +149,14 @@ pub struct MapTrace {
     pub start_solid: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct TraceCandidate {
     pub(super) fraction: f32,
     pub(super) normal: Vec3,
     pub(super) start_solid: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct MapRayHit {
     pub(super) fraction: f32,
     pub(super) is_sky: bool,
@@ -1420,7 +1428,7 @@ pub(super) fn intervals_overlap(a_min: f32, a_max: f32, b_min: f32, b_max: f32) 
     a_min <= b_max && a_max >= b_min
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct MapLeafLocator {
     pub(super) planes: Vec<MapPlane>,
     pub(super) nodes: Vec<MapNode>,

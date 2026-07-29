@@ -36,14 +36,14 @@ macro_rules! thread_pool {
         rayon::ThreadPoolBuilder::new()
             .num_threads($crate::util::pool_threads($n))
             .build()
-            .unwrap()
+            .expect("rayon pool construction")
     };
 
     () => {
         rayon::ThreadPoolBuilder::new()
             .num_threads(*$crate::util::NUM_THREADS)
             .build()
-            .unwrap()
+            .expect("rayon pool construction")
     };
 }
 pub(crate) use thread_pool;

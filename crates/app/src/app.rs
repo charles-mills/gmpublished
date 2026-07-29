@@ -1,3 +1,13 @@
+//! The root of the Elm loop: the model every feature's state hangs off, the
+//! message enum they all fold into, and the update/view/subscription trio Iced
+//! drives.
+//!
+//! Features never reach each other or the backend directly. Each `update`
+//! returns plain `Effect` values, and the runners in the `side_effects_*`
+//! modules are the only place those become work — a task on a worker pool, a
+//! window operation, a native dialog. That is what keeps the features testable
+//! without a backend and keeps every side effect enumerable in one place.
+
 use std::{
     collections::HashMap,
     fs,
