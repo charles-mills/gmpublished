@@ -11,7 +11,6 @@ use gmpublished_backend::SteamAvatarRgba;
 use gmpublished_backend::SteamRuntimeUser;
 use gmpublished_backend::TransactionPayload;
 use gmpublished_backend::publishing as steam_publishing;
-use gmpublished_backend::steam_users;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -149,7 +148,7 @@ pub(super) fn steam_user_from_backend(user: SteamRuntimeUser) -> SteamUser {
     }
 }
 
-pub(super) fn steam_user_from_workshop_backend(user: steam_users::SteamUser) -> SteamUser {
+pub(super) fn steam_user_from_workshop_backend(user: gmpublished_backend::SteamUser) -> SteamUser {
     SteamUser {
         steamid: SteamId::new(user.steamid.raw()),
         name: user.name,

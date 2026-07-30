@@ -5,24 +5,25 @@ use crate::theme::Tokens;
 use super::{ChromeStrategy, Effect, Message, State, UPSTREAM_REPO_URL};
 
 /// Applies a shell message and returns outward effects as plain data.
-pub fn update(
+pub fn update_at(
     state: &mut State,
     message: Message,
     _tokens: &Tokens,
     _chrome_strategy: ChromeStrategy,
+    now: Instant,
 ) -> Vec<Effect> {
     match message {
         Message::Navigate(route) => state
-            .select_route(route, Instant::now())
+            .select_route(route, now)
             .map(|(from, to)| Effect::Navigated { from, to })
             .into_iter()
             .collect(),
         Message::SearchActivated => {
-            state.dismiss_account_menu(Instant::now());
+            state.dismiss_account_menu(now);
             vec![Effect::OpenSearchPalette]
         }
         Message::AccountMenuDismissed => {
-            state.dismiss_account_menu(Instant::now());
+            state.dismiss_account_menu(now);
             Vec::new()
         }
         Message::DragRegionPressed => vec![Effect::BeginWindowDrag],
@@ -32,7 +33,7 @@ pub fn update(
             Vec::new()
         }
         Message::AccountMenuToggled => {
-            state.toggle_account_menu(Instant::now());
+            state.toggle_account_menu(now);
             Vec::new()
         }
         Message::UpdateReleaseFound(release) => {
@@ -48,7 +49,7 @@ pub fn update(
             Vec::new()
         }
         Message::UpdateNagActivated => {
-            state.dismiss_account_menu(Instant::now());
+            state.dismiss_account_menu(now);
             let url = state.update_release_url();
             if url.is_empty() {
                 Vec::new()
@@ -57,15 +58,15 @@ pub fn update(
             }
         }
         Message::UpstreamRepoActivated => {
-            state.dismiss_account_menu(Instant::now());
+            state.dismiss_account_menu(now);
             vec![Effect::OpenUrl(UPSTREAM_REPO_URL.to_owned())]
         }
         Message::SettingsActivated => {
-            state.dismiss_account_menu(Instant::now());
+            state.dismiss_account_menu(now);
             vec![Effect::OpenSettings]
         }
         Message::DownloaderJobCountChanged(count) => {
-            state.set_downloader_jobs(count, Instant::now());
+            state.set_downloader_jobs(count, now);
             Vec::new()
         }
         Message::DownloaderDropTargetEntered => {
@@ -77,6 +78,16 @@ pub fn update(
             Vec::new()
         }
     }
+}
+
+#[cfg(test)]
+fn update(
+    state: &mut State,
+    message: Message,
+    tokens: &Tokens,
+    chrome_strategy: ChromeStrategy,
+) -> Vec<Effect> {
+    update_at(state, message, tokens, chrome_strategy, Instant::now())
 }
 
 #[cfg(test)]

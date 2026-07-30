@@ -51,15 +51,19 @@ pub(super) fn build_props(
         load_unique_prop_models_parallel(skybox_static_props, resolver, load_model);
     refresh_entity_prop_aabb_visibility(
         static_props,
-        usize::try_from(raw_stats.world_static_prop_count).unwrap_or(usize::MAX),
-        usize::try_from(raw_stats.world_entity_prop_count).unwrap_or(0),
+        usize::try_from(raw_stats.world_static_prop_count)
+            .expect("u32 map prop counts fit usize on supported targets"),
+        usize::try_from(raw_stats.world_entity_prop_count)
+            .expect("u32 map prop counts fit usize on supported targets"),
         visibility,
         &loaded_models,
     );
     refresh_entity_prop_aabb_visibility(
         skybox_static_props,
-        usize::try_from(raw_stats.skybox_static_prop_count).unwrap_or(usize::MAX),
-        usize::try_from(raw_stats.skybox_entity_prop_count).unwrap_or(0),
+        usize::try_from(raw_stats.skybox_static_prop_count)
+            .expect("u32 map prop counts fit usize on supported targets"),
+        usize::try_from(raw_stats.skybox_entity_prop_count)
+            .expect("u32 map prop counts fit usize on supported targets"),
         visibility,
         &skybox_loaded_models,
     );

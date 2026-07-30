@@ -50,13 +50,59 @@ fn staged_startup_activates_exactly_once_after_first_frame() {
 
 use super::{
     AddonDragMessage, AddonDragOutcome, AddonDragSource, AddonDragState, App, ContextMenuTarget,
-    GlobalShortcut, LocalMenuTarget, RootMessage, StartupPhase, State,
+    ExtractionHandoff, GlobalShortcut, LocalMenuTarget, RootMessage, StartupPhase, State,
     backend_runtime_action_message, map_global_shortcut, map_settings_toggle_shortcut,
     system_scheme_from_mode,
 };
 use crate::bridge::ui_error::UiError;
 use crate::generation::Generation;
 use crate::widgets::grid_rows::CardId;
+
+/// The feature/service boundary is checked as an architectural constraint,
+/// not left as a convention every reviewer has to rediscover.
+#[test]
+fn feature_modules_do_not_import_operational_service_handles() {
+    const FORBIDDEN: &[&str] = &[
+        "BackendContext",
+        "BackendServices",
+        "WorkshopService",
+        "ConfigService",
+        "ArchiveService",
+        "PublishService",
+        ".run_blocking(",
+        "spawn_blocking",
+    ];
+
+    fn inspect(path: &Path, offenders: &mut Vec<String>) {
+        for entry in std::fs::read_dir(path).expect("feature source directory") {
+            let path = entry.expect("feature source entry").path();
+            if path.is_dir() {
+                inspect(&path, offenders);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(&path).expect("feature source file");
+                for (line_number, line) in source.lines().enumerate() {
+                    for forbidden in FORBIDDEN {
+                        if line.contains(forbidden) {
+                            offenders.push(format!(
+                                "{}:{} contains `{forbidden}`",
+                                path.display(),
+                                line_number + 1
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/features");
+    let mut offenders = Vec::new();
+    inspect(&features, &mut offenders);
+    assert!(
+        offenders.is_empty(),
+        "operational dependencies leaked into feature modules: {offenders:#?}"
+    );
+}
 
 fn assert_task_scheduled(task: &Task<RootMessage>) {
     assert!(task.units() > 0, "expected a scheduled task");
@@ -70,9 +116,9 @@ fn assert_no_task(task: &Task<RootMessage>) {
 fn test_constructor_uses_default_root_state_without_running_startup() {
     let app = App::new_for_test();
 
-    assert_eq!(app.state.shell.route(), shell::Route::MyWorkshop);
-    assert_eq!(app.state.shell.account_name(), None);
-    assert!(!app.state.my_workshop.is_route_visible());
+    assert_eq!(app.state.features.shell.route(), shell::Route::MyWorkshop);
+    assert_eq!(app.state.features.shell.account_name(), None);
+    assert!(!app.state.features.my_workshop.is_route_visible());
     assert_eq!(app.theme(), None);
     assert_eq!(app.title(), "gmpublished");
 }
@@ -85,8 +131,8 @@ fn update_delegates_modal_stack_messages_to_modal_state() {
         modal_stack::Message::OpenDestinationSelect,
     ));
 
-    assert!(app.state.modal_stack.overlay_active());
-    assert_eq!(app.state.modal_stack.active(), None);
+    assert!(app.state.features.modal_stack.overlay_active());
+    assert_eq!(app.state.features.modal_stack.active(), None);
 }
 
 #[test]
@@ -102,27 +148,27 @@ fn modal_stack_close_clears_preview_gma_state() {
     ));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-    assert!(app.state.preview_gma.is_open());
+    assert!(app.state.features.preview_gma.is_open());
 
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::CloseRequested,
     ));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-    assert!(app.state.preview_gma.is_open());
+    assert!(app.state.features.preview_gma.is_open());
 
     let _task = app.update(RootMessage::AnimationTick(
         std::time::Instant::now() + std::time::Duration::from_secs(1),
     ));
 
-    assert_eq!(app.state.modal_stack.active(), None);
-    assert!(!app.state.preview_gma.is_open());
+    assert_eq!(app.state.features.modal_stack.active(), None);
+    assert!(!app.state.features.preview_gma.is_open());
 }
 
 #[test]
@@ -141,11 +187,11 @@ fn destination_overlay_layers_over_preview_and_closes_first() {
     ));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-    assert!(app.state.modal_stack.overlay_active());
-    assert!(app.state.preview_gma.is_open());
+    assert!(app.state.features.modal_stack.overlay_active());
+    assert!(app.state.features.preview_gma.is_open());
 
     // Scrim/Escape close targets the overlay; the preview stays put.
     let _task = app.update(RootMessage::ModalStack(
@@ -155,12 +201,12 @@ fn destination_overlay_layers_over_preview_and_closes_first() {
         std::time::Instant::now() + std::time::Duration::from_secs(1),
     ));
 
-    assert!(!app.state.modal_stack.overlay_active());
+    assert!(!app.state.features.modal_stack.overlay_active());
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-    assert!(app.state.preview_gma.is_open());
+    assert!(app.state.features.preview_gma.is_open());
 }
 
 #[test]
@@ -176,10 +222,10 @@ fn prepare_publish_open_claims_modal_stack_slot() {
     ));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreparePublish)
     );
-    assert!(app.state.prepare_publish.open());
+    assert!(app.state.features.prepare_publish.open());
 }
 
 #[test]
@@ -198,17 +244,17 @@ fn modal_stack_close_clears_prepare_publish_state() {
     ));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreparePublish)
     );
-    assert!(app.state.prepare_publish.open());
+    assert!(app.state.features.prepare_publish.open());
 
     let _task = app.update(RootMessage::AnimationTick(
         std::time::Instant::now() + std::time::Duration::from_secs(1),
     ));
 
-    assert_eq!(app.state.modal_stack.active(), None);
-    assert!(!app.state.prepare_publish.open());
+    assert_eq!(app.state.features.modal_stack.active(), None);
+    assert!(!app.state.features.prepare_publish.open());
 }
 
 /// A modal that is replaced rather than closed never animates out, so the
@@ -226,7 +272,7 @@ fn a_displaced_modal_runs_the_close_teardown_it_never_animated_into() {
             upscale_icon_default: false,
         },
     ));
-    assert!(app.state.prepare_publish.open());
+    assert!(app.state.features.prepare_publish.open());
 
     let snapshot = app.settings_snapshot();
     let _task = app.update(RootMessage::Settings(settings::Message::OpenRequested(
@@ -234,10 +280,10 @@ fn a_displaced_modal_runs_the_close_teardown_it_never_animated_into() {
     )));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
     );
-    assert!(!app.state.prepare_publish.open());
+    assert!(!app.state.features.prepare_publish.open());
 }
 
 /// The previewer's messages travel as an effect, so no root match arm has to
@@ -251,14 +297,14 @@ fn a_preview_message_wrapped_by_prepare_publish_still_reaches_the_previewer() {
     let _task = app.update(RootMessage::FilePreview(
         file_preview::Message::OpenRequested(file_preview_request()),
     ));
-    assert!(!app.state.file_preview.expanded());
+    assert!(!app.state.features.file_preview.expanded());
 
     let _task = app.update(RootMessage::PreparePublish(
         prepare_publish::Message::FilePreview(file_preview::Message::ExpandToggled),
     ));
 
     assert!(
-        app.state.file_preview.expanded(),
+        app.state.features.file_preview.expanded(),
         "the wrapped message must reach file_preview's own update"
     );
 }
@@ -274,10 +320,10 @@ fn settings_activation_claims_modal_stack_slot() {
     )));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
     );
-    assert!(app.state.settings.open());
+    assert!(app.state.features.settings.open());
 }
 
 #[test]
@@ -341,11 +387,13 @@ fn downloader_executor_submission_schedules_worker_task() {
 fn downloader_executor_cancels_requested_tasks() {
     let mut app = App::new_for_test();
     let handle = app
+        .environment
         .ctx
         .create_task(TaskKind::Download, TransactionStatus::Downloading);
     let task_id = handle.id();
-    let transaction = app.ctx.begin_transaction();
-    app.ctx
+    let transaction = app.environment.ctx.begin_transaction();
+    app.environment
+        .ctx
         .correlate_backend_transaction(transaction.id(), handle);
 
     let task = app.batch_effects(
@@ -364,7 +412,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     // The backend queues a Steam download: DownloadStarted correlates a
     // fresh task with the transaction (the same path backend_event_task
     // takes when the event arrives over the wire).
-    let transaction = app.ctx.begin_transaction();
+    let transaction = app.environment.ctx.begin_transaction();
     let _task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::DownloadStarted {
             transaction_id: transaction.id(),
@@ -375,6 +423,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     // The item id arrives as transaction data; feeding the resulting action
     // back into update() mirrors backend_event_task's Task::done loop.
     let actions = app
+        .environment
         .ctx
         .handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             crate::bridge::tasks::TransactionRuntimeEvent::Data {
@@ -389,12 +438,12 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     for action in actions {
         let _task = app.update(backend_runtime_action_message(action));
     }
-    assert_eq!(app.state.downloader.downloading().len(), 1);
+    assert_eq!(app.state.features.downloader.downloading().len(), 1);
 
     // Pressing the row's X sends CancelRequested; the row leaves the list
     // immediately and its effect aborts the very transaction the download
     // worker polls.
-    let row_id = app.state.downloader.downloading()[0].id();
+    let row_id = app.state.features.downloader.downloading()[0].id();
     let _task = app.update(RootMessage::Downloader(
         downloader::Message::CancelRequested {
             section: downloader::Section::Downloading,
@@ -402,7 +451,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
         },
     ));
 
-    assert!(app.state.downloader.downloading().is_empty());
+    assert!(app.state.features.downloader.downloading().is_empty());
     assert!(transaction.aborted());
 }
 
@@ -419,8 +468,8 @@ fn downloader_row_cancel_button_is_clickable_through_the_full_app_view() {
             task_id: TaskId::from_raw(7),
         },
     )));
-    assert_eq!(app.state.downloader.downloading().len(), 1);
-    let row_id = app.state.downloader.downloading()[0].id();
+    assert_eq!(app.state.features.downloader.downloading().len(), 1);
+    let row_id = app.state.features.downloader.downloading()[0].id();
 
     let mut ui = iced_test::Simulator::new(app.view());
     let press = iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
@@ -501,20 +550,22 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
 
     // Mirrors `run_local_gma_extraction`: begin a transaction and correlate
     // it with the task so cancellation can reach the extraction.
-    let transaction = app.ctx.begin_transaction();
+    let transaction = app.environment.ctx.begin_transaction();
     let task = app
+        .environment
         .ctx
         .create_task(TaskKind::Extract, TransactionStatus::Extracting);
     let task_id = task.id();
-    app.ctx
+    app.environment
+        .ctx
         .correlate_backend_transaction(transaction.id(), task);
 
     // Cancelling through the same path the UI's cancel button uses reaches
     // the transaction the extraction call below is about to use.
-    assert!(app.ctx.cancel_task(task_id));
+    assert!(app.environment.ctx.cancel_task(task_id));
     assert!(transaction.aborted());
 
-    let result = app.ctx.extract_preview_archive(
+    let result = app.environment.ctx.extract_preview_archive(
         &archive,
         ExtractDestination::Temp,
         &PreviewExtractOptions::default(),
@@ -523,7 +574,7 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
 
     assert!(matches!(result, Err(GmaError::Cancelled)));
     // A second cancellation attempt has nothing left to cancel.
-    assert!(!app.ctx.cancel_task(task_id));
+    assert!(!app.environment.ctx.cancel_task(task_id));
 }
 
 #[test]
@@ -561,7 +612,7 @@ fn downloader_executor_destination_selection_opens_overlay() {
         App::run_downloader_effect,
     );
 
-    assert!(app.state.modal_stack.overlay_active());
+    assert!(app.state.features.modal_stack.overlay_active());
     assert_no_task(&task);
 }
 
@@ -575,7 +626,7 @@ fn destination_select_executor_modal_open_opens_overlay() {
     );
 
     assert_no_task(&task);
-    assert!(app.state.modal_stack.overlay_active());
+    assert!(app.state.features.modal_stack.overlay_active());
 }
 
 #[test]
@@ -638,14 +689,16 @@ fn destination_select_executor_persisted_begins_closing_the_overlay() {
     );
 
     assert_no_task(&task);
-    assert!(app.state.modal_stack.overlay_active());
-    assert!(!app.state.modal_stack.overlay_interactive());
+    assert!(app.state.features.modal_stack.overlay_active());
+    assert!(!app.state.features.modal_stack.overlay_interactive());
 }
 
 #[test]
-fn destination_select_executor_dismissed_clears_context_menu_extract_paths() {
+fn destination_select_executor_dismissed_clears_extraction_handoff() {
     let mut app = App::new_for_test();
-    app.state.context_menu_extract_paths = Some(vec![PathBuf::from("/tmp/context.gma")]);
+    app.state
+        .context_menu_extraction
+        .begin(vec![PathBuf::from("/tmp/context.gma")]);
 
     let task = app.batch_effects(
         vec![destination_select::Effect::DestinationDismissed],
@@ -653,7 +706,7 @@ fn destination_select_executor_dismissed_clears_context_menu_extract_paths() {
     );
 
     assert_no_task(&task);
-    assert_eq!(app.state.context_menu_extract_paths, None);
+    assert_eq!(app.state.context_menu_extraction, ExtractionHandoff::Idle);
 }
 
 #[test]
@@ -680,9 +733,10 @@ fn downloader_executor_active_job_count_updates_shell_badge() {
     );
 
     assert_no_task(&task);
-    assert_eq!(app.state.shell.downloader_jobs(), 3);
+    assert_eq!(app.state.features.shell.downloader_jobs(), 3);
     assert_eq!(
         app.state
+            .features
             .shell
             .downloader_badge(Instant::now())
             .expect("active count should show badge")
@@ -763,19 +817,21 @@ fn search_executor_full_search_starts_stream_task() {
     );
 
     assert_task_scheduled(&task);
-    assert!(app.state.search.loading());
-    assert!(!app.state.search.should_begin_full_search());
+    assert!(app.state.features.search.loading());
+    assert!(!app.state.features.search.should_begin_full_search());
 }
 
 #[test]
 fn search_executor_cancels_requested_task() {
     let mut app = App::new_for_test();
     let handle = app
+        .environment
         .ctx
         .create_task(TaskKind::Search, TransactionStatus::Searching);
     let task_id = handle.id();
-    let transaction = app.ctx.begin_transaction();
-    app.ctx
+    let transaction = app.environment.ctx.begin_transaction();
+    app.environment
+        .ctx
         .correlate_backend_transaction(transaction.id(), handle);
 
     let task = app.batch_effects(
@@ -826,7 +882,7 @@ fn search_executor_metadata_refresh_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retries(),
+        app.state.features.steam_session.pending_retries(),
         [steam_session::PendingRetry::SearchMetadataRefresh {
             generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::fixture(123)],
@@ -847,7 +903,7 @@ fn my_workshop_executor_page_request_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retries(),
+        app.state.features.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopPage {
             generation: Generation::from_raw(7),
             page: 2,
@@ -868,7 +924,7 @@ fn my_workshop_executor_stats_refresh_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retries(),
+        app.state.features.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopStats {
             generation: Generation::from_raw(7),
             pages: 2,
@@ -891,7 +947,7 @@ fn my_workshop_executor_prepare_publish_schedules_open() {
 }
 
 #[test]
-fn my_workshop_executor_context_menu_sets_target_and_schedules_open() {
+fn my_workshop_executor_context_menu_schedules_owned_open_request() {
     let mut app = App::new_for_test();
 
     let task = app.batch_effects(
@@ -902,11 +958,6 @@ fn my_workshop_executor_context_menu_sets_target_and_schedules_open() {
     );
 
     assert_task_scheduled(&task);
-    assert!(matches!(
-        app.state.context_menu_target,
-        Some(ContextMenuTarget::MyWorkshop { workshop_id, .. })
-            if workshop_id == PublishedFileId::fixture(123)
-    ));
 }
 
 /// The demand handlers must not schedule work — they mutate the demand index
@@ -975,7 +1026,7 @@ fn installed_addons_executor_metadata_request_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retries(),
+        app.state.features.steam_session.pending_retries(),
         [steam_session::PendingRetry::InstalledMetadata {
             generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::fixture(123)],
@@ -996,7 +1047,7 @@ fn installed_addons_executor_metadata_refresh_defers_until_steam_connects() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retries(),
+        app.state.features.steam_session.pending_retries(),
         [steam_session::PendingRetry::InstalledMetadataRefresh {
             generation: Generation::from_raw(7),
             item_ids: vec![PublishedFileId::fixture(123)],
@@ -1018,13 +1069,13 @@ fn installed_addons_executor_preview_schedules_preview_open() {
     // Modal + local archive + Workshop details now start together.
     assert_task_scheduled(&task);
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
 }
 
 #[test]
-fn installed_addons_executor_context_menu_sets_target_and_schedules_open() {
+fn installed_addons_executor_context_menu_schedules_owned_open_request() {
     let mut app = App::new_for_test();
     let request = installed_context_menu_request();
 
@@ -1034,11 +1085,6 @@ fn installed_addons_executor_context_menu_sets_target_and_schedules_open() {
     );
 
     assert_task_scheduled(&task);
-    assert!(matches!(
-        app.state.context_menu_target,
-        Some(ContextMenuTarget::Local(LocalMenuTarget { workshop_id, .. }))
-            if workshop_id == Some(PublishedFileId::fixture(123))
-    ));
 }
 
 #[test]
@@ -1122,7 +1168,7 @@ fn size_analyzer_executor_preview_schedules_preview_open() {
 }
 
 #[test]
-fn size_analyzer_executor_context_menu_sets_target_and_schedules_open() {
+fn size_analyzer_executor_context_menu_schedules_owned_open_request() {
     let mut app = App::new_for_test();
 
     let task = app.batch_effects(
@@ -1131,11 +1177,6 @@ fn size_analyzer_executor_context_menu_sets_target_and_schedules_open() {
     );
 
     assert_task_scheduled(&task);
-    assert!(matches!(
-        app.state.context_menu_target,
-        Some(ContextMenuTarget::Local(LocalMenuTarget { workshop_id, .. }))
-            if workshop_id == Some(PublishedFileId::fixture(123))
-    ));
 }
 
 #[test]
@@ -1196,7 +1237,7 @@ fn preview_gma_executor_modal_open_claims_modal_slot() {
 
     assert_no_task(&task);
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
 }
@@ -1253,7 +1294,7 @@ fn preview_gma_executor_destination_select_opens_overlay() {
     );
 
     assert_no_task(&task);
-    assert!(app.state.modal_stack.overlay_active());
+    assert!(app.state.features.modal_stack.overlay_active());
 }
 
 #[test]
@@ -1268,8 +1309,8 @@ fn preview_gma_executor_entry_preview_opens_embedded_file_preview() {
     );
 
     assert_task_scheduled(&task);
-    assert_eq!(app.state.modal_stack.overlay_modal(), None);
-    assert!(app.state.file_preview.loading());
+    assert_eq!(app.state.features.modal_stack.overlay_modal(), None);
+    assert!(app.state.features.file_preview.loading());
 }
 
 #[test]
@@ -1284,7 +1325,7 @@ fn prepare_publish_executor_entry_preview_opens_embedded_file_preview() {
     );
 
     assert_task_scheduled(&task);
-    assert!(app.state.file_preview.loading());
+    assert!(app.state.features.file_preview.loading());
 }
 
 #[test]
@@ -1306,50 +1347,50 @@ fn preview_gma_close_request_chains_expanded_preview_back_then_modal() {
     ));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-    assert!(app.state.preview_gma.is_open());
-    assert!(app.state.file_preview.is_open());
-    assert!(app.state.file_preview.expanded());
+    assert!(app.state.features.preview_gma.is_open());
+    assert!(app.state.features.file_preview.is_open());
+    assert!(app.state.features.file_preview.expanded());
 
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::CloseRequested,
     ));
 
-    assert!(app.state.file_preview.is_open());
-    assert!(!app.state.file_preview.expanded());
+    assert!(app.state.features.file_preview.is_open());
+    assert!(!app.state.features.file_preview.expanded());
     assert_eq!(
-        app.state.modal_stack.active(),
-        Some(modal_stack::ActiveModal::PreviewGma)
-    );
-
-    let _task = app.update(RootMessage::ModalStack(
-        modal_stack::Message::CloseRequested,
-    ));
-
-    assert!(!app.state.file_preview.is_open());
-    assert!(app.state.preview_gma.is_open());
-    assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
 
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::CloseRequested,
     ));
+
+    assert!(!app.state.features.file_preview.is_open());
+    assert!(app.state.features.preview_gma.is_open());
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-    assert!(!app.state.modal_stack.interactive());
+
+    let _task = app.update(RootMessage::ModalStack(
+        modal_stack::Message::CloseRequested,
+    ));
+    assert_eq!(
+        app.state.features.modal_stack.active(),
+        Some(modal_stack::ActiveModal::PreviewGma)
+    );
+    assert!(!app.state.features.modal_stack.interactive());
 
     let _task = app.update(RootMessage::AnimationTick(
         std::time::Instant::now() + std::time::Duration::from_secs(1),
     ));
 
-    assert_eq!(app.state.modal_stack.active(), None);
-    assert!(!app.state.preview_gma.is_open());
+    assert_eq!(app.state.features.modal_stack.active(), None);
+    assert!(!app.state.features.preview_gma.is_open());
 }
 
 #[test]
@@ -1368,6 +1409,7 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
     ));
     let request = app
         .state
+        .features
         .file_preview
         .request()
         .expect("preview request should be active")
@@ -1375,7 +1417,7 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
     let data = preview_model::PreviewData::from_request(
         &request,
         preview_model::PreviewContent::Audio {
-            bytes: Arc::new(vec![1, 2, 3]),
+            bytes: Arc::from(vec![1, 2, 3]),
             duration_secs: Some(4.0),
         },
     );
@@ -1387,18 +1429,18 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
         file_preview::Message::AudioPlaybackStarted(request.request_id),
     ));
 
-    assert!(app.state.file_preview.is_open());
-    assert!(app.state.file_preview.audio_playing());
+    assert!(app.state.features.file_preview.is_open());
+    assert!(app.state.features.file_preview.audio_playing());
 
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::CloseRequested,
     ));
 
-    assert!(!app.state.file_preview.is_open());
-    assert!(!app.state.file_preview.audio_playing());
-    assert!(app.state.preview_gma.is_open());
+    assert!(!app.state.features.file_preview.is_open());
+    assert!(!app.state.features.file_preview.audio_playing());
+    assert!(app.state.features.preview_gma.is_open());
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
 }
@@ -1478,7 +1520,7 @@ fn settings_executor_modal_open_claims_modal_slot() {
 
     assert_no_task(&task);
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
     );
 }
@@ -1498,10 +1540,10 @@ fn settings_executor_modal_close_starts_close_animation() {
 
     assert_no_task(&task);
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
     );
-    assert!(!app.state.modal_stack.interactive());
+    assert!(!app.state.features.modal_stack.interactive());
 }
 
 #[test]
@@ -1523,6 +1565,7 @@ fn settings_executor_path_validation_schedules_worker() {
     let mut app = App::new_for_test();
     let request = app
         .state
+        .features
         .settings
         .path_validation_request(settings::PathSetting::Temp);
 
@@ -1659,15 +1702,15 @@ fn shell_executor_open_search_palette_focuses_search_and_dismisses_account_menu(
     let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::Shell(shell::Message::AccountMenuToggled));
-    assert!(app.state.shell.account_menu_open());
+    assert!(app.state.features.shell.account_menu_open());
 
     let _task = app.batch_effects(
         vec![shell::Effect::OpenSearchPalette],
         App::run_shell_effect,
     );
 
-    assert!(app.state.search.palette_open());
-    assert!(!app.state.shell.account_menu_open());
+    assert!(app.state.features.search.palette_open());
+    assert!(!app.state.features.shell.account_menu_open());
 }
 
 #[test]
@@ -1675,10 +1718,10 @@ fn command_f_toggles_palette_when_global_shortcuts_are_enabled() {
     let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch));
-    assert!(app.state.search.palette_open());
+    assert!(app.state.features.search.palette_open());
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch));
-    assert!(!app.state.search.palette_open());
+    assert!(!app.state.features.search.palette_open());
 }
 
 #[test]
@@ -1686,15 +1729,21 @@ fn global_shortcuts_are_guarded_while_context_or_modal_ui_is_active() {
     let mut app = App::new_for_test();
     let _task = app.update(RootMessage::ContextMenu(
         context_menu::Message::OpenRequested(context_menu::OpenRequest::new(
-            context_menu::Owner::InstalledAddons,
             Point::new(10.0, 10.0),
             vec![context_menu::Entry::copy_path()],
+            ContextMenuTarget::Local(LocalMenuTarget {
+                path: PathBuf::from("/tmp/addon.gma"),
+                path_text: "/tmp/addon.gma".to_owned(),
+                workshop_id: None,
+                workshop_url: None,
+                preview_url: None,
+            }),
         )),
     ));
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch));
 
-    assert!(!app.state.search.palette_open());
+    assert!(!app.state.features.search.palette_open());
 
     let mut app = App::new_for_test();
     let _task = app.update(RootMessage::ModalStack(
@@ -1703,7 +1752,7 @@ fn global_shortcuts_are_guarded_while_context_or_modal_ui_is_active() {
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch));
 
-    assert!(!app.state.search.palette_open());
+    assert!(!app.state.features.search.palette_open());
 }
 
 #[test]
@@ -1711,12 +1760,12 @@ fn command_comma_dismisses_account_menu_and_defers_to_settings_open_task() {
     let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::Shell(shell::Message::AccountMenuToggled));
-    assert!(app.state.shell.account_menu_open());
+    assert!(app.state.features.shell.account_menu_open());
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSettings));
 
-    assert!(!app.state.shell.account_menu_open());
-    assert_eq!(app.state.modal_stack.active(), None);
+    assert!(!app.state.features.shell.account_menu_open());
+    assert_eq!(app.state.features.modal_stack.active(), None);
 }
 
 /// The shortcut's own contribution is the scheduled close task; the harness
@@ -1732,7 +1781,7 @@ fn requesting_a_settings_close_clears_the_modal_on_the_next_tick() {
         snapshot,
     )));
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
     );
 
@@ -1747,8 +1796,8 @@ fn requesting_a_settings_close_clears_the_modal_on_the_next_tick() {
         Instant::now() + Duration::from_secs(1),
     ));
 
-    assert_eq!(app.state.modal_stack.active(), None);
-    assert!(!app.state.settings.open());
+    assert_eq!(app.state.features.modal_stack.active(), None);
+    assert!(!app.state.features.settings.open());
 }
 
 #[test]
@@ -1778,7 +1827,7 @@ fn command_comma_stays_inert_over_other_modals() {
         modal_stack::Message::OpenPreviewGma,
     ));
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
 
@@ -1786,7 +1835,7 @@ fn command_comma_stays_inert_over_other_modals() {
 
     assert_no_task(&task);
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
 }
@@ -1796,11 +1845,11 @@ fn search_result_activation_closes_palette() {
     let mut app = App::new_for_test();
 
     let _task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSearch));
-    assert!(app.state.search.palette_open());
+    assert!(app.state.features.search.palette_open());
 
     let _task = app.update(RootMessage::Search(search::Message::ResultActivated(123)));
 
-    assert!(!app.state.search.palette_open());
+    assert!(!app.state.features.search.palette_open());
 }
 
 #[test]
@@ -1816,55 +1865,78 @@ fn modal_stack_close_clears_settings_state() {
     ));
 
     assert_eq!(
-        app.state.modal_stack.active(),
+        app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::Settings)
     );
-    assert!(app.state.settings.open());
+    assert!(app.state.features.settings.open());
 
     let _task = app.update(RootMessage::AnimationTick(
         std::time::Instant::now() + std::time::Duration::from_secs(1),
     ));
 
-    assert_eq!(app.state.modal_stack.active(), None);
-    assert!(!app.state.settings.open());
+    assert_eq!(app.state.features.modal_stack.active(), None);
+    assert!(!app.state.features.settings.open());
 }
 
 #[test]
 fn context_menu_extract_opens_destination_select_with_pending_path() {
     let mut app = App::new_for_test();
     let path = PathBuf::from("/tmp/context-menu.gma");
-    app.state.context_menu_target = Some(ContextMenuTarget::Local(LocalMenuTarget {
-        path: path.clone(),
-        path_text: path.display().to_string(),
-        workshop_id: None,
-        workshop_url: None,
-        preview_url: None,
-    }));
+    let _task = app.update(RootMessage::ContextMenu(
+        context_menu::Message::OpenRequested(context_menu::OpenRequest::new(
+            Point::ORIGIN,
+            vec![context_menu::Entry::extract()],
+            ContextMenuTarget::Local(LocalMenuTarget {
+                path: path.clone(),
+                path_text: path.display().to_string(),
+                workshop_id: None,
+                workshop_url: None,
+                preview_url: None,
+            }),
+        )),
+    ));
 
     let _task = app.update(RootMessage::ContextMenu(
         context_menu::Message::ActionSelected(context_menu::ContextMenuAction::Extract),
     ));
 
-    assert!(app.state.modal_stack.overlay_active());
-    assert_eq!(app.state.modal_stack.active(), None);
-    assert_eq!(app.state.context_menu_extract_paths, Some(vec![path]));
-    assert_eq!(app.state.context_menu_target, None);
+    assert!(app.state.features.modal_stack.overlay_active());
+    assert_eq!(app.state.features.modal_stack.active(), None);
+    assert_eq!(
+        app.state.context_menu_extraction.paths(),
+        Some([path].as_slice())
+    );
+    assert!(app.state.features.context_menu.target().is_none());
+    assert!(!app.state.features.context_menu.open());
+    assert!(app.state.features.context_menu.visible());
 }
 
 #[test]
-fn context_menu_dismiss_clears_active_target() {
+fn context_menu_dismiss_retains_target_until_close_settles() {
     let mut app = App::new_for_test();
-    app.state.context_menu_target = Some(ContextMenuTarget::MyWorkshop {
-        workshop_id: PublishedFileId::fixture(42),
-        workshop_url: workshop_url::workshop_item_url(PublishedFileId::fixture(42)),
-        preview_url: None,
-    });
+    let _task = app.update(RootMessage::ContextMenu(
+        context_menu::Message::OpenRequested(context_menu::OpenRequest::new(
+            Point::ORIGIN,
+            vec![context_menu::Entry::steam_workshop()],
+            ContextMenuTarget::MyWorkshop {
+                workshop_id: PublishedFileId::fixture(42),
+                workshop_url: workshop_url::workshop_item_url(PublishedFileId::fixture(42)),
+                preview_url: None,
+            },
+        )),
+    ));
 
     let _task = app.update(RootMessage::ContextMenu(
         context_menu::Message::DismissRequested,
     ));
 
-    assert_eq!(app.state.context_menu_target, None);
+    assert!(app.state.features.context_menu.target().is_some());
+    assert!(app.state.features.context_menu.visible());
+    let _task = app.update(RootMessage::AnimationTick(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    ));
+    assert!(app.state.features.context_menu.target().is_none());
+    assert!(!app.state.features.context_menu.visible());
 }
 
 #[cfg(feature = "debug")]
@@ -1873,18 +1945,25 @@ fn hide_addon_context_action_is_session_scoped_and_removes_my_workshop_row() {
     let mut app = App::new_for_test();
     let workshop_id = PublishedFileId::fixture(123);
     app.state
+        .features
         .my_workshop
         .push_rows_for_test(vec![my_workshop::Row::for_test(123, "Hidden", 10)], 1);
-    app.state.context_menu_target = Some(ContextMenuTarget::MyWorkshop {
-        workshop_id,
-        workshop_url: workshop_url::workshop_item_url(workshop_id),
-        preview_url: None,
-    });
+    let _task = app.update(RootMessage::ContextMenu(
+        context_menu::Message::OpenRequested(context_menu::OpenRequest::new(
+            Point::ORIGIN,
+            vec![context_menu::Entry::hide_addon()],
+            ContextMenuTarget::MyWorkshop {
+                workshop_id,
+                workshop_url: workshop_url::workshop_item_url(workshop_id),
+                preview_url: None,
+            },
+        )),
+    ));
 
     let _task = app.route_context_menu_action(context_menu::ContextMenuAction::HideAddon);
 
     assert!(app.state.hidden_addons.contains_workshop_id(workshop_id));
-    assert!(app.state.my_workshop.row_for_test(123).is_none());
+    assert!(app.state.features.my_workshop.row_for_test(123).is_none());
 }
 
 #[test]
@@ -1895,7 +1974,7 @@ fn update_delegates_search_messages_to_search_state() {
         "addons".to_owned(),
     )));
 
-    assert_eq!(app.state.search.input(), "addons");
+    assert_eq!(app.state.features.search.input(), "addons");
 }
 
 #[test]
@@ -2037,7 +2116,7 @@ fn update_delegates_steam_session_messages_to_session_state() {
     ));
 
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Connecting
     );
 }
@@ -2051,20 +2130,20 @@ fn backend_steam_events_update_session_and_shell_state() {
     ));
 
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Connected
     );
-    assert!(app.state.shell.steam_status().connected());
+    assert!(app.state.features.shell.steam_status().connected());
 
     let _task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::SteamDisconnected,
     ));
 
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Disconnected
     );
-    assert!(!app.state.shell.steam_status().connected());
+    assert!(!app.state.features.shell.steam_status().connected());
 }
 
 fn backend_appdata_snapshot_for_test(
@@ -2098,9 +2177,10 @@ fn backend_appdata_snapshot_for_test(
 #[test]
 fn backend_appdata_event_refreshes_settings_and_paths() {
     let mut app = App::new_for_test();
-    let initial_steam_status = app.state.steam_session.status();
+    let initial_steam_status = app.state.features.steam_session.status();
     let root = tempfile::tempdir().expect("tempdir");
-    app.ctx
+    app.environment
+        .ctx
         .update_settings_snapshot_for_test(|settings| {
             settings.ui.play_gifs_by_default = false;
             settings.ui.download_count_format = DownloadCountFormat::Period;
@@ -2122,11 +2202,14 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
     // The event handler deliberately performs sanitization and path
     // resolution on the blocking pool. Apply the worker result explicitly in
     // this reducer-level test.
-    let (settings, paths) = app.ctx.apply_appdata_snapshot_for_test(snapshot);
+    let (settings, paths) = app
+        .environment
+        .ctx
+        .apply_appdata_snapshot_for_test(snapshot);
     let _task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
         settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
     ))));
-    let (settings, paths) = app.ctx.settings_and_paths_snapshot();
+    let (settings, paths) = app.environment.ctx.settings_and_paths_snapshot();
 
     assert!(!settings.backend.sounds);
     assert_eq!(settings.backend.language.as_deref(), Some("en-US"));
@@ -2137,7 +2220,10 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
         DownloadCountFormat::Period
     );
     assert_eq!(settings.ui.theme_preset, ThemePreset::ClassicSource);
-    assert_eq!(app.state.steam_session.status(), initial_steam_status);
+    assert_eq!(
+        app.state.features.steam_session.status(),
+        initial_steam_status
+    );
 }
 
 #[test]
@@ -2177,7 +2263,7 @@ fn backend_appdata_events_are_serialized_and_coalesce_to_the_latest_snapshot() {
         Some("latest")
     );
 
-    let (settings, paths) = app.ctx.apply_appdata_snapshot_for_test(first);
+    let (settings, paths) = app.environment.ctx.apply_appdata_snapshot_for_test(first);
     let task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
         settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
     ))));
@@ -2185,11 +2271,11 @@ fn backend_appdata_events_are_serialized_and_coalesce_to_the_latest_snapshot() {
     assert!(app.appdata_snapshot_in_flight);
     assert!(app.pending_appdata_snapshot.is_none());
 
-    let (settings, paths) = app.ctx.apply_appdata_snapshot_for_test(latest);
+    let (settings, paths) = app.environment.ctx.apply_appdata_snapshot_for_test(latest);
     let _task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
         settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
     ))));
-    let (settings, _) = app.ctx.settings_and_paths_snapshot();
+    let (settings, _) = app.environment.ctx.settings_and_paths_snapshot();
     assert_eq!(settings.backend.language.as_deref(), Some("latest"));
     assert!(!app.appdata_snapshot_in_flight);
 }
@@ -2211,7 +2297,7 @@ fn download_count_format_mutation_updates_runtime_formatter() {
 #[test]
 fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
     let mut app = App::new_for_test();
-    app.ctx.clear_search_for_test();
+    app.environment.ctx.clear_search_for_test();
     let snapshot = LibrarySnapshot {
         addons: Arc::from(
             vec![installed_addon_for_library(
@@ -2235,8 +2321,9 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
         Ok(refresh),
     ));
 
-    assert_eq!(app.state.installed_addons.row_count(), 1);
+    assert_eq!(app.state.features.installed_addons.row_count(), 1);
     let result = app
+        .environment
         .ctx
         .quick_addon_search_for_test("root-needle".to_owned());
     assert_eq!(result.hits.len(), 1);
@@ -2248,7 +2335,13 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
         shell::Route::SizeAnalyzer,
     )));
-    assert!(app.state.size_analyzer.projection_key_for_test().is_some());
+    assert!(
+        app.state
+            .features
+            .size_analyzer
+            .projection_key_for_test()
+            .is_some()
+    );
 }
 
 #[test]
@@ -2333,14 +2426,14 @@ fn workshop_download_completion_starts_baseline_inspection() {
         ),
     ));
 
-    assert_eq!(app.state.prepare_publish.addon_path(), "");
-    assert!(app.state.prepare_publish.path_pending());
+    assert_eq!(app.state.features.prepare_publish.addon_path(), "");
+    assert!(app.state.features.prepare_publish.path_pending());
 }
 
 #[test]
 fn uncorrelated_backend_transaction_events_are_data_only() {
     let mut app = App::new_for_test();
-    let initial_steam_status = app.state.steam_session.status();
+    let initial_steam_status = app.state.features.steam_session.status();
 
     let _task = app.update(RootMessage::BackendEvent(BackendRuntimeEvent::Transaction(
         crate::bridge::tasks::TransactionRuntimeEvent::Progress {
@@ -2349,7 +2442,10 @@ fn uncorrelated_backend_transaction_events_are_data_only() {
         },
     )));
 
-    assert_eq!(app.state.steam_session.status(), initial_steam_status);
+    assert_eq!(
+        app.state.features.steam_session.status(),
+        initial_steam_status
+    );
 }
 
 #[test]
@@ -2365,14 +2461,14 @@ fn steam_backed_page_request_defers_until_connection() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retries(),
+        app.state.features.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopPage {
             generation: Generation::from_raw(7),
             page: 2,
         }]
     );
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Connecting
     );
 }
@@ -2390,14 +2486,14 @@ fn steam_backed_stats_refresh_defers_until_connection() {
     );
 
     assert_eq!(
-        app.state.steam_session.pending_retries(),
+        app.state.features.steam_session.pending_retries(),
         [steam_session::PendingRetry::MyWorkshopStats {
             generation: Generation::from_raw(7),
             pages: 2,
         }]
     );
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Connecting
     );
 }
@@ -2422,9 +2518,15 @@ fn failed_steam_connection_clears_pending_retry() {
         ),
     ));
 
-    assert!(app.state.steam_session.pending_retries().is_empty());
+    assert!(
+        app.state
+            .features
+            .steam_session
+            .pending_retries()
+            .is_empty()
+    );
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Unavailable
     );
 }
@@ -2446,12 +2548,18 @@ fn successful_steam_connection_retries_pending_operation_once() {
         ),
     ));
 
-    assert!(app.state.steam_session.pending_retries().is_empty());
+    assert!(
+        app.state
+            .features
+            .steam_session
+            .pending_retries()
+            .is_empty()
+    );
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Connected
     );
-    assert!(app.state.shell.steam_status().connected());
+    assert!(app.state.features.shell.steam_status().connected());
 
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionAttemptCompleted(
@@ -2459,7 +2567,13 @@ fn successful_steam_connection_retries_pending_operation_once() {
         ),
     ));
 
-    assert!(app.state.steam_session.pending_retries().is_empty());
+    assert!(
+        app.state
+            .features
+            .steam_session
+            .pending_retries()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2471,19 +2585,19 @@ fn connected_steam_attempt_retries_pending_operation_without_edge() {
     };
 
     let _task = steam_session::update(
-        &mut app.state.steam_session,
+        &mut app.state.features.steam_session,
         steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
     );
     let _task = steam_session::update(
-        &mut app.state.steam_session,
+        &mut app.state.features.steam_session,
         steam_session::Message::PendingRetrySet(retry.clone()),
     );
 
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Connected
     );
-    assert_eq!(app.state.steam_session.pending_retries(), [retry]);
+    assert_eq!(app.state.features.steam_session.pending_retries(), [retry]);
 
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionAttemptCompleted(
@@ -2491,9 +2605,15 @@ fn connected_steam_attempt_retries_pending_operation_without_edge() {
         ),
     ));
 
-    assert!(app.state.steam_session.pending_retries().is_empty());
+    assert!(
+        app.state
+            .features
+            .steam_session
+            .pending_retries()
+            .is_empty()
+    );
     assert_eq!(
-        app.state.steam_session.status(),
+        app.state.features.steam_session.status(),
         steam_session::ConnectionStatus::Connected
     );
 }
@@ -2509,8 +2629,8 @@ fn steam_identity_fetch_completion_updates_shell_identity() {
         steam_session::Message::IdentityFetched(Generation::from_raw(1), Ok(steam_identity("Ada"))),
     ));
 
-    assert_eq!(app.state.shell.account_name(), Some("Ada"));
-    assert!(app.state.shell.steam_avatar().is_some());
+    assert_eq!(app.state.features.shell.account_name(), Some("Ada"));
+    assert!(app.state.features.shell.steam_avatar().is_some());
 }
 
 #[test]
@@ -2533,8 +2653,8 @@ fn steam_identity_fetch_failure_restores_anonymous_shell_identity() {
         ),
     ));
 
-    assert_eq!(app.state.shell.account_name(), None);
-    assert!(app.state.shell.steam_avatar().is_none());
+    assert_eq!(app.state.features.shell.account_name(), None);
+    assert!(app.state.features.shell.steam_avatar().is_none());
 }
 
 #[test]
@@ -2549,8 +2669,8 @@ fn shell_executor_navigated_enters_destination_and_exits_previous_route() {
         App::run_shell_effect,
     );
 
-    assert!(!app.state.my_workshop.is_route_visible());
-    assert!(app.state.installed_addons.is_route_visible());
+    assert!(!app.state.features.my_workshop.is_route_visible());
+    assert!(app.state.features.installed_addons.is_route_visible());
 }
 
 #[test]
@@ -2580,8 +2700,14 @@ fn shell_executor_navigated_runs_size_analyzer_enter_and_exit_effects() {
     let _task = app.update(RootMessage::SizeAnalyzer(
         size_analyzer::Message::ViewportResized(Size::new(640.0, 360.0)),
     ));
-    assert!(!app.state.size_analyzer.is_route_visible());
-    assert!(app.state.size_analyzer.projection_key_for_test().is_none());
+    assert!(!app.state.features.size_analyzer.is_route_visible());
+    assert!(
+        app.state
+            .features
+            .size_analyzer
+            .projection_key_for_test()
+            .is_none()
+    );
 
     let enter_task = app.batch_effects(
         vec![shell::Effect::Navigated {
@@ -2591,8 +2717,14 @@ fn shell_executor_navigated_runs_size_analyzer_enter_and_exit_effects() {
         App::run_shell_effect,
     );
 
-    assert!(app.state.size_analyzer.is_route_visible());
-    assert!(app.state.size_analyzer.projection_key_for_test().is_some());
+    assert!(app.state.features.size_analyzer.is_route_visible());
+    assert!(
+        app.state
+            .features
+            .size_analyzer
+            .projection_key_for_test()
+            .is_some()
+    );
     assert_task_scheduled(&enter_task);
 
     let _exit_task = app.batch_effects(
@@ -2603,7 +2735,7 @@ fn shell_executor_navigated_runs_size_analyzer_enter_and_exit_effects() {
         App::run_shell_effect,
     );
 
-    assert!(!app.state.size_analyzer.is_route_visible());
+    assert!(!app.state.features.size_analyzer.is_route_visible());
 }
 
 #[test]
@@ -2634,13 +2766,19 @@ fn shell_navigation_to_current_route_does_not_reenter_route() {
     let _task = app.update(RootMessage::SizeAnalyzer(
         size_analyzer::Message::ViewportResized(Size::new(640.0, 360.0)),
     ));
-    assert!(app.state.size_analyzer.projection_key_for_test().is_none());
+    assert!(
+        app.state
+            .features
+            .size_analyzer
+            .projection_key_for_test()
+            .is_none()
+    );
 
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
         shell::Route::SizeAnalyzer,
     )));
-    assert_eq!(app.state.shell.route(), shell::Route::SizeAnalyzer);
-    let entered_projection = app.state.size_analyzer.projection_key_for_test();
+    assert_eq!(app.state.features.shell.route(), shell::Route::SizeAnalyzer);
+    let entered_projection = app.state.features.size_analyzer.projection_key_for_test();
     assert!(entered_projection.is_some());
 
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
@@ -2648,7 +2786,7 @@ fn shell_navigation_to_current_route_does_not_reenter_route() {
     )));
 
     assert_eq!(
-        app.state.size_analyzer.projection_key_for_test(),
+        app.state.features.size_analyzer.projection_key_for_test(),
         entered_projection
     );
 }
@@ -2657,17 +2795,17 @@ fn shell_navigation_to_current_route_does_not_reenter_route() {
 fn update_check_completion_marks_update_nag_available() {
     let mut app = App::new_for_test();
 
-    let _task = app.update(RootMessage::UpdateCheckCompleted(Ok(Ok(Some(
-        shell::UpdateRelease::new(
+    let _task = app.update(RootMessage::UpdateCheckCompleted(
+        super::UpdateCheckOutcome::ReleaseAvailable(shell::UpdateRelease::new(
             "v0.1.1".to_owned(),
             "https://github.com/charles-mills/gmpublished/releases/tag/v0.1.1".to_owned(),
-        ),
-    )))));
+        )),
+    ));
 
-    assert!(app.state.shell.update_available());
-    assert_eq!(app.state.shell.update_version(), "v0.1.1");
+    assert!(app.state.features.shell.update_available());
+    assert_eq!(app.state.features.shell.update_version(), "v0.1.1");
     assert_eq!(
-        app.state.shell.update_release_url(),
+        app.state.features.shell.update_release_url(),
         "https://github.com/charles-mills/gmpublished/releases/tag/v0.1.1"
     );
 }
@@ -2686,6 +2824,7 @@ fn downloader_start_events_sync_shell_job_badge() {
 
     let badge = app
         .state
+        .features
         .shell
         .downloader_badge(Instant::now())
         .expect("running Downloader job should project a shell badge");
@@ -2707,7 +2846,7 @@ fn language_switch_rebuilds_the_runtime_bundle() {
         "Affichage de 2 sur 8 addons"
     );
     assert_eq!(
-        app.state.my_workshop.publish_new_title_for_test(),
+        app.state.features.my_workshop.publish_new_title_for_test(),
         "Publier un nouveau..."
     );
     assert_eq!(app.title(), "gmpublished");
@@ -2910,6 +3049,7 @@ fn size_analyzer_snapshot(epoch: u64) -> LibrarySnapshot {
 
 fn seed_search_request(app: &mut App) -> SearchQuickRequest {
     app.state
+        .features
         .search
         .edit_query("alpha".to_owned())
         .quick_request
@@ -2925,16 +3065,18 @@ fn seed_search_result(app: &mut App, has_more: bool) -> SearchQuickRequest {
     );
     assert!(
         app.state
+            .features
             .search
             .apply_quick_result(request.key(), Ok(batch))
     );
     app.state.viewport_size = Size::new(800.0, 600.0);
     let (generation, ids) = app
         .state
+        .features
         .search
         .take_thumbnail_metadata_request(600.0)
         .expect("search thumbnail metadata request");
-    assert!(app.state.search.apply_metadata_refresh(
+    assert!(app.state.features.search.apply_metadata_refresh(
         generation,
         &ids,
         Ok(vec![search::MetadataPatch::for_test(
@@ -3005,7 +3147,7 @@ fn installed_addon_for_library(
 #[test]
 fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
     let mut app = App::new_for_test();
-    assert_eq!(app.state.shell.route(), shell::Route::MyWorkshop);
+    assert_eq!(app.state.features.shell.route(), shell::Route::MyWorkshop);
 
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Unavailable),
@@ -3024,7 +3166,7 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
         ),
     ));
     assert!(matches!(
-        app.state.my_workshop.page_status(),
+        app.state.features.my_workshop.page_status(),
         my_workshop::PageStatus::Failed(_)
     ));
 
@@ -3034,7 +3176,7 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
 
     assert!(
         !matches!(
-            app.state.my_workshop.page_status(),
+            app.state.features.my_workshop.page_status(),
             my_workshop::PageStatus::Failed(_)
         ),
         "the stale Steam failure survived the reconnect that resolved it"
@@ -3052,6 +3194,7 @@ fn a_repeated_connected_message_does_not_re_enter_the_route() {
 
     assert!(
         !app.state
+            .features
             .prerequisites
             .observe_steam(steam_session::ConnectionStatus::Connected),
         "a repeated Connected reported a fresh reconnect edge"
@@ -3094,7 +3237,7 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
         ),
     ));
     assert!(
-        app.state.installed_addons.has_failed_metadata(),
+        app.state.features.installed_addons.has_failed_metadata(),
         "the refused lookup should park its id for a retry"
     );
 
@@ -3103,7 +3246,7 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
     ));
 
     assert!(
-        !app.state.installed_addons.has_failed_metadata(),
+        !app.state.features.installed_addons.has_failed_metadata(),
         "the reconnect that resolved the outage left the metadata parked"
     );
 }

@@ -79,8 +79,8 @@ impl CpuExecutor {
         self.0.install(work)
     }
 
-    /// The owned Rayon pool for APIs that need scoped parallelism and must
-    /// not fall back to Rayon's ambient global pool.
+    /// The owned Rayon pool for APIs that require explicit scoped
+    /// parallelism and must never fall back to Rayon's process-global pool.
     #[must_use]
     pub fn rayon_pool(&self) -> &rayon::ThreadPool {
         &self.0

@@ -111,7 +111,7 @@ impl App {
     }
 
     pub(super) fn settings_snapshot(&self) -> Box<settings::SettingsSnapshot> {
-        let (settings, paths) = self.ctx.settings_and_paths_snapshot();
+        let (settings, paths) = self.environment.ctx.settings_and_paths_snapshot();
         Box::new(settings::SettingsSnapshot::new(
             settings,
             paths,
@@ -129,7 +129,7 @@ impl App {
         &self,
         kind: settings::PathSetting,
     ) -> Task<RootMessage> {
-        let directory = self.state.settings.initial_browse_directory(kind);
+        let directory = self.state.features.settings.initial_browse_directory(kind);
         let title = self.state.i18n.tr("native-dialog-select-settings-folder");
         Task::future(async move {
             let selected = rfd::AsyncFileDialog::new()
@@ -147,7 +147,8 @@ impl App {
         &self,
         request: settings::PathValidationRequest,
     ) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("settings-validate-path", move |_app| {
                 Ok(settings::validate_path_request(request))
             })
@@ -168,7 +169,8 @@ impl App {
         mutation: settings::SettingsMutation,
     ) -> Task<RootMessage> {
         let system_scheme = self.state.system_scheme;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("settings-save", move |app| {
                 app.config()
                     .update_settings_snapshot(|settings| {
@@ -193,7 +195,8 @@ impl App {
 
     pub(super) fn settings_reset_task(&self, action: settings::ResetAction) -> Task<RootMessage> {
         let system_scheme = self.state.system_scheme;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("settings-reset", move |app| {
                 let settings = match action {
                     settings::ResetAction::Settings => {

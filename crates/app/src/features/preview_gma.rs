@@ -12,11 +12,11 @@ pub use message::Message;
 
 pub use model::{
     AuthorRequest, ExtractionIntent, ExtractionRequest, LoadedArchive, MetadataRequest,
-    OpenRequest, OpenSeed, OpenTarget, cached_workshop_metadata, query_steam_user_streaming,
-    query_workshop_metadata,
+    OpenRequest, OpenSeed, OpenTarget, author_info_from_user, cached_workshop_metadata,
+    workshop_metadata_from_details,
 };
 pub use state::State;
-pub use update::{browser_rows_scrollable_id, nav_path_scrollable_id, update};
+pub use update::{browser_rows_scrollable_id, nav_path_scrollable_id, update_at};
 pub use view::view;
 
 /// Animation clock for an open Preview GMA modal: runs while the thumbnail

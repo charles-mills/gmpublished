@@ -9,7 +9,7 @@ use crate::features::file_preview;
 use super::{
     model::{
         IgnorePatternMutationResult, IgnoredPattern, PublishIconSubmitResult, PublishSubmitContext,
-        PublishSubmitResult, VerifiedContentPath, VerifiedIconPreview,
+        PublishSubmitResult, VerifiedContentPath, VerifiedIconPreview, WorkshopSnapshotInventory,
     },
     state::{AddonTag, AddonType, OpenTarget},
 };
@@ -27,7 +27,7 @@ pub enum Message {
     WorkshopContentSubmissionCompleted(WorkshopSnapshotId, Result<(), UiError>),
     WorkshopContentDownloaded(WorkshopSnapshotId, WorkshopDownloadSuccess),
     WorkshopSnapshotFailed(WorkshopSnapshotId, UiError),
-    WorkshopSnapshotInspected(Generation, Result<Arc<VerifiedContentPath>, UiError>),
+    WorkshopSnapshotInspected(Generation, Result<Arc<WorkshopSnapshotInventory>, UiError>),
     AddonPathEdited(String),
     AddonPathAccepted,
     WorkshopLinkRequested,
@@ -36,7 +36,6 @@ pub enum Message {
     IconBrowseRequested,
     IconBrowseCompleted {
         path: Option<PathBuf>,
-        temp_dir: PathBuf,
         well_rgb: [u8; 3],
     },
     IconVerificationCompleted(Generation, Result<Arc<VerifiedIconPreview>, UiError>),

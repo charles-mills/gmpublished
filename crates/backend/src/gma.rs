@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const GMA_HEADER: &[u8; 4] = b"GMAD";
+/// GMA format version emitted by this writer and accepted as the newest
+/// supported read version.
+pub const GMA_VERSION: u8 = 3;
 
 /// Zero is never a real Steam Workshop id; treat it as "no id" wherever a
 /// digit-suffix or folder-name parse can produce it.
@@ -54,9 +57,10 @@ fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
+/// Failures produced while reading, writing, or extracting GMA archives.
 pub enum GmaError {
     #[error("GMA I/O failed")]
-    IOError(#[source] crate::IoFailure),
+    IoError(#[source] crate::IoFailure),
     #[error("the GMA is malformed")]
     FormatError,
     #[error("the GMA header is not recognisable")]
@@ -101,14 +105,14 @@ pub enum GmaError {
 }
 impl From<std::io::Error> for GmaError {
     fn from(error: std::io::Error) -> Self {
-        Self::IOError(error.into())
+        Self::IoError(error.into())
     }
 }
 impl crate::error_key::HasErrorKey for GmaError {
     fn error_key(&self) -> crate::error_key::ErrorKey {
         use crate::error_key::keys;
         match self {
-            Self::IOError(_) => keys::IO_ERROR,
+            Self::IoError(_) => keys::IO_ERROR,
             Self::FormatError => keys::GMA_FORMAT_ERROR,
             Self::InvalidHeader => keys::GMA_INVALID_HEADER,
             Self::EntryNotFound => keys::GMA_ENTRY_NOT_FOUND,
@@ -124,7 +128,7 @@ impl crate::error_key::HasErrorKey for GmaError {
 
     fn error_detail(&self) -> Option<String> {
         match self {
-            Self::IOError(source)
+            Self::IoError(source)
             | Self::Lzma(source)
             | Self::DecompressionInput(source)
             | Self::DecompressionOutput(source) => Some(source.to_string()),
@@ -190,6 +194,8 @@ impl StandardManifest {
 }
 
 impl GmaMetadata {
+    /// Display title stored in either metadata representation.
+    #[must_use]
     pub fn title(&self) -> &str {
         match &self {
             Self::Standard { title, .. } => title,
@@ -198,6 +204,8 @@ impl GmaMetadata {
         .as_str()
     }
 
+    /// Standard-manifest addon type, absent for legacy metadata.
+    #[must_use]
     pub fn addon_type(&self) -> Option<&str> {
         match &self {
             Self::Standard { addon_type, .. } => Some(addon_type.as_str()),
@@ -205,6 +213,8 @@ impl GmaMetadata {
         }
     }
 
+    /// Standard-manifest Workshop tags, absent for legacy metadata.
+    #[must_use]
     pub fn tags(&self) -> Option<&[String]> {
         match &self {
             Self::Standard { tags, .. } => Some(tags),
@@ -212,6 +222,8 @@ impl GmaMetadata {
         }
     }
 
+    /// Standard-manifest ignore globs, absent for legacy metadata.
+    #[must_use]
     pub fn ignore(&self) -> Option<&[String]> {
         match &self {
             Self::Standard { ignore, .. } => Some(ignore),
@@ -221,26 +233,39 @@ impl GmaMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Parsed GMA header independent of its payload index.
 pub struct GmaHeader {
+    /// On-disk GMA format version.
     pub version: u8,
+    /// Archive timestamp field.
     pub timestamp: u64,
+    /// Parsed standard or legacy addon metadata.
     pub metadata: GmaMetadata,
+    /// Author field stored by the archive.
     pub author: String,
+    /// Addon revision stored by the archive.
     pub addon_version: i32,
 }
 impl GmaHeader {
+    /// Display title projected from the parsed metadata.
+    #[must_use]
     pub fn title(&self) -> &str {
         self.metadata.title()
     }
 }
 
 #[derive(Clone, Debug, Serialize)]
+/// Indexed GMA payload entry.
 pub struct GmaEntry {
+    /// Normalized archive-relative path.
     pub path: String,
+    /// Payload size in bytes.
     pub size: u64,
+    /// CRC-32 of the payload.
     pub crc: u32,
 
     #[serde(skip)]
+    /// Source entry ordinal.
     pub index: u64,
 }
 
@@ -273,18 +298,18 @@ pub fn is_unsafe_entry_path(path: &str) -> bool {
 /// whenever their mtimes match.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GmaFile {
-    pub path: PathBuf,
-    pub size: u64,
+    path: PathBuf,
+    size: u64,
 
-    pub id: Option<WorkshopId>,
+    id: Option<WorkshopId>,
 
-    pub metadata: GmaMetadata,
+    metadata: GmaMetadata,
 
-    pub version: u8,
+    version: u8,
 
-    pub extracted_name: String,
+    extracted_name: String,
 
-    pub modified: Option<u64>,
+    modified: Option<u64>,
 }
 impl std::fmt::Debug for GmaFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -300,13 +325,75 @@ impl std::fmt::Debug for GmaFile {
     }
 }
 impl GmaFile {
+    /// Creates an archive handle for content that will be packed to `path`.
+    ///
+    /// Identity derived from an existing archive belongs to the read path;
+    /// newly packed content starts without a Workshop id or filesystem
+    /// timestamp, and always writes the current GMA version.
+    #[must_use]
+    pub fn for_creation(path: impl Into<PathBuf>, metadata: GmaMetadata) -> Self {
+        let mut file = Self {
+            path: path.into(),
+            size: 0,
+            id: None,
+            metadata,
+            version: GMA_VERSION,
+            extracted_name: String::new(),
+            modified: None,
+        };
+        file.refresh_extracted_name();
+        file
+    }
+
+    /// Opens and indexes an existing GMA archive.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GmaError> {
         read::GmaView::open_file(path.as_ref())?.handle(path)
     }
 
-    pub fn set_ws_id(&mut self, id: WorkshopId) {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn workshop_id(&self) -> Option<WorkshopId> {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn metadata(&self) -> &GmaMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u8 {
+        self.version
+    }
+
+    #[must_use]
+    pub fn extracted_name(&self) -> &str {
+        &self.extracted_name
+    }
+
+    #[must_use]
+    pub const fn modified(&self) -> Option<u64> {
+        self.modified
+    }
+
+    /// Assigns Workshop identity and refreshes every value derived from it.
+    pub fn set_workshop_id(&mut self, id: WorkshopId) {
         self.id = Some(id);
-        self.extracted_name = self.derive_extracted_name();
+        self.refresh_extracted_name();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_modified_for_test(&mut self, modified: Option<u64>) {
+        self.modified = modified;
     }
 
     /// Takes the workshop id from the file name when the archive itself did not
@@ -318,6 +405,10 @@ impl GmaFile {
     /// method's name rather than hidden inside the derive.
     pub(crate) fn adopt_path_id_and_name(&mut self) {
         self.id = self.id.or_else(|| id_from_path(&self.path));
+        self.refresh_extracted_name();
+    }
+
+    fn refresh_extracted_name(&mut self) {
         self.extracted_name = self.derive_extracted_name();
     }
 

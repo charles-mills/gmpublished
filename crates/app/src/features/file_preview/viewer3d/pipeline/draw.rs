@@ -38,7 +38,8 @@ pub fn draw_sky_background<'a>(
         let Some(bind_group) = skybox.face_bind_groups[face.index()].as_ref() else {
             continue;
         };
-        let start = u32::try_from(face.index() * 6).unwrap_or(0);
+        let start =
+            u32::try_from(face.index() * 6).expect("the six skybox faces fit a u32 draw range");
         pass.set_bind_group(1, bind_group, &[]);
         pass.draw(start..start + 6, 0..1);
     }

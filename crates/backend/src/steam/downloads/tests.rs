@@ -159,20 +159,15 @@ fn write_installed_gma(
     fs::write(source.join("lua/installed.lua"), "print('installed')\n").expect("source file");
 
     let gma_path = installed.join(file_name);
-    let gma = GmaFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: crate::gma::GmaMetadata::Standard {
+    let gma = GmaFile::for_creation(
+        gma_path.clone(),
+        crate::gma::GmaMetadata::Standard {
             title: title.to_owned(),
             addon_type: "servercontent".to_owned(),
             tags: vec!["build".to_owned()],
             ignore: Vec::new(),
         },
-        version: 3,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    );
     let transaction = downloads.transactions.begin();
     gma.create(
         &source,

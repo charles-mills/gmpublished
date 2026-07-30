@@ -386,27 +386,27 @@ impl Searchable for WorkshopItem {
 impl Searchable for GmaFile {
     fn search_item(&self) -> Option<SearchItem> {
         let mut terms = self
-            .metadata
+            .metadata()
             .tags()
             .map(<[String]>::to_vec)
             .unwrap_or_default();
-        if let Some(addon_type) = self.metadata.addon_type() {
+        if let Some(addon_type) = self.metadata().addon_type() {
             terms.push(addon_type.to_string());
         }
-        let label = self.metadata.title().to_owned();
+        let label = self.metadata().title().to_owned();
 
-        if let Some(id) = self.id {
+        if let Some(id) = self.workshop_id() {
             terms.push(id.get().to_string());
         }
 
         Some(SearchItem::new(
             SearchItemSource::InstalledAddons(
-                dunce::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone()),
-                self.id,
+                dunce::canonicalize(self.path()).unwrap_or_else(|_| self.path().to_owned()),
+                self.workshop_id(),
             ),
             label,
             terms,
-            self.modified.unwrap_or(0),
+            self.modified().unwrap_or(0),
         ))
     }
 }

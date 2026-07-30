@@ -400,7 +400,7 @@ pub struct Tokens {
 /// spacing, radii, typography, motion, and dimensions all come from plain
 /// `const fn`s regardless of variant, unlike `colors`. Call sites that only
 /// ever needed those fields can read the shared static instead of building
-/// a throwaway [`Tokens::dark()`].
+/// a throwaway test-only dark [`Tokens`] value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InvariantTokens {
     pub(crate) spacing: Spacing,

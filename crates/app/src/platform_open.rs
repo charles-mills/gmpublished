@@ -11,8 +11,8 @@
 //! drained once the subscription's forwarder thread starts.
 //!
 //! There is no sibling module for other platforms, and that is not an
-//! omission: elsewhere the shell puts the path in `argv`, which
-//! [`gmpublished_backend::cli::is_cli_mode`] treats as a headless extraction
+//! omission: elsewhere the shell puts the path in `argv`, which the binary's
+//! CLI composition root treats as a headless extraction
 //! request — so the GUI never starts and there is nothing to forward. That
 //! divergence is documented there, where both halves are visible.
 
@@ -52,6 +52,8 @@ pub fn install() {
     macos::install();
 }
 
+/// Subscribes to document-open batches delivered by the native handlers.
+#[must_use]
 pub fn subscription() -> Subscription<Vec<PathBuf>> {
     Subscription::run(document_open_stream)
 }

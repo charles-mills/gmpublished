@@ -209,7 +209,9 @@ fn workshop_snapshot_error_leaves_manual_selection_available() {
     );
     state.apply_workshop_submission_result(
         WorkshopSnapshotId::new(1),
-        Err(UiError::new(ErrorKey::new("DOWNLOAD_FAILED"))),
+        Err(UiError::new(
+            gmpublished_backend::error_keys::DOWNLOAD_FAILED,
+        )),
     );
 
     assert!(!state.path_pending());
@@ -271,7 +273,7 @@ fn stale_verification_result_is_ignored() {
 
     assert!(!state.apply_verification_result(
         first.generation,
-        Err(UiError::new(ErrorKey::new("ERR_BAD")))
+        Err(UiError::new(ErrorKey::for_test("ERR_BAD")))
     ));
     assert!(state.path_pending());
     assert!(state.path_error().is_none());
@@ -387,7 +389,7 @@ fn stale_submit_completion_is_ignored() {
 
     assert!(!state.apply_submit_completion(
         envelope.generation.next(),
-        Err(UiError::new(ErrorKey::new("ERR_STALE"))),
+        Err(UiError::new(ErrorKey::for_test("ERR_STALE"))),
     ));
     assert!(state.submit_pending());
 
@@ -406,11 +408,7 @@ fn icon_success_stores_selection_and_upscale_flag() {
     let mut state = State::default();
     let _request = open_new(&mut state);
     let request = state
-        .begin_icon_verification(
-            "/tmp/icon.png".into(),
-            "/tmp/prepare-temp".into(),
-            [0x10, 0x10, 0x10],
-        )
+        .begin_icon_verification("/tmp/icon.png".into(), [0x10, 0x10, 0x10])
         .expect("open modal should verify icons");
 
     assert!(state.icon_pending());
@@ -431,11 +429,7 @@ fn stale_icon_result_is_ignored_after_remove() {
     let mut state = State::default();
     let _request = open_new(&mut state);
     let request = state
-        .begin_icon_verification(
-            "/tmp/icon.png".into(),
-            "/tmp/prepare-temp".into(),
-            [0x10, 0x10, 0x10],
-        )
+        .begin_icon_verification("/tmp/icon.png".into(), [0x10, 0x10, 0x10])
         .expect("open modal should verify icons");
 
     assert!(state.remove_icon());
@@ -479,11 +473,7 @@ fn removing_the_icon_keeps_the_upscale_preference() {
     let mut state = State::default();
     let _request = state.open_target(OpenTarget::New, Vec::new(), true);
     let request = state
-        .begin_icon_verification(
-            "/tmp/icon.png".into(),
-            "/tmp/prepare-temp".into(),
-            [0x10, 0x10, 0x10],
-        )
+        .begin_icon_verification("/tmp/icon.png".into(), [0x10, 0x10, 0x10])
         .expect("open modal should verify icons");
     assert!(state.apply_icon_verification_result(
         request.generation,
@@ -530,11 +520,7 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
     assert!(state.begin_publish_icon().is_none());
 
     let request = state
-        .begin_icon_verification(
-            "/tmp/icon.png".into(),
-            "/tmp/prepare-temp".into(),
-            [0x10, 0x10, 0x10],
-        )
+        .begin_icon_verification("/tmp/icon.png".into(), [0x10, 0x10, 0x10])
         .expect("open modal should verify icons");
     assert!(state.apply_icon_verification_result(
         request.generation,
@@ -555,7 +541,7 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
 
     assert!(!state.apply_publish_icon_completion(
         envelope.generation.next(),
-        Err(UiError::new(ErrorKey::new("ERR_STALE"))),
+        Err(UiError::new(ErrorKey::for_test("ERR_STALE"))),
     ));
     assert!(state.submit_pending());
     assert!(state.apply_publish_icon_completion(
@@ -720,11 +706,7 @@ fn browsed_icon_replaces_the_seeded_preview() {
     let seeded_id = state.icon_handle().expect("seeded preview").id();
 
     let request = state
-        .begin_icon_verification(
-            "/tmp/icon.png".into(),
-            "/tmp/prepare-temp".into(),
-            [0x10, 0x10, 0x10],
-        )
+        .begin_icon_verification("/tmp/icon.png".into(), [0x10, 0x10, 0x10])
         .expect("open modal should verify icons");
     assert!(state.apply_icon_verification_result(
         request.generation,

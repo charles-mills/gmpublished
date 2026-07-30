@@ -333,7 +333,7 @@ fn quiet_error_keeps_current_rows_on_screen() {
     state.apply_snapshot(
         LibraryRefreshReason::DiskChanged,
         Err(UiError::detailed(
-            gmpublished_backend::ErrorKey::new("ERR_TEST"),
+            gmpublished_backend::ErrorKey::for_test("ERR_TEST"),
             Some("scan raced a file move".to_owned()),
         )),
     );

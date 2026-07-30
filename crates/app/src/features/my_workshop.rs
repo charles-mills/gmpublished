@@ -11,9 +11,7 @@ pub use effect::Effect;
 pub use message::Message;
 #[cfg(all(test, feature = "debug"))]
 pub use model::Row;
-pub use model::{
-    ContextMenuRequest, PreparePublishTarget, browse_page, refresh_subscription_counts,
-};
+pub use model::{ContextMenuRequest, PageResult, PreparePublishTarget};
 /// Only the route's own view reads the load status in anger; the app-level
 /// reconnect test needs to name it too. Same shape as the `Row` export above.
 #[cfg(test)]

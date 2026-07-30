@@ -708,7 +708,7 @@ fn correlated_backend_transaction_error_finishes_task_with_error() {
             TransactionRuntimeEvent::Error {
                 id: TransactionId::from_raw(501),
                 error: TransactionError::detailed(
-                    gmpublished_backend::ErrorKey::new("ERR_TEST"),
+                    gmpublished_backend::ErrorKey::for_test("ERR_TEST"),
                     Some("detail".to_owned()),
                 ),
             },
@@ -739,7 +739,7 @@ fn direct_correlated_backend_transaction_error_removes_task() {
 
     assert!(ctx.error_backend_transaction_task(
         TransactionId::from_raw(502),
-        UiError::new(gmpublished_backend::ErrorKey::new("ERR_DIRECT"))
+        UiError::new(gmpublished_backend::ErrorKey::for_test("ERR_DIRECT"))
     ));
     assert!(
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
@@ -932,7 +932,7 @@ fn workshop_snapshot_error_is_request_scoped() {
         TransactionRuntimeEvent::Error {
             id: TransactionId::from_raw(623),
             error: TransactionError::detailed(
-                gmpublished_backend::ErrorKey::new("ERR_TEST"),
+                gmpublished_backend::ErrorKey::for_test("ERR_TEST"),
                 Some("detail".to_owned()),
             ),
         },

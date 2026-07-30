@@ -8,8 +8,10 @@ pub use effect::Effect;
 pub use message::Message;
 #[cfg(feature = "debug")]
 pub use state::SimulatedToast;
-pub use state::{ContextMenuAction, Entry, Icon, OpenRequest, Owner, State};
-pub use update::{subscription, update};
+pub use state::{
+    ContextMenuAction, ContextMenuTarget, Entry, Icon, LocalMenuTarget, OpenRequest, State,
+};
+pub use update::{subscription, update_at};
 #[cfg(test)]
 pub use view::accepts_pointer_input;
 pub use view::view;

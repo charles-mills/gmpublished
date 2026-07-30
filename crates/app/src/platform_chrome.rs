@@ -52,7 +52,8 @@ fn appearance_change_stream() -> impl iced::futures::Stream<Item = ()> + use<> {
         // does). What the leak keeps alive is the `RcBlock` — and therefore the
         // `futures` mpsc sender cloned into it — which is what holds this
         // stream open. Dropping the token would close the stream.
-        std::mem::forget(observer);
+        let process_lifetime_observer = observer;
+        std::mem::forget(process_lifetime_observer);
     })
 }
 
@@ -130,8 +131,12 @@ fn install_resize_keepalive_on_window(
             &block,
         )
     };
-    // App-lifetime observer for the app's one window: never removed.
-    std::mem::forget(observer);
+    // App-lifetime observer for the app's one window: the notification center
+    // retains its registration, and leaking our token keeps the captured
+    // block alive for every future resize. There is deliberately no teardown
+    // before process exit.
+    let process_lifetime_observer = observer;
+    std::mem::forget(process_lifetime_observer);
     Ok(())
 }
 

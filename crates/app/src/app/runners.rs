@@ -7,7 +7,7 @@ use super::{
     WorkshopDownloadSuccess, downloader, gma, iced_mpsc, installed_addons, prepare_publish,
     preview_gma, search, size_analyzer, steam_session, tasks,
 };
-use crate::bridge::tasks::TransactionStatus;
+use crate::bridge::tasks::{TransactionStatus, WorkshopService};
 use crate::generation::Generation;
 use gmpublished_backend::TransactionId;
 
@@ -18,6 +18,14 @@ pub(super) fn flatten_blocking_ui_result<T>(
         Ok(inner) => inner,
         Err(error) => Err(UiError::from(&error)),
     }
+}
+
+/// Runner-owned Steam connection orchestration shared by every operation
+/// that needs a connected Workshop service.
+pub(super) fn connect_steam_for_operation(
+    workshop: WorkshopService<'_>,
+) -> steam_session::ConnectionAttempt {
+    steam_session::connect_for_operation_with(|| workshop.connected(), || workshop.connect())
 }
 
 pub(super) fn run_search_full(
@@ -118,8 +126,13 @@ pub(super) fn run_installed_metadata_refresh(
     item_ids: &[PublishedFileId],
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let result =
-        installed_addons::refresh_metadata_streaming(app.workshop(), item_ids, |patches| {
+    let result = app
+        .workshop()
+        .refresh_metadata_streaming(item_ids, |metadata| {
+            let patches = installed_addons::metadata_patches(&metadata);
+            if patches.is_empty() {
+                return;
+            }
             let _sent = send_root_message(
                 &mut output,
                 RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
@@ -490,7 +503,7 @@ pub(super) fn run_downloader_submission(
     item_ids: Vec<PublishedFileId>,
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let attempt = steam_session::connect_context_for_operation(app.workshop());
+    let attempt = connect_steam_for_operation(app.workshop());
     let connected = attempt.connected();
     let connection_error = attempt.error().cloned();
     if !send_root_message(

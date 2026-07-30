@@ -3,8 +3,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use arc_swap::ArcSwap;
-
 const BUILTIN_ADDON_WHITELIST: &[&str] = &[
     "lua/*.lua",
     "scenes/*.vcd",
@@ -150,7 +148,7 @@ pub enum WhitelistSource {
 /// upstream gmad source. Cheap to clone (`Arc` internally).
 #[derive(Clone, Debug)]
 pub struct AddonWhitelist {
-    list: Arc<ArcSwap<Vec<String>>>,
+    list: Arc<parking_lot::RwLock<Arc<[String]>>>,
     source: WhitelistSource,
 }
 
@@ -170,7 +168,7 @@ impl AddonWhitelist {
     #[must_use]
     pub fn with_source(source: WhitelistSource) -> Self {
         Self {
-            list: Arc::new(ArcSwap::from_pointee(builtin_whitelist())),
+            list: Arc::new(parking_lot::RwLock::new(Arc::from(builtin_whitelist()))),
             source,
         }
     }
@@ -178,8 +176,8 @@ impl AddonWhitelist {
     /// Current addon whitelist. Callers checking many entries should bind
     /// this once and reuse it rather than calling it per entry.
     #[must_use]
-    pub fn snapshot(&self) -> Arc<Vec<String>> {
-        self.list.load_full()
+    pub fn snapshot(&self) -> Arc<[String]> {
+        Arc::clone(&self.list.read())
     }
 
     /// Fetches the up-to-date whitelist from the upstream gmad source and
@@ -194,7 +192,7 @@ impl AddonWhitelist {
         match download_addon_whitelist() {
             Ok(wildcard) => {
                 log::info!("Downloaded up to date addon whitelist: {wildcard:#?}");
-                self.list.store(Arc::new(wildcard));
+                *self.list.write() = Arc::from(wildcard);
             }
             Err(err) => log::warn!("Failed to download addon whitelist: {err:#?}"),
         }
@@ -208,10 +206,9 @@ impl Default for AddonWhitelist {
 }
 
 fn download_addon_whitelist() -> Result<Vec<String>, std::io::Error> {
-    let agent: ureq::Agent = crate::net::tls_agent_builder()
-        .timeout_global(Some(Duration::from_secs(2)))
-        .build()
-        .into();
+    let agent = crate::net::build_http_agent(
+        crate::net::HttpAgentConfig::new().global_timeout(Duration::from_secs(2)),
+    );
 
     let body = agent
         .get("https://raw.githubusercontent.com/Facepunch/gmad/master/include/AddonWhiteList.h")

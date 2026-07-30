@@ -1,5 +1,4 @@
 use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
-use crate::bridge::tasks::WorkshopService;
 use crate::bridge::ui_error::UiError;
 use crate::generation::Generation;
 
@@ -414,11 +413,6 @@ impl ConnectionAttempt {
     pub(crate) fn error(&self) -> Option<&UiError> {
         self.error.as_ref()
     }
-}
-
-/// Connects the core Steam service for a Steam-backed operation.
-pub fn connect_context_for_operation(ctx: WorkshopService<'_>) -> ConnectionAttempt {
-    connect_for_operation_with(|| ctx.connected(), || ctx.connect())
 }
 
 /// Runs the connection check/connect seam without binding it to a concrete UI runtime.

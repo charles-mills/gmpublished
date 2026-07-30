@@ -17,5 +17,5 @@ pub use state::{ChromeStrategy, Route, State, UpdateRelease, sidebar_rail_width,
 #[cfg(target_os = "macos")]
 pub use state::{traffic_light_center_y, traffic_light_origin_x};
 pub use subscription::subscription;
-pub use update::update;
+pub use update::update_at;
 pub use view::{account_menu_overlay, sidebar};

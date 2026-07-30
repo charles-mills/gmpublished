@@ -317,6 +317,7 @@ pub(super) enum Force {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Rendering topology requested by a compiled particle system.
 pub enum RendererKind {
     /// Camera-facing sprites; the workhorse.
     AnimatedSprites,
@@ -327,12 +328,17 @@ pub enum RendererKind {
 }
 
 #[derive(Clone, Debug)]
+/// Renderer parameters projected from a PCF renderer function.
 pub struct RendererInfo {
+    /// Rendering topology.
     pub kind: RendererKind,
     /// Trail length is expressed in seconds of motion.
     pub trail_length_fade_in: f32,
+    /// Minimum trail length in world units.
     pub trail_min_length: f32,
+    /// Maximum trail length in world units.
     pub trail_max_length: f32,
+    /// Number of interpolated rope segments between particles.
     pub rope_subdivisions: u32,
     /// Sprite sheet playback speed multiplier (or FPS, see below).
     pub animation_rate: f32,
@@ -367,6 +373,7 @@ pub(super) struct CompiledChild {
 }
 
 #[derive(Clone, Debug)]
+/// Immutable, typed particle-system program consumed by the simulator.
 pub struct CompiledSystem {
     pub(super) name: String,
     pub(super) material: String,
@@ -400,18 +407,26 @@ pub struct CompiledSystem {
 }
 
 impl CompiledSystem {
+    /// Original PCF system name.
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Canonical material name used by renderers.
+    #[must_use]
     pub fn material(&self) -> &str {
         &self.material
     }
 
+    /// Coverage classification for every source function.
+    #[must_use]
     pub fn coverage(&self) -> &[CoverageEntry] {
         &self.coverage
     }
 
+    /// Compiled renderer parameters.
+    #[must_use]
     pub fn renderer(&self) -> &RendererInfo {
         &self.renderer
     }

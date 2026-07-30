@@ -92,7 +92,7 @@ impl GmaFile {
 
         f.write_all(GMA_HEADER)?;
 
-        f.write_all(&[3])?; // gma version
+        f.write_all(&[super::GMA_VERSION])?;
 
         // steamid [unused]
         f.write_all(&0u64.to_le_bytes())?;
@@ -114,10 +114,10 @@ impl GmaFile {
         // addon description
         match addon_json {
             Some(addon_json) => {
-                write_nt_string(
-                    &mut f,
-                    serde_json::ser::to_string(addon_json).as_deref().unwrap(),
-                )?;
+                let description = serde_json::ser::to_string(addon_json).expect(
+                    "serializing the string-and-list-only standard GMA manifest cannot fail",
+                );
+                write_nt_string(&mut f, &description)?;
             }
             None => write_nt_string(&mut f, "Description")?,
         };
@@ -361,18 +361,13 @@ mod tests {
             crate::transactions::FinalizeOutcome::Finalized
         );
 
-        let gma = GmaFile {
-            path: gma_path.clone(),
-            size: 0,
-            id: None,
-            metadata: GmaMetadata::Legacy {
+        let gma = GmaFile::for_creation(
+            gma_path.clone(),
+            GmaMetadata::Legacy {
                 title: "Cancelled Addon".to_owned(),
                 description: String::new(),
             },
-            version: 3,
-            extracted_name: String::new(),
-            modified: None,
-        };
+        );
 
         assert!(matches!(
             gma.create(

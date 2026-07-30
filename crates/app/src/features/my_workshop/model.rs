@@ -1,11 +1,9 @@
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use iced::widget::image;
 
-use crate::bridge::{
-    domain::{PublishedFileId, WorkshopItem, WorkshopPage, workshop_url::workshop_item_url},
-    tasks::WorkshopService,
-    ui_error::UiError,
+use crate::bridge::domain::{
+    PublishedFileId, WorkshopItem, WorkshopPage, workshop_url::workshop_item_url,
 };
 use crate::features::context_menu;
 use crate::format::DownloadCountFormatter;
@@ -469,7 +467,7 @@ pub struct PageResult {
 }
 
 impl PageResult {
-    fn from_page(page: u32, result: &WorkshopPage) -> Self {
+    pub(crate) fn from_page(page: u32, result: &WorkshopPage) -> Self {
         Self {
             page,
             total: result.total,
@@ -485,18 +483,6 @@ impl PageResult {
         self.rows
             .retain(|row| !hidden_workshop_ids.contains(&row.workshop_id()));
     }
-}
-
-pub fn browse_page(ctx: WorkshopService<'_>, page: u32) -> Result<PageResult, UiError> {
-    ctx.browse_my_page(page)
-        .map(|result| PageResult::from_page(page, &result))
-}
-
-pub fn refresh_subscription_counts(
-    ctx: WorkshopService<'_>,
-    pages: u32,
-) -> Result<HashMap<PublishedFileId, u64>, UiError> {
-    ctx.refresh_subscription_counts(pages)
 }
 
 /// The "publish new" tile that leads this route's grid.

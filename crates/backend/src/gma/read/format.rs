@@ -8,10 +8,9 @@
 
 use std::io::{BufRead, BufReader, Read};
 
-use crate::gma::GmaError;
+use crate::gma::{GMA_VERSION, GmaError};
 
 const MAGIC: &[u8; 4] = b"GMAD";
-const MAX_VERSION: u8 = 3;
 
 // Payloads are deliberately uncapped, but the retained index must stay
 // bounded even when the archive is hostile. These limits are far above real
@@ -161,7 +160,7 @@ pub(super) fn parse(reader: impl Read, archive_len: u64) -> Result<ParsedGma, Gm
         return Err(GmaError::InvalidHeader);
     }
     let version = reader.u8()?;
-    if version > MAX_VERSION {
+    if version > GMA_VERSION {
         return Err(GmaError::InvalidHeader);
     }
 

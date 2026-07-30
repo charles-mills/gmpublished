@@ -148,8 +148,8 @@ pub fn load_map(bytes: &[u8]) -> Result<MapData, BspError> {
 
 /// Loads a map using a caller-owned Rayon pool for independent lump decodes.
 ///
-/// Requiring the pool at this boundary keeps the domain crate from silently
-/// initializing or borrowing Rayon's process-global executor.
+/// Requiring the pool at this boundary makes the executor choice explicit and
+/// prevents an accidental dependency on Rayon's process-global executor.
 pub fn load_map_with_pool(bytes: &[u8], pool: &rayon::ThreadPool) -> Result<MapData, BspError> {
     load_map_impl(bytes, true, Some(pool))
 }

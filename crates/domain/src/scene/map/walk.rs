@@ -1567,7 +1567,10 @@ impl MapLeafLocator {
                             return MapPropVisibility::Always;
                         };
                         if cluster_in_range(leaf.cluster, cluster_count) {
-                            clusters.insert(u32::try_from(leaf.cluster).unwrap_or(0));
+                            clusters.insert(
+                                u32::try_from(leaf.cluster)
+                                    .expect("cluster_in_range guarantees a nonnegative cluster"),
+                            );
                         }
                     }
                     NodeChild::Node(node_index) => {
@@ -1627,20 +1630,10 @@ impl PlaneSide {
 }
 
 pub(super) fn aabb_plane_side(bounds_min: Vec3, bounds_max: Vec3, plane: MapPlane) -> PlaneSide {
-    let center = [
-        (bounds_min[0] + bounds_max[0]) * 0.5,
-        (bounds_min[1] + bounds_max[1]) * 0.5,
-        (bounds_min[2] + bounds_max[2]) * 0.5,
-    ];
-    let half = [
-        (bounds_max[0] - bounds_min[0]) * 0.5,
-        (bounds_max[1] - bounds_min[1]) * 0.5,
-        (bounds_max[2] - bounds_min[2]) * 0.5,
-    ];
-    let distance = Vec3::from(center).dot(plane.normal) - plane.dist;
-    let radius = half[0] * plane.normal[0].abs()
-        + half[1] * plane.normal[1].abs()
-        + half[2] * plane.normal[2].abs();
+    let center = (bounds_min + bounds_max) * 0.5;
+    let half_extents = (bounds_max - bounds_min) * 0.5;
+    let distance = center.dot(plane.normal) - plane.dist;
+    let radius = plane.normal.dot_abs(half_extents);
     if distance > radius {
         PlaneSide::Front
     } else if distance < -radius {

@@ -23,6 +23,7 @@ debug = []
 arc-swap.workspace = true
 bytemuck.workspace = true
 vformats.workspace = true
+clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 # pinned to match iced 0.14's internal version — do not bump independently
 cosmic-text = { version = "0.15.0", default-features = false, features = ["std", "swash"] }
 fast_image_resize.workspace = true

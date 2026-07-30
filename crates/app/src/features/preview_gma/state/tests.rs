@@ -241,7 +241,9 @@ fn pending_image_square_is_reserved_until_metadata_settles() {
     assert!(state.apply_workshop_metadata(
         request.request_id,
         PublishedFileId::fixture(42),
-        Err(UiError::new(gmpublished_backend::ErrorKey::new("ERR_TEST")))
+        Err(UiError::new(gmpublished_backend::ErrorKey::for_test(
+            "ERR_TEST",
+        )))
     ));
     assert!(!state.thumbnail_loading());
     assert!(state.thumbnail_handle().is_none());

@@ -7,7 +7,7 @@ use crate::bridge::tasks::TaskId;
 
 pub const SEARCH_INPUT_ID: &str = "search-palette-input";
 
-pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
     match message {
         Message::QueryEdited(query) => {
             let palette_open_before = state.palette_open();
@@ -26,7 +26,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::FocusRequested => {
             let palette_open_before = state.palette_open();
-            let _changed = state.focus(Instant::now());
+            let _changed = state.focus(now);
             let mut effects = vec![Effect::FocusInputRequested];
             let _palette_changed =
                 append_palette_transition_effect(&mut effects, palette_open_before, state);
@@ -35,7 +35,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::ModeFocusRequested(mode) => {
             let palette_open_before = state.palette_open();
-            let outcome = state.focus_mode(mode, Instant::now());
+            let outcome = state.focus_mode(mode, now);
             let mut effects = vec![Effect::FocusInputRequested];
             let palette_changed =
                 append_palette_transition_effect(&mut effects, palette_open_before, state);
@@ -102,18 +102,18 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::ResultActivated(row_id) => {
             let mut effects = vec![Effect::ResultActivated(row_id)];
-            append_dismiss_effects(&mut effects, state);
+            append_dismiss_effects(&mut effects, state, now);
             effects
         }
         Message::DismissRequested => {
             let mut effects = Vec::new();
-            append_dismiss_effects(&mut effects, state);
+            append_dismiss_effects(&mut effects, state, now);
             effects
         }
         Message::EscapePressed => {
             let mut effects = Vec::new();
             if state.input().is_empty() {
-                append_dismiss_effects(&mut effects, state);
+                append_dismiss_effects(&mut effects, state, now);
             } else {
                 append_cancel_effect(&mut effects, state.clear());
                 effects.push(Effect::ThumbnailDemandsChanged);
@@ -136,11 +136,16 @@ pub fn subscription(state: &State) -> Subscription<Message> {
     }
 }
 
-fn append_dismiss_effects(effects: &mut Vec<Effect>, state: &mut State) {
+fn append_dismiss_effects(effects: &mut Vec<Effect>, state: &mut State, now: Instant) {
     let palette_open_before = state.palette_open();
-    let cancel_task = state.dismiss(Instant::now());
+    let cancel_task = state.dismiss(now);
     append_palette_transition_effect(effects, palette_open_before, state);
     append_cancel_effect(effects, cancel_task);
+}
+
+#[cfg(test)]
+fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    update_at(state, message, Instant::now())
 }
 
 fn append_cancel_effect(effects: &mut Vec<Effect>, task_id: Option<TaskId>) {

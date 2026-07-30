@@ -1,4 +1,3 @@
-use super::UiError;
 use gmpublished_backend::{ExecutionResources, ExecutionScheduleError};
 use std::sync::Arc;
 use thiserror::Error;
@@ -13,7 +12,10 @@ pub enum RunBlockingError {
 
 impl gmpublished_backend::HasErrorKey for RunBlockingError {
     fn error_key(&self) -> gmpublished_backend::ErrorKey {
-        gmpublished_backend::error_keys::UNKNOWN
+        match self {
+            Self::Schedule(error) => gmpublished_backend::HasErrorKey::error_key(error),
+            Self::WorkerDropped => gmpublished_backend::error_keys::WORKER_DROPPED,
+        }
     }
 
     fn error_detail(&self) -> Option<String> {
@@ -99,11 +101,54 @@ impl From<ExecutionScheduleError> for ScheduleError {
     }
 }
 
-impl From<&ScheduleError> for UiError {
-    fn from(error: &ScheduleError) -> Self {
-        Self::detailed(
-            gmpublished_backend::error_keys::UNKNOWN,
-            Some(error.to_string()),
-        )
+impl gmpublished_backend::HasErrorKey for ScheduleError {
+    fn error_key(&self) -> gmpublished_backend::ErrorKey {
+        match self {
+            Self::QueueFull { .. } => gmpublished_backend::error_keys::WORKER_QUEUE_FULL,
+            Self::PoolStopped { .. } => gmpublished_backend::error_keys::WORKER_POOL_STOPPED,
+        }
+    }
+
+    fn error_detail(&self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::ui_error::UiError;
+    use gmpublished_backend::HasErrorKey;
+
+    #[test]
+    fn scheduler_failures_keep_distinct_wire_meaning() {
+        let full = ScheduleError::QueueFull {
+            pool: "blocking",
+            job: Arc::from("refresh"),
+        };
+        let stopped = ScheduleError::PoolStopped {
+            pool: "network",
+            job: Arc::from("thumbnail"),
+        };
+
+        assert_eq!(
+            full.error_key(),
+            gmpublished_backend::error_keys::WORKER_QUEUE_FULL
+        );
+        assert_eq!(
+            stopped.error_key(),
+            gmpublished_backend::error_keys::WORKER_POOL_STOPPED
+        );
+        assert_eq!(
+            RunBlockingError::WorkerDropped.error_key(),
+            gmpublished_backend::error_keys::WORKER_DROPPED
+        );
+
+        let ui = UiError::from(&full);
+        assert_eq!(ui.key, gmpublished_backend::error_keys::WORKER_QUEUE_FULL);
+        assert_eq!(
+            ui.detail.as_deref(),
+            Some("blocking worker queue is full while scheduling `refresh`")
+        );
     }
 }

@@ -381,7 +381,9 @@ impl MapFaceVisibilityBuilder {
 
 pub(super) fn visibility_bucket(cluster: i16, cluster_count: u32) -> MapVisibilityBucket {
     if cluster_in_range(cluster, cluster_count) {
-        MapVisibilityBucket::Cluster(u32::try_from(cluster).unwrap_or(0))
+        MapVisibilityBucket::Cluster(
+            u32::try_from(cluster).expect("cluster_in_range guarantees a nonnegative cluster"),
+        )
     } else {
         MapVisibilityBucket::Always
     }

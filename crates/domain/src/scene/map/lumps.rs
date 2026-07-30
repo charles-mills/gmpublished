@@ -460,7 +460,7 @@ pub(super) fn walk_to_leaf(
     for _ in 0..node_count {
         let (plane_index, children) = node(current_index)?;
         let (normal, dist) = plane(plane_index)?;
-        let distance = point[0] * normal[0] + point[1] * normal[1] + point[2] * normal[2];
+        let distance = point.dot(normal);
         let [front, back] = children;
         let next = if distance < dist { back } else { front };
         match NodeChild::decode(next)? {

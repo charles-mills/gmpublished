@@ -118,7 +118,9 @@ impl RenderResources {
                 .unwrap_or(fallback_level)
         };
         let mip_level_count = if use_supplied_chain {
-            u32::try_from(levels.len()).unwrap_or(1).max(1)
+            u32::try_from(levels.len())
+                .expect("a resident RGBA mip slice cannot exceed u32::MAX elements")
+                .max(1)
         } else {
             1
         };
@@ -137,11 +139,13 @@ impl RenderResources {
             view_formats: &[],
         });
         if use_supplied_chain {
-            for (mip_level, level) in levels.iter().take(mip_level_count as usize).enumerate() {
+            let upload_mip_count = usize::try_from(mip_level_count)
+                .expect("u32 texture mip counts fit usize on supported targets");
+            for (mip_level, level) in levels.iter().take(upload_mip_count).enumerate() {
                 write_texture_level(
                     queue,
                     &texture,
-                    u32::try_from(mip_level).unwrap_or(0),
+                    u32::try_from(mip_level).expect("validated texture mip counts fit u32"),
                     *level,
                 );
             }
@@ -192,6 +196,9 @@ impl RenderResources {
             return self.create_texture_view(device, queue, label, WHITE_RGBA.as_slice(), 1, 1);
         }
 
+        let mip_level_count = u32::try_from(mips.len())
+            .expect("a resident BC mip slice cannot exceed u32::MAX elements")
+            .max(1);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -199,18 +206,20 @@ impl RenderResources {
                 height: base.height.max(1),
                 depth_or_array_layers: 1,
             },
-            mip_level_count: u32::try_from(mips.len()).unwrap_or(1).max(1),
+            mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: bc_texture_format(format),
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        for (mip_level, mip) in mips.iter().enumerate() {
+        let upload_mip_count = usize::try_from(mip_level_count)
+            .expect("u32 texture mip counts fit usize on supported targets");
+        for (mip_level, mip) in mips.iter().take(upload_mip_count).enumerate() {
             write_bc_texture_level(
                 queue,
                 &texture,
-                u32::try_from(mip_level).unwrap_or(0),
+                u32::try_from(mip_level).expect("validated texture mip counts fit u32"),
                 format,
                 mip,
             );

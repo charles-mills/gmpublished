@@ -14,7 +14,7 @@ use crate::WorkshopId;
 use super::{CALLBACK_RESULT_TIMEOUT, ConnectedSteam, Steam, users::SteamUser};
 
 use crate::util::main_thread_forbidden;
-use crate::{GMOD_APP_ID, search::Search};
+use crate::{STEAM_GMOD_APP_ID, search::Search};
 
 type WorkshopChunkQueryResult = Result<Vec<WorkshopItem>, WorkshopQueryError>;
 const WORKSHOP_DEDUP_LOCK_TIMEOUT: Duration = Duration::from_millis(51);
@@ -295,7 +295,7 @@ impl Steam {
                 user_list,
                 steamworks::UGCType::ItemsReadyToUse,
                 user_list_order,
-                steamworks::AppIDs::ConsumerAppId(GMOD_APP_ID),
+                steamworks::AppIDs::ConsumerAppId(STEAM_GMOD_APP_ID),
                 page,
             )
             .ok()?

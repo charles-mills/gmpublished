@@ -11,7 +11,7 @@ pub use gmpublished_backend::{
 };
 
 #[cfg(test)]
-pub const GMA_VERSION: u8 = 3;
+pub use gmpublished_backend::GMA_VERSION;
 
 /// Safe, already-validated path for one file entry inside a GMA archive.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -138,7 +138,8 @@ impl From<ArchiveDirectoryPath> for String {
 ///
 /// Not mirrored: both were duplicated field-for-field *and* accessor-for-
 /// accessor, with identity `From` impls in each direction. A newtype earns its
-/// conversions by refining something — see [`PublishedFileId`], which enforces
+/// conversions by refining something — see
+/// [`PublishedFileId`](crate::bridge::domain::PublishedFileId), which enforces
 /// non-zero where the backend's does not. These refined nothing.
 pub use gmpublished_backend::{GmaHeader, GmaMetadata};
 
@@ -276,7 +277,7 @@ impl PreviewArchive {
             .and_then(gmpublished_backend::WorkshopId::new)
         {
             // Recomputes extracted_name so it includes both title and id.
-            gma.set_ws_id(id);
+            gma.set_workshop_id(id);
         }
         let header = bundle.header;
         let entries = preview_entries_from_backend(bundle.entries);
@@ -301,7 +302,7 @@ impl PreviewArchive {
     /// Sanitized folder name the archive extracts into (backend
     /// `extracted_name`); empty when the metadata carried no usable name.
     pub(crate) fn extracted_name(&self) -> &str {
-        &self.gma.extracted_name
+        self.gma.extracted_name()
     }
 
     pub(crate) fn entries(&self) -> &[PreviewEntry] {

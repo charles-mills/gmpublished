@@ -86,7 +86,8 @@ pub(super) fn write_bc_texture_level(
             &mip.data,
             row_bytes_usize,
             padded_row_bytes_usize,
-            usize::try_from(blocks_high).unwrap_or(0),
+            usize::try_from(blocks_high)
+                .expect("u32 texture block counts fit usize on supported targets"),
             padded_len,
         );
         upload.as_slice()

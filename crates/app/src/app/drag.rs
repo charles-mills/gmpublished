@@ -207,7 +207,7 @@ impl App {
     }
 
     pub(super) fn finish_addon_drag_task(&mut self) -> Task<RootMessage> {
-        let over_downloader = self.state.shell.downloader_drop_target_hovered();
+        let over_downloader = self.state.features.shell.downloader_drop_target_hovered();
         let outcome = self.state.addon_drag.release(over_downloader);
         self.addon_drag_outcome_task(outcome)
     }
@@ -216,7 +216,10 @@ impl App {
         &mut self,
         outcome: Option<AddonDragOutcome>,
     ) -> Task<RootMessage> {
-        let clear_hover = self.apply_shell_message(shell::Message::DownloaderDropTargetExited);
+        let clear_hover = self.apply_shell_message(
+            shell::Message::DownloaderDropTargetExited,
+            self.update_context,
+        );
 
         let Some(outcome) = outcome else {
             return clear_hover;

@@ -6,6 +6,21 @@ use crate::media::preview_model::MapStats;
 
 use super::{PropBakeSkipStats, duration_ms, format_mib};
 
+pub(super) fn lightmap_status(
+    lightmap: Option<&gmpublished_domain::scene::map::LightmapAtlas>,
+) -> String {
+    lightmap.map_or_else(
+        || "lightmap none".to_owned(),
+        |lightmap| {
+            let source = match lightmap.source {
+                gmpublished_domain::scene::map::LightmapSource::Ldr => "LDR",
+                gmpublished_domain::scene::map::LightmapSource::Hdr => "HDR",
+            };
+            format!("lightmap {}x{} ({source})", lightmap.width, lightmap.height)
+        },
+    )
+}
+
 /// Pre-formatted status fragments used by the map build summary.
 pub(super) struct MapPreviewStatuses<'a> {
     pub(super) water: &'a str,

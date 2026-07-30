@@ -1,9 +1,29 @@
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
 use iced::Point;
 use iced::animation::Easing;
 
+use crate::bridge::domain::PublishedFileId;
 use crate::theme::{self, motion};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalMenuTarget {
+    pub(crate) path: PathBuf,
+    pub(crate) path_text: String,
+    pub(crate) workshop_id: Option<PublishedFileId>,
+    pub(crate) workshop_url: Option<String>,
+    pub(crate) preview_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContextMenuTarget {
+    Local(LocalMenuTarget),
+    MyWorkshop {
+        workshop_id: PublishedFileId,
+        workshop_url: String,
+        preview_url: Option<String>,
+    },
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextMenuAction {
@@ -31,13 +51,6 @@ pub enum SimulatedToast {
     Success,
     Error,
     Notice,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Owner {
-    InstalledAddons,
-    MyWorkshop,
-    SizeAnalyzer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,26 +203,69 @@ impl Entry {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpenRequest {
-    owner: Owner,
     position: Point,
     entries: Vec<Entry>,
+    target: ContextMenuTarget,
 }
 
 impl OpenRequest {
-    pub(crate) fn new(owner: Owner, position: Point, entries: Vec<Entry>) -> Self {
+    pub(crate) fn new(position: Point, entries: Vec<Entry>, target: ContextMenuTarget) -> Self {
         Self {
-            owner,
             position,
             entries,
+            target,
         }
+    }
+}
+
+#[derive(Debug, Default)]
+enum ContextMenuSession {
+    #[default]
+    Closed,
+    Open {
+        target: Option<ContextMenuTarget>,
+    },
+    Closing {
+        target: Option<ContextMenuTarget>,
+    },
+}
+
+impl ContextMenuSession {
+    const fn open(&self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+
+    const fn visible(&self) -> bool {
+        !matches!(self, Self::Closed)
+    }
+
+    #[cfg(test)]
+    const fn target(&self) -> Option<&ContextMenuTarget> {
+        match self {
+            Self::Closed => None,
+            Self::Open { target } | Self::Closing { target } => target.as_ref(),
+        }
+    }
+
+    fn take_target(&mut self) -> Option<ContextMenuTarget> {
+        match self {
+            Self::Closed => None,
+            Self::Open { target } | Self::Closing { target } => target.take(),
+        }
+    }
+
+    fn begin_close(&mut self) {
+        let current = std::mem::take(self);
+        *self = match current {
+            Self::Open { target } | Self::Closing { target } => Self::Closing { target },
+            Self::Closed => Self::Closed,
+        };
     }
 }
 
 #[derive(Debug)]
 pub struct State {
-    open: bool,
-    visible: bool,
-    owner: Option<Owner>,
+    session: ContextMenuSession,
     position: Point,
     entries: Vec<Entry>,
     presence: motion::Presence<bool>,
@@ -218,9 +274,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            open: false,
-            visible: false,
-            owner: None,
+            session: ContextMenuSession::Closed,
             position: Point::ORIGIN,
             entries: Vec::new(),
             presence: motion::asymmetric(
@@ -235,16 +289,22 @@ impl Default for State {
 
 impl State {
     pub(crate) const fn open(&self) -> bool {
-        self.open
+        self.session.open()
     }
 
     pub(crate) const fn visible(&self) -> bool {
-        self.visible
+        self.session.visible()
     }
 
     #[cfg(test)]
-    pub(crate) const fn owner(&self) -> Option<Owner> {
-        self.owner
+    pub(crate) const fn target(&self) -> Option<&ContextMenuTarget> {
+        self.session.target()
+    }
+
+    /// Consumes this session's action target without disturbing its fade-out
+    /// entries. A second queued action for the same rendered menu is ignored.
+    pub(crate) fn take_target(&mut self) -> Option<ContextMenuTarget> {
+        self.session.take_target()
     }
 
     pub(crate) const fn position(&self) -> Point {
@@ -270,9 +330,8 @@ impl State {
 
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         let settled = self.presence.tick(now);
-        if settled && !self.open && self.visible {
-            self.visible = false;
-            self.owner = None;
+        if settled && matches!(self.session, ContextMenuSession::Closing { .. }) {
+            self.session = ContextMenuSession::Closed;
             self.entries.clear();
             true
         } else {
@@ -281,9 +340,9 @@ impl State {
     }
 
     pub(super) fn open_request(&mut self, request: OpenRequest, now: Instant) {
-        self.open = true;
-        self.visible = true;
-        self.owner = Some(request.owner);
+        self.session = ContextMenuSession::Open {
+            target: Some(request.target),
+        };
         self.position = request.position;
         self.entries = request.entries;
 
@@ -301,7 +360,7 @@ impl State {
     }
 
     pub(super) fn dismiss(&mut self, now: Instant) {
-        self.open = false;
+        self.session.begin_close();
         self.presence.go(false, now);
     }
 }
@@ -312,16 +371,22 @@ mod tests {
 
     use super::*;
 
+    fn target() -> ContextMenuTarget {
+        ContextMenuTarget::Local(LocalMenuTarget {
+            path: PathBuf::from("/tmp/addon.gma"),
+            path_text: "/tmp/addon.gma".to_owned(),
+            workshop_id: None,
+            workshop_url: None,
+            preview_url: None,
+        })
+    }
+
     #[test]
     fn entrance_starts_visibly_instead_of_snapping_open() {
         let mut state = State::default();
         let now = Instant::now();
         state.open_request(
-            OpenRequest::new(
-                Owner::InstalledAddons,
-                Point::ORIGIN,
-                vec![Entry::copy_path()],
-            ),
+            OpenRequest::new(Point::ORIGIN, vec![Entry::copy_path()], target()),
             now,
         );
 

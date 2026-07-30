@@ -378,7 +378,9 @@ fn font_preview_data(request: &PreviewRequest, bytes: &[u8], tokens: &Tokens) ->
     }
 
     let mut db = fontdb::Database::new();
-    let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(bytes.to_vec())));
+    let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(
+        bytes.to_vec().into_boxed_slice(),
+    )));
     let Some(face) = ids.first().and_then(|id| db.face(*id)) else {
         return info_preview_data(request, InfoReason::DecodeFailed);
     };
@@ -440,7 +442,7 @@ fn audio_preview_data(request: &PreviewRequest, bytes: &[u8]) -> PreviewData {
         return info_preview_data(request, InfoReason::TooLarge);
     }
 
-    let bytes = std::sync::Arc::new(bytes.to_vec());
+    let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(bytes);
     match audio_duration_secs(std::sync::Arc::clone(&bytes)) {
         Ok(duration_secs) => PreviewData::from_request(
             request,
@@ -457,7 +459,7 @@ fn audio_preview_data(request: &PreviewRequest, bytes: &[u8]) -> PreviewData {
 }
 
 fn audio_duration_secs(
-    bytes: std::sync::Arc<Vec<u8>>,
+    bytes: std::sync::Arc<[u8]>,
 ) -> Result<Option<f32>, rodio::decoder::DecoderError> {
     crate::media::audio_playback::decoder_from_audio_bytes(bytes).map(|decoder| {
         decoder

@@ -9,15 +9,14 @@ use iced::{Subscription, time};
 
 pub use effect::Effect;
 pub use message::Message;
+pub(crate) use model::PublishIconSubmitResult;
 pub use model::{
     ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation, IgnoredPattern,
     PublishIconSubmitRequestEnvelope, PublishSubmitContext, PublishSubmitRequestEnvelope,
-    PublishSubmitResult, WorkshopContentRequest, apply_ignore_pattern_mutation,
-    ignored_patterns_from_settings, inspect_workshop_snapshot, run_publish_icon_submit,
-    run_publish_submit, verify_content_path, verify_icon_preview,
+    PublishSubmitResult, WorkshopContentRequest,
 };
 pub use state::{OpenTarget, State, UpdateTarget};
-pub use update::{browser_rows_scrollable_id, update};
+pub use update::{browser_rows_scrollable_id, update_at};
 pub use view::view;
 
 const SUBMIT_SPINNER_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);

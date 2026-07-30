@@ -7,5 +7,5 @@ mod view;
 pub use effect::Effect;
 pub use message::Message;
 pub use state::State;
-pub use update::update;
+pub use update::update_at;
 pub use view::view;

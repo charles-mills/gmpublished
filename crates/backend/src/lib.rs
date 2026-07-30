@@ -18,7 +18,8 @@ pub(crate) mod logging;
 pub use logging::log_panic;
 pub use logging::shutdown as shutdown_logging;
 
-pub const GMOD_APP_ID: steamworks::AppId = steamworks::AppId(4000);
+pub(crate) const GMOD_APP_ID: u32 = 4000;
+pub(crate) const STEAM_GMOD_APP_ID: steamworks::AppId = steamworks::AppId(GMOD_APP_ID);
 
 pub(crate) mod util;
 pub use util::panic::payload_message as panic_payload_message;
@@ -34,7 +35,7 @@ pub use execution::{
 
 mod transactions;
 pub use transactions::{
-    FinalizeOutcome, Transaction, TransactionError, TransactionId, TransactionPayload,
+    EmitOutcome, FinalizeOutcome, Transaction, TransactionError, TransactionId, TransactionPayload,
     TransactionStatus,
 };
 
@@ -75,7 +76,8 @@ pub use gma::extract::{
 };
 pub use gma::read::{GmaIndexBundle, GmaIndexedEntry, GmaMetaBundle, GmaView};
 pub use gma::{
-    GmaEntry, GmaError, GmaFile, GmaHeader, GmaMetadata, is_unsafe_entry_path, ws_id_from_file_name,
+    GMA_VERSION, GmaEntry, GmaError, GmaFile, GmaHeader, GmaMetadata, is_unsafe_entry_path,
+    ws_id_from_file_name,
 };
 
 /// Stateless whitelist vocabulary used by app-side preflight presentation.
@@ -88,7 +90,7 @@ pub mod whitelist {
 pub mod vpk;
 
 mod net;
-pub use net::tls_agent_builder;
+pub use net::{HttpAgentConfig, build_http_agent};
 mod signal;
 
 mod steam;
@@ -103,7 +105,7 @@ pub use steam::{
 pub mod publishing {
     pub use crate::steam::publishing::{
         PublishError, PublishSettingsSnapshot, PublishSubmission, PublishSubmissionMode,
-        PublishSubmissionOutcome, WorkshopIcon,
+        PublishSubmissionOutcome, WorkshopIcon, workshop_icon_can_upscale,
     };
 }
 
@@ -116,15 +118,13 @@ pub mod workshop {
 
 /// Connected Steam-user queries used by the app's narrow Workshop service.
 pub mod steam_users {
-    pub use crate::steam::users::{SteamUser, fetch_steam_user, fetch_steam_user_streaming};
+    pub use crate::steam::users::{fetch_steam_user, fetch_steam_user_streaming};
 }
 
 mod search;
 pub use search::{
     FileSearchAddon, QuickSearchHit, QuickSearchResult, SearchItem, SearchItemSource, SearchScope,
 };
-
-pub mod cli;
 
 mod backend;
 pub use backend::{

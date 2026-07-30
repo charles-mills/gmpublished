@@ -8,7 +8,7 @@
 
 use crate::transactions::TransactionStatus;
 use crate::{
-    GMOD_APP_ID, Transaction,
+    STEAM_GMOD_APP_ID, Transaction,
     appdata::AppData,
     gma::{GmaFile, GmaMetadata, whitelist::AddonWhitelist},
 };
@@ -35,12 +35,20 @@ use walkdir::WalkDir;
 /// progress inactivity as proof that the upload stopped.
 const PUBLISH_RESULT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Whether a non-animated Workshop icon can benefit from the supported
+/// square, minimum-edge upscale operation.
+#[must_use]
+pub const fn workshop_icon_can_upscale(width: u32, height: u32, animated: bool) -> bool {
+    !animated && (width < 512 || height < 512 || width != height)
+}
+
 #[cfg(test)]
 use crate::gma::GmaEntry;
 #[cfg(test)]
 use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error)]
+/// Failures produced by validation, packing, or Steam Workshop submission.
 pub enum PublishError {
     #[error("{} files are not whitelisted for upload", .0.len())]
     NotWhitelisted(Vec<String>),
@@ -59,7 +67,7 @@ pub enum PublishError {
     #[error("the icon is not a format the Workshop accepts")]
     IconInvalidFormat,
     #[error("publish I/O failed")]
-    IOError(#[source] crate::IoFailure),
+    IoError(#[source] crate::IoFailure),
     /// A filesystem operation failed while publishing, and the path it failed
     /// on is the reportable part.
     ///
@@ -95,7 +103,7 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::IconTooLarge => keys::ICON_TOO_LARGE,
             Self::IconTooSmall => keys::ICON_TOO_SMALL,
             Self::IconInvalidFormat => keys::ICON_INVALID_FORMAT,
-            Self::IOError(_) => keys::IO_ERROR,
+            Self::IoError(_) => keys::IO_ERROR,
             Self::PathIo { .. } => keys::PATH_IO_ERROR,
             Self::SteamError(_) => keys::STEAM_ERROR,
             Self::MissingPublishedFileId | Self::CallbackAbandoned => keys::STEAM_ERROR,
@@ -110,7 +118,7 @@ impl crate::error_key::HasErrorKey for PublishError {
         match self {
             Self::NotWhitelisted(failed) => Some(failed.join("\n")),
             Self::DuplicateEntry(path) => Some(path.clone()),
-            Self::IOError(source) => Some(source.to_string()),
+            Self::IoError(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::SteamError(error) => Some(error.to_string()),
             Self::MissingPublishedFileId | Self::CallbackAbandoned => Some(self.to_string()),
@@ -151,12 +159,12 @@ impl From<ImageError> for PublishError {
 }
 impl From<std::io::Error> for PublishError {
     fn from(error: std::io::Error) -> Self {
-        Self::IOError(error.into())
+        Self::IoError(error.into())
     }
 }
 
 use super::{ConnectedSteam, Steam};
-pub struct ContentPath(PathBuf);
+struct ContentPath(PathBuf);
 impl AsRef<Path> for ContentPath {
     fn as_ref(&self) -> &Path {
         &self.0
@@ -168,7 +176,7 @@ impl From<ContentPath> for PathBuf {
     }
 }
 impl ContentPath {
-    pub fn new(path: &Path) -> Result<Self, PublishError> {
+    fn new(path: &Path) -> Result<Self, PublishError> {
         if !path.is_dir() {
             return Err(PublishError::InvalidContentPath);
         }
@@ -343,20 +351,55 @@ fn pump_publish_progress(
     }
 }
 
-pub enum WorkshopIcon {
+/// A Workshop preview icon validated for Steam's size and format rules.
+///
+/// The representation is deliberately opaque: custom icons can only enter
+/// through [`Self::new`], and only formats the image crate can safely write
+/// back may carry an upscale request.
+pub struct WorkshopIcon {
+    source: WorkshopIconSource,
+}
+
+enum WorkshopIconSource {
     Custom {
-        image: DynamicImage,
         path: PathBuf,
-        format: ImageFormat,
-        width: u32,
-        height: u32,
-        upscale: bool,
+        upscale: Option<WorkshopIconUpscale>,
     },
     Default,
 }
-impl WorkshopIcon {
-    pub fn can_upscale(width: u32, height: u32, format: ImageFormat) -> bool {
-        !matches!(format, ImageFormat::Gif) && ((width < 512 || height < 512) || (width != height))
+
+struct WorkshopIconUpscale {
+    image: DynamicImage,
+    format: UpscalableImageFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpscalableImageFormat {
+    Png,
+    Jpeg,
+}
+
+impl UpscalableImageFormat {
+    const fn image_format(self) -> ImageFormat {
+        match self {
+            Self::Png => ImageFormat::Png,
+            Self::Jpeg => ImageFormat::Jpeg,
+        }
+    }
+
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+}
+
+impl Default for WorkshopIcon {
+    fn default() -> Self {
+        Self {
+            source: WorkshopIconSource::Default,
+        }
     }
 }
 /// The default icon could not be written to disk; carries the path that was
@@ -414,31 +457,19 @@ impl WorkshopIcon {
     /// materialized temp file is uniquely named, so concurrent publishes and
     /// crashed prior runs never collide.
     fn into_preview_path(self, app_data: &AppData) -> Result<PreviewPath, PreviewIconWriteFailed> {
-        match self {
-            Self::Custom {
-                path,
-                image,
-                width,
-                height,
-                upscale,
-                format,
-            } => {
-                if upscale && Self::can_upscale(width, height, format) {
-                    let format_extension = match format {
-                        ImageFormat::Png => "png",
-                        ImageFormat::Jpeg => "jpg",
-                        _ => unreachable!(),
-                    };
-
+        match self.source {
+            WorkshopIconSource::Custom { path, upscale } => {
+                if let Some(WorkshopIconUpscale { image, format }) = upscale {
                     let mut temp_img = ensure_temp_dir(app_data);
                     temp_img.push(format!(
-                        "gmpublisher_upscaled_icon_{}.{format_extension}",
-                        unique_temp_suffix()
+                        "gmpublisher_upscaled_icon_{}.{}",
+                        unique_temp_suffix(),
+                        format.extension()
                     ));
 
                     let image =
                         image.resize_exact(512, 512, image::imageops::FilterType::CatmullRom);
-                    match image.save_with_format(&temp_img, format) {
+                    match image.save_with_format(&temp_img, format.image_format()) {
                         Ok(_) => Ok(PreviewPath::owned(temp_img)),
                         Err(_) => Ok(PreviewPath::borrowed(path)),
                     }
@@ -446,7 +477,7 @@ impl WorkshopIcon {
                     Ok(PreviewPath::borrowed(path))
                 }
             }
-            Self::Default => {
+            WorkshopIconSource::Default => {
                 let mut path = ensure_temp_dir(app_data);
                 path.push(format!(
                     "gmpublisher_default_icon_{}.png",
@@ -472,6 +503,7 @@ impl WorkshopIcon {
     }
 }
 impl WorkshopIcon {
+    /// Validates a custom Workshop icon and records an optional upscale plan.
     pub fn new<P: AsRef<Path>>(path: P, upscale: bool) -> Result<Self, PublishError> {
         let path = path.as_ref();
 
@@ -487,44 +519,49 @@ impl WorkshopIcon {
             .and_then(|x| x.to_str())
             .unwrap_or("jpg")
             .to_ascii_lowercase();
-        let image_format = match file_extension.as_str() {
-            "png" => ImageFormat::Png,
-            "gif" => ImageFormat::Gif,
-            "jpeg" | "jpg" => ImageFormat::Jpeg,
+        let (image_format, upscale_format) = match file_extension.as_str() {
+            "png" => (ImageFormat::Png, Some(UpscalableImageFormat::Png)),
+            "gif" => (ImageFormat::Gif, None),
+            "jpeg" | "jpg" => (ImageFormat::Jpeg, Some(UpscalableImageFormat::Jpeg)),
             _ => return Err(PublishError::IconInvalidFormat),
         };
 
         let image = image::load(BufReader::new(File::open(path)?), image_format)?;
-        Ok(Self::Custom {
-            path: path.to_path_buf(),
-            width: image.width(),
-            height: image.height(),
-            format: image_format,
-            upscale,
-            image,
+        let can_upscale =
+            workshop_icon_can_upscale(image.width(), image.height(), upscale_format.is_none());
+        let upscale = match (upscale && can_upscale, upscale_format) {
+            (true, Some(format)) => Some(WorkshopIconUpscale { image, format }),
+            _ => None,
+        };
+
+        Ok(Self {
+            source: WorkshopIconSource::Custom {
+                path: path.to_path_buf(),
+                upscale,
+            },
         })
     }
 }
 
 /// The first revision of a newly-created Workshop item. Creation-only fields
 /// are mandatory here and cannot be passed to [`ConnectedSteam::update`].
-pub struct WorkshopCreation {
-    pub title: String,
-    pub path: ContentPath,
-    pub tags: Vec<String>,
-    pub addon_type: String,
-    pub preview: WorkshopIcon,
+struct WorkshopCreation {
+    title: String,
+    path: ContentPath,
+    tags: Vec<String>,
+    addon_type: String,
+    preview: WorkshopIcon,
 }
 
 /// A revision of an existing Workshop item. Its identity is supplied
 /// separately to [`ConnectedSteam::update`]; title/default-description fields
 /// cannot accidentally be applied through this path.
-pub struct WorkshopUpdate {
-    pub path: ContentPath,
-    pub tags: Vec<String>,
-    pub addon_type: String,
-    pub preview: Option<WorkshopIcon>,
-    pub changes: Option<String>,
+struct WorkshopUpdate {
+    path: ContentPath,
+    tags: Vec<String>,
+    addon_type: String,
+    preview: Option<WorkshopIcon>,
+    changes: Option<String>,
 }
 
 enum WorkshopRevision {
@@ -533,22 +570,33 @@ enum WorkshopRevision {
 }
 
 #[derive(Clone, Debug)]
+/// Settings captured once for a publish submission.
 pub struct PublishSettingsSnapshot {
+    /// Optional configured temporary directory.
     pub temp: Option<PathBuf>,
+    /// User-configured upload ignore globs.
     pub ignore_globs: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
+/// Fully resolved input to a Workshop create or update operation.
 pub struct PublishSubmission {
+    /// Directory or GMA to submit.
     pub content_path_src: PathBuf,
+    /// Optional custom preview icon.
     pub icon_path: Option<PathBuf>,
     /// Embedded in the packed GMA's metadata for both modes; the Workshop item
     /// title is only set when creating.
     pub title: String,
+    /// Workshop tags.
     pub tags: Vec<String>,
+    /// Workshop addon-type tag.
     pub addon_type: String,
+    /// Whether a small custom icon may be enlarged.
     pub upscale: bool,
+    /// Create/update-specific fields.
     pub mode: PublishSubmissionMode,
+    /// Optional pre-captured settings; live settings are used when absent.
     pub settings: Option<PublishSettingsSnapshot>,
 }
 
@@ -558,16 +606,23 @@ pub struct PublishSubmission {
 /// than beside an `Option<WorkshopId>` that could disagree with it.
 #[derive(Clone, Debug)]
 pub enum PublishSubmissionMode {
+    /// Create a new Workshop item.
     Create,
+    /// Update an existing Workshop item.
     Update {
+        /// Existing Workshop identity.
         id: WorkshopId,
+        /// Optional public changelog.
         changes: Option<String>,
     },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Stable result returned by the high-level publish submission facade.
 pub struct PublishSubmissionOutcome {
+    /// Created or updated Workshop identity.
     pub published_file_id: WorkshopId,
+    /// Whether Steam requires accepting its legal agreement.
     pub legal_agreement_required: bool,
 }
 
@@ -575,9 +630,9 @@ pub struct PublishSubmissionOutcome {
 /// freshly created id alongside whether Steam requires the legal agreement
 /// to be accepted before the item is visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PublishOutcome {
-    pub id: WorkshopId,
-    pub legal_agreement_required: bool,
+struct PublishOutcome {
+    id: WorkshopId,
+    legal_agreement_required: bool,
 }
 
 impl ConnectedSteam<'_> {
@@ -609,7 +664,7 @@ impl ConnectedSteam<'_> {
                     .interface
                     .client()
                     .ugc()
-                    .start_item_update(GMOD_APP_ID, id.into())
+                    .start_item_update(STEAM_GMOD_APP_ID, id.into())
                     .content_path(path.as_ref())
                     .title(&title)
                     .preview_path(preview_path.as_ref())
@@ -638,7 +693,7 @@ impl ConnectedSteam<'_> {
                     .interface
                     .client()
                     .ugc()
-                    .start_item_update(GMOD_APP_ID, id.into());
+                    .start_item_update(STEAM_GMOD_APP_ID, id.into());
                 let handle = match preview_path.as_ref() {
                     Some(preview_path) => update.preview_path(preview_path.as_ref()),
                     None => update,
@@ -673,7 +728,7 @@ impl ConnectedSteam<'_> {
         }
     }
 
-    pub fn update(
+    fn update(
         &self,
         id: WorkshopId,
         details: WorkshopUpdate,
@@ -687,7 +742,7 @@ impl ConnectedSteam<'_> {
     /// revision. A definitively failed revision deletes the empty item; when
     /// completion is unknown, the item and its inputs remain intact because
     /// Steam may still be committing them.
-    pub fn publish(
+    fn publish(
         &self,
         details: WorkshopCreation,
         transaction: &Transaction,
@@ -695,7 +750,7 @@ impl ConnectedSteam<'_> {
     ) -> Result<PublishOutcome, PublishError> {
         let (published_tx, published_rx) = mpsc::channel();
         self.interface.client().ugc().create_item(
-            GMOD_APP_ID,
+            STEAM_GMOD_APP_ID,
             steamworks::FileType::Community,
             move |result| {
                 let _ = published_tx.send(result);
@@ -734,7 +789,7 @@ impl ConnectedSteam<'_> {
         }
     }
 
-    pub fn update_icon(
+    pub(crate) fn update_icon(
         &self,
         addon_id: WorkshopId,
         icon: WorkshopIcon,
@@ -748,7 +803,7 @@ impl ConnectedSteam<'_> {
             .interface
             .client()
             .ugc()
-            .start_item_update(GMOD_APP_ID, addon_id.into())
+            .start_item_update(STEAM_GMOD_APP_ID, addon_id.into())
             .preview_path(preview_path.as_ref())
             .submit(None, move |result| {
                 let _ = result_tx.send(result);
@@ -782,146 +837,138 @@ pub(crate) fn submit_with_transaction(
     whitelist: &AddonWhitelist,
     cpu: &crate::execution::CpuExecutor,
 ) -> Result<PublishSubmissionOutcome, PublishError> {
-    let PublishSubmission {
-        content_path_src,
-        icon_path,
-        title,
-        tags,
-        addon_type,
-        upscale,
-        mode,
-        settings,
-    } = submission;
-
-    // The submission carries the globs this publish should honour; falling
-    // back to the stored ones keeps a submission without a snapshot working.
-    let ignore_globs = settings.as_ref().map_or_else(
-        || app_data.publish_ignore_globs_snapshot(),
-        |settings| settings.ignore_globs.clone(),
-    );
-
-    if let Some(settings) = settings.as_ref()
-        && let Err(error) = prepare_publish_temp_dir(settings)
-    {
-        return emit_publish_error(transaction, error);
-    }
-
-    // `Some` only for a custom icon; `None` means "keep the existing preview"
-    // when updating, or "use the default icon" when creating (resolved at the
-    // mode-specific request construction below, where each branch knows which).
-    let custom_icon = match icon_path {
-        Some(icon_path) => {
-            transaction.status(crate::transactions::TransactionStatus::PublishProcessingIcon);
-
-            match WorkshopIcon::new(icon_path, upscale) {
-                Ok(icon) => Some(icon),
-                Err(error) => return emit_publish_error(transaction, error),
-            }
-        }
-        None => None,
-    };
-
-    transaction.status(crate::transactions::TransactionStatus::PublishPacking);
-
-    let publish_dir = publish_temp_dir(app_data, settings.as_ref());
-    if let Err(error) = std::fs::create_dir_all(&publish_dir) {
-        return emit_publish_error(transaction, error.into());
-    }
-    let publish_dir_guard = PublishDirGuard::new(publish_dir.clone());
-
-    {
-        let gma = GmaFile {
-            path: publish_dir.join("gmpublisher.gma"),
-            size: 0,
-            id: None,
-            metadata: GmaMetadata::Standard {
-                title: title.clone(),
-                addon_type: addon_type.clone(),
-                tags: tags.clone(),
-                ignore: ignore_globs,
-            },
-            version: 3,
-            extracted_name: String::new(),
-            modified: None,
-        };
-
-        if let Err(error) = gma.create(&content_path_src, transaction, whitelist, cpu) {
-            // The pack reports cancellation as its own error, so this reads the
-            // cause rather than re-observing the transaction and hoping the two
-            // agree — an I/O failure that happens to coincide with a cancel is
-            // still an I/O failure worth surfacing.
-            if matches!(error, crate::GmaError::Cancelled) {
-                return Err(PublishError::Cancelled);
-            }
-            return emit_publish_error(transaction, error.into());
-        }
-    }
-
-    let content_path = match ContentPath::new(&publish_dir) {
-        Ok(content_path) => content_path,
-        Err(error) => return emit_publish_error(transaction, error),
-    };
-
-    transaction.status(crate::transactions::TransactionStatus::PublishStarting);
-
-    // Everything above runs without Steam; the client is required only from
-    // here, so validation failures stay reachable offline.
-    let steam = match steam.require_client() {
-        Ok(steam) => steam,
-        Err(error) => return emit_publish_error(transaction, PublishError::from(error)),
-    };
-
-    let outcome = if let PublishSubmissionMode::Update { id, changes } = mode {
-        steam
-            .update(
-                id,
-                WorkshopUpdate {
-                    path: content_path,
-                    tags,
-                    addon_type,
-                    preview: custom_icon,
-                    changes,
-                },
-                transaction,
-                app_data,
-            )
-            .map(|legal_agreement_required| PublishOutcome {
-                id,
-                legal_agreement_required,
-            })
-    } else {
-        steam.publish(
-            WorkshopCreation {
+    // Keep deterministic temp cleanup outside `complete` so its potentially
+    // slow directory walk cannot delay the terminal event.
+    let mut publish_dir_guard = None;
+    let result = transaction.complete(
+        || {
+            let PublishSubmission {
+                content_path_src,
+                icon_path,
                 title,
-                path: content_path,
                 tags,
                 addon_type,
-                preview: custom_icon.unwrap_or(WorkshopIcon::Default),
-            },
-            transaction,
-            app_data,
-        )
-    };
+                upscale,
+                mode,
+                settings,
+            } = submission;
 
-    match outcome {
-        Ok(PublishOutcome {
-            id,
-            legal_agreement_required,
-        }) => {
-            transaction.finished(crate::transactions::TransactionPayload::None);
-            Ok(PublishSubmissionOutcome {
-                published_file_id: id,
-                legal_agreement_required,
-            })
-        }
-        Err(error) => {
-            if error.submitted_upload_may_be_active() {
-                publish_dir_guard.preserve();
+            // The submission carries the globs this publish should honour; falling
+            // back to the stored ones keeps a submission without a snapshot working.
+            let ignore_globs = settings.as_ref().map_or_else(
+                || app_data.publish_ignore_globs_snapshot(),
+                |settings| settings.ignore_globs.clone(),
+            );
+
+            if let Some(settings) = settings.as_ref() {
+                prepare_publish_temp_dir(settings)?;
             }
-            transaction.error(&error);
-            Err(error)
-        }
-    }
+
+            // `Some` only for a custom icon; `None` means "keep the existing preview"
+            // when updating, or "use the default icon" when creating (resolved at the
+            // mode-specific request construction below, where each branch knows which).
+            let custom_icon = match icon_path {
+                Some(icon_path) => {
+                    transaction
+                        .status(crate::transactions::TransactionStatus::PublishProcessingIcon);
+
+                    Some(WorkshopIcon::new(icon_path, upscale)?)
+                }
+                None => None,
+            };
+
+            transaction.status(crate::transactions::TransactionStatus::PublishPacking);
+
+            let publish_dir = publish_temp_dir(app_data, settings.as_ref());
+            std::fs::create_dir_all(&publish_dir)?;
+            publish_dir_guard = Some(PublishDirGuard::new(publish_dir.clone()));
+
+            {
+                let gma = GmaFile::for_creation(
+                    publish_dir.join("gmpublisher.gma"),
+                    GmaMetadata::Standard {
+                        title: title.clone(),
+                        addon_type: addon_type.clone(),
+                        tags: tags.clone(),
+                        ignore: ignore_globs,
+                    },
+                );
+
+                if let Err(error) = gma.create(&content_path_src, transaction, whitelist, cpu) {
+                    // The pack reports cancellation as its own error, so this reads the
+                    // cause rather than re-observing the transaction and hoping the two
+                    // agree — an I/O failure that happens to coincide with a cancel is
+                    // still an I/O failure worth surfacing.
+                    if matches!(error, crate::GmaError::Cancelled) {
+                        return Err(PublishError::Cancelled);
+                    }
+                    return Err(error.into());
+                }
+            }
+
+            let content_path = ContentPath::new(&publish_dir)?;
+
+            transaction.status(crate::transactions::TransactionStatus::PublishStarting);
+
+            // Everything above runs without Steam; the client is required only from
+            // here, so validation failures stay reachable offline.
+            let steam = steam.require_client().map_err(PublishError::from)?;
+
+            let outcome = if let PublishSubmissionMode::Update { id, changes } = mode {
+                steam
+                    .update(
+                        id,
+                        WorkshopUpdate {
+                            path: content_path,
+                            tags,
+                            addon_type,
+                            preview: custom_icon,
+                            changes,
+                        },
+                        transaction,
+                        app_data,
+                    )
+                    .map(|legal_agreement_required| PublishOutcome {
+                        id,
+                        legal_agreement_required,
+                    })
+            } else {
+                steam.publish(
+                    WorkshopCreation {
+                        title,
+                        path: content_path,
+                        tags,
+                        addon_type,
+                        preview: custom_icon.unwrap_or_default(),
+                    },
+                    transaction,
+                    app_data,
+                )
+            };
+
+            match outcome {
+                Ok(PublishOutcome {
+                    id,
+                    legal_agreement_required,
+                }) => Ok(PublishSubmissionOutcome {
+                    published_file_id: id,
+                    legal_agreement_required,
+                }),
+                Err(error) => {
+                    if error.submitted_upload_may_be_active() {
+                        publish_dir_guard
+                            .take()
+                            .expect("the publish directory guard is installed before submission")
+                            .preserve();
+                    }
+                    Err(error)
+                }
+            }
+        },
+        |_| crate::transactions::TransactionPayload::None,
+    );
+    drop(publish_dir_guard);
+    result
 }
 
 /// The submission's temp directory has to exist before packing writes into it.
@@ -930,14 +977,6 @@ fn prepare_publish_temp_dir(settings: &PublishSettingsSnapshot) -> Result<(), Pu
         std::fs::create_dir_all(temp)?;
     }
     Ok(())
-}
-
-fn emit_publish_error(
-    transaction: &Transaction,
-    error: PublishError,
-) -> Result<PublishSubmissionOutcome, PublishError> {
-    transaction.error(&error);
-    Err(error)
 }
 
 #[cfg(test)]
@@ -1112,6 +1151,17 @@ mod tests {
         image
             .save_with_format(path, ImageFormat::Png)
             .expect("write png");
+    }
+
+    fn write_gif(path: &Path, width: u32, height: u32) {
+        let image = DynamicImage::ImageRgba8(image::ImageBuffer::from_pixel(
+            width,
+            height,
+            image::Rgba([32, 64, 96, 255]),
+        ));
+        image
+            .save_with_format(path, ImageFormat::Gif)
+            .expect("write gif");
     }
 
     fn assert_content_path_error(path: &Path, expected_key: &str) {
@@ -1305,24 +1355,21 @@ mod tests {
             Ok(icon) => icon,
             Err(error) => panic!("unexpected icon error: {error}"),
         };
-        match icon {
-            WorkshopIcon::Custom {
-                format,
-                width,
-                height,
-                upscale,
-                ..
-            } => {
-                assert_eq!(format, ImageFormat::Png);
-                assert_eq!((width, height), (128, 64));
-                assert!(!upscale);
+        match icon.source {
+            WorkshopIconSource::Custom { path, upscale } => {
+                assert_eq!(path, icon_path);
+                assert!(upscale.is_none());
             }
-            WorkshopIcon::Default => panic!("expected custom icon"),
+            WorkshopIconSource::Default => panic!("expected custom icon"),
         }
 
-        assert!(!WorkshopIcon::can_upscale(512, 512, ImageFormat::Png));
-        assert!(WorkshopIcon::can_upscale(512, 256, ImageFormat::Png));
-        assert!(!WorkshopIcon::can_upscale(32, 32, ImageFormat::Gif));
+        let square_icon = dir.path().join("square.png");
+        write_png(&square_icon, 512, 512);
+        let square_icon = WorkshopIcon::new(&square_icon, true).expect("square icon");
+        assert!(matches!(
+            square_icon.source,
+            WorkshopIconSource::Custom { upscale: None, .. }
+        ));
 
         fs::write(dir.path().join("too-small.png"), [0_u8; 15]).expect("small icon");
         match WorkshopIcon::new(dir.path().join("too-small.png"), false) {
@@ -1397,7 +1444,7 @@ mod tests {
             "owned upscaled icon temp should be cleaned up on drop"
         );
 
-        let default_preview = WorkshopIcon::Default
+        let default_preview = WorkshopIcon::default()
             .into_preview_path(&fixture.app_data)
             .expect("default icon path");
         let default_path = default_preview.as_ref().to_path_buf();
@@ -1422,7 +1469,7 @@ mod tests {
         );
 
         // Two resolutions never share a temp name, even for the same icon.
-        let another_default = WorkshopIcon::Default
+        let another_default = WorkshopIcon::default()
             .into_preview_path(&fixture.app_data)
             .expect("second default icon path");
         assert_ne!(default_path.as_path(), another_default.as_ref());
@@ -1439,6 +1486,22 @@ mod tests {
             icon_path.is_file(),
             "user-supplied icon must not be deleted"
         );
+
+        // GIF is accepted by Steam but cannot be safely rewritten by this
+        // path. Requesting upscale must therefore be represented as a plain
+        // borrowed icon, never as an upscale operation with a format that the
+        // resolver has to reject or mark unreachable.
+        let gif_path = dir.path().join("animated.gif");
+        write_gif(&gif_path, 32, 16);
+        let gif_icon = WorkshopIcon::new(&gif_path, true).expect("valid gif icon");
+        assert!(matches!(
+            &gif_icon.source,
+            WorkshopIconSource::Custom { upscale: None, .. }
+        ));
+        let gif_preview = gif_icon
+            .into_preview_path(&fixture.app_data)
+            .expect("gif preview path");
+        assert_eq!(gif_preview.as_ref(), gif_path.as_path());
     }
 
     #[test]

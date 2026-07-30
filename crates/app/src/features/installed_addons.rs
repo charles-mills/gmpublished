@@ -12,8 +12,7 @@ use iced::Subscription;
 pub use effect::Effect;
 pub use message::Message;
 pub use model::{
-    ContextMenuRequest, PreviewTarget, refresh_metadata_streaming, resolve_metadata,
-    rows_from_snapshot,
+    ContextMenuRequest, PreviewTarget, metadata_patches, resolve_metadata, rows_from_snapshot,
 };
 pub use state::State;
 pub use update::update;

@@ -9,9 +9,9 @@ pub fn browser_rows_scrollable_id() -> iced::widget::Id {
     iced::widget::Id::new("prepare-publish-browser-rows")
 }
 
-pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
     let sounds = SoundObservation::before(state, &message);
-    let mut effects = apply(state, message);
+    let mut effects = apply(state, message, now);
     sounds.append_effects(state, &mut effects);
     // Every snapshot refresh resets the model's scroll offset; the widget
     // keeps its own offset, so it has to be snapped in the same update or the
@@ -97,7 +97,7 @@ impl SoundObservation {
     }
 }
 
-fn apply(state: &mut State, message: Message) -> Vec<Effect> {
+fn apply(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
     match message {
         Message::OpenRequested {
             target,
@@ -171,12 +171,8 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             effects
         }
         Message::IconBrowseRequested => vec![Effect::IconPickerRequested],
-        Message::IconBrowseCompleted {
-            path,
-            temp_dir,
-            well_rgb,
-        } => path
-            .and_then(|path| state.begin_icon_verification(path, temp_dir, well_rgb))
+        Message::IconBrowseCompleted { path, well_rgb } => path
+            .and_then(|path| state.begin_icon_verification(path, well_rgb))
             .map_or_else(Vec::new, |request| {
                 vec![Effect::IconVerificationRequested(request)]
             }),
@@ -228,7 +224,7 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             Vec::new()
         }
         Message::BrowserSelectHoverChanged(hovered) => {
-            state.set_browser_select_hover(hovered, Instant::now());
+            state.set_browser_select_hover(hovered, now);
             Vec::new()
         }
         Message::BrowserScrolled { offset } => {
@@ -258,11 +254,11 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             Vec::new()
         }
         Message::SubmitRequested => vec![Effect::SubmitContextRequested],
-        Message::PublishIconRequested => {
-            state.begin_publish_icon().map_or_else(Vec::new, |request| {
+        Message::PublishIconRequested => state
+            .begin_publish_icon_at(now)
+            .map_or_else(Vec::new, |request| {
                 vec![Effect::PublishIconSubmitRequested(request)]
-            })
-        }
+            }),
         Message::PublishIconSubmitCompleted(generation, result) => {
             let effects = if matches!(&result, Ok(result) if result.legal_agreement_required) {
                 vec![Effect::OpenUrlRequested(WORKSHOP_LEGAL_URL.to_owned())]
@@ -277,7 +273,7 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             Vec::new()
         }
         Message::SubmitContextLoaded(Ok(context)) => state
-            .begin_submit(context)
+            .begin_submit_at(context, now)
             .map_or_else(Vec::new, |request| {
                 vec![Effect::PublishSubmitRequested(request)]
             }),
@@ -294,6 +290,11 @@ fn apply(state: &mut State, message: Message) -> Vec<Effect> {
             effects
         }
     }
+}
+
+#[cfg(test)]
+fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    update_at(state, message, Instant::now())
 }
 
 fn cleanup_effects(state: &mut State) -> Vec<Effect> {

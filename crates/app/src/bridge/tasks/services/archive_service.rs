@@ -29,7 +29,7 @@ impl<'a> ArchiveService<'a> {
     ) -> Result<PathBuf, super::super::super::gma::GmaError> {
         archive.extract_entry_with_transaction(entry_path, transaction, &self.inner.backend)
     }
-    pub(crate) fn whitelist_snapshot(self) -> Arc<Vec<String>> {
+    pub(crate) fn whitelist_snapshot(self) -> Arc<[String]> {
         self.inner.backend.whitelist_snapshot()
     }
 }

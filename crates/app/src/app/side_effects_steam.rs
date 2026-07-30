@@ -2,8 +2,8 @@ use gmpublished_backend::error_keys as keys;
 
 use super::{
     App, BackendRuntimeEvent, LibraryRefreshReason, RootMessage, RouteLifecycle, Task, UiError,
-    backend_runtime_action_message, flatten_blocking_ui_result, installed_addons, my_workshop,
-    prerequisites, search, settings, shell, steam_session,
+    backend_runtime_action_message, connect_steam_for_operation, flatten_blocking_ui_result,
+    installed_addons, my_workshop, prerequisites, search, settings, shell, steam_session,
 };
 use crate::generation::Generation;
 
@@ -18,14 +18,16 @@ impl App {
         };
         let identity_completed = matches!(message, steam_session::Message::IdentityFetched(_, _));
 
-        let effects = steam_session::update(&mut self.state.steam_session, message);
+        let effects = steam_session::update(&mut self.state.features.steam_session, message);
         // Prerequisite panels need the edge, not just the level: a Connecting
         // that follows a failure is a retry, and must not read as a first
         // attempt.
+        let steam_status = self.state.features.steam_session.status();
         let reconnected = self
             .state
+            .features
             .prerequisites
-            .observe_steam(self.state.steam_session.status());
+            .observe_steam(steam_status);
         let session_task = self.run_steam_session_effects(effects);
         let shell_status_task = self.sync_shell_steam_status();
         let (reload_task, installed_retry_task) = if reconnected {
@@ -40,7 +42,7 @@ impl App {
         } else {
             (Task::none(), Task::none())
         };
-        let retry_task = if self.state.steam_session.status().connected() {
+        let retry_task = if self.state.features.steam_session.status().connected() {
             self.retry_pending_steam_operation()
         } else {
             Task::none()
@@ -71,7 +73,7 @@ impl App {
     /// Re-entering is exactly what leaving the route and coming back does —
     /// the manual workaround a user would otherwise have to find.
     fn reload_steam_route_after_reconnect(&mut self) -> Task<RootMessage> {
-        let route = self.state.shell.route();
+        let route = self.state.features.shell.route();
         if !prerequisites::requires_steam(route) {
             return Task::none();
         }
@@ -101,21 +103,22 @@ impl App {
         &mut self,
         retry: steam_session::PendingRetry,
     ) -> Option<Task<RootMessage>> {
-        if self.ctx.steam_connected() {
+        if self.environment.ctx.steam_connected() {
             return None;
         }
 
         let set_retry_effects = steam_session::update(
-            &mut self.state.steam_session,
+            &mut self.state.features.steam_session,
             steam_session::Message::PendingRetrySet(retry),
         );
         let set_retry = self.run_steam_session_effects(set_retry_effects);
-        if self.state.steam_session.status() == steam_session::ConnectionStatus::Connecting {
+        if self.state.features.steam_session.status() == steam_session::ConnectionStatus::Connecting
+        {
             return Some(set_retry);
         }
 
         let connecting_effects = steam_session::update(
-            &mut self.state.steam_session,
+            &mut self.state.features.steam_session,
             steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connecting),
         );
         let connecting = self.run_steam_session_effects(connecting_effects);
@@ -150,7 +153,8 @@ impl App {
             BackendRuntimeEvent::DownloadStarted { .. }
             | BackendRuntimeEvent::ExtractionStarted { .. }
             | BackendRuntimeEvent::Transaction(_) => Task::batch(
-                self.ctx
+                self.environment
+                    .ctx
                     .handle_backend_runtime_event(&event)
                     .into_actions()
                     .into_iter()
@@ -166,7 +170,8 @@ impl App {
         debug_assert!(!self.appdata_snapshot_in_flight);
         self.appdata_snapshot_in_flight = true;
         let system_scheme = self.state.system_scheme;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("apply-appdata-snapshot", move |services| {
                 let (settings, paths) = services.config().apply_appdata_snapshot(*snapshot);
                 Box::new(settings::SettingsSnapshot::new(
@@ -184,15 +189,16 @@ impl App {
     /// machinery as a deferred operation's lazy connect — a failed attempt
     /// is silent and measurement modes ignore it — just without a retry.
     pub(super) fn warm_steam_connect_task(&mut self) -> Task<RootMessage> {
-        if !self.state.steam_session.take_warm_connect_cue()
-            || self.ctx.steam_connected()
-            || self.state.steam_session.status() == steam_session::ConnectionStatus::Connecting
+        if !self.state.features.steam_session.take_warm_connect_cue()
+            || self.environment.ctx.steam_connected()
+            || self.state.features.steam_session.status()
+                == steam_session::ConnectionStatus::Connecting
         {
             return Task::none();
         }
 
         let connecting_effects = steam_session::update(
-            &mut self.state.steam_session,
+            &mut self.state.features.steam_session,
             steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connecting),
         );
         Task::batch([
@@ -202,9 +208,10 @@ impl App {
     }
 
     pub(super) fn steam_connect_task(&self) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("steam-connect", |app| {
-                steam_session::connect_context_for_operation(app.workshop())
+                connect_steam_for_operation(app.workshop())
             })
             .map(|result| {
                 let attempt = match result {
@@ -221,7 +228,8 @@ impl App {
     }
 
     pub(super) fn steam_identity_task(&self, generation: Generation) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("steam-current-user", |app| {
                 app.workshop()
                     .current_user()
@@ -236,7 +244,7 @@ impl App {
     }
 
     pub(super) fn fail_pending_steam_retry(&mut self, error: &UiError) -> Task<RootMessage> {
-        let retries = self.state.steam_session.take_pending_retries();
+        let retries = self.state.features.steam_session.take_pending_retries();
         Task::batch(
             retries
                 .into_iter()
@@ -245,7 +253,7 @@ impl App {
     }
 
     pub(super) fn retry_pending_steam_operation(&mut self) -> Task<RootMessage> {
-        let retries = self.state.steam_session.take_pending_retries();
+        let retries = self.state.features.steam_session.take_pending_retries();
         let tasks = retries
             .into_iter()
             .map(|retry| retry.retry_message(self))
@@ -254,14 +262,18 @@ impl App {
     }
 
     pub(super) fn sync_shell_steam_status(&mut self) -> Task<RootMessage> {
-        self.apply_shell_message(shell::Message::SteamStatusChanged(
-            self.state.steam_session.status(),
-        ))
+        self.apply_shell_message(
+            shell::Message::SteamStatusChanged(self.state.features.steam_session.status()),
+            self.update_context,
+        )
     }
 
     pub(super) fn sync_shell_steam_identity(&mut self) -> Task<RootMessage> {
-        let identity = self.state.steam_session.identity().cloned();
-        self.apply_shell_message(shell::Message::SteamIdentityChanged(identity))
+        let identity = self.state.features.steam_session.identity().cloned();
+        self.apply_shell_message(
+            shell::Message::SteamIdentityChanged(identity),
+            self.update_context,
+        )
     }
 }
 

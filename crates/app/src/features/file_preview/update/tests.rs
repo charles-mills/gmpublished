@@ -393,7 +393,7 @@ fn extract_requested_emits_current_info_path() {
 fn audio_toggle_requests_play_then_pause_via_state_messages() {
     let mut state = State::default();
     let request = state.begin_open(request());
-    let bytes = Arc::new(vec![1, 2, 3]);
+    let bytes: Arc<[u8]> = Arc::from(vec![1, 2, 3]);
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Audio {
@@ -443,7 +443,7 @@ fn animation_tick_polls_audio_position_only_while_playing() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Audio {
-            bytes: Arc::new(vec![1, 2, 3]),
+            bytes: Arc::from(vec![1, 2, 3]),
             duration_secs: None,
         },
     );
@@ -472,7 +472,7 @@ fn stale_audio_callback_cannot_start_a_new_loading_preview() {
     let data = PreviewData::from_request(
         &first,
         PreviewContent::Audio {
-            bytes: Arc::new(vec![1, 2, 3]),
+            bytes: Arc::from(vec![1, 2, 3]),
             duration_secs: None,
         },
     );
@@ -481,7 +481,7 @@ fn stale_audio_callback_cannot_start_a_new_loading_preview() {
         update(&mut state, Message::AudioToggleRequested),
         vec![Effect::AudioPlayRequested {
             request_id: first.request_id,
-            bytes: Arc::new(vec![1, 2, 3]),
+            bytes: Arc::from(vec![1, 2, 3]),
             resume_at: 0.0,
         }]
     );

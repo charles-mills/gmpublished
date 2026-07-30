@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use iced::widget::image;
 
 use crate::bridge::gma::is_gma_path;
-use crate::bridge::tasks::WorkshopService;
-use crate::bridge::ui_error::UiError;
 use crate::bridge::{
     domain::{InstalledAddon, PublishedFileId, WorkshopMetadata, workshop_url::workshop_item_url},
     library::LibrarySnapshot,
@@ -493,10 +491,9 @@ pub fn rows_from_snapshot(snapshot: &LibrarySnapshot) -> Vec<Row> {
 }
 
 pub fn resolve_metadata(
-    ctx: WorkshopService<'_>,
-    item_ids: &[PublishedFileId],
+    metadata: &[WorkshopMetadata],
+    stale_ids: Vec<PublishedFileId>,
 ) -> MetadataResolution {
-    let (metadata, stale_ids) = ctx.resolve_metadata(item_ids);
     MetadataResolution {
         patches: metadata
             .iter()
@@ -506,23 +503,14 @@ pub fn resolve_metadata(
     }
 }
 
-/// Streams metadata as each Workshop query chunk lands, handing `on_batch`
-/// the patches for that chunk so visible rows hydrate after one round trip
-/// rather than waiting on the slowest chunk.
-pub fn refresh_metadata_streaming(
-    ctx: WorkshopService<'_>,
-    item_ids: &[PublishedFileId],
-    mut on_batch: impl FnMut(Vec<MetadataPatch>),
-) -> Result<(), UiError> {
-    ctx.refresh_metadata_streaming(item_ids, |metadata| {
-        let patches = metadata
-            .iter()
-            .filter_map(MetadataPatch::from_metadata)
-            .collect::<Vec<_>>();
-        if !patches.is_empty() {
-            on_batch(patches);
-        }
-    })
+/// Projects Workshop metadata into the patches understood by installed rows.
+/// Streaming and chunk scheduling belong to the caller; this function only
+/// performs the per-batch conversion.
+pub fn metadata_patches(metadata: &[WorkshopMetadata]) -> Vec<MetadataPatch> {
+    metadata
+        .iter()
+        .filter_map(MetadataPatch::from_metadata)
+        .collect()
 }
 
 pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {

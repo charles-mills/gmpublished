@@ -26,7 +26,8 @@ impl App {
 
     pub(super) fn search_quick_task(&self, request: SearchQuickRequest) -> Task<RootMessage> {
         let key = request.key().clone();
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("search-quick", move |app| app.search().quick(&request))
             .map(move |result| {
                 RootMessage::Search(search::Message::QuickSearchCompleted(
@@ -43,9 +44,11 @@ impl App {
     ) -> Task<RootMessage> {
         let worker_item_ids = item_ids.clone();
         let delivery_item_ids = item_ids;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("search-metadata", move |app| {
-                search::resolve_metadata(app.workshop(), &worker_item_ids)
+                let (metadata, stale_ids) = app.workshop().resolve_metadata(&worker_item_ids);
+                search::resolve_metadata(&metadata, stale_ids)
             })
             .map(move |result| {
                 RootMessage::Search(search::Message::MetadataCompleted(
@@ -72,9 +75,12 @@ impl App {
 
         let worker_item_ids = item_ids.clone();
         let delivery_item_ids = item_ids;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("search-metadata-refresh", move |app| {
-                search::refresh_metadata(app.workshop(), &worker_item_ids)
+                app.workshop()
+                    .refresh_metadata(&worker_item_ids)
+                    .map(|metadata| search::refresh_metadata(&metadata))
             })
             .map(move |result| {
                 RootMessage::Search(search::Message::MetadataRefreshCompleted(
@@ -87,15 +93,16 @@ impl App {
 
     pub(super) fn search_full_task(&mut self) -> Task<RootMessage> {
         let task = self
+            .environment
             .ctx
             .create_task(TaskKind::Search, TransactionStatus::Searching);
-        let Some(start) = self.state.search.begin_full_search(task.id()) else {
+        let Some(start) = self.state.features.search.begin_full_search(task.id()) else {
             task.error(gmpublished_backend::error_keys::CANCELLED);
             return Task::none();
         };
 
         if let Some(task_id) = start.cancel_task {
-            let _cancelled = self.ctx.cancel_task(task_id);
+            let _cancelled = self.environment.ctx.cancel_task(task_id);
         }
 
         self.search_full_stream_task(start.request, task)
@@ -106,7 +113,7 @@ impl App {
         request: SearchFullRequest,
         task: TaskHandle,
     ) -> Task<RootMessage> {
-        let ctx = self.ctx.clone();
+        let ctx = self.environment.ctx.clone();
         Task::stream(stream::channel(100, async move |output| {
             let fallback_request = request.clone();
             let mut schedule_error_output = output.clone();
@@ -129,7 +136,7 @@ impl App {
     }
 
     pub(super) fn search_result_task(&mut self, row_id: usize) -> Task<RootMessage> {
-        let Some(selection) = self.state.search.selection_for(row_id) else {
+        let Some(selection) = self.state.features.search.selection_for(row_id) else {
             log::debug!("ignored search activation for unknown row id `{row_id}`");
             return Task::none();
         };
@@ -139,14 +146,17 @@ impl App {
                 path,
                 workshop_id,
                 preview_url,
-            } => self.apply_preview_gma_message(preview_gma::Message::OpenRequested(
-                preview_gma::OpenTarget::new(path, selection.title, workshop_id).with_seed(
-                    preview_gma::OpenSeed {
-                        preview_url,
-                        ..preview_gma::OpenSeed::default()
-                    },
+            } => self.apply_preview_gma_message(
+                preview_gma::Message::OpenRequested(
+                    preview_gma::OpenTarget::new(path, selection.title, workshop_id).with_seed(
+                        preview_gma::OpenSeed {
+                            preview_url,
+                            ..preview_gma::OpenSeed::default()
+                        },
+                    ),
                 ),
-            )),
+                self.update_context,
+            ),
             search::SelectionAction::MyWorkshop {
                 workshop_id,
                 title,
@@ -178,10 +188,13 @@ impl App {
                 addon_title,
                 workshop_id,
                 entry_path,
-            } => self.apply_preview_gma_message(preview_gma::Message::OpenRequested(
-                preview_gma::OpenTarget::new(addon_path, addon_title, workshop_id)
-                    .with_initial_entry_preview(entry_path),
-            )),
+            } => self.apply_preview_gma_message(
+                preview_gma::Message::OpenRequested(
+                    preview_gma::OpenTarget::new(addon_path, addon_title, workshop_id)
+                        .with_initial_entry_preview(entry_path),
+                ),
+                self.update_context,
+            ),
         }
     }
 }

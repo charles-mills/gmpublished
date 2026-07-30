@@ -628,19 +628,24 @@ mod tests {
         use gmpublished_backend::error_keys as keys;
 
         let i18n = I18n::for_locale(Some("en"));
-        let fallback = i18n.tr("err-unknown");
 
-        for key in [
-            keys::GMOD_PATH_MISSING,
-            keys::NO_ADDONS_FOUND,
-            keys::IO_ERROR,
-        ] {
+        for &key in keys::ALL {
+            let message_id = format!(
+                "err-{}",
+                key.as_str()
+                    .trim_start_matches("ERR_")
+                    .to_ascii_lowercase()
+                    .replace('_', "-")
+            );
+            let expected = i18n
+                .try_tr(&message_id)
+                .unwrap_or_else(|| panic!("{} has no {message_id} catalog entry", key.as_str()));
             let translated =
                 super::translated_error(&i18n, &crate::bridge::ui_error::UiError::new(key));
-            assert_ne!(
+            assert_eq!(
                 translated,
-                fallback,
-                "{} has no err-* catalog entry",
+                expected,
+                "{} did not resolve through its own catalog entry",
                 key.as_str()
             );
         }

@@ -115,15 +115,7 @@ fn create_fixture_gma(fixture: &Fixture, dir: &TempDir, title: &str) -> PathBuf 
     write_fixture_source(&source);
 
     let gma_path = dir.path().join("fixture.gma");
-    let gma = GmaFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata(title),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata(title));
 
     let transaction = fixture.transactions.begin();
     gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu)
@@ -190,11 +182,11 @@ fn gma_write_read_extract_round_trip_from_generated_fixture() {
     let gma_path = create_fixture_gma(&fixture, &dir, "Round Trip Fixture");
 
     let (gma, view) = read_generated_gma(&gma_path);
-    assert_eq!(gma.version, 3);
-    assert_eq!(gma.metadata.title(), "Round Trip Fixture");
-    assert_eq!(gma.metadata.addon_type(), Some("tool"));
+    assert_eq!(gma.version(), 3);
+    assert_eq!(gma.metadata().title(), "Round Trip Fixture");
+    assert_eq!(gma.metadata().addon_type(), Some("tool"));
     assert_eq!(
-        gma.metadata.tags().unwrap(),
+        gma.metadata().tags().unwrap(),
         &vec!["build".to_string(), "fun".to_string()]
     );
 
@@ -248,15 +240,7 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
     fs::write(lua_dir.join("z_after.lua"), b"print('after')\n").unwrap();
 
     let gma_path = dir.path().join("large.gma");
-    let gma = GmaFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Large Stream Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Large Stream Fixture"));
     let transaction = fixture.transactions.begin();
     gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu)
         .unwrap();
@@ -324,15 +308,7 @@ fn gma_create_failure_leaves_nothing_at_the_final_path() {
     let gma_path = dir.path().join("blocked.gma");
     fs::create_dir_all(&gma_path).unwrap();
 
-    let gma = GmaFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Blocked Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Blocked Fixture"));
 
     let transaction = fixture.transactions.begin();
     let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
@@ -370,15 +346,7 @@ fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
     let gma_path = dir.path().join("walk-error.gma");
-    let gma = GmaFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Walk Error Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Walk Error Fixture"));
 
     let transaction = fixture.transactions.begin();
     let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
@@ -426,15 +394,7 @@ fn gma_create_non_utf8_entry_name_errors_naming_the_path() {
     fs::write(source.join(bad_name), b"print('bad name')\n").unwrap();
 
     let gma_path = dir.path().join("non-utf8.gma");
-    let gma = GmaFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Non-UTF8 Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Non-UTF8 Fixture"));
 
     let transaction = fixture.transactions.begin();
     let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
@@ -460,17 +420,23 @@ fn gma_lzma_bin_decompresses_generated_gma_payload() {
     fs::write(&bin_path, encoded).unwrap();
 
     let transaction = fixture.transactions.begin();
-    let (decompressed, view) =
+    let (mut decompressed, view) =
         GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
 
-    assert_eq!(decompressed.metadata.title(), "LZMA Fixture");
+    assert_eq!(decompressed.metadata().title(), "LZMA Fixture");
+    decompressed.set_workshop_id(gmpublished_backend::WorkshopId::new(4242).unwrap());
+    assert_eq!(
+        decompressed.extracted_name(),
+        "lzma_fixture_4242",
+        "assigning the downloaded item id must refresh a legacy .bin's extraction name"
+    );
     assert!(
         view.entries()
             .unwrap()
             .contains_key("lua/autorun/round_trip.lua")
     );
-    assert_eq!(decompressed.size, fs::metadata(&gma_path).unwrap().len());
+    assert_eq!(decompressed.size(), fs::metadata(&gma_path).unwrap().len());
 }
 
 #[test]
@@ -495,8 +461,8 @@ fn gma_lzma_bin_with_known_size_decompresses_in_memory() {
 
     assert!(!view.is_temp_backed());
 
-    assert_eq!(decompressed.metadata.title(), "LZMA Sized Fixture");
-    assert_eq!(decompressed.size, raw.len() as u64);
+    assert_eq!(decompressed.metadata().title(), "LZMA Sized Fixture");
+    assert_eq!(decompressed.size(), raw.len() as u64);
 }
 
 #[test]
@@ -561,7 +527,7 @@ fn gma_lzma_bin_with_unknown_size_spills_to_disk_and_cleans_up_on_drop() {
         .to_path_buf();
     assert!(spill_path.is_file());
 
-    assert_eq!(decompressed.metadata.title(), "LZMA Spill Fixture");
+    assert_eq!(decompressed.metadata().title(), "LZMA Spill Fixture");
 
     drop((decompressed, view));
     assert!(!spill_path.exists());
@@ -632,7 +598,7 @@ fn gma_header_projects_full_fields_matching_the_constructed_handle() {
     // `header()` independently re-derives fields the handle doesn't keep
     // (timestamp, author, addon_version); its title still agrees with the
     // one `open()` already stamped onto the handle.
-    assert_eq!(gma.metadata.title(), header.metadata.title());
+    assert_eq!(gma.metadata().title(), header.metadata.title());
 }
 
 #[test]

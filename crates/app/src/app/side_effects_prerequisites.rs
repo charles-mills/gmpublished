@@ -44,8 +44,9 @@ impl App {
     /// session moves to Connecting first so the panel spins the button that
     /// was pressed rather than replacing itself.
     fn steam_retry_now_task(&mut self) -> Task<RootMessage> {
-        if self.ctx.steam_connected()
-            || self.state.steam_session.status() == steam_session::ConnectionStatus::Connecting
+        if self.environment.ctx.steam_connected()
+            || self.state.features.steam_session.status()
+                == steam_session::ConnectionStatus::Connecting
         {
             return Task::none();
         }
@@ -57,7 +58,7 @@ impl App {
     }
 
     fn game_folder_picker_task(&self) -> Task<RootMessage> {
-        let (_, resolved) = self.ctx.game_paths();
+        let (_, resolved) = self.environment.ctx.game_paths();
         let directory = resolved.unwrap_or_else(|| PathBuf::from("."));
         let title = self.state.i18n.tr("native-dialog-select-settings-folder");
         Task::future(async move {
@@ -82,8 +83,9 @@ impl App {
             return Task::none();
         }
 
-        self.state.prerequisites.begin_game_search();
-        self.ctx
+        self.state.features.prerequisites.begin_game_search();
+        self.environment
+            .ctx
             .run_blocking_ui("prerequisites-set-gmod-dir", move |app| {
                 app.config()
                     .update_settings_snapshot(|settings| {
@@ -98,8 +100,9 @@ impl App {
     }
 
     fn game_search_task(&mut self) -> Task<RootMessage> {
-        self.state.prerequisites.begin_game_search();
-        self.ctx
+        self.state.features.prerequisites.begin_game_search();
+        self.environment
+            .ctx
             .run_blocking_ui("prerequisites-discover-gmod-dir", |app| {
                 Ok(app.config().rediscover_gmod_dir())
             })
@@ -123,8 +126,9 @@ impl App {
             }
         };
         let resolved = resolved.as_deref();
-        let (configured, _) = self.ctx.game_paths();
+        let (configured, _) = self.environment.ctx.game_paths();
         self.state
+            .features
             .prerequisites
             .set_game(prerequisites::GameStatus::from_paths(
                 configured.as_deref(),
@@ -143,8 +147,9 @@ impl App {
     /// Re-reads the prerequisite facts from whatever settings snapshot just
     /// landed. Cheap: both halves are already-cached values.
     pub(super) fn sync_game_prerequisite(&mut self) {
-        let (configured, resolved) = self.ctx.game_paths();
+        let (configured, resolved) = self.environment.ctx.game_paths();
         self.state
+            .features
             .prerequisites
             .set_game(prerequisites::GameStatus::from_paths(
                 configured.as_deref(),
@@ -156,7 +161,8 @@ impl App {
     /// answers with the client closed — which is exactly the case that has to
     /// tell "not running" apart from "not installed".
     pub(super) fn steam_installed_probe_task(&self) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("prerequisites-steam-installed", |_app| {
                 gmpublished_backend::steam_client_installed()
             })

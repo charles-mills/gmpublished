@@ -17,7 +17,7 @@ use steamworks::{ItemState, QueryResults, UGC};
 use crate::WorkshopId;
 
 use crate::{
-    GMOD_APP_ID, GmaError, GmaFile,
+    GmaError, GmaFile, STEAM_GMOD_APP_ID,
     appdata::AppData,
     events::{BackendEvent, DownloadStartedEvent, ExtractionStartedEvent, WorkshopSnapshotId},
     execution::ExecutionResources,
@@ -360,12 +360,12 @@ impl Downloads {
                     return;
                 };
 
-                gma.id = Some(item);
+                gma.set_workshop_id(item);
 
                 transaction.status(crate::transactions::TransactionStatus::ReadingMetadata);
                 transaction.data(crate::transactions::TransactionPayload::ByteSize {
-                    source: Some(gma.metadata.title().to_owned()),
-                    bytes: gma.size,
+                    source: Some(gma.metadata().title().to_owned()),
+                    bytes: gma.size(),
                 });
 
                 let extraction = match ExtractionContext::resolve(
@@ -936,7 +936,7 @@ impl Downloads {
         let downloads_for_callback = Arc::clone(downloads);
         let callback_client = client.clone();
         let _cb = client.register_callback(move |result: steamworks::DownloadItemResult| {
-            if result.app_id == GMOD_APP_ID {
+            if result.app_id == STEAM_GMOD_APP_ID {
                 let mut in_progress = in_progress_ref.0.lock();
                 let matched = in_progress.as_ref().is_some_and(|download| {
                     Ok(download.item) == WorkshopId::try_from(result.published_file_id)

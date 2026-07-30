@@ -4,8 +4,7 @@ use iced::{Event, Subscription, event, keyboard};
 
 use super::{ActiveModal, Effect, Message, State};
 
-pub fn update(state: &mut State, message: &Message) -> Vec<Effect> {
-    let now = Instant::now();
+pub fn update_at(state: &mut State, message: &Message, now: Instant) -> Vec<Effect> {
     let displaced = match message {
         Message::OpenDestinationSelect => state.open(ActiveModal::DestinationSelect, now),
         Message::OpenPreparePublish => state.open(ActiveModal::PreparePublish, now),
@@ -17,6 +16,11 @@ pub fn update(state: &mut State, message: &Message) -> Vec<Effect> {
         }
     };
     displaced.map(Effect::Displaced).into_iter().collect()
+}
+
+#[cfg(test)]
+fn update(state: &mut State, message: &Message) -> Vec<Effect> {
+    update_at(state, message, Instant::now())
 }
 
 /// Overlay modals always close on Escape. For the base layer, Settings is

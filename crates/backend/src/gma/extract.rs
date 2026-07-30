@@ -118,7 +118,7 @@ pub struct ExtractionContext {
     recycle_existing: bool,
     overwrite_mode: ExtractionOverwriteMode,
     open_after: bool,
-    whitelist: Option<Arc<Vec<String>>>,
+    whitelist: Option<Arc<[String]>>,
 }
 
 impl ExtractionContext {
@@ -544,152 +544,147 @@ impl GmaView {
         context: ExtractionContext,
         cpu: &CpuExecutor,
     ) -> Result<PathBuf, GmaError> {
-        let context = match context.prepare_destination() {
-            Ok(context) => context,
-            Err(error) => {
-                if !transaction.aborted() {
-                    transaction.error(&error);
-                }
-                return Err(error);
-            }
-        };
-        let ExtractionContext {
-            destination: dest_path,
-            recycle_existing: _,
-            overwrite_mode: _,
-            open_after,
-            whitelist: whitelist_snapshot,
-        } = context;
+        let open_after = context.open_after;
+        let result = transaction.complete(
+            || {
+                let context = context.prepare_destination()?;
+                let ExtractionContext {
+                    destination: dest_path,
+                    recycle_existing: _,
+                    overwrite_mode: _,
+                    open_after: _,
+                    whitelist: whitelist_snapshot,
+                } = context;
 
-        let result = cpu.install(|| -> Result<PathBuf, GmaError> {
-            // Only a destination that survived cleanup (or was never
-            // touched, e.g. an explicit `Directory`) can carry out-of-band
-            // symlinks; a freshly allocated one has nothing planted in it.
-            let dest_existed = dest_path.exists();
+                let dest_path = cpu.install(|| -> Result<PathBuf, GmaError> {
+                    // Only a destination that survived cleanup (or was never
+                    // touched, e.g. an explicit `Directory`) can carry out-of-band
+                    // symlinks; a freshly allocated one has nothing planted in it.
+                    let dest_existed = dest_path.exists();
 
-            let entries = self.extraction_entries()?;
-            let entries_len_f = entries.len() as f64;
+                    let entries = self.extraction_entries()?;
+                    let entries_len_f = entries.len() as f64;
 
-            let i = AtomicUsize::new(0);
-            let extracted = AtomicUsize::new(0);
-            let failed = AtomicUsize::new(0);
-            let rejected = AtomicUsize::new(0);
-            let first_error: OnceLock<Arc<str>> = OnceLock::new();
-            let verified_dirs: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
-            let record_first_error = |message: String| {
-                let _ = first_error.set(message.into());
-            };
+                    let i = AtomicUsize::new(0);
+                    let extracted = AtomicUsize::new(0);
+                    let failed = AtomicUsize::new(0);
+                    let rejected = AtomicUsize::new(0);
+                    let first_error: OnceLock<Arc<str>> = OnceLock::new();
+                    let verified_dirs: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
+                    let record_first_error = |message: String| {
+                        let _ = first_error.set(message.into());
+                    };
 
-            entries
-                .par_iter()
-                .try_for_each(|entry| -> Result<(), GmaError> {
-                    let entry_path = &entry.path;
-                    if whitelist_snapshot
-                        .as_ref()
-                        .is_none_or(|snapshot| whitelist::is_whitelisted_in(snapshot, entry_path))
-                    {
-                        if transaction.aborted() {
-                            return Err(GmaError::Cancelled);
-                        }
-
-                        let final_path = dest_path.join(entry_path);
-                        if !final_path.starts_with(&dest_path) {
-                            failed.fetch_add(1, Ordering::AcqRel);
-                            record_first_error(format!("unsafe entry path: {entry_path}"));
-                            log::warn!("Refusing to extract unsafe entry path: {entry_path}");
-                        } else if dest_existed
-                            && let Err(err) = verify_no_symlink_ancestors(
-                                &dest_path,
-                                final_path.parent().unwrap_or(&dest_path),
-                                &verified_dirs,
-                            )
-                        {
-                            failed.fetch_add(1, Ordering::AcqRel);
-                            record_first_error(format!(
-                                "refusing to extract {}: {err}",
-                                final_path.display()
-                            ));
-                            log::warn!("Refusing to extract {}: {err}", final_path.display());
-                        } else {
-                            match write_entry(self, entry, &final_path, None) {
-                                Ok(()) => {
-                                    extracted.fetch_add(1, Ordering::AcqRel);
+                    entries
+                        .par_iter()
+                        .try_for_each(|entry| -> Result<(), GmaError> {
+                            let entry_path = &entry.path;
+                            if whitelist_snapshot.as_ref().is_none_or(|snapshot| {
+                                whitelist::is_whitelisted_in(snapshot, entry_path)
+                            }) {
+                                if transaction.aborted() {
+                                    return Err(GmaError::Cancelled);
                                 }
-                                Err(err) => {
+
+                                let final_path = dest_path.join(entry_path);
+                                if !final_path.starts_with(&dest_path) {
+                                    failed.fetch_add(1, Ordering::AcqRel);
+                                    record_first_error(format!("unsafe entry path: {entry_path}"));
+                                    log::warn!(
+                                        "Refusing to extract unsafe entry path: {entry_path}"
+                                    );
+                                } else if dest_existed
+                                    && let Err(err) = verify_no_symlink_ancestors(
+                                        &dest_path,
+                                        final_path.parent().unwrap_or(&dest_path),
+                                        &verified_dirs,
+                                    )
+                                {
                                     failed.fetch_add(1, Ordering::AcqRel);
                                     record_first_error(format!(
-                                        "failed to extract entry to {}: {err}",
+                                        "refusing to extract {}: {err}",
                                         final_path.display()
                                     ));
                                     log::warn!(
-                                        "Failed to extract entry to {}: {err}",
+                                        "Refusing to extract {}: {err}",
                                         final_path.display()
                                     );
+                                } else {
+                                    match write_entry(self, entry, &final_path, None) {
+                                        Ok(()) => {
+                                            extracted.fetch_add(1, Ordering::AcqRel);
+                                        }
+                                        Err(err) => {
+                                            failed.fetch_add(1, Ordering::AcqRel);
+                                            record_first_error(format!(
+                                                "failed to extract entry to {}: {err}",
+                                                final_path.display()
+                                            ));
+                                            log::warn!(
+                                                "Failed to extract entry to {}: {err}",
+                                                final_path.display()
+                                            );
+                                        }
+                                    }
                                 }
+                            } else {
+                                rejected.fetch_add(1, Ordering::AcqRel);
+                                record_first_error(format!(
+                                    "entry rejected by whitelist: {entry_path}"
+                                ));
                             }
-                        }
-                    } else {
-                        rejected.fetch_add(1, Ordering::AcqRel);
-                        record_first_error(format!("entry rejected by whitelist: {entry_path}"));
+
+                            let i = i.fetch_add(1, Ordering::AcqRel) + 1;
+                            transaction.progress((i as f64) / entries_len_f);
+
+                            Ok(())
+                        })?;
+
+                    let extracted = extracted.into_inner();
+                    let failed = failed.into_inner();
+                    let rejected = rejected.into_inner();
+                    let mut first_error = first_error.into_inner();
+
+                    // A manifest write failure on an otherwise-complete extraction
+                    // still means the addon didn't fully land; fold it into the
+                    // same failed-entry accounting rather than a separate outcome.
+                    if failed == 0
+                        && extracted > 0
+                        && let Err(err) = write_addon_json(handle, &dest_path)
+                    {
+                        return Err(GmaError::ExtractionFailed {
+                            extracted,
+                            failed: 1,
+                            rejected,
+                            first_error: Some(format!("failed to write addon.json: {err}").into()),
+                        });
                     }
 
-                    let i = i.fetch_add(1, Ordering::AcqRel) + 1;
-                    transaction.progress((i as f64) / entries_len_f);
+                    if failed > 0 || extracted == 0 {
+                        return Err(GmaError::ExtractionFailed {
+                            extracted,
+                            failed,
+                            rejected,
+                            first_error: first_error.take(),
+                        });
+                    }
 
-                    Ok(())
+                    Ok(dest_path)
                 })?;
 
-            let extracted = extracted.into_inner();
-            let failed = failed.into_inner();
-            let rejected = rejected.into_inner();
-            let mut first_error = first_error.into_inner();
-
-            // A manifest write failure on an otherwise-complete extraction
-            // still means the addon didn't fully land; fold it into the
-            // same failed-entry accounting rather than a separate outcome.
-            if failed == 0
-                && extracted > 0
-                && let Err(err) = write_addon_json(handle, &dest_path)
-            {
-                return Err(GmaError::ExtractionFailed {
-                    extracted,
-                    failed: 1,
-                    rejected,
-                    first_error: Some(format!("failed to write addon.json: {err}").into()),
-                });
-            }
-
-            if failed > 0 || extracted == 0 {
-                return Err(GmaError::ExtractionFailed {
-                    extracted,
-                    failed,
-                    rejected,
-                    first_error: first_error.take(),
-                });
-            }
-
-            Ok(dest_path)
-        });
-
-        match &result {
-            Ok(dest_path) => {
-                if !transaction.aborted() {
-                    transaction.finished(crate::transactions::TransactionPayload::ExtractedPath(
-                        dest_path.clone(),
-                    ));
-                    if open_after {
-                        // Failure is already logged; extraction itself succeeded.
-                        let _ = crate::path::open(dest_path);
-                    }
-                }
-            }
-            Err(error) => {
-                if !transaction.aborted() {
-                    transaction.error(error);
-                }
-            }
+                Ok(dest_path)
+            },
+            |dest_path| crate::transactions::TransactionPayload::ExtractedPath(dest_path.clone()),
+        );
+        if open_after
+            && !transaction.cancelled()
+            && let Ok(dest_path) = &result
+        {
+            // Native opening is an optional post-success side effect. Emit the
+            // terminal event first so a slow shell integration cannot hold the
+            // task in its running state.
+            let _ = crate::path::open(dest_path);
         }
-
         result
     }
 
@@ -712,44 +707,41 @@ impl GmaView {
             open_after: open_after_extract,
             whitelist: _,
         } = options;
-        let context = ExtractionAppDataContext::for_temp_entry(app_data, steam);
-        let mut base = context.temp_dir;
-        base.push("gmpublisher");
-        base.push(&handle.extracted_name);
+        let result = transaction.complete(
+            || {
+                let context = ExtractionAppDataContext::for_temp_entry(app_data, steam);
+                let mut base = context.temp_dir;
+                base.push("gmpublisher");
+                base.push(&handle.extracted_name);
 
-        let mut path = base.clone();
-        path.push(&entry_path);
+                let mut path = base.clone();
+                path.push(&entry_path);
 
-        if !path.starts_with(&base) {
-            return Err(GmaError::FormatError);
+                if !path.starts_with(&base) {
+                    return Err(GmaError::FormatError);
+                }
+
+                // Unsafe entry paths must stay invisible here, exactly as `entries`
+                // filters them out of its projection; the `starts_with` check above
+                // does not resolve `..` components.
+                let entries = self.extraction_entries()?;
+                let entry = (!is_unsafe_entry_path(&entry_path))
+                    .then(|| entries.iter().find(|entry| entry.path == entry_path))
+                    .flatten()
+                    .ok_or(GmaError::EntryNotFound)?;
+                write_entry(self, entry, &path, Some(transaction))?;
+
+                Ok(path)
+            },
+            |path| crate::transactions::TransactionPayload::ExtractedPath(path.clone()),
+        );
+        if open_after_extract
+            && !transaction.cancelled()
+            && let Ok(path) = &result
+        {
+            // Keep optional native integration outside transaction completion.
+            let _ = crate::path::open(path);
         }
-
-        // Unsafe entry paths must stay invisible here, exactly as `entries`
-        // filters them out of its projection; the `starts_with` check above
-        // does not resolve `..` components.
-        let entries = self.extraction_entries()?;
-        let entry = (!is_unsafe_entry_path(&entry_path))
-            .then(|| entries.iter().find(|entry| entry.path == entry_path))
-            .flatten()
-            .ok_or(GmaError::EntryNotFound)?;
-        let result = write_entry(self, entry, &path, Some(transaction)).map(|_| path.clone());
-
-        if let Err(error) = &result {
-            if !transaction.aborted() {
-                transaction.error(error);
-            }
-        } else if !transaction.aborted() {
-            if open_after_extract {
-                transaction.finished(crate::transactions::TransactionPayload::ExtractedPath(
-                    path.clone(),
-                ));
-                // Failure is already logged; extraction itself succeeded.
-                let _ = crate::path::open(path);
-            } else {
-                transaction.finished(crate::transactions::TransactionPayload::ExtractedPath(path));
-            }
-        }
-
         result
     }
 }

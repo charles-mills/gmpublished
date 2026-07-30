@@ -11,11 +11,10 @@ const GITHUB_RELEASE_TAG_URL_PREFIX: &str =
     "https://github.com/charles-mills/gmpublished/releases/tag/";
 const UPDATE_CHECK_USER_AGENT: &str = concat!("gmpublished/", env!("CARGO_PKG_VERSION"));
 // Fail fast and silent: a slow GitHub round-trip should never hold the
-// update badge hostage. Sub-timeouts sit inside the global budget so none
-// of them is dead config.
-const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
-const UPDATE_CHECK_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const UPDATE_CHECK_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
+// update badge hostage.
+const UPDATE_CHECK_TIMEOUTS: crate::net::HttpTimeouts = crate::net::HttpTimeouts::new()
+    .global_timeout(Duration::from_secs(3))
+    .connect_timeout(Duration::from_secs(2));
 
 #[derive(Debug, Error)]
 pub enum UpdateCheckError {
@@ -47,11 +46,7 @@ pub fn fetch_latest_update(
 }
 
 fn update_check_agent() -> ureq::Agent {
-    crate::net::build_agent(
-        UPDATE_CHECK_TIMEOUT,
-        UPDATE_CHECK_CONNECT_TIMEOUT,
-        UPDATE_CHECK_RESPONSE_TIMEOUT,
-    )
+    crate::net::build_agent(UPDATE_CHECK_TIMEOUTS)
 }
 
 fn update_release_from_json(json: &str, current_version: &str) -> Option<UpdateRelease> {

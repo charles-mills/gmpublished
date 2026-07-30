@@ -309,7 +309,7 @@ impl State {
         }
     }
 
-    pub(super) fn begin_open(&mut self, target: OpenTarget) -> OpenRequest {
+    pub(super) fn begin_open_at(&mut self, target: OpenTarget, now: Instant) -> OpenRequest {
         self.request_id.bump();
         self.open = true;
         self.loading = true;
@@ -328,7 +328,7 @@ impl State {
         self.workshop_metadata_requested = self.workshop_id.is_none();
         self.author_requested = false;
         self.author_fetch_failed = false;
-        self.spinner_started_at = Some(Instant::now());
+        self.spinner_started_at = Some(now);
         self.spinner_now = None;
         // Seed the preview from the click source so the pipeline can serve
         // the grid's cached image immediately; otherwise reserve the square
@@ -349,6 +349,11 @@ impl State {
             path: target.path,
             workshop_id: self.workshop_id,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn begin_open(&mut self, target: OpenTarget) -> OpenRequest {
+        self.begin_open_at(target, Instant::now())
     }
 
     pub(super) fn apply_archive_opened(

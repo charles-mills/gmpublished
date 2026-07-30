@@ -15,11 +15,11 @@ use std::{
 
 use crate::gma::{ExtractDestination, ExtractionOverwriteMode};
 
-use crate::GMOD_APP_ID;
 use crate::WorkshopId;
 use crate::events::BackendEvent;
 use crate::steam::Steam;
 use crate::transactions::Transactions;
+use crate::{GMOD_APP_ID, STEAM_GMOD_APP_ID};
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -652,7 +652,7 @@ impl AppData {
             log::info!("Steam is not connected, parsing Steam library folders...");
             if let Some(path) = steamlocate::SteamDir::locate().ok().and_then(|steam_dir| {
                 steam_dir
-                    .find_app(GMOD_APP_ID.0)
+                    .find_app(GMOD_APP_ID)
                     .ok()
                     .flatten()
                     .map(|(app, library)| library.resolve_app_dir(&app))
@@ -675,7 +675,7 @@ impl AppData {
             .ok()?
             .client()
             .apps()
-            .app_install_dir(GMOD_APP_ID)
+            .app_install_dir(STEAM_GMOD_APP_ID)
             .into();
         if gmod.is_dir() {
             log::info!("Located!");

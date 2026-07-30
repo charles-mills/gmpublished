@@ -48,7 +48,7 @@ fn load_audio_state(state: &mut State, duration_secs: f32, position_secs: f32) {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Audio {
-            bytes: Arc::new(Vec::new()),
+            bytes: Arc::from(Vec::new()),
             duration_secs: Some(duration_secs),
         },
     );

@@ -125,7 +125,7 @@ fn write_raw_gma(path: &Path, entries: &[(&str, &[u8])]) {
 fn open_fixture_gma(path: &Path) -> (GmaFile, GmaView) {
     let gma = GmaFile::open(path).expect("fixture gma");
     let view = gma.view().expect("fixture view");
-    assert_eq!(gma.extracted_name, FIXTURE_EXTRACTED_NAME);
+    assert_eq!(gma.extracted_name(), FIXTURE_EXTRACTED_NAME);
     (gma, view)
 }
 

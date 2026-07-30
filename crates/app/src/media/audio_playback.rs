@@ -12,18 +12,18 @@ const MAX_DOOR_PLAYERS: usize = 16;
 const MIN_DOOR_GAIN: f32 = 0.001;
 
 #[derive(Clone)]
-pub struct SharedAudioBytes(Arc<Vec<u8>>);
+pub struct SharedAudioBytes(Arc<[u8]>);
 
 impl AsRef<[u8]> for SharedAudioBytes {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_slice()
+        &self.0
     }
 }
 
 pub type AudioDecoder = rodio::Decoder<Cursor<SharedAudioBytes>>;
 
 pub fn decoder_from_audio_bytes(
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<[u8]>,
 ) -> Result<AudioDecoder, rodio::decoder::DecoderError> {
     rodio::Decoder::try_from(Cursor::new(SharedAudioBytes(bytes)))
 }
@@ -78,7 +78,7 @@ impl AudioPlayback {
 
     pub fn play(
         &mut self,
-        bytes: Arc<Vec<u8>>,
+        bytes: Arc<[u8]>,
         resume_at: f32,
     ) -> Result<(), rodio::decoder::DecoderError> {
         let decoder = decoder_from_audio_bytes(bytes)?;
@@ -235,7 +235,7 @@ impl AudioPlayback {
         self.door_one_shots.push(DoorPlayer { player, gain });
     }
 
-    fn next_door_sound_wave(&mut self, sound: &preview_model::DoorSound) -> Option<Arc<Vec<u8>>> {
+    fn next_door_sound_wave(&mut self, sound: &preview_model::DoorSound) -> Option<Arc<[u8]>> {
         if sound.waves.is_empty() {
             return None;
         }

@@ -449,6 +449,10 @@ impl TransactionInner {
     fn aborted(&self) -> bool {
         State::from_raw(self.state.load(Ordering::Acquire)) != State::Running
     }
+
+    fn cancelled(&self) -> bool {
+        State::from_raw(self.state.load(Ordering::Acquire)) == State::Cancelled
+    }
 }
 impl Transaction {
     #[must_use]
@@ -491,6 +495,33 @@ impl Transaction {
         self.0.finished(payload)
     }
 
+    /// Runs fallible transaction work and performs its matching terminal
+    /// transition exactly once on the normal path.
+    ///
+    /// The original result is returned unchanged. If cancellation wins while
+    /// `work` is running, the attempted success or error transition is rejected
+    /// by the transaction state machine, leaving cancellation as the terminal
+    /// event.
+    pub fn complete<T, E>(
+        &self,
+        work: impl FnOnce() -> Result<T, E>,
+        success_payload: impl FnOnce(&T) -> TransactionPayload,
+    ) -> Result<T, E>
+    where
+        E: HasErrorKey,
+    {
+        let result = work();
+        match &result {
+            Ok(value) => {
+                self.finished(success_payload(value));
+            }
+            Err(error) => {
+                self.error(TransactionError::from(error));
+            }
+        }
+        result
+    }
+
     /// Attempts to cancel this transaction.
     pub fn cancel(&self) -> FinalizeOutcome {
         self.0.cancel()
@@ -499,6 +530,16 @@ impl Transaction {
     #[must_use]
     pub fn aborted(&self) -> bool {
         self.0.aborted()
+    }
+
+    /// Reports whether cancellation, specifically, won the terminal transition.
+    ///
+    /// Unlike [`Self::aborted`], successful and errored completion return
+    /// `false`. Terminal states never change, so a `false` result after this
+    /// transaction has attempted completion cannot race with a later cancel.
+    #[must_use]
+    pub fn cancelled(&self) -> bool {
+        self.0.cancelled()
     }
 }
 
@@ -531,8 +572,8 @@ mod tests {
     use std::sync::{Arc, Barrier, atomic::AtomicU8};
 
     use super::{
-        EmitOutcome, FinalizeOutcome, State, TransactionId, TransactionInner, TransactionRegistry,
-        TransactionStatus, Transactions, TransactionsShared, progress_as_int,
+        EmitOutcome, FinalizeOutcome, State, TransactionId, TransactionInner, TransactionPayload,
+        TransactionRegistry, TransactionStatus, Transactions, TransactionsShared, progress_as_int,
     };
 
     use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};
@@ -662,6 +703,79 @@ mod tests {
         assert_eq!(
             transaction.error(crate::error_key::keys::UNKNOWN),
             FinalizeOutcome::AlreadyCompleted
+        );
+    }
+
+    #[test]
+    fn complete_maps_success_to_exactly_one_finished_event() {
+        let collector = BackendEventCollector::default();
+        let transactions = Transactions::new(Arc::new(collector.clone()));
+        let transaction = transactions.begin();
+        let id = transaction.id();
+
+        let result = transaction.complete(
+            || Ok::<_, crate::GmaError>(42_u64),
+            |bytes| TransactionPayload::TotalBytes(*bytes),
+        );
+
+        assert_eq!(result, Ok(42));
+        assert!(!transaction.cancelled());
+        assert_eq!(
+            collector.drain(),
+            vec![BackendEvent::Transaction(TransactionEvent::Finished {
+                id,
+                payload: TransactionPayload::TotalBytes(42),
+            })]
+        );
+    }
+
+    #[test]
+    fn complete_preserves_the_error_and_emits_it_exactly_once() {
+        let collector = BackendEventCollector::default();
+        let transactions = Transactions::new(Arc::new(collector.clone()));
+        let transaction = transactions.begin();
+        let id = transaction.id();
+
+        let result = transaction.complete(
+            || Err::<(), _>(crate::GmaError::FormatError),
+            |_| TransactionPayload::None,
+        );
+
+        assert_eq!(result, Err(crate::GmaError::FormatError));
+        assert!(!transaction.cancelled());
+        assert_eq!(
+            collector.drain(),
+            vec![BackendEvent::Transaction(TransactionEvent::Error {
+                id,
+                error: super::TransactionError::new(crate::error_key::keys::GMA_FORMAT_ERROR),
+            })]
+        );
+    }
+
+    #[test]
+    fn cancellation_remains_the_winner_when_complete_returns_later() {
+        let collector = BackendEventCollector::default();
+        let transactions = Transactions::new(Arc::new(collector.clone()));
+        let transaction = transactions.begin();
+        let id = transaction.id();
+        let cancelling_transaction = transaction.clone();
+
+        let result = transaction.complete(
+            || {
+                assert_eq!(cancelling_transaction.cancel(), FinalizeOutcome::Finalized);
+                Ok::<_, crate::GmaError>(())
+            },
+            |_| TransactionPayload::None,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert!(transaction.cancelled());
+        assert_eq!(
+            collector.drain(),
+            vec![BackendEvent::Transaction(TransactionEvent::Error {
+                id,
+                error: super::TransactionError::new(crate::error_key::keys::CANCELLED),
+            })]
         );
     }
 

@@ -2,11 +2,17 @@
 //! message enum they all fold into, and the update/view/subscription trio Iced
 //! drives.
 //!
-//! Features never reach each other or the backend directly. Each `update`
-//! returns plain `Effect` values, and the runners in the `side_effects_*`
-//! modules are the only place those become work — a task on a shared executor, a
-//! window operation, a native dialog. That is what keeps the features testable
-//! without a backend and keeps every side effect enumerable in one place.
+//! Feature state and update code never holds backend/service handles or starts
+//! operational work. Each `update` returns plain `Effect` values; runners in
+//! `side_effects_*` invoke bridge services on the shared executors, perform
+//! window/native operations, and translate their results back into messages.
+//! Bridge modules own filesystem, image, Steam, and transaction orchestration;
+//! features own UI state and pure projections of bridge DTOs.
+//!
+//! A feature may deliberately compose another UI feature. Prepare Publish, for
+//! example, embeds File Preview and forwards its messages as an effect. This is
+//! view/state composition, not permission to reach the embedded feature's
+//! runner or operational dependencies directly.
 
 use std::{
     collections::HashMap,
@@ -82,6 +88,10 @@ mod tests;
 
 use crate::media::audio_playback::AudioPlayback;
 #[cfg(test)]
+use context_menu::ContextMenuTarget;
+#[cfg(test)]
+use context_menu::LocalMenuTarget;
+#[cfg(test)]
 use drag::AddonDragOutcome;
 use drag::{
     AddonDragMessage, AddonDragSource, AddonDragState, addon_drag_event, file_drop_event,
@@ -91,34 +101,44 @@ use routes::{RouteLifecycle, open_modal_message};
 #[cfg(target_os = "macos")]
 use runners::run_document_open_extraction;
 use runners::{
-    backend_runtime_action_message, flatten_blocking_ui_result, run_downloader_local_extraction,
-    run_downloader_submission, run_installed_metadata_refresh, run_preview_gma_archive_extraction,
-    run_preview_gma_entry_extraction, run_search_full, run_size_analyzer_preview_urls,
-    schedule_native_open_target, send_root_message, spawn_blocking_detached_or_warn,
+    backend_runtime_action_message, connect_steam_for_operation, flatten_blocking_ui_result,
+    run_downloader_local_extraction, run_downloader_submission, run_installed_metadata_refresh,
+    run_preview_gma_archive_extraction, run_preview_gma_entry_extraction, run_search_full,
+    run_size_analyzer_preview_urls, schedule_native_open_target, send_root_message,
+    spawn_blocking_detached_or_warn,
 };
-use side_effects_shell::ContextMenuTarget;
-#[cfg(test)]
-use side_effects_shell::LocalMenuTarget;
 use side_effects_thumbnails::log_thumbnail_delivery;
 use view_support::{addon_drag_ghost, resolve_tokens, system_scheme_from_mode};
 
 #[derive(Debug)]
 pub struct App {
-    ctx: BackendContext,
-    thumbnails: thumbnail_demand::Manager,
-    workshop_snapshot_sequence: std::cell::Cell<u64>,
+    environment: AppEnvironment,
     state: State,
     window_id: Option<window::Id>,
     startup_phase: StartupPhase,
     /// One warm pass per session; set when the first library snapshot kicks it.
     library_warm_kicked: bool,
     audio_playback: Option<AudioPlayback>,
+    /// Timestamp shared by every synchronous state transition in the current
+    /// root-message dispatch.
+    update_context: UpdateContext,
     /// App-data snapshots arrive in backend order but are sanitized on a
     /// CPU executor. Keep exactly one such job in flight so an older
     /// snapshot can never finish after, and overwrite, a newer one. While it
     /// runs, only the newest queued snapshot matters.
     appdata_snapshot_in_flight: bool,
     pending_appdata_snapshot: Option<Box<gmpublished_backend::AppDataSnapshot>>,
+}
+
+/// Operational dependencies shared by root effect runners.
+///
+/// Keeping this concrete avoids smuggling services into feature state while
+/// making the root's environment boundary explicit.
+#[derive(Debug)]
+pub struct AppEnvironment {
+    ctx: BackendContext,
+    thumbnails: thumbnail_demand::Manager,
+    workshop_snapshot_sequence: std::cell::Cell<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,7 +172,7 @@ impl Drop for App {
     /// release their workers under a bounded deadline. Cancelling gives active
     /// jobs the chance to stop at their own next checkpoint first.
     fn drop(&mut self) {
-        let cancelled = self.ctx.shutdown();
+        let cancelled = self.environment.ctx.shutdown();
         if cancelled > 0 {
             log::info!("cancelled {cancelled} in-flight transaction(s) on quit");
         }
@@ -161,6 +181,27 @@ impl Drop for App {
 
 #[derive(Debug)]
 pub struct State {
+    features: FeatureStates,
+    chrome_strategy: shell::ChromeStrategy,
+    theme_preset: ThemePreset,
+    download_count_format: DownloadCountFormat,
+    system_scheme: SystemColorScheme,
+    accent_inputs: theme::AccentInputs,
+    tokens: Tokens,
+    addon_drag: AddonDragState,
+    context_menu_extraction: ExtractionHandoff,
+    hidden_addons: hidden_addons::HiddenAddons,
+    viewport_size: Size,
+    i18n: I18n,
+}
+
+/// Concrete ownership of every independent feature model.
+///
+/// This is deliberately only an aggregate: features keep their existing
+/// messages and update functions, and no generic feature abstraction is
+/// introduced.
+#[derive(Debug, Default)]
+pub struct FeatureStates {
     shell: shell::State,
     my_workshop: my_workshop::State,
     installed_addons: installed_addons::State,
@@ -177,18 +218,6 @@ pub struct State {
     prerequisites: prerequisites::State,
     modal_stack: modal_stack::State,
     tasks_overlay: tasks_overlay::State,
-    chrome_strategy: shell::ChromeStrategy,
-    theme_preset: ThemePreset,
-    download_count_format: DownloadCountFormat,
-    system_scheme: SystemColorScheme,
-    accent_inputs: theme::AccentInputs,
-    tokens: Tokens,
-    addon_drag: AddonDragState,
-    context_menu_target: Option<ContextMenuTarget>,
-    context_menu_extract_paths: Option<Vec<PathBuf>>,
-    hidden_addons: hidden_addons::HiddenAddons,
-    viewport_size: Size,
-    i18n: I18n,
 }
 
 impl Default for State {
@@ -198,22 +227,7 @@ impl Default for State {
         let system_scheme = SystemColorScheme::Dark;
         let accent_inputs = theme::AccentInputs::for_preset(theme_preset);
         let mut state = Self {
-            shell: shell::State::default(),
-            my_workshop: my_workshop::State::default(),
-            installed_addons: installed_addons::State::default(),
-            downloader: downloader::State::default(),
-            size_analyzer: size_analyzer::State::default(),
-            search: search::State::default(),
-            destination_select: destination_select::State::default(),
-            file_preview: file_preview::State::default(),
-            prepare_publish: prepare_publish::State::default(),
-            preview_gma: preview_gma::State::default(),
-            settings: settings::State::default(),
-            context_menu: context_menu::State::default(),
-            steam_session: steam_session::State::default(),
-            prerequisites: prerequisites::State::default(),
-            modal_stack: modal_stack::State::default(),
-            tasks_overlay: tasks_overlay::State::default(),
+            features: FeatureStates::default(),
             chrome_strategy: shell::ChromeStrategy::resolve(Settings::default().backend.titlebar),
             theme_preset,
             download_count_format,
@@ -221,8 +235,7 @@ impl Default for State {
             accent_inputs,
             tokens: resolve_tokens(theme_preset, system_scheme, accent_inputs),
             addon_drag: AddonDragState::default(),
-            context_menu_target: None,
-            context_menu_extract_paths: None,
+            context_menu_extraction: ExtractionHandoff::Idle,
             hidden_addons: hidden_addons::HiddenAddons::default(),
             viewport_size: Size::ZERO,
             i18n: I18n::from_user_or_system(None),
@@ -238,38 +251,47 @@ impl State {
     }
 
     fn set_play_gifs_by_default(&mut self, enabled: bool) {
-        self.my_workshop.set_play_gifs_by_default(enabled);
-        self.installed_addons.set_play_gifs_by_default(enabled);
+        self.features.my_workshop.set_play_gifs_by_default(enabled);
+        self.features
+            .installed_addons
+            .set_play_gifs_by_default(enabled);
     }
 
     /// GIFs never play while the window is unfocused: every playback site
     /// pauses on its current frame and its clock subscription drops, so a
     /// backgrounded window idles at 0% CPU.
     fn set_window_focused(&mut self, focused: bool) {
-        self.my_workshop.set_window_focused(focused);
-        self.installed_addons.set_window_focused(focused);
-        self.prepare_publish.set_window_focused(focused);
-        self.preview_gma.set_window_focused(focused);
+        self.features.my_workshop.set_window_focused(focused);
+        self.features.installed_addons.set_window_focused(focused);
+        self.features.prepare_publish.set_window_focused(focused);
+        self.features.preview_gma.set_window_focused(focused);
     }
 
     fn apply_thumbnail_delivery(&mut self, delivery: &thumbnail_demand::Delivery) {
-        let _updated = self.installed_addons.apply_thumbnail_delivery(delivery);
-        let _updated = self.my_workshop.apply_thumbnail_delivery(delivery);
+        let _updated = self
+            .features
+            .installed_addons
+            .apply_thumbnail_delivery(delivery);
+        let _updated = self.features.my_workshop.apply_thumbnail_delivery(delivery);
         let well = self.tokens.colors.surface_sunken;
         let _updated = self
+            .features
             .prepare_publish
             .apply_thumbnail_delivery(delivery, [well.r, well.g, well.b]);
-        let _updated = self.preview_gma.apply_thumbnail_delivery(delivery);
-        let _updated = self.search.apply_thumbnail_delivery(delivery);
-        let _invalidation = self.size_analyzer.apply_thumbnail_delivery(delivery);
+        let _updated = self.features.preview_gma.apply_thumbnail_delivery(delivery);
+        let _updated = self.features.search.apply_thumbnail_delivery(delivery);
+        let _invalidation = self
+            .features
+            .size_analyzer
+            .apply_thumbnail_delivery(delivery);
     }
 
     fn invalidate_ready_thumbnails(&mut self) {
-        let _changed = self.my_workshop.invalidate_ready_thumbnails();
-        let _changed = self.installed_addons.invalidate_ready_thumbnails();
-        let _changed = self.search.invalidate_ready_thumbnails();
-        let _changed = self.preview_gma.invalidate_ready_thumbnail();
-        let _invalidation = self.size_analyzer.invalidate_ready_thumbnails();
+        let _changed = self.features.my_workshop.invalidate_ready_thumbnails();
+        let _changed = self.features.installed_addons.invalidate_ready_thumbnails();
+        let _changed = self.features.search.invalidate_ready_thumbnails();
+        let _changed = self.features.preview_gma.invalidate_ready_thumbnail();
+        let _invalidation = self.features.size_analyzer.invalidate_ready_thumbnails();
     }
 
     fn thumbnail_demand_sets(
@@ -277,17 +299,19 @@ impl State {
         search_viewport_height: f32,
     ) -> Vec<thumbnail_demand::DemandSet> {
         vec![
-            self.my_workshop.thumbnail_demands(),
-            self.installed_addons.thumbnail_demands(),
-            self.search.thumbnail_demands(search_viewport_height),
-            self.prepare_publish.thumbnail_demands(),
-            self.preview_gma.thumbnail_demands(),
-            self.size_analyzer.thumbnail_demands(),
+            self.features.my_workshop.thumbnail_demands(),
+            self.features.installed_addons.thumbnail_demands(),
+            self.features
+                .search
+                .thumbnail_demands(search_viewport_height),
+            self.features.prepare_publish.thumbnail_demands(),
+            self.features.preview_gma.thumbnail_demands(),
+            self.features.size_analyzer.thumbnail_demands(),
         ]
     }
 
     fn set_scale_factor(&mut self, scale_factor: f32) -> bool {
-        self.size_analyzer.set_scale_factor(scale_factor)
+        self.features.size_analyzer.set_scale_factor(scale_factor)
     }
 
     fn apply_settings_snapshot(
@@ -297,18 +321,23 @@ impl State {
     ) -> SettingsFanoutResult {
         let previous_chrome = self.chrome_strategy;
         let previous_gmod_dir = self
+            .features
             .installed_addons
             .watch_gmod_dir()
             .map(Path::to_path_buf);
         let destination_label = destination_select::destination_label(&settings, &paths);
 
         self.apply_runtime_settings(&settings);
-        self.installed_addons
+        self.features
+            .installed_addons
             .set_watch_gmod_dir(paths.gmod_dir.clone());
         let gmod_dir_changed = previous_gmod_dir != paths.gmod_dir;
-        self.destination_select
+        self.features
+            .destination_select
             .reset_from_snapshot(destination_select::SettingsSnapshot::new(settings, paths));
-        self.downloader.set_destination_label(destination_label);
+        self.features
+            .downloader
+            .set_destination_label(destination_label);
 
         SettingsFanoutResult {
             previous_chrome,
@@ -338,8 +367,8 @@ impl State {
     }
 
     fn apply_localized_labels(&mut self) {
-        self.my_workshop
-            .set_publish_new_title(self.i18n.tr("publish-new"));
+        let publish_new = self.i18n.tr("publish-new");
+        self.features.my_workshop.set_publish_new_title(publish_new);
     }
 
     fn download_count_formatter(&self) -> DownloadCountFormatter {
@@ -351,15 +380,21 @@ impl State {
 
     fn apply_download_count_formatter(&mut self) {
         let formatter = self.download_count_formatter();
-        self.my_workshop.set_download_count_formatter(formatter);
-        self.installed_addons
+        self.features
+            .my_workshop
             .set_download_count_formatter(formatter);
-        self.preview_gma.set_download_count_formatter(formatter);
+        self.features
+            .installed_addons
+            .set_download_count_formatter(formatter);
+        self.features
+            .preview_gma
+            .set_download_count_formatter(formatter);
     }
 
     fn apply_system_theme(&mut self, mode: Mode) {
         self.system_scheme = system_scheme_from_mode(mode);
-        self.settings.apply_system_scheme(self.system_scheme);
+        let system_scheme = self.system_scheme;
+        self.features.settings.apply_system_scheme(system_scheme);
 
         if self.follows_system_theme() {
             self.tokens = resolve_tokens(self.theme_preset, self.system_scheme, self.accent_inputs);
@@ -367,16 +402,20 @@ impl State {
     }
 
     fn needs_motion_ticks(&self) -> bool {
-        self.modal_stack.needs_ticks()
-            || self.context_menu.needs_ticks()
-            || self.shell.needs_motion_ticks()
-            || self.search.needs_motion_ticks()
-            || self.tasks_overlay.needs_ticks()
-            || self.prepare_publish.browser_select_hover_needs_ticks()
-            || self.downloader.needs_progress_ticks()
+        self.features.modal_stack.needs_ticks()
+            || self.features.context_menu.needs_ticks()
+            || self.features.shell.needs_motion_ticks()
+            || self.features.search.needs_motion_ticks()
+            || self.features.tasks_overlay.needs_ticks()
             || self
-                .prerequisites
-                .animating(self.shell.route(), self.steam_session.status())
+                .features
+                .prepare_publish
+                .browser_select_hover_needs_ticks()
+            || self.features.downloader.needs_progress_ticks()
+            || self.features.prerequisites.animating(
+                self.features.shell.route(),
+                self.features.steam_session.status(),
+            )
     }
 }
 
@@ -384,6 +423,93 @@ impl State {
 struct SettingsFanoutResult {
     previous_chrome: shell::ChromeStrategy,
     gmod_dir_changed: bool,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+enum ExtractionHandoff {
+    #[default]
+    Idle,
+    AwaitingDestination {
+        paths: Vec<PathBuf>,
+    },
+}
+
+impl ExtractionHandoff {
+    fn begin(&mut self, paths: Vec<PathBuf>) {
+        debug_assert!(!paths.is_empty(), "an extraction handoff needs input paths");
+        *self = Self::AwaitingDestination { paths };
+    }
+
+    fn clear(&mut self) {
+        *self = Self::Idle;
+    }
+
+    fn take_paths(&mut self) -> Option<Vec<PathBuf>> {
+        match std::mem::take(self) {
+            Self::Idle => None,
+            Self::AwaitingDestination { paths } => Some(paths),
+        }
+    }
+
+    #[cfg(test)]
+    const fn paths(&self) -> Option<&[PathBuf]> {
+        match self {
+            Self::Idle => None,
+            Self::AwaitingDestination { paths } => Some(paths.as_slice()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UpdateContext {
+    now: Instant,
+}
+
+impl UpdateContext {
+    fn capture() -> Self {
+        Self {
+            now: Instant::now(),
+        }
+    }
+
+    fn for_message(message: &RootMessage) -> Self {
+        let now = match message {
+            RootMessage::AnimationTick(now) => *now,
+            _ => return Self::capture(),
+        };
+        Self { now }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum UpdateCheckOutcome {
+    ReleaseAvailable(shell::UpdateRelease),
+    UpToDate,
+    CheckFailed(Arc<shell::UpdateCheckError>),
+    WorkerFailed(RunBlockingError),
+}
+
+impl
+    From<
+        Result<
+            Result<Option<shell::UpdateRelease>, Arc<shell::UpdateCheckError>>,
+            RunBlockingError,
+        >,
+    > for UpdateCheckOutcome
+{
+    fn from(
+        result: Result<
+            Result<Option<shell::UpdateRelease>, Arc<shell::UpdateCheckError>>,
+            RunBlockingError,
+        >,
+    ) -> Self {
+        match result {
+            Ok(Ok(Some(release))) => Self::ReleaseAvailable(release),
+            Ok(Ok(None)) => Self::UpToDate,
+            Ok(Err(error)) => Self::CheckFailed(error),
+            Err(error) => Self::WorkerFailed(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -419,12 +545,7 @@ pub enum RootMessage {
         LibraryRefreshReason,
         Result<LibraryRefresh, RunBlockingError>,
     ),
-    UpdateCheckCompleted(
-        Result<
-            Result<Option<shell::UpdateRelease>, Arc<shell::UpdateCheckError>>,
-            RunBlockingError,
-        >,
-    ),
+    UpdateCheckCompleted(UpdateCheckOutcome),
     ThumbnailDemand(thumbnail_demand::Message),
     /// Cached preview URLs for the whole library, resolved once per session
     /// to warm the thumbnail disk cache in the background.
@@ -536,7 +657,7 @@ macro_rules! feature_dispatch {
     ($($method:ident => $feature:ident . $field:ident, $run:ident;)*) => {
         $(
             fn $method(&mut self, message: $feature::Message) -> Task<RootMessage> {
-                let effects = $feature::update(&mut self.state.$field, message);
+                let effects = $feature::update(&mut self.state.features.$field, message);
                 self.batch_effects(effects, Self::$run)
             }
         )*
@@ -547,10 +668,10 @@ impl App {
     /// The narrow surface an effect runner gets. See [`ports`].
     fn ports(&self) -> ports::Ports<'_> {
         ports::Ports {
-            ctx: &self.ctx,
+            ctx: &self.environment.ctx,
             i18n: &self.state.i18n,
             tokens: &self.state.tokens,
-            workshop_snapshot_sequence: &self.workshop_snapshot_sequence,
+            workshop_snapshot_sequence: &self.environment.workshop_snapshot_sequence,
         }
     }
 
@@ -585,14 +706,17 @@ impl App {
         let (settings, paths) = ctx.settings_and_paths_snapshot();
         let _result = state.apply_settings_snapshot(settings, paths);
         let app = Self {
-            ctx,
-            thumbnails,
-            workshop_snapshot_sequence: std::cell::Cell::new(0),
+            environment: AppEnvironment {
+                ctx,
+                thumbnails,
+                workshop_snapshot_sequence: std::cell::Cell::new(0),
+            },
             state,
             window_id: None,
             startup_phase,
             library_warm_kicked: false,
             audio_playback: None,
+            update_context: UpdateContext::capture(),
             appdata_snapshot_in_flight: false,
             pending_appdata_snapshot: None,
         };
@@ -607,7 +731,7 @@ impl App {
             return Task::none();
         }
 
-        if let Err(error) = self.ctx.activate_startup_services() {
+        if let Err(error) = self.environment.ctx.activate_startup_services() {
             // Local browsing and archive operations remain usable without
             // Steam, so a supervisor startup failure is reported but does not
             // tear down the already-visible application.
@@ -615,13 +739,16 @@ impl App {
         }
         // Seed placeholders from the persisted metadata snapshot so grids
         // paint blurred-then-sharp instead of blank while decoding.
-        self.thumbnails.seed_thumbhashes(self.ctx.thumbhash_seed());
+        self.environment
+            .thumbnails
+            .seed_thumbhashes(self.environment.ctx.thumbhash_seed());
         self.startup_tasks()
     }
 
     fn startup_tasks(&mut self) -> Task<RootMessage> {
         let startup_snapshot_task =
-            self.ctx
+            self.environment
+                .ctx
                 .library_snapshot()
                 .map_or_else(Task::none, |snapshot| {
                     let snapshot = self.state.hidden_addons.visible(&snapshot);
@@ -636,15 +763,16 @@ impl App {
                             LibraryRefreshReason::Startup,
                             Ok(Some(snapshot.clone())),
                         ));
-                    sync_search_installed_addons(&self.ctx, Some(&snapshot));
+                    sync_search_installed_addons(&self.environment.ctx, Some(&snapshot));
                     Task::batch([installed, analyzer])
                 });
-        let startup_route = self.state.shell.route();
+        let startup_route = self.state.features.shell.route();
         let startup_route_task = self.route_lifecycle_task(startup_route, RouteLifecycle::Entered);
         let startup_library_started = self.apply_installed_addons_message(
             installed_addons::Message::LibraryRefreshStarted(LibraryRefreshReason::Startup),
         );
         let startup_library_task = self
+            .environment
             .ctx
             .begin_library_refresh(LibraryRefreshReason::Startup)
             .map_or_else(Task::none, |task| {
@@ -655,7 +783,7 @@ impl App {
         // Connectivity is a level, not an edge. Seed the session from the
         // current backend state as well as consuming its event stream; the
         // session state machine dedups a repeated Connected.
-        let steam_bootstrap_task = if self.ctx.steam_connected() {
+        let steam_bootstrap_task = if self.environment.ctx.steam_connected() {
             Task::done(RootMessage::SteamSession(
                 steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
             ))
@@ -663,16 +791,18 @@ impl App {
             Task::none()
         };
         let update_check_task = self
+            .environment
             .ctx
             .run_blocking("shell-update-check", |_app| {
                 shell::fetch_latest_update(env!("CARGO_PKG_VERSION")).map_err(Arc::new)
             })
-            .map(RootMessage::UpdateCheckCompleted);
+            .map(|result| RootMessage::UpdateCheckCompleted(result.into()));
         // The analyzer rasterizes its category labels synchronously in
         // update(); loading the font database is the one expensive part, so
         // warm the shared context off the UI thread before the route is
         // first entered. One-shot — no timer.
         let label_context_warmup_task = self
+            .environment
             .ctx
             .run_blocking("label-context-warmup", |_app| {
                 crate::media::size_analyzer_render::with_shared_label_context(|_context| ());
@@ -696,28 +826,39 @@ impl App {
     }
 
     pub(crate) fn update(&mut self, message: RootMessage) -> Task<RootMessage> {
+        let update = UpdateContext::for_message(&message);
+        self.update_at(message, update)
+    }
+
+    fn update_at(&mut self, message: RootMessage, update: UpdateContext) -> Task<RootMessage> {
+        self.update_context = update;
         match message {
-            RootMessage::Shell(message) => self.apply_shell_message(message),
+            RootMessage::Shell(message) => self.apply_shell_message(message, update),
             RootMessage::MyWorkshop(message) => self.apply_my_workshop_message(message),
             RootMessage::InstalledAddons(message) => self.apply_installed_addons_message(message),
-            RootMessage::Downloader(message) => self.apply_downloader_message(message),
+            RootMessage::Downloader(message) => self.apply_downloader_message(message, update),
             RootMessage::SizeAnalyzer(message) => self.apply_size_analyzer_message(message),
-            RootMessage::Search(message) => self.apply_search_message(message),
+            RootMessage::Search(message) => self.apply_search_message(message, update),
             RootMessage::DestinationSelect(message) => {
                 self.apply_destination_select_message(message)
             }
             RootMessage::FilePreview(message) => self.apply_file_preview_message(message),
-            RootMessage::PreparePublish(message) => self.prepare_publish_message_task(message),
-            RootMessage::PreviewGma(message) => self.apply_preview_gma_message(message),
+            RootMessage::PreparePublish(message) => {
+                self.prepare_publish_message_task(message, update)
+            }
+            RootMessage::PreviewGma(message) => self.apply_preview_gma_message(message, update),
             RootMessage::Settings(message) => self.apply_settings_message(message),
-            RootMessage::ContextMenu(message) => self.apply_context_menu_message(message),
+            RootMessage::ContextMenu(message) => self.apply_context_menu_message(message, update),
             RootMessage::SteamSession(message) => self.apply_steam_session_message(message),
             RootMessage::Prerequisites(message) => self.apply_prerequisites_message(message),
             RootMessage::SteamClientInstalledProbed(installed) => {
-                self.state.prerequisites.set_steam_installed(installed);
+                self.state
+                    .features
+                    .prerequisites
+                    .set_steam_installed(installed);
                 Task::none()
             }
-            RootMessage::ModalStack(message) => self.apply_modal_stack_message(&message),
+            RootMessage::ModalStack(message) => self.apply_modal_stack_message(&message, update),
             RootMessage::SystemThemeObserved(mode) => {
                 self.state.apply_system_theme(mode);
                 Task::none()
@@ -727,12 +868,15 @@ impl App {
             RootMessage::TaskEvent(event) => {
                 let overlay = self.apply_tasks_overlay_message(
                     tasks_overlay::Message::TaskEventsReceived(vec![event.clone()]),
+                    update,
                 );
-                let downloader = self
-                    .apply_downloader_message(downloader::Message::TaskEventsReceived(vec![event]));
+                let downloader = self.apply_downloader_message(
+                    downloader::Message::TaskEventsReceived(vec![event]),
+                    update,
+                );
                 Task::batch([overlay, downloader])
             }
-            RootMessage::TasksOverlay(message) => self.apply_tasks_overlay_message(message),
+            RootMessage::TasksOverlay(message) => self.apply_tasks_overlay_message(message, update),
             RootMessage::BackendEvent(event) => self.backend_event_task(event),
             RootMessage::AppDataSnapshotApplied(result) => {
                 self.appdata_snapshot_in_flight = false;
@@ -764,17 +908,17 @@ impl App {
             RootMessage::LibraryRefreshed(reason, result) => {
                 self.library_refreshed_task(reason, result)
             }
-            RootMessage::UpdateCheckCompleted(result) => match result {
-                Ok(Ok(Some(release))) => {
-                    self.apply_shell_message(shell::Message::UpdateReleaseFound(release))
+            RootMessage::UpdateCheckCompleted(outcome) => match outcome {
+                UpdateCheckOutcome::ReleaseAvailable(release) => {
+                    self.apply_shell_message(shell::Message::UpdateReleaseFound(release), update)
                 }
-                Ok(Ok(None)) => Task::none(),
-                Ok(Err(error)) => {
+                UpdateCheckOutcome::UpToDate => Task::none(),
+                UpdateCheckOutcome::CheckFailed(error) => {
                     log::debug!("update check failed: {error}");
                     Task::none()
                 }
-                Err(error) => {
-                    log::warn!("failed to schedule update check: {error}");
+                UpdateCheckOutcome::WorkerFailed(error) => {
+                    log::warn!("update check worker failed: {error}");
                     Task::none()
                 }
             },
@@ -783,7 +927,7 @@ impl App {
                 if let thumbnail_demand::DeliveryResult::Ready(ready) = &delivery.result
                     && let (Some(url), Some(hash)) = (delivery.key.source_url(), ready.thumbhash())
                 {
-                    self.ctx.record_thumbhash(url, hash);
+                    self.environment.ctx.record_thumbhash(url, hash);
                 }
                 self.state.apply_thumbnail_delivery(&delivery);
                 Task::none()
@@ -792,8 +936,9 @@ impl App {
                 self.warm_library_demands_task(preview_urls)
             }
             RootMessage::ThumbnailDemand(message) => self
+                .environment
                 .thumbnails
-                .update(&self.ctx, message)
+                .update(&self.environment.ctx, message)
                 .map(RootMessage::ThumbnailDemand),
             RootMessage::FirstFramePresented(id) => {
                 // iced_winit broadcasts the raw interaction while handling
@@ -825,11 +970,14 @@ impl App {
                 }
 
                 match shortcut {
-                    GlobalShortcut::ToggleSearch => self.toggle_search_palette_task(),
-                    GlobalShortcut::ToggleFileSearch => self.toggle_file_search_palette_task(),
-                    GlobalShortcut::ToggleSettings => {
-                        Task::batch([self.dismiss_account_menu_task(), self.settings_open_task()])
+                    GlobalShortcut::ToggleSearch => self.toggle_search_palette_task(update),
+                    GlobalShortcut::ToggleFileSearch => {
+                        self.toggle_file_search_palette_task(update)
                     }
+                    GlobalShortcut::ToggleSettings => Task::batch([
+                        self.dismiss_account_menu_task(update),
+                        self.settings_open_task(),
+                    ]),
                     GlobalShortcut::NavigateRoute(route) => {
                         Task::done(RootMessage::Shell(shell::Message::Navigate(route)))
                     }
@@ -839,20 +987,23 @@ impl App {
             RootMessage::FileDropped(path) => self.handle_file_drop(path),
             RootMessage::Noop => Task::none(),
             RootMessage::AnimationTick(now) => {
-                self.state.context_menu.tick(now);
-                self.state.prerequisites.tick(now);
-                self.state.shell.tick_motion(now);
-                let _changed = self.state.tasks_overlay.tick(now);
-                let palette_close_settled = self.state.search.tick_motion(now);
-                self.state.prepare_publish.tick_browser_select_hover(now);
-                self.state.downloader.tick_progress(now);
+                self.state.features.context_menu.tick(now);
+                self.state.features.prerequisites.tick(now);
+                self.state.features.shell.tick_motion(now);
+                let _changed = self.state.features.tasks_overlay.tick(now);
+                let palette_close_settled = self.state.features.search.tick_motion(now);
+                self.state
+                    .features
+                    .prepare_publish
+                    .tick_browser_select_hover(now);
+                self.state.features.downloader.tick_progress(now);
                 let mut finish_tasks = Vec::new();
                 if palette_close_settled {
                     // The fading rows kept their thumbnails demanded; release
                     // them after the palette has fully reset.
                     finish_tasks.push(self.search_thumbnail_demands());
                 }
-                for modal in self.state.modal_stack.tick(now) {
+                for modal in self.state.features.modal_stack.tick(now) {
                     finish_tasks.push(self.finish_modal_close_task(modal));
                 }
                 Task::batch(finish_tasks)
@@ -883,36 +1034,69 @@ impl App {
     // prepare_publish, my_workshop's debug filter) keep their own handler
     // below, where the difference is visible.
     feature_dispatch! {
-        apply_downloader_message => downloader.downloader, run_downloader_effect;
         apply_installed_addons_message => installed_addons.installed_addons, run_installed_addons_effect;
         apply_size_analyzer_message => size_analyzer.size_analyzer, run_size_analyzer_effect;
-        apply_search_message => search.search, run_search_effect;
         apply_destination_select_message => destination_select.destination_select, run_destination_select_effect;
-        apply_preview_gma_message => preview_gma.preview_gma, run_preview_gma_effect;
         apply_settings_message => settings.settings, run_settings_effect;
+    }
+
+    fn apply_downloader_message(
+        &mut self,
+        message: downloader::Message,
+        update: UpdateContext,
+    ) -> Task<RootMessage> {
+        let effects =
+            downloader::update_at(&mut self.state.features.downloader, message, update.now);
+        self.batch_effects(effects, Self::run_downloader_effect)
+    }
+
+    fn apply_search_message(
+        &mut self,
+        message: search::Message,
+        update: UpdateContext,
+    ) -> Task<RootMessage> {
+        let effects = search::update_at(&mut self.state.features.search, message, update.now);
+        self.batch_effects(effects, Self::run_search_effect)
+    }
+
+    fn apply_preview_gma_message(
+        &mut self,
+        message: preview_gma::Message,
+        update: UpdateContext,
+    ) -> Task<RootMessage> {
+        let effects =
+            preview_gma::update_at(&mut self.state.features.preview_gma, message, update.now);
+        self.batch_effects(effects, Self::run_preview_gma_effect)
     }
 
     fn apply_tasks_overlay_message(
         &mut self,
         message: tasks_overlay::Message,
+        update: UpdateContext,
     ) -> Task<RootMessage> {
-        let effects = tasks_overlay::update(&mut self.state.tasks_overlay, message);
+        let effects =
+            tasks_overlay::update_at(&mut self.state.features.tasks_overlay, message, update.now);
         self.batch_effects(effects, |app, effect| match effect {
             tasks_overlay::Effect::CancelRequested(task_id) => {
                 // Uncorrelated tasks have nothing to cancel; the press is a
                 // no-op and the toast settles when its work does.
-                let _cancelled = app.ctx.cancel_task(task_id);
+                let _cancelled = app.environment.ctx.cancel_task(task_id);
                 Task::none()
             }
         })
     }
 
-    fn apply_shell_message(&mut self, message: shell::Message) -> Task<RootMessage> {
-        let effects = shell::update(
-            &mut self.state.shell,
+    fn apply_shell_message(
+        &mut self,
+        message: shell::Message,
+        update: UpdateContext,
+    ) -> Task<RootMessage> {
+        let effects = shell::update_at(
+            &mut self.state.features.shell,
             message,
             &self.state.tokens,
             self.state.chrome_strategy,
+            update.now,
         );
         self.batch_effects(effects, Self::run_shell_effect)
     }
@@ -969,7 +1153,7 @@ impl App {
     fn apply_my_workshop_message(&mut self, message: my_workshop::Message) -> Task<RootMessage> {
         #[cfg(feature = "debug")]
         let message = self.filter_my_workshop_message(message);
-        let effects = my_workshop::update(&mut self.state.my_workshop, message);
+        let effects = my_workshop::update(&mut self.state.features.my_workshop, message);
         self.batch_effects(effects, Self::run_my_workshop_effect)
     }
 
@@ -1008,7 +1192,7 @@ impl App {
             }
             downloader::Effect::TaskCancellationRequested(task_ids) => {
                 for task_id in task_ids {
-                    if !self.ctx.cancel_task(task_id) {
+                    if !self.environment.ctx.cancel_task(task_id) {
                         log::debug!(
                             "downloader cancellation for task {task_id:?} had no effect (already terminal or not yet correlated)"
                         );
@@ -1017,15 +1201,18 @@ impl App {
                 Task::none()
             }
             downloader::Effect::DownloadQueueCancellationRequested => {
-                self.ctx.cancel_all_workshop_downloads();
+                self.environment.ctx.cancel_all_workshop_downloads();
                 Task::none()
             }
             downloader::Effect::PathsOpenRequested(paths) => self.downloader_open_paths_task(paths),
-            downloader::Effect::PreviewRequested(target) => {
-                self.apply_preview_gma_message(preview_gma::Message::OpenRequested(
-                    preview_gma::OpenTarget::new(target.path, target.title, target.workshop_id),
-                ))
-            }
+            downloader::Effect::PreviewRequested(target) => self.apply_preview_gma_message(
+                preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
+                    target.path,
+                    target.title,
+                    target.workshop_id,
+                )),
+                self.update_context,
+            ),
             downloader::Effect::WorkshopPageOpenRequested(workshop_id) => {
                 let url = workshop_id.map_or_else(
                     || STEAM_WORKSHOP_URL.to_owned(),
@@ -1050,9 +1237,10 @@ impl App {
             downloader::Effect::WorkshopTitleQueryRequested(item_ids) => {
                 self.downloader_title_query_task(item_ids)
             }
-            downloader::Effect::ActiveJobCountChanged(count) => {
-                self.apply_shell_message(shell::Message::DownloaderJobCountChanged(count))
-            }
+            downloader::Effect::ActiveJobCountChanged(count) => self.apply_shell_message(
+                shell::Message::DownloaderJobCountChanged(count),
+                self.update_context,
+            ),
             downloader::Effect::PrerequisiteActivated(action) => {
                 self.prerequisite_action_task(action)
             }
@@ -1078,7 +1266,11 @@ impl App {
                 card_id,
                 workshop_id,
             } => {
-                let thumbnail = self.state.my_workshop.drag_thumbnail_for_card(&card_id);
+                let thumbnail = self
+                    .state
+                    .features
+                    .my_workshop
+                    .drag_thumbnail_for_card(&card_id);
                 self.state.addon_drag.press(
                     AddonDragSource::MyWorkshop,
                     card_id,
@@ -1129,6 +1321,7 @@ impl App {
             } => {
                 let thumbnail = self
                     .state
+                    .features
                     .installed_addons
                     .drag_thumbnail_for_card(&card_id);
                 self.state.addon_drag.press(
@@ -1162,7 +1355,7 @@ impl App {
                 workshop_id,
             } => {
                 let thumbnail = workshop_id
-                    .and_then(|id| self.state.size_analyzer.tile_for(id))
+                    .and_then(|id| self.state.features.size_analyzer.tile_for(id))
                     .map(|tile| tile.handle.clone());
                 self.state.addon_drag.press(
                     AddonDragSource::SizeAnalyzer,
@@ -1191,7 +1384,7 @@ impl App {
                 item_ids,
             } => self.search_metadata_refresh_task(generation, item_ids),
             search::Effect::TaskCancellationRequested(task_id) => {
-                if !self.ctx.cancel_task(task_id) {
+                if !self.environment.ctx.cancel_task(task_id) {
                     log::debug!(
                         "search cancellation for task {task_id:?} had no effect (already terminal or not yet correlated)"
                     );
@@ -1214,9 +1407,13 @@ impl App {
             destination_select::Effect::SnapshotApplied => self.sync_downloader_destination_label(),
             destination_select::Effect::FolderPickerRequested => self
                 .destination_select_folder_picker_task(
-                    self.state.destination_select.initial_browse_directory(),
+                    self.state
+                        .features
+                        .destination_select
+                        .initial_browse_directory(),
                 ),
             destination_select::Effect::CustomPathValidationRequested(request) => self
+                .environment
                 .ctx
                 .run_blocking("destination-validate-path", move |_app| {
                     let valid = destination_select::probe_custom_path(&request.path);
@@ -1242,7 +1439,7 @@ impl App {
                 self.destination_select_save_task(request)
             }
             destination_select::Effect::DestinationPersisted => Task::batch([
-                if self.state.modal_stack.overlay_active() {
+                if self.state.features.modal_stack.overlay_active() {
                     self.close_modal_stack_task()
                 } else {
                     Task::none()
@@ -1276,6 +1473,7 @@ impl App {
             preview_gma::Effect::DestinationSelectRequested => {
                 let extracted_name = self
                     .state
+                    .features
                     .preview_gma
                     .archive()
                     .map(|archive| archive.extracted_name().to_owned())
@@ -1354,7 +1552,7 @@ impl App {
 
         let content_area = row![
             shell::sidebar(
-                &self.state.shell,
+                &self.state.features.shell,
                 ctx,
                 self.state.chrome_strategy,
                 self.state.addon_drag.is_dragging(),
@@ -1384,21 +1582,26 @@ impl App {
         if self.state.addon_drag.is_dragging() {
             layers = layers.push(addon_drag_cursor_overlay(&self.state, &tokens, now));
         }
-        if let Some(dropdown) =
-            search::dropdown_overlay(&self.state.search, ctx, self.state.viewport_size, now)
-        {
+        if let Some(dropdown) = search::dropdown_overlay(
+            &self.state.features.search,
+            ctx,
+            self.state.viewport_size,
+            now,
+        ) {
             layers = layers.push(dropdown.map(RootMessage::Search));
         }
 
-        if let Some(account_menu) = shell::account_menu_overlay(&self.state.shell, ctx, now) {
+        if let Some(account_menu) =
+            shell::account_menu_overlay(&self.state.features.shell, ctx, now)
+        {
             layers = layers.push(account_menu.map(RootMessage::Shell));
         }
 
-        if let Some(active) = self.state.modal_stack.active() {
-            let modal_scale = self.state.modal_stack.scale(now);
-            let modal_interactive = self.state.modal_stack.interactive();
+        if let Some(active) = self.state.features.modal_stack.active() {
+            let modal_scale = self.state.features.modal_stack.scale(now);
+            let modal_interactive = self.state.features.modal_stack.interactive();
             layers = layers.push(
-                modal_stack::scrim(&self.state.modal_stack, &tokens, now)
+                modal_stack::scrim(&self.state.features.modal_stack, &tokens, now)
                     .map(RootMessage::ModalStack),
             );
 
@@ -1415,9 +1618,9 @@ impl App {
                 active,
                 modal_stack::ActiveModal::PreparePublish | modal_stack::ActiveModal::PreviewGma
             );
-            if hosts_preview && file_preview::embedded_expanded(&self.state.file_preview) {
+            if hosts_preview && file_preview::embedded_expanded(&self.state.features.file_preview) {
                 layers = layers.push(
-                    modal_stack::expanded_scrim(&self.state.modal_stack, &tokens, now)
+                    modal_stack::expanded_scrim(&self.state.features.modal_stack, &tokens, now)
                         .map(RootMessage::ModalStack),
                 );
             }
@@ -1425,8 +1628,8 @@ impl App {
             let content = match active {
                 modal_stack::ActiveModal::PreparePublish => Some(
                     prepare_publish::view(
-                        &self.state.prepare_publish,
-                        &self.state.file_preview,
+                        &self.state.features.prepare_publish,
+                        &self.state.features.file_preview,
                         ctx,
                         self.state.viewport_size,
                         chrome_clearance,
@@ -1436,8 +1639,8 @@ impl App {
                 ),
                 modal_stack::ActiveModal::PreviewGma => Some(
                     preview_gma::view(
-                        &self.state.preview_gma,
-                        &self.state.file_preview,
+                        &self.state.features.preview_gma,
+                        &self.state.features.file_preview,
                         ctx,
                         self.state.viewport_size,
                         chrome_clearance,
@@ -1445,7 +1648,7 @@ impl App {
                     .map(RootMessage::PreviewGma),
                 ),
                 modal_stack::ActiveModal::Settings => Some(
-                    settings::view(&self.state.settings, ctx, self.state.viewport_size)
+                    settings::view(&self.state.features.settings, ctx, self.state.viewport_size)
                         .map(RootMessage::Settings),
                 ),
                 // Overlay-only; drawn in the overlay block below.
@@ -1458,18 +1661,18 @@ impl App {
 
         // Overlay modals layer on top of whatever base modal is open, behind
         // their own scrim.
-        if let Some(overlay_modal) = self.state.modal_stack.overlay_modal() {
-            let overlay_scale = self.state.modal_stack.overlay_scale(now);
-            let overlay_interactive = self.state.modal_stack.overlay_interactive();
+        if let Some(overlay_modal) = self.state.features.modal_stack.overlay_modal() {
+            let overlay_scale = self.state.features.modal_stack.overlay_scale(now);
+            let overlay_interactive = self.state.features.modal_stack.overlay_interactive();
             layers = layers.push(
-                modal_stack::overlay_scrim(&self.state.modal_stack, &tokens, now)
+                modal_stack::overlay_scrim(&self.state.features.modal_stack, &tokens, now)
                     .map(RootMessage::ModalStack),
             );
 
             let content = match overlay_modal {
                 modal_stack::ActiveModal::DestinationSelect => Some(
                     destination_select::view(
-                        &self.state.destination_select,
+                        &self.state.features.destination_select,
                         ctx,
                         self.state.viewport_size,
                     )
@@ -1489,10 +1692,15 @@ impl App {
             }
         }
 
-        if self.state.context_menu.visible() {
+        if self.state.features.context_menu.visible() {
             layers = layers.push(
-                context_menu::view(&self.state.context_menu, ctx, self.state.viewport_size, now)
-                    .map(RootMessage::ContextMenu),
+                context_menu::view(
+                    &self.state.features.context_menu,
+                    ctx,
+                    self.state.viewport_size,
+                    now,
+                )
+                .map(RootMessage::ContextMenu),
             );
         }
 
@@ -1503,7 +1711,7 @@ impl App {
         // The tasks overlay is the topmost layer, above modal scrims, so
         // publish/extract progress stays visible whatever else is open.
         if let Some(overlay) = tasks_overlay::view(
-            &self.state.tasks_overlay,
+            &self.state.features.tasks_overlay,
             ctx,
             self.state.viewport_size,
             now,
@@ -1527,21 +1735,21 @@ impl App {
 
     fn active_route_view(&self) -> Element<'_, RootMessage> {
         let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
-        let route = self.state.shell.route();
+        let route = self.state.features.shell.route();
         // Prerequisites are a shell concern, not a feature one: the routes
         // stay ignorant of Steam and Garry's Mod availability, and the one
         // place that knows decides what they get to render.
         let blocker = prerequisites::blocker_for(
             route,
-            self.state.steam_session.status(),
-            &self.state.prerequisites,
+            self.state.features.steam_session.status(),
+            &self.state.features.prerequisites,
         );
         let panel = |blocker: &prerequisites::Blocker| {
             prerequisites::view(
                 ctx,
                 route,
                 blocker,
-                self.state.prerequisites.spinner_elapsed(),
+                self.state.features.prerequisites.spinner_elapsed(),
                 |action| RootMessage::Prerequisites(prerequisites::Message::Activated(action)),
             )
         };
@@ -1551,16 +1759,16 @@ impl App {
             // queue: pasting IDs while Steam boots is a reasonable thing to
             // be doing, and the queue starts as soon as it connects.
             (shell::Route::Downloader, blocker) => downloader::view(
-                &self.state.downloader,
+                &self.state.features.downloader,
                 ctx,
                 blocker
-                    .filter(|_| self.state.downloader.queue_is_empty())
+                    .filter(|_| self.state.features.downloader.queue_is_empty())
                     .map(|blocker| {
                         prerequisites::view(
                             ctx,
                             route,
                             blocker,
-                            self.state.prerequisites.spinner_elapsed(),
+                            self.state.features.prerequisites.spinner_elapsed(),
                             downloader::Message::Prerequisite,
                         )
                     }),
@@ -1568,14 +1776,16 @@ impl App {
             .map(RootMessage::Downloader),
             (_, Some(blocker)) => panel(blocker),
             (shell::Route::MyWorkshop, None) => {
-                my_workshop::view(&self.state.my_workshop, ctx).map(RootMessage::MyWorkshop)
+                my_workshop::view(&self.state.features.my_workshop, ctx)
+                    .map(RootMessage::MyWorkshop)
             }
             (shell::Route::InstalledAddons, None) => {
-                installed_addons::view(&self.state.installed_addons, ctx)
+                installed_addons::view(&self.state.features.installed_addons, ctx)
                     .map(RootMessage::InstalledAddons)
             }
             (shell::Route::SizeAnalyzer, None) => {
-                size_analyzer::view(&self.state.size_analyzer, ctx).map(RootMessage::SizeAnalyzer)
+                size_analyzer::view(&self.state.features.size_analyzer, ctx)
+                    .map(RootMessage::SizeAnalyzer)
             }
         }
     }
@@ -1585,6 +1795,7 @@ impl App {
             installed_addons::Message::LibraryRefreshStarted(reason),
         );
         let refresh = self
+            .environment
             .ctx
             .begin_library_refresh(reason)
             .map_or_else(Task::none, |task| {
@@ -1611,6 +1822,7 @@ impl App {
                     size_analyzer::Message::SnapshotPushed(requested_reason, Err(error)),
                 );
                 let rerun = self
+                    .environment
                     .ctx
                     .abort_library_refresh()
                     .map_or_else(Task::none, |reason| self.request_library_refresh(reason));
@@ -1623,7 +1835,7 @@ impl App {
             .as_ref()
             .map(|snapshot| self.state.hidden_addons.visible(snapshot));
 
-        sync_search_installed_addons(&self.ctx, visible_snapshot.as_ref());
+        sync_search_installed_addons(&self.environment.ctx, visible_snapshot.as_ref());
 
         let warm_library = visible_snapshot
             .as_ref()
@@ -1653,63 +1865,81 @@ impl App {
     }
 
     fn open_search_palette_task(&mut self) -> Task<RootMessage> {
-        self.open_search_mode_palette_task(SearchMode::Addons)
+        self.open_search_mode_palette_task(SearchMode::Addons, self.update_context)
     }
 
-    fn open_search_mode_palette_task(&mut self, mode: SearchMode) -> Task<RootMessage> {
+    fn open_search_mode_palette_task(
+        &mut self,
+        mode: SearchMode,
+        update: UpdateContext,
+    ) -> Task<RootMessage> {
         Task::batch([
-            self.dismiss_account_menu_task(),
-            self.apply_search_message(search::Message::ModeFocusRequested(mode)),
+            self.dismiss_account_menu_task(update),
+            self.apply_search_message(search::Message::ModeFocusRequested(mode), update),
         ])
     }
 
-    fn toggle_search_palette_task(&mut self) -> Task<RootMessage> {
-        if self.state.search.palette_open() && self.state.search.mode() == SearchMode::Addons {
-            self.apply_search_message(search::Message::DismissRequested)
+    fn toggle_search_palette_task(&mut self, update: UpdateContext) -> Task<RootMessage> {
+        if self.state.features.search.palette_open()
+            && self.state.features.search.mode() == SearchMode::Addons
+        {
+            self.apply_search_message(search::Message::DismissRequested, update)
         } else {
-            self.open_search_palette_task()
+            self.open_search_mode_palette_task(SearchMode::Addons, update)
         }
     }
 
-    fn toggle_file_search_palette_task(&mut self) -> Task<RootMessage> {
-        if self.state.search.palette_open() && self.state.search.mode() == SearchMode::Files {
-            self.apply_search_message(search::Message::DismissRequested)
+    fn toggle_file_search_palette_task(&mut self, update: UpdateContext) -> Task<RootMessage> {
+        if self.state.features.search.palette_open()
+            && self.state.features.search.mode() == SearchMode::Files
+        {
+            self.apply_search_message(search::Message::DismissRequested, update)
         } else {
-            self.open_search_mode_palette_task(SearchMode::Files)
+            self.open_search_mode_palette_task(SearchMode::Files, update)
         }
     }
 
-    fn dismiss_account_menu_task(&mut self) -> Task<RootMessage> {
-        self.apply_shell_message(shell::Message::AccountMenuDismissed)
+    fn dismiss_account_menu_task(&mut self, update: UpdateContext) -> Task<RootMessage> {
+        self.apply_shell_message(shell::Message::AccountMenuDismissed, update)
     }
 
     fn dismiss_search_palette_task(&mut self) -> Task<RootMessage> {
-        if !self.state.search.palette_open() {
+        if !self.state.features.search.palette_open() {
             return Task::none();
         }
 
-        self.apply_search_message(search::Message::DismissRequested)
+        self.apply_search_message(search::Message::DismissRequested, self.update_context)
     }
 
     fn global_shortcuts_enabled(&self) -> bool {
-        self.state.modal_stack.active().is_none()
-            && !self.state.modal_stack.overlay_active()
-            && !self.state.context_menu.visible()
+        self.state.features.modal_stack.active().is_none()
+            && !self.state.features.modal_stack.overlay_active()
+            && !self.state.features.context_menu.visible()
     }
 
     /// ⌘, may close Settings only while it is the top layer; an overlay or
     /// context menu above it keeps the toggle inert like every other global
     /// shortcut, and a different active modal is never closed by it.
     fn settings_shortcut_should_close(&self) -> bool {
-        self.state.modal_stack.active() == Some(modal_stack::ActiveModal::Settings)
-            && !self.state.modal_stack.overlay_active()
-            && !self.state.context_menu.visible()
+        self.state.features.modal_stack.active() == Some(modal_stack::ActiveModal::Settings)
+            && !self.state.features.modal_stack.overlay_active()
+            && !self.state.features.context_menu.visible()
     }
 
     pub(crate) fn subscription(&self) -> Subscription<RootMessage> {
-        let mut streams = vec![self.ctx.task_events().map(RootMessage::TaskEvent)];
-        streams.push(self.ctx.backend_events().map(RootMessage::BackendEvent));
-        streams.push(shell::subscription(&self.state.shell).map(RootMessage::Shell));
+        let mut streams = vec![
+            self.environment
+                .ctx
+                .task_events()
+                .map(RootMessage::TaskEvent),
+        ];
+        streams.push(
+            self.environment
+                .ctx
+                .backend_events()
+                .map(RootMessage::BackendEvent),
+        );
+        streams.push(shell::subscription(&self.state.features.shell).map(RootMessage::Shell));
         if self.state.follows_system_theme() {
             streams.push(system::theme_changes().map(RootMessage::SystemThemeObserved));
         }
@@ -1717,41 +1947,48 @@ impl App {
             theme::motion::redraw_subscription(self.state.needs_motion_ticks())
                 .map(RootMessage::AnimationTick),
         );
-        streams
-            .push(my_workshop::subscription(&self.state.my_workshop).map(RootMessage::MyWorkshop));
+        streams.push(
+            my_workshop::subscription(&self.state.features.my_workshop)
+                .map(RootMessage::MyWorkshop),
+        );
         if self.startup_phase.started() {
             streams.push(
                 library_watch::subscription(
-                    self.state.installed_addons.watch_gmod_dir(),
-                    self.state.installed_addons.watch_arm_epoch(),
+                    self.state.features.installed_addons.watch_gmod_dir(),
+                    self.state.features.installed_addons.watch_arm_epoch(),
                 )
                 .map(RootMessage::LibraryWatch),
             );
         }
         streams.push(
-            installed_addons::subscription(&self.state.installed_addons)
+            installed_addons::subscription(&self.state.features.installed_addons)
                 .map(RootMessage::InstalledAddons),
         );
         streams.push(
             prerequisites::subscription(
-                self.state.shell.route(),
-                self.state.steam_session.status(),
+                self.state.features.shell.route(),
+                self.state.features.steam_session.status(),
             )
             .map(RootMessage::Prerequisites),
         );
         streams.push(
-            prepare_publish::subscription(&self.state.prepare_publish)
+            prepare_publish::subscription(&self.state.features.prepare_publish)
                 .map(RootMessage::PreparePublish),
         );
-        streams
-            .push(preview_gma::subscription(&self.state.preview_gma).map(RootMessage::PreviewGma));
         streams.push(
-            file_preview::subscription(&self.state.file_preview).map(RootMessage::FilePreview),
+            preview_gma::subscription(&self.state.features.preview_gma)
+                .map(RootMessage::PreviewGma),
         );
-        streams.push(search::subscription(&self.state.search).map(RootMessage::Search));
-        streams.push(settings::subscription(&self.state.settings).map(RootMessage::Settings));
         streams.push(
-            context_menu::subscription(&self.state.context_menu).map(RootMessage::ContextMenu),
+            file_preview::subscription(&self.state.features.file_preview)
+                .map(RootMessage::FilePreview),
+        );
+        streams.push(search::subscription(&self.state.features.search).map(RootMessage::Search));
+        streams
+            .push(settings::subscription(&self.state.features.settings).map(RootMessage::Settings));
+        streams.push(
+            context_menu::subscription(&self.state.features.context_menu)
+                .map(RootMessage::ContextMenu),
         );
         // Global shortcuts (⌘F/⌘,) are handled by the shortcut_capture
         // wrapper in view(), not a subscription: subscriptions observe key
@@ -1759,9 +1996,10 @@ impl App {
         // swallow the closing ⌘F as text for a frame.
         // The context menu owns Escape while it is visible; the modal keeps
         // its scrim-click dismissal in the meantime.
-        if !self.state.context_menu.visible() {
+        if !self.state.features.context_menu.visible() {
             streams.push(
-                modal_stack::subscription(&self.state.modal_stack).map(RootMessage::ModalStack),
+                modal_stack::subscription(&self.state.features.modal_stack)
+                    .map(RootMessage::ModalStack),
             );
         }
         streams.push(window::events().map(|(id, event)| RootMessage::WindowEvent(id, event)));

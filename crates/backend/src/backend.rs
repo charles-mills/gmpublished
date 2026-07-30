@@ -283,7 +283,7 @@ impl Backend {
     }
 
     #[must_use]
-    pub fn whitelist_snapshot(&self) -> Arc<Vec<String>> {
+    pub fn whitelist_snapshot(&self) -> Arc<[String]> {
         self.whitelist.snapshot()
     }
 

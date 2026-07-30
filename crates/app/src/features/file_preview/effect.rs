@@ -14,7 +14,7 @@ pub enum Effect {
     },
     AudioPlayRequested {
         request_id: Generation,
-        bytes: Arc<Vec<u8>>,
+        bytes: Arc<[u8]>,
         resume_at: f32,
     },
     AudioPauseRequested(Generation),

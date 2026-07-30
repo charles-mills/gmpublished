@@ -979,7 +979,7 @@ fn resolves_raw_sound_wave_prefixes_case_insensitively() {
     assert_eq!(resolved.waves.len(), 1);
     assert_eq!(resolved.waves[0].path, "sound/doors/door1_move.wav");
     assert_eq!(resolved.waves[0].source_tier, ContentSourceTier::Addon);
-    assert_eq!(resolved.waves[0].bytes.as_slice(), b"move bytes");
+    assert_eq!(resolved.waves[0].bytes.as_ref(), b"move bytes");
 }
 
 #[test]
@@ -1055,7 +1055,7 @@ fn resolves_manifest_and_globbed_soundscripts_to_waves() {
     assert_eq!(move_sound.sound_level, 75.0);
     assert_eq!(move_sound.waves.len(), 1);
     assert_eq!(move_sound.waves[0].source_tier, ContentSourceTier::Addon);
-    assert_eq!(move_sound.waves[0].bytes.as_slice(), b"default move");
+    assert_eq!(move_sound.waves[0].bytes.as_ref(), b"default move");
 
     let open_sound = resolver
         .resolve_sound_reference("doorsound.defaultopen")

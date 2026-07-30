@@ -114,7 +114,7 @@ impl SiblingGmaIndex {
         if u64::try_from(bytes.len()).ok() == Some(data_end) {
             *self.legacy_bin_cache.lock() = Some(LegacyBinCache {
                 archive_index,
-                bytes: Arc::new(bytes),
+                bytes: Arc::from(bytes),
             });
         }
         Some(entry_bytes)
@@ -157,7 +157,7 @@ impl std::fmt::Debug for SiblingGmaArchiveKind {
 #[derive(Clone, Debug)]
 pub(super) struct LegacyBinCache {
     archive_index: usize,
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

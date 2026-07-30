@@ -6,11 +6,13 @@ use super::{
     FetchOutcome, Thumbnail, ThumbnailCancellation, ThumbnailError, ThumbnailResult,
     ThumbnailWorkerOutcome, thumbnail::ThumbnailDecoder as AppThumbnailDecoder,
 };
-use crate::net::build_agent_with_max_idle_connections_per_host;
+use crate::net::{HttpTimeouts, build_agent_with_max_idle_connections_per_host};
 
-const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
-const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-const HTTP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(12);
+const HTTP_TIMEOUTS: HttpTimeouts = HttpTimeouts::new()
+    .global_timeout(Duration::from_secs(20))
+    .connect_timeout(Duration::from_secs(8))
+    .receive_response_timeout(Duration::from_secs(12))
+    .receive_body_timeout(Duration::from_secs(12));
 // Matches the media pool width so keep-alive connections cover every worker
 // during sustained scrolling and avoid TLS re-handshakes mid-scroll.
 const HTTP_MAX_IDLE_CONNECTIONS_PER_HOST: usize = 16;
@@ -202,9 +204,7 @@ fn steam_cdn_variant_url(url: &str, max_edge: u32) -> Option<String> {
 
 pub(super) fn http_agent() -> ureq::Agent {
     build_agent_with_max_idle_connections_per_host(
-        HTTP_TIMEOUT,
-        HTTP_CONNECT_TIMEOUT,
-        HTTP_RESPONSE_TIMEOUT,
+        HTTP_TIMEOUTS,
         HTTP_MAX_IDLE_CONNECTIONS_PER_HOST,
     )
 }

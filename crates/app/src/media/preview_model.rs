@@ -178,7 +178,7 @@ pub enum PreviewContent {
         family: String,
     },
     Audio {
-        bytes: Arc<Vec<u8>>,
+        bytes: Arc<[u8]>,
         duration_secs: Option<f32>,
     },
     Model(Arc<ModelPreview>),
@@ -318,7 +318,7 @@ pub struct DoorSound {
 pub struct DoorSoundWave {
     pub(crate) path: String,
     pub(crate) source_tier: DoorSoundSourceTier,
-    pub(crate) bytes: Arc<Vec<u8>>,
+    pub(crate) bytes: Arc<[u8]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

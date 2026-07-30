@@ -9,7 +9,7 @@ impl App {
         &mut self,
         message: file_preview::Message,
     ) -> Task<RootMessage> {
-        let effects = file_preview::update(&mut self.state.file_preview, message);
+        let effects = file_preview::update(&mut self.state.features.file_preview, message);
         self.batch_effects(effects, Self::run_file_preview_effect)
     }
 
@@ -19,6 +19,7 @@ impl App {
             file_preview::Effect::LoadRequested(request) => self.file_preview_load_task(request),
             file_preview::Effect::ExtractRequested { entry_path } => self
                 .state
+                .features
                 .preview_gma
                 .entry_extraction_request(&entry_path)
                 .map_or_else(Task::none, |request| {
@@ -52,8 +53,13 @@ impl App {
     fn file_preview_load_task(&self, request: PreviewRequest) -> Task<RootMessage> {
         let request_id = request.request_id;
         let tokens = self.state.tokens;
-        let gmod_dir = self.ctx.settings_and_paths_snapshot().1.gmod_dir;
-        let ctx = self.ctx.clone();
+        let gmod_dir = self
+            .environment
+            .ctx
+            .settings_and_paths_snapshot()
+            .1
+            .gmod_dir;
+        let ctx = self.environment.ctx.clone();
         Task::stream(stream::channel(100, async move |output| {
             let mut schedule_error_output = output.clone();
             let schedule = ctx.spawn_blocking_detached("file-preview-load", move |app| {

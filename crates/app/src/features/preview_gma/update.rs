@@ -12,10 +12,10 @@ pub fn browser_rows_scrollable_id() -> iced::widget::Id {
 
 use super::{Effect, Message, State};
 
-pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -> Vec<Effect> {
     match message {
         Message::OpenRequested(target) => {
-            let request = state.begin_open(target);
+            let request = state.begin_open_at(target, now);
             let mut effects = vec![
                 Effect::ModalOpenRequested,
                 Effect::ArchiveOpenRequested(request),
@@ -129,6 +129,11 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             vec![Effect::ThumbnailDemandsChanged]
         }
     }
+}
+
+#[cfg(test)]
+fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    update_at(state, message, std::time::Instant::now())
 }
 
 fn normalize_description_url(url: &str) -> Option<String> {

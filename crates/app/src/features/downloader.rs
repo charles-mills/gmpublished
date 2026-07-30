@@ -12,5 +12,7 @@ pub use jobs::{DownloaderEvent, LocalExtractionOutcome};
 pub use jobs::Section;
 pub use message::Message;
 pub use state::State;
-pub use update::update;
+#[cfg(test)]
+pub(crate) use update::update;
+pub use update::update_at;
 pub use view::view;

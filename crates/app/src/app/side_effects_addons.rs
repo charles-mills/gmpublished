@@ -27,9 +27,12 @@ impl App {
         generation: Generation,
         page: u32,
     ) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("my-workshop-page", move |app| {
-                my_workshop::browse_page(app.workshop(), page)
+                app.workshop()
+                    .browse_my_page(page)
+                    .map(|result| my_workshop::PageResult::from_page(page, &result))
             })
             .map(move |result| {
                 RootMessage::MyWorkshop(my_workshop::Message::PageCompleted(
@@ -61,9 +64,10 @@ impl App {
         generation: Generation,
         pages: u32,
     ) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("my-workshop-stats-refresh", move |app| {
-                my_workshop::refresh_subscription_counts(app.workshop(), pages)
+                app.workshop().refresh_subscription_counts(pages)
             })
             .map(move |result| {
                 RootMessage::MyWorkshop(my_workshop::Message::StatsRefreshCompleted(
@@ -129,9 +133,11 @@ impl App {
         }
         let worker_item_ids = item_ids.clone();
         let delivery_item_ids = item_ids;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("installed-addons-metadata", move |app| {
-                installed_addons::resolve_metadata(app.workshop(), &worker_item_ids)
+                let (metadata, stale_ids) = app.workshop().resolve_metadata(&worker_item_ids);
+                installed_addons::resolve_metadata(&metadata, stale_ids)
             })
             .map(move |result| {
                 RootMessage::InstalledAddons(installed_addons::Message::MetadataCompleted(
@@ -155,7 +161,7 @@ impl App {
         {
             return task;
         }
-        let ctx = self.ctx.clone();
+        let ctx = self.environment.ctx.clone();
         // The worker takes `item_ids`; a scheduling failure still has to name
         // them so the ids go back in line rather than staying marked finished.
         let schedule_error_item_ids = item_ids.clone();
@@ -193,19 +199,22 @@ impl App {
             target.title,
             target.path.display()
         );
-        self.apply_preview_gma_message(preview_gma::Message::OpenRequested(
-            preview_gma::OpenTarget::new(
-                target.path.clone(),
-                target.title.clone(),
-                target.workshop_id,
-            )
-            .with_seed(preview_gma::OpenSeed {
-                preview_url: target.preview_url.clone(),
-                subscription_count: Some(target.subscription_count),
-                score_bucket: Some(target.score_bucket),
-                score_label: Some(target.score_label),
-            }),
-        ))
+        self.apply_preview_gma_message(
+            preview_gma::Message::OpenRequested(
+                preview_gma::OpenTarget::new(
+                    target.path.clone(),
+                    target.title.clone(),
+                    target.workshop_id,
+                )
+                .with_seed(preview_gma::OpenSeed {
+                    preview_url: target.preview_url.clone(),
+                    subscription_count: Some(target.subscription_count),
+                    score_bucket: Some(target.score_bucket),
+                    score_label: Some(target.score_label),
+                }),
+            ),
+            self.update_context,
+        )
     }
 
     pub(super) fn installed_addons_context_menu_task(

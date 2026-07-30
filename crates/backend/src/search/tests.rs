@@ -14,20 +14,20 @@ fn gma_for_search(
     id: Option<WorkshopId>,
     modified: Option<u64>,
 ) -> GmaFile {
-    GmaFile {
+    let mut gma = GmaFile::for_creation(
         path,
-        size: 0,
-        id,
-        metadata: crate::gma::GmaMetadata::Standard {
+        crate::gma::GmaMetadata::Standard {
             title: title.to_owned(),
             addon_type: "servercontent".to_owned(),
             tags: vec!["build".to_owned(), "fun".to_owned()],
             ignore: Vec::new(),
         },
-        version: 3,
-        extracted_name: String::new(),
-        modified,
+    );
+    if let Some(id) = id {
+        gma.set_workshop_id(id);
     }
+    gma.set_modified_for_test(modified);
+    gma
 }
 
 #[test]

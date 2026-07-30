@@ -76,6 +76,7 @@ macro_rules! mapped_enum_with_all {
 mod app;
 mod assets;
 mod bridge;
+mod cli;
 mod features;
 mod format;
 mod generation;
@@ -133,7 +134,7 @@ enum RunError {
     #[error(transparent)]
     Iced(#[from] iced::Error),
     #[error(transparent)]
-    Cli(#[from] gmpublished_backend::cli::CliError),
+    Cli(#[from] cli::CliError),
 }
 
 fn run() -> Result<(), RunError> {
@@ -142,7 +143,7 @@ fn run() -> Result<(), RunError> {
     // `PANIC_LOG_PATH` resolves below, reports land on the fallback path.
     install_panic_log_hook();
 
-    if let Some(outcome) = gmpublished_backend::cli::run() {
+    if let Some(outcome) = cli::run() {
         return Ok(outcome?);
     }
 

@@ -62,20 +62,36 @@ impl PublishedFileDetail {
 }
 
 fn api_agent() -> ureq::Agent {
-    crate::net::tls_agent_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into()
+    crate::net::build_http_agent(
+        crate::net::HttpAgentConfig::new().global_timeout(Duration::from_secs(30)),
+    )
 }
 
-/// Agent for CDN payload downloads: no global deadline (large addons on
-/// slow lines take minutes), but bounded connect/response latency.
+/// Agent for CDN payload downloads: no global or response-header deadline,
+/// so a healthy stream may take minutes, with bounded connection setup and
+/// body-idle periods. Ureq's response timeout also caps the subsequent body,
+/// so it is deliberately not configured for this streaming transfer.
 pub(super) fn download_agent() -> ureq::Agent {
-    crate::net::tls_agent_builder()
-        .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
-        .build()
-        .into()
+    crate::net::build_http_agent(
+        crate::net::HttpAgentConfig::new()
+            .connect_timeout(Duration::from_secs(15))
+            .receive_body_timeout(Duration::from_secs(30)),
+    )
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn download_agent_has_idle_budget_without_total_body_deadline() {
+        let timeouts = download_agent().config().timeouts();
+
+        assert_eq!(timeouts.global, None);
+        assert_eq!(timeouts.connect, Some(Duration::from_secs(15)));
+        assert_eq!(timeouts.recv_response, None);
+        assert_eq!(timeouts.recv_body, Some(Duration::from_secs(30)));
+    }
 }
 
 /// Expands collections (recursively, deduplicated) and returns details for

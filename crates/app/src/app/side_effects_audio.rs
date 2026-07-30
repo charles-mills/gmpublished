@@ -24,7 +24,7 @@ impl App {
     pub(super) fn file_preview_audio_play_task(
         &mut self,
         request_id: Generation,
-        bytes: Arc<Vec<u8>>,
+        bytes: Arc<[u8]>,
         resume_at: f32,
     ) -> Task<RootMessage> {
         let Some(playback) = self.ensure_audio_playback() else {
@@ -112,7 +112,7 @@ impl App {
         &self,
         event: preview_model::DoorAudioEvent,
     ) -> Option<&preview_model::DoorInstance> {
-        let data = self.state.file_preview.current()?;
+        let data = self.state.features.file_preview.current()?;
         let expected_content_id = data.content_id();
         if event.content_id != expected_content_id {
             return None;

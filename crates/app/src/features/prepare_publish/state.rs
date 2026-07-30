@@ -41,247 +41,27 @@ use super::model::{
     IgnorePatternMutationResult, IgnoredPattern, PublishIconSubmitRequestEnvelope,
     PublishIconSubmitResult, PublishSubmitContext, PublishSubmitRequestEnvelope,
     PublishSubmitResult, VerifiedContentPath, VerifiedContentPathState, VerifiedIconPreview,
-    WorkshopContentRequest, default_icon_path, publish_selected_preview,
+    WorkshopContentRequest, WorkshopSnapshotInventory, default_icon_path, publish_selected_preview,
 };
 use crate::generation::Generation;
 use crate::spinner_clock::SpinnerClock;
 
+mod content_selection;
+mod icon_state;
+mod request;
+mod submission_state;
+mod verification;
+mod workshop_snapshot;
+
+pub use content_selection::{
+    AddonTag, AddonType, BrowserSelectHover, Mode, OpenTarget, UpdateTarget,
+};
+use icon_state::{seeded_backdrop, thumbnail_owner};
+pub use submission_state::{Blockers, ChangelogContent, Requirement};
+use verification::Verification;
+use workshop_snapshot::WorkshopContentLoad;
+
 const SEED_THUMBNAIL_MAX_EDGE: u32 = 512;
-
-mapped_enum_with_all! {
-    /// Steam Workshop addon-type tag. The wire value (`as_str`) is the exact
-    /// string the backend and workshop tags expect, not a Rust-cased rendering.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum AddonType {
-        ServerContent => "ServerContent",
-        Gamemode => "gamemode",
-        Map => "map",
-        Weapon => "weapon",
-        Vehicle => "vehicle",
-        Npc => "npc",
-        Tool => "tool",
-        Effects => "effects",
-        Model => "model",
-        Entity => "entity",
-    }
-    as_str -> &'static str
-}
-
-impl AddonType {
-    fn from_workshop_tag(tag: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str().eq_ignore_ascii_case(tag))
-    }
-}
-
-mapped_enum_with_all! {
-    /// Steam Workshop content tag (up to three per addon).
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum AddonTag {
-        Fun => "fun",
-        Roleplay => "roleplay",
-        Scenic => "scenic",
-        Movie => "movie",
-        Realism => "realism",
-        Cartoon => "cartoon",
-        Water => "water",
-        Comic => "comic",
-        Build => "build",
-    }
-    as_str -> &'static str
-}
-
-impl AddonTag {
-    fn from_workshop_tag(tag: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|candidate| candidate.as_str().eq_ignore_ascii_case(tag))
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OpenTarget {
-    New,
-    Update(UpdateTarget),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpdateTarget {
-    pub(crate) workshop_id: PublishedFileId,
-    pub(crate) title: String,
-    pub(crate) tags: Vec<String>,
-    pub(crate) preview_url: Option<String>,
-    pub(crate) snapshot_request_id: WorkshopSnapshotId,
-    pub(crate) snapshot_destination: PathBuf,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct WorkshopContentLoad {
-    workshop_id: PublishedFileId,
-    destination: PathBuf,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Mode {
-    New,
-    Update(UpdateTarget),
-}
-
-/// Hover presence of the file-browser empty state, with value semantics.
-#[derive(Clone, Debug)]
-pub struct BrowserSelectHover(motion::Presence<bool>);
-
-impl Default for BrowserSelectHover {
-    fn default() -> Self {
-        Self(motion::asymmetric(
-            false,
-            theme::invariant().motion.hover_in_duration(),
-            theme::invariant().motion.hover_out_duration(),
-            Easing::EaseOut,
-        ))
-    }
-}
-
-impl PartialEq for BrowserSelectHover {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-/// Changelog editor content with value semantics for state snapshots.
-#[derive(Debug, Default)]
-pub struct ChangelogContent(text_editor::Content);
-
-impl ChangelogContent {
-    fn from_text(text: &str) -> Self {
-        Self(text_editor::Content::with_text(text))
-    }
-
-    pub(crate) const fn content(&self) -> &text_editor::Content {
-        &self.0
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn text(&self) -> String {
-        self.0.text()
-    }
-
-    fn perform(&mut self, action: text_editor::Action) {
-        self.0.perform(action);
-    }
-}
-
-impl Clone for ChangelogContent {
-    fn clone(&self) -> Self {
-        Self::from_text(&self.text())
-    }
-}
-
-impl PartialEq for ChangelogContent {
-    fn eq(&self, other: &Self) -> bool {
-        self.text() == other.text()
-    }
-}
-
-mapped_enum_with_all! {
-    /// A submit prerequisite the user supplies themselves, ordered as the modal
-    /// lays them out.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    #[repr(u8)]
-    pub enum Requirement {
-        AddonPath => "prepare-publish-needs-addon-path",
-        Title => "prepare-publish-needs-title",
-        AddonType => "prepare-publish-needs-addon-type",
-        Tag => "prepare-publish-needs-tag",
-        Changelog => "prepare-publish-needs-changelog",
-    }
-    label_key -> &'static str
-}
-
-impl Requirement {
-    const fn bit(self) -> u8 {
-        1 << self as u8
-    }
-}
-
-/// Everything standing between the modal's contents and a submit.
-///
-/// The two halves read differently, so they stay apart: `pending` work clears
-/// itself and only ever earns a "hold on" line, while `missing` requirements
-/// wait on the user and are the ones that redden a control.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Blockers {
-    pending: bool,
-    missing: u8,
-}
-
-impl Blockers {
-    pub(crate) const fn is_empty(self) -> bool {
-        !self.pending && self.missing == 0
-    }
-
-    pub(crate) const fn pending(self) -> bool {
-        self.pending
-    }
-
-    pub(crate) const fn contains(self, requirement: Requirement) -> bool {
-        self.missing & requirement.bit() != 0
-    }
-
-    pub(crate) fn missing(self) -> impl Iterator<Item = Requirement> {
-        Requirement::ALL
-            .into_iter()
-            .filter(move |requirement| self.contains(*requirement))
-    }
-}
-
-/// Something the user chose that has to be checked before the app can use it.
-/// Exactly one of "nothing chosen", "check in flight", "usable" and "rejected"
-/// holds at a time, and the checked-out value lives on `Verified` so it cannot
-/// outlive the check that produced it.
-#[derive(Clone, Debug, Default)]
-enum Verification<T> {
-    #[default]
-    Empty,
-    Pending,
-    Verified(T),
-    Failed(UiError),
-}
-
-impl<T> Verification<T> {
-    const fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
-
-    const fn is_pending(&self) -> bool {
-        matches!(self, Self::Pending)
-    }
-
-    const fn error(&self) -> Option<&UiError> {
-        match self {
-            Self::Failed(error) => Some(error),
-            _ => None,
-        }
-    }
-
-    const fn verified(&self) -> Option<&T> {
-        match self {
-            Self::Verified(value) => Some(value),
-            _ => None,
-        }
-    }
-
-    const fn verified_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Self::Verified(value) => Some(value),
-            _ => None,
-        }
-    }
-}
 
 #[derive(Debug)]
 #[expect(
@@ -968,7 +748,6 @@ impl State {
     pub(super) fn begin_icon_verification(
         &mut self,
         path: PathBuf,
-        temp_dir: PathBuf,
         well_rgb: [u8; 3],
     ) -> Option<IconVerificationRequest> {
         if !self.open {
@@ -984,7 +763,6 @@ impl State {
             generation,
             display_path,
             path,
-            temp_dir,
             well_rgb,
         })
     }
@@ -1053,18 +831,16 @@ impl State {
 
         match result {
             Ok(verified) => {
-                self.addon_path.clone_from(&verified.display_path);
+                self.addon_path = verified.display_path().to_owned();
                 self.content_path = Verification::Verified(VerifiedContentPathState {
-                    display_path: verified.display_path.clone(),
-                    path: verified.path.clone(),
-                    total_size: verified.total_size,
+                    display_path: verified.display_path().to_owned(),
+                    path: verified.path().to_owned(),
+                    total_size: verified.total_size(),
                 });
                 self.browser = Some(FileBrowserState::from_entries(
-                    verified.entries.iter().cloned(),
+                    verified.entries().iter().cloned(),
                 ));
-                {
-                    self.preview_source = Some(Arc::clone(&verified.preview_source));
-                }
+                self.preview_source = Some(Arc::clone(verified.preview_source()));
             }
             Err(error) => {
                 log::warn!("Prepare Publish content verification failed: {error}");
@@ -1080,7 +856,7 @@ impl State {
     pub(super) fn apply_snapshot_inspection_result(
         &mut self,
         generation: Generation,
-        result: Result<Arc<VerifiedContentPath>, UiError>,
+        result: Result<Arc<WorkshopSnapshotInventory>, UiError>,
     ) -> bool {
         if !self.open || self.request_generation != generation {
             return false;
@@ -1090,11 +866,9 @@ impl State {
             Ok(snapshot) => {
                 self.content_path = Verification::Empty;
                 self.browser = Some(FileBrowserState::from_entries(
-                    snapshot.entries.iter().cloned(),
+                    snapshot.entries().iter().cloned(),
                 ));
-                {
-                    self.preview_source = Some(Arc::clone(&snapshot.preview_source));
-                }
+                self.preview_source = Some(Arc::clone(snapshot.preview_source()));
             }
             Err(error) => {
                 log::warn!("Prepare Publish Workshop snapshot inspection failed: {error}");
@@ -1282,146 +1056,6 @@ impl State {
         }
     }
 
-    pub(super) fn begin_submit(
-        &mut self,
-        context: PublishSubmitContext,
-    ) -> Option<PublishSubmitRequestEnvelope> {
-        if !self.can_submit() {
-            return None;
-        }
-
-        let verified = self.verified_path().cloned()?;
-        let tags = selected_tags(&self.tags);
-        if tags.is_empty() {
-            return None;
-        }
-        let mode = self.submit_mode()?;
-        let changelog = self.submit_changelog();
-        let preview = self.submit_preview(&context.temp_dir);
-
-        let generation = self.bump_submit_generation();
-        self.begin_submit_pending();
-
-        Some(PublishSubmitRequestEnvelope {
-            generation,
-            request: PublishSubmitRequest {
-                mode,
-                content_source_path: verified.path,
-                title: self.title.trim().to_owned(),
-                addon_type: self
-                    .addon_type
-                    .map_or_else(String::new, |value| value.as_str().to_owned()),
-                tags,
-                changelog,
-                preview,
-                ignore_globs: context.ignore_globs,
-                total_size: verified.total_size,
-                temp_dir: context.temp_dir,
-            },
-        })
-    }
-
-    pub(super) fn apply_submit_completion(
-        &mut self,
-        generation: Generation,
-        result: Result<PublishSubmitResult, UiError>,
-    ) -> bool {
-        self.apply_submit_outcome(generation, result.map(|_result| ()))
-    }
-
-    pub(super) fn begin_publish_icon(&mut self) -> Option<PublishIconSubmitRequestEnvelope> {
-        if !self.can_publish_icon() {
-            return None;
-        }
-        let Mode::Update(target) = &self.mode else {
-            return None;
-        };
-        let workshop_id = target.workshop_id;
-        let (icon_source_path, upscale) = {
-            let selected = self.verified_icon()?;
-            (
-                selected.icon.source_path.clone(),
-                self.upscale_icon && selected.icon.can_upscale,
-            )
-        };
-
-        let generation = self.bump_submit_generation();
-        self.begin_submit_pending();
-
-        Some(PublishIconSubmitRequestEnvelope {
-            generation,
-            icon_source_path,
-            upscale,
-            workshop_id,
-        })
-    }
-
-    pub(super) fn apply_publish_icon_completion(
-        &mut self,
-        generation: Generation,
-        result: Result<PublishIconSubmitResult, UiError>,
-    ) -> bool {
-        self.apply_submit_outcome(generation, result.map(|_result| ()))
-    }
-
-    pub(super) fn tick_submit_spinner(&mut self, now: Instant) -> bool {
-        self.submit.advance(now)
-    }
-
-    fn begin_submit_pending(&mut self) {
-        self.submit.start(Instant::now());
-    }
-
-    /// Failures are surfaced by the tasks overlay toast (and logged here);
-    /// the modal itself only stops its spinner.
-    fn apply_submit_outcome(
-        &mut self,
-        generation: Generation,
-        result: Result<(), UiError>,
-    ) -> bool {
-        if !self.open || !self.submit_pending() || self.submit_generation != generation {
-            return false;
-        }
-
-        self.submit.stop();
-        if let Err(error) = result {
-            log::warn!("Prepare Publish submit failed: {error}");
-        }
-        true
-    }
-
-    fn submit_mode(&self) -> Option<PublishSubmitMode> {
-        match &self.mode {
-            Mode::New => (!self.title.trim().is_empty()).then_some(PublishSubmitMode::New),
-            Mode::Update(target) => {
-                (!self.changelog_trimmed().is_empty()).then_some(PublishSubmitMode::Update {
-                    workshop_id: target.workshop_id,
-                })
-            }
-        }
-    }
-
-    fn submit_changelog(&self) -> Option<String> {
-        match &self.mode {
-            Mode::New => None,
-            Mode::Update(_) => Some(self.changelog_trimmed()),
-        }
-    }
-
-    fn submit_preview(&self, temp_dir: &Path) -> Option<PublishSubmitPreview> {
-        if let Some(icon) = self.verified_icon() {
-            return Some(PublishSubmitPreview::Selected(publish_selected_preview(
-                &icon.icon,
-                self.upscale_icon,
-            )));
-        }
-
-        match &self.mode {
-            Mode::New => Some(PublishSubmitPreview::Default(default_icon_path(temp_dir))),
-            Mode::Update(_) => None,
-        }
-    }
-
     fn prefill_from_workshop_tags(&mut self, workshop_tags: &[String]) {
         let mut chosen_tags = Vec::with_capacity(self.tags.len());
         for tag in workshop_tags {
@@ -1462,28 +1096,6 @@ impl State {
     fn bump_submit_generation(&mut self) -> Generation {
         self.submit_generation.bump();
         self.submit_generation
-    }
-}
-
-fn thumbnail_owner() -> thumbnail_demand::Owner {
-    thumbnail_demand::Owner::PreparePublish
-}
-
-fn seeded_backdrop(
-    still: &iced::widget::image::Handle,
-    well_rgb: [u8; 3],
-) -> iced::widget::image::Handle {
-    if let iced::widget::image::Handle::Rgba {
-        width,
-        height,
-        ref pixels,
-        ..
-    } = *still
-    {
-        crate::media::backdrop::bake_blurred_backdrop(width, height, pixels, well_rgb)
-            .unwrap_or_else(|| still.clone())
-    } else {
-        still.clone()
     }
 }
 

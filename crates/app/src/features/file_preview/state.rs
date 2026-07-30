@@ -346,7 +346,7 @@ impl State {
         }
     }
 
-    pub(crate) fn current_audio_bytes(&self) -> Option<std::sync::Arc<Vec<u8>>> {
+    pub(crate) fn current_audio_bytes(&self) -> Option<std::sync::Arc<[u8]>> {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Audio { bytes, .. }) => Some(std::sync::Arc::clone(bytes)),
             _ => None,

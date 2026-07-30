@@ -352,7 +352,7 @@ pub struct ResolvedSoundReference {
 pub struct ResolvedSoundWave {
     pub(crate) path: String,
     pub(crate) source_tier: ContentSourceTier,
-    pub(crate) bytes: Arc<Vec<u8>>,
+    pub(crate) bytes: Arc<[u8]>,
 }
 
 #[derive(Debug)]
@@ -925,7 +925,7 @@ impl MaterialResolver {
         Some(ResolvedSoundWave {
             path: resolved.path,
             source_tier: resolved.tier,
-            bytes: Arc::new(resolved.bytes),
+            bytes: Arc::from(resolved.bytes),
         })
     }
 
