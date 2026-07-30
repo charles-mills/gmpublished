@@ -1126,7 +1126,8 @@ impl App {
     #[cfg(not(target_os = "macos"))]
     #[expect(
         clippy::unused_self,
-        reason = "matches the macOS handler, which dispatches on self"
+        clippy::needless_pass_by_value,
+        reason = "matches the macOS handler, which dispatches on self and consumes the message"
     )]
     fn platform_task(&self, message: crate::platform::Message) -> Task<RootMessage> {
         match message {}
