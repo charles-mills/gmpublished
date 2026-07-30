@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use super::shell;
 use super::{
     App, NativeOpenTarget, PathBuf, Point, PublishedFileId, RootMessage, Task, UpdateContext,
@@ -7,7 +8,6 @@ use super::{
 };
 #[cfg(feature = "debug")]
 use crate::bridge::tasks::TransactionStatus;
-#[cfg(target_os = "macos")]
 use crate::bridge::ui_error::ResultExt as _;
 use crate::features::context_menu::{ContextMenuTarget, LocalMenuTarget};
 

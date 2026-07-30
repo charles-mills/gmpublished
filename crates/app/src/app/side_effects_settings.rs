@@ -1,9 +1,9 @@
+#[cfg(target_os = "macos")]
 use super::window;
 use super::{
     App, LibraryRefreshReason, RootMessage, Task, flatten_blocking_ui_result, resolve_tokens,
     settings, shell, theme,
 };
-#[cfg(target_os = "macos")]
 use crate::bridge::ui_error::ResultExt as _;
 
 impl App {
