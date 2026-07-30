@@ -42,19 +42,19 @@ gmod-broken-title = Garry's Mod-Ordner fehlt
 gmod-broken-body = Der gespeicherte Pfad enthält kein GarrysMod/addons mehr.
 gmod-broken-research = Erneut suchen
 account-update-title = Update verfügbar
-account-update-caption = {$arg0} · zum Herunterladen klicken
+account-update-caption = {$version} · zum Herunterladen klicken
 my-workshop = Mein Workshop
 publish-new = Neues veröffentlichen...
 my-workshop-loading = Laden...
 my-workshop-empty-title = Noch keine Addons veröffentlicht
 my-workshop-empty-body = Alles, was du im Workshop veröffentlichst, erscheint hier.
-my-workshop-error = Laden von Mein Workshop fehlgeschlagen: {$arg0}
-my-workshop-count = Zeige {$arg0} von {$arg1} Addons
+my-workshop-error = Laden von Mein Workshop fehlgeschlagen: {$error}
+my-workshop-count = Zeige {$loaded} von {$total} Addons
 installed-addons = Installierte Addons
 installed-addons-loading = Laden...
 installed-addons-empty-title = Keine Addons installiert
 installed-addons-empty-body = Abonniere etwas im Workshop oder ziehe eine .gma-Datei hierher.
-installed-addons-error = Suche nach installierten Addons fehlgeschlagen: {$arg0}
+installed-addons-error = Suche nach installierten Addons fehlgeschlagen: {$error}
 downloader = Downloads
 downloader-workshop-input = Füge Workshop IDs, Links, Kollektionen hier ein...
 downloader-bulk-extract = GMAs stapelweise extrahieren
@@ -68,8 +68,13 @@ downloader-open-all = Open all
 downloader-remove-all = Clear
 downloader-status-finished = Fertig
 downloader-status-error = Fehler
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = Workshop {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-column-addon = Erweiterung
+downloader-column-speed = Geschwindigkeit
+downloader-column-total = Gesamt
+downloader-column-progress = Fortschritt
+workshop-item = Workshop-Objekt
+downloader-workshop-id = Workshop {$id}
 destination-where-to = Wohin?
 destination-overwrite-warning = Existierende Dateien werden überschrieben.
 destination-browse = Durchsuchen...
@@ -84,76 +89,78 @@ destination-invalid-path = Wähle einen vorhandenen, absoluten Ordner.
 relative-time-now = gerade eben
 relative-time-past-year = vor 1 Jahr
 relative-time-past-years =
-    { $arg0 ->
-       *[other] vor {$arg0} Jahren
+    { $count ->
+       *[other] vor {$count} Jahren
     }
 relative-time-past-month = vor 1 Monat
 relative-time-past-months =
-    { $arg0 ->
-       *[other] vor {$arg0} Monaten
+    { $count ->
+       *[other] vor {$count} Monaten
     }
 relative-time-past-day = vor 1 Tag
 relative-time-past-days =
-    { $arg0 ->
-       *[other] vor {$arg0} Tagen
+    { $count ->
+       *[other] vor {$count} Tagen
     }
 relative-time-past-hour = vor 1 Stunde
 relative-time-past-hours =
-    { $arg0 ->
-       *[other] vor {$arg0} Stunden
+    { $count ->
+       *[other] vor {$count} Stunden
     }
 relative-time-past-minute = vor 1 Minute
 relative-time-past-minutes =
-    { $arg0 ->
-       *[other] vor {$arg0} Minuten
+    { $count ->
+       *[other] vor {$count} Minuten
     }
 relative-time-past-second = vor 1 Sekunde
 relative-time-past-seconds =
-    { $arg0 ->
-       *[other] vor {$arg0} Sekunden
+    { $count ->
+       *[other] vor {$count} Sekunden
     }
 relative-time-future-year = in 1 Jahr
 relative-time-future-years =
-    { $arg0 ->
-       *[other] in {$arg0} Jahren
+    { $count ->
+       *[other] in {$count} Jahren
     }
 relative-time-future-month = in 1 Monat
 relative-time-future-months =
-    { $arg0 ->
-       *[other] in {$arg0} Monaten
+    { $count ->
+       *[other] in {$count} Monaten
     }
 relative-time-future-day = in 1 Tag
 relative-time-future-days =
-    { $arg0 ->
-       *[other] in {$arg0} Tagen
+    { $count ->
+       *[other] in {$count} Tagen
     }
 relative-time-future-hour = in 1 Stunde
 relative-time-future-hours =
-    { $arg0 ->
-       *[other] in {$arg0} Stunden
+    { $count ->
+       *[other] in {$count} Stunden
     }
 relative-time-future-minute = in 1 Minute
 relative-time-future-minutes =
-    { $arg0 ->
-       *[other] in {$arg0} Minuten
+    { $count ->
+       *[other] in {$count} Minuten
     }
 relative-time-future-second = in 1 Sekunde
 relative-time-future-seconds =
-    { $arg0 ->
-       *[other] in {$arg0} Sekunden
+    { $count ->
+       *[other] in {$count} Sekunden
     }
 downloading = Herunterladen
 locating = Warten
 decompressing = Extrahiere
-extracting_progress = Extrahiere {$arg0}% ({$arg1} / {$arg2})
+reading_metadata = Metadaten werden gelesen
+searching = Suche läuft...
+extracting_progress = Extrahiere {$percent}% ({$done} / {$total})
 size-analyzer = Addon-Größen-Analysator
 size-analyzer-waiting = Warte auf die Treemap-Ansicht...
 size-analyzer-loading = Verarbeiten...
 size-analyzer-empty = Keine Addons mit positiver Größe gefunden.
 size-analyzer-empty-title = Nichts zu messen
 size-analyzer-empty-body = Jedes Addon in deiner Bibliothek ist leer, daher gibt es nichts darzustellen.
-size-analyzer-error = Größen-Analyse fehlgeschlagen: {$arg0}
-size-analyzer-summary-cells = {$arg0} Gegenstände
+size-analyzer-error = Größen-Analyse fehlgeschlagen: {$error}
+size-analyzer-summary-cells = {$count} Gegenstände
 size-analyzer-name = Name
 size-analyzer-type = Typ
 size-analyzer-size = Größe
@@ -223,7 +230,7 @@ context-menu-debug-simulate-minus = -10 simulieren
 context-menu-debug-simulate-plus-million = +1 Million simulieren
 context-menu-debug-simulate-minus-million = -1 Million simulieren
 publish-processing-icon = Workshop-Symbol wird verarbeitet...
-publish-packing = Packe {$arg0}% ({$arg1} / {$arg2})
+publish-packing = Packe {$percent}% ({$done} / {$total})
 PUBLISH_STARTING = Veröffentlichung wird gestartet
 PUBLISH_PREPARING_CONFIG = Konfiguration wird vorbereitet
 PUBLISH_PREPARING_CONTENT = Inhalt wird vorbereitet
@@ -233,13 +240,12 @@ PUBLISH_COMMITTING_CHANGES = Änderungen werden übernommen
 context-menu-debug-toast-success = Toast simulieren: Erfolg
 context-menu-debug-toast-error = Toast simulieren: Fehler
 context-menu-debug-toast-notice = Simulierter Hinweis
-ERR_CANCELLED = Abgebrochen
 err-cancelled = Abgebrochen
 err-whitelist = Einige ausgewählte Dateien sind nicht erlaubt.
-err-whitelist-detail = Einige ausgewählte Dateien sind nicht erlaubt: {$arg0}
+err-whitelist-detail = Einige ausgewählte Dateien sind nicht erlaubt: {$detail}
 err-no-entries = Es wurden keine veröffentlichbaren Dateien gefunden.
 err-duplicate-entries = Doppelter Veröffentlichungspfad.
-err-duplicate-entries-detail = Doppelter Veröffentlichungspfad: {$arg0}
+err-duplicate-entries-detail = Doppelter Veröffentlichungspfad: {$detail}
 err-invalid-content-path = Wähle einen gültigen Addon-Inhaltsordner.
 err-multiple-gmas = Der Inhaltsordner darf nicht mehrere GMA-Dateien enthalten.
 err-icon-too-large = Das Workshop-Symbol ist zu groß.
@@ -247,12 +253,37 @@ err-icon-too-small = Das Workshop-Symbol muss mindestens 512x512 groß sein.
 err-icon-invalid-format = Wähle ein PNG-, JPEG- oder GIF-Symbol.
 err-icon-cannot-optimize = Dieses Symbol konnte nicht unter Steams Vorschaugrenze gebracht werden.
 err-io-error = Dateivorgang fehlgeschlagen.
+err-path-io-error = Ein Dateisystemvorgang ist fehlgeschlagen.
+err-path-io-error-detail = Ein Dateisystemvorgang ist fehlgeschlagen: {$detail}
+err-gma-format-error = Das GMA-Archiv ist beschädigt.
+err-gma-invalid-header = Der GMA-Dateikopf ist ungültig.
+err-gma-entry-not-found = Der angeforderte GMA-Eintrag wurde nicht gefunden.
+err-lzma = Die LZMA-Dekomprimierung ist fehlgeschlagen.
+err-gma-extraction-failed = Das Addon konnte nicht vollständig entpackt werden.
+err-gma-destination-unavailable = Es konnte kein verfügbares Entpackziel erstellt werden.
+err-vpk-format-error = Das VPK-Archiv ist beschädigt.
+err-vpk-invalid-header = Der VPK-Dateikopf ist ungültig.
+err-vpk-entry-not-found = Der angeforderte VPK-Eintrag wurde nicht gefunden.
+err-vpk-unsafe-path = Das VPK-Archiv enthält einen unsicheren Pfad.
+err-vpk-missing-archive = Ein erforderliches VPK-Archiv fehlt.
+err-download-missing = Die heruntergeladenen Addon-Dateien fehlen.
+err-download-failed = Das Addon konnte nicht heruntergeladen werden.
+err-item-not-found = Der Workshop-Eintrag wurde nicht gefunden.
+err-search-event-sink-unavailable = Suchergebnisse können derzeit nicht zugestellt werden.
+err-search-event-sink-disconnected = Die Zustellung der Suchergebnisse wurde unerwartet beendet.
+err-search-data-shape = Die Suche hat fehlerhafte Ergebnisdaten geliefert.
+err-unknown = Etwas ist schiefgelaufen
+err-worker-queue-full = Die App ist ausgelastet. Versuche es gleich noch einmal.
+err-worker-pool-stopped = Die Hintergrundverarbeitung ist nicht verfügbar.
+err-worker-dropped = Die Hintergrundverarbeitung wurde unerwartet beendet.
+err-gmod-path-missing = Der Garry's-Mod-Ordner ist nicht eingerichtet
+err-no-addons-found = Keine Addons gefunden
 err-image-error = Bildverarbeitung fehlgeschlagen.
-err-image-error-detail = Bildverarbeitung fehlgeschlagen: {$arg0}
+err-image-error-detail = Bildverarbeitung fehlgeschlagen: {$detail}
 err-steam-error = Steam-Fehler.
-err-steam-error-detail = Steam-Fehler: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/s
+err-steam-error-detail = Steam-Fehler: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/s
 byte-unit-b = B
 byte-unit-kb = KB
 byte-unit-mb = MB
@@ -286,7 +317,7 @@ file-type-txt = Text
 file-type-properties = Eigenschaften
 file-type-audio = Audio
 file-type-image = Bild
-file-type-unknown = Unbekannt ({$arg0})
+file-type-unknown = Unbekannt ({$extension})
 file-preview-loading = Vorschau wird geladen...
 file-preview-stage-reading-archive = Archiv wird gelesen...
 file-preview-stage-reading-bsp = BSP wird gelesen...
@@ -298,7 +329,7 @@ file-preview-expand = Vorschau erweitern
 file-preview-collapse = Vorschau einklappen
 file-preview-open-material = Material öffnen
 file-preview-open-texture = Textur öffnen
-file-preview-error = Vorschau fehlgeschlagen: {$arg0}
+file-preview-error = Vorschau fehlgeschlagen: {$error}
 file-preview-path = Pfad
 file-preview-size = Größe
 file-preview-crc = CRC
@@ -320,7 +351,7 @@ file-preview-particle-level-approximate = Angenähert — kann im Spiel anders a
 file-preview-particle-level-inert = Benötigt eine Map oder Entity — in dieser Vorschau wirkungslos
 file-preview-particle-level-unsupported = In dieser Vorschau nicht simuliert
 file-preview-truncated = Vorschau gekürzt — die vollständige Datei ist größer als hier angezeigt.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Netze
 file-preview-model-bones = Knochen
 file-preview-model-sequences = Sequenzen
@@ -328,8 +359,8 @@ file-preview-model-vertices = Scheitelpunkte
 file-preview-model-triangles = Dreiecke
 file-preview-model-materials = Materialien aufgelöst
 file-preview-model-skin = Skin
-file-preview-model-skin-option = Skin {$arg0}
-file-preview-model-bodygroup = Bodygroup {$arg0}
+file-preview-model-skin-option = Skin {$index}
+file-preview-model-bodygroup = Bodygroup {$index}
 file-preview-model-bounds-min = Grenzen min.
 file-preview-model-bounds-max = Grenzen max.
 file-preview-map-controls = Ziehen zum Umsehen · WASD zum Fliegen · Shift für Tempo · Scrollen passt das Tempo an
@@ -361,7 +392,7 @@ prepare-publish-tag-2 = Schlagwort 2
 prepare-publish-tag-3 = Schlagwort 3
 prepare-publish-update-exclamation = Aktualisieren!
 prepare-publish-publish-exclamation = Veröffentlichen!
-prepare-publish-update-warning = Du veröffentlichst ein UPDATE für {$arg0} ({$arg1})
+prepare-publish-update-warning = Du veröffentlichst ein UPDATE für {$title} ({$id})
 prepare-publish-still-needed = Noch erforderlich:
 prepare-publish-needs-addon-path = Addon-Pfad
 prepare-publish-needs-title = Titel
@@ -373,8 +404,8 @@ prepare-publish-file-browser = Dateibrowser
 prepare-publish-browser-select = Datei hierher ziehen oder klicken zum Durchsuchen
 prepare-publish-no-files = Keine Dateien gefunden
 prepare-publish-items-one = 1 Gegenstand
-prepare-publish-items-num = {$arg0} Gegenstände
-prepare-publish-items-shown = {$arg0} angezeigt
+prepare-publish-items-num = {$count} Gegenstände
+prepare-publish-items-shown = {$count} angezeigt
 prepare-publish-ignored-patterns = Ignorierte Dateimuster
 prepare-publish-ignore-placeholder = Hinzufügen...
 prepare-publish-ignored-for-convenience = Dieses Dateimuster wird standardmäßig zur Vereinfachung ignoriert.

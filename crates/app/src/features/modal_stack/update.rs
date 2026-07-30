@@ -4,16 +4,23 @@ use iced::{Event, Subscription, event, keyboard};
 
 use super::{ActiveModal, Effect, Message, State};
 
-pub fn update(state: &mut State, message: &Message) -> Vec<Effect> {
-    let now = Instant::now();
-    match message {
+pub fn update_at(state: &mut State, message: &Message, now: Instant) -> Vec<Effect> {
+    let displaced = match message {
         Message::OpenDestinationSelect => state.open(ActiveModal::DestinationSelect, now),
         Message::OpenPreparePublish => state.open(ActiveModal::PreparePublish, now),
         Message::OpenPreviewGma => state.open(ActiveModal::PreviewGma, now),
         Message::OpenSettings => state.open(ActiveModal::Settings, now),
-        Message::CloseRequested => state.close(now),
-    }
-    Vec::new()
+        Message::CloseRequested => {
+            state.close(now);
+            None
+        }
+    };
+    displaced.map(Effect::Displaced).into_iter().collect()
+}
+
+#[cfg(test)]
+fn update(state: &mut State, message: &Message) -> Vec<Effect> {
+    update_at(state, message, Instant::now())
 }
 
 /// Overlay modals always close on Escape. For the base layer, Settings is
@@ -56,7 +63,7 @@ fn escape_event(
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{ActiveModal, Message, State, update};
+    use super::{ActiveModal, Effect, Message, State, update};
 
     #[test]
     fn open_destination_select_layers_over_the_base_modal() {
@@ -82,17 +89,42 @@ mod tests {
         assert!(state.has_active_modal());
     }
 
+    /// A swapped-out modal never animates closed, so `tick` will never report
+    /// it and its feature would otherwise keep staged temp files and thumbnail
+    /// demands alive behind the modal that replaced it.
     #[test]
-    fn base_modals_swap_within_the_base_layer() {
+    fn base_modals_swap_within_the_base_layer_and_report_the_one_they_displaced() {
         let mut state = State::default();
 
-        let _effects = update(&mut state, &Message::OpenPreviewGma);
-        let _effects = update(&mut state, &Message::OpenPreparePublish);
+        assert_eq!(update(&mut state, &Message::OpenPreviewGma), vec![]);
+        assert_eq!(
+            update(&mut state, &Message::OpenPreparePublish),
+            vec![Effect::Displaced(ActiveModal::PreviewGma)]
+        );
         assert_eq!(state.active(), Some(ActiveModal::PreparePublish));
 
-        let _effects = update(&mut state, &Message::OpenSettings);
+        assert_eq!(
+            update(&mut state, &Message::OpenSettings),
+            vec![Effect::Displaced(ActiveModal::PreparePublish)]
+        );
         assert_eq!(state.active(), Some(ActiveModal::Settings));
         assert!(!state.overlay_active());
+    }
+
+    /// The overlay is a separate layer, so raising it over a base modal
+    /// displaces nothing — and re-issuing the open for the modal already on a
+    /// layer reverses its close rather than displacing itself.
+    #[test]
+    fn only_a_different_modal_on_the_same_layer_counts_as_displaced() {
+        let mut state = State::default();
+
+        let _effects = update(&mut state, &Message::OpenSettings);
+        assert_eq!(update(&mut state, &Message::OpenDestinationSelect), vec![]);
+        assert_eq!(update(&mut state, &Message::OpenDestinationSelect), vec![]);
+        assert_eq!(update(&mut state, &Message::OpenSettings), vec![]);
+
+        let _effects = update(&mut state, &Message::CloseRequested);
+        assert_eq!(update(&mut state, &Message::OpenDestinationSelect), vec![]);
     }
 
     #[test]

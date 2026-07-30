@@ -1,34 +1,39 @@
 use super::*;
+use crate::workshop_id::workshop_id;
 use std::fs;
 
 use crate::events::{BackendEvent, TransactionEvent, TransactionPayload};
 
+fn test_cpu() -> crate::execution::CpuExecutor {
+    crate::execution::CpuExecutor::build(2).expect("test CPU executor")
+}
+
 fn gma_for_search(
     path: PathBuf,
     title: &str,
-    id: Option<PublishedFileId>,
+    id: Option<WorkshopId>,
     modified: Option<u64>,
-) -> GMAFile {
-    GMAFile {
+) -> GmaFile {
+    let mut gma = GmaFile::for_creation(
         path,
-        size: 0,
-        id,
-        metadata: crate::gma::GMAMetadata::Standard {
+        crate::gma::GmaMetadata::Standard {
             title: title.to_owned(),
             addon_type: "servercontent".to_owned(),
             tags: vec!["build".to_owned(), "fun".to_owned()],
             ignore: Vec::new(),
         },
-        version: 3,
-        extracted_name: String::new(),
-        modified,
+    );
+    if let Some(id) = id {
+        gma.set_workshop_id(id);
     }
+    gma.set_modified_for_test(modified);
+    gma
 }
 
 #[test]
 fn search_item_new_sorts_terms_and_tracks_max_length() {
     let item = SearchItem::new(
-        SearchItemSource::MyWorkshop(PublishedFileId(99)),
+        SearchItemSource::MyWorkshop(workshop_id(99)),
         "Medium".to_string(),
         vec![
             "longest-term".to_string(),
@@ -58,7 +63,7 @@ fn gma_search_item_uses_metadata_terms_id_and_canonical_path() {
     let gma = gma_for_search(
         gma_path.clone(),
         "Search Fixture",
-        Some(PublishedFileId(123)),
+        Some(workshop_id(123)),
         Some(55),
     );
 
@@ -73,7 +78,7 @@ fn gma_search_item_uses_metadata_terms_id_and_canonical_path() {
     match item.source {
         SearchItemSource::InstalledAddons(path, id) => {
             assert_eq!(path, dunce::canonicalize(gma_path).expect("canonical path"));
-            assert_eq!(id, Some(PublishedFileId(123)));
+            assert_eq!(id, Some(workshop_id(123)));
         }
         _ => panic!("expected installed addon source"),
     }
@@ -85,20 +90,20 @@ fn search_add_bulk_indexes_installed_addons_and_deduplicates_workshop_ids() {
     let first = gma_for_search(
         dir.path().join("first.gma"),
         "First",
-        Some(PublishedFileId(77)),
+        Some(workshop_id(77)),
         Some(1),
     );
     let second = gma_for_search(
         dir.path().join("second.gma"),
         "Second",
-        Some(PublishedFileId(77)),
+        Some(workshop_id(77)),
         Some(2),
     );
     let local_only = gma_for_search(dir.path().join("local.gma"), "Local", None, Some(3));
-    let search = Search::new();
+    let search = Search::new(test_cpu());
 
     search.add_bulk(&[first, second, local_only]);
-    search.dirty();
+    search.ensure_sorted();
 
     assert_eq!(search.items.read().len(), 3);
     assert_eq!(search.installed_addons.read().len(), 1);
@@ -106,13 +111,13 @@ fn search_add_bulk_indexes_installed_addons_and_deduplicates_workshop_ids() {
         search
             .installed_addons
             .read()
-            .contains_key(&PublishedFileId(77))
+            .contains_key(&workshop_id(77))
     );
 }
 
 #[test]
 fn sync_installed_addons_replaces_installed_subset_only() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add(&search_fixture(11, "Workshop Survivor", ["survivor"], 1));
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/old.gma"),
@@ -121,7 +126,7 @@ fn sync_installed_addons_replaces_installed_subset_only() {
         vec!["oldterm".to_owned()],
         2_u64,
     )]);
-    search.dirty();
+    search.ensure_sorted();
 
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/new.gma"),
@@ -130,7 +135,7 @@ fn sync_installed_addons_replaces_installed_subset_only() {
         vec!["newterm".to_owned()],
         3_u64,
     )]);
-    search.dirty();
+    search.ensure_sorted();
 
     let labels = search
         .items
@@ -145,7 +150,7 @@ fn sync_installed_addons_replaces_installed_subset_only() {
 
 #[test]
 fn sync_installed_addons_added_addon_is_findable_immediately() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
 
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/live.gma"),
@@ -162,7 +167,7 @@ fn sync_installed_addons_added_addon_is_findable_immediately() {
 
 #[test]
 fn sync_installed_addons_removed_addon_stops_matching() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/removed.gma"),
         Some(55),
@@ -180,7 +185,7 @@ fn sync_installed_addons_removed_addon_stops_matching() {
 
 #[test]
 fn sync_installed_addon_files_searches_file_scope_only() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/riverden.gma"),
         Some(66),
@@ -191,7 +196,7 @@ fn sync_installed_addon_files_searches_file_scope_only() {
     let riverden = FileSearchAddon::new(
         PathBuf::from("/tmp/riverden.gma"),
         "Riverden Addon".to_owned(),
-        Some(66),
+        Some(workshop_id(66)),
     );
     search.sync_installed_addon_files(vec![
         SearchItem::new_installed_addon_file(
@@ -238,15 +243,15 @@ fn sync_installed_addon_files_searches_file_scope_only() {
 }
 
 #[test]
-fn dirty_sorts_once_then_singular_adds_replace_by_identity() {
-    let search = Search::new();
+fn ensure_sorted_sorts_once_then_singular_adds_replace_by_identity() {
+    let search = Search::new(test_cpu());
     search.add_bulk(&[
         search_fixture(1, "Alpha", ["tool"], 100),
         search_fixture(2, "Beta", ["tool"], 200),
     ]);
 
     // The first query sorts; the flag must clear so later queries skip it.
-    search.dirty();
+    search.ensure_sorted();
     assert!(!search.dirty.load(std::sync::atomic::Ordering::Acquire));
 
     // Same source, new timestamp: the old entry is replaced, not
@@ -264,7 +269,7 @@ fn dirty_sorts_once_then_singular_adds_replace_by_identity() {
 
 #[derive(Clone)]
 struct SearchFixture {
-    id: PublishedFileId,
+    id: WorkshopId,
     label: String,
     terms: Vec<String>,
     timestamp: u64,
@@ -288,7 +293,7 @@ fn search_fixture(
     timestamp: u64,
 ) -> SearchFixture {
     SearchFixture {
-        id: PublishedFileId(id),
+        id: workshop_id(id),
         label: label.into(),
         terms: terms.into_iter().map(Into::into).collect(),
         timestamp,
@@ -297,9 +302,9 @@ fn search_fixture(
 
 #[test]
 fn search_quick_matches_terms_when_label_does_not_match() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&[search_fixture(501, "Completely Different", ["needle"], 1)]);
-    search.dirty();
+    search.ensure_sorted();
 
     let result = search.quick_scored("needle", SearchScope::Addons);
 
@@ -310,13 +315,13 @@ fn search_quick_matches_terms_when_label_does_not_match() {
 
 #[test]
 fn search_quick_multi_word_query_requires_all_atoms() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&[
         search_fixture(510, "Wire Model Pack", Vec::<String>::new(), 1),
         search_fixture(511, "Wire Extras", Vec::<String>::new(), 2),
         search_fixture(512, "Model Dump", Vec::<String>::new(), 3),
     ]);
-    search.dirty();
+    search.ensure_sorted();
 
     let result = search.quick_scored("wire model", SearchScope::Addons);
 
@@ -336,35 +341,52 @@ fn search_quick_caps_results_reports_has_more_and_orders_by_score() {
             )
         })
         .collect::<Vec<_>>();
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&fixtures);
-    search.dirty();
+    search.ensure_sorted();
+
+    let pattern = Pattern::parse("needle", CaseMatching::Ignore, Normalization::Smart);
+    let mut expected = search
+        .items
+        .read()
+        .iter()
+        .filter_map(|item| {
+            best_search_item_score(&pattern, "needle", item).map(|score| QuickSearchHit {
+                score,
+                item: item.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    expected.sort_by(quick_hit_order);
+    expected.truncate(MAX_QUICK_RESULTS);
 
     let result = search.quick_scored("needle", SearchScope::Addons);
 
-    assert_eq!(result.hits.len(), usize::from(MAX_QUICK_RESULTS));
+    assert_eq!(result.hits, expected);
     assert!(result.has_more);
-    assert!(
-        result
-            .hits
-            .windows(2)
-            .all(|window| window[0].score >= window[1].score)
-    );
+
+    // Rayon scheduling is deliberately outside the result contract.
+    for _ in 0..20 {
+        assert_eq!(
+            search.quick_scored("needle", SearchScope::Addons).hits,
+            expected
+        );
+    }
 }
 
 #[test]
 fn full_search_emits_progress_data_and_finished_transaction_events() {
     let collector = crate::events::BackendEventCollector::default();
-    let transactions = crate::transactions::Transactions::new(Arc::new(collector.clone()), false);
-    let search = Search::new();
+    let transactions = crate::transactions::Transactions::new(Arc::new(collector.clone()));
+    let search = Search::new(test_cpu());
     search.add_bulk(&[
         search_fixture(701, "Needle One", ["servercontent"], 1),
         search_fixture(702, "Other", ["needle"], 2),
         search_fixture(703, "Unrelated", ["sandbox"], 3),
     ]);
-    search.dirty();
+    search.ensure_sorted();
     let transaction = transactions.begin();
-    let transaction_id = transaction.id;
+    let transaction_id = transaction.id();
 
     search.full_scored("needle", SearchScope::Addons, &transaction);
 
@@ -399,9 +421,9 @@ fn full_search_emits_progress_data_and_finished_transaction_events() {
 #[test]
 fn eq_matches_ord_across_a_matrix_of_key_components() {
     let sources = [
-        SearchItemSource::MyWorkshop(PublishedFileId(1)),
-        SearchItemSource::MyWorkshop(PublishedFileId(2)),
-        SearchItemSource::WorkshopItem(PublishedFileId(1)),
+        SearchItemSource::MyWorkshop(workshop_id(1)),
+        SearchItemSource::MyWorkshop(workshop_id(2)),
+        SearchItemSource::WorkshopItem(workshop_id(1)),
     ];
     let timestamps = [10_u64, 20_u64];
     let labels = ["abc", "abcde"];
@@ -433,22 +455,22 @@ fn eq_matches_ord_across_a_matrix_of_key_components() {
 
 #[test]
 fn refresh_installed_addon_labels_replaces_stale_label_everywhere() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add(&gma_for_search(
         PathBuf::from("/tmp/refresh.gma"),
         "Old Title",
-        Some(PublishedFileId(77)),
+        Some(workshop_id(77)),
         Some(1),
     ));
 
-    let mut fresh = WorkshopItem::from(PublishedFileId(77));
+    let mut fresh = WorkshopItem::from(workshop_id(77));
     fresh.title = "New Title".to_owned();
     search.refresh_installed_addon_labels(&[fresh]);
 
     let installed = search
         .installed_addons
         .read()
-        .get(&PublishedFileId(77))
+        .get(&workshop_id(77))
         .cloned()
         .expect("installed addon entry");
     assert_eq!(installed.label(), "New Title");

@@ -49,9 +49,9 @@ pub enum SteamRuntimeStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SteamRuntimeError {
-    #[error("ERR_STEAM_ERROR:STEAM_UNAVAILABLE")]
+    #[error("the Steam client is not running")]
     Unavailable,
-    #[error("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED")]
+    #[error("not connected to Steam")]
     NotConnected,
 }
 
@@ -88,7 +88,7 @@ impl SteamRuntime {
         Self::with_options(Some(steam), DEFAULT_CONNECT_TIMEOUT)
     }
 
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn unavailable_for_tests() -> Self {
         Self::with_options(None, Duration::ZERO)
@@ -138,7 +138,6 @@ impl SteamRuntime {
         self.inner.started.store(true, Ordering::Release);
 
         if steam.wait_for_connected(self.inner.connect_timeout) {
-            self.inner.unavailable.store(false, Ordering::Release);
             Ok(())
         } else {
             self.inner.unavailable.store(true, Ordering::Release);
@@ -154,7 +153,7 @@ impl SteamRuntime {
             return Err(SteamRuntimeError::NotConnected);
         }
 
-        let user = steam.current_user();
+        let user = steam.require_client()?.current_user();
         Ok(SteamRuntimeUser {
             steamid: user.steamid,
             name: user.name,
@@ -180,10 +179,7 @@ mod tests {
     use crate::{events::NullEventSink, transactions::Transactions};
 
     fn test_steam() -> Arc<Steam> {
-        Arc::new(Steam::new(Transactions::new(
-            Arc::new(NullEventSink),
-            false,
-        )))
+        Arc::new(Steam::new(Transactions::new(Arc::new(NullEventSink))))
     }
 
     #[test]

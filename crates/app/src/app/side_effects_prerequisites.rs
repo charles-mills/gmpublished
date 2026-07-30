@@ -1,9 +1,7 @@
-use std::path::{Path, PathBuf};
+use crate::bridge::ui_error::ResultExt as _;
+use std::path::PathBuf;
 
-use super::{
-    App, LibraryRefreshReason, RootMessage, Task, UiError, flatten_blocking_ui_result,
-    prerequisites, steam_session,
-};
+use super::{App, LibraryRefreshReason, RootMessage, Task, UiError, prerequisites, steam_session};
 
 /// Opens (or focuses) the Steam client.
 const STEAM_OPEN_URL: &str = "steam://open/main";
@@ -23,7 +21,7 @@ impl App {
                 selected.map_or_else(Task::none, |path| self.game_folder_chosen_task(path))
             }
             prerequisites::Message::GameSearchCompleted(resolved) => {
-                self.game_search_completed_task(resolved.as_deref())
+                self.game_search_completed_task(resolved)
             }
         }
     }
@@ -46,8 +44,9 @@ impl App {
     /// session moves to Connecting first so the panel spins the button that
     /// was pressed rather than replacing itself.
     fn steam_retry_now_task(&mut self) -> Task<RootMessage> {
-        if self.ctx.steam_connected()
-            || self.state.steam_session.status() == steam_session::ConnectionStatus::Connecting
+        if self.environment.ctx.steam_connected()
+            || self.state.features.steam_session.status()
+                == steam_session::ConnectionStatus::Connecting
         {
             return Task::none();
         }
@@ -59,7 +58,7 @@ impl App {
     }
 
     fn game_folder_picker_task(&self) -> Task<RootMessage> {
-        let (_, resolved) = self.ctx.game_paths();
+        let (_, resolved) = self.environment.ctx.game_paths();
         let directory = resolved.unwrap_or_else(|| PathBuf::from("."));
         let title = self.state.i18n.tr("native-dialog-select-settings-folder");
         Task::future(async move {
@@ -77,44 +76,59 @@ impl App {
     /// pick is rejected by the one validator that already knows what a
     /// Garry's Mod folder looks like.
     fn game_folder_chosen_task(&mut self, path: PathBuf) -> Task<RootMessage> {
-        if !gmpublished_backend::appdata::validate_gmod(path.clone()) {
+        if !gmpublished_backend::validate_gmod(path.clone()) {
             // Nothing was persisted, so there is nothing to re-evaluate: the
             // panel stays as it was rather than reporting a second, different
             // failure for what was really a mis-click.
             return Task::none();
         }
 
-        self.state.prerequisites.begin_game_search();
-        self.ctx
-            .run_blocking("prerequisites-set-gmod-dir", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    settings.gmod = Some(path);
-                })
-                .map(|()| app.paths().gmod_dir)
-                .map_err(|error| UiError::from(&error))
+        self.state.features.prerequisites.begin_game_search();
+        self.environment
+            .ctx
+            .run_blocking_ui("prerequisites-set-gmod-dir", move |app| {
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        settings.backend.gmod = Some(path);
+                    })
+                    .map(|()| app.config().paths().gmod_dir)
+                    .ui_err()
             })
-            .map(|result| {
-                let resolved = flatten_blocking_ui_result(result).unwrap_or_default();
+            .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
             })
     }
 
     fn game_search_task(&mut self) -> Task<RootMessage> {
-        self.state.prerequisites.begin_game_search();
-        self.ctx
-            .run_blocking("prerequisites-discover-gmod-dir", |app| {
-                app.rediscover_gmod_dir()
+        self.state.features.prerequisites.begin_game_search();
+        self.environment
+            .ctx
+            .run_blocking_ui("prerequisites-discover-gmod-dir", |app| {
+                Ok(app.config().rediscover_gmod_dir())
             })
-            .map(|result| {
-                RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(
-                    result.ok().flatten(),
-                ))
+            .map(|resolved| {
+                RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
             })
     }
 
-    fn game_search_completed_task(&mut self, resolved: Option<&Path>) -> Task<RootMessage> {
-        let (configured, _) = self.ctx.game_paths();
+    fn game_search_completed_task(
+        &mut self,
+        resolved: Result<Option<PathBuf>, UiError>,
+    ) -> Task<RootMessage> {
+        // A search that could not run is not a search that found nothing: the
+        // status stays as it was, so the user is not told the folder is
+        // missing when we never looked.
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                log::warn!("Garry's Mod folder search could not run: {error}");
+                return Task::none();
+            }
+        };
+        let resolved = resolved.as_deref();
+        let (configured, _) = self.environment.ctx.game_paths();
         self.state
+            .features
             .prerequisites
             .set_game(prerequisites::GameStatus::from_paths(
                 configured.as_deref(),
@@ -133,8 +147,9 @@ impl App {
     /// Re-reads the prerequisite facts from whatever settings snapshot just
     /// landed. Cheap: both halves are already-cached values.
     pub(super) fn sync_game_prerequisite(&mut self) {
-        let (configured, resolved) = self.ctx.game_paths();
+        let (configured, resolved) = self.environment.ctx.game_paths();
         self.state
+            .features
             .prerequisites
             .set_game(prerequisites::GameStatus::from_paths(
                 configured.as_deref(),
@@ -146,9 +161,10 @@ impl App {
     /// answers with the client closed — which is exactly the case that has to
     /// tell "not running" apart from "not installed".
     pub(super) fn steam_installed_probe_task(&self) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("prerequisites-steam-installed", |_app| {
-                gmpublished_backend::appdata::steam_client_installed()
+                gmpublished_backend::steam_client_installed()
             })
             .map(|result| RootMessage::SteamClientInstalledProbed(result.unwrap_or(true)))
     }

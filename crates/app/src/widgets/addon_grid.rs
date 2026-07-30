@@ -5,8 +5,11 @@ use iced::Task;
 use iced::widget::{Space, column, container, mouse_area, row, scrollable, sensor};
 use iced::{Element, Length, Point, Size};
 
-use crate::theme::{self, Tokens};
+#[cfg(test)]
+use crate::generation::Generation;
+use crate::theme::{self, InvariantTokens, Tokens};
 use crate::widgets::addon_card;
+use crate::widgets::grid_rows::CardId;
 
 pub const DEFAULT_CARD_WIDTH: f32 = 200.0;
 pub const MIN_CARD_WIDTH: f32 = 120.0;
@@ -28,7 +31,7 @@ pub struct State {
     visible_rows: VisibleRowRange,
     last_reported_visible_rows: VisibleRowRange,
     cursor: Option<Point>,
-    hovered_id: Option<String>,
+    hovered_id: Option<CardId>,
     loading: bool,
     has_more_pages: bool,
     next_page_requested: bool,
@@ -42,7 +45,7 @@ pub struct State {
     card_gap: f32,
     layout: RowLayout,
     #[cfg(test)]
-    layout_cache_generation: u64,
+    layout_cache_generation: Generation,
 }
 
 impl Default for State {
@@ -66,12 +69,13 @@ impl Default for State {
             card_gap: DEFAULT_CARD_GAP,
             layout: RowLayout::default(),
             #[cfg(test)]
-            layout_cache_generation: 0,
+            layout_cache_generation: Generation::INITIAL,
         }
     }
 }
 
 impl State {
+    #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub(crate) fn set_items(&mut self, items: Vec<Item>) -> Vec<Message> {
         self.set_items_at(items, Instant::now())
     }
@@ -94,6 +98,7 @@ impl State {
     /// lead card offsetting the grid) degrades to a slower lookup instead of
     /// a silently dropped patch. An id that is no longer in the grid at all
     /// is skipped — that item was removed.
+    #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub(crate) fn patch_items(&mut self, updates: Vec<(usize, Item)>) -> Vec<Message> {
         self.patch_items_at(updates, Instant::now())
     }
@@ -144,7 +149,7 @@ impl State {
     pub(crate) fn update_item_thumbnail(
         &mut self,
         index_hint: usize,
-        id: &str,
+        id: &CardId,
         thumbnail: addon_card::Thumbnail,
     ) -> bool {
         let item = match self.items.get_mut(index_hint) {
@@ -189,6 +194,7 @@ impl State {
         }
     }
 
+    #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub(crate) fn set_page_status(&mut self, loading: bool, has_more_pages: bool) -> Vec<Message> {
         self.set_page_status_at(loading, has_more_pages, Instant::now())
     }
@@ -207,6 +213,31 @@ impl State {
         self.reconcile_layout_at(now)
     }
 
+    /// Whether the grid has reached the point of needing another page, and
+    /// claims the request if so.
+    ///
+    /// A pull rather than a message: the decision latches
+    /// `next_page_requested`, so a caller that could not act on a returned
+    /// message would leave the latch suppressing every later request. Re-armed
+    /// by [`Self::set_page_status`] once the fetch is no longer in flight.
+    #[must_use]
+    pub(crate) fn take_next_page_request(&mut self) -> bool {
+        let row_count = self.layout.rows.len();
+        if row_count == 0 || !self.has_more_pages || self.loading || self.next_page_requested {
+            return false;
+        }
+
+        // With no measured viewport the visible range is empty and can never
+        // reach the last row, so any scroll away from the top stands in for it.
+        let reached_last_row = self.visible_rows.end >= row_count.saturating_sub(1);
+        let scrolled_blind = self.viewport_height <= 0.0 && self.scroll_offset > 0.0;
+        if reached_last_row || scrolled_blind {
+            self.next_page_requested = true;
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn scroll_offset(&self) -> f32 {
         self.scroll_offset
     }
@@ -217,7 +248,7 @@ impl State {
     }
 
     #[cfg(test)]
-    fn layout_cache_generation(&self) -> u64 {
+    fn layout_cache_generation(&self) -> Generation {
         self.layout_cache_generation
     }
 
@@ -245,30 +276,19 @@ impl State {
 
     fn set_scroll_offset_at(&mut self, offset: f32, now: Instant) -> Vec<Message> {
         self.scroll_offset = finite_nonnegative(offset);
-        let mut messages = self.reconcile_layout_at(now);
-        if self.viewport_height <= 0.0
-            && self.scroll_offset > 0.0
-            && !self.layout.rows.is_empty()
-            && self.has_more_pages
-            && !self.loading
-            && !self.next_page_requested
-        {
-            self.next_page_requested = true;
-            messages.push(Message::NextPageRequested);
-        }
-        messages
+        self.reconcile_layout_at(now)
     }
 
     fn set_viewport_size_at(&mut self, size: Size, now: Instant) -> Vec<Message> {
         self.viewport_height = finite_nonnegative(size.height);
         self.content_width = finite_nonnegative(size.width);
-        let tokens = Tokens::dark();
-        let columns = columns_for_width(scrollable_content_width(self.content_width, &tokens));
+        let tokens = theme::invariant();
+        let columns = columns_for_width(scrollable_content_width(self.content_width, tokens));
         if self.columns != columns.max(1) {
             return self.set_columns_at(columns, now);
         }
 
-        let card_width = self.resolved_card_width(&tokens);
+        let card_width = self.resolved_card_width(tokens);
         if self.card_width != card_width {
             self.recompute_layout_cache();
         }
@@ -280,15 +300,6 @@ impl State {
             visible_rows_for_viewport(&self.layout.rows, self.scroll_offset, self.viewport_height);
         let mut messages = Vec::new();
         if visible_rows == self.visible_rows {
-            if let Some(message) = maybe_request_next_page(
-                self.layout.rows.len(),
-                visible_rows,
-                self.has_more_pages,
-                self.loading,
-                &mut self.next_page_requested,
-            ) {
-                messages.push(message);
-            }
             messages.extend(self.reconcile_hover(now));
             return messages;
         }
@@ -302,22 +313,13 @@ impl State {
             ));
         }
 
-        if let Some(message) = maybe_request_next_page(
-            self.layout.rows.len(),
-            visible_rows,
-            self.has_more_pages,
-            self.loading,
-            &mut self.next_page_requested,
-        ) {
-            messages.push(message);
-        }
         messages.extend(self.reconcile_hover(now));
         messages
     }
 
     fn recompute_layout_cache(&mut self) {
-        let tokens = Tokens::dark();
-        let card_width = self.resolved_card_width(&tokens);
+        let tokens = theme::invariant();
+        let card_width = self.resolved_card_width(tokens);
         // Theme switches do not invalidate this cache: addon-card geometry
         // uses theme-invariant spacing, dimensions, and typography tokens.
         // Width changes do not clear it either — entries carry their own
@@ -336,18 +338,18 @@ impl State {
         self.card_heights = self
             .items
             .iter()
-            .map(|item| item.preferred_height_cached(card_width, &tokens, title_measures))
+            .map(|item| item.preferred_height_cached(card_width, tokens, title_measures))
             .collect();
-        self.layout = RowLayout::for_items(&self.items, &self.card_heights, self.columns, &tokens);
+        self.layout = RowLayout::for_items(&self.items, &self.card_heights, self.columns, tokens);
         self.card_width = card_width;
         self.card_gap = tokens.spacing.gap;
         #[cfg(test)]
         {
-            self.layout_cache_generation += 1;
+            self.layout_cache_generation.bump();
         }
     }
 
-    fn resolved_card_width(&self, tokens: &Tokens) -> f32 {
+    fn resolved_card_width(&self, tokens: &InvariantTokens) -> f32 {
         card_width_for_columns(
             scrollable_content_width(self.content_width, tokens),
             self.columns,
@@ -356,7 +358,7 @@ impl State {
     }
 
     fn reconcile_hover(&mut self, now: Instant) -> Vec<Message> {
-        let target_id = self.hover_target_id().map(str::to_owned);
+        let target_id = self.hover_target_id().cloned();
         if target_id == self.hovered_id {
             return Vec::new();
         }
@@ -364,14 +366,14 @@ impl State {
         let previous_id = self.hovered_id.take();
         let mut messages = Vec::new();
         if let Some(previous_id) = previous_id {
-            if let Some(item) = self.items.iter_mut().find(|item| item.id() == previous_id) {
+            if let Some(item) = self.items.iter_mut().find(|item| *item.id() == previous_id) {
                 item.set_hovered(false, now);
             }
             messages.push(Message::CardHoverChanged(previous_id, false));
         }
 
         if let Some(target_id) = target_id {
-            if let Some(item) = self.items.iter_mut().find(|item| item.id() == target_id) {
+            if let Some(item) = self.items.iter_mut().find(|item| *item.id() == target_id) {
                 item.set_hovered(true, now);
             }
             messages.push(Message::CardHoverChanged(target_id.clone(), true));
@@ -381,7 +383,7 @@ impl State {
         messages
     }
 
-    fn hover_target_id(&self) -> Option<&str> {
+    fn hover_target_id(&self) -> Option<&CardId> {
         let cursor = self.cursor?;
         let columns = self.columns.max(1);
         let x = finite_nonnegative(cursor.x);
@@ -437,19 +439,27 @@ fn preserve_hovered_items(previous: &[Item], next: &mut [Item]) {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// What the grid asks of its owner.
+///
+/// The mutators above return these rather than applying them, because two of
+/// them cannot be applied from in here: [`Self::VisibleRangeChanged`] drives
+/// thumbnail demands and metadata windows the grid knows nothing about, and
+/// [`Self::ScrollAnchored`] has to reach the Iced runtime as a *relative*
+/// scroll. Dropping either is therefore a claim that nothing downstream cares
+/// — true only when the grid is empty, or when the caller re-derives both from
+/// state immediately afterwards. Bind the result to a named `_` and say which.
 pub enum Message {
     ColumnsChanged(u32),
     Scrolled(u32),
     ViewportResized(u32, u32),
     VisibleRangeChanged(usize, usize),
-    CardClicked(String),
-    CardPressed(String),
-    CardReleased(String),
-    CardContextRequested(String, Point),
+    CardClicked(CardId),
+    CardPressed(CardId),
+    CardReleased(CardId),
+    CardContextRequested(CardId, Point),
     CursorMoved(Point),
     CursorLeft,
-    CardHoverChanged(String, bool),
-    NextPageRequested,
+    CardHoverChanged(CardId, bool),
     /// The grid moved its own scroll offset by this delta to keep the first
     /// visible row stationary after item heights changed above it. The owner
     /// must relay it to the runtime as a *relative* `scroll_by` — the
@@ -497,10 +507,6 @@ fn apply_at(state: &mut State, message: &Message, now: Instant) -> Vec<Message> 
         Message::CardClicked(_) | Message::CardPressed(_) | Message::CardReleased(_) => Vec::new(),
         Message::CardContextRequested(_, _) => Vec::new(),
         Message::CardHoverChanged(_, _) => Vec::new(),
-        Message::NextPageRequested => {
-            state.next_page_requested = true;
-            Vec::new()
-        }
         Message::ScrollAnchored(_) => Vec::new(),
     }
 }
@@ -657,7 +663,7 @@ impl Item {
         &self.card
     }
 
-    fn id(&self) -> &str {
+    fn id(&self) -> &CardId {
         self.card.id()
     }
 
@@ -674,7 +680,7 @@ impl Item {
     }
 
     #[cfg(test)]
-    fn preferred_height(&self, width: f32, tokens: &Tokens) -> f32 {
+    fn preferred_height(&self, width: f32, tokens: &InvariantTokens) -> f32 {
         self.preferred_height_cached(width, tokens, &mut HashMap::new())
     }
 
@@ -683,7 +689,7 @@ impl Item {
     fn preferred_height_cached(
         &self,
         width: f32,
-        tokens: &Tokens,
+        tokens: &InvariantTokens,
         measures: &mut HashMap<String, TitleMeasure>,
     ) -> f32 {
         #[cfg(test)]
@@ -704,10 +710,10 @@ impl Item {
 
 fn map_card_message(message: addon_card::Message) -> Message {
     match message {
-        addon_card::Message::Pressed(id) => Message::CardPressed(id.as_ref().to_owned()),
-        addon_card::Message::Released(id) => Message::CardReleased(id.as_ref().to_owned()),
+        addon_card::Message::Pressed(id) => Message::CardPressed(id),
+        addon_card::Message::Released(id) => Message::CardReleased(id),
         addon_card::Message::ContextRequested(id, position) => {
-            Message::CardContextRequested(id.as_ref().to_owned(), position)
+            Message::CardContextRequested(id, position)
         }
     }
 }
@@ -730,7 +736,7 @@ struct TitleMeasure {
 fn cached_title_height(
     title: &str,
     width: f32,
-    tokens: &Tokens,
+    tokens: &InvariantTokens,
     measures: &mut HashMap<String, TitleMeasure>,
 ) -> f32 {
     let single_line = addon_card::single_line_title_height(tokens);
@@ -818,7 +824,12 @@ struct RowLayout {
 }
 
 impl RowLayout {
-    fn for_items(items: &[Item], item_heights: &[f32], columns: usize, tokens: &Tokens) -> Self {
+    fn for_items(
+        items: &[Item],
+        item_heights: &[f32],
+        columns: usize,
+        tokens: &InvariantTokens,
+    ) -> Self {
         debug_assert_eq!(items.len(), item_heights.len());
         let columns = columns.max(1);
         let rows = item_heights
@@ -974,37 +985,18 @@ pub fn columns_for_width(width: f32) -> usize {
         .max(1)
 }
 
-fn card_width_for_columns(width: f32, columns: usize, tokens: &Tokens) -> f32 {
+fn card_width_for_columns(width: f32, columns: usize, tokens: &InvariantTokens) -> f32 {
     let columns = columns.max(1);
     let content_width = finite_nonnegative(width);
     let gaps = tokens.spacing.gap * columns.saturating_sub(1) as f32;
     ((content_width - gaps) / columns as f32).max(MIN_CARD_WIDTH)
 }
 
-fn scrollable_content_width(width: f32, tokens: &Tokens) -> f32 {
+fn scrollable_content_width(width: f32, tokens: &InvariantTokens) -> f32 {
     sub_clamped(
         finite_nonnegative(width),
-        theme::styles::vertical_scrollbar_reserved_width(tokens),
+        tokens.dims.scrollbar_thumb_width + tokens.dims.scrollbar_track_inset,
     )
-}
-
-fn maybe_request_next_page(
-    row_count: usize,
-    visible_rows: VisibleRowRange,
-    has_more_pages: bool,
-    loading: bool,
-    already_requested: &mut bool,
-) -> Option<Message> {
-    if row_count == 0 || !has_more_pages || loading || *already_requested {
-        return None;
-    }
-
-    if visible_rows.end >= row_count.saturating_sub(1) {
-        *already_requested = true;
-        Some(Message::NextPageRequested)
-    } else {
-        None
-    }
 }
 
 fn finite_nonnegative(value: f32) -> f32 {

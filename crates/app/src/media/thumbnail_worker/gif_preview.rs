@@ -1,7 +1,5 @@
 //! App-local GIF preview decode, composition, resizing, and animation atlas data.
 
-#[cfg(test)]
-use std::cell::RefCell;
 use std::{
     fmt,
     io::{Cursor, Read},
@@ -20,7 +18,6 @@ pub const MIN_FRAME_DELAY: Duration = Duration::from_millis(10);
 /// Maximum width or height retained for decoded GIF preview frames in tests.
 #[cfg(test)]
 pub const GIF_PREVIEW_MAX_EDGE: u32 = 256;
-/// Maximum frame count retained in a baked display atlas before decimation.
 /// Frames retained in a baked display atlas.
 ///
 /// 32, not 64. Combined with the 256 px tile ceiling this halves the worst-case
@@ -43,6 +40,14 @@ const NANOS_PER_MILLI: u128 = 1_000_000;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const GIF_DECODER_MAX_IMAGE_EDGE: u32 = 4096;
 const GIF_DECODER_MAX_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Source frames walked before a GIF is refused.
+///
+/// Frames composite one at a time over a reused canvas, so frame count is the
+/// one dimension the size limits above do not bound. Refused rather than
+/// truncated: the baked atlas summarises the whole animation, so a short walk
+/// is a wrong answer rather than a smaller one.
+const GIF_SOURCE_MAX_FRAMES: usize = 1024;
 
 pub type GifPreviewResult<T> = Result<T, GifPreviewError>;
 
@@ -264,7 +269,7 @@ impl BakedAnimation {
 #[derive(Clone, Debug)]
 pub struct LazyGifPreview {
     bytes: Arc<[u8]>,
-    delays: Arc<[Duration]>,
+    frame_count: usize,
     first_frame: GifPreviewFrame,
     max_edge: u32,
 }
@@ -273,7 +278,7 @@ impl LazyGifPreview {
     /// Returns the number of frames discovered in the GIF stream.
     #[must_use]
     pub fn frame_count(&self) -> usize {
-        self.delays.len()
+        self.frame_count
     }
 
     /// Returns the first decoded frame, available immediately at readiness.
@@ -315,94 +320,6 @@ impl LazyGifPreview {
     #[must_use]
     pub fn initial_peak_decoded_byte_len(&self) -> usize {
         self.first_frame.byte_len()
-    }
-}
-
-/// Lazily decodes GIF preview frames from retained encoded bytes.
-#[cfg(test)]
-pub struct LazyGifPlayback {
-    preview: LazyGifPreview,
-    stream: RefCell<LazyGifFrameStream>,
-}
-
-#[cfg(test)]
-impl LazyGifPlayback {
-    #[must_use]
-    pub fn new(preview: LazyGifPreview) -> Self {
-        Self {
-            stream: RefCell::new(LazyGifFrameStream::new(&preview)),
-            preview,
-        }
-    }
-
-    #[must_use]
-    pub fn frame_count(&self) -> usize {
-        self.preview.frame_count()
-    }
-
-    /// Decodes and returns the requested frame, resetting the lazy stream when needed.
-    pub fn frame(&self, frame_index: usize) -> GifPreviewResult<GifPreviewFrame> {
-        if frame_index >= self.preview.frame_count() {
-            return Err(GifPreviewError::FrameIndexOutOfRange {
-                frame_index,
-                frame_count: self.preview.frame_count(),
-            });
-        }
-        if frame_index == 0 {
-            *self.stream.borrow_mut() = LazyGifFrameStream::new(&self.preview);
-            return Ok(self.preview.first_frame.clone());
-        }
-        self.stream
-            .borrow_mut()
-            .decode_frame(&self.preview, frame_index)
-    }
-}
-
-#[cfg(test)]
-struct LazyGifFrameStream {
-    next_index: usize,
-    frames: CompositedGifFrameStream<Cursor<Arc<[u8]>>>,
-    decoder: GifFrameDecoder,
-}
-
-#[cfg(test)]
-impl LazyGifFrameStream {
-    fn new(preview: &LazyGifPreview) -> Self {
-        Self {
-            next_index: 0,
-            frames: gif_preview_frame_stream(Cursor::new(Arc::clone(&preview.bytes)))
-                .expect("validated lazy GIF bytes should reopen"),
-            decoder: GifFrameDecoder::new(preview.max_edge),
-        }
-    }
-
-    fn decode_frame(
-        &mut self,
-        preview: &LazyGifPreview,
-        requested_frame_index: usize,
-    ) -> GifPreviewResult<GifPreviewFrame> {
-        if requested_frame_index < self.next_index {
-            *self = Self::new(preview);
-        }
-
-        while self.next_index <= requested_frame_index {
-            let frame_index = self.next_index;
-            let frame = self.frames.decode_next_frame(frame_index)?.ok_or(
-                GifPreviewError::FrameIndexOutOfRange {
-                    frame_index: requested_frame_index,
-                    frame_count: preview.frame_count(),
-                },
-            )?;
-            self.next_index += 1;
-            if frame_index == requested_frame_index {
-                return self.decoder.decode_frame(frame_index, frame);
-            }
-        }
-
-        Err(GifPreviewError::FrameIndexOutOfRange {
-            frame_index: requested_frame_index,
-            frame_count: preview.frame_count(),
-        })
     }
 }
 
@@ -466,7 +383,12 @@ pub fn bake_gif_animation(bytes: &[u8], display_max_edge: u32) -> GifPreviewResu
         frame_index += 1;
     }
 
-    bake_gif_preview_frames(frames)
+    if frames.is_empty() {
+        return Err(GifPreviewError::EmptyFrameSet);
+    }
+    // No second decimation pass: `Decimation` above already capped the set at
+    // `BAKED_ANIMATION_MAX_FRAMES`, and this is the only route into packing.
+    pack_baked_animation(&frames)
 }
 
 fn budgeted_tile_edge(
@@ -497,16 +419,10 @@ fn atlas_budget_edge_cap(frame_count: usize, budget_bytes: usize) -> GifPreviewR
 /// Which frame indices survive decimation, and where each dropped frame's time
 /// goes.
 ///
-/// Mirrors `decimate_baked_frames` exactly — same bucket boundaries, same
-/// "first frame of the bucket wins" rule, same delay accumulation — so
-/// pre-filtering here and decimating afterwards produce identical output. That
-/// function stays as the safety net for callers that build frame sets by other
-/// routes.
-///
 /// The bucket starts are materialised rather than inverted on the fly. The
-/// inverse of `floor(bucket * frame_count / MAX)` is a ceiling division that is
-/// easy to get subtly wrong — an earlier version of this kept 2 frames out of
-/// 70 — and the table is at most `MAX` entries.
+/// inverse of `floor(bucket * frame_count / MAX)` is a ceiling division whose
+/// off-by-one failure mode is silent and severe — it keeps a handful of frames
+/// out of dozens — and the table is at most `MAX` entries.
 struct Decimation {
     /// First frame index of each bucket, ascending. Empty when no decimation
     /// applies.
@@ -575,17 +491,6 @@ pub fn bake_lazy_gif_preview(preview: &LazyGifPreview) -> GifPreviewResult<Baked
     bake_gif_animation(preview.encoded_bytes(), preview.max_edge())
 }
 
-pub fn bake_gif_preview_frames(
-    frames: impl Into<Vec<GifPreviewFrame>>,
-) -> GifPreviewResult<BakedAnimation> {
-    let frames = frames.into();
-    if frames.is_empty() {
-        return Err(GifPreviewError::EmptyFrameSet);
-    }
-    let frames = decimate_baked_frames(frames);
-    pack_baked_animation(&frames)
-}
-
 /// Prepares a GIF preview by decoding only the first frame.
 ///
 /// The frame count and per-frame delays come from `gif_frame_delays`, a
@@ -603,7 +508,7 @@ pub fn decode_lazy_gif_preview(
     let first_frame = decode_first_frame(&bytes, max_edge)?;
     Ok(LazyGifPreview {
         bytes,
-        delays: delays.into(),
+        frame_count: delays.len(),
         first_frame,
         max_edge,
     })
@@ -616,7 +521,7 @@ pub fn decode_lazy_gif_preview(
 pub fn broken_multi_frame_gif_preview() -> LazyGifPreview {
     LazyGifPreview {
         bytes: Arc::from(&b"not a gif"[..]),
-        delays: vec![MIN_FRAME_DELAY; 2].into(),
+        frame_count: 2,
         first_frame: GifPreviewFrame::new(2, 2, vec![255; 2 * 2 * 4], MIN_FRAME_DELAY)
             .expect("test frame dimensions are valid"),
         max_edge: GIF_PREVIEW_MAX_EDGE,
@@ -640,6 +545,13 @@ fn gif_frame_delays(bytes: &[u8]) -> GifPreviewResult<Vec<Duration>> {
         .next_frame_info()
         .map_err(GifPreviewError::GifParse)?
     {
+        // The one frame walk that does not go through the composited stream,
+        // so it carries the cap itself.
+        if delays.len() == GIF_SOURCE_MAX_FRAMES {
+            return Err(GifPreviewError::TooManyFrames {
+                limit: GIF_SOURCE_MAX_FRAMES,
+            });
+        }
         delays.push(normalize_gif_delay(frame.delay));
     }
     Ok(delays)
@@ -695,33 +607,6 @@ pub fn decoded_byte_len(frames: &[GifPreviewFrame]) -> usize {
     frames.iter().fold(0_usize, |total, frame| {
         total.saturating_add(frame.byte_len())
     })
-}
-
-fn decimate_baked_frames(mut frames: Vec<GifPreviewFrame>) -> Vec<GifPreviewFrame> {
-    let original_count = frames.len();
-    if original_count <= BAKED_ANIMATION_MAX_FRAMES {
-        return frames;
-    }
-
-    log::warn!(
-        "decimating GIF display atlas from {original_count} to {BAKED_ANIMATION_MAX_FRAMES} frames"
-    );
-
-    let mut decimated = Vec::with_capacity(BAKED_ANIMATION_MAX_FRAMES);
-    for bucket in 0..BAKED_ANIMATION_MAX_FRAMES {
-        let start = bucket * original_count / BAKED_ANIMATION_MAX_FRAMES;
-        let end = ((bucket + 1) * original_count / BAKED_ANIMATION_MAX_FRAMES).max(start + 1);
-        let delay = frames[start..end]
-            .iter()
-            .fold(Duration::ZERO, |total, frame| {
-                total.saturating_add(frame.delay())
-            });
-        let mut frame = frames[start].clone();
-        frame.delay = normalize_duration_delay(delay);
-        decimated.push(frame);
-    }
-    frames.clear();
-    decimated
 }
 
 fn pack_baked_animation(frames: &[GifPreviewFrame]) -> GifPreviewResult<BakedAnimation> {
@@ -884,6 +769,15 @@ impl<R: Read> CompositedGifFrameStream<R> {
         let Some(info) = self.next_frame_info()? else {
             return Ok(None);
         };
+        // Enforced here rather than at each walk: the priming pass, the bake
+        // pass and the test decode all reach frames only through this method.
+        // After the `None` check, not before — every walk calls once past the
+        // last frame to discover the end, and that call is not a frame.
+        if frame_index >= GIF_SOURCE_MAX_FRAMES {
+            return Err(GifPreviewError::TooManyFrames {
+                limit: GIF_SOURCE_MAX_FRAMES,
+            });
+        }
         validate_frame_dimensions(frame_index, info.width, info.height)?;
         let expected = bounded_frame_rgba_len(frame_index, info.width, info.height)?;
         let actual = self.decoder.buffer_size();
@@ -1231,6 +1125,9 @@ pub enum GifPreviewError {
     /// The GIF decoded successfully but did not contain any frames.
     #[error("GIF preview contains no frames")]
     EmptyFrameSet,
+    /// The GIF declares more source frames than the preview decoder will walk.
+    #[error("GIF preview has more than {limit} source frames")]
+    TooManyFrames { limit: usize },
     /// Requested GIF frame was not present.
     #[error("GIF preview frame {frame_index} was out of range for {frame_count} frames")]
     FrameIndexOutOfRange {

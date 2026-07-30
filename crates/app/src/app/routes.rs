@@ -55,9 +55,9 @@ impl App {
         next: shell::Route,
     ) -> Task<RootMessage> {
         if previous == next {
-            debug_assert_ne!(
-                previous, next,
-                "route_transitioned_task is an invariant guard; shell emits Navigated only on changes"
+            debug_assert!(
+                false,
+                "shell emits Navigated only on real changes, but {previous:?} -> {next:?}"
             );
             return Task::none();
         }
@@ -81,7 +81,7 @@ impl App {
                         task,
                         grid_scroll_restore(
                             my_workshop::GRID_KEY,
-                            self.state.my_workshop.grid().scroll_offset(),
+                            self.state.features.my_workshop.grid().scroll_offset(),
                         ),
                     ]),
                     RouteLifecycle::Exited => task,
@@ -95,14 +95,14 @@ impl App {
                         task,
                         grid_scroll_restore(
                             installed_addons::GRID_KEY,
-                            self.state.installed_addons.grid().scroll_offset(),
+                            self.state.features.installed_addons.grid().scroll_offset(),
                         ),
                     ]),
                     RouteLifecycle::Exited => task,
                 }
             }
             shell::Route::Downloader => {
-                self.apply_downloader_message(lifecycle.downloader_message())
+                self.apply_downloader_message(lifecycle.downloader_message(), self.update_context)
             }
             shell::Route::SizeAnalyzer => {
                 self.apply_size_analyzer_message(lifecycle.size_analyzer_message())

@@ -8,7 +8,7 @@ impl App {
         &self,
         ids: Vec<PublishedFileId>,
     ) -> Task<RootMessage> {
-        let ctx = self.ctx.clone();
+        let ctx = self.environment.ctx.clone();
         Task::stream(stream::channel(100, async move |output| {
             let _scheduled = spawn_blocking_detached_or_warn(
                 &ctx,
@@ -45,12 +45,13 @@ impl App {
             target.title,
             target.path.display()
         );
-        self.apply_preview_gma_message(preview_gma::Message::OpenRequested(
-            preview_gma::OpenTarget::new(
+        self.apply_preview_gma_message(
+            preview_gma::Message::OpenRequested(preview_gma::OpenTarget::new(
                 target.path.clone(),
                 target.title.clone(),
                 target.workshop_id,
-            ),
-        ))
+            )),
+            self.update_context,
+        )
     }
 }

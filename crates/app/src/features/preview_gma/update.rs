@@ -12,10 +12,10 @@ pub fn browser_rows_scrollable_id() -> iced::widget::Id {
 
 use super::{Effect, Message, State};
 
-pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -> Vec<Effect> {
     match message {
         Message::OpenRequested(target) => {
-            let request = state.begin_open(target);
+            let request = state.begin_open_at(target, now);
             let mut effects = vec![
                 Effect::ModalOpenRequested,
                 Effect::ArchiveOpenRequested(request),
@@ -31,9 +31,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 return Vec::new();
             }
             let effects = vec![Effect::BrowserPathChanged, Effect::ThumbnailDemandsChanged];
-            #[cfg(feature = "asset-studio")]
             let mut effects = effects;
-            #[cfg(feature = "asset-studio")]
             if let Some(request) = state.take_initial_entry_preview_request() {
                 effects.insert(0, Effect::EntryPreviewRequested(request));
             }
@@ -75,20 +73,12 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 Vec::new()
             }
         }
-        #[cfg(not(feature = "asset-studio"))]
-        Message::ExtractEntryRequested(path) => state
-            .entry_extraction_request(&path)
-            .map_or_else(Vec::new, |request| {
-                vec![Effect::EntryExtractionRequested(request)]
-            }),
-        #[cfg(feature = "asset-studio")]
         Message::PreviewEntryRequested(path) => state
             .entry_preview_request(&path)
             .map_or_else(Vec::new, |request| {
                 vec![Effect::EntryPreviewRequested(request)]
             }),
-        #[cfg(feature = "asset-studio")]
-        Message::FilePreview(_) => Vec::new(),
+        Message::FilePreview(message) => vec![Effect::FilePreview(message)],
         Message::WorkshopLinkRequested => state
             .workshop_link_url()
             .map_or_else(Vec::new, |url| vec![Effect::OpenUrlRequested(url)]),
@@ -141,6 +131,11 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     }
 }
 
+#[cfg(test)]
+fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    update_at(state, message, std::time::Instant::now())
+}
+
 fn normalize_description_url(url: &str) -> Option<String> {
     let url = url.trim();
     if url.is_empty() || url.chars().any(char::is_whitespace) {
@@ -159,6 +154,7 @@ fn normalize_description_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::generation::Generation;
     use std::path::PathBuf;
 
     use super::*;
@@ -186,31 +182,25 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/addon.gma"),
                 "Addon",
-                Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(123)),
             )),
         );
 
         assert!(state.is_open());
         assert!(state.loading());
-        assert_eq!(
-            state.workshop_id(),
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
-        );
+        assert_eq!(state.workshop_id(), Some(PublishedFileId::fixture(123)));
         assert_eq!(
             effects,
             vec![
                 Effect::ModalOpenRequested,
                 Effect::ArchiveOpenRequested(OpenRequest {
-                    request_id: 1,
+                    request_id: Generation::from_raw(1),
                     path: PathBuf::from("/tmp/addon.gma"),
-                    workshop_id: Some(
-                        PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-                    ),
+                    workshop_id: Some(PublishedFileId::fixture(123)),
                 }),
                 Effect::WorkshopMetadataRequested(MetadataRequest {
-                    request_id: 1,
-                    workshop_id: PublishedFileId::new(123)
-                        .expect("test fixture ids are always nonzero"),
+                    request_id: Generation::from_raw(1),
+                    workshop_id: PublishedFileId::fixture(123),
                 }),
                 Effect::ThumbnailDemandsChanged,
             ]
@@ -245,13 +235,13 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/addon.gma"),
                 "Addon",
-                Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(123)),
             )),
         );
 
         let effects = update(
             &mut state,
-            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+            Message::ArchiveOpened(Generation::from_raw(1), Box::new(Ok(loaded_archive()))),
         );
 
         assert!(matches!(
@@ -260,7 +250,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "asset-studio")]
     #[test]
     fn loaded_archive_with_initial_entry_emits_entry_preview_effect() {
         let mut state = State::default();
@@ -270,7 +259,7 @@ mod tests {
                 OpenTarget::new(
                     PathBuf::from("/tmp/addon.gma"),
                     "Addon",
-                    Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                    Some(PublishedFileId::fixture(123)),
                 )
                 .with_initial_entry_preview("lua/autorun/init.lua"),
             ),
@@ -278,7 +267,7 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+            Message::ArchiveOpened(Generation::from_raw(1), Box::new(Ok(loaded_archive()))),
         );
 
         assert!(effects.iter().any(|effect| {
@@ -299,7 +288,7 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/first.gma"),
                 "First",
-                Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(123)),
             )),
         );
         let _effects = update(
@@ -307,13 +296,13 @@ mod tests {
             Message::OpenRequested(OpenTarget::new(
                 PathBuf::from("/tmp/second.gma"),
                 "Second",
-                Some(PublishedFileId::new(456).expect("test fixture ids are always nonzero")),
+                Some(PublishedFileId::fixture(456)),
             )),
         );
 
         let effects = update(
             &mut state,
-            Message::ArchiveOpened(1, Box::new(Ok(loaded_archive()))),
+            Message::ArchiveOpened(Generation::from_raw(1), Box::new(Ok(loaded_archive()))),
         );
 
         assert!(effects.is_empty());

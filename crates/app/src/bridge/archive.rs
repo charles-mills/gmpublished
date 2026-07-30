@@ -1,5 +1,3 @@
-#![cfg_attr(not(feature = "asset-studio"), allow(dead_code))]
-
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,14 +7,14 @@ use thiserror::Error;
 
 use crate::bridge::gma::{GmaError, PreviewArchive};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArchivePreviewEntry<'a> {
     pub(crate) path: &'a str,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreviewArchiveSource {
     Gma(Arc<PreviewArchive>),
     Folder(FolderSource),
@@ -26,18 +24,20 @@ pub enum PreviewArchiveSource {
 /// lowercase/forward-slash form the rest of the preview stack expects;
 /// `disk_paths` maps each back to the real file so reads still resolve on
 /// case-sensitive filesystems.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FolderSource {
     entries: HashMap<FolderPath, FolderEntry>,
     paths: Vec<FolderPath>,
 }
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct FolderPath(Arc<String>);
 
 impl FolderPath {
-    fn new(path: String) -> Self {
-        Self(Arc::new(path))
+    /// `None` for a path with no canonical form. The index must be keyed the
+    /// same way lookups arrive, or an entry is present but unreachable.
+    fn new(path: &str) -> Option<Self> {
+        crate::bridge::content_path::normalize_archive_path(path).map(|path| Self(Arc::new(path)))
     }
 
     fn as_str(&self) -> &str {
@@ -51,13 +51,13 @@ impl Borrow<str> for FolderPath {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct FolderEntry {
     size: u64,
     disk_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PreviewArchiveSourceError {
     #[error(transparent)]
     Gma(#[from] GmaError),
@@ -80,7 +80,9 @@ impl PreviewArchiveSource {
         let mut entries = HashMap::with_capacity(lower);
         let mut paths = Vec::with_capacity(lower);
         for (path, size, disk_path) in files {
-            let path = FolderPath::new(path);
+            let Some(path) = FolderPath::new(&path) else {
+                continue;
+            };
             if entries
                 .insert(path.clone(), FolderEntry { size, disk_path })
                 .is_none()
@@ -165,7 +167,6 @@ impl PreviewArchiveSource {
         matches!(self, Self::Gma(_))
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {
         match self {
             Self::Gma(archive) => archive
@@ -187,9 +188,31 @@ impl PreviewArchiveSource {
     }
 }
 
-#[cfg(all(test, feature = "asset-studio"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder index keyed by the entry path as authored is unreachable from
+    /// the normalized paths every content lookup arrives with.
+    #[test]
+    fn folder_entries_are_indexed_in_the_form_lookups_use() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let disk_path = dir.path().join("Thing.VMT");
+        std::fs::write(&disk_path, b"vmt").expect("write");
+
+        let source = PreviewArchiveSource::from_folder([(
+            r"Materials\Models\Thing.VMT".to_owned(),
+            3,
+            disk_path,
+        )]);
+
+        assert_eq!(
+            source
+                .entry_bytes("materials/models/thing.vmt")
+                .expect("a normalized lookup must reach the entry"),
+            b"vmt"
+        );
+    }
 
     #[test]
     fn folder_source_reads_entries_through_the_disk_path_map() {

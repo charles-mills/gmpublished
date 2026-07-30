@@ -3,6 +3,7 @@ use super::{
     RootMessage, Task, WORKSHOP_DRAG_PREFIX, addon_grid, downloader, event, fs, installed_addons,
     my_workshop, shell, size_analyzer, window, workshop_url,
 };
+use crate::widgets::grid_rows::CardId;
 use iced::widget::image;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +22,7 @@ impl AddonDragState {
     pub(super) fn press(
         &mut self,
         source: AddonDragSource,
-        card_id: String,
+        card_id: CardId,
         workshop_id: Option<PublishedFileId>,
         thumbnail: Option<image::Handle>,
     ) {
@@ -147,14 +148,14 @@ pub(super) enum AddonDragPhase {
     Idle,
     Pending {
         source: AddonDragSource,
-        card_id: String,
+        card_id: CardId,
         workshop_id: Option<PublishedFileId>,
         thumbnail: Option<image::Handle>,
         origin: Option<Point>,
     },
     Dragging {
         source: AddonDragSource,
-        card_id: String,
+        card_id: CardId,
         workshop_id: PublishedFileId,
         thumbnail: Option<image::Handle>,
         origin: Point,
@@ -166,7 +167,7 @@ pub(super) enum AddonDragPhase {
 pub(super) enum AddonDragOutcome {
     Click {
         source: AddonDragSource,
-        card_id: String,
+        card_id: CardId,
     },
     Drop {
         workshop_id: PublishedFileId,
@@ -206,7 +207,7 @@ impl App {
     }
 
     pub(super) fn finish_addon_drag_task(&mut self) -> Task<RootMessage> {
-        let over_downloader = self.state.shell.downloader_drop_target_hovered();
+        let over_downloader = self.state.features.shell.downloader_drop_target_hovered();
         let outcome = self.state.addon_drag.release(over_downloader);
         self.addon_drag_outcome_task(outcome)
     }
@@ -215,7 +216,10 @@ impl App {
         &mut self,
         outcome: Option<AddonDragOutcome>,
     ) -> Task<RootMessage> {
-        let clear_hover = self.apply_shell_message(shell::Message::DownloaderDropTargetExited);
+        let clear_hover = self.apply_shell_message(
+            shell::Message::DownloaderDropTargetExited,
+            self.update_context,
+        );
 
         let Some(outcome) = outcome else {
             return clear_hover;
@@ -237,7 +241,7 @@ impl App {
     pub(super) fn addon_drag_click_task(
         &self,
         source: AddonDragSource,
-        card_id: String,
+        card_id: CardId,
     ) -> Task<RootMessage> {
         match source {
             AddonDragSource::MyWorkshop => Task::done(RootMessage::MyWorkshop(

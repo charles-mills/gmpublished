@@ -377,9 +377,9 @@ fn search_text_input_style(
         tokens.colors.text
     };
     let radius = if connected {
-        border::Radius::new(tokens.radii.base).bottom(0.0)
+        border::Radius::new(tokens.radii.sm).bottom(0.0)
     } else {
-        border::Radius::new(tokens.radii.base)
+        border::Radius::new(tokens.radii.sm)
     };
 
     text_input::Style {
@@ -473,7 +473,7 @@ fn dropdown_panel_style(tokens: &Tokens, opacity: f32) -> container::Style {
             ))
             .into(),
         ),
-        border: border::rounded(tokens.radii.lg),
+        border: border::rounded(tokens.radii.md),
         shadow: Shadow {
             color: Color::from(tokens.colors.shadow_dropdown).scale_alpha(opacity),
             offset: Vector::ZERO,
@@ -503,7 +503,7 @@ fn keycap_style(tokens: &Tokens, opacity: f32) -> container::Style {
         border: Border {
             color: Color::from(tokens.colors.search_keycap_border).scale_alpha(opacity),
             width: tokens.dims.border_width,
-            radius: border::Radius::new(tokens.radii.base),
+            radius: border::Radius::new(tokens.radii.sm),
         },
         ..container::Style::default()
     }
@@ -544,7 +544,7 @@ fn thumbnail_style(tokens: &Tokens, opacity: f32) -> container::Style {
                 .into(),
         ),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         ..container::Style::default()

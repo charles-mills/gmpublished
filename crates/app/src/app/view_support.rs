@@ -5,14 +5,16 @@ use super::{
     AddonDragState, Element, Mode, RootMessage, Space, SystemColorScheme, ThemePreset, Tokens,
     container, effective_theme_preset, row, text, theme,
 };
+use crate::theme::ViewCtx;
 
 const DRAG_GHOST_EDGE: f32 = 48.0;
 const DRAG_GHOST_CURSOR_OFFSET: f32 = 10.0;
 
 pub(super) fn addon_drag_ghost<'a>(
     drag: &'a AddonDragState,
-    tokens: &Tokens,
+    ctx: ViewCtx<'a>,
 ) -> Element<'a, RootMessage> {
+    let tokens = ctx.tokens;
     let Some(cursor) = drag.cursor() else {
         return Space::new().width(0.0).height(0.0).into();
     };
@@ -25,7 +27,7 @@ pub(super) fn addon_drag_ghost<'a>(
                 .width(DRAG_GHOST_EDGE)
                 .height(DRAG_GHOST_EDGE)
                 .content_fit(ContentFit::Cover)
-                .border_radius(tokens.radii.base),
+                .border_radius(tokens.radii.sm),
         )
         .padding(2.0)
         .style(move |_| {
@@ -39,7 +41,7 @@ pub(super) fn addon_drag_ghost<'a>(
         })
         .into()
     } else {
-        container(text("Workshop item").size(tokens.typography.caption))
+        container(text(ctx.i18n.tr("workshop-item")).size(tokens.typography.caption))
             .padding([tokens.spacing.pad_xs, tokens.spacing.pad_sm])
             .style(move |_| theme::styles::tag(&tokens))
             .into()

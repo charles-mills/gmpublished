@@ -2,6 +2,7 @@
 members = [
     "crates/app",
     "crates/backend",
+    "crates/domain",
 ]
 # Vendored crates that are consumed as external inputs rather than maintained
 # as workspace crates.
@@ -23,7 +24,14 @@ iced_winit = { path = "crates/vendor/iced_winit" }
 
 # Applied by crates/app and crates/backend via `[lints] workspace = true`;
 # vendored crates deliberately do not opt in.
+# `unreachable_pub` is deliberately absent: it contradicts `redundant_pub_crate`
+# in a binary crate. Only the library opts in — see crates/backend/src/lib.rs.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 [workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
 # ownership / clones
 redundant_clone = "warn"
 implicit_clone = "warn"
@@ -55,7 +63,7 @@ match_wildcard_for_single_variants = "warn"
 unnested_or_patterns = "warn"
 derive_partial_eq_without_eq = "warn"
 return_self_not_must_use = "warn"
-# phase B: ownership / signature discipline
+# ownership / signature discipline
 large_types_passed_by_value = "warn"
 needless_pass_by_value = "warn"
 struct_excessive_bools = "warn"
@@ -118,7 +126,8 @@ bytemuck = { version = "1", default-features = false, features = ["derive"] }
 # `rustls-no-provider` + `_ring` gives rustls with the ring crypto provider but
 # WITHOUT the bundled Mozilla webpki roots; `platform-verifier` enables
 # certificate verification against the OS trust store (rustls-platform-verifier).
-# Every agent must set `RootCerts::PlatformVerifier` — the WebPki default panics.
+# No bundled webpki roots: build agents through `backend::net::tls_agent_builder`,
+# which is where the trust-store choice and its rationale live.
 ureq = { version = "3.3.0", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier"] }
 walkdir = "2.5.0"
 
@@ -126,7 +135,6 @@ walkdir = "2.5.0"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
 opt-level = "s"
 
 [profile.profiling]

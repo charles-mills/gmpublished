@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use std::time::Instant;
 
 use iced::widget::{
@@ -8,6 +9,7 @@ use iced::{
     font, mouse,
 };
 
+use crate::widgets::icon::svg_icon_with_opacity as svg_icon;
 use crate::{
     assets,
     features::steam_session::ConnectionStatus,
@@ -241,8 +243,8 @@ fn rail_route_item<'a>(
     let control = button(
         container(svg_icon(
             route.icon(),
-            tokens.dims.sidebar_rail_icon_glyph,
             icon_color.into(),
+            tokens.dims.sidebar_rail_icon_glyph,
             1.0,
         ))
         .center(Length::Fixed(tokens.dims.sidebar_rail_icon_button_size)),
@@ -507,7 +509,7 @@ fn sidebar_icon_button<'a>(
 ) -> Element<'a, Message> {
     let tokens = *tokens;
     let control = button(
-        container(svg_icon(handle, glyph_size, tokens.colors.text.into(), 1.0))
+        container(svg_icon(handle, tokens.colors.text.into(), glyph_size, 1.0))
             .center(Length::Fixed(button_size)),
     )
     .on_press_maybe(message)
@@ -566,10 +568,11 @@ fn settings_row(ctx: ViewCtx<'_>, interactive: bool, opacity: f32) -> Element<'_
         menu_icon_slot(
             svg_icon(
                 assets::icons::gear(),
-                tokens.dims.icon_size,
                 tokens.colors.text_dim.into(),
+                tokens.dims.icon_size,
                 opacity,
-            ),
+            )
+            .into(),
             &tokens,
         ),
         text(i18n.tr("settings-settings"))
@@ -606,16 +609,17 @@ fn update_row<'a>(
     let i18n = ctx.i18n;
     let caption = i18n.trn(
         "account-update-caption",
-        &[("arg0", state.update_version())],
+        &[("version", Arg::Text(state.update_version()))],
     );
     let content = row![
         menu_icon_slot(
             svg_icon(
                 assets::icons::cloud_download(),
-                tokens.dims.icon_size,
                 tokens.colors.link.into(),
+                tokens.dims.icon_size,
                 opacity,
-            ),
+            )
+            .into(),
             &tokens,
         ),
         column![
@@ -714,21 +718,6 @@ fn menu_icon_slot<'a>(content: Element<'a, Message>, tokens: &Tokens) -> Element
         .into()
 }
 
-fn svg_icon<'a>(
-    handle: svg::Handle,
-    size: f32,
-    color: Color,
-    opacity: f32,
-) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .content_fit(ContentFit::Contain)
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .opacity(opacity)
-        .into()
-}
-
 fn status_color(status: ConnectionStatus, tokens: &Tokens) -> Rgba {
     match status {
         ConnectionStatus::Connected => tokens.colors.success,
@@ -776,7 +765,7 @@ fn popover_style(tokens: &Tokens, opacity: f32) -> container::Style {
             ))
             .into(),
         ),
-        border: border::rounded(tokens.radii.lg),
+        border: border::rounded(tokens.radii.md),
         shadow: Shadow {
             color: Color::from(tokens.colors.shadow_dropdown).scale_alpha(opacity),
             offset: Vector::ZERO,
@@ -872,7 +861,7 @@ fn menu_row_style(tokens: &Tokens, status: button::Status, opacity: f32) -> butt
     button::Style {
         background,
         text_color: Color::from(tokens.colors.text).scale_alpha(opacity),
-        border: border::rounded(tokens.radii.base),
+        border: border::rounded(tokens.radii.sm),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -888,7 +877,7 @@ fn update_row_style(tokens: &Tokens, status: button::Status, opacity: f32) -> bu
     button::Style {
         background: Some(Color::from(theme::motion::scaled_alpha(background, opacity)).into()),
         text_color: Color::from(tokens.colors.text).scale_alpha(opacity),
-        border: border::rounded(tokens.radii.base),
+        border: border::rounded(tokens.radii.sm),
         shadow: Shadow::default(),
         snap: true,
     }

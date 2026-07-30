@@ -1,12 +1,14 @@
 use super::*;
+use crate::bridge::domain::SteamId;
 use crate::bridge::gma::PreviewArchive;
+use crate::generation::Generation;
 use crate::test_support::GmaFixtureBuilder;
 
 fn target() -> OpenTarget {
     OpenTarget::new(
         PathBuf::from("/tmp/local.gma"),
         "Local Addon",
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
     )
 }
 
@@ -30,11 +32,8 @@ fn begin_open_marks_modal_loading_and_emits_worker_request() {
     assert!(state.is_open());
     assert!(state.loading());
     assert_eq!(state.title(), "Local Addon");
-    assert_eq!(
-        state.workshop_id(),
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero"))
-    );
-    assert_eq!(request.request_id, 1);
+    assert_eq!(state.workshop_id(), Some(PublishedFileId::fixture(42)));
+    assert_eq!(request.request_id, Generation::from_raw(1));
     assert_eq!(request.path, PathBuf::from("/tmp/local.gma"));
 }
 
@@ -154,7 +153,7 @@ fn seeded_target() -> OpenTarget {
     OpenTarget::new(
         PathBuf::from("/tmp/local.gma"),
         "Grid Title",
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
     )
     .with_seed(OpenSeed {
         preview_url: Some("https://example.invalid/preview.jpg".to_owned()),
@@ -164,7 +163,7 @@ fn seeded_target() -> OpenTarget {
     })
 }
 
-fn ready_delivery(generation: u64) -> thumbnail_demand::Delivery {
+fn ready_delivery(generation: Generation) -> thumbnail_demand::Delivery {
     let input = ThumbnailInput::from_url("https://example.invalid/preview.jpg");
     let key = input.cache_key(PREVIEW_THUMBNAIL_MAX_EDGE);
     let metadata = crate::media::thumbnail_worker::ThumbnailMetadata {
@@ -177,7 +176,7 @@ fn ready_delivery(generation: u64) -> thumbnail_demand::Delivery {
     thumbnail_demand::Delivery {
         owner: thumbnail_demand::Owner::PreviewGma,
         generation,
-        id: thumbnail_demand::DemandId::new(PREVIEW_THUMBNAIL_DEMAND_ID),
+        id: thumbnail_demand::DemandId::Singleton,
         key: key.clone(),
         result: thumbnail_demand::DeliveryResult::Ready(
             thumbnail_demand::ReadyThumbnail::for_test(key, metadata, vec![7_u8; 8 * 8 * 4]),
@@ -205,7 +204,7 @@ fn open_seeds_the_thumbnail_demand_before_the_archive_loads() {
     // Metadata arriving with the SAME url must not reset the image.
     state.apply_archive_opened(request.request_id, Ok(loaded_archive()));
     let metadata = WorkshopMetadata {
-        id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(42),
         title: "Remote".to_owned(),
         author: None,
         steamid64: None,
@@ -221,7 +220,7 @@ fn open_seeds_the_thumbnail_demand_before_the_archive_loads() {
     };
     assert!(state.apply_workshop_metadata(
         request.request_id,
-        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        PublishedFileId::fixture(42),
         Ok(Some(metadata))
     ));
     assert!(state.thumbnail_handle().is_some());
@@ -241,9 +240,9 @@ fn pending_image_square_is_reserved_until_metadata_settles() {
 
     assert!(state.apply_workshop_metadata(
         request.request_id,
-        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-        Err(UiError::new(gmpublished_backend::error_key::ErrorKey(
-            "ERR_TEST"
+        PublishedFileId::fixture(42),
+        Err(UiError::new(gmpublished_backend::ErrorKey::for_test(
+            "ERR_TEST",
         )))
     ));
     assert!(!state.thumbnail_loading());
@@ -273,7 +272,7 @@ fn click_time_stats_and_title_render_before_hydration() {
     assert_eq!(details.title, "Grid Title");
 
     let metadata = WorkshopMetadata {
-        id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(42),
         title: "Workshop Title".to_owned(),
         author: None,
         steamid64: None,
@@ -289,7 +288,7 @@ fn click_time_stats_and_title_render_before_hydration() {
     };
     assert!(state.apply_workshop_metadata(
         request.request_id,
-        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        PublishedFileId::fixture(42),
         Ok(Some(metadata))
     ));
     let details = state.details();
@@ -304,10 +303,10 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     state.apply_archive_opened(request.request_id, Ok(loaded_archive()));
 
     let metadata = WorkshopMetadata {
-        id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(42),
         title: "Remote".to_owned(),
         author: None,
-        steamid64: Some(76_561_197_990_735_296),
+        steamid64: Some(SteamId::new(76_561_197_990_735_296)),
         avatar: None,
         time_created: 0,
         time_updated: 0,
@@ -320,18 +319,21 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     };
     assert!(state.apply_workshop_metadata(
         request.request_id,
-        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        PublishedFileId::fixture(42),
         Ok(Some(metadata))
     ));
 
     let author_request = state
         .take_author_request()
         .expect("missing owner should request a profile fetch");
-    assert_eq!(author_request.steamid64, 76_561_197_990_735_296);
+    assert_eq!(
+        author_request.steamid64,
+        SteamId::new(76_561_197_990_735_296)
+    );
     assert!(state.take_author_request().is_none(), "one-shot");
 
     assert!(!state.apply_author_result(
-        author_request.request_id + 1,
+        author_request.request_id.next(),
         author_request.steamid64,
         Ok(super::AuthorInfo {
             name: "Ada".to_owned(),
@@ -354,7 +356,7 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     // A live detail refresh racing the progressive author result must not
     // replace the resolved persona with its owner-id placeholder.
     let refreshed = WorkshopMetadata {
-        id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(42),
         title: "Refreshed".to_owned(),
         author: None,
         steamid64: Some(author_request.steamid64),
@@ -370,7 +372,7 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     };
     assert!(state.apply_workshop_metadata(
         request.request_id,
-        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        PublishedFileId::fixture(42),
         Ok(Some(refreshed)),
     ));
     assert_eq!(
@@ -388,10 +390,8 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
 
     assert!(state.apply_workshop_metadata(
         request.request_id,
-        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR
-        )),
+        PublishedFileId::fixture(42),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     ));
     assert_eq!(
         state.details().description.plain_text(),
@@ -403,10 +403,10 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     let request = failed_state.begin_open(target());
     failed_state.apply_archive_opened(request.request_id, Ok(loaded_archive()));
     let metadata = WorkshopMetadata {
-        id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        id: PublishedFileId::fixture(42),
         title: "Remote".to_owned(),
         author: None,
-        steamid64: Some(76_561_197_990_735_296),
+        steamid64: Some(SteamId::new(76_561_197_990_735_296)),
         avatar: None,
         time_created: 0,
         time_updated: 0,
@@ -419,16 +419,14 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     };
     failed_state.apply_workshop_metadata(
         request.request_id,
-        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+        PublishedFileId::fixture(42),
         Ok(Some(metadata)),
     );
     let author_request = failed_state.take_author_request().expect("fetch");
     assert!(failed_state.apply_author_result(
         author_request.request_id,
         author_request.steamid64,
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR
-        )),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     ));
     let author = failed_state.details().author.as_ref().expect("author row");
     assert_eq!(author.name, "STEAM_1:0:15234784");
@@ -446,14 +444,14 @@ fn window_unfocus_pauses_thumbnail_animation() {
     };
     assert!(state.has_active_animation());
 
-    assert!(state.set_window_focused(false));
+    state.set_window_focused(false);
     assert!(!state.has_active_animation());
     // Spinner-driven ticks must not advance the paused GIF.
     let now = Instant::now();
     let _ = state.tick_animation(now);
     assert!(!state.tick_animation(now + std::time::Duration::from_secs(1)));
 
-    assert!(state.set_window_focused(true));
+    state.set_window_focused(true);
     assert!(state.has_active_animation());
 }
 

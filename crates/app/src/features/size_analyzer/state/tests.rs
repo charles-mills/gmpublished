@@ -4,24 +4,25 @@ use crate::bridge::{
     domain::{InstalledAddon, PublishedFileId},
     gma::{GmaHeader, GmaMeta, GmaMetadata},
     library::LibrarySnapshot,
-    size_analyzer::SizeAnalyzerAddon,
 };
+use crate::treemap::SizeAnalyzerAddon;
 
 use crate::media::{
     thumbnail_demand::{
         Delivery, DeliveryResult, DemandId, Owner, PlaceholderImage, ReadyThumbnail,
         ThumbnailDeliveryError,
     },
-    thumbnail_worker::{ThumbnailError, ThumbnailInput, ThumbnailMetadata},
+    thumbnail_worker::{ThumbnailDecodeError, ThumbnailError, ThumbnailInput, ThumbnailMetadata},
 };
 
 use super::*;
+use crate::generation::Generation;
 
 #[test]
 fn hover_title_prefers_the_installed_title() {
     let addon = SizeAnalyzerAddon::new(
         "a.gma",
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
         "Cool Map",
         Some("map".to_owned()),
         Vec::new(),
@@ -37,7 +38,7 @@ fn hover_title_prefers_the_installed_title() {
 fn hover_title_falls_back_to_the_workshop_id_when_title_is_blank() {
     let addon = SizeAnalyzerAddon::new(
         "a.gma",
-        Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+        Some(PublishedFileId::fixture(42)),
         "   ",
         Some("map".to_owned()),
         Vec::new(),
@@ -182,26 +183,34 @@ fn context_menu_includes_download_for_workshop_cells() {
 
     let menu = state.request_context_menu(Point::ORIGIN).unwrap();
 
-    assert!(
-        menu.entries()
-            .iter()
-            .any(|entry| entry.action() == Some(context_menu::ContextMenuAction::Download))
-    );
-    assert!(
-        menu.entries()
-            .iter()
-            .any(|entry| entry.action() == Some(context_menu::ContextMenuAction::CopyImageLink))
-    );
+    assert!(menu.entries().iter().any(|entry| matches!(
+        entry,
+        context_menu::Entry::Item {
+            action: context_menu::ContextMenuAction::Download,
+            ..
+        }
+    )));
+    assert!(menu.entries().iter().any(|entry| matches!(
+        entry,
+        context_menu::Entry::Item {
+            action: context_menu::ContextMenuAction::CopyImageLink,
+            ..
+        }
+    )));
     assert_eq!(
         menu.target().workshop_id(),
-        Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+        Some(PublishedFileId::fixture(123))
     );
     #[cfg(feature = "debug")]
-    assert!(
-        menu.entries()
-            .iter()
-            .any(|entry| { entry.action() == Some(context_menu::ContextMenuAction::HideAddon) })
-    );
+    assert!(menu.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            context_menu::Entry::Item {
+                action: context_menu::ContextMenuAction::HideAddon,
+                ..
+            }
+        )
+    }));
 }
 
 #[test]
@@ -224,10 +233,7 @@ fn preview_target_uses_active_hover_cell() {
 
     assert_eq!(target.path, PathBuf::from("tool-a.gma"));
     assert_eq!(target.title, "Tool A");
-    assert_eq!(
-        target.workshop_id,
-        Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
-    );
+    assert_eq!(target.workshop_id, Some(PublishedFileId::fixture(123)));
 }
 
 #[test]
@@ -239,7 +245,7 @@ fn thumbnail_demands_include_current_layout_workshop_leaves() {
     assert_eq!(set.owner, Owner::SizeAnalyzer);
     assert_eq!(set.generation, ANALYZER_THUMBNAIL_GENERATION);
     assert_eq!(set.demands.len(), 1);
-    assert_eq!(set.demands[0].id.as_str(), "123");
+    assert_eq!(set.demands[0].id.workshop_id(), Some(id(123)));
     assert_eq!(set.demands[0].logical_max_edge, ADDON_THUMBNAIL_MAX_EDGE);
 }
 
@@ -308,49 +314,41 @@ fn thumbnail_plan_deduplicates_workshop_ids_at_the_largest_required_edge() {
 fn preview_url_refresh_merges_for_current_layout_only() {
     let mut state = ready_state_with_workshop();
     assert_eq!(
-        state.preview_url_for_test(
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-        ),
+        state.preview_url_for_test(PublishedFileId::fixture(123)),
         Some("https://example.invalid/preview.jpg")
     );
 
     assert_eq!(
         state.apply_preview_urls(HashMap::from([(
-            PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(456),
             "https://example.invalid/stale.jpg".to_owned()
         )])),
         LayerInvalidation::NONE
     );
     assert_eq!(
-        state.preview_url_for_test(
-            PublishedFileId::new(456).expect("test fixture ids are always nonzero")
-        ),
+        state.preview_url_for_test(PublishedFileId::fixture(456)),
         None
     );
 
     assert_eq!(
         state.apply_preview_urls(HashMap::from([
             (
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(123),
                 "https://example.invalid/refreshed.jpg".to_owned()
             ),
             (
-                PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(456),
                 "https://example.invalid/new.jpg".to_owned()
             ),
         ]),),
         LayerInvalidation::THUMBNAILS
     );
     assert_eq!(
-        state.preview_url_for_test(
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-        ),
+        state.preview_url_for_test(PublishedFileId::fixture(123)),
         Some("https://example.invalid/refreshed.jpg")
     );
     assert_eq!(
-        state.preview_url_for_test(
-            PublishedFileId::new(456).expect("test fixture ids are always nonzero")
-        ),
+        state.preview_url_for_test(PublishedFileId::fixture(456)),
         None
     );
 }
@@ -361,7 +359,7 @@ fn preview_url_ids_are_taken_once_per_snapshot_epoch() {
 
     assert_eq!(
         state.take_pending_preview_url_ids(),
-        vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")]
+        vec![PublishedFileId::fixture(123)]
     );
     // Same epoch: a resize reprojects but must not redispatch a resolve.
     state.note_viewport(Size::new(660.0, 360.0));
@@ -375,7 +373,7 @@ fn preview_url_ids_are_taken_once_per_snapshot_epoch() {
     state.apply_snapshot(Ok(Some(workshop_snapshot_resized(3))));
     assert_eq!(
         state.take_pending_preview_url_ids(),
-        vec![PublishedFileId::new(123).expect("test fixture ids are always nonzero")]
+        vec![PublishedFileId::fixture(123)]
     );
 }
 
@@ -462,7 +460,7 @@ fn ready_thumbnail_delivery_stores_tile_and_invalidates_thumbnail_layer() {
     assert_eq!(invalidation, LayerInvalidation::THUMBNAILS);
     let tile = state
         .thumbnail_tiles()
-        .get(&PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+        .get(&PublishedFileId::fixture(123))
         .unwrap();
     assert_eq!((tile.width, tile.height), (8, 8));
     assert!(state.thumbnail_demands().demands.is_empty());
@@ -471,7 +469,7 @@ fn ready_thumbnail_delivery_stores_tile_and_invalidates_thumbnail_layer() {
 #[test]
 fn placeholder_delivery_fills_tile_until_real_pixels_replace_it() {
     let mut state = ready_state_with_workshop();
-    let id = PublishedFileId::new(123).expect("test fixture ids are always nonzero");
+    let id = PublishedFileId::fixture(123);
 
     let placeholder = placeholder_delivery(ANALYZER_THUMBNAIL_GENERATION, 123);
     assert_eq!(
@@ -504,7 +502,7 @@ fn ready_thumbnail_delivery_reuses_the_delivered_handle() {
     assert_eq!(
         state
             .thumbnail_tiles()
-            .get(&PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+            .get(&PublishedFileId::fixture(123))
             .unwrap()
             .handle,
         expected_handle
@@ -522,7 +520,7 @@ fn failed_thumbnail_delivery_marks_cell_dead_and_invalidates_thumbnail_layer() {
     assert!(
         state
             .failed_thumbnail_ids()
-            .contains(&PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+            .contains(&PublishedFileId::fixture(123))
     );
     assert!(state.thumbnail_demands().demands.is_empty());
 }
@@ -531,27 +529,21 @@ fn failed_thumbnail_delivery_marks_cell_dead_and_invalidates_thumbnail_layer() {
 fn thumbnail_pending_tracks_deliverable_cells_only() {
     let mut state = ready_state_with_workshop();
 
-    assert!(state.thumbnail_pending(Some(
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-    )));
+    assert!(state.thumbnail_pending(Some(PublishedFileId::fixture(123))));
     // Local addon (no workshop id) and unknown workshop cells never
     // deliver, so their cells show the dead placeholder immediately.
     assert!(!state.thumbnail_pending(None));
-    assert!(!state.thumbnail_pending(Some(
-        PublishedFileId::new(999).expect("test fixture ids are always nonzero")
-    )));
+    assert!(!state.thumbnail_pending(Some(PublishedFileId::fixture(999))));
 
     let _invalidation =
         state.apply_thumbnail_delivery(&failed_delivery(ANALYZER_THUMBNAIL_GENERATION, 123));
-    assert!(!state.thumbnail_pending(Some(
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-    )));
+    assert!(!state.thumbnail_pending(Some(PublishedFileId::fixture(123))));
 }
 
 #[test]
 fn thumbnail_delivery_survives_stable_generation_echo() {
     let mut state = ready_state_with_workshop();
-    let delivery = ready_delivery(999, 123, [44, 180, 90, 255]);
+    let delivery = ready_delivery(Generation::from_raw(999), 123, [44, 180, 90, 255]);
 
     assert_eq!(
         state.apply_thumbnail_delivery(&delivery),
@@ -560,7 +552,7 @@ fn thumbnail_delivery_survives_stable_generation_echo() {
     assert!(
         state
             .thumbnail_tiles()
-            .contains_key(&PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+            .contains_key(&PublishedFileId::fixture(123))
     );
 }
 
@@ -587,7 +579,7 @@ fn thumbnails_are_retained_for_surviving_ids_across_snapshot_change() {
     let _invalidation = state.apply_thumbnail_delivery(&delivery);
     let handle = state
         .thumbnail_tiles()
-        .get(&PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+        .get(&PublishedFileId::fixture(123))
         .unwrap()
         .handle
         .clone();
@@ -597,7 +589,7 @@ fn thumbnails_are_retained_for_surviving_ids_across_snapshot_change() {
     assert_eq!(
         state
             .thumbnail_tiles()
-            .get(&PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+            .get(&PublishedFileId::fixture(123))
             .unwrap()
             .handle,
         handle
@@ -608,7 +600,7 @@ fn thumbnails_are_retained_for_surviving_ids_across_snapshot_change() {
     assert!(
         !state
             .thumbnail_tiles()
-            .contains_key(&PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+            .contains_key(&PublishedFileId::fixture(123))
     );
 }
 
@@ -821,7 +813,7 @@ fn ready_state() -> State {
 fn ready_state_with_workshop() -> State {
     let mut state = ready_state_from_snapshot(workshop_snapshot(1));
     let _invalidation = state.apply_preview_urls(HashMap::from([(
-        PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+        PublishedFileId::fixture(123),
         "https://example.invalid/preview.jpg".to_owned(),
     )]));
     state
@@ -870,7 +862,7 @@ fn workshop_snapshot_resized(epoch: u64) -> LibrarySnapshot {
 }
 
 fn id(workshop_id: u64) -> PublishedFileId {
-    PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero")
+    PublishedFileId::fixture(workshop_id)
 }
 
 fn empty_snapshot(epoch: u64) -> LibrarySnapshot {
@@ -880,7 +872,7 @@ fn empty_snapshot(epoch: u64) -> LibrarySnapshot {
 fn snapshot_from_addons(epoch: u64, addons: Vec<InstalledAddon>) -> LibrarySnapshot {
     LibrarySnapshot {
         addons: Arc::from(addons.into_boxed_slice()),
-        epoch,
+        epoch: Generation::from_raw(epoch),
     }
 }
 
@@ -917,7 +909,7 @@ fn installed_addon(
     }
 }
 
-fn ready_delivery(generation: u64, workshop_id: u64, color: [u8; 4]) -> Delivery {
+fn ready_delivery(generation: Generation, workshop_id: u64, color: [u8; 4]) -> Delivery {
     let url = "https://example.invalid/preview.jpg";
     let input = ThumbnailInput::from_url(url);
     let key = input.cache_key(ADDON_THUMBNAIL_MAX_EDGE);
@@ -931,7 +923,7 @@ fn ready_delivery(generation: u64, workshop_id: u64, color: [u8; 4]) -> Delivery
     Delivery {
         owner: Owner::SizeAnalyzer,
         generation,
-        id: DemandId::new(workshop_id.to_string()),
+        id: DemandId::workshop(id(workshop_id)),
         key: key.clone(),
         result: DeliveryResult::Ready(ReadyThumbnail::for_test(
             key,
@@ -941,27 +933,29 @@ fn ready_delivery(generation: u64, workshop_id: u64, color: [u8; 4]) -> Delivery
     }
 }
 
-fn placeholder_delivery(generation: u64, workshop_id: u64) -> Delivery {
+fn placeholder_delivery(generation: Generation, workshop_id: u64) -> Delivery {
     let input = ThumbnailInput::from_url("https://example.invalid/preview.jpg");
     Delivery {
         owner: Owner::SizeAnalyzer,
         generation,
-        id: DemandId::new(workshop_id.to_string()),
+        id: DemandId::workshop(id(workshop_id)),
         key: input.cache_key(ADDON_THUMBNAIL_MAX_EDGE),
         result: DeliveryResult::Placeholder(PlaceholderImage::for_test(6, 6)),
     }
 }
 
-fn failed_delivery(generation: u64, workshop_id: u64) -> Delivery {
+fn failed_delivery(generation: Generation, workshop_id: u64) -> Delivery {
     let url = "https://example.invalid/preview.jpg";
     let input = ThumbnailInput::from_url(url);
     Delivery {
         owner: Owner::SizeAnalyzer,
         generation,
-        id: DemandId::new(workshop_id.to_string()),
+        id: DemandId::workshop(id(workshop_id)),
         key: input.cache_key(ADDON_THUMBNAIL_MAX_EDGE),
         result: DeliveryResult::Failed {
-            error: ThumbnailDeliveryError::Thumbnail(Arc::new(ThumbnailError::InvalidMaxEdge)),
+            error: ThumbnailDeliveryError::Thumbnail(Arc::new(ThumbnailError::Decode(
+                ThumbnailDecodeError::InvalidMaxEdge,
+            ))),
         },
     }
 }

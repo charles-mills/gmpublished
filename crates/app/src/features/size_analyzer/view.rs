@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use iced::font::Weight;
 use iced::mouse;
 use iced::widget::{
@@ -8,20 +9,18 @@ use iced::{
     Shadow, Size, Theme,
 };
 
-use crate::bridge::size_analyzer::{
-    Rect as TreemapRect, TreemapBounds, TreemapLayout, TreemapSquareData,
-};
 use crate::format::format_bytes;
 use crate::media::size_analyzer_render::{
     ADDON_PLACEHOLDER, BACKGROUND, DEAD_GLYPH, RgbaColor, SizeAnalyzerLabelSprite,
     dead_placeholder_geometry, tag_color,
 };
 use crate::media::text_measure;
+use crate::treemap::{Rect as TreemapRect, TreemapBounds, TreemapLayout, TreemapSquareData};
 use crate::widgets::context_area::context_area;
 use crate::widgets::tag_chip::{TAG_POINT_WIDTH, TAG_TEXT_SIZE, tag_chip};
 use crate::{
     assets,
-    i18n::I18n,
+    i18n::{I18n, translated_error},
     theme::{self, Tokens, ViewCtx},
 };
 
@@ -38,7 +37,11 @@ const TOOLTIP_ARROW_H: f32 = 8.0;
 const TOOLTIP_ARROW_W: f32 = 16.0;
 /// Inset the panel keeps from the surface edges when clamped.
 const TOOLTIP_MARGIN: f32 = 8.0;
-/// Hard cap on panel width (tippy's default max-width).
+/// Hard cap on panel width, matching tippy's default max-width.
+///
+/// Its own constant rather than `dims.tooltip_max_width`: this panel is drawn
+/// here rather than by the tooltip widget, and the number is a fidelity pin to
+/// the web original it reproduces, not the app's tooltip metric.
 const TOOLTIP_MAX_WIDTH: f32 = 350.0;
 /// Grid gap between the label and value columns / between rows (.5rem).
 const TOOLTIP_GRID_GAP: f32 = 8.0;
@@ -714,7 +717,10 @@ fn empty_surface_text(state: &State, i18n: &I18n) -> String {
         LoadStatus::Loading => i18n.tr("size-analyzer-loading"),
         LoadStatus::Ready => String::new(),
         LoadStatus::Empty => i18n.tr("size-analyzer-empty"),
-        LoadStatus::Error(error) => i18n.trn("size-analyzer-error", &[("arg0", error.as_str())]),
+        LoadStatus::Error(error) => i18n.trn(
+            "size-analyzer-error",
+            &[("error", Arg::Text(translated_error(i18n, error).as_str()))],
+        ),
     }
 }
 

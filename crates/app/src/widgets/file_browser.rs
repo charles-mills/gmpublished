@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::i18n::Arg;
 use iced::widget::{button, container, image, row, text};
 use iced::{Center, Color, Element, Length};
 
@@ -17,7 +18,6 @@ use crate::widgets::tooltip as tooltip_widget;
 const SILKICON_SIZE: f32 = 16.0;
 const TYPE_COLUMN_MAX_WIDTH: f32 = 170.0;
 const SIZE_COLUMN_WIDTH: f32 = 78.0;
-const TOOLTIP_MAX_WIDTH: f32 = 320.0;
 pub const ROW_HEIGHT: f32 = 32.0;
 const ROW_OVERSCAN: usize = 4;
 
@@ -134,7 +134,10 @@ pub fn row_view<'a, Message: Clone + 'a>(
         }
         RowKind::File => {
             let info = file_type_info(row_data.display_name());
-            let type_label = i18n.trn(info.translation_key, &[("arg0", info.extension.as_ref())]);
+            let type_label = i18n.trn(
+                info.translation_key,
+                &[("extension", Arg::Text(info.extension.as_ref()))],
+            );
 
             row![
                 silk_image(info.icon, type_label.clone(), &tokens),
@@ -185,7 +188,7 @@ fn silk_image<'a, Message: 'a>(
             .height(Length::Fixed(SILKICON_SIZE)),
         tooltip,
         tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     )
 }
 

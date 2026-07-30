@@ -15,7 +15,7 @@ const VPK_SIGNATURE: u32 = 0x55aa1234;
 const VPK_DIR_ARCHIVE_INDEX: u16 = 0x7fff;
 const VPK_ENTRY_TERMINATOR: u16 = 0xffff;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct FixtureEntrySpec {
     path: String,
     bytes: Vec<u8>,
@@ -58,7 +58,7 @@ impl FixtureEntrySpec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct PreparedEntry {
     extension: String,
     path: String,

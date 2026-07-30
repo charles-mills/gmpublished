@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::tasks::TaskEvent;
 
-use super::model::{DownloaderEvent, RowId, Section};
+use super::jobs::{DownloaderEvent, RowId, Section};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {

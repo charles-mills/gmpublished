@@ -1,6 +1,18 @@
+//! Draws the preview pane: the header and its controls, and the body for
+//! whichever [`PreviewContent`] loaded — image, audio, text, model, map or
+//! particle system.
+//!
+//! Each content kind renders through its own builder rather than one branching
+//! layout, because their chrome genuinely differs: a model gets a viewport and
+//! camera controls, text gets a scrollable gutter, audio gets a transport.
+//!
+//! [`PreviewContent`]: crate::media::preview_model::PreviewContent
+
+use crate::i18n::Arg;
+use gmpublished_domain::math::Vec3;
 use iced::widget::{
     Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
-    sensor, stack, svg, text,
+    sensor, stack, text,
 };
 use iced::{Border, Center, Color, ContentFit, Element, Font, Length, Padding, Shadow, border};
 
@@ -10,49 +22,51 @@ use crate::{
     theme::{self, Tokens, ViewCtx},
     widgets::{
         file_types::{SilkIcon, file_type_info},
+        icon::svg_icon as icon,
         select,
         spinner::spinner,
         split_pane, tooltip as tooltip_widget,
     },
 };
 
-use super::model::{
-    CodeLine, InfoReason, PreviewContent, PreviewData, PreviewRequest, RelatedPreviewKind,
-};
-#[cfg(feature = "asset-studio")]
-use super::model::{MapStats, ModelPreview, ParticlePreview};
-#[cfg(feature = "asset-studio")]
 use super::state::MovementMode;
 use super::{Message, State};
-#[cfg(feature = "asset-studio")]
-use gmpublished_backend::particles::SupportLevel;
+use crate::media::preview_model::{
+    CodeLine, InfoReason, PreviewContent, PreviewData, PreviewRequest, RelatedPreviewKind,
+};
+use crate::media::preview_model::{MapPreview, MapStats, ModelPreview, ParticlePreview};
+use gmpublished_domain::particles::SupportLevel;
 
 fn count_text(count: impl std::fmt::Display) -> String {
     count.to_string()
 }
 
-const TOOLTIP_MAX_WIDTH: f32 = 280.0;
+fn full_width_action<'a>(
+    label: String,
+    message: Message,
+    text_size: f32,
+    tokens: &Tokens,
+) -> iced::widget::Button<'a, Message> {
+    let tokens = *tokens;
+    button(container(text(label).size(text_size).line_height(1.0)).center_x(Length::Fill))
+        .on_press(message)
+        .padding(tokens.spacing.pad_control)
+        .width(Length::Fill)
+        .style(move |_, status| theme::styles::extract_button(&tokens, status))
+}
+
 const SILKICON_SIZE: f32 = 16.0;
 const SPINNER_SIZE: f32 = 32.0;
 const INFO_LABEL_WIDTH: f32 = 76.0;
 const CODE_LINE_NUMBER_WIDTH: f32 = 32.0;
-#[cfg(feature = "asset-studio")]
 const VIEWER_MIN_WIDTH: f32 = 240.0;
-#[cfg(feature = "asset-studio")]
 const INSPECTOR_MIN_WIDTH: f32 = 200.0;
-#[cfg(feature = "asset-studio")]
 const INSPECTOR_MAX_WIDTH: f32 = 420.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_MARGIN: f32 = 12.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_PADDING: f32 = 3.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_SLOT_GAP: f32 = 2.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_SLOT_WIDTH: f32 = 34.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_SLOT_HEIGHT: f32 = 28.0;
-#[cfg(feature = "asset-studio")]
 const MODE_PILL_ICON_SIZE: f32 = 18.0;
 
 /// Renders the in-archive File Preview pane embedded in Preview GMA.
@@ -81,7 +95,10 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let display_name = display_name(state);
     let size_bytes = size_bytes(state);
     let info = file_type_info(display_name);
-    let type_label = i18n.trn(info.translation_key, &[("arg0", info.extension.as_ref())]);
+    let type_label = i18n.trn(
+        info.translation_key,
+        &[("extension", Arg::Text(info.extension.as_ref()))],
+    );
 
     let back = tooltip_widget::below(
         button(icon(
@@ -94,7 +111,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
         i18n.tr("file-preview-back"),
         &tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     );
     let (expand_icon, expand_tooltip) = if state.expanded() {
         (
@@ -118,7 +135,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
         expand_tooltip,
         &tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     );
 
     let name = scrollable(
@@ -163,7 +180,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
             tooltip,
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ));
     }
 
@@ -181,7 +198,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
             i18n.tr("file-preview-extract"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ));
     }
     container(controls)
@@ -228,7 +245,7 @@ fn body<'a>(
                     tokens.colors.text_dim.into(),
                     SPINNER_SIZE,
                 ),
-                text(i18n.trn("file-preview-error", &[("arg0", &error)]))
+                text(i18n.trn("file-preview-error", &[("error", Arg::Text(&error))]))
                     .size(tokens.typography.body)
                     .color(Color::from(tokens.colors.text_dim))
                     .align_x(Center)
@@ -247,7 +264,6 @@ fn body<'a>(
     )
 }
 
-#[cfg_attr(not(feature = "asset-studio"), allow(unused_variables))]
 fn preview_content<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -263,17 +279,13 @@ fn preview_content<'a>(
             height,
         } => image_preview(handle, *width, *height, ctx),
         PreviewContent::Font { handle, family, .. } => raster_preview(handle, family.clone(), ctx),
-        #[cfg(feature = "asset-studio")]
         PreviewContent::Audio { duration_secs, .. } => audio_preview(state, *duration_secs, ctx),
-        #[cfg(feature = "asset-studio")]
         PreviewContent::Model(model) => {
             model_preview(state, data, model, ctx, show_inspector, content_width)
         }
-        #[cfg(feature = "asset-studio")]
         PreviewContent::Particle(preview) => {
             particle_preview(state, data, preview, ctx, show_inspector, content_width)
         }
-        #[cfg(feature = "asset-studio")]
         PreviewContent::Map {
             scene,
             stats,
@@ -399,8 +411,8 @@ fn image_preview<'a>(
     let caption = i18n.trn(
         "file-preview-image-dimensions",
         &[
-            ("arg0", width_text.as_str()),
-            ("arg1", height_text.as_str()),
+            ("width", Arg::Number(width_text.as_str())),
+            ("height", Arg::Number(height_text.as_str())),
         ],
     );
 
@@ -437,7 +449,6 @@ fn raster_preview<'a>(
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn audio_preview<'a>(
     state: &'a State,
     content_duration_secs: Option<f32>,
@@ -467,18 +478,12 @@ fn audio_preview<'a>(
             image(assets::silkicons::silkicon(SilkIcon::Sound))
                 .width(Length::Fixed(48.0))
                 .height(Length::Fixed(48.0)),
-            button(
-                container(
-                    text(button_label)
-                        .size(tokens.typography.body)
-                        .line_height(1.0),
-                )
-                .center_x(Length::Fill),
-            )
-            .on_press(Message::AudioToggleRequested)
-            .padding(tokens.spacing.pad_control)
-            .width(Length::Fill)
-            .style(move |_, status| theme::styles::extract_button(&tokens, status)),
+            full_width_action(
+                button_label,
+                Message::AudioToggleRequested,
+                tokens.typography.body,
+                &tokens,
+            ),
             container(
                 progress_bar(progress, progress_value)
                     .style(move |_| theme::styles::progress_bar(&tokens)),
@@ -499,7 +504,6 @@ fn audio_preview<'a>(
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn format_audio_time(seconds: Option<f32>) -> String {
     let Some(seconds) = seconds else {
         return "--:--".to_owned();
@@ -541,35 +545,19 @@ fn info_preview<'a>(
     .spacing(tokens.spacing.gap_sm)
     .width(Length::Fill);
     if reason == InfoReason::TooLarge {
-        rows = rows.push(
-            button(
-                container(
-                    text(i18n.tr("file-preview-load-anyway"))
-                        .size(tokens.typography.body)
-                        .line_height(1.0),
-                )
-                .center_x(Length::Fill),
-            )
-            .on_press(Message::LoadAnywayRequested)
-            .padding(tokens.spacing.pad_control)
-            .width(Length::Fill)
-            .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-        );
+        rows = rows.push(full_width_action(
+            i18n.tr("file-preview-load-anyway"),
+            Message::LoadAnywayRequested,
+            tokens.typography.body,
+            &tokens,
+        ));
     }
-    let rows = rows.push(
-        button(
-            container(
-                text(i18n.tr("file-preview-extract"))
-                    .size(tokens.typography.body)
-                    .line_height(1.0),
-            )
-            .center_x(Length::Fill),
-        )
-        .on_press(Message::ExtractRequested)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-    );
+    let rows = rows.push(full_width_action(
+        i18n.tr("file-preview-extract"),
+        Message::ExtractRequested,
+        tokens.typography.body,
+        &tokens,
+    ));
 
     container(rows)
         .width(Length::Fill)
@@ -578,7 +566,6 @@ fn info_preview<'a>(
         .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn model_preview<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -639,21 +626,18 @@ fn model_preview<'a>(
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IndexedChoice {
     index: usize,
     label: String,
 }
 
-#[cfg(feature = "asset-studio")]
 impl std::fmt::Display for IndexedChoice {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.label)
     }
 }
 
-#[cfg(feature = "asset-studio")]
 fn model_selectors<'a>(
     state: &'a State,
     model: &'a ModelPreview,
@@ -672,7 +656,7 @@ fn model_selectors<'a>(
             let index_text = count_text(index);
             i18n.trn(
                 "file-preview-model-skin-option",
-                &[("arg0", index_text.as_str())],
+                &[("index", Arg::Number(index_text.as_str()))],
             )
         });
         selectors = selectors.push(selector_row(
@@ -694,7 +678,7 @@ fn model_selectors<'a>(
         selectors = selectors.push(selector_row(
             i18n.trn(
                 "file-preview-model-bodygroup",
-                &[("arg0", group_text.as_str())],
+                &[("index", Arg::Number(group_text.as_str()))],
             ),
             options,
             selected,
@@ -709,7 +693,6 @@ fn model_selectors<'a>(
     selectors.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn indexed_choices(count: usize, label: impl Fn(usize) -> String) -> Vec<IndexedChoice> {
     (0..count)
         .map(|index| IndexedChoice {
@@ -719,7 +702,6 @@ fn indexed_choices(count: usize, label: impl Fn(usize) -> String) -> Vec<Indexed
         .collect()
 }
 
-#[cfg(feature = "asset-studio")]
 fn selector_row<'a>(
     label: String,
     options: Vec<IndexedChoice>,
@@ -752,7 +734,7 @@ fn selector_row<'a>(
             select::Metrics {
                 text_size: tokens.typography.body_sm,
                 padding: Padding::from([tokens.spacing.pad_xs, tokens.spacing.pad_sm]),
-                radius: tokens.radii.base,
+                radius: tokens.radii.sm,
                 max_rows: select::MAX_ROWS,
             },
             select::Chevron::Shown,
@@ -764,7 +746,6 @@ fn selector_row<'a>(
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn model_inspector_rows<'a>(
     data: &'a PreviewData,
     model: &'a ModelPreview,
@@ -772,7 +753,7 @@ fn model_inspector_rows<'a>(
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    let stats = model.stats;
+    let stats = model.scene.stats;
     let material_status = material_status_text(stats.resolved_material_count, stats.material_count);
     let rows = column![
         info_row(
@@ -817,27 +798,21 @@ fn model_inspector_rows<'a>(
         ),
         info_row(
             i18n.tr("file-preview-model-bounds-min"),
-            format_model_bounds(model.bounds_min),
+            format_model_bounds(model.scene.bounds_min),
             &tokens
         ),
         info_row(
             i18n.tr("file-preview-model-bounds-max"),
-            format_model_bounds(model.bounds_max),
+            format_model_bounds(model.scene.bounds_max),
             &tokens
         ),
         Space::new().height(tokens.spacing.gap),
-        button(
-            container(
-                text(i18n.tr("file-preview-extract"))
-                    .size(tokens.typography.body)
-                    .line_height(1.0),
-            )
-            .center_x(Length::Fill),
-        )
-        .on_press(Message::ExtractRequested)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status)),
+        full_width_action(
+            i18n.tr("file-preview-extract"),
+            Message::ExtractRequested,
+            tokens.typography.body,
+            &tokens,
+        ),
     ]
     .spacing(tokens.spacing.gap_sm)
     .width(Length::Fill);
@@ -845,7 +820,6 @@ fn model_inspector_rows<'a>(
     rows.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn particle_preview<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -902,10 +876,8 @@ fn particle_preview<'a>(
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
-#[cfg(feature = "asset-studio")]
 const PARTICLE_SPEED_OPTIONS: [f32; 5] = [0.1, 0.25, 0.5, 1.0, 2.0];
 
-#[cfg(feature = "asset-studio")]
 fn particle_speed_choices() -> Vec<IndexedChoice> {
     PARTICLE_SPEED_OPTIONS
         .iter()
@@ -917,7 +889,6 @@ fn particle_speed_choices() -> Vec<IndexedChoice> {
         .collect()
 }
 
-#[cfg(feature = "asset-studio")]
 fn particle_selectors<'a>(
     state: &'a State,
     preview: &'a ParticlePreview,
@@ -958,14 +929,7 @@ fn particle_selectors<'a>(
         i18n.tr("file-preview-audio-play")
     };
     let playback_button = |label: String, message: Message| {
-        button(
-            container(text(label).size(tokens.typography.body_sm).line_height(1.0))
-                .center_x(Length::Fill),
-        )
-        .on_press(message)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status))
+        full_width_action(label, message, tokens.typography.body_sm, &tokens)
     };
     selectors = selectors.push(
         row![
@@ -982,7 +946,6 @@ fn particle_selectors<'a>(
     selectors.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn particle_inspector_rows<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -1041,28 +1004,19 @@ fn particle_inspector_rows<'a>(
     }
 
     rows = rows.push(Space::new().height(tokens.spacing.gap));
-    rows = rows.push(
-        button(
-            container(
-                text(i18n.tr("file-preview-extract"))
-                    .size(tokens.typography.body)
-                    .line_height(1.0),
-            )
-            .center_x(Length::Fill),
-        )
-        .on_press(Message::ExtractRequested)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-    );
+    rows = rows.push(full_width_action(
+        i18n.tr("file-preview-extract"),
+        Message::ExtractRequested,
+        tokens.typography.body,
+        &tokens,
+    ));
 
     rows.into()
 }
 
 /// One operator line in the fidelity panel: a support-level dot + name.
-#[cfg(feature = "asset-studio")]
 fn coverage_row<'a>(
-    entry: &'a gmpublished_backend::particles::CoverageEntry,
+    entry: &'a gmpublished_domain::particles::CoverageEntry,
     ctx: ViewCtx<'a>,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
@@ -1104,21 +1058,19 @@ fn coverage_row<'a>(
         .spacing(tokens.spacing.gap_sm),
         i18n.tr(level_key),
         &tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     )
 }
 
-#[cfg(feature = "asset-studio")]
 #[derive(Clone, Copy)]
 struct MapPreviewParts<'a> {
-    scene: &'a std::sync::Arc<ModelPreview>,
+    scene: &'a std::sync::Arc<MapPreview>,
     stats: MapStats,
-    fog: Option<super::model::MapFog>,
-    sky_camera: Option<super::model::MapSkyCamera>,
-    spawn: Option<super::model::MapSpawn>,
+    fog: Option<crate::media::preview_model::MapFog>,
+    sky_camera: Option<crate::media::preview_model::MapSkyCamera>,
+    spawn: Option<crate::media::preview_model::MapSpawn>,
 }
 
-#[cfg(feature = "asset-studio")]
 fn map_preview<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -1187,7 +1139,6 @@ fn map_preview<'a>(
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
-#[cfg(feature = "asset-studio")]
 fn resizable_inspector<'a>(
     state: &'a State,
     tokens: &Tokens,
@@ -1228,7 +1179,6 @@ fn resizable_inspector<'a>(
         .into()
 }
 
-#[cfg(feature = "asset-studio")]
 pub(super) fn effective_inspector_ratio(ratio: f32, width: f32) -> f32 {
     split_pane::clamp_ratio(
         ratio,
@@ -1240,7 +1190,6 @@ pub(super) fn effective_inspector_ratio(ratio: f32, width: f32) -> f32 {
     )
 }
 
-#[cfg(feature = "asset-studio")]
 fn map_viewer_with_overlays<'a>(
     viewer: Element<'a, Message>,
     state: &'a State,
@@ -1265,7 +1214,6 @@ fn map_viewer_with_overlays<'a>(
     layered
 }
 
-#[cfg(feature = "asset-studio")]
 fn speed_readout_overlay<'a>(speed: f32, tokens: &Tokens) -> Element<'a, Message> {
     let tokens = *tokens;
     let readout = container(
@@ -1289,7 +1237,6 @@ fn speed_readout_overlay<'a>(speed: f32, tokens: &Tokens) -> Element<'a, Message
     overlay.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_overlay(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message> {
     let pill = mode_pill(active_mode, ctx);
     column![
@@ -1302,7 +1249,6 @@ fn mode_pill_overlay(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_,
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
@@ -1330,7 +1276,6 @@ fn mode_pill(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message
     .into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_slot<'a>(
     mode: MovementMode,
     active_mode: MovementMode,
@@ -1353,19 +1298,20 @@ fn mode_pill_slot<'a>(
     .on_press_maybe((!active).then_some(Message::MovementModeSelected(mode)))
     .style(move |_, _| mode_pill_slot_style(active));
 
-    tooltip_widget::below(slot, tooltip, tokens, TOOLTIP_MAX_WIDTH)
+    tooltip_widget::below(slot, tooltip, tokens, tokens.dims.tooltip_max_width)
 }
 
-#[cfg(feature = "asset-studio")]
-fn scene_supports_walk(scene: &ModelPreview) -> bool {
+fn scene_supports_walk(scene: &MapPreview) -> bool {
     scene
         .walk_collision
         .as_ref()
         .is_some_and(|collision| !collision.is_empty())
 }
 
-#[cfg(feature = "asset-studio")]
-fn active_movement_mode(state: &State, spawn: Option<super::model::MapSpawn>) -> MovementMode {
+fn active_movement_mode(
+    state: &State,
+    spawn: Option<crate::media::preview_model::MapSpawn>,
+) -> MovementMode {
     state.fly_movement_mode().unwrap_or_else(|| {
         if spawn.is_some() {
             MovementMode::Walk
@@ -1375,7 +1321,6 @@ fn active_movement_mode(state: &State, spawn: Option<super::model::MapSpawn>) ->
     })
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_style() -> iced::widget::container::Style {
     iced::widget::container::Style {
         text_color: Some(Color::WHITE),
@@ -1390,7 +1335,6 @@ fn mode_pill_style() -> iced::widget::container::Style {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 fn mode_pill_slot_style(active: bool) -> iced::widget::button::Style {
     iced::widget::button::Style {
         background: active.then(|| Color::from_rgba(1.0, 1.0, 1.0, 0.16).into()),
@@ -1404,12 +1348,10 @@ fn mode_pill_slot_style(active: bool) -> iced::widget::button::Style {
     }
 }
 
-#[cfg(feature = "asset-studio")]
 fn format_fly_speed(speed: f32) -> String {
     format!("{speed:.1}x")
 }
 
-#[cfg(feature = "asset-studio")]
 fn map_inspector_rows<'a>(
     state: &'a State,
     data: &'a PreviewData,
@@ -1487,25 +1429,16 @@ fn map_inspector_rows<'a>(
             &tokens,
         ))
         .push(Space::new().height(tokens.spacing.gap))
-        .push(
-            button(
-                container(
-                    text(i18n.tr("file-preview-extract"))
-                        .size(tokens.typography.body)
-                        .line_height(1.0),
-                )
-                .center_x(Length::Fill),
-            )
-            .on_press(Message::ExtractRequested)
-            .padding(tokens.spacing.pad_control)
-            .width(Length::Fill)
-            .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-        );
+        .push(full_width_action(
+            i18n.tr("file-preview-extract"),
+            Message::ExtractRequested,
+            tokens.typography.body,
+            &tokens,
+        ));
 
     rows.into()
 }
 
-#[cfg(feature = "asset-studio")]
 fn phy_debug_checkbox<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
@@ -1517,12 +1450,10 @@ fn phy_debug_checkbox<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Mes
         .into()
 }
 
-#[cfg(feature = "asset-studio")]
-fn format_model_bounds(bounds: [f32; 3]) -> String {
+fn format_model_bounds(bounds: Vec3) -> String {
     format!("{:.2}, {:.2}, {:.2}", bounds[0], bounds[1], bounds[2])
 }
 
-#[cfg(feature = "asset-studio")]
 fn material_status_text(resolved: u32, total: u32) -> String {
     format!("{resolved}/{total}")
 }
@@ -1590,14 +1521,6 @@ fn silk_image<'a>(icon: SilkIcon, tooltip: String, tokens: &Tokens) -> Element<'
             .height(Length::Fixed(SILKICON_SIZE)),
         tooltip,
         tokens,
-        TOOLTIP_MAX_WIDTH,
+        tokens.dims.tooltip_max_width,
     )
-}
-
-fn icon<'a>(handle: iced::widget::svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
 }

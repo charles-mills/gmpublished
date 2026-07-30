@@ -5,29 +5,16 @@ use crate::bridge::domain::PublishedFileId;
 use crate::bridge::domain::workshop_url::parse_workshop_ids;
 use crate::bridge::tasks::{TaskEvent, TaskId};
 
-use super::model::{DownloaderEvent, DownloaderJob, DownloaderUiState, RowId, Section};
+use super::jobs::{DownloaderEvent, DownloaderJob, Jobs, RowId, Section};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, Default)]
 pub struct State {
     route_visible: bool,
     input_text: String,
     input_error: bool,
     destination_label: String,
-    jobs: DownloaderUiState,
+    jobs: Jobs,
     compact_section: Section,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            route_visible: false,
-            input_text: String::new(),
-            input_error: false,
-            destination_label: String::new(),
-            jobs: DownloaderUiState::default(),
-            compact_section: Section::Downloading,
-        }
-    }
 }
 
 impl State {
@@ -184,7 +171,7 @@ impl State {
         &self,
         section: Section,
         row_id: RowId,
-    ) -> Option<super::model::DownloadPreviewTarget> {
+    ) -> Option<super::jobs::DownloadPreviewTarget> {
         self.jobs.preview_target(section, row_id)
     }
 

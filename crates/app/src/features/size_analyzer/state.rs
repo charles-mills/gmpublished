@@ -5,21 +5,22 @@ use std::{
     sync::Arc,
 };
 
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 use iced::widget::{canvas, image};
 use iced::{Point, Size};
 
 use crate::bridge::domain::PublishedFileId;
 use crate::bridge::library::LibrarySnapshot;
-use crate::bridge::size_analyzer::{
-    Rect, SizeAnalyzerError, TreemapAddon, TreemapBounds, TreemapLayout, analyze_installed_addons,
-};
 use crate::bridge::ui_error::UiError;
 use crate::features::context_menu;
+use crate::generation::Generation;
 use crate::media::{
     size_analyzer_render::{RgbaColor, SizeAnalyzerLabelSprite, tag_color},
     thumbnail_demand::{self, DeliveryResult},
     thumbnail_worker::ThumbnailInput,
+};
+use crate::treemap::{
+    Rect, SizeAnalyzerError, TreemapAddon, TreemapBounds, TreemapLayout, analyze_installed_addons,
 };
 
 const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
@@ -28,15 +29,17 @@ const SPATIAL_COLUMNS: usize = 16;
 const SPATIAL_ROWS: usize = 10;
 const LABEL_SCALE_BUCKET: f32 = 0.5;
 const MAX_LABEL_SCALE: f32 = 3.0;
-const ANALYZER_THUMBNAIL_GENERATION: u64 = 0;
+/// The Size Analyzer never re-requests thumbnails, so its demands all carry
+/// the one generation that `Generation::next` never issues.
+const ANALYZER_THUMBNAIL_GENERATION: Generation = Generation::INITIAL;
 
 /// State owned by the Size Analyzer route.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     route_visible: bool,
     load_status: LoadStatus,
     snapshot: Option<LibrarySnapshot>,
-    snapshot_error: Option<String>,
+    snapshot_error: Option<UiError>,
     scale_factor: f32,
     pending_viewport: Option<RenderViewport>,
     last_completed_viewport: Option<RenderViewport>,
@@ -48,7 +51,7 @@ pub struct State {
     layout_workshop_ids: HashSet<PublishedFileId>,
     /// Snapshot epoch whose missing preview URLs were already handed to a
     /// resolve worker.
-    preview_resolve_epoch: Option<u64>,
+    preview_resolve_epoch: Option<Generation>,
     preview_urls: HashMap<PublishedFileId, String>,
     thumbnail_plan: Vec<(PublishedFileId, u32)>,
     thumbnails: HashMap<PublishedFileId, ThumbnailTile>,
@@ -130,7 +133,7 @@ impl State {
         }
         let snapshot = LibrarySnapshot {
             addons: Arc::from(addons),
-            epoch: snapshot.epoch.wrapping_add(1),
+            epoch: snapshot.epoch.next(),
         };
         self.apply_snapshot(Ok(Some(snapshot)));
         true
@@ -238,13 +241,12 @@ impl State {
             }
             Ok(None) => {
                 self.snapshot = None;
-                let error = UiError::new(keys::GMOD_PATH_MISSING).to_string();
+                let error = UiError::new(keys::GMOD_PATH_MISSING);
                 self.snapshot_error = Some(error.clone());
                 self.clear_projection(LoadStatus::Error(error));
             }
             Err(error) => {
                 self.snapshot = None;
-                let error = error.to_string();
                 self.snapshot_error = Some(error.clone());
                 self.clear_projection(LoadStatus::Error(error));
             }
@@ -363,10 +365,11 @@ impl State {
             .filter(|(workshop_id, _)| !self.failed_thumbnails.contains(workshop_id))
             .filter_map(|(workshop_id, max_edge)| {
                 Some(thumbnail_demand::Demand {
-                    id: workshop_demand_id(*workshop_id),
+                    id: thumbnail_demand::DemandId::workshop(*workshop_id),
                     input: ThumbnailInput::from_url(self.preview_urls.get(workshop_id)?.clone()),
                     logical_max_edge: *max_edge,
                     priority: thumbnail_demand::Priority::SizeAnalyzer,
+                    capabilities: thumbnail_demand::DemandCapabilities::STATIC_ANALYSIS,
                 })
             })
             .collect();
@@ -390,7 +393,7 @@ impl State {
             return LayerInvalidation::NONE;
         }
 
-        let Some(workshop_id) = parse_workshop_demand_id(&delivery.id) else {
+        let Some(workshop_id) = delivery.id.workshop_id() else {
             return LayerInvalidation::NONE;
         };
         if !self.preview_urls.contains_key(&workshop_id) {
@@ -597,11 +600,12 @@ impl State {
                 self.load_status = LoadStatus::Ready;
                 let _invalidation = self.invalidate_layers(LayerInvalidation::ALL);
             }
+            // "No addons" is an empty library, not a failure to show the user.
             Err(SizeAnalyzerError::NoAddonsFound) => {
                 self.clear_projection(LoadStatus::Empty);
             }
             Err(error) => {
-                self.clear_projection(LoadStatus::Error(size_analyzer_error_key(&error)));
+                self.clear_projection(LoadStatus::Error(UiError::from(&error)));
             }
         }
     }
@@ -760,24 +764,11 @@ fn snapshots_content_identical(a: &LibrarySnapshot, b: &LibrarySnapshot) -> bool
     a.addons == b.addons
 }
 
-/// Renders the same two outputs as before `SizeAnalyzerError` gained a
-/// `HasErrorKey` impl: `NoAddonsFound` is unreachable here (handled as
-/// `LoadStatus::Empty` above), and `InvalidBounds` renders its own Display
-/// with no key prefix — a generic `UiError::from(&error).to_string()` would
-/// prepend `ERR_UNKNOWN:`, which the `size-analyzer-error` template has never
-/// interpolated.
-fn size_analyzer_error_key(error: &SizeAnalyzerError) -> String {
-    match error {
-        SizeAnalyzerError::NoAddonsFound => keys::NO_ADDONS_FOUND.as_str().to_owned(),
-        SizeAnalyzerError::InvalidBounds { .. } => error.to_string(),
-    }
-}
-
 /// A delivered thumbnail's shared texture handle plus its pixel dimensions.
 ///
 /// The handle is the same one the grids display, so the GPU uploads each
 /// thumbnail once ever; the treemap references it with zero pixel copies.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThumbnailTile {
     pub(crate) handle: image::Handle,
     pub(crate) width: u32,
@@ -884,18 +875,6 @@ impl Default for TreemapLayers {
     }
 }
 
-impl Clone for TreemapLayers {
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
-impl PartialEq for TreemapLayers {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
 impl fmt::Debug for TreemapLayers {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("TreemapLayers")
@@ -909,7 +888,7 @@ pub enum LoadStatus {
     Loading,
     Ready,
     Empty,
-    Error(String),
+    Error(UiError),
 }
 
 /// Resolves the tooltip/preview title for a hovered addon. The analyzer
@@ -1071,7 +1050,7 @@ impl ContextMenuRequest {
 /// Identity of the synchronous treemap projection currently installed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayoutProjectionKey {
-    snapshot_epoch: u64,
+    snapshot_epoch: Generation,
     dimensions: RenderDimensions,
 }
 
@@ -1156,17 +1135,6 @@ fn rounded_dimension(value: f32) -> u32 {
 
 fn thumbnail_owner() -> thumbnail_demand::Owner {
     thumbnail_demand::Owner::SizeAnalyzer
-}
-
-fn workshop_demand_id(workshop_id: PublishedFileId) -> thumbnail_demand::DemandId {
-    thumbnail_demand::DemandId::new(workshop_id.to_string())
-}
-
-fn parse_workshop_demand_id(id: &thumbnail_demand::DemandId) -> Option<PublishedFileId> {
-    id.as_str()
-        .parse::<u64>()
-        .ok()
-        .and_then(PublishedFileId::new)
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use crate::bridge::ui_error::ResultExt as _;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -7,12 +8,12 @@ use crate::bridge::domain::{
     AvatarRgba, PublishedFileId, SteamUser, WorkshopItem, workshop_url::workshop_item_url,
 };
 
+use crate::bridge::domain::SteamId;
 use crate::bridge::gma::PreviewArchive;
-use crate::bridge::tasks::BackendServices;
 use crate::bridge::ui_error::UiError;
-use crate::features::steam_session;
+use crate::generation::Generation;
 use crate::widgets::file_browser::{Entry as FileBrowserEntry, State as FileBrowserState};
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 /// Data the click source already rendered, seeded for the first frame.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -60,7 +61,7 @@ impl OpenTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: Generation,
     pub(crate) path: PathBuf,
     /// Resolved workshop id (click source or path inference); stamps the
     /// archive so its `extracted_name` carries the `<title>_<id>` suffix.
@@ -69,15 +70,15 @@ pub struct OpenRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetadataRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: Generation,
     pub(crate) workshop_id: PublishedFileId,
 }
 
 /// Author lookup request emitted when metadata carries only a steamid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorRequest {
-    pub(crate) request_id: u64,
-    pub(crate) steamid64: u64,
+    pub(crate) request_id: Generation,
+    pub(crate) steamid64: SteamId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,23 +89,13 @@ pub struct AuthorInfo {
 
 /// Renders a steamid64 in the classic Steam2 form, shown as a placeholder
 /// while the author lookup is in flight.
-pub fn steam2_rendered_id(steamid64: u64) -> String {
+pub fn steam2_rendered_id(steamid64: SteamId) -> String {
     const ACCOUNT_OFFSET: u64 = 76_561_197_960_265_728;
-    let account = steamid64.saturating_sub(ACCOUNT_OFFSET);
+    let account = steamid64.get().saturating_sub(ACCOUNT_OFFSET);
     format!("STEAM_1:{}:{}", account & 1, account >> 1)
 }
 
-pub fn query_steam_user_streaming(
-    ctx: &BackendServices,
-    steamid64: u64,
-    mut on_author: impl FnMut(Result<AuthorInfo, UiError>),
-) -> Result<(), UiError> {
-    ctx.steam_user_details_streaming(steamid64, |user| {
-        on_author(author_info_from_user(user));
-    })
-}
-
-fn author_info_from_user(user: SteamUser) -> Result<AuthorInfo, UiError> {
+pub fn author_info_from_user(user: SteamUser) -> Result<AuthorInfo, UiError> {
     if user.dead {
         return Err(UiError::new(keys::STEAM_ERROR));
     }
@@ -135,7 +126,7 @@ impl ExtractionIntent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtractionRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: Generation,
     pub(crate) archive: Arc<PreviewArchive>,
     pub(crate) intent: ExtractionIntent,
 }
@@ -145,7 +136,7 @@ pub struct WorkshopMetadata {
     pub(crate) id: PublishedFileId,
     pub(crate) title: String,
     pub(crate) author: Option<String>,
-    pub(crate) steamid64: Option<u64>,
+    pub(crate) steamid64: Option<SteamId>,
     pub(crate) avatar: Option<AvatarRgba>,
     pub(crate) time_created: u32,
     pub(crate) time_updated: u32,
@@ -170,7 +161,7 @@ impl LoadedArchive {
     ) -> Result<Self, UiError> {
         PreviewArchive::open_with_workshop_id(path, workshop_id.map(PublishedFileId::get))
             .map(Self::from_archive)
-            .map_err(|error| UiError::from(&error))
+            .ui_err()
     }
 
     pub(crate) fn from_archive(archive: PreviewArchive) -> Self {
@@ -185,33 +176,18 @@ impl LoadedArchive {
     }
 }
 
-pub fn query_workshop_metadata(
-    ctx: &BackendServices,
-    workshop_id: PublishedFileId,
-) -> Result<Option<WorkshopMetadata>, UiError> {
-    let attempt = steam_session::connect_context_for_operation(ctx);
-    if !attempt.connected() {
-        return Err(attempt
-            .error()
-            .cloned()
-            .unwrap_or_else(|| UiError::new(keys::STEAM_ERROR)));
-    }
-
-    let item = ctx.workshop_item_details(workshop_id)?;
+pub fn workshop_metadata_from_details(item: WorkshopItem) -> Option<WorkshopMetadata> {
     // Author resolution stays asynchronous: when the item lacks a live owner
     // the modal shows the Steam2 placeholder and fetches the profile
     // separately.
     let owner = item.owner.as_ref().filter(|owner| !owner.dead).cloned();
-
-    Ok(workshop_metadata_from_item(item, owner))
+    workshop_metadata_from_item(item, owner)
 }
 
 pub fn cached_workshop_metadata(
-    ctx: &BackendServices,
-    workshop_id: PublishedFileId,
-) -> Option<WorkshopMetadata> {
-    let metadata = ctx.cached_workshop_item_details(workshop_id)?;
-    Some(WorkshopMetadata {
+    metadata: crate::bridge::domain::WorkshopMetadata,
+) -> WorkshopMetadata {
+    WorkshopMetadata {
         id: metadata.id,
         title: metadata.title.trim().to_owned(),
         author: None,
@@ -225,7 +201,7 @@ pub fn cached_workshop_metadata(
         subscriptions: metadata.subscriptions,
         score_bucket: score_bucket(metadata.score),
         score_label: score_label(metadata.score),
-    })
+    }
 }
 
 pub fn workshop_url(workshop_id: PublishedFileId) -> String {
@@ -289,10 +265,4 @@ fn live_user_name(user: &SteamUser) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-fn score_bucket(score: f32) -> i32 {
-    (score.clamp(0.0, 1.0) * 5.0).round() as i32
-}
-
-fn score_label(score: f32) -> String {
-    format!("{:.2}%", score.clamp(0.0, 1.0) * 100.0)
-}
+use crate::widgets::grid_rows::{score_bucket, score_label};

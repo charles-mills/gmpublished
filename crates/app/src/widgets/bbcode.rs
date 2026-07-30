@@ -48,7 +48,7 @@ impl From<&Tokens> for RenderTokens {
             title_sm: tokens.typography.title_sm,
             title: tokens.typography.title,
             radius_xs: tokens.radii.xs,
-            radius_base: tokens.radii.base,
+            radius_base: tokens.radii.sm,
             divider: tokens.colors.divider,
             text_dim: tokens.colors.text_dim,
             link: tokens.colors.link,

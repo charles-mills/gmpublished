@@ -1,11 +1,24 @@
-use gmpublished_backend::events::BackendEventSink;
+use gmpublished_backend::BackendEventSink;
 
 use super::{
-    Arc, BackendAppDataSnapshot, BackendDownloadStartedEvent, BackendExtractionStartedEvent,
-    BackendSinkEvent, BackendTransactionEvent, DOWNLOAD_STATUS_LOCATING, Duration, PathBuf,
-    PublishedFileId, SyncSender, TaskId, TransactionError, TransactionPayload, TrySendError,
-    UiError, WorkshopDownloadTaskKind, fmt, mpsc,
+    PublishedFileId, TaskId, TransactionStatus, UiError, WorkshopDownloadTaskKind,
+    WorkshopSnapshotId,
 };
+use gmpublished_backend::AppDataSnapshot as BackendAppDataSnapshot;
+use gmpublished_backend::BackendEvent as BackendSinkEvent;
+use gmpublished_backend::DownloadStartedEvent as BackendDownloadStartedEvent;
+use gmpublished_backend::ExtractionStartedEvent as BackendExtractionStartedEvent;
+use gmpublished_backend::TransactionError;
+use gmpublished_backend::TransactionEvent as BackendTransactionEvent;
+use gmpublished_backend::TransactionId;
+use gmpublished_backend::TransactionPayload;
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::TrySendError;
+use std::time::Duration;
 
 #[cfg(not(test))]
 pub(super) const fn install_backend_event_sink_by_default() -> bool {
@@ -14,26 +27,6 @@ pub(super) const fn install_backend_event_sink_by_default() -> bool {
 
 #[cfg(test)]
 pub(super) const fn install_backend_event_sink_by_default() -> bool {
-    false
-}
-
-#[cfg(not(test))]
-pub(super) const fn persist_appdata_settings_by_default() -> bool {
-    true
-}
-
-#[cfg(test)]
-pub(super) const fn persist_appdata_settings_by_default() -> bool {
-    false
-}
-
-#[cfg(not(test))]
-pub(super) const fn persist_ui_settings_by_default() -> bool {
-    true
-}
-
-#[cfg(test)]
-pub(super) const fn persist_ui_settings_by_default() -> bool {
     false
 }
 
@@ -93,11 +86,10 @@ impl BackendEventHub {
     }
 
     fn emit(&self, event: &BackendRuntimeEvent) {
-        if event.is_terminal() {
-            // Terminals (Finished/Error) must never be silently dropped: the
-            // consumer is the dedicated forwarder thread, which always
-            // drains, so a full queue here is a transient backlog, not a
-            // stall worth blocking indefinitely to avoid.
+        if event.must_not_drop() {
+            // The consumer is the dedicated forwarder thread, which always
+            // drains, so a full queue here is a transient backlog rather than
+            // a stall worth dropping state-establishing events to avoid.
             let _disconnected = self.root.send(event.clone());
         } else {
             match self.root.try_send(event.clone()) {
@@ -144,15 +136,15 @@ pub enum BackendRuntimeEvent {
     AppDataUpdated(Box<BackendAppDataSnapshot>),
     InstalledAddonsRefreshed,
     DownloadStarted {
-        transaction_id: u32,
-        request_id: Option<u64>,
+        transaction_id: TransactionId,
+        request_id: Option<WorkshopSnapshotId>,
     },
     ExtractionStarted {
-        transaction_id: u32,
+        transaction_id: TransactionId,
         source_path: Option<PathBuf>,
         file_name: Option<String>,
         workshop_id: Option<PublishedFileId>,
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
     },
     Transaction(TransactionRuntimeEvent),
 }
@@ -174,12 +166,23 @@ impl BackendRuntimeEvent {
     /// (Finished/Error - cancellation rides the `Error` variant with a
     /// `CANCELLED` error key). Terminal events must reach their subscriber;
     /// everything else may be dropped under backpressure.
-    pub(crate) fn is_terminal(&self) -> bool {
+    /// Whether dropping this event would leave the app in a wrong state
+    /// rather than merely a stale one.
+    ///
+    /// Progress is safe to drop: the next one supersedes it. Lifecycle is not.
+    /// `DownloadStarted` and `ExtractionStarted` are what correlate a backend
+    /// transaction with an app task, and a terminal for an uncorrelated
+    /// transaction is discarded — so dropping a start strands its task as
+    /// running forever, and dropping a terminal loses the completion.
+    pub(crate) const fn must_not_drop(&self) -> bool {
         matches!(
             self,
-            Self::Transaction(
-                TransactionRuntimeEvent::Finished { .. } | TransactionRuntimeEvent::Error { .. }
-            )
+            Self::DownloadStarted { .. }
+                | Self::ExtractionStarted { .. }
+                | Self::Transaction(
+                    TransactionRuntimeEvent::Finished { .. }
+                        | TransactionRuntimeEvent::Error { .. }
+                )
         )
     }
 }
@@ -230,13 +233,13 @@ pub enum BackendRuntimeAction {
         task_id: TaskId,
     },
     DownloadFinished {
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
         item_id: PublishedFileId,
         installed_path: Option<PathBuf>,
         extracted_path: PathBuf,
     },
     SnapshotFailed {
-        request_id: u64,
+        request_id: WorkshopSnapshotId,
         error: UiError,
     },
 }
@@ -244,34 +247,34 @@ pub enum BackendRuntimeAction {
 /// These values update the task overlay only when a live-service boundary has
 /// explicitly correlated the backend transaction id with an app `TaskId`.
 /// Uncorrelated transaction events remain data-only no-ops.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionRuntimeEvent {
     Finished {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Error {
-        id: u32,
+        id: TransactionId,
         error: TransactionError,
     },
     Data {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Status {
-        id: u32,
-        status: String,
+        id: TransactionId,
+        status: TransactionStatus,
     },
     Progress {
-        id: u32,
+        id: TransactionId,
         progress: u16,
     },
     IncrProgress {
-        id: u32,
+        id: TransactionId,
         incr: u16,
     },
     ResetProgress {
-        id: u32,
+        id: TransactionId,
     },
 }
 
@@ -323,9 +326,7 @@ impl From<BackendExtractionStartedEvent> for BackendRuntimeEvent {
             transaction_id: event.transaction_id,
             source_path: event.source_path,
             file_name: event.file_name,
-            workshop_id: event.workshop_id.map(|id| {
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
-            }),
+            workshop_id: event.workshop_id.map(PublishedFileId::from),
             request_id: event.request_id,
         }
     }
@@ -346,7 +347,7 @@ impl From<BackendTransactionEvent> for TransactionRuntimeEvent {
 }
 
 impl TransactionRuntimeEvent {
-    pub(super) const fn transaction_id(&self) -> u32 {
+    pub(super) const fn transaction_id(&self) -> TransactionId {
         match self {
             Self::Finished { id, .. }
             | Self::Error { id, .. }
@@ -361,7 +362,11 @@ impl TransactionRuntimeEvent {
     pub(super) fn is_bufferable_pre_start(&self) -> bool {
         matches!(
             self,
-            Self::Status { status, .. } if status == DOWNLOAD_STATUS_LOCATING
+            Self::Status { status, .. } if *status == TransactionStatus::Locating
         )
+    }
+
+    pub(super) const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished { .. } | Self::Error { .. })
     }
 }

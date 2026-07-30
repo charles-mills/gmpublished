@@ -8,7 +8,6 @@ use std::{
 use gif::{DisposalMethod, Encoder, Frame, Repeat};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use tempfile::TempDir;
-#[cfg(feature = "asset-studio")]
 use vformats::vtf::VtfFormat;
 
 use crate::bridge::gma::{FixtureGmaEntry, FixtureGmaFile, GMA_VERSION, GmaHeader, GmaMetadata};
@@ -113,7 +112,6 @@ fn solid_gif_frame(width: u16, height: u16, color: [u8; 4], delay_ms: u32) -> Fr
 /// Minimal VTF 7.1 container wrapping raw high-resolution mip payloads,
 /// laid out exactly as `vformats::vtf::parse` expects: one frame, no
 /// lowres image, mips stored smallest-first (VTF file order).
-#[cfg(feature = "asset-studio")]
 pub fn fixture_vtf_bytes(
     width: u16,
     height: u16,
@@ -214,14 +212,13 @@ fn write_nt_string(file: &mut File, value: &str) {
 fn embedded_description(metadata: &GmaMetadata) -> String {
     match metadata {
         GmaMetadata::Standard { .. } => {
-            let backend_metadata: gmpublished_backend::GMAMetadata = metadata.clone().into();
-            serde_json::to_string(&backend_metadata).expect("standard gma metadata should encode")
+            serde_json::to_string(metadata).expect("standard gma metadata should encode")
         }
         GmaMetadata::Legacy { description, .. } => description.clone(),
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct GmaFixtureBuilder {
     title: String,
     entries: Vec<(String, Vec<u8>)>,

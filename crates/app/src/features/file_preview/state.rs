@@ -1,10 +1,15 @@
+use gmpublished_domain::math::Vec3;
 use std::time::{Duration, Instant};
 
 use iced::widget::pane_grid;
 
-use super::message::PreviewLoadError;
-use super::model::{PreviewContent, PreviewData, PreviewLoadStage, PreviewRequest};
+use crate::generation::Generation;
+use crate::media::preview_model::{
+    PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest,
+};
+use crate::spinner_clock::SpinnerClock;
 use crate::widgets::split_pane;
+use gmpublished_domain::particles::{ControlPointIndex, MAX_CONTROL_POINTS};
 
 const FLY_SPEED_READOUT_VISIBLE_FOR: Duration = Duration::from_millis(800);
 const DEFAULT_VIEWER_RATIO: f32 = (704.0 - 236.0) / 704.0;
@@ -17,7 +22,7 @@ pub(super) enum Pane {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyPose {
-    pub(crate) position: [f32; 3],
+    pub(crate) position: Vec3,
     pub(crate) yaw: f32,
     pub(crate) pitch: f32,
     pub(crate) speed: f32,
@@ -49,7 +54,7 @@ impl Default for OrbitPose {
 
 impl FlyPose {
     fn is_finite(self) -> bool {
-        self.position.iter().all(|value| value.is_finite())
+        self.position.is_finite()
             && self.yaw.is_finite()
             && self.pitch.is_finite()
             && self.speed.is_finite()
@@ -62,53 +67,28 @@ impl OrbitPose {
     }
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each flag is an independently toggleable preview UI/setting, not a mode enum"
-)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     open: bool,
     expanded: bool,
     loading: bool,
     loading_stage: Option<PreviewLoadStage>,
     error: Option<PreviewLoadError>,
-    request_id: u64,
+    request_id: Generation,
     request: Option<PreviewRequest>,
     current: Option<PreviewData>,
-    spinner_started_at: Option<Instant>,
-    spinner_now: Option<Instant>,
-    audio_playing: bool,
-    audio_position_secs: f32,
-    audio_duration_secs: Option<f32>,
-    selected_skin: usize,
-    bodygroup_choices: Vec<usize>,
-    map_fog_enabled: bool,
-    map_skybox_enabled: bool,
-    map_visibility_enabled: bool,
-    phy_debug_enabled: bool,
-    fly_speed_readout: Option<FlySpeedReadout>,
-    fly_pose: Option<FlyPose>,
-    fly_movement_mode: Option<MovementMode>,
-    requested_movement_mode: Option<MovementMode>,
-    orbit_pose: Option<OrbitPose>,
-    particle_system: usize,
-    particle_playing: bool,
-    particle_speed: f32,
-    particle_restart_epoch: u64,
-    particle_control_points: [[f32; 3]; PARTICLE_CONTROL_POINTS],
+    spinner: SpinnerClock,
+    content_ui: ContentUiState,
     inspector_panes: split_pane::State<Pane>,
 }
 
-pub(super) const PARTICLE_CONTROL_POINTS: usize = 8;
-
 /// CP0 is the effect origin, pinned at the viewport centre; the rest fan out
 /// along +X so two-point effects (beams, tracers) are visible immediately.
-const fn default_particle_control_points() -> [[f32; 3]; PARTICLE_CONTROL_POINTS] {
-    let mut points = [[0.0; 3]; PARTICLE_CONTROL_POINTS];
+const fn default_particle_control_points() -> [Vec3; MAX_CONTROL_POINTS] {
+    let mut points = [Vec3::splat(0.0); MAX_CONTROL_POINTS];
     let mut index = 1;
-    while index < PARTICLE_CONTROL_POINTS {
-        points[index] = [96.0 * index as f32, 0.0, 0.0];
+    while index < MAX_CONTROL_POINTS {
+        points[index] = Vec3::new(96.0 * index as f32, 0.0, 0.0);
         index += 1;
     }
     points
@@ -121,6 +101,163 @@ struct FlySpeedReadout {
     now: Option<Instant>,
 }
 
+#[derive(Debug, Default)]
+enum ContentUiState {
+    #[default]
+    None,
+    Audio(AudioUiState),
+    Model(ModelUiState),
+    Map(MapUiState),
+    Particle(ParticleUiState),
+}
+
+#[derive(Debug)]
+struct AudioUiState {
+    playing: bool,
+    position_secs: f32,
+    duration_secs: Option<f32>,
+}
+
+#[derive(Debug)]
+struct ModelUiState {
+    selected_skin: usize,
+    bodygroup_choices: Vec<usize>,
+    orbit_pose: Option<OrbitPose>,
+    phy_debug_enabled: bool,
+}
+
+#[derive(Debug)]
+struct MapUiState {
+    fog_enabled: bool,
+    skybox_enabled: bool,
+    visibility_enabled: bool,
+    phy_debug_enabled: bool,
+    speed_readout: Option<FlySpeedReadout>,
+    fly_pose: Option<FlyPose>,
+    movement_mode: Option<MovementMode>,
+    requested_movement_mode: Option<MovementMode>,
+}
+
+#[derive(Debug)]
+struct ParticleUiState {
+    system: usize,
+    playing: bool,
+    speed: f32,
+    restart_epoch: Generation,
+    control_points: [Vec3; MAX_CONTROL_POINTS],
+    orbit_pose: Option<OrbitPose>,
+}
+
+impl Default for AudioUiState {
+    fn default() -> Self {
+        Self {
+            playing: false,
+            position_secs: 0.0,
+            duration_secs: None,
+        }
+    }
+}
+
+impl Default for ModelUiState {
+    fn default() -> Self {
+        Self {
+            selected_skin: 0,
+            bodygroup_choices: Vec::new(),
+            orbit_pose: None,
+            phy_debug_enabled: false,
+        }
+    }
+}
+
+impl Default for MapUiState {
+    fn default() -> Self {
+        Self {
+            fog_enabled: true,
+            skybox_enabled: true,
+            visibility_enabled: true,
+            phy_debug_enabled: false,
+            speed_readout: None,
+            fly_pose: None,
+            movement_mode: None,
+            requested_movement_mode: None,
+        }
+    }
+}
+
+impl Default for ParticleUiState {
+    fn default() -> Self {
+        Self {
+            system: 0,
+            playing: true,
+            speed: 1.0,
+            restart_epoch: Generation::INITIAL,
+            control_points: default_particle_control_points(),
+            orbit_pose: None,
+        }
+    }
+}
+
+impl ContentUiState {
+    fn from_request(request: &PreviewRequest) -> Self {
+        let extension = request
+            .entry_path
+            .rsplit_once('.')
+            .map(|(_, extension)| extension)
+            .unwrap_or_default();
+        if extension.eq_ignore_ascii_case("bsp") {
+            Self::Map(MapUiState::default())
+        } else if ["mdl", "vvd", "vtx", "phy"]
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        {
+            Self::Model(ModelUiState::default())
+        } else if extension.eq_ignore_ascii_case("pcf") {
+            Self::Particle(ParticleUiState::default())
+        } else if ["wav", "mp3", "ogg", "flac"]
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        {
+            Self::Audio(AudioUiState::default())
+        } else {
+            Self::None
+        }
+    }
+
+    fn from_content(content: &PreviewContent) -> Self {
+        match content {
+            PreviewContent::Audio { duration_secs, .. } => Self::Audio(AudioUiState {
+                duration_secs: *duration_secs,
+                ..AudioUiState::default()
+            }),
+            PreviewContent::Model(model) => Self::Model(ModelUiState {
+                bodygroup_choices: vec![0; model.bodygroups.len()],
+                ..ModelUiState::default()
+            }),
+            PreviewContent::Map { .. } => Self::Map(MapUiState::default()),
+            PreviewContent::Particle(_) => Self::Particle(ParticleUiState::default()),
+            PreviewContent::Code { .. }
+            | PreviewContent::Image { .. }
+            | PreviewContent::Font { .. }
+            | PreviewContent::Info { .. } => Self::None,
+        }
+    }
+
+    fn reconcile_with_content(&mut self, content: &PreviewContent) {
+        match (&mut *self, content) {
+            (Self::Audio(audio), PreviewContent::Audio { duration_secs, .. }) => {
+                audio.duration_secs = *duration_secs;
+            }
+            (Self::Model(model_ui), PreviewContent::Model(model)) => {
+                model_ui.selected_skin = 0;
+                model_ui.bodygroup_choices = vec![0; model.bodygroups.len()];
+            }
+            (Self::Map(_), PreviewContent::Map { .. })
+            | (Self::Particle(_), PreviewContent::Particle(_)) => {}
+            (state, content) => *state = Self::from_content(content),
+        }
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -129,30 +266,11 @@ impl Default for State {
             loading: false,
             loading_stage: None,
             error: None,
-            request_id: 0,
+            request_id: Generation::INITIAL,
             request: None,
             current: None,
-            spinner_started_at: None,
-            spinner_now: None,
-            audio_playing: false,
-            audio_position_secs: 0.0,
-            audio_duration_secs: None,
-            selected_skin: 0,
-            bodygroup_choices: Vec::new(),
-            map_fog_enabled: true,
-            map_skybox_enabled: true,
-            map_visibility_enabled: true,
-            phy_debug_enabled: false,
-            fly_speed_readout: None,
-            fly_pose: None,
-            fly_movement_mode: None,
-            requested_movement_mode: None,
-            orbit_pose: None,
-            particle_system: 0,
-            particle_playing: true,
-            particle_speed: 1.0,
-            particle_restart_epoch: 0,
-            particle_control_points: default_particle_control_points(),
+            spinner: SpinnerClock::Idle,
+            content_ui: ContentUiState::None,
             inspector_panes: split_pane::State::vertical(
                 Pane::Viewer,
                 Pane::Inspector,
@@ -208,30 +326,51 @@ impl State {
     }
 
     pub(crate) const fn audio_playing(&self) -> bool {
-        self.audio_playing
+        match &self.content_ui {
+            ContentUiState::Audio(audio) => audio.playing,
+            _ => false,
+        }
     }
 
     pub(crate) const fn audio_position_secs(&self) -> f32 {
-        self.audio_position_secs
+        match &self.content_ui {
+            ContentUiState::Audio(audio) => audio.position_secs,
+            _ => 0.0,
+        }
     }
 
     pub(crate) const fn audio_duration_secs(&self) -> Option<f32> {
-        self.audio_duration_secs
+        match &self.content_ui {
+            ContentUiState::Audio(audio) => audio.duration_secs,
+            _ => None,
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn current_audio_bytes(&self) -> Option<std::sync::Arc<Vec<u8>>> {
+    pub(crate) fn current_audio_bytes(&self) -> Option<std::sync::Arc<[u8]>> {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Audio { bytes, .. }) => Some(std::sync::Arc::clone(bytes)),
             _ => None,
         }
     }
 
+    /// Identifies the loaded audio whose playback callbacks may mutate this
+    /// state. A request that is merely loading (even if its extension is an
+    /// audio type) deliberately has no playback identity yet.
+    pub(crate) fn current_audio_request_id(&self) -> Option<Generation> {
+        matches!(
+            self.current.as_ref().map(|data| &data.content),
+            Some(PreviewContent::Audio { .. })
+        )
+        .then_some(self.request_id)
+    }
+
     pub(crate) const fn request(&self) -> Option<&PreviewRequest> {
         self.request.as_ref()
     }
 
-    pub(crate) fn related_preview(&self) -> Option<&super::model::RelatedPreviewTarget> {
+    pub(crate) fn related_preview(
+        &self,
+    ) -> Option<&crate::media::preview_model::RelatedPreviewTarget> {
         self.current.as_ref()?.related_preview.as_ref()
     }
 
@@ -239,7 +378,7 @@ impl State {
         let archive = &self.request.as_ref()?.archive;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {
-            request_id: 0,
+            request_id: Generation::INITIAL,
             archive: std::sync::Arc::clone(archive),
             entry_path: entry.path.to_owned(),
             display_name: entry
@@ -262,7 +401,7 @@ impl State {
     }
 
     pub(crate) fn begin_open(&mut self, mut request: PreviewRequest) -> PreviewRequest {
-        self.request_id = self.request_id.saturating_add(1);
+        self.request_id.bump();
         request.request_id = self.request_id;
         self.open = true;
         self.expanded = false;
@@ -271,16 +410,8 @@ impl State {
         self.error = None;
         self.current = None;
         self.request = Some(request.clone());
-        self.spinner_started_at = None;
-        self.spinner_now = None;
-        self.clear_audio();
-        self.clear_model_selections();
-        self.map_fog_enabled = true;
-        self.map_skybox_enabled = true;
-        self.map_visibility_enabled = true;
-        self.phy_debug_enabled = false;
-        self.clear_fly_speed_readout();
-        self.clear_camera_poses();
+        self.spinner.stop();
+        self.content_ui = ContentUiState::from_request(&request);
         request
     }
 
@@ -289,49 +420,59 @@ impl State {
     }
 
     pub(crate) fn spinner_elapsed(&self) -> f32 {
-        match (self.spinner_started_at, self.spinner_now) {
-            (Some(started), Some(now)) => now.saturating_duration_since(started).as_secs_f32(),
-            _ => 0.0,
-        }
+        self.spinner.elapsed()
     }
 
     pub(crate) fn fly_speed_readout(&self) -> Option<f32> {
-        self.fly_speed_readout.as_ref().map(|readout| readout.speed)
+        match &self.content_ui {
+            ContentUiState::Map(map) => map.speed_readout.as_ref().map(|readout| readout.speed),
+            _ => None,
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) const fn fly_pose(&self) -> Option<FlyPose> {
-        self.fly_pose
+        match &self.content_ui {
+            ContentUiState::Map(map) => map.fly_pose,
+            _ => None,
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) const fn fly_movement_mode(&self) -> Option<MovementMode> {
-        self.fly_movement_mode
+        match &self.content_ui {
+            ContentUiState::Map(map) => map.movement_mode,
+            _ => None,
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) const fn requested_movement_mode(&self) -> Option<MovementMode> {
-        self.requested_movement_mode
+        match &self.content_ui {
+            ContentUiState::Map(map) => map.requested_movement_mode,
+            _ => None,
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) const fn orbit_pose(&self) -> Option<OrbitPose> {
-        self.orbit_pose
+        match &self.content_ui {
+            ContentUiState::Model(model) => model.orbit_pose,
+            ContentUiState::Particle(particle) => particle.orbit_pose,
+            _ => None,
+        }
     }
 
     pub(crate) const fn fly_speed_readout_visible(&self) -> bool {
-        self.open && self.fly_speed_readout.is_some()
+        self.open
+            && matches!(&self.content_ui, ContentUiState::Map(map) if map.speed_readout.is_some())
     }
 
     pub(super) fn tick_animation(&mut self, now: Instant) {
         if self.spinner_visible() {
-            if self.spinner_started_at.is_none() {
-                self.spinner_started_at = Some(now);
-            }
-            self.spinner_now = Some(now);
+            self.spinner.advance_or_start(now);
         }
 
-        let Some(readout) = self.fly_speed_readout.as_mut() else {
+        let ContentUiState::Map(map) = &mut self.content_ui else {
+            return;
+        };
+        let Some(readout) = map.speed_readout.as_mut() else {
             return;
         };
         if readout.started_at.is_none() {
@@ -341,11 +482,15 @@ impl State {
         if readout.started_at.is_some_and(|started| {
             now.saturating_duration_since(started) >= FLY_SPEED_READOUT_VISIBLE_FOR
         }) {
-            self.clear_fly_speed_readout();
+            map.speed_readout = None;
         }
     }
 
-    pub(crate) fn apply_load_stage(&mut self, request_id: u64, stage: PreviewLoadStage) -> bool {
+    pub(crate) fn apply_load_stage(
+        &mut self,
+        request_id: Generation,
+        stage: PreviewLoadStage,
+    ) -> bool {
         if !self.open || !self.loading || self.request_id != request_id {
             return false;
         }
@@ -355,7 +500,7 @@ impl State {
 
     pub(crate) fn apply_loaded(
         &mut self,
-        request_id: u64,
+        request_id: Generation,
         result: Result<PreviewData, PreviewLoadError>,
     ) -> bool {
         if !self.open || self.request_id != request_id {
@@ -366,14 +511,12 @@ impl State {
         self.loading_stage = None;
         match result {
             Ok(data) => {
-                self.audio_duration_secs = audio_duration_secs(&data.content);
-                self.init_model_selections(&data.content);
+                self.content_ui.reconcile_with_content(&data.content);
                 self.error = None;
                 self.current = Some(data);
             }
             Err(error) => {
-                self.clear_audio();
-                self.clear_model_selections();
+                self.content_ui = ContentUiState::None;
                 self.error = Some(error);
                 self.current = None;
             }
@@ -381,82 +524,111 @@ impl State {
         true
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(super) fn show_fly_speed_readout(&mut self, speed: f32) {
         if !self.open || !speed.is_finite() {
             return;
         }
-        self.fly_speed_readout = Some(FlySpeedReadout {
+        let ContentUiState::Map(map) = &mut self.content_ui else {
+            return;
+        };
+        map.speed_readout = Some(FlySpeedReadout {
             speed,
             started_at: None,
             now: None,
         });
     }
 
-    #[cfg(all(feature = "asset-studio", test))]
+    #[cfg(test)]
     pub(super) fn set_fly_pose(&mut self, pose: FlyPose) {
         if !self.open || !pose.is_finite() {
             return;
         }
-        self.fly_pose = Some(pose);
-        self.fly_movement_mode = None;
-        self.requested_movement_mode = None;
+        if let ContentUiState::Map(map) = &mut self.content_ui {
+            map.fly_pose = Some(pose);
+            map.movement_mode = None;
+            map.requested_movement_mode = None;
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(super) fn set_fly_camera(&mut self, pose: FlyPose, mode: MovementMode) {
         if !self.open || !pose.is_finite() {
             return;
         }
-        self.fly_pose = Some(pose);
-        self.fly_movement_mode = Some(mode);
-        self.requested_movement_mode = None;
+        if let ContentUiState::Map(map) = &mut self.content_ui {
+            map.fly_pose = Some(pose);
+            map.movement_mode = Some(mode);
+            map.requested_movement_mode = None;
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(super) fn request_movement_mode(&mut self, mode: MovementMode) {
         if !self.open {
             return;
         }
-        if self.fly_movement_mode == Some(mode) {
-            self.requested_movement_mode = None;
+        let ContentUiState::Map(map) = &mut self.content_ui else {
+            return;
+        };
+        if map.movement_mode == Some(mode) {
+            map.requested_movement_mode = None;
             return;
         }
-        self.requested_movement_mode = Some(mode);
+        map.requested_movement_mode = Some(mode);
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(super) fn set_orbit_pose(&mut self, pose: OrbitPose) {
-        if self.open && pose.is_finite() {
-            self.orbit_pose = Some(pose);
+        if !self.open || !pose.is_finite() {
+            return;
+        }
+        match &mut self.content_ui {
+            ContentUiState::Model(model) => model.orbit_pose = Some(pose),
+            ContentUiState::Particle(particle) => particle.orbit_pose = Some(pose),
+            _ => {}
         }
     }
 
     pub(crate) const fn selected_skin(&self) -> usize {
-        self.selected_skin
+        match &self.content_ui {
+            ContentUiState::Model(model) => model.selected_skin,
+            _ => 0,
+        }
     }
 
     pub(crate) fn bodygroup_choices(&self) -> &[usize] {
-        &self.bodygroup_choices
+        match &self.content_ui {
+            ContentUiState::Model(model) => &model.bodygroup_choices,
+            _ => &[],
+        }
     }
 
     pub(crate) const fn map_fog_enabled(&self) -> bool {
-        self.map_fog_enabled
+        match &self.content_ui {
+            ContentUiState::Map(map) => map.fog_enabled,
+            _ => false,
+        }
     }
 
     pub(crate) const fn map_skybox_enabled(&self) -> bool {
-        self.map_skybox_enabled
+        match &self.content_ui {
+            ContentUiState::Map(map) => map.skybox_enabled,
+            _ => false,
+        }
     }
 
     pub(crate) const fn map_visibility_enabled(&self) -> bool {
-        self.map_visibility_enabled
+        match &self.content_ui {
+            ContentUiState::Map(map) => map.visibility_enabled,
+            _ => false,
+        }
     }
 
     pub(crate) const fn phy_debug_enabled(&self) -> bool {
-        self.phy_debug_enabled
+        match &self.content_ui {
+            ContentUiState::Model(model) => model.phy_debug_enabled,
+            ContentUiState::Map(map) => map.phy_debug_enabled,
+            _ => false,
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) fn map_fog_control_visible(&self) -> bool {
         matches!(
             self.current.as_ref().map(|data| &data.content),
@@ -464,12 +636,6 @@ impl State {
         )
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn map_fog_control_visible(&self) -> bool {
-        false
-    }
-
-    #[cfg(feature = "asset-studio")]
     pub(crate) fn map_skybox_control_visible(&self) -> bool {
         matches!(
             self.current.as_ref().map(|data| &data.content),
@@ -481,12 +647,6 @@ impl State {
         )
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn map_skybox_control_visible(&self) -> bool {
-        false
-    }
-
-    #[cfg(feature = "asset-studio")]
     pub(crate) fn map_visibility_control_visible(&self) -> bool {
         matches!(
             self.current.as_ref().map(|data| &data.content),
@@ -494,56 +654,51 @@ impl State {
         )
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn map_visibility_control_visible(&self) -> bool {
-        false
-    }
-
-    #[cfg(feature = "asset-studio")]
     pub(crate) fn phy_debug_control_visible(&self) -> bool {
         match self.current.as_ref().map(|data| &data.content) {
-            Some(PreviewContent::Model(model)) => !model.phy_debug_meshes.is_empty(),
-            Some(PreviewContent::Map { scene, .. }) => !scene.phy_debug_meshes.is_empty(),
+            Some(PreviewContent::Model(model)) => !model.scene.phy_debug_meshes.is_empty(),
+            Some(PreviewContent::Map { scene, .. }) => !scene.scene.phy_debug_meshes.is_empty(),
             _ => false,
         }
     }
 
-    #[cfg(not(feature = "asset-studio"))]
-    pub(crate) const fn phy_debug_control_visible(&self) -> bool {
-        false
+    pub(super) fn set_map_fog_enabled(&mut self, enabled: bool) {
+        if let ContentUiState::Map(map) = &mut self.content_ui {
+            map.fog_enabled = enabled;
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_map_fog_enabled(&mut self, enabled: bool) {
-        self.map_fog_enabled = enabled;
+    pub(super) fn set_map_skybox_enabled(&mut self, enabled: bool) {
+        if let ContentUiState::Map(map) = &mut self.content_ui {
+            map.skybox_enabled = enabled;
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_map_skybox_enabled(&mut self, enabled: bool) {
-        self.map_skybox_enabled = enabled;
+    pub(super) fn set_map_visibility_enabled(&mut self, enabled: bool) {
+        if let ContentUiState::Map(map) = &mut self.content_ui {
+            map.visibility_enabled = enabled;
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_map_visibility_enabled(&mut self, enabled: bool) {
-        self.map_visibility_enabled = enabled;
+    pub(super) fn set_phy_debug_enabled(&mut self, enabled: bool) {
+        match &mut self.content_ui {
+            ContentUiState::Model(model) => model.phy_debug_enabled = enabled,
+            ContentUiState::Map(map) => map.phy_debug_enabled = enabled,
+            _ => {}
+        }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(super) const fn set_phy_debug_enabled(&mut self, enabled: bool) {
-        self.phy_debug_enabled = enabled;
-    }
-
-    #[cfg(feature = "asset-studio")]
     pub(super) fn select_skin(&mut self, skin: usize) {
         let skin_count = self
             .current_model()
             .map_or(0, |model| model.skin_tables.len());
-        if skin < skin_count {
-            self.selected_skin = skin;
+        if skin < skin_count
+            && let ContentUiState::Model(model) = &mut self.content_ui
+        {
+            model.selected_skin = skin;
         }
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(super) fn select_bodygroup_choice(&mut self, group: usize, choice: usize) {
         let Some(choices) = self
             .current_model()
@@ -552,89 +707,97 @@ impl State {
             return;
         };
         if choice < choices
-            && let Some(slot) = self.bodygroup_choices.get_mut(group)
+            && let ContentUiState::Model(model) = &mut self.content_ui
+            && let Some(slot) = model.bodygroup_choices.get_mut(group)
         {
             *slot = choice;
         }
     }
 
-    #[cfg(feature = "asset-studio")]
-    pub(crate) fn current_model(&self) -> Option<&std::sync::Arc<super::model::ModelPreview>> {
+    pub(crate) fn current_model(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::media::preview_model::ModelPreview>> {
         match self.current.as_ref().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => Some(model),
             _ => None,
         }
     }
 
-    fn init_model_selections(&mut self, content: &PreviewContent) {
-        self.clear_model_selections();
-        #[cfg(feature = "asset-studio")]
-        if let PreviewContent::Model(model) = content {
-            self.bodygroup_choices = vec![0; model.bodygroups.len()];
-        }
-        #[cfg(not(feature = "asset-studio"))]
-        let _ = content;
-    }
-
-    fn clear_model_selections(&mut self) {
-        self.selected_skin = 0;
-        self.bodygroup_choices.clear();
-        self.particle_system = 0;
-        self.particle_playing = true;
-        self.particle_speed = 1.0;
-        self.particle_control_points = default_particle_control_points();
-    }
-
     pub(crate) const fn particle_system(&self) -> usize {
-        self.particle_system
+        match &self.content_ui {
+            ContentUiState::Particle(particle) => particle.system,
+            _ => 0,
+        }
     }
 
     pub(crate) const fn particle_playing(&self) -> bool {
-        self.particle_playing
+        match &self.content_ui {
+            ContentUiState::Particle(particle) => particle.playing,
+            _ => false,
+        }
     }
 
     pub(crate) const fn particle_speed(&self) -> f32 {
-        self.particle_speed
+        match &self.content_ui {
+            ContentUiState::Particle(particle) => particle.speed,
+            _ => 1.0,
+        }
     }
 
-    pub(crate) const fn particle_restart_epoch(&self) -> u64 {
-        self.particle_restart_epoch
+    pub(crate) const fn particle_restart_epoch(&self) -> Generation {
+        match &self.content_ui {
+            ContentUiState::Particle(particle) => particle.restart_epoch,
+            _ => Generation::INITIAL,
+        }
     }
 
-    pub(crate) const fn particle_control_points(&self) -> [[f32; 3]; PARTICLE_CONTROL_POINTS] {
-        self.particle_control_points
+    pub(crate) const fn particle_control_points(&self) -> [Vec3; MAX_CONTROL_POINTS] {
+        match &self.content_ui {
+            ContentUiState::Particle(particle) => particle.control_points,
+            _ => default_particle_control_points(),
+        }
     }
 
     pub(super) fn select_particle_system(&mut self, index: usize) {
-        if self.particle_system == index {
+        let ContentUiState::Particle(particle) = &mut self.content_ui else {
+            return;
+        };
+        if particle.system == index {
             return;
         }
-        self.particle_system = index;
+        particle.system = index;
         // A different system is a different effect; replay from t=0 with a
         // clean stage.
-        self.particle_playing = true;
-        self.particle_restart_epoch = self.particle_restart_epoch.wrapping_add(1);
+        particle.playing = true;
+        particle.restart_epoch.bump();
     }
 
     pub(super) fn toggle_particle_playing(&mut self) {
-        self.particle_playing = !self.particle_playing;
-    }
-
-    pub(super) fn request_particle_restart(&mut self) {
-        self.particle_restart_epoch = self.particle_restart_epoch.wrapping_add(1);
-        self.particle_playing = true;
-    }
-
-    pub(super) fn set_particle_speed(&mut self, speed: f32) {
-        if speed.is_finite() {
-            self.particle_speed = speed.clamp(0.05, 10.0);
+        if let ContentUiState::Particle(particle) = &mut self.content_ui {
+            particle.playing = !particle.playing;
         }
     }
 
-    pub(super) fn set_particle_control_point(&mut self, index: usize, position: [f32; 3]) {
-        if index < PARTICLE_CONTROL_POINTS && position.iter().all(|component| component.is_finite())
+    pub(super) fn request_particle_restart(&mut self) {
+        if let ContentUiState::Particle(particle) = &mut self.content_ui {
+            particle.restart_epoch.bump();
+            particle.playing = true;
+        }
+    }
+
+    pub(super) fn set_particle_speed(&mut self, speed: f32) {
+        if speed.is_finite()
+            && let ContentUiState::Particle(particle) = &mut self.content_ui
         {
-            self.particle_control_points[index] = position;
+            particle.speed = speed.clamp(0.05, 10.0);
+        }
+    }
+
+    pub(super) fn set_particle_control_point(&mut self, index: ControlPointIndex, position: Vec3) {
+        if position.is_finite()
+            && let ContentUiState::Particle(particle) = &mut self.content_ui
+        {
+            particle.control_points[index.get()] = position;
         }
     }
 
@@ -652,24 +815,37 @@ impl State {
         }
     }
 
-    pub(super) fn start_audio(&mut self) {
-        if self.current_audio_available() {
-            self.audio_playing = true;
+    pub(super) fn start_audio(&mut self, request_id: Generation) {
+        if self.current_audio_request_id() == Some(request_id)
+            && let ContentUiState::Audio(audio) = &mut self.content_ui
+        {
+            audio.playing = true;
         }
     }
 
-    pub(super) const fn pause_audio(&mut self) {
-        self.audio_playing = false;
+    pub(super) fn pause_audio(&mut self, request_id: Generation) {
+        if self.current_audio_request_id() == Some(request_id)
+            && let ContentUiState::Audio(audio) = &mut self.content_ui
+        {
+            audio.playing = false;
+        }
     }
 
-    pub(super) fn finish_audio(&mut self) {
-        self.audio_playing = false;
-        self.audio_position_secs = 0.0;
+    pub(super) fn finish_audio(&mut self, request_id: Generation) {
+        if self.current_audio_request_id() == Some(request_id)
+            && let ContentUiState::Audio(audio) = &mut self.content_ui
+        {
+            audio.playing = false;
+            audio.position_secs = 0.0;
+        }
     }
 
-    pub(super) fn update_audio_position(&mut self, position_secs: f32) {
-        if position_secs.is_finite() {
-            self.audio_position_secs = position_secs.max(0.0);
+    pub(super) fn update_audio_position(&mut self, request_id: Generation, position_secs: f32) {
+        if position_secs.is_finite()
+            && self.current_audio_request_id() == Some(request_id)
+            && let ContentUiState::Audio(audio) = &mut self.content_ui
+        {
+            audio.position_secs = position_secs.max(0.0);
         }
     }
 
@@ -677,7 +853,7 @@ impl State {
         if !self.open && !self.loading && self.current.is_none() && self.request.is_none() {
             return;
         }
-        self.request_id = self.request_id.saturating_add(1);
+        self.request_id.bump();
         self.open = false;
         self.expanded = false;
         self.loading = false;
@@ -685,59 +861,9 @@ impl State {
         self.error = None;
         self.request = None;
         self.current = None;
-        self.spinner_started_at = None;
-        self.spinner_now = None;
-        self.clear_audio();
-        self.clear_model_selections();
-        self.map_fog_enabled = true;
-        self.map_skybox_enabled = true;
-        self.map_visibility_enabled = true;
-        self.phy_debug_enabled = false;
-        self.clear_fly_speed_readout();
-        self.clear_camera_poses();
+        self.spinner.stop();
+        self.content_ui = ContentUiState::None;
     }
-
-    fn clear_audio(&mut self) {
-        self.audio_playing = false;
-        self.audio_position_secs = 0.0;
-        self.audio_duration_secs = None;
-    }
-
-    fn current_audio_available(&self) -> bool {
-        #[cfg(feature = "asset-studio")]
-        {
-            matches!(
-                self.current.as_ref().map(|data| &data.content),
-                Some(PreviewContent::Audio { .. })
-            )
-        }
-        #[cfg(not(feature = "asset-studio"))]
-        {
-            false
-        }
-    }
-
-    fn clear_fly_speed_readout(&mut self) {
-        self.fly_speed_readout = None;
-    }
-
-    fn clear_camera_poses(&mut self) {
-        self.fly_pose = None;
-        self.fly_movement_mode = None;
-        self.requested_movement_mode = None;
-        self.orbit_pose = None;
-    }
-}
-
-fn audio_duration_secs(content: &PreviewContent) -> Option<f32> {
-    #[cfg(feature = "asset-studio")]
-    {
-        if let PreviewContent::Audio { duration_secs, .. } = content {
-            return *duration_secs;
-        }
-    }
-    let _ = content;
-    None
 }
 
 #[cfg(test)]

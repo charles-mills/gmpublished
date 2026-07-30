@@ -1,3 +1,11 @@
+//! The search palette's state: the query, the rows currently shown, and which
+//! one is selected.
+//!
+//! Two result kinds share one list — installed addons and files inside them —
+//! and results arrive from two paths: a debounced quick search answered from
+//! memory, and a full search that runs as a cancellable backend task. Both are
+//! generation-stamped so a slower earlier query cannot overwrite a newer one.
+
 use std::{
     collections::HashSet,
     ops::Range,
@@ -5,28 +13,39 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::bridge::domain::{
+    PublishedFileId, SearchFullBatch, SearchFullBatchMode, SearchFullHits, SearchFullRequest,
+    SearchHit, SearchItem, SearchItemSource, SearchMode, SearchQuickBatch, SearchQuickRequest,
+    SearchRequestKey, SearchSession, WorkshopMetadata, workshop_url::workshop_item_url,
+};
 use crate::bridge::tasks::TaskId;
 use crate::bridge::ui_error::UiError;
-use crate::bridge::{
-    domain::{
-        PublishedFileId, SearchFullBatch, SearchFullBatchMode, SearchFullHits, SearchFullRequest,
-        SearchHit, SearchItem, SearchItemSource, SearchMode, SearchQuickBatch, SearchQuickRequest,
-        SearchRequestKey, SearchSession, WorkshopMetadata, workshop_url::workshop_item_url,
-    },
-    tasks::BackendServices,
-};
-use iced::{animation::Easing, widget::image};
+use iced::widget::image;
 
+use crate::generation::Generation;
 use crate::media::{thumbnail_demand, thumbnail_worker::ThumbnailInput};
-use crate::theme::{Tokens, motion};
 
+mod lifecycle;
+mod metadata;
+mod palette_motion;
+mod rows;
+mod thumbnail;
+
+pub use metadata::{
+    MetadataCompletion, MetadataPatch, MetadataResolution, refresh_metadata, resolve_metadata,
+};
+use palette_motion::PaletteMotion;
+#[cfg(test)]
+use rows::row_from_search_item;
+pub use rows::{Row, Selection, SelectionAction};
+use rows::{rows_from_full_hits, rows_from_hits};
+pub use thumbnail::RowThumbnail;
+use thumbnail::thumbnail_owner;
 pub const QUICK_SEARCH_DEBOUNCE: Duration = Duration::from_millis(100);
 pub const RESULT_ROW_HEIGHT: f32 = 70.0;
 
 const VIRTUAL_ROW_OVERSCAN: usize = 4;
 const SEARCH_THUMBNAIL_MAX_EDGE: u32 = 256;
-const THUMBNAIL_OWNER_LABEL: &str = "Search";
-const PALETTE_CLOSED_SCALE: f32 = 0.98;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowSource {
@@ -47,18 +66,16 @@ impl RowSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct State {
     input: String,
     mode: SearchMode,
     session: SearchSession,
     rows: Vec<Row>,
-    expanded: bool,
-    visible: bool,
-    presence: motion::Presence<bool>,
+    palette: PaletteMotion,
     pending_quick: Option<SearchQuickRequest>,
-    thumbnail_generation: u64,
-    metadata_generation: u64,
+    thumbnail_generation: Generation,
+    metadata_generation: Generation,
     metadata_in_flight: HashSet<PublishedFileId>,
     metadata_finished: HashSet<PublishedFileId>,
     scroll_offset: f32,
@@ -66,23 +83,15 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let tokens = Tokens::dark();
         Self {
             input: String::new(),
             mode: SearchMode::Addons,
             session: SearchSession::default(),
             rows: Vec::new(),
-            expanded: false,
-            visible: false,
-            presence: motion::asymmetric(
-                false,
-                tokens.motion.modal_enter_duration(),
-                tokens.motion.modal_exit_duration(),
-                Easing::EaseOut,
-            ),
+            palette: PaletteMotion::default(),
             pending_quick: None,
-            thumbnail_generation: 0,
-            metadata_generation: 0,
+            thumbnail_generation: Generation::INITIAL,
+            metadata_generation: Generation::INITIAL,
             metadata_in_flight: HashSet::new(),
             metadata_finished: HashSet::new(),
             scroll_offset: 0.0,
@@ -92,259 +101,47 @@ impl Default for State {
 
 impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.rows == other.rows
-            && self.mode == other.mode
-            && self.expanded == other.expanded
-            && self.visible == other.visible
-            && self.presence == other.presence
-            && self.pending_quick == other.pending_quick
-            && self.thumbnail_generation == other.thumbnail_generation
-            && self.metadata_generation == other.metadata_generation
-            && self.metadata_in_flight == other.metadata_in_flight
-            && self.metadata_finished == other.metadata_finished
-            && self.scroll_offset == other.scroll_offset
-            && self.session.generation() == other.session.generation()
-            && self.session.query() == other.session.query()
-            && self.session.loading() == other.session.loading()
-            && self.session.has_more() == other.session.has_more()
-            && self.session.active_full_task() == other.session.active_full_task()
-            && self.session.full_replace_pending() == other.session.full_replace_pending()
+        let Self {
+            input,
+            mode,
+            session,
+            rows,
+            palette,
+            pending_quick,
+            thumbnail_generation,
+            metadata_generation,
+            metadata_in_flight,
+            metadata_finished,
+            scroll_offset,
+        } = self;
+        let Self {
+            input: other_input,
+            mode: other_mode,
+            session: other_session,
+            rows: other_rows,
+            palette: other_palette,
+            pending_quick: other_pending_quick,
+            thumbnail_generation: other_thumbnail_generation,
+            metadata_generation: other_metadata_generation,
+            metadata_in_flight: other_metadata_in_flight,
+            metadata_finished: other_metadata_finished,
+            scroll_offset: other_scroll_offset,
+        } = other;
+
+        input == other_input
+            && mode == other_mode
+            && session == other_session
+            && rows == other_rows
+            && palette == other_palette
+            && pending_quick == other_pending_quick
+            && thumbnail_generation == other_thumbnail_generation
+            && metadata_generation == other_metadata_generation
+            && metadata_in_flight == other_metadata_in_flight
+            && metadata_finished == other_metadata_finished
+            && scroll_offset == other_scroll_offset
     }
 }
-
 impl State {
-    pub(crate) fn input(&self) -> &str {
-        &self.input
-    }
-
-    pub(crate) const fn mode(&self) -> SearchMode {
-        self.mode
-    }
-
-    pub(crate) fn rows(&self) -> &[Row] {
-        &self.rows
-    }
-
-    pub(crate) const fn loading(&self) -> bool {
-        self.session.loading()
-    }
-
-    pub(crate) const fn has_more(&self) -> bool {
-        self.session.has_more()
-    }
-
-    pub(crate) fn should_begin_full_search(&self) -> bool {
-        self.expanded
-            && self.query_active()
-            && self.session.has_more()
-            && self.session.active_full_task().is_none()
-    }
-
-    pub(crate) fn show_empty(&self) -> bool {
-        self.query_active() && !self.loading() && self.rows.is_empty()
-    }
-
-    pub(crate) const fn palette_open(&self) -> bool {
-        self.expanded
-    }
-
-    pub(crate) const fn palette_visible(&self) -> bool {
-        self.visible
-    }
-
-    pub(crate) fn needs_motion_ticks(&self) -> bool {
-        self.presence.needs_ticks()
-    }
-
-    pub(crate) fn opacity(&self, now: Instant) -> f32 {
-        self.presence.interpolate(0.0, 1.0, now)
-    }
-
-    pub(crate) fn scale(&self, now: Instant) -> f32 {
-        self.presence.interpolate(PALETTE_CLOSED_SCALE, 1.0, now)
-    }
-
-    pub(crate) fn dropdown_open(&self) -> bool {
-        self.expanded
-            && self.query_active()
-            && (self.loading() || !self.rows.is_empty() || self.has_more() || self.show_empty())
-    }
-
-    pub(crate) fn query_active(&self) -> bool {
-        !self.input.trim().is_empty()
-    }
-
-    pub(crate) fn edit_query(&mut self, input: String) -> QueryEditOutcome {
-        if !self.expanded {
-            if self.visible {
-                return QueryEditOutcome {
-                    quick_request: None,
-                    cancel_task: None,
-                };
-            }
-            self.expanded = true;
-            self.visible = true;
-            self.presence.snap(true);
-        }
-
-        self.input = input;
-        // Editing keeps the palette open even when the input empties out
-        // (e.g. backspacing over a typo'd first character) — an empty query
-        // hides the results section, not the palette itself.
-        let change = self.session.begin_query(&self.input, self.mode);
-        self.replace_rows(Vec::new());
-        self.pending_quick.clone_from(&change.quick_request);
-
-        QueryEditOutcome {
-            quick_request: change.quick_request,
-            cancel_task: change.cancel_task,
-        }
-    }
-
-    pub(crate) fn clear(&mut self) -> Option<TaskId> {
-        self.input.clear();
-        self.expanded = true;
-        self.visible = true;
-        self.replace_rows(Vec::new());
-        self.pending_quick = None;
-        self.session.clear().cancel_task
-    }
-
-    pub(crate) fn focus(&mut self, now: Instant) -> bool {
-        if self.expanded {
-            return false;
-        }
-        self.expanded = true;
-        self.visible = true;
-        self.presence.go(true, now);
-        true
-    }
-
-    pub(crate) fn focus_mode(&mut self, mode: SearchMode, now: Instant) -> FocusModeOutcome {
-        let mode_changed = self.mode != mode;
-        let cancel_task = if mode_changed {
-            self.mode = mode;
-            self.input.clear();
-            self.replace_rows(Vec::new());
-            self.pending_quick = None;
-            self.session.clear().cancel_task
-        } else {
-            None
-        };
-        let opened = self.focus(now);
-        FocusModeOutcome {
-            opened,
-            mode_changed,
-            cancel_task,
-        }
-    }
-
-    /// Starts closing the palette. The clean-slate reset happens on the
-    /// final animation tick so the input stays mounted through the fade.
-    /// While closing, edits are ignored; this preserves the ⌘F leak guard.
-    pub(crate) fn dismiss(&mut self, now: Instant) -> Option<TaskId> {
-        if !self.expanded {
-            return None;
-        }
-        let cancel_task = self.session.active_full_task();
-        self.expanded = false;
-        self.pending_quick = None;
-        self.presence.go(false, now);
-        cancel_task
-    }
-
-    /// Returns true when the close animation just settled and the palette
-    /// fully reset — the caller should re-sweep thumbnail demands, since the
-    /// fading rows kept theirs alive until this moment.
-    pub(crate) fn tick_motion(&mut self, now: Instant) -> bool {
-        if self.presence.tick(now) && !self.expanded && self.visible {
-            self.reset_after_close();
-            self.visible = false;
-            return true;
-        }
-        false
-    }
-
-    fn reset_after_close(&mut self) {
-        self.input.clear();
-        self.replace_rows(Vec::new());
-        self.pending_quick = None;
-        let _clear = self.session.clear();
-    }
-
-    pub(crate) fn take_debounced_request(
-        &mut self,
-        request: &SearchQuickRequest,
-    ) -> Option<SearchQuickRequest> {
-        let current = self.pending_quick.as_ref()?;
-        if current.key() != request.key()
-            || !self
-                .session
-                .is_current(request.generation(), request.mode(), request.query())
-        {
-            return None;
-        }
-
-        self.pending_quick.take()
-    }
-
-    pub(crate) fn apply_quick_result(
-        &mut self,
-        key: &SearchRequestKey,
-        result: Result<SearchQuickBatch, UiError>,
-    ) -> bool {
-        match result {
-            Ok(batch) => {
-                let Some(accepted) = self.session.accept_quick_batch(batch) else {
-                    return false;
-                };
-                let (hits, _has_more) = accepted.into_parts();
-                self.replace_rows(rows_from_hits(hits));
-            }
-            Err(error) => {
-                if !self.session.fail_quick(key) {
-                    return false;
-                }
-                self.replace_rows(Vec::new());
-                log::warn!("quick search failed for `{}`: {error}", key.query());
-            }
-        }
-        true
-    }
-
-    pub(crate) fn begin_full_search(&mut self, task_id: TaskId) -> Option<FullSearchStart> {
-        let start = self.session.begin_full_search(task_id, self.mode)?;
-        self.pending_quick = None;
-        Some(FullSearchStart {
-            request: start.request,
-            cancel_task: start.cancel_task,
-        })
-    }
-
-    pub(crate) fn apply_full_batch(&mut self, batch: SearchFullBatch) -> bool {
-        let Some(accepted) = self.session.accept_full_batch(batch) else {
-            return false;
-        };
-        let (mode, hits) = accepted.into_parts();
-
-        match mode {
-            SearchFullBatchMode::ReplaceQuickRows => {
-                self.replace_rows(rows_from_full_hits(0, &hits));
-            }
-            SearchFullBatchMode::AppendRows => {
-                let start = self.rows.len();
-                self.rows.extend(rows_from_full_hits(start, &hits));
-                self.thumbnail_generation = self.next_thumbnail_generation();
-            }
-        }
-        true
-    }
-
-    pub(crate) fn finish_full_search(&mut self, request: &SearchFullRequest) -> bool {
-        self.session.finish_full_search(request)
-    }
-
     pub(crate) fn selection_for(&self, row_id: usize) -> Option<Selection> {
         self.rows.get(row_id).map(|row| {
             let mut action = row.action.clone();
@@ -375,7 +172,7 @@ impl State {
     pub(crate) fn take_thumbnail_metadata_request(
         &mut self,
         viewport_height: f32,
-    ) -> Option<(u64, Vec<PublishedFileId>)> {
+    ) -> Option<(Generation, Vec<PublishedFileId>)> {
         let ids = self.pending_thumbnail_metadata_ids(viewport_height);
         if ids.is_empty() {
             return None;
@@ -411,7 +208,7 @@ impl State {
 
     pub(crate) fn finish_metadata_request(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: &[PublishedFileId],
         result: Result<MetadataResolution, UiError>,
     ) -> MetadataCompletion {
@@ -441,7 +238,7 @@ impl State {
 
     pub(crate) fn apply_metadata_refresh(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: &[PublishedFileId],
         result: Result<Vec<MetadataPatch>, UiError>,
     ) -> bool {
@@ -489,7 +286,8 @@ impl State {
         // The closing palette keeps its rows on screen while fading out, so
         // their thumbnails must stay demanded until the animation settles —
         // releasing them at dismiss time blanks the images mid-fade.
-        let closing_with_rows = self.visible && !self.expanded && !self.rows.is_empty();
+        let closing_with_rows =
+            self.palette.visible && !self.palette.expanded && !self.rows.is_empty();
         if !self.dropdown_open() && !closing_with_rows {
             return thumbnail_demand::DemandSet::empty(thumbnail_owner());
         }
@@ -585,12 +383,12 @@ impl State {
         self.metadata_finished.clear();
     }
 
-    fn next_thumbnail_generation(&self) -> u64 {
-        self.thumbnail_generation.wrapping_add(1).max(1)
+    fn next_thumbnail_generation(&self) -> Generation {
+        self.thumbnail_generation.next()
     }
 
-    fn next_metadata_generation(&self) -> u64 {
-        self.metadata_generation.wrapping_add(1).max(1)
+    fn next_metadata_generation(&self) -> Generation {
+        self.metadata_generation.next()
     }
 
     fn row_range(&self, viewport_height: f32, overscan: usize) -> Range<usize> {
@@ -634,295 +432,6 @@ pub struct FullSearchStart {
     pub(crate) cancel_task: Option<TaskId>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct MetadataCompletion {
-    pub(crate) changed: bool,
-    pub(crate) stale_ids: Vec<PublishedFileId>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct MetadataResolution {
-    pub(crate) patches: Vec<MetadataPatch>,
-    pub(crate) stale_ids: Vec<PublishedFileId>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MetadataPatch {
-    workshop_id: PublishedFileId,
-    preview_url: Option<String>,
-}
-
-impl MetadataPatch {
-    fn from_metadata(metadata: &WorkshopMetadata) -> Self {
-        Self {
-            workshop_id: metadata.id,
-            preview_url: metadata
-                .preview_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|url| !url.is_empty())
-                .map(str::to_owned),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(workshop_id: PublishedFileId, preview_url: Option<&str>) -> Self {
-        Self {
-            workshop_id,
-            preview_url: preview_url.map(str::to_owned),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Selection {
-    pub(crate) title: String,
-    pub(crate) action: SelectionAction,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SelectionAction {
-    InstalledAddon {
-        path: PathBuf,
-        workshop_id: Option<PublishedFileId>,
-        preview_url: Option<String>,
-    },
-    MyWorkshop {
-        workshop_id: PublishedFileId,
-        title: String,
-        tags: Vec<String>,
-        preview_url: Option<String>,
-    },
-    SteamWorkshop {
-        workshop_id: PublishedFileId,
-    },
-    InstalledAddonFile {
-        addon_path: PathBuf,
-        addon_title: String,
-        workshop_id: Option<PublishedFileId>,
-        entry_path: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Row {
-    id: usize,
-    title: String,
-    source: RowSource,
-    association: String,
-    workshop_id: Option<PublishedFileId>,
-    thumbnail_url: Option<String>,
-    thumbnail: RowThumbnail,
-    action: SelectionAction,
-}
-
-impl Row {
-    pub(crate) const fn id(&self) -> usize {
-        self.id
-    }
-
-    pub(crate) fn title(&self) -> &str {
-        &self.title
-    }
-
-    pub(crate) fn association(&self) -> &str {
-        &self.association
-    }
-
-    pub(crate) const fn thumbnail(&self) -> &RowThumbnail {
-        &self.thumbnail
-    }
-
-    pub(crate) fn source_label_key(&self) -> &'static str {
-        self.source.label_key()
-    }
-
-    fn thumbnail_demand(
-        &self,
-        priority: thumbnail_demand::Priority,
-    ) -> Option<thumbnail_demand::Demand> {
-        if !matches!(self.thumbnail, RowThumbnail::Loading) {
-            return None;
-        }
-        let preview_url = self.thumbnail_url.as_deref()?.trim();
-        if preview_url.is_empty() {
-            return None;
-        }
-
-        Some(thumbnail_demand::Demand {
-            id: thumbnail_demand::DemandId::new(self.id.to_string()),
-            input: ThumbnailInput::from_url(preview_url),
-            logical_max_edge: SEARCH_THUMBNAIL_MAX_EDGE,
-            priority,
-        })
-    }
-
-    fn apply_thumbnail_delivery(&mut self, delivery: &thumbnail_demand::Delivery) -> bool {
-        if delivery.id.as_str().parse::<usize>() != Ok(self.id) {
-            return false;
-        }
-
-        self.thumbnail = match &delivery.result {
-            thumbnail_demand::DeliveryResult::Ready(ready) => {
-                RowThumbnail::Ready(ready.handle().clone())
-            }
-            // Search rows keep their spinner rather than a blurred placeholder.
-            thumbnail_demand::DeliveryResult::Placeholder(_) => return false,
-            thumbnail_demand::DeliveryResult::Failed { .. } => RowThumbnail::Dead,
-        };
-        true
-    }
-
-    fn apply_metadata_patch(&mut self, patch: &MetadataPatch) -> bool {
-        if self.workshop_id != Some(patch.workshop_id) {
-            return false;
-        }
-
-        if self.thumbnail_url == patch.preview_url {
-            if patch.preview_url.is_none() && matches!(self.thumbnail, RowThumbnail::Loading) {
-                self.thumbnail = RowThumbnail::Dead;
-                return true;
-            }
-            return false;
-        }
-
-        self.thumbnail_url.clone_from(&patch.preview_url);
-        self.thumbnail = if self.thumbnail_url.is_some() {
-            RowThumbnail::Loading
-        } else {
-            RowThumbnail::Dead
-        };
-        true
-    }
-
-    fn settle_without_metadata(&mut self) -> bool {
-        if self.thumbnail_url.is_some() || !matches!(self.thumbnail, RowThumbnail::Loading) {
-            return false;
-        }
-
-        self.thumbnail = RowThumbnail::Dead;
-        true
-    }
-
-    fn invalidate_ready_thumbnail(&mut self) -> bool {
-        if !matches!(self.thumbnail, RowThumbnail::Ready(_)) {
-            return false;
-        }
-
-        self.thumbnail = if self
-            .thumbnail_url
-            .as_deref()
-            .is_some_and(|url| !url.trim().is_empty())
-        {
-            RowThumbnail::Loading
-        } else {
-            RowThumbnail::Dead
-        };
-        true
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RowThumbnail {
-    Loading,
-    Dead,
-    Ready(image::Handle),
-}
-
-fn rows_from_hits(hits: Vec<SearchHit>) -> Vec<Row> {
-    hits.into_iter()
-        .enumerate()
-        .map(|(index, hit)| row_from_search_item(index, &hit.item))
-        .collect()
-}
-
-fn rows_from_full_hits(start: usize, hits: &SearchFullHits) -> Vec<Row> {
-    let mut index = start;
-    hits.map_rows(|_score, item| {
-        let row = row_from_search_item(index, item);
-        index += 1;
-        row
-    })
-}
-
-fn row_from_search_item(index: usize, item: &SearchItem) -> Row {
-    let title = item.label.clone();
-    match &item.source {
-        SearchItemSource::InstalledAddons(path, workshop_id) => Row {
-            id: index,
-            title,
-            source: RowSource::InstalledAddons,
-            association: path.to_string_lossy().into_owned(),
-            workshop_id: *workshop_id,
-            thumbnail_url: None,
-            thumbnail: thumbnail_for_workshop_id(*workshop_id),
-            action: SelectionAction::InstalledAddon {
-                path: path.clone(),
-                workshop_id: *workshop_id,
-                preview_url: None,
-            },
-        },
-        SearchItemSource::InstalledAddonFile {
-            addon_path,
-            addon_title,
-            workshop_id,
-            entry_path,
-            ..
-        } => Row {
-            id: index,
-            title,
-            source: RowSource::InstalledAddonFile,
-            association: format!("{entry_path} - {addon_title}"),
-            workshop_id: *workshop_id,
-            thumbnail_url: None,
-            thumbnail: thumbnail_for_workshop_id(*workshop_id),
-            action: SelectionAction::InstalledAddonFile {
-                addon_path: addon_path.clone(),
-                addon_title: addon_title.clone(),
-                workshop_id: *workshop_id,
-                entry_path: entry_path.clone(),
-            },
-        },
-        SearchItemSource::MyWorkshop(id) => Row {
-            id: index,
-            title: title.clone(),
-            source: RowSource::MyWorkshop,
-            association: workshop_item_url(*id),
-            workshop_id: Some(*id),
-            thumbnail_url: None,
-            thumbnail: RowThumbnail::Loading,
-            action: SelectionAction::MyWorkshop {
-                workshop_id: *id,
-                title,
-                tags: my_workshop_tags_from_terms(&item.terms, *id),
-                preview_url: None,
-            },
-        },
-        SearchItemSource::WorkshopItem(id) => Row {
-            id: index,
-            title,
-            source: RowSource::SteamWorkshop,
-            association: workshop_item_url(*id),
-            workshop_id: Some(*id),
-            thumbnail_url: None,
-            thumbnail: RowThumbnail::Loading,
-            action: SelectionAction::SteamWorkshop { workshop_id: *id },
-        },
-    }
-}
-
-fn thumbnail_for_workshop_id(workshop_id: Option<PublishedFileId>) -> RowThumbnail {
-    if workshop_id.is_some() {
-        RowThumbnail::Loading
-    } else {
-        RowThumbnail::Dead
-    }
-}
-
-fn thumbnail_owner() -> thumbnail_demand::Owner {
-    thumbnail_demand::Owner::AddonGrid(THUMBNAIL_OWNER_LABEL)
-}
-
 fn finite_nonnegative(value: f32) -> f32 {
     if value.is_finite() && value > 0.0 {
         value
@@ -931,42 +440,11 @@ fn finite_nonnegative(value: f32) -> f32 {
     }
 }
 
-pub fn resolve_metadata(ctx: &BackendServices, item_ids: &[PublishedFileId]) -> MetadataResolution {
-    let (metadata, stale_ids) = ctx.resolve_workshop_metadata(item_ids);
-    MetadataResolution {
-        patches: metadata.iter().map(MetadataPatch::from_metadata).collect(),
-        stale_ids,
-    }
-}
-
-pub fn refresh_metadata(
-    ctx: &BackendServices,
-    item_ids: &[PublishedFileId],
-) -> Result<Vec<MetadataPatch>, UiError> {
-    Ok(ctx
-        .refresh_workshop_metadata(item_ids)?
-        .iter()
-        .map(MetadataPatch::from_metadata)
-        .collect())
-}
-
-fn my_workshop_tags_from_terms(terms: &[impl AsRef<str>], id: PublishedFileId) -> Vec<String> {
-    let id_term = id.to_string();
-    terms
-        .iter()
-        .map(AsRef::as_ref)
-        .filter(|term| *term != id_term.as_str())
-        .map(str::to_owned)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::bridge::domain::{
-        SearchFullBatch, SearchItem, SearchItemSource, SearchQuickBatch, SearchQuickCarry,
-    };
+    use crate::bridge::domain::{SearchFullBatch, SearchItem, SearchItemSource, SearchQuickBatch};
 
     use super::*;
 
@@ -1081,15 +559,14 @@ mod tests {
             request.key().clone(),
             vec![my_workshop_hit("Alpha", 42)],
             false,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
         let generation = state.metadata_generation;
         assert!(state.apply_metadata_refresh(
             generation,
-            &[PublishedFileId::new(42).expect("test fixture ids are always nonzero")],
+            &[PublishedFileId::fixture(42)],
             Ok(vec![MetadataPatch::for_test(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(42),
                 Some("https://example.test/alpha.png")
             )]),
         ));
@@ -1112,16 +589,15 @@ mod tests {
             request.key().clone(),
             vec![my_workshop_hit("Alpha", 42)],
             false,
-            SearchQuickCarry::default(),
         );
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
         let generation = state.metadata_generation;
         assert!(state.apply_metadata_refresh(
             generation,
-            &[PublishedFileId::new(42).expect("test fixture ids are always nonzero")],
+            &[PublishedFileId::fixture(42)],
             Ok(vec![MetadataPatch::for_test(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(42),
                 Some("https://example.test/alpha.png")
             )]),
         ));
@@ -1143,12 +619,7 @@ mod tests {
         let first = state.edit_query("first".to_owned()).quick_request.unwrap();
         let second = state.edit_query("second".to_owned()).quick_request.unwrap();
 
-        let batch = SearchQuickBatch::new(
-            first.key().clone(),
-            vec![hit("First", 1)],
-            false,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(first.key().clone(), vec![hit("First", 1)], false);
 
         assert!(!state.apply_quick_result(first.key(), Ok(batch)));
         assert_eq!(state.rows().len(), 0);
@@ -1159,12 +630,7 @@ mod tests {
     fn quick_result_maps_rows_and_selection() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
 
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
@@ -1173,7 +639,7 @@ mod tests {
         assert_eq!(
             state.selection_for(0).map(|selection| selection.action),
             Some(SelectionAction::SteamWorkshop {
-                workshop_id: PublishedFileId::new(42).expect("test fixture ids are always nonzero")
+                workshop_id: PublishedFileId::fixture(42)
             })
         );
     }
@@ -1182,12 +648,7 @@ mod tests {
     fn full_search_batches_replace_quick_rows_then_append() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let quick = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Quick", 1)],
-            true,
-            SearchQuickCarry::default(),
-        );
+        let quick = SearchQuickBatch::new(request.key().clone(), vec![hit("Quick", 1)], true);
         assert!(state.apply_quick_result(request.key(), Ok(quick)));
 
         let start = state
@@ -1226,12 +687,7 @@ mod tests {
     fn virtual_rows_render_visible_window_with_overscan_spacers() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            hits(20),
-            false,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), hits(20), false);
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
         let _changed = state.set_scroll_offset(RESULT_ROW_HEIGHT * 10.0);
@@ -1246,12 +702,7 @@ mod tests {
     fn thumbnail_metadata_and_demands_include_prefetch_window() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            hits(20),
-            false,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), hits(20), false);
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
         let _changed = state.set_scroll_offset(RESULT_ROW_HEIGHT * 10.0);
@@ -1264,7 +715,7 @@ mod tests {
             ids,
             [11, 12, 13, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19]
                 .into_iter()
-                .map(|id| PublishedFileId::new(id).expect("test fixture ids are always nonzero"))
+                .map(PublishedFileId::fixture)
                 .collect::<Vec<_>>()
         );
 
@@ -1290,10 +741,22 @@ mod tests {
             demands
                 .demands
                 .iter()
-                .map(|demand| demand.id.as_str())
+                .map(|demand| demand.id.search_row_index())
                 .collect::<Vec<_>>(),
             vec![
-                "10", "11", "12", "6", "7", "8", "9", "13", "14", "15", "16", "17", "18"
+                Some(10),
+                Some(11),
+                Some(12),
+                Some(6),
+                Some(7),
+                Some(8),
+                Some(9),
+                Some(13),
+                Some(14),
+                Some(15),
+                Some(16),
+                Some(17),
+                Some(18)
             ]
         );
         assert!(
@@ -1312,12 +775,7 @@ mod tests {
     fn metadata_miss_keeps_row_loading_until_refresh_settles() {
         let mut state = State::default();
         let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            false,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], false);
         assert!(state.apply_quick_result(request.key(), Ok(batch)));
 
         let (generation, ids) = state
@@ -1338,7 +796,7 @@ mod tests {
             generation,
             &ids,
             Ok(vec![MetadataPatch::for_test(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(42),
                 Some("https://example.test/alpha.png")
             )]),
         ));
@@ -1353,9 +811,7 @@ mod tests {
                 SearchItemSource::InstalledAddonFile {
                     addon_path: PathBuf::from("/tmp/riverden.gma"),
                     addon_title: "Riverden".to_owned(),
-                    workshop_id: Some(
-                        PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-                    ),
+                    workshop_id: Some(PublishedFileId::fixture(123)),
                     entry_path: "maps/rp_riverden_v1a.bsp".to_owned(),
                     size_bytes: 42,
                     crc32: 77,
@@ -1374,9 +830,7 @@ mod tests {
             SelectionAction::InstalledAddonFile {
                 addon_path: PathBuf::from("/tmp/riverden.gma"),
                 addon_title: "Riverden".to_owned(),
-                workshop_id: Some(
-                    PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-                ),
+                workshop_id: Some(PublishedFileId::fixture(123)),
                 entry_path: "maps/rp_riverden_v1a.bsp".to_owned(),
             }
         );
@@ -1392,9 +846,7 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::WorkshopItem(
-                    PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero"),
-                ),
+                SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
                 label,
                 Vec::<String>::new(),
                 0,
@@ -1406,9 +858,7 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::MyWorkshop(
-                    PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero"),
-                ),
+                SearchItemSource::MyWorkshop(PublishedFileId::fixture(workshop_id)),
                 label,
                 Vec::<String>::new(),
                 0,

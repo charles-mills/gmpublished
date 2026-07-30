@@ -4,16 +4,17 @@ use iced::widget::text_editor;
 
 use crate::bridge::domain::WorkshopDownloadSuccess;
 use crate::bridge::ui_error::UiError;
-#[cfg(feature = "asset-studio")]
 use crate::features::file_preview;
 
 use super::{
     model::{
         IgnorePatternMutationResult, IgnoredPattern, PublishIconSubmitResult, PublishSubmitContext,
-        PublishSubmitResult, SelectOption, VerifiedContentPath, VerifiedIconPreview,
+        PublishSubmitResult, VerifiedContentPath, VerifiedIconPreview, WorkshopSnapshotInventory,
     },
-    state::OpenTarget,
+    state::{AddonTag, AddonType, OpenTarget},
 };
+use crate::bridge::tasks::WorkshopSnapshotId;
+use crate::generation::Generation;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
@@ -23,10 +24,10 @@ pub enum Message {
         upscale_icon_default: bool,
     },
     CloseRequested,
-    WorkshopContentSubmissionCompleted(u64, Result<(), UiError>),
-    WorkshopContentDownloaded(u64, WorkshopDownloadSuccess),
-    WorkshopSnapshotFailed(u64, UiError),
-    WorkshopSnapshotInspected(u64, Result<Arc<VerifiedContentPath>, UiError>),
+    WorkshopContentSubmissionCompleted(WorkshopSnapshotId, Result<(), UiError>),
+    WorkshopContentDownloaded(WorkshopSnapshotId, WorkshopDownloadSuccess),
+    WorkshopSnapshotFailed(WorkshopSnapshotId, UiError),
+    WorkshopSnapshotInspected(Generation, Result<Arc<WorkshopSnapshotInventory>, UiError>),
     AddonPathEdited(String),
     AddonPathAccepted,
     WorkshopLinkRequested,
@@ -35,36 +36,33 @@ pub enum Message {
     IconBrowseRequested,
     IconBrowseCompleted {
         path: Option<PathBuf>,
-        temp_dir: PathBuf,
         well_rgb: [u8; 3],
     },
-    IconVerificationCompleted(u64, Result<Arc<VerifiedIconPreview>, UiError>),
+    IconVerificationCompleted(Generation, Result<Arc<VerifiedIconPreview>, UiError>),
     IconRemoveRequested,
     IconUpscaleToggled(bool),
     IconAnimationTick(Instant),
-    AddonTypeSelected(SelectOption),
-    TagSelected(usize, SelectOption),
+    AddonTypeSelected(Option<AddonType>),
+    TagSelected(usize, Option<AddonTag>),
     IgnorePatternEdited(String),
     IgnorePatternAccepted,
     IgnorePatternRemoveRequested(String),
     IgnorePatternMutationCompleted(Result<IgnorePatternMutationResult, UiError>),
-    PathVerificationCompleted(u64, Result<Arc<VerifiedContentPath>, UiError>),
+    PathVerificationCompleted(Generation, Result<Arc<VerifiedContentPath>, UiError>),
     BrowserSelectHoverChanged(bool),
     BrowserScrolled {
         offset: f32,
     },
     DirectoryOpened(Arc<String>),
-    #[cfg(feature = "asset-studio")]
     PreviewEntryRequested(Arc<String>),
-    #[cfg(feature = "asset-studio")]
     FilePreview(file_preview::Message),
     UpRequested,
     TitleEdited(String),
     ChangelogActionPerformed(text_editor::Action),
     SubmitRequested,
     PublishIconRequested,
-    PublishIconSubmitCompleted(u64, Result<PublishIconSubmitResult, UiError>),
+    PublishIconSubmitCompleted(Generation, Result<PublishIconSubmitResult, UiError>),
     SubmitSpinnerTick(Instant),
     SubmitContextLoaded(Result<PublishSubmitContext, UiError>),
-    PublishSubmitCompleted(u64, Result<PublishSubmitResult, UiError>),
+    PublishSubmitCompleted(Generation, Result<PublishSubmitResult, UiError>),
 }

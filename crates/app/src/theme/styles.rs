@@ -1,8 +1,7 @@
 use iced::border;
 use iced::widget::{
     button as button_widget, checkbox as checkbox_widget, container,
-    progress_bar as progress_bar_widget, scrollable, svg, text_editor as text_editor_widget,
-    text_input,
+    progress_bar as progress_bar_widget, scrollable, text_editor as text_editor_widget, text_input,
 };
 use iced::{Border, Color, Font, Shadow, Vector, font};
 
@@ -21,14 +20,6 @@ pub fn surface(tokens: &Tokens) -> container::Style {
     container_style(tokens.colors.bg, tokens.colors.text, Border::default())
 }
 
-pub fn card(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.surface,
-        tokens.colors.text,
-        border(tokens, tokens.colors.border, tokens.radii.base),
-    )
-}
-
 pub fn modal(tokens: &Tokens) -> container::Style {
     container::Style {
         shadow: Shadow {
@@ -39,7 +30,7 @@ pub fn modal(tokens: &Tokens) -> container::Style {
         ..container_style(
             tokens.colors.modal_bg,
             tokens.colors.text,
-            border::rounded(tokens.radii.md),
+            border::rounded(tokens.radii.lg),
         )
     }
 }
@@ -56,7 +47,7 @@ pub fn preview_modal(tokens: &Tokens) -> container::Style {
             tokens.colors.preview_modal_bg,
             tokens.colors.text,
             Border {
-                radius: border::radius(tokens.radii.md),
+                radius: border::radius(tokens.radii.lg),
                 ..Border::default()
             },
         )
@@ -94,7 +85,7 @@ pub fn preview_extract_button(
 ) -> button_widget::Style {
     button_widget::Style {
         border: Border {
-            radius: border::radius(0.0).top_left(tokens.radii.md),
+            radius: border::radius(0.0).top_left(tokens.radii.lg),
             ..Border::default()
         },
         ..extract_button(tokens, status)
@@ -113,7 +104,7 @@ pub fn preview_sidebar(tokens: &Tokens) -> container::Style {
             tokens.colors.surface_muted,
             tokens.colors.text,
             Border {
-                radius: border::radius(tokens.radii.md)
+                radius: border::radius(tokens.radii.lg)
                     .top_right(0.0)
                     .bottom_right(0.0),
                 ..Border::default()
@@ -166,20 +157,20 @@ pub fn browser_bar(tokens: &Tokens) -> container::Style {
 }
 
 pub fn preview_browser_top_bar(tokens: &Tokens) -> container::Style {
-    browser_bar_with_radius(tokens, border::radius(0.0).top_right(tokens.radii.md))
+    browser_bar_with_radius(tokens, border::radius(0.0).top_right(tokens.radii.lg))
 }
 
 pub fn preview_browser_bottom_bar(tokens: &Tokens) -> container::Style {
-    browser_bar_with_radius(tokens, border::radius(0.0).bottom_right(tokens.radii.md))
+    browser_bar_with_radius(tokens, border::radius(0.0).bottom_right(tokens.radii.lg))
 }
 
 pub fn file_preview_header_bar(tokens: &Tokens, expanded: bool) -> container::Style {
     let radius = if expanded {
-        border::radius(tokens.radii.md)
+        border::radius(tokens.radii.lg)
             .bottom_left(0.0)
             .bottom_right(0.0)
     } else {
-        border::radius(0.0).top_right(tokens.radii.md)
+        border::radius(0.0).top_right(tokens.radii.lg)
     };
     browser_bar_with_radius(tokens, radius)
 }
@@ -188,7 +179,7 @@ pub fn file_preview_body_well(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.surface_sunken,
         tokens.colors.text,
-        border(tokens, tokens.colors.border, tokens.radii.base),
+        border(tokens, tokens.colors.border, tokens.radii.sm),
     )
 }
 
@@ -204,7 +195,7 @@ pub fn file_preview_speed_readout(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.overlay_panel_bg.with_alpha(220),
         tokens.colors.text,
-        border(tokens, tokens.colors.border_subtle, tokens.radii.base),
+        border(tokens, tokens.colors.border_subtle, tokens.radii.sm),
     )
 }
 
@@ -212,7 +203,7 @@ pub fn sunken_card(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.surface_raised,
         tokens.colors.text,
-        border(tokens, tokens.colors.border, tokens.radii.lg),
+        border(tokens, tokens.colors.border, tokens.radii.md),
     )
 }
 
@@ -245,7 +236,7 @@ pub fn destination_tile(tokens: &Tokens, selected: bool, enabled: bool) -> conta
             offset: Vector::ZERO,
             blur_radius: 6.0,
         },
-        ..container_style(background, text, border(tokens, edge, tokens.radii.lg))
+        ..container_style(background, text, border(tokens, edge, tokens.radii.md))
     }
 }
 
@@ -253,7 +244,7 @@ pub fn icon_preview_well(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.surface_sunken,
         tokens.colors.text,
-        border(tokens, tokens.colors.border, tokens.radii.lg),
+        border(tokens, tokens.colors.border, tokens.radii.md),
     )
 }
 
@@ -284,7 +275,7 @@ pub fn tooltip(tokens: &Tokens) -> container::Style {
     container_style(
         tokens.colors.tooltip_bg,
         tokens.colors.tooltip_text,
-        border(tokens, tokens.colors.tooltip_border, tokens.radii.base),
+        border(tokens, tokens.colors.tooltip_border, tokens.radii.sm),
     )
 }
 
@@ -302,9 +293,9 @@ pub fn select_face(tokens: &Tokens, open: bool) -> container::Style {
                 0.0
             },
             radius: if open {
-                border::top(tokens.radii.base)
+                border::top(tokens.radii.sm)
             } else {
-                tokens.radii.base.into()
+                tokens.radii.sm.into()
             },
         },
     )
@@ -364,14 +355,6 @@ pub fn select_option(
     }
 }
 
-pub fn context_menu(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.menu_bg,
-        tokens.colors.text,
-        border(tokens, tokens.colors.border_subtle, tokens.radii.base),
-    )
-}
-
 /// Flat filled disc: no border, no shadow, radius half the edge.
 pub fn circle(fill: Rgba, radius: f32) -> container::Style {
     container::Style {
@@ -386,18 +369,6 @@ pub fn tag(tokens: &Tokens) -> container::Style {
         tokens.colors.surface_2,
         tokens.colors.text,
         border(tokens, tokens.colors.border_subtle, tokens.radii.xs),
-    )
-}
-
-pub fn avatar(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.surface_2,
-        tokens.colors.text,
-        border(
-            tokens,
-            tokens.colors.border_subtle,
-            tokens.dims.avatar_size / 2.0,
-        ),
     )
 }
 
@@ -440,7 +411,7 @@ pub fn sidebar_item_button(
         border: border(
             tokens,
             tokens.colors.sidebar_panel_bg.with_alpha(0),
-            tokens.radii.base,
+            tokens.radii.sm,
         ),
         shadow: Shadow::default(),
         snap: true,
@@ -455,16 +426,8 @@ pub fn job_badge(tokens: &Tokens, opacity: f32) -> container::Style {
         border(
             tokens,
             tokens.colors.neutral.with_alpha(alpha),
-            tokens.radii.lg,
+            tokens.radii.md,
         ),
-    )
-}
-
-pub fn select(tokens: &Tokens) -> container::Style {
-    container_style(
-        tokens.colors.dropdown_bg,
-        tokens.colors.text,
-        border(tokens, tokens.colors.border, tokens.radii.base),
     )
 }
 
@@ -481,7 +444,7 @@ pub fn button(tokens: &Tokens, status: button_widget::Status) -> button_widget::
     button_widget::Style {
         background: Some(Color::from(background).into()),
         text_color: tokens.colors.text.into(),
-        border: border::rounded(tokens.radii.base),
+        border: border::rounded(tokens.radii.sm),
         shadow: control_shadow(tokens),
         snap: true,
     }
@@ -513,7 +476,7 @@ pub fn action_button(tokens: &Tokens, status: button_widget::Status) -> button_w
     button_widget::Style {
         background: Some(Color::from(background).into()),
         text_color: text.into(),
-        border: border::rounded(tokens.radii.base),
+        border: border::rounded(tokens.radii.sm),
         shadow,
         snap: true,
     }
@@ -533,7 +496,7 @@ pub fn input(tokens: &Tokens, status: text_input::Status) -> text_input::Style {
     let border = match status {
         text_input::Status::Focused { .. } => focus_ring(tokens, tokens.colors.focus_ring),
         text_input::Status::Active | text_input::Status::Hovered | text_input::Status::Disabled => {
-            border::rounded(tokens.radii.base)
+            border::rounded(tokens.radii.sm)
         }
     };
 
@@ -584,7 +547,7 @@ pub fn text_editor(
         text_editor_widget::Status::Focused { .. } => focus_ring(tokens, tokens.colors.focus_ring),
         text_editor_widget::Status::Active
         | text_editor_widget::Status::Hovered
-        | text_editor_widget::Status::Disabled => border::rounded(tokens.radii.base),
+        | text_editor_widget::Status::Disabled => border::rounded(tokens.radii.sm),
     };
 
     text_editor_widget::Style {
@@ -663,7 +626,7 @@ pub fn scrollbar(tokens: &Tokens, status: scrollable::Status) -> scrollable::Sty
         gap: None,
         auto_scroll: scrollable::AutoScroll {
             background: Color::from(tokens.colors.overlay_fill).into(),
-            border: border(tokens, tokens.colors.border_subtle, tokens.radii.base),
+            border: border(tokens, tokens.colors.border_subtle, tokens.radii.sm),
             shadow: shadow(tokens.colors.shadow_soft),
             icon: tokens.colors.text.into(),
         },
@@ -742,17 +705,7 @@ pub fn progress_bar(tokens: &Tokens) -> progress_bar_widget::Style {
     progress_bar_widget::Style {
         background: Color::from(tokens.colors.control_bg_alt).into(),
         bar: Color::from(tokens.colors.neutral).into(),
-        border: border(tokens, tokens.colors.border, tokens.radii.base),
-    }
-}
-
-pub fn svg_icon(tokens: &Tokens, status: svg::Status) -> svg::Style {
-    let color = match status {
-        svg::Status::Idle => tokens.colors.icon_muted,
-        svg::Status::Hovered => tokens.colors.text,
-    };
-    svg::Style {
-        color: Some(color.into()),
+        border: border(tokens, tokens.colors.border, tokens.radii.sm),
     }
 }
 
@@ -789,7 +742,7 @@ fn focus_ring(tokens: &Tokens, color: Rgba) -> Border {
     Border {
         color: color.into(),
         width: tokens.dims.focus_border_width,
-        radius: tokens.radii.base.into(),
+        radius: tokens.radii.sm.into(),
     }
 }
 
@@ -900,7 +853,7 @@ mod tests {
     #[test]
     fn select_menu_rounds_only_the_edge_away_from_its_control() {
         let tokens = Tokens::dark();
-        let style = styles::select_menu(&tokens, tokens.radii.md);
+        let style = styles::select_menu(&tokens, tokens.radii.lg);
 
         assert_eq!(
             style.background,
@@ -908,8 +861,8 @@ mod tests {
         );
         assert_eq!(style.border.radius.top_left, 0.0);
         assert_eq!(style.border.radius.top_right, 0.0);
-        assert_eq!(style.border.radius.bottom_left, tokens.radii.md);
-        assert_eq!(style.border.radius.bottom_right, tokens.radii.md);
+        assert_eq!(style.border.radius.bottom_left, tokens.radii.lg);
+        assert_eq!(style.border.radius.bottom_right, tokens.radii.lg);
     }
 
     #[test]
@@ -920,9 +873,9 @@ mod tests {
 
         assert_eq!(open.border.width, tokens.dims.focus_border_width);
         assert_eq!(open.border.radius.bottom_left, 0.0);
-        assert_eq!(open.border.radius.top_left, tokens.radii.base);
+        assert_eq!(open.border.radius.top_left, tokens.radii.sm);
         assert_eq!(closed.border.width, 0.0);
-        assert_eq!(closed.border.radius.bottom_left, tokens.radii.base);
+        assert_eq!(closed.border.radius.bottom_left, tokens.radii.sm);
     }
 
     #[test]
@@ -966,13 +919,11 @@ mod tests {
         ] {
             let tokens = Tokens::for_variant(variant);
             let selected = styles::select_option(&tokens, true, button::Status::Active);
-            let panel = styles::select_menu(&tokens, tokens.radii.md);
+            let panel = styles::select_menu(&tokens, tokens.radii.lg);
 
             assert_ne!(
-                selected.background,
-                panel.background,
-                "{}: the chosen option is indistinguishable from the panel",
-                variant.name(),
+                selected.background, panel.background,
+                "{variant:?}: the chosen option is indistinguishable from the panel",
             );
         }
     }

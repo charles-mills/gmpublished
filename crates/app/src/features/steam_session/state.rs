@@ -1,6 +1,6 @@
 use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
-use crate::bridge::tasks::BackendServices;
 use crate::bridge::ui_error::UiError;
+use crate::generation::Generation;
 
 /// Startup connection policy retained for the Iced shell.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -80,23 +80,23 @@ pub enum ConnectionChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PendingRetry {
     MyWorkshopPage {
-        generation: u64,
+        generation: Generation,
         page: u32,
     },
     MyWorkshopStats {
-        generation: u64,
+        generation: Generation,
         pages: u32,
     },
     InstalledMetadata {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
     InstalledMetadataRefresh {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
     SearchMetadataRefresh {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
 }
@@ -176,9 +176,9 @@ impl PendingRetry {
 }
 
 fn merge_retry_item_ids(
-    generation: &mut u64,
+    generation: &mut Generation,
     item_ids: &mut Vec<PublishedFileId>,
-    other_generation: u64,
+    other_generation: Generation,
     other_item_ids: Vec<PublishedFileId>,
 ) {
     if *generation > other_generation {
@@ -221,17 +221,16 @@ impl SteamIdentity {
 }
 
 /// State owned by the Steam session feature.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     status: ConnectionStatus,
     startup_policy: StartupConnectPolicy,
     identity: Option<SteamIdentity>,
-    identity_generation: u64,
+    identity_generation: Generation,
     /// Operations deferred until a lazy connection lands, in the order they
-    /// were requested. A single slot used to hold these, which silently
-    /// dropped every deferral but the last: the dropped request's caller
-    /// never saw a completion, so the rows it named stayed marked in-flight
-    /// and were never asked for again.
+    /// were requested. All of them, not the most recent: a dropped deferral's
+    /// caller never sees a completion, so the rows it named stay marked
+    /// in-flight and are never asked for again.
     pending_retries: Vec<PendingRetry>,
     warm_connect_attempted: bool,
 }
@@ -242,7 +241,7 @@ impl Default for State {
             status: ConnectionStatus::Disconnected,
             startup_policy: StartupConnectPolicy::Lazy,
             identity: None,
-            identity_generation: 0,
+            identity_generation: Generation::INITIAL,
             pending_retries: Vec::new(),
             warm_connect_attempted: false,
         }
@@ -255,7 +254,7 @@ impl State {
     }
 
     #[cfg(test)]
-    pub(crate) const fn identity_generation(&self) -> u64 {
+    pub(crate) const fn identity_generation(&self) -> Generation {
         self.identity_generation
     }
 
@@ -337,13 +336,13 @@ impl State {
         std::mem::take(&mut self.pending_retries)
     }
 
-    pub(super) fn start_identity_fetch(&mut self) -> u64 {
+    pub(super) fn start_identity_fetch(&mut self) -> Generation {
         self.next_identity_generation()
     }
 
     pub(super) fn apply_identity_result(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<SteamIdentity, UiError>,
     ) -> bool {
         if generation != self.identity_generation {
@@ -373,8 +372,8 @@ impl State {
         }
     }
 
-    fn next_identity_generation(&mut self) -> u64 {
-        self.identity_generation = self.identity_generation.wrapping_add(1).max(1);
+    fn next_identity_generation(&mut self) -> Generation {
+        self.identity_generation.bump();
         self.identity_generation
     }
 
@@ -416,11 +415,6 @@ impl ConnectionAttempt {
     }
 }
 
-/// Connects the core Steam service for a Steam-backed operation.
-pub fn connect_context_for_operation(ctx: &BackendServices) -> ConnectionAttempt {
-    connect_for_operation_with(|| ctx.steam_connected(), || ctx.connect_steam())
-}
-
 /// Runs the connection check/connect seam without binding it to a concrete UI runtime.
 pub fn connect_for_operation_with<E>(
     connected: impl FnOnce() -> bool,
@@ -457,7 +451,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use gmpublished_backend::error_key::keys;
+    use crate::bridge::domain::SteamId;
+    use crate::generation::Generation;
+    use gmpublished_backend::error_keys as keys;
     use std::{cell::Cell, sync::Arc};
 
     use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
@@ -618,19 +614,19 @@ mod tests {
     fn pending_retries_queue_in_order_and_take_clears_them() {
         let mut state = State::default();
         let page = PendingRetry::MyWorkshopPage {
-            generation: 7,
+            generation: Generation::from_raw(7),
             page: 2,
         };
         let metadata = PendingRetry::InstalledMetadata {
-            generation: 7,
-            item_ids: vec![PublishedFileId::new(1).expect("test fixture ids are always nonzero")],
+            generation: Generation::from_raw(7),
+            item_ids: vec![PublishedFileId::fixture(1)],
         };
 
         state.push_pending_retry(page.clone());
         state.push_pending_retry(metadata.clone());
 
-        // A single slot used to drop the page load here, leaving My Workshop
-        // waiting on a request that would never be resumed or failed.
+        // Both survive: dropping the page load here leaves My Workshop waiting
+        // on a request that is never resumed and never failed.
         assert_eq!(state.pending_retries(), [page.clone(), metadata.clone()]);
         assert_eq!(state.take_pending_retries(), vec![page, metadata]);
         assert!(state.pending_retries().is_empty());
@@ -639,22 +635,22 @@ mod tests {
     #[test]
     fn same_kind_pending_retries_coalesce_instead_of_queueing() {
         let mut state = State::default();
-        let id = |value| PublishedFileId::new(value).expect("test fixture ids are always nonzero");
+        let id = |value| PublishedFileId::fixture(value);
 
         state.push_pending_retry(PendingRetry::InstalledMetadata {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![id(1), id(2)],
         });
         // A scrolling grid defers one of these per visible-range change.
         state.push_pending_retry(PendingRetry::InstalledMetadata {
-            generation: 7,
+            generation: Generation::from_raw(7),
             item_ids: vec![id(2), id(3)],
         });
 
         assert_eq!(
             state.pending_retries(),
             [PendingRetry::InstalledMetadata {
-                generation: 7,
+                generation: Generation::from_raw(7),
                 item_ids: vec![id(1), id(2), id(3)],
             }]
         );
@@ -662,14 +658,14 @@ mod tests {
         // A newer generation renames the rows outright, so it replaces rather
         // than merges — the old ids no longer identify anything on screen.
         state.push_pending_retry(PendingRetry::InstalledMetadata {
-            generation: 8,
+            generation: Generation::from_raw(8),
             item_ids: vec![id(9)],
         });
 
         assert_eq!(
             state.pending_retries(),
             [PendingRetry::InstalledMetadata {
-                generation: 8,
+                generation: Generation::from_raw(8),
                 item_ids: vec![id(9)],
             }]
         );
@@ -734,7 +730,7 @@ mod tests {
 
     fn identity(name: &str, avatar: Option<AvatarRgba>) -> SteamIdentity {
         SteamIdentity::from_user(SteamUser {
-            steamid: 76561198000000001,
+            steamid: SteamId::new(76561198000000001),
             name: name.to_owned(),
             avatar,
             dead: false,

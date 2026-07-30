@@ -39,19 +39,19 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             mutation_effect(mutation, state)
         }
         Message::LanguageSelected(option) => {
-            let mutation = state.language_mutation(&option.value);
+            let mutation = state.language_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::DownloadCountFormatSelected(option) => {
-            let mutation = state.download_count_format_mutation(&option.value);
+            let mutation = state.download_count_format_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::ThemeSelected(option) => {
-            let mutation = state.theme_mutation(&option.value);
+            let mutation = state.theme_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::OverwriteModeSelected(option) => {
-            let mutation = state.overwrite_mode_mutation(&option.value);
+            let mutation = state.overwrite_mode_mutation(option);
             mutation_effect(mutation, state)
         }
         Message::PathEdited(kind, value) => {
@@ -106,8 +106,8 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             .map(Effect::ResetRunRequested)
             .into_iter()
             .collect(),
-        Message::SaveCompleted(result) => {
-            let snapshot = state.apply_save_completed(result.map(|snapshot| *snapshot));
+        Message::SaveCompleted(generation, result) => {
+            let snapshot = state.apply_save_completed(generation, result.map(|snapshot| *snapshot));
             snapshot
                 .map(|snapshot| Effect::SnapshotApplied(Box::new(snapshot)))
                 .into_iter()
@@ -135,10 +135,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
 
 fn mutation_effect(mutation: Option<super::SettingsMutation>, state: &mut State) -> Vec<Effect> {
     mutation
-        .map(|mutation| {
-            state.apply_save_started();
-            Effect::MutationApplied(mutation)
-        })
+        .map(|mutation| Effect::MutationApplied(state.apply_save_started(), mutation))
         .into_iter()
         .collect()
 }
@@ -200,6 +197,53 @@ mod tests {
         ));
     }
 
+    fn test_snapshot() -> SettingsSnapshot {
+        SettingsSnapshot::new(
+            Settings::default(),
+            AppPaths::resolve_with_defaults(
+                &Settings::default(),
+                AppPaths {
+                    settings_file: std::env::temp_dir().join("gmpublished-settings.json"),
+                    default_user_data_dir: std::env::temp_dir(),
+                    default_temp_dir: std::env::temp_dir(),
+                    default_downloads_dir: None,
+                    temp_dir: std::env::temp_dir(),
+                    user_data_dir: std::env::temp_dir(),
+                    downloads_dir: None,
+                    gmod_dir: None,
+                },
+            ),
+            SystemColorScheme::Dark,
+        )
+    }
+
+    /// Saves run on the multi-worker runtime, so a slow earlier save can
+    /// complete after a later one. Adopting its snapshot would silently revert
+    /// the newer edit in the UI while the newer value is what is on disk.
+    #[test]
+    fn a_save_completing_after_a_later_edit_is_discarded() {
+        let mut state = State::default();
+        let stale = state.apply_save_started();
+        let current = state.apply_save_started();
+        assert_ne!(stale, current);
+
+        let snapshot = test_snapshot();
+        let effects = update(
+            &mut state,
+            Message::SaveCompleted(stale, Ok(Box::new(snapshot.clone()))),
+        );
+        assert!(
+            effects.is_empty(),
+            "a superseded save must not re-publish its snapshot"
+        );
+
+        let effects = update(
+            &mut state,
+            Message::SaveCompleted(current, Ok(Box::new(snapshot))),
+        );
+        assert_eq!(effects.len(), 1, "the current save still applies");
+    }
+
     #[test]
     fn tab_selection_updates_active_tab() {
         let mut state = State::default();
@@ -253,7 +297,7 @@ mod tests {
     fn unchanged_scalar_setting_emits_no_persistence_effect() {
         let mut state = State::default();
         open_settings(&mut state);
-        let enabled = state.settings().sounds;
+        let enabled = state.settings().backend.sounds;
 
         let effects = update(&mut state, Message::SoundsToggled(enabled));
 
@@ -264,13 +308,16 @@ mod tests {
     fn changed_scalar_setting_emits_mutation_effect_and_marks_saving() {
         let mut state = State::default();
         open_settings(&mut state);
-        let enabled = !state.settings().sounds;
+        let enabled = !state.settings().backend.sounds;
 
         let effects = update(&mut state, Message::SoundsToggled(enabled));
 
         assert_eq!(
             effects,
-            vec![Effect::MutationApplied(SettingsMutation::Sounds(enabled))]
+            vec![Effect::MutationApplied(
+                state.save_generation_for_test(),
+                SettingsMutation::Sounds(enabled)
+            )]
         );
         assert_eq!(state.status_key(), Some("settings-saving"));
     }
@@ -298,37 +345,25 @@ mod tests {
     #[test]
     fn save_success_emits_snapshot_effect_but_failure_does_not() {
         let mut state = State::default();
-        let snapshot = SettingsSnapshot::new(
-            Settings::default(),
-            AppPaths::resolve_with_defaults(
-                &Settings::default(),
-                AppPaths {
-                    settings_file: std::env::temp_dir().join("gmpublished-settings.json"),
-                    default_user_data_dir: std::env::temp_dir(),
-                    default_temp_dir: std::env::temp_dir(),
-                    default_downloads_dir: None,
-                    temp_dir: std::env::temp_dir(),
-                    user_data_dir: std::env::temp_dir(),
-                    downloads_dir: None,
-                    gmod_dir: None,
-                },
-            ),
-            SystemColorScheme::Dark,
-        );
+        let snapshot = test_snapshot();
 
+        let generation = state.save_generation_for_test();
         let effects = update(
             &mut state,
-            Message::SaveCompleted(Ok(Box::new(snapshot.clone()))),
+            Message::SaveCompleted(generation, Ok(Box::new(snapshot.clone()))),
         );
 
         assert_eq!(effects, vec![Effect::SnapshotApplied(Box::new(snapshot))]);
 
         let effects = update(
             &mut state,
-            Message::SaveCompleted(Err(crate::bridge::ui_error::UiError::detailed(
-                gmpublished_backend::error_key::keys::IO_ERROR,
-                Some("failed".to_owned()),
-            ))),
+            Message::SaveCompleted(
+                generation,
+                Err(crate::bridge::ui_error::UiError::detailed(
+                    gmpublished_backend::error_keys::IO_ERROR,
+                    Some("failed".to_owned()),
+                )),
+            ),
         );
 
         assert!(effects.is_empty());

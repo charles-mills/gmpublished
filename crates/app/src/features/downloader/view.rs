@@ -1,3 +1,5 @@
+use crate::bridge::tasks::TransactionStatus;
+use crate::i18n::Arg;
 use std::time::Instant;
 
 use iced::widget::{
@@ -12,10 +14,11 @@ use crate::{
     format::format_bytes,
     i18n::I18n,
     theme::{self, Tokens, ViewCtx},
+    widgets::icon::{svg_icon as icon, svg_icon_with_opacity as icon_with_opacity},
     widgets::tooltip as tooltip_widget,
 };
 
-use super::model::{DownloaderJob, EXTRACT_STATUS, JobProgress, Section};
+use super::jobs::{DownloaderJob, JobProgress, Section};
 use super::{Message, State};
 
 const JOB_ROW_HEIGHT: f32 = 44.0;
@@ -253,7 +256,7 @@ fn section_view<'a>(
     let panel_content = if jobs.is_empty() {
         column![body].height(Length::Fill)
     } else {
-        column![table_header(&tokens), body].height(Length::Fill)
+        column![table_header(ctx.i18n, &tokens), body].height(Length::Fill)
     };
 
     let panel = container(panel_content)
@@ -275,15 +278,35 @@ fn section_view<'a>(
     container(content).width(Length::Fill).height(Length::Fill)
 }
 
-fn table_header<'a>(tokens: &Tokens) -> Element<'a, Message> {
+fn table_header<'a>(i18n: &I18n, tokens: &Tokens) -> Element<'a, Message> {
     let tokens = *tokens;
     container(
         row![
             text("").width(48.0),
-            header_text("Addon", &tokens, alignment::Horizontal::Left).width(Length::Fill),
-            header_text("Speed", &tokens, alignment::Horizontal::Right).width(84.0),
-            header_text("Total", &tokens, alignment::Horizontal::Right).width(84.0),
-            header_text("Progress", &tokens, alignment::Horizontal::Center).width(180.0),
+            header_text(
+                i18n.tr("downloader-column-addon"),
+                &tokens,
+                alignment::Horizontal::Left
+            )
+            .width(Length::Fill),
+            header_text(
+                i18n.tr("downloader-column-speed"),
+                &tokens,
+                alignment::Horizontal::Right
+            )
+            .width(84.0),
+            header_text(
+                i18n.tr("downloader-column-total"),
+                &tokens,
+                alignment::Horizontal::Right
+            )
+            .width(84.0),
+            header_text(
+                i18n.tr("downloader-column-progress"),
+                &tokens,
+                alignment::Horizontal::Center,
+            )
+            .width(180.0),
         ]
         .align_y(Center)
         .spacing(tokens.spacing.gap_sm)
@@ -299,7 +322,7 @@ fn table_header<'a>(tokens: &Tokens) -> Element<'a, Message> {
 }
 
 fn header_text(
-    label: &'static str,
+    label: String,
     tokens: &Tokens,
     align_x: alignment::Horizontal,
 ) -> iced::widget::Text<'static> {
@@ -428,7 +451,7 @@ fn progress_cell<'a>(
         JobProgress::Error(error) => container(
             text(i18n.trn(
                 "downloader-status-error",
-                &[("arg0", error.to_string().as_str())],
+                &[("error", Arg::Text(error.to_string().as_str()))],
             ))
             .size(tokens.typography.body_sm)
             .color(Color::from(tokens.colors.error)),
@@ -551,27 +574,7 @@ fn section_icon<'a>(section: Section, tokens: &Tokens) -> Element<'a, Message> {
         Section::Downloading => assets::icons::cloud_download(),
         Section::Extracting => assets::icons::folder_add(),
     };
-    icon(handle, tokens.colors.text.into(), 32.0)
-}
-
-fn icon<'a>(handle: svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    icon_with_opacity(handle, color, size, 1.0)
-}
-
-fn icon_with_opacity<'a>(
-    handle: svg::Handle,
-    color: Color,
-    size: f32,
-    opacity: f32,
-) -> Element<'a, Message> {
-    container(
-        svg(handle)
-            .width(size)
-            .height(size)
-            .style(move |_, _| svg::Style { color: Some(color) })
-            .opacity(opacity),
-    )
-    .into()
+    icon(handle, tokens.colors.text.into(), 32.0).into()
 }
 
 fn centered_text<'a>(
@@ -650,15 +653,17 @@ fn job_title_color(job: &DownloaderJob, tokens: &Tokens) -> Color {
 
 fn progress_label(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
     match job.progress() {
-        JobProgress::Running { ratio, status_key } if status_key == EXTRACT_STATUS => {
+        JobProgress::Running { ratio, status_key }
+            if *status_key == TransactionStatus::Extracting =>
+        {
             let total = format_bytes(job.total_bytes(), i18n);
             let done = format_bytes((job.total_bytes() as f64 * ratio) as u64, i18n);
             i18n.trn(
-                status_key,
+                status_key.translation_key(),
                 &[
-                    ("arg0", &format!("{:.0}", ratio * 100.0)),
-                    ("arg1", done.as_str()),
-                    ("arg2", total.as_str()),
+                    ("percent", Arg::Number(&format!("{:.0}", ratio * 100.0))),
+                    ("done", Arg::Text(done.as_str())),
+                    ("total", Arg::Text(total.as_str())),
                 ],
             )
         }
@@ -667,15 +672,15 @@ fn progress_label(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
             i18n.trn(
                 "downloader-progress-percent",
                 &[
-                    ("arg0", &format!("{:.0}", ratio * 100.0)),
-                    ("arg1", speed.as_str()),
+                    ("percent", Arg::Number(&format!("{:.0}", ratio * 100.0))),
+                    ("speed", Arg::Text(speed.as_str())),
                 ],
             )
         }
         JobProgress::Finished => i18n.tr("downloader-status-finished"),
         JobProgress::Error(error) => i18n.trn(
             "downloader-status-error",
-            &[("arg0", error.to_string().as_str())],
+            &[("error", Arg::Text(error.to_string().as_str()))],
         ),
     }
 }
@@ -684,7 +689,7 @@ fn speed_text(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
     let JobProgress::Running { ratio, status_key } = job.progress() else {
         return String::new();
     };
-    if status_key == EXTRACT_STATUS {
+    if *status_key == TransactionStatus::Extracting {
         return String::new();
     }
 
@@ -695,7 +700,10 @@ fn speed_text(job: &DownloaderJob, i18n: &I18n, now: Instant) -> String {
         })
         .map(|bytes_per_second| {
             let formatted = format_bytes(bytes_per_second as u64, i18n);
-            i18n.trn("byte-rate-per-second", &[("arg0", formatted.as_str())])
+            i18n.trn(
+                "byte-rate-per-second",
+                &[("rate", Arg::Text(formatted.as_str()))],
+            )
         })
         .unwrap_or_default()
 }
@@ -715,7 +723,7 @@ fn panel_style(tokens: &Tokens) -> container::Style {
         Border {
             color: tokens.colors.border.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.lg.into(),
+            radius: tokens.radii.md.into(),
         },
     )
 }
@@ -727,7 +735,7 @@ fn compact_tab_bar_style(tokens: &Tokens) -> container::Style {
         Border {
             color: tokens.colors.border.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.lg.into(),
+            radius: tokens.radii.md.into(),
         },
     )
 }
@@ -745,7 +753,7 @@ fn compact_tab_style(tokens: &Tokens, active: bool, status: button::Status) -> b
         background: Some(Color::from(background).into()),
         text_color: tokens.colors.text.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -814,7 +822,7 @@ fn top_input_style(
         border: Border {
             color: border_color.into(),
             width: border_width,
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         icon: if error {
             tokens.colors.error.into()
@@ -843,7 +851,7 @@ fn top_icon_button_style(tokens: &Tokens, status: button::Status) -> button::Sty
         border: Border {
             color: tokens.colors.bg.with_alpha(0).into(),
             width: 0.0,
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         shadow: Shadow::default(),
         snap: true,
@@ -866,7 +874,7 @@ fn downloader_button_style(tokens: &Tokens, status: button::Status) -> button::S
         border: Border {
             color: tokens.colors.bg.with_alpha(0).into(),
             width: 0.0,
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         shadow: Shadow::default(),
         snap: true,
@@ -889,7 +897,7 @@ fn idle_button_style(tokens: &Tokens, status: button::Status) -> button::Style {
         border: Border {
             color: tokens.colors.bg.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
         },
         shadow: Shadow::default(),
         snap: true,
@@ -932,7 +940,7 @@ mod tests {
     use crate::i18n::I18n;
     use crate::theme::{Tokens, ViewCtx};
 
-    use super::super::model::{DownloaderEvent, workshop_result_success_with_gma};
+    use super::super::jobs::{DownloaderEvent, workshop_result_success_with_gma};
     use super::super::update;
     use super::{LayoutMode, Message, State, layout_mode, view};
 

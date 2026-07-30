@@ -14,17 +14,19 @@ name = "gmpublished_backend"
 path = "src/lib.rs"
 
 [features]
-# Gates `scene` (BSP map preview decoding) and its tests. No
-# longer needs an optional dependency: the BSP path runs on `vformats`,
-# which is always available.
-scene = []
+# Surface that exists only for tests to reach: probes that observe state no
+# real operation needs (the `GmaView` spill-file pair), constructors for
+# states production never builds (`SteamRuntime::unavailable_for_tests`,
+# `TransactionId::from_raw`, the `MapWalkCollision` box builders), and
+# `events::BackendEventCollector`. Off by default so a reader of the public
+# API cannot mistake them for real operations; the self dev-dependency below
+# turns it on for this crate's own integration tests, and the app crate's
+# dev-dependencies turn it on for theirs.
+test-support = []
 
 [dependencies]
 vformats.workspace = true
-# Read-only maps of GMA archives (never fully loaded; addons reach GBs).
-memmap2 = "0.9"
 arc-swap.workspace = true
-clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 crc32fast.workspace = true
 dirs.workspace = true
 dunce = "1.0.5"
@@ -46,6 +48,7 @@ ureq.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+gmpublished-backend = { path = ".", features = ["test-support"] }
 # The encoder feature is only needed to build LZMA-alone test fixtures.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 steamworks-sys = "0.13.0"

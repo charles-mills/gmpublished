@@ -1,31 +1,21 @@
-#[cfg(target_os = "macos")]
 use super::window;
 use super::{
-    App, LibraryRefreshReason, RootMessage, Task, UiError, destination_select,
-    flatten_blocking_ui_result, resolve_tokens, settings, shell, theme,
+    App, LibraryRefreshReason, RootMessage, Task, flatten_blocking_ui_result, resolve_tokens,
+    settings, shell, theme,
 };
+#[cfg(target_os = "macos")]
+use crate::bridge::ui_error::ResultExt as _;
 
 impl App {
     pub(super) fn apply_settings_snapshot_runtime(
         &mut self,
         snapshot: &settings::SettingsSnapshot,
     ) -> Task<RootMessage> {
-        let previous = self.state.chrome_strategy;
-        let previous_gmod_dir = self.state.installed_addons.watch_gmod_dir().cloned();
-        self.state.apply_runtime_settings(&snapshot.settings);
-        self.state
-            .installed_addons
-            .set_watch_gmod_dir(snapshot.paths.gmod_dir.clone());
-        self.state.destination_select.reset_from_snapshot(
-            destination_select::SettingsSnapshot::new(
-                snapshot.settings.clone(),
-                snapshot.paths.clone(),
-            ),
-        );
-        let label = destination_select::destination_label(&snapshot.settings, &snapshot.paths);
-        self.state.downloader.set_destination_label(label);
+        let result = self
+            .state
+            .apply_settings_snapshot(snapshot.settings.clone(), snapshot.paths.clone());
         self.sync_game_prerequisite();
-        let library_refresh = if previous_gmod_dir != snapshot.paths.gmod_dir {
+        let library_refresh = if result.gmod_dir_changed {
             Task::done(RootMessage::LibraryRefreshRequested(
                 LibraryRefreshReason::SettingsChanged,
             ))
@@ -34,7 +24,10 @@ impl App {
         };
         #[cfg(target_os = "macos")]
         self.install_macos_menu();
-        Task::batch([self.chrome_strategy_apply_task(previous), library_refresh])
+        Task::batch([
+            self.chrome_strategy_apply_task(result.previous_chrome),
+            library_refresh,
+        ])
     }
 
     pub(super) fn apply_settings_mutation_runtime(
@@ -95,32 +88,30 @@ impl App {
         self.chrome_strategy_apply_task(previous)
     }
 
+    #[cfg(target_os = "macos")]
     fn chrome_strategy_apply_task(&self, previous: shell::ChromeStrategy) -> Task<RootMessage> {
         if self.state.chrome_strategy == previous {
             return Task::none();
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let Some(window_id) = self.window_id else {
-                return Task::none();
-            };
-            let apply_task = window::run(
-                window_id,
-                crate::platform_chrome::apply(self.state.chrome_strategy.mac_native_inset()),
-            )
-            .discard();
-            apply_task.chain(self.traffic_light_position_task(window_id))
-        }
+        let Some(window_id) = self.window_id else {
+            return Task::none();
+        };
+        let apply_task = window::run(
+            window_id,
+            crate::platform_chrome::apply(self.state.chrome_strategy.mac_native_inset()),
+        )
+        .discard();
+        apply_task.chain(self.traffic_light_position_task(window_id))
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            Task::none()
-        }
+    #[cfg(not(target_os = "macos"))]
+    fn chrome_strategy_apply_task(&self, _previous: shell::ChromeStrategy) -> Task<RootMessage> {
+        Task::none()
     }
 
     pub(super) fn settings_snapshot(&self) -> Box<settings::SettingsSnapshot> {
-        let (settings, paths) = self.ctx.settings_and_paths_snapshot();
+        let (settings, paths) = self.environment.ctx.settings_and_paths_snapshot();
         Box::new(settings::SettingsSnapshot::new(
             settings,
             paths,
@@ -138,7 +129,7 @@ impl App {
         &self,
         kind: settings::PathSetting,
     ) -> Task<RootMessage> {
-        let directory = self.state.settings.initial_browse_directory(kind);
+        let directory = self.state.features.settings.initial_browse_directory(kind);
         let title = self.state.i18n.tr("native-dialog-select-settings-folder");
         Task::future(async move {
             let selected = rfd::AsyncFileDialog::new()
@@ -156,7 +147,8 @@ impl App {
         &self,
         request: settings::PathValidationRequest,
     ) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("settings-validate-path", move |_app| {
                 Ok(settings::validate_path_request(request))
             })
@@ -164,31 +156,38 @@ impl App {
                 Ok(result) => {
                     RootMessage::Settings(settings::Message::PathValidationCompleted(result))
                 }
-                Err(error) => RootMessage::Settings(settings::Message::SaveCompleted(Err(error))),
+                Err(error) => RootMessage::Settings(settings::Message::SaveCompleted(
+                    crate::generation::Generation::INITIAL,
+                    Err(error),
+                )),
             })
     }
 
     pub(super) fn settings_save_task(
         &self,
+        generation: crate::generation::Generation,
         mutation: settings::SettingsMutation,
     ) -> Task<RootMessage> {
         let system_scheme = self.state.system_scheme;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("settings-save", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    settings::apply_settings_mutation(settings, mutation);
-                })
-                .map(|()| {
-                    Box::new(settings::SettingsSnapshot::new(
-                        app.settings_snapshot(),
-                        app.paths(),
-                        system_scheme,
-                    ))
-                })
-                .map_err(|error| UiError::from(&error))
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        settings::apply_settings_mutation(settings, mutation);
+                    })
+                    .map(|()| {
+                        Box::new(settings::SettingsSnapshot::new(
+                            app.config().settings_snapshot(),
+                            app.config().paths(),
+                            system_scheme,
+                        ))
+                    })
+                    .ui_err()
             })
-            .map(|result| {
+            .map(move |result| {
                 RootMessage::Settings(settings::Message::SaveCompleted(
+                    generation,
                     flatten_blocking_ui_result(result),
                 ))
             })
@@ -196,20 +195,24 @@ impl App {
 
     pub(super) fn settings_reset_task(&self, action: settings::ResetAction) -> Task<RootMessage> {
         let system_scheme = self.state.system_scheme;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("settings-reset", move |app| {
                 let settings = match action {
-                    settings::ResetAction::Settings => app
-                        .reset_settings()
-                        .map(Some)
-                        .map_err(|error| UiError::from(&error))?,
-                    settings::ResetAction::TempFiles => app.clear_temp_files().map(|()| None)?,
-                    settings::ResetAction::UserData => app.clear_user_data().map(|()| None)?,
+                    settings::ResetAction::Settings => {
+                        app.config().reset_settings().map(Some).ui_err()?
+                    }
+                    settings::ResetAction::TempFiles => {
+                        app.config().clear_temp_files().map(|()| None)?
+                    }
+                    settings::ResetAction::UserData => {
+                        app.config().clear_user_data().map(|()| None)?
+                    }
                 };
                 Ok(settings.map(|settings| {
                     Box::new(settings::SettingsSnapshot::new(
                         settings,
-                        app.paths(),
+                        app.config().paths(),
                         system_scheme,
                     ))
                 }))

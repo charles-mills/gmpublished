@@ -1,3 +1,11 @@
+//! The on-disk half of the thumbnail cache: decoded thumbnails keyed by source
+//! URL and size, so a restart does not re-download and re-decode the library.
+//!
+//! Bounded by total bytes and evicted least-recently-used. The index is
+//! rewritten atomically and tolerates entries whose file has vanished, because
+//! the cache directory is in user-writable space and may be cleared behind the
+//! app at any point.
+
 use image::{
     ColorType, ImageEncoder, ImageFormat, ImageReader,
     codecs::png::{CompressionType as PngCompressionType, FilterType as PngFilterType, PngEncoder},
@@ -27,6 +35,12 @@ const CACHE_FORMAT_PNG_RGBA: u8 = 1;
 // Animated GIF: the payload is the raw encoded GIF stream, replayed on read.
 const CACHE_FORMAT_GIF: u8 = 2;
 
+/// The on-disk thumbnail cache, with an in-memory index of what it holds.
+///
+/// Single-writer: clones share one index, but a second process sharing the
+/// directory keeps its own. `max_bytes` is therefore a soft target, not a
+/// ceiling, and [`Self::contains_source`] answers from this process's index
+/// rather than the filesystem.
 #[derive(Clone, Debug)]
 pub struct WorkerDiskCache {
     dir: PathBuf,
@@ -39,7 +53,7 @@ impl WorkerDiskCache {
             dir,
             state: Arc::new(DiskCacheState {
                 max_bytes: AtomicU64::new(max_bytes),
-                index: Mutex::new(DiskCacheIndex::default()),
+                index: Mutex::new(None),
             }),
         }
     }
@@ -67,8 +81,8 @@ impl WorkerDiskCache {
     /// Idempotent and racy-safe: a worker that got there first leaves this a
     /// mutex acquire.
     pub(crate) fn prime_index(&self) {
-        let mut index = self.state.index.lock();
-        if let Err(error) = ensure_disk_cache_index(self, &mut index) {
+        let mut slot = self.state.index.lock();
+        if let Err(error) = ensure_disk_cache_index(self, &mut slot) {
             log::debug!(
                 "failed to pre-build thumbnail disk index {}: {error}",
                 self.dir.display()
@@ -86,10 +100,10 @@ impl WorkerDiskCache {
     /// the source is what it produces.
     pub(crate) fn contains_source(&self, url: &str) -> bool {
         let path = source_cache_path(&self.dir, url);
-        let mut index = self.state.index.lock();
-        if ensure_disk_cache_index(self, &mut index).is_err() {
+        let mut slot = self.state.index.lock();
+        let Ok(index) = ensure_disk_cache_index(self, &mut slot) else {
             return false;
-        }
+        };
         index.by_path.contains_key(path.as_path())
     }
 }
@@ -98,12 +112,12 @@ impl WorkerDiskCache {
 struct DiskCacheState {
     /// Shared across clones so a capacity change reaches the workers.
     max_bytes: AtomicU64,
-    index: Mutex<DiskCacheIndex>,
+    /// `None` until the first operation that needs it builds it from disk.
+    index: Mutex<Option<DiskCacheIndex>>,
 }
 
 #[derive(Debug, Default)]
 struct DiskCacheIndex {
-    initialized: bool,
     total_bytes: u64,
     by_path: HashMap<CachePath, CacheFileMetadata>,
     by_age: BTreeMap<(SystemTime, CachePath), u64>,
@@ -132,11 +146,37 @@ impl Borrow<Path> for CachePath {
 struct CacheFileMetadata {
     len: u64,
     modified: SystemTime,
+    tier: CacheTier,
+}
+
+/// Which of the two caches a file belongs to. Both live in one directory and
+/// share one budget, so eviction has to tell them apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheTier {
+    /// Fetched bytes keyed by URL — what warming produces, and what makes a
+    /// later interactive request local. Evicted last.
+    Source,
+    /// One decoded thumbnail at one size, re-derivable from a source.
+    Derived,
+}
+
+impl CacheTier {
+    /// `None` for a file that belongs to neither cache.
+    fn from_path(path: &Path) -> Option<Self> {
+        match path.extension().and_then(|value| value.to_str()) {
+            Some(crate::media::thumbnail_worker::THUMBNAIL_SOURCE_FILE_EXTENSION) => {
+                Some(Self::Source)
+            }
+            Some(CACHE_FILE_EXTENSION) => Some(Self::Derived),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct CacheFile {
     path: PathBuf,
+    tier: CacheTier,
     len: u64,
     modified: SystemTime,
 }
@@ -179,7 +219,6 @@ pub fn read_disk_cache(
                     path.display()
                 );
             }
-            remove_indexed_cache_file(cache, &path);
             None
         }
     }
@@ -200,8 +239,19 @@ pub fn read_source_bytes(cache: &WorkerDiskCache, url: &str) -> Option<Vec<u8>> 
             let _ = refresh_source_age(cache, &path);
             Some(bytes)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // The read path is the only place that learns the index is wrong.
+            // A second instance sharing this directory evicts against its own
+            // private index and unlinks files this one still has recorded;
+            // without this, `contains_source` reports the URL as banked
+            // forever and the warm filter never re-fetches it.
+            remove_indexed_cache_file(cache, &path);
+            None
+        }
         Err(error) => {
+            // Deliberately not a repair: an unreadable file is still a file,
+            // and dropping its index entry would leak its bytes from the
+            // budget while eviction still has to unlink it.
             log::debug!(
                 "failed to read thumbnail source {}: {error}",
                 path.display()
@@ -236,11 +286,11 @@ fn refresh_source_age(cache: &WorkerDiskCache, path: &Path) -> Option<()> {
     // Read out and drop the guard before the `set_times` syscall: holding the
     // index lock across I/O would stall every other worker's cache write.
     let existing = {
-        let index = cache.state.index.lock();
+        let slot = cache.state.index.lock();
         // Before the first build there is nothing to reorder, and the build
         // itself will read this file's real mtime anyway.
-        let existing = *index.by_path.get(path)?;
-        drop(index);
+        let existing = *slot.as_ref()?.by_path.get(path)?;
+        drop(slot);
         existing
     };
     if now
@@ -265,24 +315,26 @@ fn refresh_source_age(cache: &WorkerDiskCache, path: &Path) -> Option<()> {
         return None;
     }
 
-    let mut index = cache.state.index.lock();
+    let mut slot = cache.state.index.lock();
     // The lock was dropped across the syscall, so another worker's write may
     // have run eviction and unlinked this very path in the meantime. Inserting
     // blindly would resurrect an index entry for a file that no longer exists —
     // `contains_source` would then report it as banked and the warm filter
     // would never re-fetch it.
+    let index = slot.as_mut()?;
     if !index.by_path.contains_key(path) {
         return None;
     }
     insert_indexed_cache_file(
-        &mut index,
+        index,
         CacheFile {
+            tier: CacheTier::Source,
             path: path.to_owned(),
             len,
             modified: now,
         },
     );
-    drop(index);
+    drop(slot);
     Some(())
 }
 
@@ -310,17 +362,15 @@ pub fn remove_source_bytes(cache: &WorkerDiskCache, url: &str) {
 /// Shares the derived tier's directory, index, and budget, so the two compete
 /// under one ceiling rather than needing a second one to tune.
 ///
-/// Note that they compete by **write age, not use**: `by_age` is keyed on
-/// mtime and no read path touches it. For the derived tier that is close
-/// enough, since entries are rewritten as they are re-derived. Sources are
-/// write-once and read-forever, so a hot source banked during the first warm
-/// ages toward the front of the eviction queue and can be dropped in favour of
-/// a newer source nothing has ever looked at. Correct but not ideal; see the
-/// plan's note on refreshing source age on read.
+/// They compete by **use**, not write age: sources are write-once and
+/// read-forever, so ranking them by mtime alone would let a hot source banked
+/// during the first warm age toward the front of the eviction queue.
+/// [`read_source_bytes`] calls [`refresh_source_age`] on every hit, which
+/// rewrites the mtime and re-inserts into `by_age`.
 pub fn write_source_bytes(cache: &WorkerDiskCache, url: &str, bytes: &[u8]) {
     let path = source_cache_path(&cache.dir, url);
     match crate::util::fs::atomic_write(&path, bytes) {
-        Ok(()) => maybe_evict_disk_cache(cache, path, bytes.len() as u64),
+        Ok(()) => maybe_evict_disk_cache(cache, path, CacheTier::Source, bytes.len() as u64),
         Err(error) => {
             log::debug!(
                 "failed to write thumbnail source {}: {error}",
@@ -335,31 +385,33 @@ pub fn write_source_bytes(cache: &WorkerDiskCache, url: &str, bytes: &[u8]) {
 ///
 /// An animated entry's payload is `LazyGifPreview::encoded_bytes`, which is the
 /// `Arc<[u8]>` the preview was decoded from: byte-for-byte the stream already
-/// sitting in the source tier. Writing it again stored the same GIF twice under
-/// one disk budget, so an animated addon cost double and evicted twice as much
-/// of everything else.
+/// sitting in the source tier. Writing it here would store the same GIF twice
+/// under one disk budget, so an animated addon would cost double and evict
+/// twice as much of everything else.
 ///
 /// Almost nothing is lost by skipping it. A derived GIF entry is not a
 /// *derivation* — unlike a resized still it is size-independent, so its read
-/// path did exactly the work the source path does: `decode_lazy_gif_preview`
-/// over the same bytes.
+/// path would do exactly the work the source path already does:
+/// `decode_lazy_gif_preview` over the same bytes.
 ///
-/// The one real cost is the ThumbHash, which the derived entry persisted and
-/// which `finish_fresh_decode` now recomputes per cold load. Measured at
+/// The one real cost is the ThumbHash, which a derived entry would persist and
+/// which `finish_fresh_decode` instead recomputes per cold load. Measured at
 /// **327 µs** for a 256² first frame (`probe_thumbhash_encode_cost`) — an order
 /// of magnitude more than it looks like it should be, so it is worth naming
 /// rather than waving at. It is paid on a media-pool thread, never the main
 /// one, next to a GIF decode already costing milliseconds. Halving the disk
 /// footprint of every animated addon is worth 0.3 ms of background work.
 ///
-/// The reader still understands `CACHE_FORMAT_GIF`, so caches written before
-/// this change keep loading rather than being discarded on upgrade.
+/// The reader still understands `CACHE_FORMAT_GIF`, so a cache that does hold
+/// animated derived entries keeps loading rather than being discarded.
 pub fn write_disk_cache(cache: &WorkerDiskCache, key: &ThumbnailKey, thumbnail: &Thumbnail) {
     if thumbnail.animation().is_some() {
         return;
     }
     match write_disk_cache_inner(cache, key, thumbnail) {
-        Ok((path, written_bytes)) => maybe_evict_disk_cache(cache, path, written_bytes),
+        Ok((path, written_bytes)) => {
+            maybe_evict_disk_cache(cache, path, CacheTier::Derived, written_bytes);
+        }
         Err(error) => {
             log::warn!(
                 "failed to write thumbnail disk cache {}: {error}",
@@ -381,50 +433,56 @@ fn write_disk_cache_inner(
     Ok((path, written_bytes))
 }
 
-fn maybe_evict_disk_cache(cache: &WorkerDiskCache, path: PathBuf, written_bytes: u64) {
-    let mut index = cache.state.index.lock();
-    if let Err(error) = ensure_disk_cache_index(cache, &mut index) {
-        log::warn!(
-            "failed to index thumbnail disk cache {}: {error}",
-            cache.dir.display()
-        );
-        return;
-    }
+fn maybe_evict_disk_cache(
+    cache: &WorkerDiskCache,
+    path: PathBuf,
+    tier: CacheTier,
+    written_bytes: u64,
+) {
+    let mut slot = cache.state.index.lock();
+    let index = match ensure_disk_cache_index(cache, &mut slot) {
+        Ok(index) => index,
+        Err(error) => {
+            log::warn!(
+                "failed to index thumbnail disk cache {}: {error}",
+                cache.dir.display()
+            );
+            return;
+        }
+    };
 
     let modified = fs::metadata(&path)
         .and_then(|metadata| metadata.modified())
         .unwrap_or_else(|_| SystemTime::now());
     insert_indexed_cache_file(
-        &mut index,
+        index,
         CacheFile {
+            tier,
             path,
             len: written_bytes,
             modified,
         },
     );
-    evict_indexed_disk_cache(cache, &mut index);
+    evict_indexed_disk_cache(cache, index);
+    drop(slot);
 }
 
-fn ensure_disk_cache_index(
+/// Builds the index on first use. `Err` only when the cache directory cannot
+/// be listed; what an unavailable index means is the caller's decision.
+fn ensure_disk_cache_index<'a>(
     cache: &WorkerDiskCache,
-    index: &mut DiskCacheIndex,
-) -> std::io::Result<()> {
-    if index.initialized {
-        return Ok(());
+    slot: &'a mut Option<DiskCacheIndex>,
+) -> std::io::Result<&'a mut DiskCacheIndex> {
+    if let Some(index) = slot {
+        return Ok(index);
     }
 
     let files = thumbnail_cache_files(&cache.dir)?;
-    index.clear();
+    let mut index = DiskCacheIndex::default();
     for file in files {
-        insert_indexed_cache_file(index, file);
+        insert_indexed_cache_file(&mut index, file);
     }
-    index.initialized = true;
-    Ok(())
-}
-
-fn is_source_file(path: &Path) -> bool {
-    path.extension().and_then(|value| value.to_str())
-        == Some(crate::media::thumbnail_worker::THUMBNAIL_SOURCE_FILE_EXTENSION)
+    Ok(slot.insert(index))
 }
 
 fn insert_indexed_cache_file(index: &mut DiskCacheIndex, file: CacheFile) {
@@ -434,6 +492,7 @@ fn insert_indexed_cache_file(index: &mut DiskCacheIndex, file: CacheFile) {
         CacheFileMetadata {
             len: file.len,
             modified: file.modified,
+            tier: file.tier,
         },
     ) {
         index.by_age.remove(&(previous.modified, path.clone()));
@@ -443,15 +502,18 @@ fn insert_indexed_cache_file(index: &mut DiskCacheIndex, file: CacheFile) {
     index.total_bytes = index.total_bytes.saturating_add(file.len);
 }
 
+/// Only touches an index that already exists: with none built, there is
+/// nothing to keep consistent and the eventual build reads the real directory.
 fn remove_indexed_cache_file(cache: &WorkerDiskCache, path: &Path) {
-    let mut index = cache.state.index.lock();
-    if !index.initialized {
+    let mut slot = cache.state.index.lock();
+    let Some(index) = slot.as_mut() else {
         return;
-    }
+    };
     if let Some((path, previous)) = index.by_path.remove_entry(path) {
         index.by_age.remove(&(previous.modified, path));
         index.total_bytes = index.total_bytes.saturating_sub(previous.len);
     }
+    drop(slot);
 }
 
 /// How far into the age order to look for a derived entry before giving up and
@@ -477,7 +539,12 @@ fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex)
             .by_age
             .iter()
             .take(EVICTION_PREFERENCE_SCAN)
-            .find(|((_, path), _)| !is_source_file(path.as_path()))
+            .find(|((_, path), _)| {
+                index
+                    .by_path
+                    .get(path.as_path())
+                    .is_some_and(|metadata| metadata.tier == CacheTier::Derived)
+            })
             .or_else(|| index.by_age.iter().next())
             .map(|((modified, path), len)| ((*modified, path.clone()), *len));
         let Some(((modified, path), len)) = victim else {
@@ -497,14 +564,6 @@ fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex)
             }
         }
         index.total_bytes = index.total_bytes.saturating_sub(len);
-    }
-}
-
-impl DiskCacheIndex {
-    fn clear(&mut self) {
-        self.total_bytes = 0;
-        self.by_path.clear();
-        self.by_age.clear();
     }
 }
 
@@ -585,52 +644,15 @@ fn should_try_png_cache_payload(pixels: &[u8]) -> bool {
     transparent || sampled == 0 || same_as_previous.saturating_mul(8) >= sampled
 }
 
-/// Why a cached thumbnail payload was rejected.
+/// Why a cached payload could not be decoded.
+///
+/// Deliberately not an enum: the sole consumer logs the reason and deletes the
+/// file, so per-cause variants bought 21 names and no dispatch. Three of them
+/// were also unconstructible — the length checks that would have made them
+/// reachable had already returned.
 #[derive(Debug, Error)]
-enum CacheDecodeError {
-    #[error("missing magic")]
-    MissingMagic,
-    #[error("invalid magic")]
-    InvalidMagic,
-    #[error("unsupported version")]
-    UnsupportedVersion,
-    #[error("missing format")]
-    MissingFormat,
-    #[error("invalid dimensions")]
-    InvalidDimensions,
-    #[error("stale max edge")]
-    StaleMaxEdge,
-    #[error("byte length overflow")]
-    ByteLengthOverflow,
-    #[error("byte length too large")]
-    ByteLengthTooLarge,
-    #[error("cache length overflow")]
-    CacheLengthOverflow,
-    #[error("cache length mismatch")]
-    CacheLengthMismatch,
-    #[error("missing pixels")]
-    MissingPixels,
-    #[error("raw byte length mismatch")]
-    RawByteLengthMismatch,
-    #[error("failed to decode payload")]
-    DecodePayloadFailed,
-    #[error("decoded dimensions mismatch")]
-    DecodedDimensionsMismatch,
-    #[error("decoded byte length mismatch")]
-    DecodedByteLengthMismatch,
-    #[error("failed to decode cached GIF")]
-    DecodeGifFailed,
-    #[error("cached GIF is not animated")]
-    GifNotAnimated,
-    #[error("unsupported cache payload format")]
-    UnsupportedFormat,
-    #[error("invalid decoded RGBA payload")]
-    InvalidRgbaPayload,
-    #[error("cache offset overflow")]
-    OffsetOverflow,
-    #[error("truncated cache")]
-    Truncated,
-}
+#[error("corrupt thumbnail cache entry: {0}")]
+struct CacheDecodeError(&'static str);
 
 fn deserialize_cached_thumbnail(
     bytes: &[u8],
@@ -638,16 +660,16 @@ fn deserialize_cached_thumbnail(
 ) -> Result<Thumbnail, CacheDecodeError> {
     let mut offset = 0;
     let Some(magic) = bytes.get(..CACHE_PAYLOAD_MAGIC.len()) else {
-        return Err(CacheDecodeError::MissingMagic);
+        return Err(CacheDecodeError("missing magic"));
     };
     if magic != CACHE_PAYLOAD_MAGIC {
-        return Err(CacheDecodeError::InvalidMagic);
+        return Err(CacheDecodeError("invalid magic"));
     }
     offset += CACHE_PAYLOAD_MAGIC.len();
 
     let version = read_u32_le(bytes, &mut offset)?;
     if version != CACHE_PAYLOAD_VERSION {
-        return Err(CacheDecodeError::UnsupportedVersion);
+        return Err(CacheDecodeError("unsupported version"));
     }
 
     let width = read_u32_le(bytes, &mut offset)?;
@@ -656,47 +678,41 @@ fn deserialize_cached_thumbnail(
     let source_height = read_u32_le(bytes, &mut offset)?;
     let max_edge = read_u32_le(bytes, &mut offset)?;
     let thumbhash = {
-        let len = usize::from(
-            *take_bytes(bytes, &mut offset, 1)?
-                .first()
-                .ok_or(CacheDecodeError::MissingFormat)?,
-        );
+        let len = usize::from(take_byte(bytes, &mut offset)?);
         if len > 0 {
             Some(Arc::<[u8]>::from(take_bytes(bytes, &mut offset, len)?))
         } else {
             None
         }
     };
-    let format = *take_bytes(bytes, &mut offset, 1)?
-        .first()
-        .ok_or(CacheDecodeError::MissingFormat)?;
+    let format = take_byte(bytes, &mut offset)?;
     let encoded_len = read_u64_le(bytes, &mut offset)?;
 
     if width == 0 || height == 0 || source_width == 0 || source_height == 0 {
-        return Err(CacheDecodeError::InvalidDimensions);
+        return Err(CacheDecodeError("invalid dimensions"));
     }
     if max_edge == 0 || max_edge != requested_max_edge || width.max(height) > max_edge {
-        return Err(CacheDecodeError::StaleMaxEdge);
+        return Err(CacheDecodeError("stale max edge"));
     }
 
     let expected_raw_len = crate::media::pixel::checked_rgba_len(width, height)
-        .ok_or(CacheDecodeError::ByteLengthOverflow)?;
+        .ok_or(CacheDecodeError("byte length overflow"))?;
     let encoded_len_usize =
-        usize::try_from(encoded_len).map_err(|_| CacheDecodeError::ByteLengthTooLarge)?;
+        usize::try_from(encoded_len).map_err(|_| CacheDecodeError("byte length too large"))?;
     let expected_total = offset
         .checked_add(encoded_len_usize)
-        .ok_or(CacheDecodeError::CacheLengthOverflow)?;
+        .ok_or(CacheDecodeError("cache length overflow"))?;
     if bytes.len() != expected_total {
-        return Err(CacheDecodeError::CacheLengthMismatch);
+        return Err(CacheDecodeError("cache length mismatch"));
     }
 
     let payload = bytes
         .get(offset..expected_total)
-        .ok_or(CacheDecodeError::MissingPixels)?;
+        .ok_or(CacheDecodeError("truncated cache"))?;
     let pixel_bytes = match format {
         CACHE_FORMAT_RAW_RGBA => {
             if payload.len() != expected_raw_len {
-                return Err(CacheDecodeError::RawByteLengthMismatch);
+                return Err(CacheDecodeError("raw byte length mismatch"));
             }
             payload.to_vec()
         }
@@ -706,27 +722,27 @@ fn deserialize_cached_thumbnail(
             reader.limits(thumbnail_decode_limits());
             let decoded = reader
                 .decode()
-                .map_err(|_| CacheDecodeError::DecodePayloadFailed)?;
+                .map_err(|_| CacheDecodeError("failed to decode payload"))?;
             if decoded.width() != width || decoded.height() != height {
-                return Err(CacheDecodeError::DecodedDimensionsMismatch);
+                return Err(CacheDecodeError("decoded dimensions mismatch"));
             }
             let pixel_bytes = decoded.into_rgba8().into_raw();
             if pixel_bytes.len() != expected_raw_len {
-                return Err(CacheDecodeError::DecodedByteLengthMismatch);
+                return Err(CacheDecodeError("decoded byte length mismatch"));
             }
             pixel_bytes
         }
         CACHE_FORMAT_GIF => {
             let preview = decode_lazy_gif_preview(Arc::<[u8]>::from(payload), max_edge)
-                .map_err(|_| CacheDecodeError::DecodeGifFailed)?;
+                .map_err(|_| CacheDecodeError("failed to decode cached GIF"))?;
             if preview.frame_count() <= 1 {
-                return Err(CacheDecodeError::GifNotAnimated);
+                return Err(CacheDecodeError("cached GIF is not animated"));
             }
             let mut thumbnail = Thumbnail::from_gif_preview(preview, max_edge);
             thumbnail.set_thumbhash(thumbhash);
             return Ok(thumbnail);
         }
-        _ => return Err(CacheDecodeError::UnsupportedFormat),
+        _ => return Err(CacheDecodeError("unsupported cache payload format")),
     };
 
     let mut thumbnail = Thumbnail::new(
@@ -739,9 +755,20 @@ fn deserialize_cached_thumbnail(
             max_edge,
         },
     )
-    .map_err(|_| CacheDecodeError::InvalidRgbaPayload)?;
+    .map_err(|_| CacheDecodeError("invalid decoded RGBA payload"))?;
     thumbnail.set_thumbhash(thumbhash);
     Ok(thumbnail)
+}
+
+/// Reads one byte, advancing `offset`. Bounds-checked here rather than
+/// slicing and then re-checking the slice.
+fn take_byte(bytes: &[u8], offset: &mut usize) -> Result<u8, CacheDecodeError> {
+    let byte = bytes
+        .get(*offset)
+        .copied()
+        .ok_or(CacheDecodeError("truncated cache"))?;
+    *offset += 1;
+    Ok(byte)
 }
 
 fn read_u32_le(bytes: &[u8], offset: &mut usize) -> Result<u32, CacheDecodeError> {
@@ -765,49 +792,12 @@ fn take_bytes<'a>(
 ) -> Result<&'a [u8], CacheDecodeError> {
     let end = offset
         .checked_add(len)
-        .ok_or(CacheDecodeError::OffsetOverflow)?;
-    let slice = bytes.get(*offset..end).ok_or(CacheDecodeError::Truncated)?;
+        .ok_or(CacheDecodeError("cache offset overflow"))?;
+    let slice = bytes
+        .get(*offset..end)
+        .ok_or(CacheDecodeError("truncated cache"))?;
     *offset = end;
     Ok(slice)
-}
-
-#[cfg(test)]
-fn evict_disk_cache(cache_dir: &Path, max_bytes: u64) -> std::io::Result<u64> {
-    let mut files = thumbnail_cache_files(cache_dir)?;
-    let mut total = files.iter().map(|file| file.len).sum::<u64>();
-    if total <= max_bytes {
-        return Ok(total);
-    }
-
-    files.sort_by(|left, right| {
-        left.modified
-            .cmp(&right.modified)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-
-    for file in files {
-        if total <= max_bytes {
-            break;
-        }
-
-        match fs::remove_file(&file.path) {
-            Ok(()) => {
-                total = total.saturating_sub(file.len);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                total = total.saturating_sub(file.len);
-            }
-            Err(error) => {
-                total = total.saturating_sub(file.len);
-                log::warn!(
-                    "failed to remove thumbnail cache file {}: {error}",
-                    file.path.display()
-                );
-            }
-        }
-    }
-
-    Ok(total)
 }
 
 fn thumbnail_cache_files(cache_dir: &Path) -> std::io::Result<Vec<CacheFile>> {
@@ -823,12 +813,9 @@ fn thumbnail_cache_files(cache_dir: &Path) -> std::io::Result<Vec<CacheFile>> {
         let path = entry.path();
         // Both tiers live here and share one budget, so both must be indexed
         // or the source files would be invisible to eviction and grow forever.
-        let extension = path.extension().and_then(|value| value.to_str());
-        if extension != Some(CACHE_FILE_EXTENSION)
-            && extension != Some(crate::media::thumbnail_worker::THUMBNAIL_SOURCE_FILE_EXTENSION)
-        {
+        let Some(tier) = CacheTier::from_path(&path) else {
             continue;
-        }
+        };
 
         let metadata = entry.metadata()?;
         if !metadata.is_file() {
@@ -837,6 +824,7 @@ fn thumbnail_cache_files(cache_dir: &Path) -> std::io::Result<Vec<CacheFile>> {
 
         files.push(CacheFile {
             path,
+            tier,
             len: metadata.len(),
             modified: metadata.modified().unwrap_or(UNIX_EPOCH),
         });
@@ -1023,6 +1011,30 @@ mod tests {
         assert!(!cache.contains_source(absent));
     }
 
+    /// A second instance sharing this directory evicts against its own private
+    /// index, so a file can vanish under a path this one still has recorded.
+    /// The read is the only operation that finds out, and `contains_source`
+    /// answers from the index alone — so without the repair the URL reads as
+    /// banked forever and warming never re-fetches it.
+    #[test]
+    fn a_source_deleted_out_of_band_stops_reading_as_banked() {
+        let root = TestDir::new("disk-cache-external-eviction");
+        let cache = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
+        let url = "https://example.invalid/evicted-elsewhere.png";
+
+        write_source_bytes(&cache, url, &[1, 2, 3, 4]);
+        assert!(cache.contains_source(url));
+
+        std::fs::remove_file(source_cache_path(root.path(), url))
+            .expect("the banked source should exist on disk");
+
+        assert!(read_source_bytes(&cache, url).is_none());
+        assert!(
+            !cache.contains_source(url),
+            "the read should have repaired the index it found wrong"
+        );
+    }
+
     /// A derived entry is not a source. Warming skips URLs whose *source* is
     /// banked; if a derived write satisfied that check, warming would never
     /// bank the source for anything the user had already scrolled past, and
@@ -1131,10 +1143,11 @@ mod tests {
         assert!(read_disk_cache(&cache, &key, 4).is_some());
     }
 
-    /// Caches written before animations left the derived tier must keep
-    /// loading, so the reader still understands `CACHE_FORMAT_GIF`. This is a
-    /// format test, not a round-trip the app performs any more — `write_disk_cache`
-    /// no longer produces this payload.
+    /// On-disk compatibility: caches on users' machines still hold
+    /// `CACHE_FORMAT_GIF` payloads, so the reader must keep understanding them.
+    /// Current builds do not produce this payload — `write_disk_cache` writes
+    /// animations to the derived tier — so this exercises the format directly
+    /// rather than a round-trip the app performs.
     #[test]
     fn thumbnails_cached_round_trips_animated_gif() {
         let gif = multi_frame_gif_bytes();
@@ -1173,33 +1186,31 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// Eviction walks the cache directory, so it must consider only the files
+    /// it owns. Anything else living there is not its to delete.
     #[test]
-    fn thumbnails_disk_cache_eviction_keeps_cache_files_under_byte_limit() {
+    fn eviction_stays_under_budget_and_leaves_foreign_files_alone() {
+        const MAX_BYTES: u64 = 4_096;
+
         let root = TestDir::new("disk-cache-eviction");
         std::fs::create_dir_all(root.path()).expect("cache dir should be created");
         std::fs::write(root.path().join("keep.txt"), b"not cache")
             .expect("non-cache file should be written");
 
-        for index in 0..3 {
+        let cache = WorkerDiskCache::new(root.path().to_path_buf(), MAX_BYTES);
+        for index in 0..8 {
             let key = ThumbnailKey::for_bytes(format!("item-{index}"), 16);
-            let path = disk_cache_path(root.path(), &key);
-            let thumbnail = solid_thumbnail(16, 16, index as u8);
-            std::fs::write(
-                path,
-                serialize_cached_thumbnail(&thumbnail).expect("cache payload should encode"),
-            )
-            .expect("cache file should be written");
+            write_disk_cache(&cache, &key, &solid_thumbnail(32, 32, index as u8));
         }
 
-        let max_bytes = thumbnail_cache_files(root.path())
-            .expect("cache files")
-            .first()
-            .map_or(1, |file| file.len.saturating_add(1));
-
-        evict_disk_cache(root.path(), max_bytes).expect("eviction should succeed");
-
-        assert!(total_cache_bytes(root.path()) <= max_bytes);
-        assert!(root.path().join("keep.txt").is_file());
+        assert!(
+            total_cache_bytes(root.path()) <= MAX_BYTES,
+            "eviction left the cache over its byte budget"
+        );
+        assert!(
+            root.path().join("keep.txt").is_file(),
+            "eviction deleted a file it does not own"
+        );
     }
 
     fn multi_frame_gif_bytes() -> Vec<u8> {

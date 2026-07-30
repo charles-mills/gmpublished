@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use steamworks::PublishedFileId;
+use crate::WorkshopId;
 
 const API_BASE: &str = "https://api.steampowered.com/ISteamRemoteStorage";
 const BATCH_SIZE: usize = 100;
@@ -41,7 +41,7 @@ impl From<ureq::Error> for WebApiError {
 /// Per-item facts from `GetPublishedFileDetails`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PublishedFileDetail {
-    pub id: PublishedFileId,
+    pub id: WorkshopId,
     /// Steam reported the item exists (`result == 1`).
     pub found: bool,
     /// Public CDN URL of the legacy LZMA payload; `None` for SteamPipe
@@ -51,7 +51,7 @@ pub(super) struct PublishedFileDetail {
 }
 
 impl PublishedFileDetail {
-    fn missing(id: PublishedFileId) -> Self {
+    fn missing(id: WorkshopId) -> Self {
         Self {
             id,
             found: false,
@@ -62,32 +62,36 @@ impl PublishedFileDetail {
 }
 
 fn api_agent() -> ureq::Agent {
-    // The workspace ureq build carries no bundled webpki roots; certificate
-    // verification must go through the OS trust store (PlatformVerifier).
-    ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into()
+    crate::net::build_http_agent(
+        crate::net::HttpAgentConfig::new().global_timeout(Duration::from_secs(30)),
+    )
 }
 
-/// Agent for CDN payload downloads: no global deadline (large addons on
-/// slow lines take minutes), but bounded connect/response latency.
+/// Agent for CDN payload downloads: no global or response-header deadline,
+/// so a healthy stream may take minutes, with bounded connection setup and
+/// body-idle periods. Ureq's response timeout also caps the subsequent body,
+/// so it is deliberately not configured for this streaming transfer.
 pub(super) fn download_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
-        .build()
-        .into()
+    crate::net::build_http_agent(
+        crate::net::HttpAgentConfig::new()
+            .connect_timeout(Duration::from_secs(15))
+            .receive_body_timeout(Duration::from_secs(30)),
+    )
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn download_agent_has_idle_budget_without_total_body_deadline() {
+        let timeouts = download_agent().config().timeouts();
+
+        assert_eq!(timeouts.global, None);
+        assert_eq!(timeouts.connect, Some(Duration::from_secs(15)));
+        assert_eq!(timeouts.recv_response, None);
+        assert_eq!(timeouts.recv_body, Some(Duration::from_secs(30)));
+    }
 }
 
 /// Expands collections (recursively, deduplicated) and returns details for
@@ -95,8 +99,8 @@ pub(super) fn download_agent() -> ureq::Agent {
 /// discovered items. Performs all network calls upfront so a failure has
 /// no side effects and callers can fall back to Steamworks queries.
 pub(super) fn resolve_downloads(
-    known_items: Vec<PublishedFileId>,
-    possible_collections: Vec<PublishedFileId>,
+    known_items: Vec<WorkshopId>,
+    possible_collections: Vec<WorkshopId>,
 ) -> Result<Vec<PublishedFileDetail>, WebApiError> {
     let agent = api_agent();
 
@@ -126,12 +130,12 @@ fn post_ids(
     agent: &ureq::Agent,
     method: &str,
     count_key: &str,
-    ids: &[PublishedFileId],
+    ids: &[WorkshopId],
 ) -> Result<String, WebApiError> {
     let mut form = Vec::with_capacity(ids.len() + 1);
     form.push((count_key.to_owned(), ids.len().to_string()));
     for (i, id) in ids.iter().enumerate() {
-        form.push((format!("publishedfileids[{i}]"), id.0.to_string()));
+        form.push((format!("publishedfileids[{i}]"), id.get().to_string()));
     }
 
     agent
@@ -145,21 +149,21 @@ fn post_ids(
 }
 
 struct CollectionRow {
-    id: PublishedFileId,
+    id: WorkshopId,
     /// `None` for plain items; children as `(id, is_collection)` otherwise.
-    children: Option<Vec<(PublishedFileId, bool)>>,
+    children: Option<Vec<(WorkshopId, bool)>>,
 }
 
 /// Frontier-at-a-time collection expansion with global deduplication.
 struct CollectionResolution {
-    seen: HashSet<PublishedFileId>,
-    items: Vec<PublishedFileId>,
-    frontier: Vec<PublishedFileId>,
+    seen: HashSet<WorkshopId>,
+    items: Vec<WorkshopId>,
+    frontier: Vec<WorkshopId>,
 }
 
 impl CollectionResolution {
-    fn new(known_items: Vec<PublishedFileId>, possible_collections: Vec<PublishedFileId>) -> Self {
-        let mut seen: HashSet<PublishedFileId> = known_items.iter().copied().collect();
+    fn new(known_items: Vec<WorkshopId>, possible_collections: Vec<WorkshopId>) -> Self {
+        let mut seen: HashSet<WorkshopId> = known_items.iter().copied().collect();
         seen.extend(possible_collections.iter().copied());
         Self {
             seen,
@@ -168,8 +172,8 @@ impl CollectionResolution {
         }
     }
 
-    fn apply_rows(&mut self, requested: &[PublishedFileId], rows: &[CollectionRow]) {
-        let children_by_id: HashMap<PublishedFileId, &Option<Vec<(PublishedFileId, bool)>>> =
+    fn apply_rows(&mut self, requested: &[WorkshopId], rows: &[CollectionRow]) {
+        let children_by_id: HashMap<WorkshopId, &Option<Vec<(WorkshopId, bool)>>> =
             rows.iter().map(|row| (row.id, &row.children)).collect();
 
         for id in requested {
@@ -208,11 +212,27 @@ fn response_rows<'a>(
         .ok_or(WebApiError::Parse("missing details array"))
 }
 
-fn row_id(row: &serde_json::Value) -> Result<PublishedFileId, WebApiError> {
-    row.get("publishedfileid")
+/// `Ok(None)` for a row whose id names no item.
+///
+/// A zero is Steam answering about nothing, which is a fact about that row and
+/// not about the response: failing the batch for it would push every item in
+/// the request onto the slower Steamworks path. An *absent* id is different —
+/// the response is not the shape this parser was written against — so that
+/// still fails.
+fn row_id(row: &serde_json::Value) -> Result<Option<WorkshopId>, WebApiError> {
+    let raw = row
+        .get("publishedfileid")
         .and_then(value_as_u64)
-        .map(PublishedFileId)
-        .ok_or(WebApiError::Parse("missing publishedfileid"))
+        .ok_or(WebApiError::Parse("missing publishedfileid"))?;
+
+    Ok(WorkshopId::new(raw))
+}
+
+/// Drops a row that named no item, keeping a genuine parse failure.
+fn skip_rows_naming_no_item(
+    id: Result<Option<WorkshopId>, WebApiError>,
+) -> Option<Result<WorkshopId, WebApiError>> {
+    id.transpose()
 }
 
 fn parse_collection_details(json: &str) -> Result<Vec<CollectionRow>, WebApiError> {
@@ -221,8 +241,9 @@ fn parse_collection_details(json: &str) -> Result<Vec<CollectionRow>, WebApiErro
 
     response_rows(&root, "collectiondetails")?
         .iter()
-        .map(|row| {
-            let id = row_id(row)?;
+        .filter_map(|row| skip_rows_naming_no_item(row_id(row)).map(|id| (row, id)))
+        .map(|(row, id)| {
+            let id = id?;
             // Plain items report result 9 (file not found) here; only real
             // collections return success.
             let is_collection = row.get("result").and_then(value_as_u64) == Some(RESULT_OK);
@@ -233,10 +254,13 @@ fn parse_collection_details(json: &str) -> Result<Vec<CollectionRow>, WebApiErro
                         children
                             .iter()
                             .filter_map(|child| {
-                                let id = child.get("publishedfileid").and_then(value_as_u64)?;
+                                let id = child
+                                    .get("publishedfileid")
+                                    .and_then(value_as_u64)
+                                    .and_then(crate::gma::nonzero_workshop_id)?;
                                 let is_collection = child.get("filetype").and_then(value_as_u64)
                                     == Some(FILETYPE_COLLECTION);
-                                Some((PublishedFileId(id), is_collection))
+                                Some((id, is_collection))
                             })
                             .collect()
                     })
@@ -253,8 +277,9 @@ fn parse_published_file_details(json: &str) -> Result<Vec<PublishedFileDetail>, 
 
     response_rows(&root, "publishedfiledetails")?
         .iter()
-        .map(|row| {
-            let id = row_id(row)?;
+        .filter_map(|row| skip_rows_naming_no_item(row_id(row)).map(|id| (row, id)))
+        .map(|(row, id)| {
+            let id = id?;
             let found = row.get("result").and_then(value_as_u64) == Some(RESULT_OK);
             let file_url = row
                 .get("file_url")
@@ -275,10 +300,10 @@ fn parse_published_file_details(json: &str) -> Result<Vec<PublishedFileDetail>, 
 /// Re-keys parsed rows onto the requested id order; ids Steam omitted from
 /// the response come back as not-found.
 fn align_details(
-    requested: &[PublishedFileId],
+    requested: &[WorkshopId],
     rows: Vec<PublishedFileDetail>,
 ) -> Vec<PublishedFileDetail> {
-    let mut by_id: HashMap<PublishedFileId, PublishedFileDetail> =
+    let mut by_id: HashMap<WorkshopId, PublishedFileDetail> =
         rows.into_iter().map(|detail| (detail.id, detail)).collect();
     requested
         .iter()
@@ -294,8 +319,31 @@ fn align_details(
 mod tests {
     use super::*;
 
-    fn id(id: u64) -> PublishedFileId {
-        PublishedFileId(id)
+    use crate::workshop_id::workshop_id as id;
+
+    /// One row naming no item costs that row, not the request. Failing the
+    /// whole response would drop every item in the batch onto the slower
+    /// Steamworks path because of a single anomaly.
+    #[test]
+    fn a_row_naming_no_item_is_skipped_without_failing_the_batch() {
+        let json = r#"{"response":{"publishedfiledetails":[
+            {"publishedfileid":"0","result":1},
+            {"publishedfileid":"77","result":1,"file_url":"https://example.invalid/a.gma","file_size":"5"}
+        ]}}"#;
+
+        let rows = parse_published_file_details(json).expect("one bad row must not fail the batch");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id(77));
+    }
+
+    /// An absent id is a different fact: the response is not the shape this
+    /// parser was written against, and that still fails.
+    #[test]
+    fn a_row_with_no_id_field_still_fails_the_batch() {
+        let json = r#"{"response":{"publishedfiledetails":[{"result":1}]}}"#;
+
+        assert!(parse_published_file_details(json).is_err());
     }
 
     #[test]

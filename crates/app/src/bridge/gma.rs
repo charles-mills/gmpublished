@@ -4,21 +4,17 @@ use std::{
     sync::Arc,
 };
 
-use gmpublished_backend::{
-    GMAFile, Transaction,
-    gma::{is_unsafe_entry_path, read::GmaView},
-};
+use gmpublished_backend::{GmaFile, GmaView, Transaction, is_unsafe_entry_path};
 
 pub use gmpublished_backend::{
-    GMAError as GmaError,
-    gma::{ExtractDestination, ExtractOptions, ExtractionOverwriteMode, Whitelist, whitelist},
+    ExtractDestination, ExtractOptions, ExtractionOverwriteMode, GmaError, Whitelist, whitelist,
 };
 
 #[cfg(test)]
-pub const GMA_VERSION: u8 = 3;
+pub use gmpublished_backend::GMA_VERSION;
 
 /// Safe, already-validated path for one file entry inside a GMA archive.
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ArchiveEntryPath(Arc<String>);
 
 impl ArchiveEntryPath {
@@ -65,7 +61,7 @@ impl From<ArchiveEntryPath> for String {
 }
 
 /// Safe archive directory path used by the archive-browser presentation model.
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ArchiveDirectoryPath(String);
 
 impl ArchiveDirectoryPath {
@@ -138,117 +134,23 @@ impl From<ArchiveDirectoryPath> for String {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum GmaMetadata {
-    Standard {
-        title: String,
-        addon_type: String,
-        tags: Vec<String>,
-        ignore: Vec<String>,
-    },
-    Legacy {
-        title: String,
-        description: String,
-    },
-}
+/// The backend's own types.
+///
+/// Not mirrored: both were duplicated field-for-field *and* accessor-for-
+/// accessor, with identity `From` impls in each direction. A newtype earns its
+/// conversions by refining something — see
+/// [`PublishedFileId`](crate::bridge::domain::PublishedFileId), which enforces
+/// non-zero where the backend's does not. These refined nothing.
+pub use gmpublished_backend::{GmaHeader, GmaMetadata};
 
-impl GmaMetadata {
-    pub(crate) fn title(&self) -> &str {
-        match self {
-            Self::Standard { title, .. } | Self::Legacy { title, .. } => title,
-        }
-    }
-
-    pub(crate) fn addon_type(&self) -> Option<&str> {
-        match self {
-            Self::Standard { addon_type, .. } => Some(addon_type.as_str()),
-            Self::Legacy { .. } => None,
-        }
-    }
-
-    pub(crate) fn tags(&self) -> Option<&Vec<String>> {
-        match self {
-            Self::Standard { tags, .. } => Some(tags),
-            Self::Legacy { .. } => None,
-        }
-    }
-}
-
-impl From<gmpublished_backend::GMAMetadata> for GmaMetadata {
-    fn from(metadata: gmpublished_backend::GMAMetadata) -> Self {
-        match metadata {
-            gmpublished_backend::GMAMetadata::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            } => Self::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            },
-            gmpublished_backend::GMAMetadata::Legacy { title, description } => {
-                Self::Legacy { title, description }
-            }
-        }
-    }
-}
-
-impl From<GmaMetadata> for gmpublished_backend::GMAMetadata {
-    fn from(metadata: GmaMetadata) -> Self {
-        match metadata {
-            GmaMetadata::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            } => Self::Standard {
-                title,
-                addon_type,
-                tags,
-                ignore,
-            },
-            GmaMetadata::Legacy { title, description } => Self::Legacy { title, description },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct GmaHeader {
-    pub(crate) version: u8,
-    pub(crate) timestamp: u64,
-    pub(crate) metadata: GmaMetadata,
-    pub(crate) author: String,
-    pub(crate) addon_version: i32,
-}
-
-impl GmaHeader {
-    pub(crate) fn title(&self) -> &str {
-        self.metadata.title()
-    }
-}
-
-impl From<gmpublished_backend::GMAHeader> for GmaHeader {
-    fn from(header: gmpublished_backend::GMAHeader) -> Self {
-        Self {
-            version: header.version,
-            timestamp: header.timestamp,
-            metadata: header.metadata.into(),
-            author: header.author,
-            addon_version: header.addon_version,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GmaMetaEntry {
     pub(crate) path: String,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GmaMeta {
     pub(crate) path: PathBuf,
     pub(crate) header: GmaHeader,
@@ -284,22 +186,21 @@ impl GmaMeta {
 
     /// Opens only the archive header for library discovery. `PreviewArchive`
     /// deliberately remains the full-entry path for the preview modal.
-    #[cfg(any(test, not(feature = "asset-studio")))]
+    #[cfg(test)]
     pub(crate) fn open_header_only(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
         Ok(Self {
             path: path.to_path_buf(),
-            header: GMAFile::open_header(path)?.into(),
+            header: GmaFile::open_header(path)?,
             entries: Arc::from([]),
         })
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        // One mmap + one parse; the previous open/header/entries chain
+        // One file open + one parse; the previous open/header/entries chain
         // re-parsed the whole entry table three times.
-        let bundle = GMAFile::open_index(path)?;
+        let bundle = GmaFile::open_index(path)?;
         let mut entries: Vec<GmaMetaEntry> = bundle
             .entries
             .into_iter()
@@ -312,13 +213,13 @@ impl GmaMeta {
         entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         Ok(Self {
             path: path.to_path_buf(),
-            header: bundle.header.into(),
+            header: bundle.header,
             entries: entries.into(),
         })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewEntry {
     pub(crate) path: ArchiveEntryPath,
     pub(crate) size: u64,
@@ -327,12 +228,11 @@ pub struct PreviewEntry {
 }
 
 /// Bytes provider and parsed identity for one open preview archive. `view`
-/// is wrapped in `Arc` purely so the struct stays `Clone` (a memory map
-/// cannot be); it plays no part in the archive's identity, so `Debug` and
-/// `PartialEq` are hand-written to skip it.
+/// is wrapped in `Arc` purely so the struct stays `Clone`; it plays no part
+/// in the archive's identity, so `Debug` and `PartialEq` skip it.
 #[derive(Clone)]
 pub struct PreviewArchive {
-    gma: GMAFile,
+    gma: GmaFile,
     view: Arc<GmaView>,
     header: GmaHeader,
     entries: Vec<PreviewEntry>,
@@ -367,16 +267,19 @@ impl PreviewArchive {
         workshop_id: Option<u64>,
     ) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        // One mmap + one parse for handle, header and entries together;
+        // One file open + one parse for handle, header and entries together;
         // the view is kept for entry fetches during the preview session.
         let view = GmaView::open(path)?;
         let bundle = view.meta(path)?;
         let mut gma = bundle.handle;
-        if let Some(id) = workshop_id.or_else(|| workshop_id_from_path(path)) {
+        if let Some(id) = workshop_id
+            .or_else(|| workshop_id_from_path(path))
+            .and_then(gmpublished_backend::WorkshopId::new)
+        {
             // Recomputes extracted_name so it includes both title and id.
-            gma.set_ws_id(gmpublished_backend::appdata::SettingsPublishedFileId(id));
+            gma.set_workshop_id(id);
         }
-        let header = bundle.header.into();
+        let header = bundle.header;
         let entries = preview_entries_from_backend(bundle.entries);
 
         Ok(Self {
@@ -399,7 +302,7 @@ impl PreviewArchive {
     /// Sanitized folder name the archive extracts into (backend
     /// `extracted_name`); empty when the metadata carried no usable name.
     pub(crate) fn extracted_name(&self) -> &str {
-        &self.gma.extracted_name
+        self.gma.extracted_name()
     }
 
     pub(crate) fn entries(&self) -> &[PreviewEntry] {
@@ -423,7 +326,6 @@ impl PreviewArchive {
             .map_err(|_| GmaError::EntryNotFound)
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
         let entry = self.entry(entry_path)?;
         self.view.read_payload_bytes(entry.data_offset, entry.size)
@@ -436,13 +338,15 @@ impl PreviewArchive {
         backend: &gmpublished_backend::Backend,
     ) -> Result<PathBuf, GmaError> {
         self.entry(entry_path)?;
-        self.view.extract_entry(
+        backend.extract_gma_entry(
+            &self.view,
             &self.gma,
             entry_path.to_owned(),
             transaction,
-            false,
-            &backend.app_data,
-            &backend.steam,
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Ignore,
+            },
         )
     }
 
@@ -453,10 +357,9 @@ impl PreviewArchive {
         transaction: &Transaction,
         backend: &gmpublished_backend::Backend,
     ) -> Result<PathBuf, GmaError> {
-        self.view.extract(
+        let context = backend.resolve_extraction(
             &self.gma,
             destination,
-            transaction,
             ExtractOptions {
                 open_after: false,
                 whitelist: if options.ignore_whitelist {
@@ -465,20 +368,18 @@ impl PreviewArchive {
                     Whitelist::Enforce
                 },
             },
-            &backend.whitelist,
-            &backend.app_data,
-            &backend.steam,
-        )
+        )?;
+        backend.extract_gma(&self.view, &self.gma, transaction, context)
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewExtractRequest {
     pub(crate) destination: ExtractDestination,
     pub(crate) options: PreviewExtractOptions,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewExtractOptions {
     pub(crate) ignore_whitelist: bool,
 }
@@ -491,13 +392,9 @@ impl Default for PreviewExtractOptions {
     }
 }
 
-pub fn build_preview_extract_request(
-    mut settings: super::Settings,
-    paths: &super::AppPaths,
-) -> PreviewExtractRequest {
-    settings.sanitize(paths);
+pub fn build_preview_extract_request(settings: super::Settings) -> PreviewExtractRequest {
     PreviewExtractRequest {
-        destination: settings.extract_destination,
+        destination: settings.backend.extract_destination,
         options: PreviewExtractOptions::default(),
     }
 }
@@ -525,7 +422,7 @@ fn workshop_id_from_path(path: &Path) -> Option<u64> {
 }
 
 pub fn workshop_id_from_filename(file_name: impl AsRef<str>) -> Option<u64> {
-    gmpublished_backend::gma::ws_id_from_file_name(file_name).map(|id| id.0)
+    gmpublished_backend::ws_id_from_file_name(file_name).map(gmpublished_backend::WorkshopId::get)
 }
 
 #[cfg(test)]
@@ -534,7 +431,7 @@ pub fn crc32(bytes: &[u8]) -> u32 {
 }
 
 fn preview_entries_from_backend(
-    entries: Vec<gmpublished_backend::gma::read::GmaIndexedEntry>,
+    entries: Vec<gmpublished_backend::GmaIndexedEntry>,
 ) -> Vec<PreviewEntry> {
     let mut preview = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -562,7 +459,7 @@ fn is_safe_archive_path_segment(segment: &str) -> bool {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureGmaEntry {
     pub(crate) path: String,
     pub(crate) crc32: u32,
@@ -579,7 +476,7 @@ impl FixtureGmaEntry {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureGmaFile {
     pub(crate) path: Option<PathBuf>,
     pub(crate) header: GmaHeader,
@@ -602,14 +499,13 @@ fn preview_archive_from_fixture(gma: FixtureGmaFile) -> Result<PreviewArchive, G
     if gma.header.version > 1 {
         bytes.push(0); // required content
     }
-    let backend_metadata: gmpublished_backend::GMAMetadata = gma.header.metadata.clone().into();
-    let (title, description) = match &backend_metadata {
-        gmpublished_backend::GMAMetadata::Legacy { title, description } => {
+    let (title, description) = match &gma.header.metadata {
+        gmpublished_backend::GmaMetadata::Legacy { title, description } => {
             (title.clone(), description.clone())
         }
-        gmpublished_backend::GMAMetadata::Standard { title, .. } => (
+        gmpublished_backend::GmaMetadata::Standard { title, .. } => (
             title.clone(),
-            serde_json::to_string(&backend_metadata).expect("fixture metadata serializes"),
+            serde_json::to_string(&gma.header.metadata).expect("fixture metadata serializes"),
         ),
     };
     for field in [&title, &description, &gma.header.author] {
@@ -631,7 +527,7 @@ fn preview_archive_from_fixture(gma: FixtureGmaFile) -> Result<PreviewArchive, G
     bytes.extend_from_slice(&gma.trailer_crc32.to_le_bytes());
 
     let path = gma.path.unwrap_or_else(|| PathBuf::from("fixture.gma"));
-    let view = GmaView::from_membuffer(bytes.into(), &path);
+    let view = GmaView::from_membuffer(bytes.into());
     let bundle = view.meta(&path).map_err(|_| GmaError::FormatError)?;
     let backend = bundle.handle;
     let entries = preview_entries_from_backend(bundle.entries);

@@ -1,14 +1,14 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::bridge::domain::{PublishedFileId, WorkshopMetadata};
 use crate::bridge::tasks::{
-    SharedTaskUpdate, StatusKey, TaskId, TaskKind, TaskUpdate, WorkshopDownloadTaskKind,
+    SharedTaskUpdate, TaskId, TaskKind, TaskUpdate, TransactionStatus, WorkshopDownloadTaskKind,
 };
 use crate::bridge::ui_error::UiError;
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
-use super::super::model::{
+use super::super::jobs::{
     DownloaderEvent, JobProgress, LocalExtractionOutcome, RowId, Section, workshop_result_success,
     workshop_result_success_with_gma,
 };
@@ -120,6 +120,23 @@ fn task_started_creates_download_row_and_metadata_updates_title() {
 }
 
 #[test]
+fn task_backed_row_ids_preserve_the_full_task_id_domain() {
+    let mut state = State::default();
+    let task_id = TaskId::from_raw(u64::MAX);
+
+    let _ = state.apply_event(
+        DownloaderEvent::TaskStarted {
+            kind: WorkshopDownloadTaskKind::Download,
+            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            task_id,
+        },
+        Instant::now(),
+    );
+
+    assert_eq!(state.downloading()[0].id(), RowId::Task(task_id));
+}
+
+#[test]
 fn workshop_snapshot_tasks_never_create_downloader_rows() {
     let mut state = State::default();
     let task_id = TaskId::from_raw(70);
@@ -127,7 +144,7 @@ fn workshop_snapshot_tasks_never_create_downloader_rows() {
     for update_message in [
         TaskUpdate::Started {
             kind: TaskKind::WorkshopSnapshot,
-            status: StatusKey::new("downloading"),
+            status: TransactionStatus::Downloading,
         },
         TaskUpdate::Progress(0.5),
         TaskUpdate::Finished,
@@ -251,7 +268,7 @@ fn task_events_update_running_row_progress() {
             (task_id, SharedTaskUpdate::new(TaskUpdate::Progress(0.5))),
             (
                 task_id,
-                SharedTaskUpdate::new(TaskUpdate::Status(StatusKey::from("decompressing"))),
+                SharedTaskUpdate::new(TaskUpdate::Status(TransactionStatus::Decompressing)),
             ),
         ]),
     );
@@ -263,8 +280,36 @@ fn task_events_update_running_row_progress() {
     assert!(matches!(
         job.progress(),
         JobProgress::Running { ratio, status_key }
-            if *ratio == 0.5 && status_key == "decompressing"
+            if *ratio == 0.5 && *status_key == TransactionStatus::Decompressing
     ));
+}
+
+#[test]
+fn progress_animation_uses_the_reducer_clock() {
+    let mut state = State::default();
+    let task_id = TaskId::from_raw(1000);
+    let started_at = Instant::now();
+    let update_at = started_at + Duration::from_secs(10);
+    let _ = state.apply_event(
+        DownloaderEvent::LocalExtractionStarted {
+            path: PathBuf::from("/tmp/local/clock.gma"),
+            task_id,
+            total_bytes: 1024,
+        },
+        started_at,
+    );
+
+    assert!(state.apply_task_events(
+        vec![(task_id, SharedTaskUpdate::new(TaskUpdate::Progress(1.0)))],
+        update_at,
+    ));
+
+    let job = &state.extracting()[0];
+    assert_eq!(job.smoothed_ratio(update_at), 0.0);
+    assert_eq!(
+        job.smoothed_ratio(update_at + Duration::from_millis(250)),
+        1.0
+    );
 }
 
 #[test]
@@ -461,7 +506,7 @@ fn cancellation_for_unknown_row_emits_no_effect() {
             &mut state,
             Message::CancelRequested {
                 section: Section::Downloading,
-                row_id: RowId::new(404),
+                row_id: RowId::Synthetic(404),
             },
         )
         .is_empty()
@@ -783,7 +828,7 @@ fn open_requested_for_running_or_unknown_row_emits_no_effect() {
             &mut state,
             Message::OpenRequested {
                 section: Section::Extracting,
-                row_id: RowId::new(404),
+                row_id: RowId::Synthetic(404),
             },
         )
         .is_empty()

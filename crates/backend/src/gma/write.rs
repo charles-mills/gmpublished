@@ -1,27 +1,20 @@
-use rayon::{
-    ThreadPool,
-    iter::{IntoParallelRefIterator, ParallelIterator},
-};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::{BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
-    sync::LazyLock,
-    sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
 
+use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
-use crate::{GMAFile, transactions::Transaction, write_nt_string};
+use crate::{CpuExecutor, GmaFile, transactions::Transaction, write_nt_string};
 
-use super::{GMAError, GMAMetadata, whitelist, whitelist::AddonWhitelist};
+use super::{GmaError, GmaMetadata, whitelist, whitelist::AddonWhitelist};
 
 use super::GMA_HEADER;
-
-static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
-
 /// Small files are read in parallel batches of at most this many bytes, so
 /// peak memory stays bounded no matter how large the addon is.
 const BATCH_MAX_BYTES: u64 = 32 * 1024 * 1024;
@@ -30,50 +23,26 @@ const BATCH_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const BATCH_FILE_MAX: u64 = 8 * 1024 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 
-/// A unique path in `final_path`'s own directory, so a pack that never
-/// finishes leaves nothing at `final_path` and two packs to the same
-/// destination never share a file.
-fn unique_temp_path(final_path: &Path) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+/// Creates the file a pack is written into: a uniquely named sibling of
+/// `final_path`, so the destination only ever appears once the pack has
+/// finished and a rename onto it stays within one filesystem.
+///
+/// Exclusive creation and deletion-on-drop both come from [`NamedTempFile`],
+/// which covers every early return in [`GmaFile::create`] — an error, a panic
+/// unwind, a cancelled transaction — without a cleanup call at each exit.
+/// The name is prefixed with the destination's so a leftover from a killed
+/// process still says what it was.
+fn create_temp_file(final_path: &Path) -> Result<NamedTempFile, GmaError> {
+    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = final_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("gmpublisher");
 
-    final_path.with_file_name(format!(".{file_name}.{nanos}.{counter}.tmp"))
-}
-
-/// Deletes the temp file it guards unless [`Self::commit`] was called. Covers
-/// every early return in [`GMAFile::create`] (an error, a panic unwind, a
-/// cancelled transaction) with one mechanism instead of a cleanup call at
-/// each exit point.
-struct TempFileGuard {
-    path: PathBuf,
-    committed: bool,
-}
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            committed: false,
-        }
-    }
-
-    fn commit(mut self) {
-        self.committed = true;
-    }
-}
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    Ok(tempfile::Builder::new()
+        .prefix(&format!(".{file_name}."))
+        .suffix(".tmp")
+        .tempfile_in(parent)?)
 }
 
 /// Converts a path already relative to the source root into the
@@ -100,32 +69,30 @@ mod entry_name_tests {
     }
 }
 
-impl GMAFile {
+impl GmaFile {
     pub fn create<P: AsRef<Path>>(
         &self,
         src_path: P,
         transaction: &Transaction,
         whitelist: &AddonWhitelist,
-    ) -> Result<(), GMAError> {
-        let temp_path = unique_temp_path(&self.path);
-        let guard = TempFileGuard::new(temp_path.clone());
-        let mut f = BufWriter::new(File::create(&temp_path)?);
+        cpu: &CpuExecutor,
+    ) -> Result<(), GmaError> {
+        let temp = create_temp_file(&self.path)?;
+        let mut f = BufWriter::new(temp.as_file());
 
         let src_path = src_path.as_ref();
 
         let metadata = &self.metadata;
-        let ignore = metadata
-            .ignore()
-            .map(|ignore| ignore.clone().into_boxed_slice());
+        let ignore = metadata.ignore().map(Box::<[String]>::from);
 
         let (title, addon_json) = match metadata {
-            GMAMetadata::Legacy { title, .. } => (title.as_str(), None),
-            GMAMetadata::Standard { title, .. } => (title.as_str(), Some(metadata)),
+            GmaMetadata::Legacy { title, .. } => (title.as_str(), None),
+            GmaMetadata::Standard { title, .. } => (title.as_str(), Some(metadata)),
         };
 
         f.write_all(GMA_HEADER)?;
 
-        f.write_all(&[3])?; // gma version
+        f.write_all(&[super::GMA_VERSION])?;
 
         // steamid [unused]
         f.write_all(&0u64.to_le_bytes())?;
@@ -147,10 +114,10 @@ impl GMAFile {
         // addon description
         match addon_json {
             Some(addon_json) => {
-                write_nt_string(
-                    &mut f,
-                    serde_json::ser::to_string(addon_json).as_deref().unwrap(),
-                )?;
+                let description = serde_json::ser::to_string(addon_json).expect(
+                    "serializing the string-and-list-only standard GMA manifest cannot fail",
+                );
+                write_nt_string(&mut f, &description)?;
             }
             None => write_nt_string(&mut f, "Description")?,
         };
@@ -168,26 +135,23 @@ impl GMAFile {
             crc_offset: u64,
         }
 
-        let path_io_error = |transaction: &Transaction, path: PathBuf| {
-            transaction.error(crate::transactions::TransactionError::detailed(
-                crate::error_key::keys::PATH_IO_ERROR,
-                crate::transactions::detail_from_serialize(path),
-            ));
-            GMAError::IOError(None)
-        };
+        let path_io_error = |path: PathBuf| GmaError::PathIo { path };
 
         let mut file_list: BTreeMap<String, Pending> = BTreeMap::new();
         {
             let whitelist_snapshot = whitelist.snapshot();
 
             for entry in WalkDir::new(src_path).follow_links(false) {
+                if transaction.aborted() {
+                    return Err(GmaError::Cancelled);
+                }
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(err) => {
                         let path = err
                             .path()
                             .map_or_else(|| src_path.to_path_buf(), Path::to_path_buf);
-                        return Err(path_io_error(transaction, path));
+                        return Err(path_io_error(path));
                     }
                 };
                 if !entry.file_type().is_file() {
@@ -200,7 +164,7 @@ impl GMAFile {
                     .ok()
                     .and_then(relative_entry_name)
                 else {
-                    return Err(path_io_error(transaction, entry.into_path()));
+                    return Err(path_io_error(entry.into_path()));
                 };
 
                 if whitelist::is_whitelisted_in(&whitelist_snapshot, &relative_path) {
@@ -213,7 +177,7 @@ impl GMAFile {
                     // ignored/non-whitelisted file must not fail the create.
                     let size = match entry.metadata() {
                         Ok(metadata) => metadata.len(),
-                        Err(_) => return Err(path_io_error(transaction, entry.into_path())),
+                        Err(_) => return Err(path_io_error(entry.into_path())),
                     };
                     file_list.insert(
                         relative_path,
@@ -260,16 +224,25 @@ impl GMAFile {
 
         let mut i = 0;
         while i < file_list.len() {
+            if transaction.aborted() {
+                return Err(GmaError::Cancelled);
+            }
             let (_, pending) = &file_list[i];
 
             if pending.size > BATCH_FILE_MAX {
                 let Ok(mut reader) = File::open(&pending.path) else {
-                    return Err(path_io_error(transaction, pending.path.clone()));
+                    return Err(path_io_error(pending.path.clone()));
                 };
 
                 let mut crc32 = crc32fast::Hasher::new();
                 let mut written: u64 = 0;
                 loop {
+                    // Per chunk, not just per file: one entry over
+                    // `BATCH_FILE_MAX` can be most of the archive, and a cancel
+                    // that only lands between files would not land at all.
+                    if transaction.aborted() {
+                        return Err(GmaError::Cancelled);
+                    }
                     match reader.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(n) => {
@@ -278,11 +251,11 @@ impl GMAFile {
                             written += n as u64;
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(_) => return Err(path_io_error(transaction, pending.path.clone())),
+                        Err(_) => return Err(path_io_error(pending.path.clone())),
                     }
                 }
                 if written != pending.size {
-                    return Err(path_io_error(transaction, pending.path.clone()));
+                    return Err(path_io_error(pending.path.clone()));
                 }
 
                 crcs.push(crc32.finalize());
@@ -302,7 +275,7 @@ impl GMAFile {
                 }
 
                 let batch = &file_list[i..batch_end];
-                let results: Vec<Result<(Vec<u8>, u32), PathBuf>> = THREAD_POOL.install(|| {
+                let results: Vec<Result<(Vec<u8>, u32), PathBuf>> = cpu.install(|| {
                     batch
                         .par_iter()
                         .map(|(_, pending)| {
@@ -327,7 +300,7 @@ impl GMAFile {
                             written_files += 1.;
                             transaction.progress(written_files / total);
                         }
-                        Err(path) => return Err(path_io_error(transaction, path)),
+                        Err(path) => return Err(path_io_error(path)),
                     }
                 }
                 i = batch_end;
@@ -347,8 +320,9 @@ impl GMAFile {
         f.get_ref().sync_all()?;
         drop(f);
 
-        fs::rename(&temp_path, &self.path)?;
-        guard.commit();
+        // Renames onto the destination, and gives up its deletion-on-drop only
+        // once that has succeeded.
+        temp.persist(&self.path).map_err(|error| error.error)?;
 
         Ok(())
     }
@@ -357,6 +331,58 @@ impl GMAFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Packing is the long phase of a publish — minutes on a large addon — so
+    /// a cancel has to reach it. Without an `aborted()` check the pack runs to
+    /// completion regardless, and `transaction.progress` logs a warning per
+    /// file on the way, so the only symptom is noise in the log.
+    #[test]
+    fn cancelling_stops_the_pack_instead_of_warning_once_per_file() {
+        use crate::events::BackendEventCollector;
+        use crate::transactions::Transactions;
+        use std::sync::Arc;
+
+        let source = tempfile::tempdir().expect("tempdir");
+        for index in 0..8 {
+            std::fs::create_dir_all(source.path().join("lua/autorun")).expect("source tree");
+            std::fs::write(
+                source.path().join(format!("lua/autorun/entry_{index}.lua")),
+                vec![b'x'; 4096],
+            )
+            .expect("source entry");
+        }
+        let destination = tempfile::tempdir().expect("tempdir");
+        let gma_path = destination.path().join("cancelled.gma");
+
+        let transactions = Transactions::new(Arc::new(BackendEventCollector::default()));
+        let transaction = transactions.begin();
+        assert_eq!(
+            transaction.cancel(),
+            crate::transactions::FinalizeOutcome::Finalized
+        );
+
+        let gma = GmaFile::for_creation(
+            gma_path.clone(),
+            GmaMetadata::Legacy {
+                title: "Cancelled Addon".to_owned(),
+                description: String::new(),
+            },
+        );
+
+        assert!(matches!(
+            gma.create(
+                source.path(),
+                &transaction,
+                &AddonWhitelist::builtin_only(),
+                &crate::execution::CpuExecutor::build(2).expect("test CPU executor"),
+            ),
+            Err(GmaError::Cancelled)
+        ));
+        assert!(
+            !gma_path.exists(),
+            "a cancelled pack must leave no half-written archive"
+        );
+    }
 
     #[test]
     fn relative_entry_name_lowercases_and_uses_forward_slashes() {
@@ -376,14 +402,40 @@ mod tests {
         assert_eq!(relative_entry_name(Path::new(bad)), None);
     }
 
+    /// Two packs aimed at one destination must not share a file, and the
+    /// temp file must be a sibling of the destination so the rename that
+    /// commits it cannot cross a filesystem.
     #[test]
-    fn unique_temp_path_is_unique_and_stays_in_the_final_path_s_directory() {
-        let final_path = Path::new("/tmp/example/gmpublisher.gma");
-        let a = unique_temp_path(final_path);
-        let b = unique_temp_path(final_path);
+    fn temp_files_are_distinct_siblings_of_the_destination() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let final_path = dir.path().join("gmpublisher.gma");
 
-        assert_ne!(a, b);
-        assert_eq!(a.parent(), final_path.parent());
-        assert_eq!(b.parent(), final_path.parent());
+        let a = create_temp_file(&final_path).expect("temp file");
+        let b = create_temp_file(&final_path).expect("temp file");
+
+        assert_ne!(a.path(), b.path());
+        assert_eq!(a.path().parent(), final_path.parent());
+        assert_eq!(b.path().parent(), final_path.parent());
+        assert!(!final_path.exists(), "the destination must not appear yet");
+    }
+
+    /// The temp file is deleted on drop, so a pack that fails or is cancelled
+    /// leaves nothing behind next to the addon it was writing.
+    #[test]
+    fn an_uncommitted_temp_file_is_removed_when_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let final_path = dir.path().join("gmpublisher.gma");
+
+        let temp = create_temp_file(&final_path).expect("temp file");
+        let temp_path = temp.path().to_path_buf();
+        assert!(temp_path.exists());
+        drop(temp);
+
+        assert!(!temp_path.exists(), "{}", temp_path.display());
+        assert_eq!(
+            fs::read_dir(dir.path()).expect("read_dir").count(),
+            0,
+            "the destination directory must be left clean"
+        );
     }
 }

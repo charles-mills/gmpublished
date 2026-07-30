@@ -2,8 +2,9 @@ use crate::bridge::{
     domain::{PublishedFileId, SearchQuickRequest},
     tasks::TaskId,
 };
+use crate::generation::Generation;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     PaletteOpened,
     PaletteDismissed,
@@ -12,7 +13,7 @@ pub enum Effect {
     QuickSearchRequested(SearchQuickRequest),
     FullSearchRequested,
     MetadataRefreshRequested {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
     TaskCancellationRequested(TaskId),

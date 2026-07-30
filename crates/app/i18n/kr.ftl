@@ -42,19 +42,19 @@ gmod-broken-title = 게리모드 폴더를 찾을 수 없습니다
 gmod-broken-body = 저장된 경로에 더 이상 GarrysMod/addons가 없습니다.
 gmod-broken-research = 다시 검색
 account-update-title = 업데이트 가능
-account-update-caption = {$arg0} · 다운로드하려면 클릭
+account-update-caption = {$version} · 다운로드하려면 클릭
 my-workshop = 내 창작마당
 publish-new = 새 애드온...
 my-workshop-loading = 로딩...
 my-workshop-empty-title = 아직 게시한 애드온이 없습니다
 my-workshop-empty-body = 창작마당에 게시한 항목이 여기에 표시됩니다.
-my-workshop-error = 내 창작마당을 불러오지 못했습니다: {$arg0}
-my-workshop-count = {$arg1}개의 애드온 중 {$arg0}개를 표시
+my-workshop-error = 내 창작마당을 불러오지 못했습니다: {$error}
+my-workshop-count = {$total}개의 애드온 중 {$loaded}개를 표시
 installed-addons = 설치된 애드온
 installed-addons-loading = 로딩...
 installed-addons-empty-title = 설치된 애드온이 없습니다
 installed-addons-empty-body = 창작마당에서 항목을 구독하거나 .gma 파일을 여기에 놓으세요.
-installed-addons-error = 설치된 애드온을 찾지 못했습니다: {$arg0}
+installed-addons-error = 설치된 애드온을 찾지 못했습니다: {$error}
 downloader = 다운로더
 downloader-workshop-input = 창작마당 id나 링크, 컬렉션 링크를 여기에 넣어주세요...
 downloader-bulk-extract = GMA 대량 추출
@@ -68,8 +68,13 @@ downloader-open-all = 전부 열기
 downloader-remove-all = 전부 지우기
 downloader-status-finished = 완료
 downloader-status-error = 에러
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = 창작마당 {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-column-addon = 애드온
+downloader-column-speed = 속도
+downloader-column-total = 전체
+downloader-column-progress = 진행률
+workshop-item = 창작마당 항목
+downloader-workshop-id = 창작마당 {$id}
 destination-where-to = 어디로?
 destination-overwrite-warning = 추출한 파일은 기존 파일을 덮어씁니다.
 destination-browse = 경로...
@@ -84,76 +89,78 @@ destination-invalid-path = 존재하는 절대 경로 폴더를 선택하세요.
 relative-time-now = 방금 전
 relative-time-past-year = 1년 전
 relative-time-past-years =
-    { $arg0 ->
-       *[other] {$arg0}년 전
+    { $count ->
+       *[other] {$count}년 전
     }
 relative-time-past-month = 1개월 전
 relative-time-past-months =
-    { $arg0 ->
-       *[other] {$arg0}개월 전
+    { $count ->
+       *[other] {$count}개월 전
     }
 relative-time-past-day = 1일 전
 relative-time-past-days =
-    { $arg0 ->
-       *[other] {$arg0}일 전
+    { $count ->
+       *[other] {$count}일 전
     }
 relative-time-past-hour = 1시간 전
 relative-time-past-hours =
-    { $arg0 ->
-       *[other] {$arg0}시간 전
+    { $count ->
+       *[other] {$count}시간 전
     }
 relative-time-past-minute = 1분 전
 relative-time-past-minutes =
-    { $arg0 ->
-       *[other] {$arg0}분 전
+    { $count ->
+       *[other] {$count}분 전
     }
 relative-time-past-second = 1초 전
 relative-time-past-seconds =
-    { $arg0 ->
-       *[other] {$arg0}초 전
+    { $count ->
+       *[other] {$count}초 전
     }
 relative-time-future-year = 1년 후
 relative-time-future-years =
-    { $arg0 ->
-       *[other] {$arg0}년 후
+    { $count ->
+       *[other] {$count}년 후
     }
 relative-time-future-month = 1개월 후
 relative-time-future-months =
-    { $arg0 ->
-       *[other] {$arg0}개월 후
+    { $count ->
+       *[other] {$count}개월 후
     }
 relative-time-future-day = 1일 후
 relative-time-future-days =
-    { $arg0 ->
-       *[other] {$arg0}일 후
+    { $count ->
+       *[other] {$count}일 후
     }
 relative-time-future-hour = 1시간 후
 relative-time-future-hours =
-    { $arg0 ->
-       *[other] {$arg0}시간 후
+    { $count ->
+       *[other] {$count}시간 후
     }
 relative-time-future-minute = 1분 후
 relative-time-future-minutes =
-    { $arg0 ->
-       *[other] {$arg0}분 후
+    { $count ->
+       *[other] {$count}분 후
     }
 relative-time-future-second = 1초 후
 relative-time-future-seconds =
-    { $arg0 ->
-       *[other] {$arg0}초 후
+    { $count ->
+       *[other] {$count}초 후
     }
 downloading = 다운로드 중
 locating = 대기중
 decompressing = 추출중
-extracting_progress = 추출 {$arg0}% ({$arg1} / {$arg2})
+reading_metadata = 메타데이터 읽는 중
+searching = 검색 중...
+extracting_progress = 추출 {$percent}% ({$done} / {$total})
 size-analyzer = 애드온 크기 분석
 size-analyzer-waiting = 트리맵 화면을 기다리는 중...
 size-analyzer-loading = 연산...
 size-analyzer-empty = 용량이 있는 애드온을 찾지 못했습니다.
 size-analyzer-empty-title = 측정할 항목이 없습니다
 size-analyzer-empty-body = 라이브러리의 모든 애드온이 비어 있어 표시할 내용이 없습니다.
-size-analyzer-error = 크기 분석에 실패했습니다: {$arg0}
-size-analyzer-summary-cells = 항목 {$arg0}개
+size-analyzer-error = 크기 분석에 실패했습니다: {$error}
+size-analyzer-summary-cells = 항목 {$count}개
 size-analyzer-name = 이름
 size-analyzer-type = 타입
 size-analyzer-size = 용량
@@ -223,7 +230,7 @@ context-menu-debug-simulate-minus = -10 시뮬레이션
 context-menu-debug-simulate-plus-million = +100만 시뮬레이션
 context-menu-debug-simulate-minus-million = -100만 시뮬레이션
 publish-processing-icon = 창작마당 아이콘 처리 중...
-publish-packing = 패킹 {$arg0}% ({$arg1} / {$arg2})
+publish-packing = 패킹 {$percent}% ({$done} / {$total})
 PUBLISH_STARTING = 업로드 시작
 PUBLISH_PREPARING_CONFIG = 구성 준비...
 PUBLISH_PREPARING_CONTENT = 콘텐츠 준비...
@@ -233,7 +240,6 @@ PUBLISH_COMMITTING_CHANGES = 변경 사항 커밋
 context-menu-debug-toast-success = 알림 시뮬레이션: 성공
 context-menu-debug-toast-error = 알림 시뮬레이션: 에러
 context-menu-debug-toast-notice = 시뮬레이션된 알림
-ERR_CANCELLED = 취소됨
 err-cancelled = 취소됨
 err-whitelist = 선택한 파일 중 일부는 허용되지 않습니다.
 err-whitelist-detail =
@@ -241,10 +247,10 @@ err-whitelist-detail =
 
     GMA에서 이러한 파일 형식을 필터링하려면 파일 무시 패턴을 추가해야합니다.
 
-    {$arg0}
+    {$detail}
 err-no-entries = 이 콘텐츠 경로에 항목이 없습니다.
-err-duplicate-entries = 이 콘텐츠 경로에 중복된 항목 ({$arg0}) 이 있습니다. 모든 경로는 고유하고 소문자여야 합니다.
-err-duplicate-entries-detail = 이 콘텐츠 경로에 중복된 항목 ({$arg0}) 이 있습니다. 모든 경로는 고유하고 소문자여야 합니다.
+err-duplicate-entries = 이 콘텐츠 경로에 중복된 항목이 있습니다. 모든 경로는 고유하고 소문자여야 합니다.
+err-duplicate-entries-detail = 이 콘텐츠 경로에 중복된 항목 ({$detail}) 이 있습니다. 모든 경로는 고유하고 소문자여야 합니다.
 err-invalid-content-path = 해당 콘텐츠 경로가 없거나, gmpublished가 접근할 수 있는 권한이 부족합니다.
 err-multiple-gmas = 해당 콘텐츠 경로에서 다수의 GMA 파일을 발견하였습니다.
 err-icon-too-large = 아이콘이 너무 큽니다 (> 1 MB)
@@ -252,12 +258,37 @@ err-icon-too-small = 아이콘이 너무 작습니다. (< 16 B)
 err-icon-invalid-format = 아이콘은 JPG, PNG 또는 GIF를 지원합니다.
 err-icon-cannot-optimize = 이 아이콘을 스팀의 미리보기 용량 제한 이하로 만들지 못했습니다
 err-io-error = I/O 에러
-err-image-error = 이미지 에러: {$arg0}
-err-image-error-detail = 이미지 에러: {$arg0}
-err-steam-error = 스팀 에러: {$arg0}
-err-steam-error-detail = 스팀 에러: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/s
+err-path-io-error = 파일 시스템 작업에 실패했습니다.
+err-path-io-error-detail = 파일 시스템 작업에 실패했습니다: {$detail}
+err-gma-format-error = GMA 파일이 손상되었습니다.
+err-gma-invalid-header = GMA 헤더가 올바르지 않습니다.
+err-gma-entry-not-found = 요청한 GMA 항목을 찾을 수 없습니다.
+err-lzma = LZMA 압축 해제에 실패했습니다.
+err-gma-extraction-failed = 애드온을 완전히 압축 해제하지 못했습니다.
+err-gma-destination-unavailable = 사용 가능한 압축 해제 위치를 만들 수 없습니다.
+err-vpk-format-error = VPK 파일이 손상되었습니다.
+err-vpk-invalid-header = VPK 헤더가 올바르지 않습니다.
+err-vpk-entry-not-found = 요청한 VPK 항목을 찾을 수 없습니다.
+err-vpk-unsafe-path = VPK에 안전하지 않은 경로가 포함되어 있습니다.
+err-vpk-missing-archive = 필요한 VPK 아카이브가 없습니다.
+err-download-missing = 다운로드한 애드온 파일이 없습니다.
+err-download-failed = 애드온 다운로드에 실패했습니다.
+err-item-not-found = 창작마당 항목을 찾을 수 없습니다.
+err-search-event-sink-unavailable = 지금은 검색 결과를 전달할 수 없습니다.
+err-search-event-sink-disconnected = 검색 결과 전달이 예기치 않게 중단되었습니다.
+err-search-data-shape = 검색에서 잘못된 결과 데이터를 반환했습니다.
+err-unknown = 문제가 발생했습니다
+err-worker-queue-full = 앱이 사용 중입니다. 잠시 후 다시 시도하세요.
+err-worker-pool-stopped = 백그라운드 작업을 사용할 수 없습니다.
+err-worker-dropped = 백그라운드 작업이 예기치 않게 중단되었습니다.
+err-gmod-path-missing = 게리모드 폴더가 설정되지 않았습니다
+err-no-addons-found = 애드온을 찾을 수 없습니다
+err-image-error = 이미지 에러
+err-image-error-detail = 이미지 에러: {$detail}
+err-steam-error = 스팀 에러
+err-steam-error-detail = 스팀 에러: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/s
 byte-unit-b = B
 byte-unit-kb = KB
 byte-unit-mb = MB
@@ -291,7 +322,7 @@ file-type-txt = 텍스트
 file-type-properties = 속성
 file-type-audio = 오디오
 file-type-image = 이미지
-file-type-unknown = 알 수 없음 ({$arg0})
+file-type-unknown = 알 수 없음 ({$extension})
 file-preview-loading = 미리보기 로드 중...
 file-preview-stage-reading-archive = 아카이브 읽는 중...
 file-preview-stage-reading-bsp = BSP 읽는 중...
@@ -303,7 +334,7 @@ file-preview-expand = 미리보기 확대
 file-preview-collapse = 미리보기 축소
 file-preview-open-material = 머티리얼 열기
 file-preview-open-texture = 텍스처 열기
-file-preview-error = 미리보기 실패: {$arg0}
+file-preview-error = 미리보기 실패: {$error}
 file-preview-path = 경로
 file-preview-size = 용량
 file-preview-crc = CRC
@@ -325,7 +356,7 @@ file-preview-particle-level-approximate = 근사치 — 게임 내 모습과 다
 file-preview-particle-level-inert = 맵 또는 엔티티 필요 — 이 미리보기에서는 효과 없음
 file-preview-particle-level-unsupported = 이 미리보기에서는 시뮬레이션되지 않음
 file-preview-truncated = 미리보기가 잘렸습니다 — 전체 파일은 표시된 것보다 큽니다.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = 메시
 file-preview-model-bones = 본
 file-preview-model-sequences = 시퀀스
@@ -333,8 +364,8 @@ file-preview-model-vertices = 버텍스
 file-preview-model-triangles = 삼각형
 file-preview-model-materials = 해결된 머티리얼
 file-preview-model-skin = 스킨
-file-preview-model-skin-option = 스킨 {$arg0}
-file-preview-model-bodygroup = 바디그룹 {$arg0}
+file-preview-model-skin-option = 스킨 {$index}
+file-preview-model-bodygroup = 바디그룹 {$index}
 file-preview-model-bounds-min = 경계 최소
 file-preview-model-bounds-max = 경계 최대
 file-preview-map-controls = 드래그로 시점 이동 · WASD로 비행 · Shift로 가속 · 스크롤로 속도 조절
@@ -366,7 +397,7 @@ prepare-publish-tag-2 = 태그 2
 prepare-publish-tag-3 = 태그 3
 prepare-publish-update-exclamation = 업데이트!
 prepare-publish-publish-exclamation = 업로드!
-prepare-publish-update-warning = {$arg0} ({$arg1})에 업데이트를 하였습니다.
+prepare-publish-update-warning = {$title} ({$id})에 업데이트를 하였습니다.
 prepare-publish-still-needed = 아직 필요함:
 prepare-publish-needs-addon-path = 애드온 경로
 prepare-publish-needs-title = 제목
@@ -378,8 +409,8 @@ prepare-publish-file-browser = 파일 브라우저
 prepare-publish-browser-select = 파일을 여기에 놓던가 경로를 선택 해 주세요.
 prepare-publish-no-files = 파일을 찾지못함.
 prepare-publish-items-one = 항목 1개
-prepare-publish-items-num = 항목 {$arg0}개
-prepare-publish-items-shown = {$arg0}개 표시
+prepare-publish-items-num = 항목 {$count}개
+prepare-publish-items-shown = {$count}개 표시
 prepare-publish-ignored-patterns = 파일 무시 패턴
 prepare-publish-ignore-placeholder = 추가...
 prepare-publish-ignored-for-convenience = 이 파일 패턴은 사용자의 편의를 위해 기본적으로 무시됩니다.

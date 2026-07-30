@@ -5,6 +5,7 @@
 //! pose and control point positions round-trip through feature state so they
 //! survive expand/collapse rebuilds.
 
+use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,31 +15,32 @@ use iced::wgpu;
 use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
-use gmpublished_backend::particles::{MAX_CONTROL_POINTS, ParticleEngine, RendererKind};
+use super::orbit::{Orbit, ZoomFloor};
+use gmpublished_domain::particles::{
+    ControlPointIndex, MAX_CONTROL_POINTS, ParticleEngine, RendererKind,
+};
 
 use super::Message;
-use super::model::ParticlePreview;
 use super::state::OrbitPose;
+use super::viewer3d::SOURCE_UP;
 use super::viewer3d::{look_at, mat_mul, perspective};
 use crate::bridge::materials::ResolvedTexture;
+use crate::generation::Generation;
+use crate::media::preview_model::ParticlePreview;
 
 const SHADER_SOURCE: &str = include_str!("particles.wgsl");
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
-const ORBIT_SENSITIVITY: f32 = 0.008;
-const ZOOM_STEP: f32 = 0.9;
-const MIN_PITCH: f32 = -1.55;
-const MAX_PITCH: f32 = 1.55;
 /// Fallback frame delta when a drag needs a velocity hint.
 const DRAG_DT_HINT: f32 = 1.0 / 60.0;
 /// Gizmo colors cycle for control points 1..; CP0 is pinned and undrawn.
-const GIZMO_COLORS: [[f32; 3]; 7] = [
-    [1.0, 0.62, 0.11],
-    [0.20, 0.78, 1.0],
-    [0.86, 0.39, 1.0],
-    [0.35, 1.0, 0.55],
-    [1.0, 0.35, 0.35],
-    [1.0, 0.95, 0.4],
-    [0.55, 0.55, 1.0],
+const GIZMO_COLORS: [Vec3; 7] = [
+    Vec3::new(1.0, 0.62, 0.11),
+    Vec3::new(0.20, 0.78, 1.0),
+    Vec3::new(0.86, 0.39, 1.0),
+    Vec3::new(0.35, 1.0, 0.55),
+    Vec3::new(1.0, 0.35, 0.35),
+    Vec3::new(1.0, 0.95, 0.4),
+    Vec3::new(0.55, 0.55, 1.0),
 ];
 
 pub(super) struct ParticleViewer {
@@ -49,9 +51,9 @@ pub(super) struct ParticleViewer {
     pub(super) playing: bool,
     pub(super) speed: f32,
     /// Bumped by the restart button; the widget replays from t=0.
-    pub(super) restart_epoch: u64,
+    pub(super) restart_epoch: Generation,
     pub(super) pose: Option<OrbitPose>,
-    pub(super) control_points: [[f32; 3]; MAX_CONTROL_POINTS],
+    pub(super) control_points: [Vec3; MAX_CONTROL_POINTS],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,33 +62,28 @@ enum Drag {
     /// Dragging a control point gizmo in the camera-facing plane through
     /// its position at grab time.
     Gizmo {
-        index: usize,
+        index: ControlPointIndex,
     },
 }
 
 pub(super) struct SimState {
     key: Option<(u64, usize)>,
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    orbit: Orbit,
     drag: Option<Drag>,
     engine: Option<ParticleEngine>,
     last_frame: Option<Instant>,
-    restart_epoch: u64,
+    restart_epoch: Generation,
 }
 
 impl Default for SimState {
     fn default() -> Self {
-        let pose = OrbitPose::default();
         Self {
             key: None,
-            yaw: pose.yaw,
-            pitch: pose.pitch,
-            distance: pose.distance,
+            orbit: Orbit::new(ZoomFloor::ParticleCloud),
             drag: None,
             engine: None,
             last_frame: None,
-            restart_epoch: 0,
+            restart_epoch: Generation::INITIAL,
         }
     }
 }
@@ -102,16 +99,14 @@ impl SimState {
                 // Content-derived seed keeps replays identical per file.
                 viewer.content_id ^ (viewer.system_index as u64).wrapping_mul(0x9E37),
             );
-            let pose = viewer.pose.unwrap_or_default();
-            self.yaw = pose.yaw;
-            self.pitch = pose.pitch;
-            self.distance = pose.distance;
+            self.orbit =
+                Orbit::from_pose(viewer.pose.unwrap_or_default(), ZoomFloor::ParticleCloud);
             self.drag = None;
             self.last_frame = None;
             self.restart_epoch = viewer.restart_epoch;
             if let Some(engine) = self.engine.as_mut() {
-                for (index, position) in viewer.control_points.iter().enumerate() {
-                    engine.set_control_point(index, *position);
+                for (index, position) in ControlPointIndex::all().zip(viewer.control_points) {
+                    engine.set_control_point(index, position);
                 }
             }
             return;
@@ -131,7 +126,7 @@ impl SimState {
             _ => None,
         };
         if let Some(engine) = self.engine.as_mut() {
-            for (index, position) in viewer.control_points.iter().enumerate() {
+            for (index, position) in ControlPointIndex::all().zip(viewer.control_points) {
                 if Some(index) == dragging {
                     continue;
                 }
@@ -142,63 +137,26 @@ impl SimState {
                     position[2] - current[2],
                 ];
                 if delta.iter().any(|component| component.abs() > 1e-3) {
-                    engine.drag_control_point(index, *position, DRAG_DT_HINT);
+                    engine.drag_control_point(index, position, DRAG_DT_HINT);
                 }
             }
         }
     }
 
     fn pose(&self) -> OrbitPose {
-        OrbitPose {
-            yaw: self.yaw,
-            pitch: self.pitch,
-            distance: self.distance,
-        }
+        self.orbit.pose()
     }
 }
 
 // --- Camera --------------------------------------------------------------
 
 struct CameraFrame {
-    eye: [f32; 3],
-    right: [f32; 3],
-    up: [f32; 3],
-    forward: [f32; 3],
+    eye: Vec3,
+    right: Vec3,
+    up: Vec3,
+    forward: Vec3,
     view_proj: [[f32; 4]; 4],
     aspect: f32,
-}
-
-fn v_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn v_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn v_scale(a: [f32; 3], s: f32) -> [f32; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
-fn v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn v_cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn v_length(a: [f32; 3]) -> f32 {
-    v_dot(a, a).sqrt()
-}
-
-fn v_normalize(a: [f32; 3]) -> [f32; 3] {
-    let len = v_length(a).max(1e-6);
-    v_scale(a, 1.0 / len)
 }
 
 fn srgb_to_linear(value: f32) -> f32 {
@@ -214,22 +172,22 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
         .engine
         .as_ref()
         .map_or(64.0, ParticleEngine::bounding_radius);
-    let center = [0.0, 0.0, 0.0];
-    let distance = radius * 2.2 * state.distance;
+    let center = Vec3::new(0.0, 0.0, 0.0);
+    let distance = radius * 2.2 * state.orbit.distance();
     let eye = [
-        center[0] + distance * state.pitch.cos() * state.yaw.sin(),
-        center[1] + distance * state.pitch.cos() * state.yaw.cos(),
-        center[2] + distance * state.pitch.sin(),
+        center[0] + distance * state.orbit.pitch().cos() * state.orbit.yaw().sin(),
+        center[1] + distance * state.orbit.pitch().cos() * state.orbit.yaw().cos(),
+        center[2] + distance * state.orbit.pitch().sin(),
     ];
     // Source is Z-up.
-    let forward = v_normalize(v_sub(center, eye));
-    let right = v_normalize(v_cross(forward, [0.0, 0.0, 1.0]));
-    let up = v_cross(right, forward);
-    let view = look_at(eye, center, [0.0, 0.0, 1.0]);
+    let forward = (center - Vec3::from(eye)).normalize_or_zero();
+    let right = forward.cross(SOURCE_UP).normalize_or_zero();
+    let up = right.cross(forward);
+    let view = look_at(Vec3::from(eye), center, SOURCE_UP);
     let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
     let proj = perspective(FOV_Y, aspect, radius * 0.01, radius * 20.0 + distance);
     CameraFrame {
-        eye,
+        eye: Vec3::from(eye),
         right,
         up,
         forward,
@@ -239,56 +197,60 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
 }
 
 /// World-space ray through a cursor position inside `bounds`.
-fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> [f32; 3] {
+fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> Vec3 {
     let ndc_x = ((cursor.x - bounds.x) / bounds.width.max(1.0)) * 2.0 - 1.0;
     let ndc_y = 1.0 - ((cursor.y - bounds.y) / bounds.height.max(1.0)) * 2.0;
     let tan_half = (FOV_Y * 0.5).tan();
-    v_normalize(v_add(
-        frame.forward,
-        v_add(
-            v_scale(frame.right, ndc_x * tan_half * frame.aspect),
-            v_scale(frame.up, ndc_y * tan_half),
-        ),
-    ))
+    (frame.forward
+        + frame.right * (ndc_x * tan_half * frame.aspect)
+        + frame.up * (ndc_y * tan_half))
+        .normalize_or_zero()
 }
 
 /// Intersects a cursor ray with the camera-facing plane through `anchor`.
-fn drag_plane_position(frame: &CameraFrame, ray: [f32; 3], anchor: [f32; 3]) -> Option<[f32; 3]> {
-    let denominator = v_dot(ray, frame.forward);
+fn drag_plane_position(frame: &CameraFrame, ray: Vec3, anchor: Vec3) -> Option<Vec3> {
+    let denominator = ray.dot(frame.forward);
     if denominator.abs() < 1e-4 {
         return None;
     }
-    let t = v_dot(v_sub(anchor, frame.eye), frame.forward) / denominator;
-    (t > 0.0).then(|| v_add(frame.eye, v_scale(ray, t)))
+    let t = (anchor - frame.eye).dot(frame.forward) / denominator;
+    (t > 0.0).then(|| frame.eye + ray * t)
 }
 
-fn gizmo_pick_radius(frame: &CameraFrame, position: [f32; 3]) -> f32 {
-    v_length(v_sub(position, frame.eye)) * 0.035
+fn gizmo_pick_radius(frame: &CameraFrame, position: Vec3) -> f32 {
+    position.distance(frame.eye) * 0.035
 }
 
 impl ParticleViewer {
     /// Draggable control points: 1..=highest referenced. CP0 stays pinned at
     /// the viewport centre so the effect cannot be dragged off-origin.
-    fn gizmo_indices(&self, state: &SimState) -> std::ops::RangeInclusive<usize> {
+    fn gizmo_indices(&self, state: &SimState) -> impl Iterator<Item = ControlPointIndex> {
         let highest = state
             .engine
             .as_ref()
             .map_or(0, ParticleEngine::highest_control_point);
-        1..=highest.min(MAX_CONTROL_POINTS - 1)
+        ControlPointIndex::all()
+            .skip(1)
+            .take(highest.min(MAX_CONTROL_POINTS - 1))
     }
 
-    fn pick_gizmo(&self, state: &SimState, frame: &CameraFrame, ray: [f32; 3]) -> Option<usize> {
+    fn pick_gizmo(
+        &self,
+        state: &SimState,
+        frame: &CameraFrame,
+        ray: Vec3,
+    ) -> Option<ControlPointIndex> {
         let engine = state.engine.as_ref()?;
-        let mut best: Option<(usize, f32)> = None;
+        let mut best: Option<(ControlPointIndex, f32)> = None;
         for index in self.gizmo_indices(state) {
             let position = engine.control_point(index);
-            let to_point = v_sub(position, frame.eye);
-            let along = v_dot(to_point, ray);
+            let to_point = position - frame.eye;
+            let along = to_point.dot(ray);
             if along <= 0.0 {
                 continue;
             }
-            let closest = v_add(frame.eye, v_scale(ray, along));
-            let miss = v_length(v_sub(position, closest));
+            let closest = frame.eye + ray * along;
+            let miss = position.distance(closest);
             if miss <= gizmo_pick_radius(frame, position)
                 && best.is_none_or(|(_, distance)| along < distance)
             {
@@ -325,9 +287,7 @@ impl shader::Program<Message> for ParticleViewer {
             Event::Mouse(mouse::Event::CursorMoved { .. }) => match state.drag? {
                 Drag::Orbit(from) => {
                     let to = cursor.position()?;
-                    state.yaw += (to.x - from.x) * ORBIT_SENSITIVITY;
-                    state.pitch = (state.pitch + (to.y - from.y) * ORBIT_SENSITIVITY)
-                        .clamp(MIN_PITCH, MAX_PITCH);
+                    state.orbit.drag(to.x - from.x, to.y - from.y);
                     state.drag = Some(Drag::Orbit(to));
                     Some(Action::publish(Message::OrbitPoseChanged(state.pose())).and_capture())
                 }
@@ -354,7 +314,7 @@ impl shader::Program<Message> for ParticleViewer {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
                 };
-                state.distance = (state.distance * ZOOM_STEP.powf(steps)).clamp(0.05, 8.0);
+                state.orbit.zoom(steps);
                 Some(Action::publish(Message::OrbitPoseChanged(state.pose())).and_capture())
             }
             Event::Window(iced::window::Event::RedrawRequested(now)) => {
@@ -409,8 +369,8 @@ impl shader::Program<Message> for ParticleViewer {
                     // Painter's order: no depth buffer, so translucents sort
                     // back-to-front along the view direction.
                     list.sort_by(|a, b| {
-                        let da = v_dot(v_sub(a.position(), frame.eye), frame.forward);
-                        let db = v_dot(v_sub(b.position(), frame.eye), frame.forward);
+                        let da = (a.position() - frame.eye).dot(frame.forward);
+                        let db = (b.position() - frame.eye).dot(frame.forward);
                         db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     translucent.push((slot, list));
@@ -429,7 +389,7 @@ impl shader::Program<Message> for ParticleViewer {
             let mut gizmos = Vec::new();
             for index in self.gizmo_indices(state) {
                 let position = engine.control_point(index);
-                let color = GIZMO_COLORS[(index - 1) % GIZMO_COLORS.len()];
+                let color = GIZMO_COLORS[(index.get() - 1) % GIZMO_COLORS.len()];
                 let size = gizmo_pick_radius(&frame, position) * 0.5;
                 gizmos.push(GpuInstance {
                     position_rotation: [
@@ -479,8 +439,8 @@ impl shader::Program<Message> for ParticleViewer {
 }
 
 fn build_instances(
-    system: &gmpublished_backend::particles::CompiledSystem,
-    particles: gmpublished_backend::particles::RenderParticles<'_>,
+    system: &gmpublished_domain::particles::CompiledSystem,
+    particles: gmpublished_domain::particles::RenderParticles<'_>,
     frame: &CameraFrame,
     sheet: Option<&vformats::vtf::SpriteSheet>,
 ) -> Vec<GpuInstance> {
@@ -497,17 +457,17 @@ fn build_instances(
         }
         RendererKind::SpriteTrail => {
             for particle in particles {
-                let speed = v_length(particle.velocity);
+                let speed = particle.velocity.length();
                 let length = (speed * particle.trail_length)
                     .clamp(renderer.trail_min_length, renderer.trail_max_length)
                     .max(particle.radius);
                 let axis = if speed > 1e-3 {
-                    v_normalize(particle.velocity)
+                    particle.velocity.normalize_or_zero()
                 } else {
                     frame.up
                 };
                 let half_length = length * 0.5;
-                let center = v_sub(particle.position, v_scale(axis, half_length));
+                let center = particle.position - axis * half_length;
                 list.push(GpuInstance {
                     position_rotation: [center[0], center[1], center[2], 0.0],
                     axis_mode: [axis[0], axis[1], axis[2], 1.0],
@@ -522,13 +482,13 @@ fn build_instances(
             ordered.sort_by_key(|particle| particle.spawn_index);
             for pair in ordered.windows(2) {
                 let (a, b) = (&pair[0], &pair[1]);
-                let span = v_sub(b.position, a.position);
-                let length = v_length(span);
+                let span = b.position - a.position;
+                let length = span.length();
                 if length < 1e-3 {
                     continue;
                 }
-                let center = v_scale(v_add(a.position, b.position), 0.5);
-                let axis = v_scale(span, 1.0 / length);
+                let center = (a.position + b.position) * 0.5;
+                let axis = span * (1.0 / length);
                 let mut color = GpuInstance::linear_color(a);
                 let color_b = GpuInstance::linear_color(b);
                 for (target, other) in color.iter_mut().zip(color_b) {
@@ -592,15 +552,15 @@ struct GpuInstance {
 }
 
 impl GpuInstance {
-    fn position(&self) -> [f32; 3] {
-        [
+    fn position(&self) -> Vec3 {
+        Vec3::new(
             self.position_rotation[0],
             self.position_rotation[1],
             self.position_rotation[2],
-        ]
+        )
     }
 
-    fn linear_color(particle: &gmpublished_backend::particles::RenderParticle) -> [f32; 4] {
+    fn linear_color(particle: &gmpublished_domain::particles::RenderParticle) -> [f32; 4] {
         [
             srgb_to_linear(particle.color[0]),
             srgb_to_linear(particle.color[1]),
@@ -610,7 +570,7 @@ impl GpuInstance {
     }
 
     fn billboard(
-        particle: &gmpublished_backend::particles::RenderParticle,
+        particle: &gmpublished_domain::particles::RenderParticle,
         uv_rect: [f32; 4],
     ) -> Self {
         Self {
@@ -636,8 +596,8 @@ impl GpuInstance {
 /// Atlas rect (as offset+scale) for a particle's current animation frame.
 fn sheet_uv_rect(
     sheet: Option<&vformats::vtf::SpriteSheet>,
-    renderer: &gmpublished_backend::particles::RendererInfo,
-    particle: &gmpublished_backend::particles::RenderParticle,
+    renderer: &gmpublished_domain::particles::RendererInfo,
+    particle: &gmpublished_domain::particles::RenderParticle,
 ) -> [f32; 4] {
     let Some(sequence) = sheet.and_then(|sheet| sheet.sequence(particle.sequence)) else {
         return FULL_UV_RECT;
@@ -654,7 +614,7 @@ fn sheet_uv_rect(
     [uv[0], uv[1], uv[2] - uv[0], uv[3] - uv[1]]
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct DrawBatch {
     /// Index into [`ParticlePreview::materials`]; `None` = white fallback.
     texture_slot: Option<usize>,

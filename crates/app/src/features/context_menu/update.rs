@@ -4,8 +4,7 @@ use iced::{Event, Subscription, event, keyboard};
 
 use super::{Effect, Message, State};
 
-pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
-    let now = Instant::now();
+pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
     match message {
         Message::OpenRequested(request) => {
             state.open_request(request, now);
@@ -20,6 +19,11 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             vec![Effect::Dismissed]
         }
     }
+}
+
+#[cfg(test)]
+fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    update_at(state, message, Instant::now())
 }
 
 pub fn subscription(state: &State) -> Subscription<Message> {
@@ -54,8 +58,20 @@ mod tests {
 
     use super::*;
     use crate::features::context_menu::{
-        ContextMenuAction, Entry, OpenRequest, Owner, accepts_pointer_input,
+        ContextMenuAction, ContextMenuTarget, Entry, LocalMenuTarget, OpenRequest,
+        accepts_pointer_input,
     };
+    use std::path::PathBuf;
+
+    fn target() -> ContextMenuTarget {
+        ContextMenuTarget::Local(LocalMenuTarget {
+            path: PathBuf::from("/tmp/addon.gma"),
+            path_text: "/tmp/addon.gma".to_owned(),
+            workshop_id: None,
+            workshop_url: None,
+            preview_url: None,
+        })
+    }
 
     /// Requested entries plus the debug-only toast simulators appended to
     /// every menu (a separator and three actions).
@@ -74,15 +90,14 @@ mod tests {
         let _effects = update(
             &mut state,
             Message::OpenRequested(OpenRequest::new(
-                Owner::InstalledAddons,
                 Point::new(14.0, 28.0),
                 vec![Entry::copy_path()],
+                target(),
             )),
         );
 
         assert!(state.open());
         assert!(state.visible());
-        assert_eq!(state.owner(), Some(Owner::InstalledAddons));
         assert_eq!(state.position(), Point::new(14.0, 28.0));
         assert_eq!(state.entries().len(), expected_len(1));
     }
@@ -93,9 +108,9 @@ mod tests {
         let _effects = update(
             &mut state,
             Message::OpenRequested(OpenRequest::new(
-                Owner::MyWorkshop,
                 Point::ORIGIN,
                 vec![Entry::copy_path()],
+                target(),
             )),
         );
 
@@ -106,6 +121,10 @@ mod tests {
 
         assert!(!state.open());
         assert!(state.visible());
+        // The entries remain mounted for the fade, but the action target is
+        // one-shot so a queued second click cannot dispatch it twice.
+        assert!(state.take_target().is_some());
+        assert!(state.take_target().is_none());
         assert!(!accepts_pointer_input(&state));
         assert_eq!(state.entries().len(), expected_len(1));
     }
@@ -115,7 +134,7 @@ mod tests {
         let mut state = State::default();
         let now = std::time::Instant::now();
         state.open_request(
-            OpenRequest::new(Owner::MyWorkshop, Point::ORIGIN, vec![Entry::copy_path()]),
+            OpenRequest::new(Point::ORIGIN, vec![Entry::copy_path()], target()),
             now,
         );
 
@@ -123,6 +142,7 @@ mod tests {
         assert!(state.tick(now + std::time::Duration::from_millis(300)));
 
         assert!(!state.visible());
+        assert!(state.target().is_none());
         assert!(state.entries().is_empty());
     }
 
@@ -131,7 +151,7 @@ mod tests {
         let mut state = State::default();
         let now = std::time::Instant::now();
         state.open_request(
-            OpenRequest::new(Owner::MyWorkshop, Point::ORIGIN, vec![Entry::copy_path()]),
+            OpenRequest::new(Point::ORIGIN, vec![Entry::copy_path()], target()),
             now,
         );
         assert!(state.needs_ticks());

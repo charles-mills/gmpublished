@@ -1,14 +1,14 @@
-use crate::{GMAFile, WorkshopItem};
+use crate::{GmaFile, WorkshopItem};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug)]
 pub enum Addon {
-    Installed(GMAFile),
+    Installed(GmaFile),
     Workshop(WorkshopItem),
 }
 
 impl Addon {
     #[inline(always)]
-    pub fn installed(&self) -> Option<&GMAFile> {
+    pub fn installed(&self) -> Option<&GmaFile> {
         match self {
             Self::Installed(addon) => Some(addon),
             Self::Workshop(_) => None,
@@ -16,8 +16,8 @@ impl Addon {
     }
 }
 
-impl From<GMAFile> for Addon {
-    fn from(installed: GMAFile) -> Self {
+impl From<GmaFile> for Addon {
+    fn from(installed: GmaFile) -> Self {
         Self::Installed(installed)
     }
 }

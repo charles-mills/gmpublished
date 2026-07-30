@@ -126,33 +126,29 @@ fn menu_row<'a>(
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    if entry.separator_row() {
+    let Entry::Item {
+        label_key,
+        action,
+        icon,
+    } = *entry
+    else {
         return separator(&tokens, opacity);
-    }
+    };
 
-    let icon: Element<'_, Message> = entry.icon().map_or_else(
-        || {
-            Space::new()
-                .width(Length::Fixed(tokens.dims.icon_size))
-                .into()
-        },
-        |icon| {
-            // The renderer ignores the tint color's alpha for svgs, so the
-            // fade has to go through the widget's own opacity.
-            svg(icon_handle(icon))
-                .width(Length::Fixed(tokens.dims.icon_size))
-                .height(Length::Fixed(tokens.dims.icon_size))
-                .style(move |_, _| svg::Style {
-                    color: Some(Color::from(tokens.colors.text)),
-                })
-                .opacity(opacity)
-                .into()
-        },
-    );
+    // The renderer ignores the tint color's alpha for svgs, so the fade has to
+    // go through the widget's own opacity.
+    let icon: Element<'_, Message> = svg(icon_handle(icon))
+        .width(Length::Fixed(tokens.dims.icon_size))
+        .height(Length::Fixed(tokens.dims.icon_size))
+        .style(move |_, _| svg::Style {
+            color: Some(Color::from(tokens.colors.text)),
+        })
+        .opacity(opacity)
+        .into();
 
     let content = row![
         icon,
-        text(i18n.tr(entry.label_key()))
+        text(i18n.tr(label_key))
             .font(assets::fonts::default_font())
             .size(tokens.typography.body)
             .color(Color::from(tokens.colors.text).scale_alpha(opacity))
@@ -166,12 +162,7 @@ fn menu_row<'a>(
     .align_y(Alignment::Center);
 
     button(content)
-        .on_press_maybe(
-            interactive
-                .then_some(entry.action())
-                .flatten()
-                .map(Message::ActionSelected),
-        )
+        .on_press_maybe(interactive.then_some(Message::ActionSelected(action)))
         .width(Length::Fill)
         .height(Length::Fixed(tokens.dims.context_menu_row_height))
         .padding([0.0, tokens.dims.context_menu_padding_x])
@@ -235,7 +226,7 @@ fn context_menu_style(tokens: &Tokens, opacity: f32) -> container::Style {
             Color::from(tokens.colors.menu_bg).scale_alpha(opacity),
         )),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -266,8 +257,10 @@ fn menu_width(entries: &[Entry], ctx: ViewCtx<'_>, viewport_size: Size) -> f32 {
     let i18n = ctx.i18n;
     let content_width = entries
         .iter()
-        .filter(|entry| !entry.separator_row())
-        .map(|entry| menu_row_width(&i18n.tr(entry.label_key()), &tokens))
+        .filter_map(|entry| match entry {
+            Entry::Separator => None,
+            Entry::Item { label_key, .. } => Some(menu_row_width(&i18n.tr(label_key), &tokens)),
+        })
         .fold(MENU_MIN_WIDTH, f32::max);
 
     if viewport_size.width > 0.0 {
@@ -290,12 +283,9 @@ fn menu_height(entries: &[Entry], tokens: &Tokens, viewport_size: Size) -> f32 {
 fn menu_content_height(entries: &[Entry], tokens: &Tokens) -> f32 {
     entries
         .iter()
-        .map(|entry| {
-            if entry.separator_row() {
-                SEPARATOR_HEIGHT
-            } else {
-                tokens.dims.context_menu_row_height
-            }
+        .map(|entry| match entry {
+            Entry::Separator => SEPARATOR_HEIGHT,
+            Entry::Item { .. } => tokens.dims.context_menu_row_height,
         })
         .sum::<f32>()
 }

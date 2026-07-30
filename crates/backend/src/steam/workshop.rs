@@ -1,12 +1,24 @@
-use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, sync::mpsc};
+use std::{
+    collections::HashSet,
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
-use steamworks::{PublishedFileId, QueryResult, QueryResults, SteamError, SteamId};
+use steamworks::{QueryResult, QueryResults, SteamError, SteamId};
 
-use super::{Steam, users::SteamUser};
+use crate::WorkshopId;
 
-use crate::{GMOD_APP_ID, search::Search};
+use super::{CALLBACK_RESULT_TIMEOUT, ConnectedSteam, Steam, users::SteamUser};
+
+use crate::util::main_thread_forbidden;
+use crate::{STEAM_GMOD_APP_ID, search::Search};
 
 type WorkshopChunkQueryResult = Result<Vec<WorkshopItem>, WorkshopQueryError>;
+const WORKSHOP_DEDUP_LOCK_TIMEOUT: Duration = Duration::from_millis(51);
+const BACKGROUND_CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DescriptionLength {
@@ -20,9 +32,12 @@ impl DescriptionLength {
     }
 }
 
+/// Deliberately has no `Eq`/`Ord`: the ordering this type invites is browse
+/// chronology, which as an `Eq` makes two snapshots of one item compare
+/// unequal. Presentation order belongs at the call site that wants it.
 #[derive(Clone, Debug)]
 pub struct WorkshopItem {
-    pub id: PublishedFileId,
+    pub id: WorkshopId,
     pub title: String,
     pub owner: Option<SteamUser>,
     pub time_created: u32,
@@ -44,10 +59,14 @@ pub struct WorkshopPage {
     pub items: Vec<WorkshopItem>,
 }
 
-impl From<QueryResult> for WorkshopItem {
-    fn from(result: QueryResult) -> Self {
-        Self {
-            id: result.published_file_id,
+/// Steam supplies the id, so it is external input: a zero names no item and
+/// there is nothing this side could do with the rest of the row.
+impl TryFrom<QueryResult> for WorkshopItem {
+    type Error = crate::workshop_id::ZeroWorkshopId;
+
+    fn try_from(result: QueryResult) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: WorkshopId::try_from(result.published_file_id)?,
             title: result.title.clone(),
             steamid: Some(result.owner),
             owner: None,
@@ -60,14 +79,14 @@ impl From<QueryResult> for WorkshopItem {
             subscriptions: 0,
             local_file: None,
             dead: false,
-        }
+        })
     }
 }
-impl From<PublishedFileId> for WorkshopItem {
-    fn from(id: PublishedFileId) -> Self {
+impl From<WorkshopId> for WorkshopItem {
+    fn from(id: WorkshopId) -> Self {
         Self {
             id,
-            title: id.0.to_string(),
+            title: id.get().to_string(),
             steamid: None,
             owner: None,
             time_created: 0,
@@ -82,41 +101,18 @@ impl From<PublishedFileId> for WorkshopItem {
         }
     }
 }
-impl WorkshopItem {
-    fn sort_key(&self) -> (u32, PublishedFileId) {
-        let effective_timestamp = if self.time_created != 0 {
-            self.time_created
-        } else {
-            self.time_updated
-        };
-        (effective_timestamp, self.id)
-    }
-}
-impl PartialEq for WorkshopItem {
-    fn eq(&self, other: &Self) -> bool {
-        self.sort_key() == other.sort_key()
-    }
-}
-impl Eq for WorkshopItem {}
-impl PartialOrd for WorkshopItem {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for WorkshopItem {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.sort_key().cmp(&other.sort_key())
-    }
-}
-
-fn enrich_workshop_item(item: QueryResult, index: u32, results: &QueryResults<'_>) -> WorkshopItem {
-    let mut item: WorkshopItem = item.into();
+/// `None` when Steam's row names no item, which leaves nothing to enrich.
+fn enrich_workshop_item(
+    item: QueryResult,
+    index: u32,
+    results: &QueryResults<'_>,
+) -> Option<WorkshopItem> {
+    let mut item = WorkshopItem::try_from(item).ok()?;
     item.preview_url = results.preview_url(index);
     item.subscriptions = results
         .statistic(index, steamworks::UGCStatisticType::Subscriptions)
         .unwrap_or(0);
-    item
+    Some(item)
 }
 
 fn format_steam_query_error(error: &str, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -129,8 +125,14 @@ fn format_steam_query_error(error: &str, formatter: &mut fmt::Formatter<'_>) -> 
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorkshopQueryError {
-    #[error("ERR_STEAM_ERROR:QUERY_CREATE_FAILED")]
+    #[error("could not create a Workshop query")]
     QueryCreateFailed,
+    /// steamworks never delivered a result for the query — it dropped the
+    /// callback without invoking it, or held it past the callback-result
+    /// timeout. Distinct from [`Self::Steam`], which is a
+    /// result Steam did return.
+    #[error("Steam did not answer the Workshop query")]
+    Abandoned,
     #[error(fmt = format_steam_query_error)]
     Steam(String),
 }
@@ -143,13 +145,19 @@ impl crate::error_key::HasErrorKey for WorkshopQueryError {
     fn error_detail(&self) -> Option<String> {
         match self {
             Self::QueryCreateFailed => Some("QUERY_CREATE_FAILED".to_owned()),
+            Self::Abandoned => Some("CALLBACK_ABANDONED".to_owned()),
             Self::Steam(error) => Some(error.clone()),
         }
     }
 }
 
 impl Steam {
-    pub fn workshop_fetcher(steam: &Arc<Self>, search: &Arc<Search>) {
+    pub(super) fn workshop_fetcher(
+        steam: &Arc<Self>,
+        search: &Arc<Search>,
+        client: steamworks::Client,
+        shutdown: &crate::signal::Signal,
+    ) {
         loop {
             let rx = steam.workshop_queue_rx.lock();
             let Ok(mut queue) = rx.recv() else {
@@ -161,6 +169,15 @@ impl Steam {
             }
             drop(rx);
 
+            // The background runtime pushes an empty batch purely to unblock the
+            // `recv` above — this thread parks there with no timeout, and the
+            // sender lives on the `Steam` its own `Arc` clone keeps alive, so
+            // the channel never disconnects on its own. Anything still queued
+            // at this point is abandoned.
+            if shutdown.is_set() {
+                return;
+            }
+
             while !queue.is_empty() {
                 let chunk_len = super::RESULTS_PER_PAGE.min(queue.len());
                 let chunk = queue.drain(..chunk_len).collect::<Vec<_>>();
@@ -169,10 +186,10 @@ impl Steam {
 
                 search.reserve(chunk.len());
 
-                let client = steam
-                    .client()
-                    .expect("workshop_fetcher only runs after Steam has connected");
-                if let Ok(query) = client.ugc().query_items(chunk) {
+                if let Ok(query) = client
+                    .ugc()
+                    .query_items(chunk.into_iter().map(Into::into).collect())
+                {
                     let steam_for_callback = Arc::clone(steam);
                     let search_for_callback = Arc::clone(search);
                     query.allow_cached_response(600).fetch(
@@ -182,7 +199,7 @@ impl Steam {
                                     .iter()
                                     .enumerate()
                                     .filter_map(|(i, item)| {
-                                        item.map(|item| {
+                                        item.and_then(|item| {
                                             enrich_workshop_item(item, i as u32, &results)
                                         })
                                     })
@@ -213,136 +230,38 @@ impl Steam {
                     let _ = done_tx.send(());
                 }
 
-                let _ = done_rx.recv();
+                if !wait_for_background_callback(&done_rx, shutdown) {
+                    return;
+                }
             }
         }
     }
 
-    pub fn fetch_workshop_items(&self, ids: Vec<PublishedFileId>) {
+    pub(super) fn wake_workshop_fetcher(&self) {
+        let _ = self.workshop_queue_tx.send(Vec::new());
+    }
+
+    /// Runs `use_cache` against the set of Workshop ids the metadata fetcher
+    /// already knows, or against `None` if the cache is busy.
+    ///
+    /// Bounded rather than blocking: both callers are on a download path, and
+    /// `None` ("assume nothing is known") only costs a wider Steam query.
+    ///
+    /// `use_cache` runs under the fetcher's lock — keep it O(ids), no I/O.
+    pub(crate) fn with_known_workshop_items<R>(
+        &self,
+        use_cache: impl FnOnce(Option<&HashSet<WorkshopId>>) -> R,
+    ) -> R {
+        let cache = self
+            .workshop_dedup
+            .try_lock_for(WORKSHOP_DEDUP_LOCK_TIMEOUT);
+        use_cache(cache.as_deref())
+    }
+
+    pub fn fetch_workshop_items(&self, ids: Vec<WorkshopId>) {
         let ids = filter_new_workshop_ids(&mut self.workshop_dedup.lock(), ids);
         if !ids.is_empty() {
             let _ = self.workshop_queue_tx.send(ids);
-        }
-    }
-
-    pub fn query_workshop_items(
-        &self,
-        ids: &[PublishedFileId],
-    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
-        self.query_workshop_items_with_description(ids, DescriptionLength::Summary)
-    }
-
-    pub fn query_workshop_item_details(
-        &self,
-        id: PublishedFileId,
-    ) -> Result<WorkshopItem, WorkshopQueryError> {
-        self.query_workshop_items_with_description(&[id], DescriptionLength::Full)
-            .map(|mut items| items.pop().unwrap_or_else(|| WorkshopItem::from(id)))
-    }
-
-    fn query_workshop_items_with_description(
-        &self,
-        ids: &[PublishedFileId],
-        description_length: DescriptionLength,
-    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
-        main_thread_forbidden!();
-
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let chunks = workshop_item_id_chunks(ids);
-        let chunk_count = chunks.len();
-        let (result_tx, result_rx) = mpsc::channel();
-
-        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-            self.register_workshop_items_chunk_query(
-                chunk_index,
-                chunk,
-                description_length,
-                result_tx.clone(),
-            );
-        }
-        drop(result_tx);
-
-        let mut chunk_results: Vec<Option<WorkshopChunkQueryResult>> = vec![None; chunk_count];
-        for _ in 0..chunk_count {
-            let (chunk_index, result) = result_rx
-                .recv()
-                .expect("all workshop query chunks should be complete");
-            chunk_results[chunk_index] = Some(result);
-        }
-        let chunk_results = chunk_results
-            .into_iter()
-            .map(|result| result.expect("all workshop query chunks should be complete"))
-            .collect();
-
-        combine_workshop_chunk_results(chunk_results, ids.len())
-    }
-
-    /// Same concurrent chunk queries as [`Self::query_workshop_items`], but
-    /// hands each chunk to `on_chunk` the moment it lands instead of joining
-    /// all chunks first, so callers hydrate on-screen rows after a single
-    /// round trip. A failed chunk is logged and skipped (its ids stay stale);
-    /// the call only errors when every chunk failed.
-    pub fn query_workshop_items_streaming(
-        &self,
-        ids: &[PublishedFileId],
-        on_chunk: impl FnMut(Vec<WorkshopItem>),
-    ) -> Result<(), WorkshopQueryError> {
-        main_thread_forbidden!();
-
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let chunks = workshop_item_id_chunks(ids);
-        let chunk_count = chunks.len();
-        let (result_tx, result_rx) = mpsc::channel();
-
-        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-            self.register_workshop_items_chunk_query(
-                chunk_index,
-                chunk,
-                DescriptionLength::Summary,
-                result_tx.clone(),
-            );
-        }
-        drop(result_tx);
-
-        drain_workshop_chunk_results(&result_rx, chunk_count, on_chunk)
-    }
-
-    fn register_workshop_items_chunk_query(
-        &self,
-        chunk_index: usize,
-        ids: Vec<PublishedFileId>,
-        description_length: DescriptionLength,
-        result_tx: mpsc::Sender<(usize, WorkshopChunkQueryResult)>,
-    ) {
-        let query = self
-            .client()
-            .expect("reached only through app-layer entry points that already checked steam_connected()")
-            .ugc()
-            .query_items(ids.clone());
-
-        match query {
-            Ok(query) => {
-                let query = if description_length.returns_full_description() {
-                    query.set_return_long_description(true)
-                } else {
-                    query
-                };
-                query.allow_cached_response(600).fetch(
-                    move |results: Result<QueryResults<'_>, SteamError>| {
-                        let _ = result_tx
-                            .send((chunk_index, query_results_to_workshop_items(&ids, results)));
-                    },
-                );
-            }
-            Err(_) => {
-                let _ = result_tx.send((chunk_index, Err(WorkshopQueryError::QueryCreateFailed)));
-            }
         }
     }
 
@@ -369,13 +288,14 @@ impl Steam {
 
         let client = self.client().ok()?;
         client
+            .client()
             .ugc()
             .query_user(
                 client.steam_id.account_id(),
                 user_list,
                 steamworks::UGCType::ItemsReadyToUse,
                 user_list_order,
-                steamworks::AppIDs::ConsumerAppId(GMOD_APP_ID),
+                steamworks::AppIDs::ConsumerAppId(STEAM_GMOD_APP_ID),
                 page,
             )
             .ok()?
@@ -393,7 +313,7 @@ impl Steam {
                                 );
                                 return None;
                             };
-                            let item = enrich_workshop_item(x, i as u32, &data);
+                            let item = enrich_workshop_item(x, i as u32, &data)?;
                             if let Some(search) = &index_into {
                                 search.add(&item);
                             }
@@ -404,29 +324,46 @@ impl Steam {
                 let _ = tx.send(page);
             });
 
-        rx.recv().ok().flatten()
+        rx.recv_timeout(CALLBACK_RESULT_TIMEOUT).ok().flatten()
     }
 }
 
-pub fn fetch_workshop_items(steam: &Steam, items: Vec<PublishedFileId>) {
-    steam.fetch_workshop_items(items);
+/// Waits for the metadata callback without making runtime shutdown pay the
+/// callback's full deadline. `false` means shutdown won the race.
+fn wait_for_background_callback(
+    done: &mpsc::Receiver<()>,
+    shutdown: &crate::signal::Signal,
+) -> bool {
+    let deadline = Instant::now() + CALLBACK_RESULT_TIMEOUT;
+    loop {
+        if shutdown.is_set() {
+            return false;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return true;
+        };
+        match done.recv_timeout(remaining.min(BACKGROUND_CALLBACK_POLL_INTERVAL)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return true,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
-fn workshop_item_id_chunks(ids: &[PublishedFileId]) -> Vec<Vec<PublishedFileId>> {
+fn workshop_item_id_chunks(ids: &[WorkshopId]) -> Vec<Vec<WorkshopId>> {
     ids.chunks(super::RESULTS_PER_PAGE.max(1))
-        .map(<[PublishedFileId]>::to_vec)
+        .map(<[WorkshopId]>::to_vec)
         .collect()
 }
 
 fn filter_new_workshop_ids(
-    cache: &mut HashSet<PublishedFileId>,
-    ids: Vec<PublishedFileId>,
-) -> Vec<PublishedFileId> {
+    cache: &mut HashSet<WorkshopId>,
+    ids: Vec<WorkshopId>,
+) -> Vec<WorkshopId> {
     ids.into_iter().filter(|id| cache.insert(*id)).collect()
 }
 
 fn query_results_to_workshop_items(
-    ids: &[PublishedFileId],
+    ids: &[WorkshopId],
     results: Result<QueryResults<'_>, SteamError>,
 ) -> WorkshopChunkQueryResult {
     results
@@ -435,10 +372,10 @@ fn query_results_to_workshop_items(
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    item.map_or_else(
-                        || WorkshopItem::from(ids[i]),
-                        |item| enrich_workshop_item(item, i as u32, &results),
-                    )
+                    // A row Steam omitted, and one whose id names no item,
+                    // both leave the requested id with nothing but itself.
+                    item.and_then(|item| enrich_workshop_item(item, i as u32, &results))
+                        .unwrap_or_else(|| WorkshopItem::from(ids[i]))
                 })
                 .collect()
         })
@@ -472,6 +409,23 @@ fn combine_workshop_chunk_results(
     Err(last_error.unwrap_or(WorkshopQueryError::QueryCreateFailed))
 }
 
+/// Waits for one chunk result, giving up at `deadline`.
+///
+/// `None` covers a dropped sender and an expired deadline alike: steamworks
+/// owns the callback's lifetime, so a result that never arrives is a failed
+/// query, not a broken invariant.
+///
+/// One deadline spans a whole fan-out — the chunks are concurrent, so a
+/// per-`recv` budget would multiply by the chunk count.
+fn recv_chunk_by(
+    results: &mpsc::Receiver<(usize, WorkshopChunkQueryResult)>,
+    deadline: Instant,
+) -> Option<(usize, WorkshopChunkQueryResult)> {
+    results
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+}
+
 /// Drains chunk query results as they arrive, handing each successful chunk
 /// to `on_chunk` immediately for incremental hydration. A failed chunk is
 /// logged and skipped so its ids stay stale for a later refresh; the call
@@ -479,15 +433,18 @@ fn combine_workshop_chunk_results(
 fn drain_workshop_chunk_results(
     results: &mpsc::Receiver<(usize, WorkshopChunkQueryResult)>,
     chunk_count: usize,
+    deadline: Instant,
     mut on_chunk: impl FnMut(Vec<WorkshopItem>),
 ) -> Result<(), WorkshopQueryError> {
     let mut any_chunk_succeeded = false;
     let mut last_error = None;
 
     for _ in 0..chunk_count {
-        let (_chunk_index, result) = results
-            .recv()
-            .expect("all workshop query chunks should be complete");
+        let Some((_chunk_index, result)) = recv_chunk_by(results, deadline) else {
+            log::warn!("Steam abandoned a workshop metadata chunk query; leaving its ids stale");
+            last_error = Some(WorkshopQueryError::Abandoned);
+            break;
+        };
         match result {
             Ok(items) => {
                 any_chunk_succeeded = true;
@@ -507,58 +464,184 @@ fn drain_workshop_chunk_results(
     }
 }
 
-pub fn query_workshop_items(
-    steam: &Steam,
-    ids: Vec<u64>,
-) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
+impl ConnectedSteam<'_> {
+    pub fn query_workshop_items(
+        &self,
+        ids: &[WorkshopId],
+    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
+        self.query_workshop_items_with_description(ids, DescriptionLength::Summary)
     }
 
-    let ids: Vec<PublishedFileId> = ids.into_iter().map(PublishedFileId).collect();
-    steam.query_workshop_items(&ids)
+    pub fn query_workshop_item_details(
+        &self,
+        id: WorkshopId,
+    ) -> Result<WorkshopItem, WorkshopQueryError> {
+        self.query_workshop_items_with_description(&[id], DescriptionLength::Full)
+            .map(|mut items| items.pop().unwrap_or_else(|| WorkshopItem::from(id)))
+    }
+
+    fn query_workshop_items_with_description(
+        &self,
+        ids: &[WorkshopId],
+        description_length: DescriptionLength,
+    ) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
+        main_thread_forbidden!();
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let chunks = workshop_item_id_chunks(ids);
+        let chunk_count = chunks.len();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+            self.register_workshop_items_chunk_query(
+                chunk_index,
+                chunk,
+                description_length,
+                result_tx.clone(),
+            );
+        }
+        drop(result_tx);
+
+        let deadline = Instant::now() + CALLBACK_RESULT_TIMEOUT;
+        let mut chunk_results: Vec<Option<WorkshopChunkQueryResult>> = vec![None; chunk_count];
+        for _ in 0..chunk_count {
+            let Some((chunk_index, result)) = recv_chunk_by(&result_rx, deadline) else {
+                break;
+            };
+            chunk_results[chunk_index] = Some(result);
+        }
+        let chunk_results = chunk_results
+            .into_iter()
+            .map(|result| result.unwrap_or(Err(WorkshopQueryError::Abandoned)))
+            .collect();
+
+        combine_workshop_chunk_results(chunk_results, ids.len())
+    }
+
+    /// Same concurrent chunk queries as [`Self::query_workshop_items`], but
+    /// hands each chunk to `on_chunk` the moment it lands instead of joining
+    /// all chunks first, so callers hydrate on-screen rows after a single
+    /// round trip. A failed chunk is logged and skipped (its ids stay stale);
+    /// the call only errors when every chunk failed.
+    pub fn query_workshop_items_streaming(
+        &self,
+        ids: &[WorkshopId],
+        on_chunk: impl FnMut(Vec<WorkshopItem>),
+    ) -> Result<(), WorkshopQueryError> {
+        main_thread_forbidden!();
+
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let chunks = workshop_item_id_chunks(ids);
+        let chunk_count = chunks.len();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+            self.register_workshop_items_chunk_query(
+                chunk_index,
+                chunk,
+                DescriptionLength::Summary,
+                result_tx.clone(),
+            );
+        }
+        drop(result_tx);
+
+        drain_workshop_chunk_results(
+            &result_rx,
+            chunk_count,
+            Instant::now() + CALLBACK_RESULT_TIMEOUT,
+            on_chunk,
+        )
+    }
+
+    fn register_workshop_items_chunk_query(
+        &self,
+        chunk_index: usize,
+        ids: Vec<WorkshopId>,
+        description_length: DescriptionLength,
+        result_tx: mpsc::Sender<(usize, WorkshopChunkQueryResult)>,
+    ) {
+        let query = self
+            .interface
+            .client()
+            .ugc()
+            .query_items(ids.iter().copied().map(Into::into).collect());
+
+        match query {
+            Ok(query) => {
+                let query = if description_length.returns_full_description() {
+                    query.set_return_long_description(true)
+                } else {
+                    query
+                };
+                query.allow_cached_response(600).fetch(
+                    move |results: Result<QueryResults<'_>, SteamError>| {
+                        let _ = result_tx
+                            .send((chunk_index, query_results_to_workshop_items(&ids, results)));
+                    },
+                );
+            }
+            Err(_) => {
+                let _ = result_tx.send((chunk_index, Err(WorkshopQueryError::QueryCreateFailed)));
+            }
+        }
+    }
+}
+
+pub fn query_workshop_items(
+    steam: ConnectedSteam<'_>,
+    ids: &[WorkshopId],
+) -> Result<Vec<WorkshopItem>, WorkshopQueryError> {
+    steam.query_workshop_items(ids)
 }
 
 pub fn query_workshop_item_details(
-    steam: &Steam,
-    id: u64,
+    steam: ConnectedSteam<'_>,
+    id: WorkshopId,
 ) -> Result<WorkshopItem, WorkshopQueryError> {
-    steam.query_workshop_item_details(PublishedFileId(id))
+    steam.query_workshop_item_details(id)
 }
 
 pub fn query_workshop_items_streaming(
-    steam: &Steam,
-    ids: Vec<u64>,
+    steam: ConnectedSteam<'_>,
+    ids: &[WorkshopId],
     on_chunk: impl FnMut(Vec<WorkshopItem>),
 ) -> Result<(), WorkshopQueryError> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-
-    let ids: Vec<PublishedFileId> = ids.into_iter().map(PublishedFileId).collect();
-    steam.query_workshop_items_streaming(&ids, on_chunk)
+    steam.query_workshop_items_streaming(ids, on_chunk)
 }
 
-pub fn browse_my_workshop_page(
+pub(crate) fn browse_my_workshop_page(
     steam: &Steam,
     search: &Arc<Search>,
     page: u32,
 ) -> Option<WorkshopPage> {
     steam.client_wait(super::CLIENT_WAIT_DEFAULT_TIMEOUT).ok()?;
-    rayon::scope(|_| steam.browse_my_workshop_page(page, search))
+    steam.browse_my_workshop_page(page, search)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::workshop_id::workshop_id;
+
     use std::collections::HashSet;
 
-    use steamworks::PublishedFileId;
-
     use super::{
-        DescriptionLength, WorkshopItem, WorkshopQueryError, combine_workshop_chunk_results,
-        drain_workshop_chunk_results, filter_new_workshop_ids, query_workshop_items,
-        workshop_item_id_chunks,
+        DescriptionLength, Instant, WorkshopChunkQueryResult, WorkshopItem, WorkshopQueryError,
+        combine_workshop_chunk_results, drain_workshop_chunk_results, filter_new_workshop_ids,
+        wait_for_background_callback, workshop_item_id_chunks,
     };
+
+    /// Every drain in these tests is fed a channel that is already closed or
+    /// already full, so nothing waits — the deadline only has to be in the
+    /// future, not realistic.
+    fn deadline() -> Instant {
+        Instant::now() + super::CALLBACK_RESULT_TIMEOUT
+    }
 
     #[test]
     fn detail_queries_request_full_descriptions() {
@@ -567,21 +650,39 @@ mod tests {
     }
 
     #[test]
-    fn query_workshop_items_empty_is_noop_without_steam() {
-        let steam = super::Steam::new(crate::transactions::Transactions::new(
-            std::sync::Arc::new(crate::events::NullEventSink),
-            false,
+    fn background_callback_wait_yields_immediately_to_shutdown() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let shutdown = crate::signal::Signal::new();
+        shutdown.set();
+
+        assert!(!wait_for_background_callback(&rx, &shutdown));
+    }
+
+    #[test]
+    fn background_callback_wait_accepts_a_delivered_result() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(()).unwrap();
+
+        assert!(wait_for_background_callback(
+            &rx,
+            &crate::signal::Signal::new()
         ));
-        assert_eq!(
-            query_workshop_items(&steam, Vec::new()).unwrap(),
-            Vec::new()
-        );
+    }
+
+    /// An empty id list must reach steamworks zero times.
+    ///
+    /// `query_workshop_items_with_description` short-circuits before chunking,
+    /// so this pins the chunker itself: were that guard removed, an empty list
+    /// still yields no chunks and therefore no `query_items` call.
+    #[test]
+    fn empty_id_list_produces_no_query_chunks() {
+        assert!(workshop_item_id_chunks(&[]).is_empty());
     }
 
     #[test]
     fn workshop_item_id_chunks_split_at_steamworks_page_cap() {
-        let ids = (0..super::super::RESULTS_PER_PAGE * 2 + 3)
-            .map(|id| PublishedFileId(id as u64))
+        let ids = (1..=super::super::RESULTS_PER_PAGE * 2 + 3)
+            .map(|id| workshop_id(id as u64))
             .collect::<Vec<_>>();
 
         let chunks = workshop_item_id_chunks(&ids);
@@ -590,49 +691,49 @@ mod tests {
         assert_eq!(chunks[0].len(), super::super::RESULTS_PER_PAGE);
         assert_eq!(chunks[1].len(), super::super::RESULTS_PER_PAGE);
         assert_eq!(chunks[2].len(), 3);
-        assert_eq!(chunks[0][0], PublishedFileId(0));
+        assert_eq!(chunks[0][0], workshop_id(1));
         assert_eq!(
             chunks[2][2],
-            PublishedFileId((super::super::RESULTS_PER_PAGE * 2 + 2) as u64)
+            workshop_id((super::super::RESULTS_PER_PAGE * 2 + 3) as u64)
         );
     }
 
     #[test]
     fn filter_new_workshop_ids_preserves_order_and_rejects_known_ids() {
-        let mut cache = HashSet::from([PublishedFileId(2), PublishedFileId(4)]);
+        let mut cache = HashSet::from([workshop_id(2), workshop_id(4)]);
 
         let filtered = filter_new_workshop_ids(
             &mut cache,
             vec![
-                PublishedFileId(1),
-                PublishedFileId(2),
-                PublishedFileId(3),
-                PublishedFileId(1),
-                PublishedFileId(4),
-                PublishedFileId(5),
+                workshop_id(1),
+                workshop_id(2),
+                workshop_id(3),
+                workshop_id(1),
+                workshop_id(4),
+                workshop_id(5),
             ],
         );
 
         assert_eq!(
             filtered,
-            vec![PublishedFileId(1), PublishedFileId(3), PublishedFileId(5)]
+            vec![workshop_id(1), workshop_id(3), workshop_id(5)]
         );
-        assert!(cache.contains(&PublishedFileId(1)));
-        assert!(cache.contains(&PublishedFileId(2)));
-        assert!(cache.contains(&PublishedFileId(3)));
-        assert!(cache.contains(&PublishedFileId(4)));
-        assert!(cache.contains(&PublishedFileId(5)));
+        assert!(cache.contains(&workshop_id(1)));
+        assert!(cache.contains(&workshop_id(2)));
+        assert!(cache.contains(&workshop_id(3)));
+        assert!(cache.contains(&workshop_id(4)));
+        assert!(cache.contains(&workshop_id(5)));
     }
 
     #[test]
     fn workshop_chunk_results_keep_ordered_partial_successes_and_last_error() {
         let items = combine_workshop_chunk_results(
             vec![
-                Ok(vec![WorkshopItem::from(PublishedFileId(10))]),
+                Ok(vec![WorkshopItem::from(workshop_id(10))]),
                 Err(WorkshopQueryError::Steam("first".to_owned())),
                 Ok(vec![
-                    WorkshopItem::from(PublishedFileId(20)),
-                    WorkshopItem::from(PublishedFileId(21)),
+                    WorkshopItem::from(workshop_id(20)),
+                    WorkshopItem::from(workshop_id(21)),
                 ]),
             ],
             3,
@@ -643,12 +744,8 @@ mod tests {
             items
                 .into_iter()
                 .map(|item| item.id)
-                .collect::<Vec<PublishedFileId>>(),
-            vec![
-                PublishedFileId(10),
-                PublishedFileId(20),
-                PublishedFileId(21)
-            ]
+                .collect::<Vec<crate::WorkshopId>>(),
+            vec![workshop_id(10), workshop_id(20), workshop_id(21)]
         );
 
         let error = combine_workshop_chunk_results(
@@ -668,22 +765,22 @@ mod tests {
         use std::sync::mpsc;
 
         let (tx, rx) = mpsc::channel();
-        tx.send((0, Ok(vec![WorkshopItem::from(PublishedFileId(10))])))
+        tx.send((0, Ok(vec![WorkshopItem::from(workshop_id(10))])))
             .unwrap();
         tx.send((1, Err(WorkshopQueryError::Steam("boom".to_owned()))))
             .unwrap();
         tx.send((
             2,
             Ok(vec![
-                WorkshopItem::from(PublishedFileId(20)),
-                WorkshopItem::from(PublishedFileId(21)),
+                WorkshopItem::from(workshop_id(20)),
+                WorkshopItem::from(workshop_id(21)),
             ]),
         ))
         .unwrap();
         drop(tx);
 
-        let mut delivered: Vec<Vec<PublishedFileId>> = Vec::new();
-        drain_workshop_chunk_results(&rx, 3, |chunk| {
+        let mut delivered: Vec<Vec<crate::WorkshopId>> = Vec::new();
+        drain_workshop_chunk_results(&rx, 3, deadline(), |chunk: Vec<WorkshopItem>| {
             delivered.push(chunk.into_iter().map(|item| item.id).collect());
         })
         .expect("a partially successful query is not an error");
@@ -693,8 +790,8 @@ mod tests {
         assert_eq!(
             delivered,
             vec![
-                vec![PublishedFileId(10)],
-                vec![PublishedFileId(20), PublishedFileId(21)],
+                vec![workshop_id(10)],
+                vec![workshop_id(20), workshop_id(21)],
             ]
         );
     }
@@ -710,11 +807,38 @@ mod tests {
             .unwrap();
         drop(tx);
 
-        let error = drain_workshop_chunk_results(&rx, 2, |_| {
+        let error = drain_workshop_chunk_results(&rx, 2, deadline(), |_| {
             panic!("no chunk should be delivered when all fail")
         })
         .expect_err("all failed chunks should surface the last failure");
 
         assert_eq!(error, WorkshopQueryError::Steam("last".to_owned()));
+    }
+
+    /// steamworks may drop a query's callback without ever invoking it, so a
+    /// chunk that never reports is an outcome the drain has to survive rather
+    /// than an invariant it can rely on.
+    #[test]
+    fn a_chunk_steam_never_answers_is_an_error_rather_than_a_panic() {
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel();
+        tx.send((0, Ok(vec![WorkshopItem::from(workshop_id(10))])))
+            .unwrap();
+        drop(tx);
+
+        let mut delivered = 0;
+        drain_workshop_chunk_results(&rx, 2, deadline(), |_| delivered += 1)
+            .expect("the chunk that did answer still counts as a success");
+        assert_eq!(delivered, 1);
+
+        let (tx, rx) = mpsc::channel::<(usize, WorkshopChunkQueryResult)>();
+        drop(tx);
+        let error = drain_workshop_chunk_results(&rx, 1, deadline(), |_| {
+            panic!("no chunk should be delivered when Steam answers none")
+        })
+        .expect_err("a query Steam never answered is a failed query");
+
+        assert_eq!(error, WorkshopQueryError::Abandoned);
     }
 }

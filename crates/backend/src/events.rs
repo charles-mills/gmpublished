@@ -1,9 +1,36 @@
+use std::fmt;
 use std::path::PathBuf;
 
-use steamworks::PublishedFileId;
+use crate::WorkshopId;
 
 use crate::appdata::AppDataSnapshot;
-pub use crate::transactions::{TransactionError, TransactionPayload};
+pub(crate) use crate::transactions::{
+    TransactionError, TransactionId, TransactionPayload, TransactionStatus,
+};
+
+/// Correlates the download/extraction pair used to stage one Workshop item
+/// for publishing. It is deliberately distinct from transaction ids and
+/// Workshop ids even though all three happen to fit in `u64`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkshopSnapshotId(u64);
+
+impl WorkshopSnapshotId {
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for WorkshopSnapshotId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
@@ -25,47 +52,47 @@ pub enum BackendEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadStartedEvent {
-    pub transaction_id: u32,
-    pub request_id: Option<u64>,
+    pub transaction_id: TransactionId,
+    pub request_id: Option<WorkshopSnapshotId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtractionStartedEvent {
-    pub transaction_id: u32,
+    pub transaction_id: TransactionId,
     pub source_path: Option<PathBuf>,
     pub file_name: Option<String>,
-    pub workshop_id: Option<PublishedFileId>,
-    pub request_id: Option<u64>,
+    pub workshop_id: Option<WorkshopId>,
+    pub request_id: Option<WorkshopSnapshotId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionEvent {
     Finished {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Error {
-        id: u32,
+        id: TransactionId,
         error: TransactionError,
     },
     Data {
-        id: u32,
+        id: TransactionId,
         payload: TransactionPayload,
     },
     Status {
-        id: u32,
-        status: String,
+        id: TransactionId,
+        status: TransactionStatus,
     },
     Progress {
-        id: u32,
+        id: TransactionId,
         progress: u16,
     },
     IncrProgress {
-        id: u32,
+        id: TransactionId,
         incr: u16,
     },
     ResetProgress {
-        id: u32,
+        id: TransactionId,
     },
 }
 
@@ -96,13 +123,17 @@ impl BackendEventSink for NullEventSink {
 }
 
 /// A `BackendEventSink` that records every event it receives, in order.
-/// Not test-gated: downstream crates (the app's own test suite) use it as a
-/// generic testing utility too, not just this crate's unit tests.
+///
+/// Behind `test-support` rather than `cfg(test)`, because the app crate's own
+/// test suite uses it too — a `cfg(test)` item is invisible to a downstream
+/// crate, and this needs to reach one.
+#[cfg(feature = "test-support")]
 #[derive(Clone, Default)]
 pub struct BackendEventCollector {
     events: std::sync::Arc<parking_lot::Mutex<Vec<BackendEvent>>>,
 }
 
+#[cfg(feature = "test-support")]
 impl BackendEventCollector {
     #[must_use]
     pub fn snapshot(&self) -> Vec<BackendEvent> {
@@ -114,6 +145,7 @@ impl BackendEventCollector {
     }
 }
 
+#[cfg(feature = "test-support")]
 impl BackendEventSink for BackendEventCollector {
     fn emit(&self, event: BackendEvent) {
         self.events.lock().push(event);
@@ -130,8 +162,8 @@ mod tests {
         let root = std::env::temp_dir().join("gmpublished-backend-event-test");
         AppDataSnapshot {
             settings: Settings::default(),
+            settings_revision: 0,
             version: "test",
-            open_count: 0,
             paths: AppDataPathsSnapshot {
                 settings_file: root.join("settings.json"),
                 default_user_data_dir: root.join("default-user-data"),

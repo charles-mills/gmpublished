@@ -1,13 +1,31 @@
 use std::{collections::HashSet, fmt, num::NonZeroU64, path::PathBuf, sync::Arc};
 
+use serde::{Deserialize, Serialize};
+
 use super::{gma::GmaMeta, tasks::TaskId};
 
 pub const WORKSHOP_LEGAL_URL: &str = "https://steamcommunity.com/workshop/workshoplegalagreement";
 
 /// Zero is never a valid Steam Workshop id (the backend already treats it
 /// as "no id"); the inner `NonZeroU64` makes that invariant unrepresentable.
+///
+/// The UI-side spelling of [`gmpublished_backend::WorkshopId`], which carries
+/// the same invariant — so crossing the bridge is a total conversion in both
+/// directions and neither side has to assert anything about the other.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PublishedFileId(NonZeroU64);
+
+impl From<gmpublished_backend::WorkshopId> for PublishedFileId {
+    fn from(id: gmpublished_backend::WorkshopId) -> Self {
+        Self(id.get_nonzero())
+    }
+}
+
+impl From<PublishedFileId> for gmpublished_backend::WorkshopId {
+    fn from(id: PublishedFileId) -> Self {
+        Self::from(id.0)
+    }
+}
 
 impl PublishedFileId {
     pub(crate) fn new(id: u64) -> Option<Self> {
@@ -17,9 +35,39 @@ impl PublishedFileId {
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
     }
+
+    /// A literal workshop id in a test. Panics on zero, which is a broken
+    /// fixture rather than a runtime condition — stated once so the fixtures
+    /// do not each carry their own wording for it.
+    #[cfg(test)]
+    pub(crate) fn fixture(id: u64) -> Self {
+        Self::new(id).expect("a fixture workshop id must be nonzero")
+    }
 }
 
 impl fmt::Display for PublishedFileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// A Steam account id. Mirrors `steamworks::SteamId` on this side of the
+/// bridge so the app does not depend on the steamworks crate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct SteamId(u64);
+
+impl SteamId {
+    pub(crate) const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for SteamId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
@@ -48,7 +96,7 @@ impl AvatarRgba {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteamUser {
-    pub(crate) steamid: u64,
+    pub(crate) steamid: SteamId,
     pub(crate) name: String,
     pub(crate) avatar: Option<AvatarRgba>,
     pub(crate) dead: bool,
@@ -59,7 +107,7 @@ pub struct WorkshopItem {
     pub(crate) id: PublishedFileId,
     pub(crate) title: String,
     pub(crate) owner: Option<SteamUser>,
-    pub(crate) steamid: Option<u64>,
+    pub(crate) steamid: Option<SteamId>,
     pub(crate) time_created: u32,
     pub(crate) time_updated: u32,
     pub(crate) description: Option<String>,
@@ -117,7 +165,7 @@ pub struct WorkshopMetadata {
     /// Present only after the single-item detail query requested the full
     /// Workshop description. `Some("")` is a known-empty description.
     pub(crate) full_description: Option<String>,
-    pub(crate) owner_steamid: Option<u64>,
+    pub(crate) owner_steamid: Option<SteamId>,
     /// ThumbHash of the preview image, computed locally the first time it is
     /// decoded (Steam never supplies it). Persisted so placeholders paint on
     /// the next launch.
@@ -214,7 +262,6 @@ impl SearchGeneration {
 pub enum SearchMode {
     #[default]
     Addons,
-    #[cfg_attr(not(feature = "asset-studio"), allow(dead_code))]
     Files,
 }
 
@@ -251,20 +298,14 @@ impl SearchRequestKey {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SearchQuickCarry {
-    index_epoch: u64,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchQuickRequest {
     key: SearchRequestKey,
-    carry: SearchQuickCarry,
 }
 
 impl SearchQuickRequest {
-    pub(crate) fn new(key: SearchRequestKey, carry: SearchQuickCarry) -> Self {
-        Self { key, carry }
+    pub(crate) const fn new(key: SearchRequestKey) -> Self {
+        Self { key }
     }
 
     pub(crate) const fn key(&self) -> &SearchRequestKey {
@@ -282,10 +323,6 @@ impl SearchQuickRequest {
     pub(crate) const fn mode(&self) -> SearchMode {
         self.key.mode()
     }
-
-    pub(crate) const fn carry(&self) -> &SearchQuickCarry {
-        &self.carry
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,21 +330,14 @@ pub struct SearchQuickBatch {
     key: SearchRequestKey,
     hits: Vec<SearchHit>,
     has_more: bool,
-    carry: SearchQuickCarry,
 }
 
 impl SearchQuickBatch {
-    pub(crate) fn new(
-        key: SearchRequestKey,
-        hits: Vec<SearchHit>,
-        has_more: bool,
-        carry: SearchQuickCarry,
-    ) -> Self {
+    pub(crate) fn new(key: SearchRequestKey, hits: Vec<SearchHit>, has_more: bool) -> Self {
         Self {
             key,
             hits,
             has_more,
-            carry,
         }
     }
 
@@ -372,32 +402,20 @@ impl SearchFullRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SearchFullHits {
-    Owned(Vec<SearchHit>),
-}
+pub struct SearchFullHits(Vec<SearchHit>);
 
 impl SearchFullHits {
-    pub(crate) fn len(&self) -> usize {
-        match self {
-            Self::Owned(hits) => hits.len(),
-        }
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.0.is_empty()
     }
 
     pub(crate) fn map_rows<R>(&self, mut map: impl FnMut(u32, &SearchItem) -> R) -> Vec<R> {
-        match self {
-            Self::Owned(hits) => hits.iter().map(|hit| map(hit.score, &hit.item)).collect(),
-        }
+        self.0.iter().map(|hit| map(hit.score, &hit.item)).collect()
     }
 
     #[cfg(test)]
     pub(crate) fn to_hits(&self) -> Vec<SearchHit> {
-        match self {
-            Self::Owned(hits) => hits.clone(),
-        }
+        self.0.clone()
     }
 }
 
@@ -420,7 +438,7 @@ impl SearchFullBatch {
             key,
             task_id,
             sequence,
-            hits: SearchFullHits::Owned(hits),
+            hits: SearchFullHits(hits),
         }
     }
 
@@ -473,7 +491,7 @@ pub struct SearchFullStart {
     pub(crate) cancel_task: Option<TaskId>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchSession {
     generation: SearchGeneration,
     latest_mode: SearchMode,
@@ -482,18 +500,9 @@ pub struct SearchSession {
     has_more: bool,
     active_full_task: Option<TaskId>,
     full_replace_pending: bool,
-    quick_carry: SearchQuickCarry,
 }
 
 impl SearchSession {
-    pub(crate) const fn generation(&self) -> SearchGeneration {
-        self.generation
-    }
-
-    pub(crate) fn query(&self) -> &str {
-        &self.latest_query
-    }
-
     pub(crate) const fn loading(&self) -> bool {
         self.loading
     }
@@ -504,10 +513,6 @@ impl SearchSession {
 
     pub(crate) const fn active_full_task(&self) -> Option<TaskId> {
         self.active_full_task
-    }
-
-    pub(crate) const fn full_replace_pending(&self) -> bool {
-        self.full_replace_pending
     }
 
     pub(crate) fn begin_query(&mut self, input: &str, mode: SearchMode) -> SearchQueryChange {
@@ -529,10 +534,7 @@ impl SearchSession {
         self.has_more = false;
 
         SearchQueryChange {
-            quick_request: Some(SearchQuickRequest::new(
-                self.current_key(),
-                self.quick_carry.clone(),
-            )),
+            quick_request: Some(SearchQuickRequest::new(self.current_key())),
             cancel_task,
         }
     }
@@ -559,7 +561,6 @@ impl SearchSession {
         self.active_full_task = None;
         self.full_replace_pending = false;
         self.has_more = batch.has_more;
-        self.quick_carry = batch.carry;
 
         Some(SearchAcceptedQuickBatch {
             hits: batch.hits,
@@ -668,7 +669,6 @@ impl SearchSession {
         self.has_more = false;
         self.active_full_task = None;
         self.full_replace_pending = false;
-        self.quick_carry = SearchQuickCarry::default();
     }
 
     fn is_current_key(&self, key: &SearchRequestKey) -> bool {
@@ -771,7 +771,7 @@ pub mod workshop_url {
     const WORKSHOP_ITEM_URL_PREFIX: &str =
         "https://steamcommunity.com/sharedfiles/filedetails/?id=";
 
-    #[derive(Debug, Clone, Eq, PartialEq, Error)]
+    #[derive(Clone, Debug, Eq, Error, PartialEq)]
     pub enum ParseWorkshopIdsError {
         #[error("invalid Workshop id token `{0}`")]
         InvalidToken(String),
@@ -801,10 +801,6 @@ pub mod workshop_url {
             let Some(id) = parse_workshop_id(token) else {
                 return Err(ParseWorkshopIdsError::InvalidToken(token.to_owned()));
             };
-
-            if id.get() == 0 {
-                return Err(ParseWorkshopIdsError::InvalidToken(token.to_owned()));
-            }
 
             if seen.insert(id) {
                 ids.push(id);

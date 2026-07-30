@@ -1,6 +1,7 @@
+use crate::i18n::Arg;
 use iced::widget::{
     Space, button, column, container, image, mouse_area, opaque, pane_grid, row, scrollable,
-    sensor, stack, svg, text,
+    sensor, stack, text,
 };
 use iced::{Center, Color, Element, Length, Size};
 
@@ -14,6 +15,7 @@ use crate::{
         bbcode,
         download_count_icon::download_count_icon,
         file_browser::{self, Row as FileBrowserRowData, RowKind as FileBrowserEntryKind},
+        icon::svg_icon as icon,
         spinner::spinner,
         split_pane,
         star_rating::star_rating,
@@ -26,7 +28,6 @@ use super::details::{AuthorDisplay, Details, MetadataRow, MetadataValue, Relativ
 use super::update::{browser_rows_scrollable_id, nav_path_scrollable_id};
 use super::{Message, State};
 
-const TOOLTIP_MAX_WIDTH: f32 = 280.0;
 const AVATAR_SIZE: f32 = 24.0;
 const DEAD_GLYPH_SIZE: f32 = 32.0;
 const SPINNER_SIZE: f32 = 32.0;
@@ -103,7 +104,6 @@ fn embedded_preview_body<'a>(
     expanded: bool,
     modal_width: f32,
 ) -> Option<Element<'a, Message>> {
-    #[cfg(feature = "asset-studio")]
     {
         let tokens = *ctx.tokens;
         if !file_preview_state.is_open() {
@@ -161,11 +161,6 @@ fn embedded_preview_body<'a>(
                     .into(),
             )
         }
-    }
-    #[cfg(not(feature = "asset-studio"))]
-    {
-        let _ = (state, file_preview_state, ctx, expanded, modal_width);
-        None
     }
 }
 
@@ -346,7 +341,7 @@ fn stats_row<'a>(details: &'a Details, tokens: &Tokens) -> Element<'a, Message> 
             stars,
             details.score_label.clone(),
             tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         )
     };
 
@@ -527,7 +522,12 @@ fn timestamp_value<'a>(row_data: &'a MetadataRow, ctx: ViewCtx<'a>) -> Element<'
     if row_data.tooltip.trim().is_empty() {
         value.into()
     } else {
-        tooltip_widget::below(value, row_data.tooltip.clone(), &tokens, TOOLTIP_MAX_WIDTH)
+        tooltip_widget::below(
+            value,
+            row_data.tooltip.clone(),
+            &tokens,
+            tokens.dims.tooltip_max_width,
+        )
     }
 }
 
@@ -542,7 +542,10 @@ fn relative_text(relative: &RelativeTime, i18n: &I18n) -> String {
     if relative.count.is_empty() {
         i18n.tr(relative.key)
     } else {
-        i18n.trn(relative.key, &[("arg0", relative.count.as_str())])
+        i18n.trn(
+            relative.key,
+            &[("count", Arg::Number(relative.count.as_str()))],
+        )
     }
 }
 
@@ -670,7 +673,7 @@ fn nav_control<'a>(
     .padding(tokens.spacing.pad_xs)
     .style(move |_, status| theme::styles::ghost_button(&tokens, status));
 
-    tooltip_widget::below(control, tooltip, &tokens, TOOLTIP_MAX_WIDTH)
+    tooltip_widget::below(control, tooltip, &tokens, tokens.dims.tooltip_max_width)
 }
 
 fn browser_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {
@@ -681,14 +684,8 @@ fn browser_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Elemen
     file_browser::row_view(row_data, Some(message), ctx)
 }
 
-#[cfg(feature = "asset-studio")]
 fn file_row_activation_message(path: std::sync::Arc<String>) -> Message {
     Message::PreviewEntryRequested(path)
-}
-
-#[cfg(not(feature = "asset-studio"))]
-fn file_row_activation_message(path: std::sync::Arc<String>) -> Message {
-    Message::ExtractEntryRequested(path)
 }
 
 fn ribbon<'a>(
@@ -702,10 +699,16 @@ fn ribbon<'a>(
         i18n.tr("prepare-publish-items-one")
     } else {
         let total = total.to_string();
-        i18n.trn("prepare-publish-items-num", &[("arg0", total.as_str())])
+        i18n.trn(
+            "prepare-publish-items-num",
+            &[("count", Arg::Number(total.as_str()))],
+        )
     };
     let shown = snapshot.shown_count().to_string();
-    let shown = i18n.trn("prepare-publish-items-shown", &[("arg0", shown.as_str())]);
+    let shown = i18n.trn(
+        "prepare-publish-items-shown",
+        &[("count", Arg::Number(shown.as_str()))],
+    );
     let size = format_bytes(snapshot.total_size_bytes(), i18n);
 
     container(
@@ -739,15 +742,7 @@ fn browser_empty_state(ctx: ViewCtx<'_>) -> Element<'_, Message> {
 }
 
 fn dead_icon<'a>(color: Color, size: f32) -> Element<'a, Message> {
-    icon(assets::icons::dead(), color, size)
-}
-
-fn icon<'a>(handle: iced::widget::svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
+    icon(assets::icons::dead(), color, size).into()
 }
 
 #[cfg(test)]

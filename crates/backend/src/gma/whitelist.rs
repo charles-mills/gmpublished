@@ -3,9 +3,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use arc_swap::ArcSwap;
-
-const ADDON_WHITELIST_OFFLINE: &[&str] = &[
+const BUILTIN_ADDON_WHITELIST: &[&str] = &[
     "lua/*.lua",
     "scenes/*.vcd",
     "particles/*.pcf",
@@ -125,32 +123,61 @@ pub const DEFAULT_IGNORE: &[&str] = &[
 ];
 
 fn builtin_whitelist() -> Vec<String> {
-    ADDON_WHITELIST_OFFLINE
+    BUILTIN_ADDON_WHITELIST
         .iter()
         .map(|glob| (*glob).to_owned())
         .collect()
+}
+
+/// Where [`AddonWhitelist::refresh_from_remote`] is allowed to look.
+///
+/// Carried on the instance rather than read from the environment so that
+/// keeping the network out of a test is a constructor choice, not a process-
+/// wide `set_var` — which is a data race against any concurrent `getenv` under
+/// the stock test harness, where all tests in a binary share one process.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WhitelistSource {
+    /// Refresh from the upstream gmad source when asked.
+    #[default]
+    Remote,
+    /// Never touch the network; the built-in list is authoritative.
+    BuiltinOnly,
 }
 
 /// The addon whitelist: the built-in list, optionally refreshed from the
 /// upstream gmad source. Cheap to clone (`Arc` internally).
 #[derive(Clone, Debug)]
 pub struct AddonWhitelist {
-    list: Arc<ArcSwap<Vec<String>>>,
+    list: Arc<parking_lot::RwLock<Arc<[String]>>>,
+    source: WhitelistSource,
 }
 
 impl AddonWhitelist {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_source(WhitelistSource::Remote)
+    }
+
+    /// A whitelist that will never fetch. Use from tests and offline runs
+    /// instead of gating the network on an environment variable.
+    #[must_use]
+    pub fn builtin_only() -> Self {
+        Self::with_source(WhitelistSource::BuiltinOnly)
+    }
+
+    #[must_use]
+    pub fn with_source(source: WhitelistSource) -> Self {
         Self {
-            list: Arc::new(ArcSwap::from_pointee(builtin_whitelist())),
+            list: Arc::new(parking_lot::RwLock::new(Arc::from(builtin_whitelist()))),
+            source,
         }
     }
 
     /// Current addon whitelist. Callers checking many entries should bind
     /// this once and reuse it rather than calling it per entry.
     #[must_use]
-    pub fn snapshot(&self) -> Arc<Vec<String>> {
-        self.list.load_full()
+    pub fn snapshot(&self) -> Arc<[String]> {
+        Arc::clone(&self.list.read())
     }
 
     /// Fetches the up-to-date whitelist from the upstream gmad source and
@@ -158,14 +185,14 @@ impl AddonWhitelist {
     /// blocking HTTPS I/O: call from a background thread, never from
     /// construction.
     pub fn refresh_from_remote(&self) {
-        if std::env::var_os("ADDON_WHITELIST_OFFLINE").is_some() {
+        if self.source == WhitelistSource::BuiltinOnly {
             return;
         }
 
         match download_addon_whitelist() {
             Ok(wildcard) => {
                 log::info!("Downloaded up to date addon whitelist: {wildcard:#?}");
-                self.list.store(Arc::new(wildcard));
+                *self.list.write() = Arc::from(wildcard);
             }
             Err(err) => log::warn!("Failed to download addon whitelist: {err:#?}"),
         }
@@ -179,17 +206,9 @@ impl Default for AddonWhitelist {
 }
 
 fn download_addon_whitelist() -> Result<Vec<String>, std::io::Error> {
-    // The workspace ureq build carries no bundled webpki roots; certificate
-    // verification must go through the OS trust store (PlatformVerifier).
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .timeout_global(Some(Duration::from_secs(2)))
-        .build()
-        .into();
+    let agent = crate::net::build_http_agent(
+        crate::net::HttpAgentConfig::new().global_timeout(Duration::from_secs(2)),
+    );
 
     let body = agent
         .get("https://raw.githubusercontent.com/Facepunch/gmad/master/include/AddonWhiteList.h")
@@ -276,8 +295,8 @@ fn globber(wild: &str, str: &str) -> bool {
     w == wild.len()
 }
 
-/// Check if a path is allowed in a GMA file, against a whitelist snapshot
-/// obtained from [`snapshot`].
+/// Check if a path is allowed in a GMA file, against the backend's current
+/// whitelist snapshot.
 pub fn is_whitelisted_in(whitelist: &[String], str: &str) -> bool {
     let mut valid = false;
 

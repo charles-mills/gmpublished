@@ -6,10 +6,9 @@
 //! cache: missing, corrupt, or version-mismatched snapshots are silently
 //! discarded and rebuilt.
 
+use crate::bridge::snapshot::SnapshotWriteError;
 use std::{
     collections::HashMap,
-    fs, io,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -17,6 +16,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use super::domain::SteamId;
 use super::domain::{PublishedFileId, WorkshopMetadata};
 
 /// Cached entries older than this are re-queued for the existing background
@@ -50,7 +50,7 @@ pub fn now_unix_seconds() -> u64 {
 }
 
 pub fn snapshot_path() -> Option<PathBuf> {
-    gmpublished_backend::appdata::cache_dir().map(|dir| dir.join(SNAPSHOT_FILE_NAME))
+    gmpublished_backend::cache_dir().map(|dir| dir.join(SNAPSHOT_FILE_NAME))
 }
 
 /// Versioned snapshot DTOs: a stable schema decoupled from the live structs.
@@ -75,7 +75,7 @@ struct SnapshotEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     full_description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner_steamid: Option<u64>,
+    owner_steamid: Option<SteamId>,
     fetched_at: u64,
     // Added after v1 shipped; `default` keeps pre-ThumbHash snapshots loadable
     // without a version bump.
@@ -83,42 +83,23 @@ struct SnapshotEntry {
     thumbhash: Option<Vec<u8>>,
 }
 
+impl crate::bridge::snapshot::Versioned for SnapshotFile {
+    const VERSION: u32 = SNAPSHOT_VERSION;
+    const NOUN: &'static str = "Workshop metadata";
+
+    fn version(&self) -> u32 {
+        self.version
+    }
+}
+
 pub fn load(path: &Path) -> HashMap<PublishedFileId, CachedWorkshopMetadata> {
     load_at(path, now_unix_seconds())
 }
 
 fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, CachedWorkshopMetadata> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            if error.kind() != io::ErrorKind::NotFound {
-                log::debug!(
-                    "ignoring unreadable Workshop metadata snapshot {}: {error}",
-                    path.display()
-                );
-            }
-            return HashMap::new();
-        }
-    };
-
-    let snapshot = match serde_json::from_str::<SnapshotFile>(&contents) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            log::debug!(
-                "discarding unparseable Workshop metadata snapshot {}: {error}",
-                path.display()
-            );
-            return HashMap::new();
-        }
-    };
-    if snapshot.version != SNAPSHOT_VERSION {
-        log::debug!(
-            "discarding Workshop metadata snapshot {} with unsupported version {}",
-            path.display(),
-            snapshot.version
-        );
+    let Some(snapshot) = crate::bridge::snapshot::load::<SnapshotFile>(path) else {
         return HashMap::new();
-    }
+    };
 
     snapshot
         .entries
@@ -148,18 +129,6 @@ fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, Cache
             Some((id, cached))
         })
         .collect()
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MetadataSnapshotWriteError {
-    #[error("failed to serialize snapshot: {0}")]
-    Serialize(#[source] serde_json::Error),
-    #[error("failed to persist snapshot {}: {source}", path.display())]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 /// Detached, deterministically ordered snapshot. Building this while holding
@@ -200,29 +169,15 @@ pub fn prepare(
 pub fn write_prepared(
     path: &Path,
     snapshot: &PreparedMetadataSnapshot,
-) -> Result<(), MetadataSnapshotWriteError> {
-    let write_error = |source| MetadataSnapshotWriteError::Write {
-        path: path.to_path_buf(),
-        source,
-    };
-    let mut temp = crate::util::fs::atomic_tempfile(path).map_err(write_error)?;
-    {
-        let mut writer = BufWriter::with_capacity(
-            crate::util::fs::ATOMIC_WRITE_BUFFER_SIZE,
-            temp.as_file_mut(),
-        );
-        serde_json::to_writer(&mut writer, &snapshot.0)
-            .map_err(MetadataSnapshotWriteError::Serialize)?;
-        writer.flush().map_err(write_error)?;
-    }
-    crate::util::fs::persist_atomic(temp, path).map_err(write_error)
+) -> Result<(), SnapshotWriteError> {
+    crate::bridge::snapshot::write(path, &snapshot.0)
 }
 
 #[cfg(test)]
 fn write(
     path: &Path,
     entries: &HashMap<PublishedFileId, CachedWorkshopMetadata>,
-) -> Result<(), MetadataSnapshotWriteError> {
+) -> Result<(), SnapshotWriteError> {
     write_prepared(path, &prepare(entries))
 }
 
@@ -232,10 +187,25 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
+    /// `SteamId` is `#[serde(transparent)]`, so wrapping the field must not
+    /// change the on-disk shape — a change here silently discards every user's
+    /// cached metadata on upgrade.
+    #[test]
+    fn owner_steamid_serializes_as_a_bare_number() {
+        let json = serde_json::to_string(&SteamId::new(76_561_197_960_265_728))
+            .expect("SteamId should serialize");
+
+        assert_eq!(json, "76561197960265728");
+        assert_eq!(
+            serde_json::from_str::<SteamId>(&json).expect("and round-trip"),
+            SteamId::new(76_561_197_960_265_728)
+        );
+    }
+
     fn sample_cached(id: u64, fetched_at: u64) -> CachedWorkshopMetadata {
         CachedWorkshopMetadata {
             metadata: WorkshopMetadata {
-                id: PublishedFileId::new(id).expect("test fixture ids are always nonzero"),
+                id: PublishedFileId::fixture(id),
                 title: format!("Addon {id}"),
                 time_created: 10,
                 time_updated: 20,
@@ -244,7 +214,7 @@ mod tests {
                 preview_url: Some(format!("https://example.test/{id}.jpg")),
                 subscriptions: 42,
                 full_description: Some(format!("Full description {id}")),
-                owner_steamid: Some(76_561_197_960_265_728 + id),
+                owner_steamid: Some(SteamId::new(76_561_197_960_265_728 + id)),
                 thumbhash: Some(Arc::from(vec![id as u8, 7, 9].as_slice())),
             },
             fetched_at,
@@ -347,7 +317,7 @@ mod tests {
         std::fs::write(&path, legacy.to_string()).expect("write legacy snapshot");
 
         let loaded = load_at(&path, NOW);
-        let id = PublishedFileId::new(123).expect("nonzero");
+        let id = PublishedFileId::fixture(123);
         assert!(
             loaded
                 .get(&id)

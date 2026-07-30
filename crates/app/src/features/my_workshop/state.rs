@@ -10,30 +10,36 @@ use crate::bridge::ui_error::UiError;
 use crate::format::DownloadCountFormatter;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
+use gmpublished_backend::error_keys as keys;
 
 use super::model::{
     self, COUNT_ROLL_TICK_INTERVAL, ContextMenuRequest, FIRST_WORKSHOP_PAGE, PUBLISH_NEW_ROW_ID,
     PageResult, PreparePublishTarget, Row,
 };
+use crate::generation::Generation;
+use crate::widgets::grid_rows;
 
-#[derive(Clone, Debug, PartialEq)]
+use crate::widgets::grid_rows::{CardId, GridRow};
+
+/// What a grid card id refers to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Card {
+    /// The synthetic first item, which has no backing row.
+    PublishNew,
+    Row(usize),
+}
+
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "route visibility, load progress, and playback/focus flags are independent UI state"
 )]
 pub struct State {
     route_visible: bool,
-    grid: addon_grid::State,
-    load_status: LoadStatus,
-    generation: u64,
+    pane: grid_rows::GridPane,
+    page_status: PageStatus,
+    generation: Generation,
     rows: Vec<Row>,
-    /// Row id -> index into `rows`.
-    ///
-    /// A delivery names exactly one row, so without this every delivery scanned
-    /// every row to find it and then walked them all again to refresh. That is
-    /// O(rows) twice per delivery, and a scroll-back produces deliveries in
-    /// bursts — measured as the dominant contributor to per-tick tail latency.
-    row_index: HashMap<String, usize>,
     publish_new_title: String,
     next_page: u32,
     loaded_pages: u32,
@@ -41,10 +47,6 @@ pub struct State {
     loading_page: bool,
     complete: bool,
     stats_in_flight: bool,
-    last_animation_tick: Option<Instant>,
-    play_gifs_by_default: bool,
-    window_focused: bool,
-    download_count_formatter: DownloadCountFormatter,
     last_roll_tick: Option<Instant>,
     pending_prepare_publish: Option<PreparePublishTarget>,
     pending_context_menu: Option<ContextMenuRequest>,
@@ -52,23 +54,14 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let play_gifs_by_default = Settings::default().play_gifs_by_default;
-        let download_count_formatter = DownloadCountFormatter::default();
-        let mut grid = addon_grid::State::default();
-        let _ = grid.set_items(model::grid_items(
-            &[],
-            play_gifs_by_default,
-            download_count_formatter,
-            "",
-        ));
+        let play_gifs_by_default = Settings::default().ui.play_gifs_by_default;
 
         Self {
             route_visible: false,
-            grid,
-            load_status: LoadStatus::Idle,
-            generation: 0,
+            pane: grid_rows::GridPane::new(play_gifs_by_default),
+            page_status: PageStatus::Idle,
+            generation: Generation::INITIAL,
             rows: Vec::new(),
-            row_index: HashMap::new(),
             publish_new_title: String::new(),
             next_page: FIRST_WORKSHOP_PAGE,
             loaded_pages: 0,
@@ -76,10 +69,6 @@ impl Default for State {
             loading_page: false,
             complete: false,
             stats_in_flight: false,
-            last_animation_tick: None,
-            play_gifs_by_default,
-            window_focused: true,
-            download_count_formatter,
             last_roll_tick: None,
             pending_prepare_publish: None,
             pending_context_menu: None,
@@ -92,8 +81,14 @@ impl State {
         self.route_visible
     }
 
-    pub(crate) const fn load_status(&self) -> &LoadStatus {
-        &self.load_status
+    pub(crate) const fn page_status(&self) -> &PageStatus {
+        &self.page_status
+    }
+
+    /// A completed fetch that found nothing, as opposed to one still running
+    /// or one that failed.
+    pub(crate) fn is_loaded_and_empty(&self) -> bool {
+        matches!(self.page_status, PageStatus::Loaded) && self.rows.is_empty()
     }
 
     pub(crate) fn loaded_count(&self) -> usize {
@@ -110,24 +105,33 @@ impl State {
     }
 
     pub(crate) const fn grid(&self) -> &addon_grid::State {
-        &self.grid
+        self.pane.grid()
     }
 
-    pub(crate) fn workshop_id_for_card(&self, id: &str) -> Option<PublishedFileId> {
-        if id == PUBLISH_NEW_ROW_ID {
-            return None;
+    /// Resolves a grid card id, which is either the synthetic publish-new row
+    /// or a row's index. The sentinel is compared here and nowhere else.
+    ///
+    /// `Card::Row` indexes `rows` as it stands right now, so it must be
+    /// consumed before the next mutation rather than stored.
+    fn card(&self, id: &CardId) -> Option<Card> {
+        if id.as_str() == PUBLISH_NEW_ROW_ID {
+            return Some(Card::PublishNew);
         }
-        self.rows
-            .iter()
-            .find(|row| row.id() == id)
-            .map(Row::workshop_id)
+        self.pane.index_of(id).map(Card::Row)
     }
 
-    pub(crate) fn drag_thumbnail_for_card(&self, id: &str) -> Option<image::Handle> {
-        self.rows
-            .iter()
-            .find(|row| row.id() == id)
-            .and_then(Row::drag_thumbnail)
+    pub(crate) fn workshop_id_for_card(&self, id: &CardId) -> Option<PublishedFileId> {
+        match self.card(id)? {
+            Card::PublishNew => None,
+            Card::Row(index) => self.rows.get(index).map(Row::workshop_id),
+        }
+    }
+
+    pub(crate) fn drag_thumbnail_for_card(&self, id: &CardId) -> Option<image::Handle> {
+        match self.card(id)? {
+            Card::PublishNew => None,
+            Card::Row(index) => self.rows.get(index).and_then(Row::drag_thumbnail),
+        }
     }
 
     pub(crate) fn thumbnail_demands(&self) -> thumbnail_demand::DemandSet {
@@ -135,7 +139,8 @@ impl State {
             return model::empty_thumbnail_demands();
         }
 
-        model::thumbnail_demands(&self.rows, self.visible_row_range(), self.generation)
+        self.pane
+            .thumbnail_demands(&self.rows, self.generation, model::thumbnail_owner())
     }
 
     pub(crate) fn apply_thumbnail_delivery(
@@ -146,7 +151,10 @@ impl State {
             return false;
         }
 
-        let Some(&index) = self.row_index.get(delivery.id.as_str()) else {
+        let Some(row_key) = delivery.id.row_key() else {
+            return false;
+        };
+        let Some(index) = self.pane.index_of_str(row_key) else {
             return false;
         };
         let Some(row) = self.rows.get_mut(index) else {
@@ -161,10 +169,10 @@ impl State {
     }
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
-        let changed = model::invalidate_ready_thumbnails(&mut self.rows);
+        let changed = grid_rows::invalidate_ready_thumbnails(&mut self.rows);
         if changed {
             self.sync_grid_items();
-            self.last_animation_tick = None;
+            self.pane.clear_animation_clock();
         }
         changed
     }
@@ -174,73 +182,54 @@ impl State {
     /// route is hidden so returning to it paints real pixels on the first
     /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
-        let visible_range = self.visible_row_range();
-        let changed = model::release_offscreen_thumbnails(&mut self.rows, visible_range);
-        for index in &changed {
-            self.refresh_item_thumbnail(*index);
-        }
-        !changed.is_empty()
+        self.pane.release_offscreen_thumbnails(&mut self.rows)
     }
 
     pub(crate) fn has_active_animations(&self) -> bool {
-        self.window_focused
-            && self.route_visible
-            && self
-                .rows
-                .get(self.visible_row_range())
-                .unwrap_or_default()
-                .iter()
-                .any(|row| row.has_active_animation(self.play_gifs_by_default))
+        self.route_visible && self.pane.has_active_animations(&self.rows)
     }
 
     pub(crate) fn needs_card_motion_ticks(&self) -> bool {
-        self.route_visible && self.grid.needs_visible_card_ticks()
+        self.route_visible && self.pane.grid().needs_visible_card_ticks()
     }
 
-    pub(crate) fn set_play_gifs_by_default(&mut self, enabled: bool) -> bool {
-        if self.play_gifs_by_default == enabled {
-            return false;
+    pub(crate) fn set_play_gifs_by_default(&mut self, enabled: bool) {
+        if self.pane.play_gifs_by_default() == enabled {
+            return;
         }
 
-        self.play_gifs_by_default = enabled;
-        self.last_animation_tick = None;
+        self.pane.set_play_gifs_by_default(enabled);
+        self.pane.clear_animation_clock();
         self.sync_grid_items();
-        true
     }
 
     /// GIF playback pauses on the current frame while the window is
     /// unfocused, so the clock subscription can drop to idle.
-    pub(crate) fn set_window_focused(&mut self, focused: bool) -> bool {
-        if self.window_focused == focused {
-            return false;
+    pub(crate) fn set_window_focused(&mut self, focused: bool) {
+        if self.pane.window_focused() == focused {
+            return;
         }
 
-        self.window_focused = focused;
-        self.last_animation_tick = None;
-        true
+        self.pane.set_window_focused(focused);
+        self.pane.clear_animation_clock();
     }
 
-    pub(crate) fn set_download_count_formatter(
-        &mut self,
-        formatter: DownloadCountFormatter,
-    ) -> bool {
-        if self.download_count_formatter == formatter {
-            return false;
+    pub(crate) fn set_download_count_formatter(&mut self, formatter: DownloadCountFormatter) {
+        if self.pane.formatter() == formatter {
+            return;
         }
 
-        self.download_count_formatter = formatter;
+        self.pane.set_download_count_formatter(formatter);
         self.sync_grid_items();
-        true
     }
 
-    pub(crate) fn set_publish_new_title(&mut self, title: String) -> bool {
+    pub(crate) fn set_publish_new_title(&mut self, title: String) {
         if self.publish_new_title == title {
-            return false;
+            return;
         }
 
         self.publish_new_title = title;
         self.sync_grid_items();
-        true
     }
 
     pub(crate) fn has_active_count_rolls(&self) -> bool {
@@ -248,12 +237,12 @@ impl State {
     }
 
     pub(super) const fn grid_mut(&mut self) -> &mut addon_grid::State {
-        &mut self.grid
+        self.pane.grid_mut()
     }
 
-    pub(super) fn enter_route(&mut self) -> Option<(u64, u32)> {
+    pub(super) fn enter_route(&mut self) -> Option<(Generation, u32)> {
         self.route_visible = true;
-        if matches!(self.load_status, LoadStatus::Idle | LoadStatus::Error(_))
+        if matches!(self.page_status, PageStatus::Idle | PageStatus::Failed(_))
             && self.rows.is_empty()
         {
             return self.begin_next_page();
@@ -265,43 +254,47 @@ impl State {
     pub(super) fn exit_route(&mut self) {
         self.route_visible = false;
         self.stats_in_flight = false;
-        self.last_animation_tick = None;
+        self.pane.clear_animation_clock();
         self.last_roll_tick = None;
         self.pending_prepare_publish = None;
         self.pending_context_menu = None;
-        let _ = self.grid.set_page_status(false, false);
+        // Items, scroll and viewport are untouched and `has_more_pages` is
+        // forced false, so nothing here can change the visible range.
+        let _follow_ups = self.pane.grid_mut().set_page_status(false, false);
     }
 
-    pub(super) fn begin_next_page(&mut self) -> Option<(u64, u32)> {
+    pub(super) fn begin_next_page(&mut self) -> Option<(Generation, u32)> {
         if !self.route_visible || self.loading_page || self.complete {
             return None;
         }
 
         if self.next_page == FIRST_WORKSHOP_PAGE && self.rows.is_empty() {
-            self.generation = self.generation.wrapping_add(1).max(1);
+            self.generation.bump();
             self.loaded_pages = 0;
             self.total_count = 0;
             self.complete = false;
             self.stats_in_flight = false;
-            self.last_animation_tick = None;
+            self.pane.clear_animation_clock();
             self.last_roll_tick = None;
             self.pending_prepare_publish = None;
             self.pending_context_menu = None;
-            self.load_status = LoadStatus::Loading;
+            self.page_status = PageStatus::LoadingFirstPage;
             self.rows.clear();
             self.sync_grid_items();
-        } else if !matches!(self.load_status, LoadStatus::Error(_)) {
-            self.load_status = LoadStatus::Ready;
+        } else if !matches!(self.page_status, PageStatus::Failed(_)) {
+            self.page_status = PageStatus::Loaded;
         }
 
         self.loading_page = true;
-        let _ = self.grid.set_page_status(true, false);
+        // Only the spinner changes: `has_more_pages` false cannot widen the
+        // range, and the item list is whatever it already was.
+        let _follow_ups = self.pane.grid_mut().set_page_status(true, false);
         Some((self.generation, self.next_page))
     }
 
     pub(super) fn apply_page(
         &mut self,
-        generation: u64,
+        generation: Generation,
         page: u32,
         result: Result<PageResult, UiError>,
     ) {
@@ -315,16 +308,19 @@ impl State {
                 self.apply_page_result(result);
             }
             Ok(_) => {
-                self.load_status = LoadStatus::Error("stale My Workshop page result".to_owned());
+                // A page result for a request we no longer want. Nothing
+                // actionable to tell the user, so the generic key.
+                log::debug!("discarding stale My Workshop page result for page {page}");
+                self.page_status = PageStatus::Failed(UiError::new(keys::UNKNOWN));
             }
             Err(error) => {
-                self.load_status = LoadStatus::Error(error.to_string());
+                self.page_status = PageStatus::Failed(error);
             }
         }
         self.sync_grid_items();
     }
 
-    pub(super) fn request_stats_refresh(&mut self) -> Option<(u64, u32)> {
+    pub(super) fn request_stats_refresh(&mut self) -> Option<(Generation, u32)> {
         if !self.route_visible || self.stats_in_flight || self.loaded_pages == 0 {
             return None;
         }
@@ -335,7 +331,7 @@ impl State {
 
     pub(super) fn apply_stats_counts(
         &mut self,
-        generation: u64,
+        generation: Generation,
         result: Result<HashMap<PublishedFileId, u64>, UiError>,
     ) -> bool {
         if generation != self.generation {
@@ -394,55 +390,30 @@ impl State {
 
     pub(super) fn tick_visible_card_motion(&mut self, now: Instant) {
         if self.route_visible {
-            self.grid.tick_visible_card_motion(now);
+            self.pane.grid_mut().tick_visible_card_motion(now);
         }
     }
 
     pub(super) fn tick_visible_animations(&mut self, now: Instant) -> bool {
         if !self.has_active_animations() {
-            self.last_animation_tick = None;
+            self.pane.clear_animation_clock();
             return false;
         }
 
-        let elapsed = self
-            .last_animation_tick
-            .and_then(|last| now.checked_duration_since(last))
-            .unwrap_or(crate::media::thumbnail_animation::ANIMATION_TICK_INTERVAL);
-        self.last_animation_tick = Some(now);
-
-        let visible = self.visible_row_range();
-        let mut changed = false;
-        if let Some(rows) = self.rows.get_mut(visible.clone()) {
-            for row in rows {
-                changed |= row.advance_animation(elapsed, self.play_gifs_by_default);
-            }
-        }
-        if changed {
-            // Swap advanced frames in place; a full sync_grid_items rebuild
-            // (every card re-allocated + re-layout) per 16ms tick is churn.
-            if let Some(rows) = self.rows.get(visible.clone()) {
-                for (offset, row) in rows.iter().enumerate() {
-                    let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
-                    // Grid item 0 is the publish-new lead card; rows start at 1.
-                    let _ = self.grid.update_item_thumbnail(
-                        visible.start + offset + 1,
-                        row.id(),
-                        thumbnail,
-                    );
-                }
-            }
-        }
-        changed
+        self.pane.tick_visible_animations(
+            &mut self.rows,
+            now,
+            crate::media::thumbnail_animation::ANIMATION_TICK_INTERVAL,
+        )
     }
 
-    pub(super) fn take_prepare_publish_target(&mut self, id: &str) -> Option<PreparePublishTarget> {
-        let target = if id == PUBLISH_NEW_ROW_ID {
-            Some(PreparePublishTarget::New)
-        } else {
-            self.rows
-                .iter()
-                .find(|row| row.id() == id)
-                .and_then(Row::prepare_publish_target)
+    pub(super) fn take_prepare_publish_target(
+        &mut self,
+        id: &CardId,
+    ) -> Option<PreparePublishTarget> {
+        let target = match self.card(id)? {
+            Card::PublishNew => Some(PreparePublishTarget::New),
+            Card::Row(index) => self.rows.get(index).and_then(Row::prepare_publish_target),
         }?;
         self.pending_prepare_publish = Some(target.clone());
         Some(target)
@@ -450,7 +421,7 @@ impl State {
 
     pub(super) fn take_context_menu(
         &mut self,
-        id: &str,
+        id: &CardId,
         position: iced::Point,
     ) -> Option<ContextMenuRequest> {
         let mut request = self
@@ -501,29 +472,24 @@ impl State {
         true
     }
 
-    pub(super) fn set_card_hovered(&mut self, id: &str, hovered: bool) -> bool {
-        if id == PUBLISH_NEW_ROW_ID {
+    pub(super) fn set_card_hovered(&mut self, id: &CardId, hovered: bool) -> bool {
+        let Some(Card::Row(index)) = self.card(id) else {
             return false;
-        }
-
-        let Some((index, row)) = self
-            .rows
-            .iter_mut()
-            .enumerate()
-            .find(|(_, row)| row.id() == id)
-        else {
+        };
+        let Some(row) = self.rows.get_mut(index) else {
             return false;
         };
         // The play flag is recorded either way (a GIF delivered mid-hover
         // starts playing), but only a row that already has an animation
         // changes appearance — and then a thumbnail swap in place suffices.
-        if !row.set_thumbnail_play_requested(hovered) || !row.has_animation() {
+        if !row.set_thumbnail_play_requested(hovered) || !row.holds_animation() {
             return false;
         }
-        let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
+        let thumbnail = row.card_thumbnail(self.pane.play_gifs_by_default());
         // Grid item 0 is the publish-new lead card; rows start at 1.
         let _ = self
-            .grid
+            .pane
+            .grid_mut()
             .update_item_thumbnail(index + 1, row.id(), thumbnail);
         true
     }
@@ -555,11 +521,7 @@ impl State {
         self.complete = self.total_count == 0
             || page_empty
             || usize::try_from(self.total_count).is_ok_and(|total| self.rows.len() >= total);
-        self.load_status = if self.rows.is_empty() {
-            LoadStatus::Empty
-        } else {
-            LoadStatus::Ready
-        };
+        self.page_status = PageStatus::Loaded;
     }
 
     /// Pushes one row's current thumbnail into the grid in place.
@@ -571,97 +533,97 @@ impl State {
         let Some(row) = self.rows.get(index) else {
             return;
         };
-        let thumbnail = row.card_thumbnail(self.play_gifs_by_default);
+        let thumbnail = row.card_thumbnail(self.pane.play_gifs_by_default());
         // Grid item 0 is the publish-new lead card; rows start at 1.
         let _ = self
-            .grid
+            .pane
+            .grid_mut()
             .update_item_thumbnail(index + 1, row.id(), thumbnail);
     }
 
-    /// Rebuilds the id -> index map. Must follow every mutation of `rows`.
-    fn reindex_rows(&mut self) {
-        self.row_index.clear();
-        self.row_index.reserve(self.rows.len());
-        for (index, row) in self.rows.iter().enumerate() {
-            let _ = self.row_index.insert(row.id().to_owned(), index);
-        }
-    }
-
+    /// Rebuilds the grid's items and page status from `rows`.
+    ///
+    /// Visible-range follow-ups are dropped because every caller re-derives
+    /// thumbnail demands and stats from state right after the sync, so an
+    /// echoed range would ask for work already queued. Hover follow-ups go
+    /// with them — a hover retargeted by rows shifting under a stationary
+    /// cursor misses one play/pause transition and self-corrects on the next
+    /// cursor move.
     fn sync_grid_items(&mut self) {
         // Every mutation of `rows` is already followed by a sync, so hanging
         // the reindex here keeps the map correct without four separate call
         // sites to keep in step.
-        self.reindex_rows();
-        let _ = self.grid.set_items(model::grid_items(
-            &self.rows,
-            self.play_gifs_by_default,
-            self.download_count_formatter,
-            &self.publish_new_title,
-        ));
-        let has_more_pages = !self.complete && !matches!(self.load_status, LoadStatus::Error(_));
-        let _ = self.grid.set_page_status(self.loading_page, has_more_pages);
+        let lead = model::publish_new_item(&self.publish_new_title);
+        let _follow_ups = self.pane.sync_items(&self.rows, [lead]);
+        let has_more_pages = !self.complete && !matches!(self.page_status, PageStatus::Failed(_));
+        let _follow_ups = self
+            .pane
+            .grid_mut()
+            .set_page_status(self.loading_page, has_more_pages);
     }
 
     fn visible_row_range(&self) -> Range<usize> {
-        grid_range_to_row_range(self.grid.visible_item_range(), self.rows.len())
+        self.pane.visible_row_range(self.rows.len())
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_for_test(&mut self) -> (u64, u32) {
+    pub(crate) fn begin_for_test(&mut self) -> (Generation, u32) {
         self.route_visible = true;
         self.begin_next_page().expect("page request should start")
     }
 
     #[cfg(test)]
     pub(crate) fn row_for_test(&self, id: u64) -> Option<&Row> {
-        self.rows.iter().find(|row| {
-            row.workshop_id()
-                == PublishedFileId::new(id).expect("test fixture ids are always nonzero")
-        })
+        self.rows
+            .iter()
+            .find(|row| row.workshop_id() == PublishedFileId::fixture(id))
     }
 
     #[cfg(test)]
     pub(crate) fn push_rows_for_test(&mut self, rows: Vec<Row>, total_count: u32) {
         self.route_visible = true;
-        self.generation = 1;
+        self.generation = Generation::INITIAL.next();
         self.rows = rows;
         self.total_count = total_count;
         self.loaded_pages = 1;
         self.next_page = 2;
-        self.complete = false;
-        self.load_status = LoadStatus::Ready;
+        self.complete = self.rows.len() as u32 >= total_count;
+        self.page_status = PageStatus::Loaded;
         self.sync_grid_items();
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum LoadStatus {
+/// How far the paged fetch has got.
+///
+/// Deliberately says nothing about whether any rows arrived — that is `rows`,
+/// and deriving it there means the two cannot disagree. `Failed` is about the
+/// most recent page request only: earlier pages stay on screen, which is why
+/// it is not a variant that owns the rows.
+pub enum PageStatus {
+    /// No page has been requested.
     Idle,
-    Loading,
-    Ready,
-    Empty,
-    Error(String),
-}
-
-fn grid_range_to_row_range(range: Range<usize>, row_count: usize) -> Range<usize> {
-    if row_count == 0 {
-        return 0..0;
-    }
-
-    let start = range.start.saturating_sub(1).min(row_count);
-    let end = range.end.saturating_sub(1).min(row_count);
-    start..end.max(start)
+    /// The first page is in flight and nothing is on screen yet.
+    LoadingFirstPage,
+    /// At least one page landed.
+    Loaded,
+    /// The most recent page request failed.
+    Failed(UiError),
 }
 
 #[cfg(test)]
 mod tests {
     use crate::bridge::domain::PublishedFileId;
+    use crate::generation::Generation;
     use crate::widgets::addon_grid;
 
     use super::super::model::PageResult;
-    use super::{LoadStatus, Row, State, grid_range_to_row_range};
+    use super::{PageStatus, Row, State};
 
-    fn ready_delivery(row_id: u64, generation: u64) -> crate::media::thumbnail_demand::Delivery {
+    fn ready_delivery(
+        row_id: u64,
+        generation: Generation,
+    ) -> crate::media::thumbnail_demand::Delivery {
         use crate::media::{thumbnail_demand, thumbnail_worker};
 
         let input = thumbnail_worker::ThumbnailInput::from_url(format!(
@@ -678,7 +640,7 @@ mod tests {
         thumbnail_demand::Delivery {
             owner: super::super::model::thumbnail_owner(),
             generation,
-            id: thumbnail_demand::DemandId::new(row_id.to_string()),
+            id: thumbnail_demand::DemandId::row(row_id.to_string()),
             key: key.clone(),
             result: thumbnail_demand::DeliveryResult::Ready(
                 thumbnail_demand::ReadyThumbnail::for_test(key, metadata, vec![9_u8; 8 * 8 * 4]),
@@ -752,7 +714,7 @@ mod tests {
         let request = state.enter_route();
 
         assert!(state.is_route_visible());
-        assert_eq!(request, Some((1, 1)));
+        assert_eq!(request, Some((Generation::from_raw(1), 1)));
     }
 
     #[test]
@@ -782,14 +744,7 @@ mod tests {
 
         assert_eq!(state.loaded_count(), 1);
         assert_eq!(state.total_count(), 1);
-        assert!(matches!(state.load_status(), LoadStatus::Ready));
-    }
-
-    #[test]
-    fn grid_range_skips_publish_new_leading_card() {
-        assert_eq!(grid_range_to_row_range(0..1, 10), 0..0);
-        assert_eq!(grid_range_to_row_range(0..4, 10), 0..3);
-        assert_eq!(grid_range_to_row_range(2..5, 10), 1..4);
+        assert!(matches!(state.page_status(), PageStatus::Loaded));
     }
 
     #[test]
@@ -802,13 +757,8 @@ mod tests {
         );
 
         let changed = state.apply_stats_counts(
-            1,
-            Ok([(
-                PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-                25,
-            )]
-            .into_iter()
-            .collect()),
+            Generation::from_raw(1),
+            Ok([(PublishedFileId::fixture(42), 25)].into_iter().collect()),
         );
 
         assert!(changed);
@@ -827,6 +777,6 @@ mod tests {
         let stats_request = state.request_stats_refresh();
 
         assert_eq!(page_request, None);
-        assert_eq!(stats_request, Some((1, 1)));
+        assert_eq!(stats_request, Some((Generation::from_raw(1), 1)));
     }
 }

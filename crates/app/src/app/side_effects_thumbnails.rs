@@ -1,5 +1,6 @@
 use super::{App, RootMessage, Task, search, thumbnail_demand};
 use crate::bridge::library::LibrarySnapshot;
+use crate::generation::Generation;
 
 /// Must equal the grids' demand edge (installed addons, size analyzer, My
 /// Workshop all use 256) so a warm fill lands on the exact keys they read.
@@ -7,66 +8,72 @@ const WARM_THUMBNAIL_MAX_EDGE: u32 = 256;
 
 impl App {
     pub(super) fn thumbnail_scale_changed_task(&mut self) -> Task<RootMessage> {
-        let _changed = self.state.my_workshop.invalidate_ready_thumbnails();
-        let _changed = self.state.installed_addons.invalidate_ready_thumbnails();
-        let _changed = self.state.search.invalidate_ready_thumbnails();
-        let _changed = self.state.preview_gma.invalidate_ready_thumbnail();
-        let _invalidation = self.state.size_analyzer.invalidate_ready_thumbnails();
+        self.state.invalidate_ready_thumbnails();
+        let viewport_height = self.search_dropdown_list_viewport_height();
+        let demand_sets = self.state.thumbnail_demand_sets(viewport_height);
 
-        let demand_sets = vec![
-            self.state.my_workshop.thumbnail_demands(),
-            self.state.installed_addons.thumbnail_demands(),
-            self.search_thumbnail_demand_set(),
-            self.state.prepare_publish.thumbnail_demands(),
-            self.state.preview_gma.thumbnail_demands(),
-            self.state.size_analyzer.thumbnail_demands(),
-        ];
-
-        self.thumbnails
-            .set_demand_sets(&self.ctx, demand_sets)
+        self.environment
+            .thumbnails
+            .set_demand_sets(&self.environment.ctx, demand_sets)
             .map(RootMessage::ThumbnailDemand)
     }
 
     pub(super) fn my_workshop_thumbnail_demands(&mut self) -> Task<RootMessage> {
-        let _released = self.state.my_workshop.release_offscreen_thumbnails();
+        let _released = self
+            .state
+            .features
+            .my_workshop
+            .release_offscreen_thumbnails();
 
-        self.thumbnails
-            .set_demands(&self.ctx, self.state.my_workshop.thumbnail_demands())
+        self.environment
+            .thumbnails
+            .set_demands(
+                &self.environment.ctx,
+                self.state.features.my_workshop.thumbnail_demands(),
+            )
             .map(RootMessage::ThumbnailDemand)
     }
 
     pub(super) fn prepare_publish_thumbnail_demands(&mut self) -> Task<RootMessage> {
-        self.thumbnails
-            .set_demands(&self.ctx, self.state.prepare_publish.thumbnail_demands())
+        self.environment
+            .thumbnails
+            .set_demands(
+                &self.environment.ctx,
+                self.state.features.prepare_publish.thumbnail_demands(),
+            )
             .map(RootMessage::ThumbnailDemand)
     }
 
     pub(super) fn search_thumbnail_demands(&mut self) -> Task<RootMessage> {
         let viewport_height = self.search_dropdown_list_viewport_height();
         let metadata_task = self.search_thumbnail_metadata_task(viewport_height);
-        let demands = self.state.search.thumbnail_demands(viewport_height);
+        let demands = self
+            .state
+            .features
+            .search
+            .thumbnail_demands(viewport_height);
         let thumbnail_task = self
+            .environment
             .thumbnails
-            .set_demands(&self.ctx, demands)
+            .set_demands(&self.environment.ctx, demands)
             .map(RootMessage::ThumbnailDemand);
         Task::batch([metadata_task, thumbnail_task])
     }
 
     pub(super) fn preview_gma_thumbnail_demands(&mut self) -> Task<RootMessage> {
-        self.thumbnails
-            .set_demands(&self.ctx, self.state.preview_gma.thumbnail_demands())
+        self.environment
+            .thumbnails
+            .set_demands(
+                &self.environment.ctx,
+                self.state.features.preview_gma.thumbnail_demands(),
+            )
             .map(RootMessage::ThumbnailDemand)
-    }
-
-    pub(super) fn search_thumbnail_demand_set(&self) -> thumbnail_demand::DemandSet {
-        self.state
-            .search
-            .thumbnail_demands(self.search_dropdown_list_viewport_height())
     }
 
     fn search_thumbnail_metadata_task(&mut self, viewport_height: f32) -> Task<RootMessage> {
         let Some((generation, item_ids)) = self
             .state
+            .features
             .search
             .take_thumbnail_metadata_request(viewport_height)
         else {
@@ -78,17 +85,25 @@ impl App {
 
     fn search_dropdown_list_viewport_height(&self) -> f32 {
         search::dropdown_list_viewport_height(
-            &self.state.search,
+            &self.state.features.search,
             self.state.viewport_size,
             &self.state.tokens,
         )
     }
 
     pub(super) fn installed_addons_thumbnail_demands(&mut self) -> Task<RootMessage> {
-        let _released = self.state.installed_addons.release_offscreen_thumbnails();
+        let _released = self
+            .state
+            .features
+            .installed_addons
+            .release_offscreen_thumbnails();
 
-        self.thumbnails
-            .set_demands(&self.ctx, self.state.installed_addons.thumbnail_demands())
+        self.environment
+            .thumbnails
+            .set_demands(
+                &self.environment.ctx,
+                self.state.features.installed_addons.thumbnail_demands(),
+            )
             .map(RootMessage::ThumbnailDemand)
     }
 
@@ -106,7 +121,8 @@ impl App {
             return Task::none();
         }
         self.library_warm_kicked = true;
-        self.thumbnails
+        self.environment
+            .thumbnails
             .scale_disk_cache_to_library(snapshot.addons.len());
 
         let ids = snapshot
@@ -132,13 +148,14 @@ impl App {
         // `apply_demands` stays as the guard for the window between this check
         // and the set being applied, and is now cheap because this primed the
         // index.
-        let disk_cache = self.thumbnails.disk_cache_handle();
-        self.ctx
+        let disk_cache = self.environment.thumbnails.disk_cache_handle();
+        self.environment
+            .ctx
             .run_blocking("warm-library-preview-urls", move |app| {
                 if let Some(cache) = &disk_cache {
                     cache.prime_index();
                 }
-                let (cached, _stale) = app.resolve_workshop_metadata(&ids);
+                let (cached, _stale) = app.workshop().resolve_metadata(&ids);
                 cached
                     .into_iter()
                     .filter_map(|metadata| {
@@ -173,26 +190,32 @@ impl App {
             .into_iter()
             .filter(|(_, url)| !url.is_empty())
             .map(|(id, url)| thumbnail_demand::Demand {
-                id: thumbnail_demand::DemandId::new(id.to_string()),
+                id: thumbnail_demand::DemandId::workshop(id),
                 input: crate::media::thumbnail_worker::ThumbnailInput::from_url(url),
                 logical_max_edge: WARM_THUMBNAIL_MAX_EDGE,
-                priority: thumbnail_demand::Priority::WarmLibrary,
+                priority: thumbnail_demand::Priority::Prefetch,
+                capabilities: thumbnail_demand::DemandCapabilities::CACHE_ONLY,
             })
             .collect();
         let set = thumbnail_demand::DemandSet {
             owner: thumbnail_demand::Owner::WarmLibrary,
-            generation: 0,
+            generation: Generation::INITIAL,
             replace: thumbnail_demand::ReplaceMode::Owner,
             demands,
         };
-        self.thumbnails
-            .set_demands(&self.ctx, set)
+        self.environment
+            .thumbnails
+            .set_demands(&self.environment.ctx, set)
             .map(RootMessage::ThumbnailDemand)
     }
 
     pub(super) fn size_analyzer_thumbnail_demands(&mut self) -> Task<RootMessage> {
-        self.thumbnails
-            .set_demands(&self.ctx, self.state.size_analyzer.thumbnail_demands())
+        self.environment
+            .thumbnails
+            .set_demands(
+                &self.environment.ctx,
+                self.state.features.size_analyzer.thumbnail_demands(),
+            )
             .map(RootMessage::ThumbnailDemand)
     }
 }
@@ -206,7 +229,7 @@ pub(super) fn log_thumbnail_delivery(delivery: &thumbnail_demand::Delivery) {
                 "thumbnail ready for {:?} generation {} id {} key {:?} (ready key {:?}, {}x{})",
                 delivery.owner,
                 delivery.generation,
-                delivery.id.as_str(),
+                delivery.id,
                 delivery.key,
                 ready.key(),
                 metadata.width,
@@ -219,7 +242,7 @@ pub(super) fn log_thumbnail_delivery(delivery: &thumbnail_demand::Delivery) {
                 "thumbnail failed for {:?} generation {} id {} key {:?}: {error}",
                 delivery.owner,
                 delivery.generation,
-                delivery.id.as_str(),
+                delivery.id,
                 delivery.key
             );
         }

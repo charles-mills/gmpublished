@@ -1,6 +1,10 @@
 use steamworks::{Friend, SteamId};
 
-use super::Steam;
+use super::ConnectedSteam;
+use crate::util::main_thread_forbidden;
+
+/// Edge length of the avatar `Friend::medium_avatar` returns.
+const AVATAR_EDGE: u32 = 64;
 
 #[derive(Clone, Debug)]
 pub struct SteamUser {
@@ -16,33 +20,27 @@ impl From<Friend> for SteamUser {
         Self {
             steamid: friend.id(),
             name: friend.name(),
-            avatar: friend
-                .medium_avatar()
-                .map(|buf| crate::rgba_image::RgbaImage::new(buf, 64, 64)),
+            // A buffer that is not a 64x64 RGBA avatar reads as no avatar: the
+            // UI already renders a placeholder for that, and it is the only
+            // honest thing to do with bytes whose shape is unknown.
+            avatar: friend.medium_avatar().and_then(|buf| {
+                crate::rgba_image::RgbaImage::try_new(buf, AVATAR_EDGE, AVATAR_EDGE)
+            }),
             dead: false,
         }
     }
 }
 
-impl Steam {
+impl ConnectedSteam<'_> {
     pub fn current_user(&self) -> SteamUser {
-        let steamid = self
-            .client()
-            .expect("reached only through app-layer entry points that already checked steam_connected()")
-            .steam_id;
-        self.fetch_user(steamid)
+        self.fetch_user(self.interface.steam_id)
     }
 
     pub fn fetch_user(&self, steamid: SteamId) -> SteamUser {
         let mut latest = None;
         self.fetch_user_streaming(steamid, |user| latest = Some(user));
         latest.unwrap_or_else(|| {
-            SteamUser::from(
-                self.client()
-                    .expect("Steam interface should remain available while fetching a user")
-                    .friends()
-                    .get_friend(steamid),
-            )
+            SteamUser::from(self.interface.client().friends().get_friend(steamid))
         })
     }
 
@@ -51,11 +49,9 @@ impl Steam {
     pub fn fetch_user_streaming(&self, steamid: SteamId, mut on_user: impl FnMut(SteamUser)) {
         main_thread_forbidden!();
 
-        let client = self.client().expect(
-            "reached only through app-layer entry points that already checked steam_connected()",
-        );
+        let client = self.interface;
 
-        if let Some(cached) = self.users.read().get(&steamid).cloned() {
+        if let Some(cached) = self.steam.users.read().get(&steamid).cloned() {
             let complete = cached.avatar.is_some();
             on_user(cached);
             if complete {
@@ -63,13 +59,11 @@ impl Steam {
             }
         }
 
-        // See the field doc: overlapping persona waits clobber each other's
-        // callback registration and turn into full timeouts.
-        let _fetch_guard = self.persona_fetch.lock();
+        let _slot = self.steam.persona_slot.claim();
         // Another serialized fetch may have completed while this caller was
         // waiting for the callback slot. Reuse it instead of starting the
         // same persona/avatar wait again.
-        if let Some(cached) = self.users.read().get(&steamid).cloned()
+        if let Some(cached) = self.steam.users.read().get(&steamid).cloned()
             && cached.avatar.is_some()
         {
             on_user(cached);
@@ -79,13 +73,19 @@ impl Steam {
         // Registered before the request so an event delivered in between
         // cannot be missed.
         let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let _persona_cb = self.register_callback(move |p: steamworks::PersonaStateChange| {
-            if p.steam_id == steamid {
-                let _ = event_tx.send(());
-            }
-        });
+        let _persona_cb =
+            self.interface
+                .register_callback(move |p: steamworks::PersonaStateChange| {
+                    if p.steam_id == steamid {
+                        let _ = event_tx.send(());
+                    }
+                });
 
-        if client.friends().request_user_information(steamid, false) {
+        if client
+            .client()
+            .friends()
+            .request_user_information(steamid, false)
+        {
             // First event for this user: the persona (name) is loaded. At
             // this point Steam serves its default avatar bytes,
             // indistinguishable from a real avatar by presence alone — the
@@ -94,33 +94,46 @@ impl Steam {
             // using further events as wakeups. A user genuinely on the
             // default avatar never changes and rides out the deadline.
             let _ = event_rx.recv_timeout(std::time::Duration::from_secs(10));
-            let persona = SteamUser::from(client.friends().get_friend(steamid));
-            self.users.write().insert(steamid, persona.clone());
+            let persona = SteamUser::from(client.client().friends().get_friend(steamid));
+            self.steam.users.write().insert(steamid, persona.clone());
             on_user(persona);
 
-            let avatar_baseline = client.friends().get_friend(steamid).medium_avatar();
+            let avatar_baseline = client
+                .client()
+                .friends()
+                .get_friend(steamid)
+                .medium_avatar();
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
             while std::time::Instant::now() < deadline
-                && client.friends().get_friend(steamid).medium_avatar() == avatar_baseline
+                && client
+                    .client()
+                    .friends()
+                    .get_friend(steamid)
+                    .medium_avatar()
+                    == avatar_baseline
             {
                 let _ = event_rx.recv_timeout(std::time::Duration::from_millis(100));
             }
         }
 
-        let user = SteamUser::from(client.friends().get_friend(steamid));
+        let user = SteamUser::from(client.client().friends().get_friend(steamid));
 
         {
             let user = user.clone();
-            self.users.write().insert(user.steamid, user);
+            self.steam.users.write().insert(user.steamid, user);
         }
         on_user(user);
     }
 }
 
-pub fn fetch_steam_user(steam: &Steam, steamid64: u64) -> SteamUser {
-    steam.fetch_user(SteamId::from_raw(steamid64))
+pub fn fetch_steam_user(steam: ConnectedSteam<'_>, steamid: SteamId) -> SteamUser {
+    steam.fetch_user(steamid)
 }
 
-pub fn fetch_steam_user_streaming(steam: &Steam, steamid64: u64, on_user: impl FnMut(SteamUser)) {
-    steam.fetch_user_streaming(SteamId::from_raw(steamid64), on_user);
+pub fn fetch_steam_user_streaming(
+    steam: ConnectedSteam<'_>,
+    steamid: SteamId,
+    on_user: impl FnMut(SteamUser),
+) {
+    steam.fetch_user_streaming(steamid, on_user);
 }

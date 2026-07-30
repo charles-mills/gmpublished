@@ -1,12 +1,18 @@
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
+
+use crate::bridge::domain::SteamId;
 
 use super::{
-    HashMap, PathBuf, PublishSelectedPreview, PublishSubmitMode, PublishSubmitPreview,
-    PublishSubmitRequest, PublishedFileId, SearchFullBatch, SearchFullRequest, SearchHit,
-    SearchItem, SearchItemSource, SearchQuickBatch, SearchQuickRequest, SteamAvatarRgba,
-    SteamRuntimeUser, SteamUser, TransactionPayload, UiError, WorkshopItem, steam_publishing,
-    steam_users,
+    PublishSelectedPreview, PublishSubmitMode, PublishSubmitPreview, PublishSubmitRequest,
+    PublishedFileId, SearchFullBatch, SearchFullRequest, SearchHit, SearchItem, SearchItemSource,
+    SearchQuickBatch, SearchQuickRequest, SteamUser, UiError, WorkshopItem,
 };
+use gmpublished_backend::SteamAvatarRgba;
+use gmpublished_backend::SteamRuntimeUser;
+use gmpublished_backend::TransactionPayload;
+use gmpublished_backend::publishing as steam_publishing;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub(super) fn subscription_counts_from_items(
     items: &[WorkshopItem],
@@ -22,9 +28,15 @@ pub(super) fn publish_submission_from_app_request(
     request: PublishSubmitRequest,
 ) -> steam_publishing::PublishSubmission {
     let (icon_path, upscale) = publish_preview_from_app_request(request.preview);
-    let update_id = match request.mode {
-        PublishSubmitMode::New => None,
-        PublishSubmitMode::Update { workshop_id } => Some(workshop_id.get()),
+    // The changelog belongs to the update case, so it travels inside it.
+    let mode = match request.mode {
+        PublishSubmitMode::New => steam_publishing::PublishSubmissionMode::Create,
+        PublishSubmitMode::Update { workshop_id } => {
+            steam_publishing::PublishSubmissionMode::Update {
+                id: workshop_id.into(),
+                changes: request.changelog,
+            }
+        }
     };
 
     steam_publishing::PublishSubmission {
@@ -34,8 +46,7 @@ pub(super) fn publish_submission_from_app_request(
         tags: request.tags,
         addon_type: request.addon_type,
         upscale,
-        update_id,
-        changes: request.changelog,
+        mode,
         settings: Some(steam_publishing::PublishSettingsSnapshot {
             temp: Some(request.temp_dir),
             ignore_globs: request.ignore_globs,
@@ -47,7 +58,7 @@ pub(super) fn publish_preview_from_app_request(
     preview: Option<PublishSubmitPreview>,
 ) -> (Option<PathBuf>, bool) {
     match preview {
-        Some(PublishSubmitPreview::Selected(PublishSelectedPreview::Source { path, upscale })) => {
+        Some(PublishSubmitPreview::Selected(PublishSelectedPreview { path, upscale })) => {
             (Some(path), upscale)
         }
         Some(PublishSubmitPreview::Default(_)) | None => (None, false),
@@ -56,12 +67,11 @@ pub(super) fn publish_preview_from_app_request(
 
 pub(super) fn search_quick_batch_from_backend(
     request: &SearchQuickRequest,
-    result: &gmpublished_backend::search::QuickSearchResult,
+    result: &gmpublished_backend::QuickSearchResult,
 ) -> SearchQuickBatch {
     let hits = result.hits.iter().map(search_hit_from_backend).collect();
     let key = request.key().clone();
-    let carry = request.carry().clone();
-    SearchQuickBatch::new(key, hits, result.has_more, carry)
+    SearchQuickBatch::new(key, hits, result.has_more)
 }
 
 pub(super) fn search_full_batch_from_transaction_payload(
@@ -80,18 +90,14 @@ pub(super) fn search_full_batch_from_transaction_payload(
     ))
 }
 
-pub(super) fn search_hit_from_backend(
-    hit: &gmpublished_backend::search::QuickSearchHit,
-) -> SearchHit {
+pub(super) fn search_hit_from_backend(hit: &gmpublished_backend::QuickSearchHit) -> SearchHit {
     SearchHit {
         score: hit.score,
         item: search_item_from_backend(&hit.item),
     }
 }
 
-pub(super) fn search_item_from_backend(
-    item: &gmpublished_backend::search::SearchItem,
-) -> SearchItem {
+pub(super) fn search_item_from_backend(item: &gmpublished_backend::SearchItem) -> SearchItem {
     SearchItem {
         label: item.label().to_owned(),
         terms: item.terms().to_vec(),
@@ -102,21 +108,16 @@ pub(super) fn search_item_from_backend(
 }
 
 pub(super) fn search_item_source_from_backend(
-    source: &gmpublished_backend::search::SearchItemSource,
+    source: &gmpublished_backend::SearchItemSource,
 ) -> SearchItemSource {
     match source {
         // The backend's own `PublishedFileId` already excludes zero (see
         // its `nonzero_workshop_id` helper), so every id it hands us
         // converts cleanly.
-        gmpublished_backend::search::SearchItemSource::InstalledAddons(path, id) => {
-            SearchItemSource::InstalledAddons(
-                path.clone(),
-                id.map(|id| {
-                    PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
-                }),
-            )
+        gmpublished_backend::SearchItemSource::InstalledAddons(path, id) => {
+            SearchItemSource::InstalledAddons(path.clone(), id.map(PublishedFileId::from))
         }
-        gmpublished_backend::search::SearchItemSource::InstalledAddonFile {
+        gmpublished_backend::SearchItemSource::InstalledAddonFile {
             addon,
             entry_path,
             size_bytes,
@@ -124,38 +125,32 @@ pub(super) fn search_item_source_from_backend(
         } => SearchItemSource::InstalledAddonFile {
             addon_path: addon.path.clone(),
             addon_title: addon.title.clone(),
-            workshop_id: addon.workshop_id.map(|id| {
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id")
-            }),
+            workshop_id: addon.workshop_id.map(PublishedFileId::from),
             entry_path: entry_path.clone(),
             size_bytes: *size_bytes,
             crc32: *crc32,
         },
-        gmpublished_backend::search::SearchItemSource::MyWorkshop(id) => {
-            SearchItemSource::MyWorkshop(
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id"),
-            )
+        gmpublished_backend::SearchItemSource::MyWorkshop(id) => {
+            SearchItemSource::MyWorkshop(PublishedFileId::from(*id))
         }
-        gmpublished_backend::search::SearchItemSource::WorkshopItem(id) => {
-            SearchItemSource::WorkshopItem(
-                PublishedFileId::new(id.0).expect("backend never stores a zero workshop id"),
-            )
+        gmpublished_backend::SearchItemSource::WorkshopItem(id) => {
+            SearchItemSource::WorkshopItem(PublishedFileId::from(*id))
         }
     }
 }
 
 pub(super) fn steam_user_from_backend(user: SteamRuntimeUser) -> SteamUser {
     SteamUser {
-        steamid: user.steamid.raw(),
+        steamid: SteamId::new(user.steamid.raw()),
         name: user.name,
         avatar: user.avatar.and_then(avatar_from_backend),
         dead: user.dead,
     }
 }
 
-pub(super) fn steam_user_from_workshop_backend(user: steam_users::SteamUser) -> SteamUser {
+pub(super) fn steam_user_from_workshop_backend(user: gmpublished_backend::SteamUser) -> SteamUser {
     SteamUser {
-        steamid: user.steamid.raw(),
+        steamid: SteamId::new(user.steamid.raw()),
         name: user.name,
         avatar: user
             .avatar
@@ -167,10 +162,10 @@ pub(super) fn steam_user_from_workshop_backend(user: steam_users::SteamUser) -> 
 
 pub(super) fn workshop_item_from_backend(item: gmpublished_backend::WorkshopItem) -> WorkshopItem {
     WorkshopItem {
-        id: PublishedFileId::new(item.id.0).expect("Steam never issues a zero published file id"),
+        id: PublishedFileId::from(item.id),
         title: item.title,
         owner: item.owner.map(steam_user_from_workshop_backend),
-        steamid: item.steamid.map(|steamid| steamid.raw()),
+        steamid: item.steamid.map(|steamid| SteamId::new(steamid.raw())),
         time_created: item.time_created,
         time_updated: item.time_updated,
         description: item.description,
@@ -193,9 +188,9 @@ pub(super) fn avatar_from_backend(
 #[error(transparent)]
 pub(super) struct ClearDirectoryError(#[from] std::io::Error);
 
-impl gmpublished_backend::error_key::HasErrorKey for ClearDirectoryError {
-    fn error_key(&self) -> gmpublished_backend::error_key::ErrorKey {
-        gmpublished_backend::error_key::keys::IO_ERROR
+impl gmpublished_backend::HasErrorKey for ClearDirectoryError {
+    fn error_key(&self) -> gmpublished_backend::ErrorKey {
+        gmpublished_backend::error_keys::IO_ERROR
     }
 
     fn error_detail(&self) -> Option<String> {

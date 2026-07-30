@@ -42,19 +42,19 @@ gmod-broken-title = Garry's Mod klasörü eksik
 gmod-broken-body = Kayıtlı konum artık GarrysMod/addons içermiyor.
 gmod-broken-research = Yeniden ara
 account-update-title = Güncelleme mevcut
-account-update-caption = {$arg0} · indirmek için tıklayın
+account-update-caption = {$version} · indirmek için tıklayın
 my-workshop = Atölyem
 publish-new = Yeni Yayınla...
 my-workshop-loading = Yükleniyor...
 my-workshop-empty-title = Henüz yayınlanmış eklenti yok
 my-workshop-empty-body = Atölyeye yayınladığınız her şey burada görünür.
-my-workshop-error = Atölyem yüklenemedi: {$arg0}
-my-workshop-count = {$arg1} eklentinin {$arg0} kadarı gösteriliyor
+my-workshop-error = Atölyem yüklenemedi: {$error}
+my-workshop-count = {$total} eklentinin {$loaded} kadarı gösteriliyor
 installed-addons = Kurulu Eklentiler
 installed-addons-loading = Yükleniyor...
 installed-addons-empty-title = Kurulu eklenti yok
 installed-addons-empty-body = Atölyeden bir şeye abone olun veya buraya bir .gma dosyası bırakın.
-installed-addons-error = Kurulu eklentiler taranamadı: {$arg0}
+installed-addons-error = Kurulu eklentiler taranamadı: {$error}
 downloader = İndirici
 downloader-workshop-input = Atölye ID'lerini, bağlantıları, koleksiyonları buraya yapıştır...
 downloader-bulk-extract = Toplu GMA Çıkar
@@ -68,8 +68,13 @@ downloader-open-all = Hepsini Aç
 downloader-remove-all = Hepsini Kaldır
 downloader-status-finished = Tamamlandı
 downloader-status-error = Hata
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = Atölye {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-column-addon = Eklenti
+downloader-column-speed = Hız
+downloader-column-total = Toplam
+downloader-column-progress = İlerleme
+workshop-item = Atölye öğesi
+downloader-workshop-id = Atölye {$id}
 destination-where-to = Nereye çıkarılsın?
 destination-overwrite-warning = Var olan dosyaların üzerine yazılacak.
 destination-browse = Göz At...
@@ -84,76 +89,78 @@ destination-invalid-path = Var olan, mutlak bir klasör seçin.
 relative-time-now = az önce
 relative-time-past-year = 1 yıl önce
 relative-time-past-years =
-    { $arg0 ->
-       *[other] {$arg0} yıl önce
+    { $count ->
+       *[other] {$count} yıl önce
     }
 relative-time-past-month = 1 ay önce
 relative-time-past-months =
-    { $arg0 ->
-       *[other] {$arg0} ay önce
+    { $count ->
+       *[other] {$count} ay önce
     }
 relative-time-past-day = 1 gün önce
 relative-time-past-days =
-    { $arg0 ->
-       *[other] {$arg0} gün önce
+    { $count ->
+       *[other] {$count} gün önce
     }
 relative-time-past-hour = 1 saat önce
 relative-time-past-hours =
-    { $arg0 ->
-       *[other] {$arg0} saat önce
+    { $count ->
+       *[other] {$count} saat önce
     }
 relative-time-past-minute = 1 dakika önce
 relative-time-past-minutes =
-    { $arg0 ->
-       *[other] {$arg0} dakika önce
+    { $count ->
+       *[other] {$count} dakika önce
     }
 relative-time-past-second = 1 saniye önce
 relative-time-past-seconds =
-    { $arg0 ->
-       *[other] {$arg0} saniye önce
+    { $count ->
+       *[other] {$count} saniye önce
     }
 relative-time-future-year = 1 yıl sonra
 relative-time-future-years =
-    { $arg0 ->
-       *[other] {$arg0} yıl sonra
+    { $count ->
+       *[other] {$count} yıl sonra
     }
 relative-time-future-month = 1 ay sonra
 relative-time-future-months =
-    { $arg0 ->
-       *[other] {$arg0} ay sonra
+    { $count ->
+       *[other] {$count} ay sonra
     }
 relative-time-future-day = 1 gün sonra
 relative-time-future-days =
-    { $arg0 ->
-       *[other] {$arg0} gün sonra
+    { $count ->
+       *[other] {$count} gün sonra
     }
 relative-time-future-hour = 1 saat sonra
 relative-time-future-hours =
-    { $arg0 ->
-       *[other] {$arg0} saat sonra
+    { $count ->
+       *[other] {$count} saat sonra
     }
 relative-time-future-minute = 1 dakika sonra
 relative-time-future-minutes =
-    { $arg0 ->
-       *[other] {$arg0} dakika sonra
+    { $count ->
+       *[other] {$count} dakika sonra
     }
 relative-time-future-second = 1 saniye sonra
 relative-time-future-seconds =
-    { $arg0 ->
-       *[other] {$arg0} saniye sonra
+    { $count ->
+       *[other] {$count} saniye sonra
     }
 downloading = İndiriliyor
 locating = Bekleniyor
 decompressing = Çıkarılıyor
-extracting_progress = Çıkarılıyor {$arg0}% ({$arg1} / {$arg2})
+reading_metadata = Üstveri okunuyor
+searching = Aranıyor...
+extracting_progress = Çıkarılıyor {$percent}% ({$done} / {$total})
 size-analyzer = Eklenti Boyut Analizi
 size-analyzer-waiting = Ağaç haritası görüntü alanı bekleniyor...
 size-analyzer-loading = Hesaplanıyor...
 size-analyzer-empty = Boyutu sıfırdan büyük eklenti bulunamadı.
 size-analyzer-empty-title = Ölçülecek bir şey yok
 size-analyzer-empty-body = Kitaplığınızdaki tüm eklentiler boş, bu yüzden grafiklenecek bir şey yok.
-size-analyzer-error = Boyut Analizi başarısız oldu: {$arg0}
-size-analyzer-summary-cells = {$arg0} öğe
+size-analyzer-error = Boyut Analizi başarısız oldu: {$error}
+size-analyzer-summary-cells = {$count} öğe
 size-analyzer-name = İsim
 size-analyzer-type = Tür
 size-analyzer-size = Boyut
@@ -223,7 +230,7 @@ context-menu-debug-simulate-minus = -10 Simüle Et
 context-menu-debug-simulate-plus-million = +1 Milyon Simüle Et
 context-menu-debug-simulate-minus-million = -1 Milyon Simüle Et
 publish-processing-icon = Atölye resmi işleniyor...
-publish-packing = Paketleniyor {$arg0}% ({$arg1} / {$arg2})
+publish-packing = Paketleniyor {$percent}% ({$done} / {$total})
 PUBLISH_STARTING = Yayınlamaya Başlanıyor
 PUBLISH_PREPARING_CONFIG = Yapılandırma hazırlanıyor
 PUBLISH_PREPARING_CONTENT = İçerik Hazırlanıyor
@@ -233,7 +240,6 @@ PUBLISH_COMMITTING_CHANGES = Değişiklikler Yapılıyor
 context-menu-debug-toast-success = Bildirimi simüle et: başarılı
 context-menu-debug-toast-error = Bildirimi simüle et: hata
 context-menu-debug-toast-notice = Simüle edilmiş bildirim
-ERR_CANCELLED = İptal Edildi
 err-cancelled = İptal Edildi
 err-whitelist = Seçilen bazı dosyalara izin verilmiyor.
 err-whitelist-detail =
@@ -241,10 +247,10 @@ err-whitelist-detail =
 
     Eğer bu dosya türlerini GMA'larınızdan filtrelemek isterseniz, onları Yok Sayılan Dosya Kalıplarına ekleyebilirsiniz.
 
-    {$arg0}
+    {$detail}
 err-no-entries = Bu içerik dosya yolunda girdi yok.
-err-duplicate-entries = İçerik dosya yolunda ({$arg0}) aynı girdiden iki tane var. Bütün dosya yolları eşsiz olmalı ve küçük harflerden oluşmalıdır. Bu arada 'arch' kullanıyorum
-err-duplicate-entries-detail = İçerik dosya yolunda ({$arg0}) aynı girdiden iki tane var. Bütün dosya yolları eşsiz olmalı ve küçük harflerden oluşmalıdır. Bu arada 'arch' kullanıyorum
+err-duplicate-entries = İçerik dosya yolunda aynı girdiden iki tane var. Bütün dosya yolları eşsiz olmalı ve küçük harflerden oluşmalıdır. Bu arada 'arch' kullanıyorum
+err-duplicate-entries-detail = İçerik dosya yolunda ({$detail}) aynı girdiden iki tane var. Bütün dosya yolları eşsiz olmalı ve küçük harflerden oluşmalıdır. Bu arada 'arch' kullanıyorum
 err-invalid-content-path = Bu içerik dosya yolu mevcut değil, dizin değil veya gmpublished'ın erişim yetkisi yok
 err-multiple-gmas = İçerik dosya yolunda birden fazla GMA dosyası bulundu
 err-icon-too-large = Resim çok büyük (> 1 MB)
@@ -252,12 +258,37 @@ err-icon-too-small = Resim çok küçük (< 16 B)
 err-icon-invalid-format = Resim JPG, PNG veya GIF türünde olmalı
 err-icon-cannot-optimize = Bu resim, Steam'in önizleme sınırının altına indirilecek şekilde hazırlanamadı
 err-io-error = G/Ç Hatası
-err-image-error = Resim Hatası: {$arg0}
-err-image-error-detail = Resim Hatası: {$arg0}
-err-steam-error = Steam Hatası: {$arg0}
-err-steam-error-detail = Steam Hatası: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/s
+err-path-io-error = Bir dosya sistemi işlemi başarısız oldu.
+err-path-io-error-detail = Bir dosya sistemi işlemi başarısız oldu: {$detail}
+err-gma-format-error = GMA arşivi bozuk.
+err-gma-invalid-header = GMA başlığı geçersiz.
+err-gma-entry-not-found = İstenen GMA girdisi bulunamadı.
+err-lzma = LZMA açma işlemi başarısız oldu.
+err-gma-extraction-failed = Eklenti tamamen çıkarılamadı.
+err-gma-destination-unavailable = Kullanılabilir bir çıkarma konumu oluşturulamadı.
+err-vpk-format-error = VPK arşivi bozuk.
+err-vpk-invalid-header = VPK başlığı geçersiz.
+err-vpk-entry-not-found = İstenen VPK girdisi bulunamadı.
+err-vpk-unsafe-path = VPK arşivi güvenli olmayan bir yol içeriyor.
+err-vpk-missing-archive = Gerekli bir VPK arşivi eksik.
+err-download-missing = İndirilen eklenti dosyaları eksik.
+err-download-failed = Eklenti indirilemedi.
+err-item-not-found = Atölye öğesi bulunamadı.
+err-search-event-sink-unavailable = Arama sonuçları şu anda iletilemiyor.
+err-search-event-sink-disconnected = Arama sonuçlarının iletimi beklenmedik şekilde durdu.
+err-search-data-shape = Arama, bozuk sonuç verileri döndürdü.
+err-unknown = Bir şeyler ters gitti
+err-worker-queue-full = Uygulama meşgul. Kısa süre sonra tekrar deneyin.
+err-worker-pool-stopped = Arka plan çalışması kullanılamıyor.
+err-worker-dropped = Arka plan çalışması beklenmedik şekilde durdu.
+err-gmod-path-missing = Garry's Mod klasörü yapılandırılmamış
+err-no-addons-found = Eklenti bulunamadı
+err-image-error = Resim Hatası
+err-image-error-detail = Resim Hatası: {$detail}
+err-steam-error = Steam Hatası
+err-steam-error-detail = Steam Hatası: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/s
 byte-unit-b = B
 byte-unit-kb = KB
 byte-unit-mb = MB
@@ -291,7 +322,7 @@ file-type-txt = Metin
 file-type-properties = Özellikler
 file-type-audio = Ses
 file-type-image = Resim
-file-type-unknown = Bilinmeyen ({$arg0})
+file-type-unknown = Bilinmeyen ({$extension})
 file-preview-loading = Önizleme yükleniyor...
 file-preview-stage-reading-archive = Arşiv okunuyor...
 file-preview-stage-reading-bsp = BSP okunuyor...
@@ -303,7 +334,7 @@ file-preview-expand = Önizlemeyi genişlet
 file-preview-collapse = Önizlemeyi daralt
 file-preview-open-material = Malzemeyi aç
 file-preview-open-texture = Dokuyu aç
-file-preview-error = Önizleme başarısız: {$arg0}
+file-preview-error = Önizleme başarısız: {$error}
 file-preview-path = Yol
 file-preview-size = Boyut
 file-preview-crc = CRC
@@ -325,7 +356,7 @@ file-preview-particle-level-approximate = Yaklaşık — görünüm oyundakinden
 file-preview-particle-level-inert = Harita veya varlık gerektirir — bu önizlemede etkisiz
 file-preview-particle-level-unsupported = Bu önizlemede simüle edilmiyor
 file-preview-truncated = Önizleme kırpıldı — dosyanın tamamı gösterilenden daha büyük.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Ağlar
 file-preview-model-bones = Kemikler
 file-preview-model-sequences = Sekanslar
@@ -333,8 +364,8 @@ file-preview-model-vertices = Köşeler
 file-preview-model-triangles = Üçgenler
 file-preview-model-materials = Çözülen materyaller
 file-preview-model-skin = Görünüm
-file-preview-model-skin-option = Görünüm {$arg0}
-file-preview-model-bodygroup = Gövde grubu {$arg0}
+file-preview-model-skin-option = Görünüm {$index}
+file-preview-model-bodygroup = Gövde grubu {$index}
 file-preview-model-bounds-min = Sınır min.
 file-preview-model-bounds-max = Sınır maks.
 file-preview-map-controls = Bakmak için sürükle · Uçmak için WASD · Hız için Shift · hızı ayarlamak için kaydır
@@ -366,7 +397,7 @@ prepare-publish-tag-2 = Etiket 2
 prepare-publish-tag-3 = Etiket 3
 prepare-publish-update-exclamation = Güncelle!
 prepare-publish-publish-exclamation = Yayınla!
-prepare-publish-update-warning = {$arg0} ({$arg1}) öğesini güncellemek üzeresiniz!
+prepare-publish-update-warning = {$title} ({$id}) öğesini güncellemek üzeresiniz!
 prepare-publish-still-needed = Hâlâ gerekli:
 prepare-publish-needs-addon-path = Eklenti dosya yolu
 prepare-publish-needs-title = Başlık
@@ -378,8 +409,8 @@ prepare-publish-file-browser = Dosyalara Göz At
 prepare-publish-browser-select = Göz atmak için tıkla veya bir dosya bırak
 prepare-publish-no-files = Dosya Bulunamadı
 prepare-publish-items-one = 1 öğe
-prepare-publish-items-num = {$arg0} öğe
-prepare-publish-items-shown = {$arg0} gösteriliyor
+prepare-publish-items-num = {$count} öğe
+prepare-publish-items-shown = {$count} gösteriliyor
 prepare-publish-ignored-patterns = Yok Sayılan Dosya Kalıpları
 prepare-publish-ignore-placeholder = Ekle...
 prepare-publish-ignored-for-convenience = Kolaylığınız için bu dosya kalıbı varsayılan olarak yok sayılıyor.

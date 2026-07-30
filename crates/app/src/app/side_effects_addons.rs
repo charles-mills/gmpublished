@@ -1,15 +1,17 @@
-use gmpublished_backend::error_key::keys;
+use crate::bridge::ui_error::ResultExt as _;
+use gmpublished_backend::error_keys as keys;
 
 use super::{
     App, PublishedFileId, RootMessage, Task, UiError, flatten_blocking_ui_result, installed_addons,
     my_workshop, prepare_publish, preview_gma, run_installed_metadata_refresh, send_root_message,
     spawn_blocking_detached_or_warn, steam_session, stream,
 };
+use crate::generation::Generation;
 
 impl App {
     pub(super) fn my_workshop_page_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         page: u32,
     ) -> Task<RootMessage> {
         if let Some(task) = self
@@ -22,12 +24,15 @@ impl App {
 
     pub(super) fn my_workshop_page_worker_task(
         &self,
-        generation: u64,
+        generation: Generation,
         page: u32,
     ) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("my-workshop-page", move |app| {
-                my_workshop::browse_page(app, page)
+                app.workshop()
+                    .browse_my_page(page)
+                    .map(|result| my_workshop::PageResult::from_page(page, &result))
             })
             .map(move |result| {
                 RootMessage::MyWorkshop(my_workshop::Message::PageCompleted(
@@ -40,7 +45,7 @@ impl App {
 
     pub(super) fn my_workshop_stats_refresh_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         pages: u32,
     ) -> Task<RootMessage> {
         if let Some(task) =
@@ -56,12 +61,13 @@ impl App {
 
     pub(super) fn my_workshop_stats_refresh_worker_task(
         &self,
-        generation: u64,
+        generation: Generation,
         pages: u32,
     ) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("my-workshop-stats-refresh", move |app| {
-                my_workshop::refresh_subscription_counts(app, pages)
+                app.workshop().refresh_subscription_counts(pages)
             })
             .map(move |result| {
                 RootMessage::MyWorkshop(my_workshop::Message::StatsRefreshCompleted(
@@ -80,7 +86,7 @@ impl App {
             my_workshop::PreparePublishTarget::Update(update) => {
                 let workshop_id = update.workshop_id;
                 let (snapshot_request_id, snapshot_destination) =
-                    self.prepare_publish_workshop_snapshot(workshop_id);
+                    self.publish().workshop_snapshot(workshop_id);
                 prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
                     workshop_id,
                     title: update.title,
@@ -94,8 +100,8 @@ impl App {
         Task::done(RootMessage::PreparePublish(
             prepare_publish::Message::OpenRequested {
                 target,
-                ignored_patterns: self.prepare_publish_ignored_patterns(),
-                upscale_icon_default: self.prepare_publish_upscale_default(),
+                ignored_patterns: self.publish().ignored_patterns(),
+                upscale_icon_default: self.publish().upscale_default(),
             },
         ))
     }
@@ -114,7 +120,7 @@ impl App {
 
     pub(super) fn installed_addons_metadata_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     ) -> Task<RootMessage> {
         if let Some(task) =
@@ -127,22 +133,24 @@ impl App {
         }
         let worker_item_ids = item_ids.clone();
         let delivery_item_ids = item_ids;
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("installed-addons-metadata", move |app| {
-                installed_addons::resolve_metadata(app, &worker_item_ids)
+                let (metadata, stale_ids) = app.workshop().resolve_metadata(&worker_item_ids);
+                installed_addons::resolve_metadata(&metadata, stale_ids)
             })
             .map(move |result| {
                 RootMessage::InstalledAddons(installed_addons::Message::MetadataCompleted(
                     generation,
                     delivery_item_ids.clone(),
-                    result.map_err(|error| UiError::from(&error)),
+                    result.ui_err(),
                 ))
             })
     }
 
     pub(super) fn installed_addons_metadata_refresh_task(
         &mut self,
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     ) -> Task<RootMessage> {
         if let Some(task) =
@@ -153,7 +161,7 @@ impl App {
         {
             return task;
         }
-        let ctx = self.ctx.clone();
+        let ctx = self.environment.ctx.clone();
         // The worker takes `item_ids`; a scheduling failure still has to name
         // them so the ids go back in line rather than staying marked finished.
         let schedule_error_item_ids = item_ids.clone();
@@ -191,19 +199,22 @@ impl App {
             target.title,
             target.path.display()
         );
-        self.apply_preview_gma_message(preview_gma::Message::OpenRequested(
-            preview_gma::OpenTarget::new(
-                target.path.clone(),
-                target.title.clone(),
-                target.workshop_id,
-            )
-            .with_seed(preview_gma::OpenSeed {
-                preview_url: target.preview_url.clone(),
-                subscription_count: Some(target.subscription_count),
-                score_bucket: Some(target.score_bucket),
-                score_label: Some(target.score_label),
-            }),
-        ))
+        self.apply_preview_gma_message(
+            preview_gma::Message::OpenRequested(
+                preview_gma::OpenTarget::new(
+                    target.path.clone(),
+                    target.title.clone(),
+                    target.workshop_id,
+                )
+                .with_seed(preview_gma::OpenSeed {
+                    preview_url: target.preview_url.clone(),
+                    subscription_count: Some(target.subscription_count),
+                    score_bucket: Some(target.score_bucket),
+                    score_label: Some(target.score_label),
+                }),
+            ),
+            self.update_context,
+        )
     }
 
     pub(super) fn installed_addons_context_menu_task(

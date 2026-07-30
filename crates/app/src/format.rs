@@ -1,6 +1,6 @@
 use crate::bridge::DownloadCountFormat;
 
-use crate::i18n::I18n;
+use crate::i18n::{Arg, I18n};
 
 const BYTE_UNIT_BASE: f64 = 1024.0;
 const BYTE_UNIT_KEYS: [&str; 5] = [
@@ -18,7 +18,10 @@ pub fn format_bytes(bytes: u64, i18n: &I18n) -> String {
     let unit = i18n.tr(unit_key);
     i18n.trn(
         "byte-format",
-        &[("arg0", value.as_str()), ("arg1", unit.as_str())],
+        &[
+            ("value", Arg::Number(value.as_str())),
+            ("unit", Arg::Text(unit.as_str())),
+        ],
     )
 }
 
@@ -47,14 +50,17 @@ fn byte_value_and_unit(bytes: u64, i18n: &I18n) -> (String, &'static str) {
     (formatted, BYTE_UNIT_KEYS[unit_index])
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DownloadCountFormatter {
     separator: Option<char>,
 }
 
 impl Default for DownloadCountFormatter {
+    /// Follows the same automatic policy as any other formatter rather than
+    /// hardcoding one locale's separator. Used before settings load, then
+    /// replaced by `set_download_count_formatter`.
     fn default() -> Self {
-        Self::with_separator(',')
+        Self::from_format_and_locale(DownloadCountFormat::default(), None)
     }
 }
 

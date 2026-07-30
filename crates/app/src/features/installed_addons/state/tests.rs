@@ -2,6 +2,7 @@ use crate::bridge::library::LibraryRefreshReason;
 
 use super::model::MetadataPatch;
 use super::*;
+use crate::generation::Generation;
 
 /// Builds a `State` pre-populated with `count` rows (the full discovered
 /// addon library), each with a unique workshop id `1..=count`, mirroring
@@ -12,18 +13,15 @@ fn fixture_state(count: usize) -> State {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
     let workshop_index = build_workshop_index(&rows);
 
     State {
-        generation: 1,
-        rows: Some(rows),
+        generation: Generation::from_raw(1),
+        library: Library::Scanned(rows),
         workshop_index,
         ..State::default()
     }
@@ -32,13 +30,12 @@ fn fixture_state(count: usize) -> State {
 fn visible_fixture_state(count: usize) -> State {
     let mut state = fixture_state(count);
     state.route_visible = true;
-    state.load_status = LoadStatus::Ready;
     state.sync_grid_items();
     let _ = addon_grid::update(
         state.grid_mut(),
         addon_grid::Message::ViewportResized(200, 160),
     );
-    let visible = state.grid.visible_item_range();
+    let visible = state.grid().visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible.clone(), state.rows().len());
     assert!(!visible.is_empty(), "fixture must expose visible rows");
     assert!(!after.is_empty(), "fixture must expose an after-window");
@@ -56,7 +53,7 @@ fn patch_batch(start: u64, count: u64) -> Vec<MetadataPatch> {
     (start..start + count)
         .map(|id| {
             MetadataPatch::for_test(
-                PublishedFileId::new(id + 1).expect("test fixture ids are always nonzero"),
+                PublishedFileId::fixture(id + 1),
                 "Updated title",
                 Some("https://example.test/p.jpg"),
             )
@@ -68,30 +65,26 @@ fn patch_batch(start: u64, count: u64) -> Vec<MetadataPatch> {
 fn settings_refresh_resets_visible_projection_loudly() {
     let mut state = fixture_state(3);
     state.route_visible = true;
-    state.load_status = LoadStatus::Ready;
 
     state.refresh_started(LibraryRefreshReason::SettingsChanged);
 
-    assert_eq!(state.load_status, LoadStatus::Loading);
-    assert!(state.rows.is_none());
+    assert_eq!(state.library, Library::Scanning);
 }
 
 #[test]
 fn settings_refresh_invalidates_hidden_projection_without_loading() {
     let mut state = fixture_state(3);
     state.route_visible = false;
-    state.load_status = LoadStatus::Ready;
 
     state.refresh_started(LibraryRefreshReason::SettingsChanged);
 
-    assert_eq!(state.load_status, LoadStatus::Idle);
-    assert!(state.rows.is_none());
+    assert_eq!(state.library, Library::Unscanned);
 }
 
 #[test]
 fn visible_metadata_request_includes_after_window_before_beyond_rows() {
     let mut state = visible_fixture_state(80);
-    let visible = state.grid.visible_item_range();
+    let visible = state.grid().visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible.clone(), state.rows().len());
 
     let (_, ids) = state
@@ -100,32 +93,25 @@ fn visible_metadata_request_includes_after_window_before_beyond_rows() {
 
     // Row `i` carries id `i + 1` (see `fixture_state`).
     let visible_ids = visible
-        .map(|index| {
-            PublishedFileId::new(index as u64 + 1).expect("test fixture ids are always nonzero")
-        })
+        .map(|index| PublishedFileId::fixture(index as u64 + 1))
         .collect::<Vec<_>>();
     assert_eq!(&ids[..visible_ids.len()], visible_ids.as_slice());
     assert_eq!(
         ids[visible_ids.len()],
-        PublishedFileId::new(after.start as u64 + 1).expect("test fixture ids are always nonzero")
+        PublishedFileId::fixture(after.start as u64 + 1)
     );
-    assert!(!ids.contains(
-        &PublishedFileId::new(after.end as u64 + 1).expect("test fixture ids are always nonzero")
-    ));
+    assert!(!ids.contains(&PublishedFileId::fixture(after.end as u64 + 1)));
 }
 
 #[test]
 fn visible_metadata_request_dedups_prefetch_window_against_known_ids() {
     let mut state = visible_fixture_state(80);
-    let visible = state.grid.visible_item_range();
+    let visible = state.grid().visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible, state.rows().len());
     // Row `i` carries id `i + 1` (see `fixture_state`).
-    let in_flight =
-        PublishedFileId::new(after.start as u64 + 1).expect("test fixture ids are always nonzero");
-    let finished = PublishedFileId::new(after.start.saturating_add(1) as u64 + 1)
-        .expect("test fixture ids are always nonzero");
-    let still_new = PublishedFileId::new(after.start.saturating_add(2) as u64 + 1)
-        .expect("test fixture ids are always nonzero");
+    let in_flight = PublishedFileId::fixture(after.start as u64 + 1);
+    let finished = PublishedFileId::fixture(after.start.saturating_add(1) as u64 + 1);
+    let still_new = PublishedFileId::fixture(after.start.saturating_add(2) as u64 + 1);
     state.metadata_in_flight.insert(in_flight);
     state.metadata_finished.insert(finished);
 
@@ -150,7 +136,7 @@ fn apply_metadata_patches_matches_expected_at_scale() {
 
     for batch in 0..BATCHES {
         let patches = patch_batch(batch * BATCH_SIZE, BATCH_SIZE);
-        state.apply_metadata_patches(1, &patches);
+        state.apply_metadata_patches(Generation::from_raw(1), &patches);
     }
 
     let patched_count = (BATCHES * BATCH_SIZE) as usize;
@@ -179,10 +165,7 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
@@ -193,36 +176,22 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
     assert_eq!(state.grid().items_len(), 120);
 
     let patches = vec![
-        MetadataPatch::for_test(
-            PublishedFileId::new(10).expect("test fixture ids are always nonzero"),
-            "Patched Early",
-            None,
-        ),
-        MetadataPatch::for_test(
-            PublishedFileId::new(115).expect("test fixture ids are always nonzero"),
-            "Patched Late",
-            None,
-        ),
+        MetadataPatch::for_test(PublishedFileId::fixture(10), "Patched Early", None),
+        MetadataPatch::for_test(PublishedFileId::fixture(115), "Patched Late", None),
     ];
     state.apply_metadata_patches(generation, &patches);
 
     let early = state
         .rows()
         .iter()
-        .find(|row| {
-            row.workshop_id()
-                == Some(PublishedFileId::new(10).expect("test fixture ids are always nonzero"))
-        })
+        .find(|row| row.workshop_id() == Some(PublishedFileId::fixture(10)))
         .expect("row 10 should be present");
     assert_eq!(early.title_for_test(), "Patched Early");
 
     let late = state
         .rows()
         .iter()
-        .find(|row| {
-            row.workshop_id()
-                == Some(PublishedFileId::new(115).expect("test fixture ids are always nonzero"))
-        })
+        .find(|row| row.workshop_id() == Some(PublishedFileId::fixture(115)))
         .expect("row 115 should be present");
     assert_eq!(late.title_for_test(), "Patched Late");
 
@@ -241,29 +210,21 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
 #[test]
 fn duplicate_workshop_ids_both_receive_patch() {
     let rows = vec![
-        Row::for_test(
-            "/addons/a.gma",
-            "Title",
-            Some(PublishedFileId::new(7).expect("test fixture ids are always nonzero")),
-        ),
-        Row::for_test(
-            "/addons/b.gma",
-            "Title",
-            Some(PublishedFileId::new(7).expect("test fixture ids are always nonzero")),
-        ),
+        Row::for_test("/addons/a.gma", "Title", Some(PublishedFileId::fixture(7))),
+        Row::for_test("/addons/b.gma", "Title", Some(PublishedFileId::fixture(7))),
     ];
     let workshop_index = build_workshop_index(&rows);
     let mut state = State {
-        generation: 1,
-        rows: Some(rows),
+        generation: Generation::from_raw(1),
+        library: Library::Scanned(rows),
         workshop_index,
         ..State::default()
     };
 
     state.apply_metadata_patches(
-        1,
+        Generation::from_raw(1),
         &[MetadataPatch::for_test(
-            PublishedFileId::new(7).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(7),
             "Patched",
             None,
         )],
@@ -282,41 +243,34 @@ fn duplicate_workshop_ids_both_receive_patch() {
 fn settled_visible_state(count: usize) -> State {
     let mut state = fixture_state(count);
     state.route_visible = true;
-    state.load_status = LoadStatus::Ready;
     state
 }
 
 #[test]
 fn disk_change_swaps_quietly_and_carries_unchanged_rows() {
     let mut state = settled_visible_state(2);
-    let rows = state.rows.as_mut().expect("fixture rows");
+    let Library::Scanned(rows) = &mut state.library else {
+        panic!("the fixture library is scanned");
+    };
     rows[0] = rows[0].clone().with_ready_animation_for_test();
     rows[1] = rows[1].clone().with_ready_animation_for_test();
 
     state.refresh_started(LibraryRefreshReason::DiskChanged);
-    assert_eq!(state.load_status, LoadStatus::Ready, "no loading flash");
+    assert!(state.library.is_scanned(), "no loading flash");
     assert_eq!(state.rows().len(), 2, "grid keeps rows mid-scan");
 
     let fresh = vec![
         // Same fingerprint (0/0) as the fixture row: carried over.
-        Row::for_test(
-            "/addons/0.gma",
-            "Title",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
-        ),
+        Row::for_test("/addons/0.gma", "Title", Some(PublishedFileId::fixture(1))),
         // Changed fingerprint: replaced by the fresh scan row.
-        Row::for_test(
-            "/addons/1.gma",
-            "Title",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
-        )
-        .with_file_fingerprint_for_test(9, 9),
+        Row::for_test("/addons/1.gma", "Title", Some(PublishedFileId::fixture(1)))
+            .with_file_fingerprint_for_test(9, 9),
     ];
     state.apply_snapshot(LibraryRefreshReason::DiskChanged, Ok(fresh));
 
     assert!(state.rows()[0].thumbnail_ready_for_test());
     assert!(!state.rows()[1].thumbnail_ready_for_test());
-    assert_eq!(state.load_status, LoadStatus::Ready);
+    assert!(state.library.is_scanned());
 }
 
 #[test]
@@ -329,10 +283,7 @@ fn quiet_apply_replaces_the_full_row_set() {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
@@ -346,10 +297,7 @@ fn quiet_apply_replaces_the_full_row_set() {
             Row::for_test(
                 &format!("/addons/{i}.gma"),
                 "Title",
-                Some(
-                    PublishedFileId::new(i as u64 + 1)
-                        .expect("test fixture ids are always nonzero"),
-                ),
+                Some(PublishedFileId::fixture(i as u64 + 1)),
             )
         })
         .collect();
@@ -361,7 +309,6 @@ fn quiet_apply_replaces_the_full_row_set() {
 #[test]
 fn disk_snapshot_while_hidden_updates_projection_without_thumbnail_work() {
     let mut state = fixture_state(3);
-    state.load_status = LoadStatus::Ready;
 
     state.refresh_started(LibraryRefreshReason::DiskChanged);
     state.apply_snapshot(
@@ -369,12 +316,12 @@ fn disk_snapshot_while_hidden_updates_projection_without_thumbnail_work() {
         Ok(vec![Row::for_test(
             "/addons/new.gma",
             "Title",
-            Some(PublishedFileId::new(9).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(9)),
         )]),
     );
 
     assert_eq!(state.rows().len(), 1);
-    assert_eq!(state.load_status, LoadStatus::Ready);
+    assert!(state.library.is_scanned());
     assert!(state.thumbnail_demands().demands.is_empty());
 }
 
@@ -386,36 +333,35 @@ fn quiet_error_keeps_current_rows_on_screen() {
     state.apply_snapshot(
         LibraryRefreshReason::DiskChanged,
         Err(UiError::detailed(
-            gmpublished_backend::error_key::ErrorKey("ERR_TEST"),
+            gmpublished_backend::ErrorKey::for_test("ERR_TEST"),
             Some("scan raced a file move".to_owned()),
         )),
     );
 
     assert_eq!(state.rows().len(), 2);
-    assert_eq!(state.load_status, LoadStatus::Ready);
-    assert!(state.rows.is_some());
+    assert!(state.library.is_scanned());
 }
 
 #[test]
 fn degraded_watch_rearms_once_per_route_entry() {
     let mut state = State::default();
-    assert_eq!(state.watch_arm_epoch(), 0);
+    assert_eq!(state.watch_arm_epoch(), Generation::INITIAL);
 
     state.apply_watch_armed(true);
     state.enter_route();
-    assert_eq!(state.watch_arm_epoch(), 1);
+    assert_eq!(state.watch_arm_epoch(), Generation::from_raw(1));
 
     // Still degraded after the retry: no second bump until re-entry.
     state.apply_watch_armed(true);
     state.exit_route();
     state.enter_route();
-    assert_eq!(state.watch_arm_epoch(), 2);
+    assert_eq!(state.watch_arm_epoch(), Generation::from_raw(2));
 
     // Healthy watch never churns the subscription.
     state.apply_watch_armed(false);
     state.exit_route();
     state.enter_route();
-    assert_eq!(state.watch_arm_epoch(), 2);
+    assert_eq!(state.watch_arm_epoch(), Generation::from_raw(2));
 }
 
 /// A metadata lookup that fails says nothing about the ids it named, so they
@@ -434,9 +380,7 @@ fn failed_metadata_lookup_is_retried_once_steam_returns() {
     let follow_up = state.finish_metadata_request(
         generation,
         &requested,
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR,
-        )),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     );
     assert!(follow_up.is_none());
 
@@ -486,9 +430,7 @@ fn failed_metadata_refresh_requeues_its_ids() {
     state.apply_metadata_refresh(
         refresh_generation,
         &refresh_ids,
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR,
-        )),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     );
 
     assert!(state.retry_failed_metadata());

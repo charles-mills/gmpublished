@@ -35,9 +35,7 @@ const DELEGATE_PATCH_ATTEMPTS: u32 = 50;
 /// the run loop (and therefore winit's `NSApplicationDelegate`) exists.
 pub fn install() {
     match apple_event::install_document_open_handler(super::accept_paths) {
-        Ok(registration) => {
-            // Keeps the handler installed for the process lifetime.
-            Box::leak(Box::new(registration));
+        Ok(()) => {
             log::info!("installed macOS document-open Apple Event fallback handler");
         }
         Err(error) => {
@@ -137,16 +135,16 @@ unsafe extern "C-unwind" fn application_open_urls(
         // `application:openURLs:` contract guarantees this argument is a
         // valid `NSArray<NSURL> *` for the duration of the callback.
         let urls = unsafe { &*(urls.cast::<NSArray<NSURL>>()) };
-        let mut paths = Vec::new();
-        for index in 0..urls.count() {
-            // SAFETY: `index` ranges over `0..urls.count()`, always in bounds
-            // for `urls`, satisfying `objectAtIndex_unchecked`'s precondition.
-            let url = unsafe { urls.objectAtIndex_unchecked(index) };
-            match url.to_file_path() {
-                Some(path) => paths.push(path),
-                None => log::debug!("ignored macOS document-open URL without file path"),
-            }
-        }
+        let paths = urls
+            .iter()
+            .filter_map(|url| {
+                let path = url.to_file_path();
+                if path.is_none() {
+                    log::debug!("ignored macOS document-open URL without file path");
+                }
+                path
+            })
+            .collect();
 
         super::accept_paths(paths);
     }));
@@ -193,21 +191,17 @@ impl std::error::Error for MacDocumentOpenError {}
 
 mod apple_event {
     use std::{
-        ffi::{c_char, c_int, c_long, c_short, c_uchar, c_uint, c_void},
+        ffi::{c_char, c_long, c_short, c_uchar, c_uint, c_void},
         fmt, panic,
         path::PathBuf,
         ptr::{self, NonNull},
     };
 
-    pub(super) struct MacDocumentOpenRegistration {
-        state: NonNull<NativeHandlerState>,
-    }
-
     struct NativeHandlerState {
         sender: Box<dyn Fn(Vec<PathBuf>)>,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) struct MacDocumentOpenError {
         operation: &'static str,
         status: OSErr,
@@ -225,17 +219,27 @@ mod apple_event {
 
     impl std::error::Error for MacDocumentOpenError {}
 
+    /// Installs the `aevt/odoc` handler for the process lifetime.
+    ///
+    /// There is no teardown, and no handle to one. The handler must stay
+    /// installed as long as the process runs, so the state it needs is leaked
+    /// deliberately.
+    ///
+    /// A registration guard with an `AERemoveEventHandler` `Drop` would be
+    /// unsafe code that never executes — the handle would have to be leaked to
+    /// keep the handler alive, so the `Drop` could not run. If removal is ever
+    /// wanted, the teardown belongs with the change that stops leaking.
     pub(super) fn install_document_open_handler(
         sender: impl Fn(Vec<PathBuf>) + 'static,
-    ) -> Result<MacDocumentOpenRegistration, MacDocumentOpenError> {
+    ) -> Result<(), MacDocumentOpenError> {
         let state = Box::new(NativeHandlerState {
             sender: Box::new(sender),
         });
         let state = NonNull::from(Box::leak(state));
         // SAFETY: `handle_open_documents` matches the `AEEventHandlerUPP`
         // signature Carbon expects, and `state.as_ptr()` is the pointer just
-        // produced by `Box::leak` above, so it stays valid for as long as the
-        // registration lives (freed on the error path below, or in Drop).
+        // produced by `Box::leak` above, so it stays valid for the process
+        // lifetime (the error path below is the only thing that reclaims it).
         let status = unsafe {
             AEInstallEventHandler(
                 K_CORE_EVENT_CLASS,
@@ -258,37 +262,7 @@ mod apple_event {
             });
         }
 
-        Ok(MacDocumentOpenRegistration { state })
-    }
-
-    impl Drop for MacDocumentOpenRegistration {
-        fn drop(&mut self) {
-            // SAFETY: this passes the exact class/id/handler/is_sys_handler
-            // tuple used to install this handler in
-            // `install_document_open_handler`, which Carbon requires to
-            // identify the registration to remove; `self` owns the
-            // registration, so this can't double-remove it.
-            let status = unsafe {
-                AERemoveEventHandler(
-                    K_CORE_EVENT_CLASS,
-                    K_AE_OPEN_DOCUMENTS,
-                    Some(handle_open_documents),
-                    FALSE,
-                )
-            };
-            if status != NO_ERR {
-                log::debug!("failed to remove macOS document-open handler: {status}");
-                return;
-            }
-            // SAFETY: `self.state` is the same pointer produced by
-            // `Box::leak` in `install_document_open_handler`, owned
-            // exclusively by this registration; the handler was just
-            // successfully removed above, so Carbon can no longer call it
-            // with this pointer, and `Drop::drop` runs at most once.
-            unsafe {
-                drop(Box::from_raw(self.state.as_ptr()));
-            }
-        }
+        Ok(())
     }
 
     // SAFETY: this is only invoked by Carbon's Apple Event dispatcher as the
@@ -339,28 +313,24 @@ mod apple_event {
         NO_ERR
     }
 
+    /// # Safety
+    ///
+    /// `event` must point to a live `AppleEvent` that stays valid for the
+    /// duration of the call.
     unsafe fn document_paths_from_event(event: *const AppleEvent) -> Result<Vec<PathBuf>, OSErr> {
-        let mut list = AEDesc::default();
         // SAFETY: `event` is this function's own precondition, upheld by its
-        // one caller (a live AppleEvent from the Carbon dispatcher); `list`
-        // is a fresh stack-owned `AEDesc` we're writing into.
-        let status = unsafe { AEGetParamDesc(event, KEY_DIRECT_OBJECT, TYPE_AE_LIST, &mut list) };
-        if status != NO_ERR {
-            return Err(status);
-        }
+        // one caller (a live AppleEvent from the Carbon dispatcher).
+        let list = unsafe { OwnedAeDesc::event_parameter(event)? };
 
-        // SAFETY: `list` was just populated by the successful `AEGetParamDesc`
-        // call above, so it's an initialized, live `AEDescList`.
-        let result = unsafe { document_paths_from_list(&list) };
-        // SAFETY: `list` was successfully filled above and not yet disposed;
-        // this releases its owned resources exactly once.
-        let dispose_status = unsafe { AEDisposeDesc(&mut list) };
-        if dispose_status != NO_ERR {
-            log::debug!("failed to dispose macOS document-open list descriptor: {dispose_status}");
-        }
-        result
+        // SAFETY: `list` owns the initialized descriptor returned by Carbon
+        // and keeps it alive until this call and every early-return path end.
+        unsafe { document_paths_from_list(list.as_ptr()) }
     }
 
+    /// # Safety
+    ///
+    /// `list` must point to an initialized `AEDescList` that stays valid for
+    /// the duration of the call.
     unsafe fn document_paths_from_list(list: *const AEDescList) -> Result<Vec<PathBuf>, OSErr> {
         let mut count = 0;
         // SAFETY: `list` is this function's own precondition, upheld by its
@@ -373,36 +343,31 @@ mod apple_event {
 
         let mut paths = Vec::new();
         for index in 1..=count {
-            let mut item = AEDesc::default();
             // SAFETY: `index` ranges over `1..=count`, where `count` was just
-            // obtained from `AECountItems` on this same `list`, satisfying
-            // the 1-based in-range requirement; `item` is a fresh local we own.
-            let status =
-                unsafe { AEGetNthDesc(list, index, TYPE_FILE_URL, ptr::null_mut(), &mut item) };
-            if status != NO_ERR {
-                log::debug!("failed to read document-open item {index}: {status}");
-                continue;
-            }
+            // obtained from `AECountItems` on this same `list`.
+            let item = match unsafe { OwnedAeDesc::list_item(list, index) } {
+                Ok(item) => item,
+                Err(status) => {
+                    log::debug!("failed to read document-open item {index}: {status}");
+                    continue;
+                }
+            };
 
-            // SAFETY: `item` was just populated by the successful
-            // `AEGetNthDesc` call above (errors `continue`d past this point).
-            match unsafe { path_from_file_url_desc(&item) } {
+            // SAFETY: `item` owns the descriptor returned by the successful
+            // `AEGetNthDesc` call and remains alive through conversion.
+            match unsafe { path_from_file_url_desc(item.as_ptr()) } {
                 Some(path) => paths.push(path),
                 None => log::debug!("ignored document-open item {index} with invalid file URL"),
-            }
-            // SAFETY: `item` was successfully filled above for this
-            // iteration and is disposed exactly once before it's reused.
-            let dispose_status = unsafe { AEDisposeDesc(&mut item) };
-            if dispose_status != NO_ERR {
-                log::debug!(
-                    "failed to dispose macOS document-open item descriptor {index}: {dispose_status}"
-                );
             }
         }
 
         Ok(paths)
     }
 
+    /// # Safety
+    ///
+    /// `desc` must point to an initialized `AEDesc` that stays valid for the
+    /// duration of the call.
     unsafe fn path_from_file_url_desc(desc: *const AEDesc) -> Option<PathBuf> {
         // SAFETY: `desc` is this function's own precondition, upheld by its
         // only caller, which passes a descriptor just filled by `AEGetNthDesc`.
@@ -425,10 +390,7 @@ mod apple_event {
     }
 
     fn file_url_bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
-        // SAFETY: `cf_file_url_bytes_to_path` only reads `bytes` through a
-        // safe `&[u8]` slice to build a CFURL; it carries no additional
-        // precondition beyond what the slice itself already guarantees.
-        let path = unsafe { cf_file_url_bytes_to_path(bytes) };
+        let path = cf_file_url_bytes_to_path(bytes);
         if path.is_some() {
             return path;
         }
@@ -437,7 +399,7 @@ mod apple_event {
         text.starts_with('/').then(|| PathBuf::from(text))
     }
 
-    unsafe fn cf_file_url_bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
+    fn cf_file_url_bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
         // SAFETY: `bytes.as_ptr()` paired with the `CFIndex`-converted
         // `bytes.len()` is exactly the pointer+length CoreFoundation needs to
         // read `length` bytes from the slice; `ptr::null()` for the
@@ -451,34 +413,27 @@ mod apple_event {
                 ptr::null(),
             )
         };
-        let url = NonNull::new(url.cast_mut())?;
+        // SAFETY: a non-null result from a Core Foundation "Create" function
+        // transfers one owned reference to the caller.
+        let url = unsafe { OwnedCfRef::from_create(url)? };
 
         // SAFETY: `url` was just produced by `CFURLCreateWithBytes` and
         // null-checked above, so it's a live `CFURLRef` we hold a "Create"
         // reference to.
-        let path =
-            unsafe { CFURLCopyFileSystemPath(url.as_ptr().cast(), K_CF_URL_POSIX_PATH_STYLE) };
-        // SAFETY: `url` came from a "Create" function, so this call releases
-        // the single reference it owns, exactly once, after its last use above.
-        unsafe {
-            CFRelease(url.as_ptr().cast());
-        }
-        let path = NonNull::new(path.cast_mut())?;
+        let path = unsafe { CFURLCopyFileSystemPath(url.as_ptr(), K_CF_URL_POSIX_PATH_STYLE) };
+        // SAFETY: a non-null result from a Core Foundation "Copy" function
+        // transfers one owned reference to the caller.
+        let path = unsafe { OwnedCfRef::from_create(path)? };
 
-        // SAFETY: `path` was just produced by `CFURLCopyFileSystemPath` and
-        // null-checked above, so it's a live `CFStringRef` valid until the
-        // `CFRelease` below.
-        let result = unsafe { cf_string_to_string(path.as_ptr().cast()) }.map(PathBuf::from);
-        // SAFETY: `path` came from a "Copy" function (same ownership rule as
-        // "Create"), so it owns exactly one reference; `cf_string_to_string`
-        // has already finished reading it, so releasing here is not a
-        // use-after-free.
-        unsafe {
-            CFRelease(path.as_ptr().cast());
-        }
-        result
+        // SAFETY: `path` owns the live CFString returned above and its RAII
+        // guard keeps the reference valid through conversion.
+        unsafe { cf_string_to_string(path.as_ptr()) }.map(PathBuf::from)
     }
 
+    /// # Safety
+    ///
+    /// `string` must be a live `CFStringRef` that stays valid for the duration
+    /// of the call.
     unsafe fn cf_string_to_string(string: CFStringRef) -> Option<String> {
         // SAFETY: `string` is this function's own precondition, upheld by its
         // one caller, which passes a live `CFStringRef` it just got from
@@ -522,7 +477,8 @@ mod apple_event {
     type Size = c_long;
     type CFIndex = c_long;
     type CFStringEncoding = c_uint;
-    type CFURLPathStyle = c_int;
+    // `CFURL.h`: `typedef CF_ENUM(CFIndex, CFURLPathStyle)` — 8 bytes, not 4.
+    type CFURLPathStyle = CFIndex;
     type CFAllocatorRef = *const c_void;
     type CFURLRef = *const c_void;
     type CFStringRef = *const c_void;
@@ -535,7 +491,7 @@ mod apple_event {
         Option<unsafe extern "C" fn(*const AppleEvent, *mut AppleEvent, SRefCon) -> OSErr>;
 
     #[repr(C)]
-    #[derive(Clone, Copy, Default)]
+    #[derive(Default)]
     struct AEDesc {
         descriptor_type: DescType,
         data_handle: *mut c_void,
@@ -543,6 +499,86 @@ mod apple_event {
 
     type AEDescList = AEDesc;
     type AppleEvent = AEDesc;
+
+    /// An initialized Carbon descriptor with exactly one disposal obligation.
+    struct OwnedAeDesc(AEDesc);
+
+    impl OwnedAeDesc {
+        /// # Safety
+        ///
+        /// `event` must point to a live Apple Event.
+        unsafe fn event_parameter(event: *const AppleEvent) -> Result<Self, OSErr> {
+            let mut descriptor = AEDesc::default();
+            // SAFETY: the caller guarantees `event`; `descriptor` is fresh
+            // writable storage and becomes initialized only on success.
+            let status =
+                unsafe { AEGetParamDesc(event, KEY_DIRECT_OBJECT, TYPE_AE_LIST, &mut descriptor) };
+            if status == NO_ERR {
+                Ok(Self(descriptor))
+            } else {
+                Err(status)
+            }
+        }
+
+        /// # Safety
+        ///
+        /// `list` must point to a live descriptor list and `index` must be
+        /// a valid one-based item index.
+        unsafe fn list_item(list: *const AEDescList, index: c_long) -> Result<Self, OSErr> {
+            let mut descriptor = AEDesc::default();
+            // SAFETY: the caller supplies the live list and valid index;
+            // `descriptor` is fresh writable storage.
+            let status = unsafe {
+                AEGetNthDesc(list, index, TYPE_FILE_URL, ptr::null_mut(), &mut descriptor)
+            };
+            if status == NO_ERR {
+                Ok(Self(descriptor))
+            } else {
+                Err(status)
+            }
+        }
+
+        fn as_ptr(&self) -> *const AEDesc {
+            &self.0
+        }
+    }
+
+    impl Drop for OwnedAeDesc {
+        fn drop(&mut self) {
+            // SAFETY: construction succeeds only when Carbon initialized this
+            // descriptor, and ownership cannot be duplicated or moved out.
+            let status = unsafe { AEDisposeDesc(&mut self.0) };
+            if status != NO_ERR {
+                log::debug!("failed to dispose macOS Apple Event descriptor: {status}");
+            }
+        }
+    }
+
+    /// A +1 Core Foundation reference returned by a Create/Copy function.
+    struct OwnedCfRef(NonNull<c_void>);
+
+    impl OwnedCfRef {
+        /// # Safety
+        ///
+        /// A non-null `reference` must carry one caller-owned +1 retain.
+        unsafe fn from_create(reference: *const c_void) -> Option<Self> {
+            NonNull::new(reference.cast_mut()).map(Self)
+        }
+
+        fn as_ptr(&self) -> *const c_void {
+            self.0.as_ptr()
+        }
+    }
+
+    impl Drop for OwnedCfRef {
+        fn drop(&mut self) {
+            // SAFETY: this wrapper is constructed only for a +1 Create/Copy
+            // result and cannot be cloned, so Drop releases it exactly once.
+            unsafe {
+                CFRelease(self.as_ptr());
+            }
+        }
+    }
 
     const NO_ERR: OSErr = 0;
     const FALSE: Boolean = 0;
@@ -570,12 +606,6 @@ mod apple_event {
             the_ae_event_id: AEEventID,
             handler: AEEventHandlerUPP,
             handler_refcon: SRefCon,
-            is_sys_handler: Boolean,
-        ) -> OSErr;
-        fn AERemoveEventHandler(
-            the_ae_event_class: AEEventClass,
-            the_ae_event_id: AEEventID,
-            handler: AEEventHandlerUPP,
             is_sys_handler: Boolean,
         ) -> OSErr;
         fn AEGetParamDesc(

@@ -15,18 +15,15 @@ name = "gmpublished"
 path = "src/main.rs"
 
 [features]
-default = ["asset-studio"]
 # Developer-only context-menu actions for simulating subscriber changes and
 # hiding addons from the current in-memory session.
 debug = []
-asset-studio = [
-    "dep:bytemuck",
-    "gmpublished-backend/scene",
-]
 
 [dependencies]
-bytemuck = { workspace = true, optional = true }
+arc-swap.workspace = true
+bytemuck.workspace = true
 vformats.workspace = true
+clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 # pinned to match iced 0.14's internal version — do not bump independently
 cosmic-text = { version = "0.15.0", default-features = false, features = ["std", "swash"] }
 fast_image_resize.workspace = true
@@ -34,12 +31,13 @@ fluent-bundle.workspace = true
 fluent-langneg.workspace = true
 gif.workspace = true
 gmpublished-backend = { path = "../backend" }
+gmpublished-domain = { path = "../domain" }
 iced.workspace = true
 image.workspace = true
 jiff.workspace = true
 log.workspace = true
-# Decoder for the build-time-compressed .ftl catalogs (already linked via the
-# backend crate, so this adds no code to the binary).
+# Decoder for the build-time-compressed font and Fluent-catalog blobs
+# (already linked via the backend crate, so this adds no code to the binary).
 lzma-rust2.workspace = true
 notify.workspace = true
 quick_cache.workspace = true
@@ -75,11 +73,14 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 raw-window-handle = "0.6.2"
 
 [build-dependencies]
-# Encoder only runs at build time to pack the .ftl catalogs; never ships.
+# Encoder only runs at build time to pack the bundled fonts and .ftl
+# catalogs; never ships.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [dev-dependencies]
 crc32fast.workspace = true
+gmpublished-backend = { path = "../backend", features = ["test-support"] }
+gmpublished-domain = { path = "../domain", features = ["test-support"] }
 # Headless widget-tree simulator for click-through view tests.
 iced_test = "0.14.0"
 lzma-rust2 = { workspace = true, features = ["encoder"] }

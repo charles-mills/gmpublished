@@ -1,5 +1,14 @@
-use crate::bridge::{EffectiveThemePreset, ThemePreset, theme as core_theme};
-use iced::{Color, Theme, theme::Palette};
+//! The design tokens every widget styles from: colours, spacing, dimensions
+//! and motion, resolved once per theme and passed down by value.
+//!
+//! Widgets never compute a colour. A token here is the only place a value is
+//! decided, which is what lets the three presets (and light/dark within them)
+//! stay coherent, and what makes a theme change a single recomputation rather
+//! than a walk of the widget tree.
+
+use crate::bridge::{EffectiveThemePreset, ThemePreset};
+use crate::theme::color as core_theme;
+use iced::Color;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThemeVariant {
@@ -9,14 +18,7 @@ pub enum ThemeVariant {
 }
 
 impl ThemeVariant {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Dark => "gmpublished Dark",
-            Self::Light => "gmpublished Light",
-            Self::ClassicSource => "gmpublished Classic Source",
-        }
-    }
-
+    #[cfg(test)]
     const fn preset(self) -> ThemePreset {
         match self {
             Self::Dark => ThemePreset::Dark,
@@ -236,7 +238,7 @@ pub struct Spacing {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Radii {
     pub(crate) xs: f32,
-    pub(crate) base: f32,
+    pub(crate) sm: f32,
     pub(crate) md: f32,
     pub(crate) lg: f32,
 }
@@ -282,6 +284,10 @@ pub struct Dimensions {
     pub(crate) control_height: f32,
     pub(crate) control_height_lg: f32,
     pub(crate) control_height_xl: f32,
+    /// Widest a tooltip may grow before wrapping. One value app-wide: a
+    /// tooltip that wraps at a different width in each panel reads as a
+    /// different component.
+    pub(crate) tooltip_max_width: f32,
     pub(crate) icon_size_sm: f32,
     pub(crate) icon_size: f32,
     pub(crate) icon_size_md: f32,
@@ -337,7 +343,6 @@ pub struct Dimensions {
     pub(crate) switch_height: f32,
     pub(crate) switch_knob: f32,
     pub(crate) switch_radius: f32,
-    pub(crate) avatar_size: f32,
     pub(crate) tag_height: f32,
     pub(crate) modal_viewport_ratio: f32,
     pub(crate) settings_modal_width: f32,
@@ -395,9 +400,9 @@ pub struct Tokens {
 /// spacing, radii, typography, motion, and dimensions all come from plain
 /// `const fn`s regardless of variant, unlike `colors`. Call sites that only
 /// ever needed those fields can read the shared static instead of building
-/// a throwaway [`Tokens::dark()`].
+/// a throwaway test-only dark [`Tokens`] value.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct InvariantTokens {
+pub struct InvariantTokens {
     pub(crate) spacing: Spacing,
     pub(crate) radii: Radii,
     pub(crate) typography: Typography,
@@ -413,23 +418,17 @@ static INVARIANT_TOKENS: InvariantTokens = InvariantTokens {
     dims: dimensions(),
 };
 
-pub(crate) fn invariant() -> &'static InvariantTokens {
+pub fn invariant() -> &'static InvariantTokens {
     &INVARIANT_TOKENS
 }
 
 impl Tokens {
+    #[cfg(test)]
     pub fn dark() -> Self {
         Self::for_variant(ThemeVariant::Dark)
     }
 
-    pub fn light() -> Self {
-        Self::for_variant(ThemeVariant::Light)
-    }
-
-    pub fn classic_source() -> Self {
-        Self::for_variant(ThemeVariant::ClassicSource)
-    }
-
+    #[cfg(test)]
     pub fn for_variant(variant: ThemeVariant) -> Self {
         Self::with_accent_inputs(variant, AccentInputs::for_preset(variant.preset()))
     }
@@ -511,25 +510,11 @@ impl Tokens {
         }
         height
     }
-
-    pub fn iced_theme(self) -> Theme {
-        Theme::custom(
-            self.variant.name(),
-            Palette {
-                background: self.colors.bg.into(),
-                text: self.colors.text.into(),
-                primary: self.colors.neutral.into(),
-                success: self.colors.success.into(),
-                warning: self.colors.link.into(),
-                danger: self.colors.error.into(),
-            },
-        )
-    }
 }
 
 /// Semantic Steam Workshop tag chip palette shared across themes. Returns
 /// (background, text); unknown tags get the base white chip with black text.
-pub(crate) fn workshop_tag_colors(tag: &str) -> (Rgba, Rgba) {
+pub fn workshop_tag_colors(tag: &str) -> (Rgba, Rgba) {
     let white = rgb(0xFFFFFF);
     let black = rgb(0x000000);
     match tag.to_ascii_lowercase().as_str() {
@@ -974,9 +959,9 @@ const fn spacing() -> Spacing {
 const fn radii() -> Radii {
     Radii {
         xs: 2.0,
-        base: 4.0,
-        md: 12.0,
-        lg: 6.0,
+        sm: 4.0,
+        md: 6.0,
+        lg: 12.0,
     }
 }
 
@@ -1023,6 +1008,7 @@ const fn dimensions() -> Dimensions {
         control_height: 40.0,
         control_height_lg: 44.0,
         control_height_xl: 48.0,
+        tooltip_max_width: 320.0,
         icon_size_sm: 12.0,
         icon_size: 16.0,
         icon_size_md: 18.0,
@@ -1078,7 +1064,6 @@ const fn dimensions() -> Dimensions {
         switch_height: 20.0,
         switch_knob: 16.0,
         switch_radius: 8.0,
-        avatar_size: 44.0,
         tag_height: 18.0,
         modal_viewport_ratio: 0.9,
         settings_modal_width: 672.0,
@@ -1192,8 +1177,13 @@ mod tests {
             tokens.colors.sidebar_item_hover
         );
         assert_eq!(tokens.spacing.gap, 16.0);
-        assert_eq!(tokens.radii.base, 4.0);
-        assert_eq!(tokens.radii.md, 12.0);
+        assert_eq!(tokens.radii.sm, 4.0);
+        assert_eq!(tokens.radii.lg, 12.0);
+        let radii = tokens.radii;
+        assert!(
+            radii.xs < radii.sm && radii.sm < radii.md && radii.md < radii.lg,
+            "radii must ascend with their names: {radii:?}"
+        );
         assert_eq!(tokens.typography.body, 14.0);
         assert_eq!(tokens.motion.modal_enter_ms, 180);
         assert_eq!(tokens.dims.sidebar_band_height, 38.0);
@@ -1220,7 +1210,13 @@ mod tests {
 
     #[test]
     fn rail_sidebar_scale_tokens_are_theme_independent() {
-        for tokens in [Tokens::dark(), Tokens::light(), Tokens::classic_source()] {
+        for tokens in [
+            ThemeVariant::Dark,
+            ThemeVariant::Light,
+            ThemeVariant::ClassicSource,
+        ]
+        .map(Tokens::for_variant)
+        {
             assert_eq!(tokens.dims.sidebar_rail_icon_button_size, 36.0);
             assert_eq!(tokens.dims.sidebar_rail_icon_glyph, 20.0);
             assert_eq!(tokens.dims.sidebar_account_rail_avatar_size, 40.0);
@@ -1254,8 +1250,8 @@ mod tests {
     #[test]
     fn all_three_variants_render_distinct_surfaces() {
         let dark = Tokens::dark();
-        let light = Tokens::light();
-        let classic = Tokens::classic_source();
+        let light = Tokens::for_variant(ThemeVariant::Light);
+        let classic = Tokens::for_variant(ThemeVariant::ClassicSource);
 
         assert_ne!(dark.colors.bg, light.colors.bg);
         assert_ne!(dark.colors.bg, classic.colors.bg);
@@ -1341,8 +1337,7 @@ mod tests {
 
             assert!(
                 ratio >= 4.5,
-                "{}: tooltip text contrast {ratio:.2}:1 is below AA",
-                variant.name(),
+                "{variant:?}: tooltip text contrast {ratio:.2}:1 is below AA",
             );
         }
     }

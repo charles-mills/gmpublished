@@ -1,9 +1,18 @@
 use parking_lot::Mutex;
 
-use super::{
-    Arc, AtomicBool, AtomicU64, BACKEND_EVENTS_ID, BackendRuntimeEvent, Hash, Hasher, Ordering,
-    Subscription, TASK_EVENTS_ID, UiError, fmt, iced_mpsc, mpsc, stream, thread,
-};
+use super::{BACKEND_EVENTS_ID, BackendRuntimeEvent, TASK_EVENTS_ID, TransactionStatus, UiError};
+use iced::Subscription;
+use iced::futures::channel::mpsc as iced_mpsc;
+use iced::stream;
+use std::fmt;
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
 
 /// Event sent from worker code to the UI-facing task drain.
 pub type TaskEvent = (TaskId, SharedTaskUpdate);
@@ -64,10 +73,6 @@ impl TaskId {
     pub(crate) const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
 }
 
 /// Coarse task classification used by the UI for labels and icons, and to
@@ -96,83 +101,13 @@ pub enum WorkshopDownloadTaskKind {
     Extract,
 }
 
-/// Placeholder value attached to a named status key.
-#[derive(Clone, Debug, PartialEq)]
-pub enum TaskValue {
-    Text(String),
-    U64(u64),
-    F64(f64),
-    Bool(bool),
-}
-
-impl From<&str> for TaskValue {
-    fn from(value: &str) -> Self {
-        Self::Text(value.to_owned())
-    }
-}
-
-impl From<String> for TaskValue {
-    fn from(value: String) -> Self {
-        Self::Text(value)
-    }
-}
-
-impl From<u64> for TaskValue {
-    fn from(value: u64) -> Self {
-        Self::U64(value)
-    }
-}
-
-impl From<u32> for TaskValue {
-    fn from(value: u32) -> Self {
-        Self::U64(u64::from(value))
-    }
-}
-
-impl From<f64> for TaskValue {
-    fn from(value: f64) -> Self {
-        Self::F64(value)
-    }
-}
-
-impl From<bool> for TaskValue {
-    fn from(value: bool) -> Self {
-        Self::Bool(value)
-    }
-}
-
-/// I18n status key with optional named placeholder values.
-#[derive(Clone, Debug, PartialEq)]
-pub struct StatusKey {
-    pub(crate) key: String,
-    pub(crate) values: Vec<(String, TaskValue)>,
-}
-
-impl StatusKey {
-    pub(crate) fn new(key: impl Into<String>) -> Self {
-        Self {
-            key: key.into(),
-            values: Vec::new(),
-        }
-    }
-}
-
-impl From<&str> for StatusKey {
-    fn from(key: &str) -> Self {
-        Self::new(key)
-    }
-}
-
-impl From<String> for StatusKey {
-    fn from(key: String) -> Self {
-        Self::new(key)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaskUpdate {
-    Started { kind: TaskKind, status: StatusKey },
-    Status(StatusKey),
+    Started {
+        kind: TaskKind,
+        status: TransactionStatus,
+    },
+    Status(TransactionStatus),
     Progress(f64),
     ProgressIncr(f64),
     ProgressReset,
@@ -219,17 +154,17 @@ impl From<CoalescedTaskTerminal> for TaskEventUpdate {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoalescedTaskStart {
     pub(crate) kind: TaskKind,
-    pub(crate) status: StatusKey,
+    pub(crate) status: TransactionStatus,
 }
 
 /// Coalesced update state for one task in one drained event batch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CoalescedTaskUpdate {
     pub(crate) started: Option<CoalescedTaskStart>,
-    pub(crate) status: Option<StatusKey>,
+    pub(crate) status: Option<TransactionStatus>,
     pub(crate) progress: Option<f64>,
     pub(crate) total_bytes: Option<u64>,
     pub(crate) terminal: Option<CoalescedTaskTerminal>,
@@ -297,8 +232,8 @@ impl TaskHandle {
         self.id
     }
 
-    pub(crate) fn status(&self, key: impl Into<StatusKey>) {
-        self.emit(TaskUpdate::Status(key.into()));
+    pub(crate) fn status(&self, status: TransactionStatus) {
+        self.emit(TaskUpdate::Status(status));
     }
 
     pub(crate) fn progress(&self, progress: f64) {
@@ -367,11 +302,7 @@ impl Tasks {
         )
     }
 
-    pub(crate) fn create(
-        &self,
-        kind: TaskKind,
-        initial_status: impl Into<StatusKey>,
-    ) -> TaskHandle {
+    pub(crate) fn create(&self, kind: TaskKind, initial_status: TransactionStatus) -> TaskHandle {
         let id = TaskId::from_raw(self.next_id.fetch_add(1, Ordering::Relaxed));
 
         let handle = TaskHandle {
@@ -382,7 +313,7 @@ impl Tasks {
 
         handle.emit(TaskUpdate::Started {
             kind,
-            status: initial_status.into(),
+            status: initial_status,
         });
 
         handle

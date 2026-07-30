@@ -2,10 +2,10 @@ use std::time::Instant;
 
 use crate::bridge::domain::PublishedFileId;
 
-use super::model::Section;
+use super::jobs::Section;
 use super::{Effect, Message, State};
 
-pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
     let active_jobs_before = state.active_job_count();
     let selected_count_before = state.section_count(state.compact_section());
     let total_count_before = state.downloading().len() + state.extracting().len();
@@ -38,11 +38,11 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             accepted_submission_effects(state.submit_workshop_ids(item_ids))
         }
         Message::EventReceived(event) => {
-            let _changed = state.apply_event(event, Instant::now());
+            let _changed = state.apply_event(event, now);
             Vec::new()
         }
         Message::TaskEventsReceived(events) => {
-            let _changed = state.apply_task_events(events, Instant::now());
+            let _changed = state.apply_task_events(events, now);
             Vec::new()
         }
         Message::CancelRequested { section, row_id } => state
@@ -98,6 +98,11 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     append_workshop_title_query_effect(&mut effects, state.take_workshop_title_query_ids());
     append_pending_cancellation_effect(&mut effects, state.take_pending_cancellations());
     effects
+}
+
+#[cfg(test)]
+pub(crate) fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    update_at(state, message, Instant::now())
 }
 
 fn accepted_submission_effects(item_ids: Vec<PublishedFileId>) -> Vec<Effect> {

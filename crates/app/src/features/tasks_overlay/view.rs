@@ -4,10 +4,11 @@ use iced::widget::text::{Shaping as TextShaping, Wrapping};
 use iced::widget::{Space, button, column, container, row, stack, svg, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Size, Vector, alignment};
 
-use crate::bridge::tasks::TaskKind;
+use crate::bridge::tasks::{TaskKind, TransactionStatus};
 use crate::format::format_bytes;
-use crate::i18n::{I18n, translated_error};
+use crate::i18n::{Arg, I18n, translated_error};
 use crate::theme::{Rgba, Tokens, ViewCtx};
+use crate::widgets::icon::svg_icon;
 use crate::{assets, widgets};
 
 use super::Message;
@@ -164,17 +165,9 @@ fn status_icon<'a>(
         Outcome::Pending => {
             widgets::spinner::spinner(&tokens, toast.spinner_elapsed(now), ICON_SIZE)
         }
-        Outcome::Finished { .. } => icon(assets::icons::check(), color),
-        Outcome::Error { .. } => icon(assets::icons::circle_alert(), color),
+        Outcome::Finished { .. } => svg_icon(assets::icons::check(), color, ICON_SIZE).into(),
+        Outcome::Error { .. } => svg_icon(assets::icons::circle_alert(), color, ICON_SIZE).into(),
     }
-}
-
-fn icon<'a>(handle: svg::Handle, color: Color) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(ICON_SIZE))
-        .height(Length::Fixed(ICON_SIZE))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
 }
 
 fn toast_label(toast: &Toast, i18n: &I18n) -> String {
@@ -183,7 +176,7 @@ fn toast_label(toast: &Toast, i18n: &I18n) -> String {
         Outcome::Finished { .. } => match toast.kind() {
             // Notices carry their message in the status key and finish at
             // birth, so the label stays the message rather than "Done".
-            TaskKind::Notice => i18n.tr(&toast.status().key),
+            TaskKind::Notice => i18n.tr(toast.status().translation_key()),
             _ => i18n.tr("downloader-status-finished"),
         },
         Outcome::Pending => status_text(toast, i18n),
@@ -191,30 +184,32 @@ fn toast_label(toast: &Toast, i18n: &I18n) -> String {
 }
 
 fn status_text(toast: &Toast, i18n: &I18n) -> String {
-    let key = toast.status().key.as_str();
-    match key {
-        // Byte-progress statuses share the downloader's formatting; the
-        // publish keys keep their upstream wire names but map onto the
-        // existing translated entries.
-        "PUBLISH_PACKING" | "extracting_progress" => {
-            let ftl_key = if key == "PUBLISH_PACKING" {
-                "publish-packing"
-            } else {
-                key
+    let status = toast.status();
+    match status {
+        // Byte-progress statuses share the downloader's formatting, which
+        // needs a message taking percent/done/total placeholders rather than
+        // the plain label this status renders as elsewhere.
+        TransactionStatus::PublishPacking | TransactionStatus::Extracting => {
+            let ftl_key = match status {
+                TransactionStatus::PublishPacking => "publish-packing",
+                _ => status.translation_key(),
             };
             let total = format_bytes(toast.total_bytes(), i18n);
             let done = format_bytes((toast.total_bytes() as f64 * toast.progress()) as u64, i18n);
             i18n.trn(
                 ftl_key,
                 &[
-                    ("arg0", &format!("{:.0}", toast.progress() * 100.0)),
-                    ("arg1", done.as_str()),
-                    ("arg2", total.as_str()),
+                    (
+                        "percent",
+                        Arg::Number(&format!("{:.0}", toast.progress() * 100.0)),
+                    ),
+                    ("done", Arg::Text(done.as_str())),
+                    ("total", Arg::Text(total.as_str())),
                 ],
             )
         }
-        "PUBLISH_PROCESSING_ICON" => i18n.tr("publish-processing-icon"),
-        key => i18n.tr(key),
+        TransactionStatus::PublishProcessingIcon => i18n.tr("publish-processing-icon"),
+        status => i18n.tr(status.translation_key()),
     }
 }
 

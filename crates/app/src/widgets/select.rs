@@ -37,6 +37,20 @@ pub struct Metrics {
     pub max_rows: usize,
 }
 
+/// Which of the two faces [`select`] swaps between is being built. Both are
+/// laid out up front so the control can switch without a relayout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Face {
+    Collapsed,
+    Expanded,
+}
+
+impl Face {
+    pub(crate) fn is_expanded(self) -> bool {
+        self == Self::Expanded
+    }
+}
+
 /// Whether a `field` control carries a chevron on its trailing edge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Chevron {
@@ -159,8 +173,8 @@ pub fn field<'a, Message: Clone + 'a>(
     let geometry = geometry(rows.len(), metrics, tokens);
 
     select(
-        face(label.clone(), false, metrics, chevron, tokens),
-        face(label, true, metrics, chevron, tokens),
+        face(label.clone(), Face::Collapsed, metrics, chevron, tokens),
+        face(label, Face::Expanded, metrics, chevron, tokens),
         menu(rows, metrics, tokens),
         geometry,
     )
@@ -170,7 +184,7 @@ pub fn field<'a, Message: Clone + 'a>(
 /// The control's face: the current label, and a chevron if asked for.
 fn face<'a, Message: 'a>(
     label: String,
-    open: bool,
+    face: Face,
     metrics: Metrics,
     chevron: Chevron,
     tokens: &Tokens,
@@ -203,7 +217,7 @@ fn face<'a, Message: 'a>(
         .width(Length::Fill)
         .padding(metrics.padding)
         .clip(true)
-        .style(move |_| theme::styles::select_face(&tokens, open))
+        .style(move |_| theme::styles::select_face(&tokens, face.is_expanded()))
         .into()
 }
 

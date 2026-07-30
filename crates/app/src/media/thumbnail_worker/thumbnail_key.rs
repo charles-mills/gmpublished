@@ -108,8 +108,7 @@ impl ThumbnailKey {
 
     #[must_use]
     pub(crate) fn with_max_edge_and_mode(&self, max_edge: u32, mode: ThumbnailMode) -> Self {
-        // Cloning the source is an `Arc` bump for URLs, so this no longer
-        // copies the string.
+        // Cloning the source is an `Arc` bump for URLs, not a string copy.
         Self::build(self.source.clone(), max_edge, mode)
     }
 
@@ -197,7 +196,7 @@ pub fn source_file_name(url: &str) -> String {
 pub fn normalize_url(url: impl Into<String>) -> String {
     let mut url = url.into();
     let (start, end) = {
-        let trimmed = url.trim();
+        let trimmed = normalized_url(&url);
         let start = trimmed.as_ptr() as usize - url.as_ptr() as usize;
         (start, start + trimmed.len())
     };
@@ -206,6 +205,15 @@ pub fn normalize_url(url: impl Into<String>) -> String {
         url.drain(..start);
     }
     url
+}
+
+/// The borrowing half of [`normalize_url`], which that function is defined in
+/// terms of so the two cannot disagree. For lookups against an
+/// already-normalized key, where allocating a fresh `String` per probe would
+/// be the only cost.
+#[must_use]
+pub fn normalized_url(url: &str) -> &str {
+    url.trim()
 }
 
 fn stable_cache_hash(key: &ThumbnailKey) -> u64 {

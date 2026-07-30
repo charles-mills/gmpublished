@@ -1,4 +1,5 @@
 use super::{Effect, Message, State};
+use crate::widgets::grid_rows::CardId;
 
 /// Applies a Size Analyzer route message and returns outward effects as plain data.
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
@@ -59,7 +60,7 @@ fn apply_message(state: &mut State, message: Message) -> Vec<Effect> {
             .map_or_else(Vec::new, |menu| vec![Effect::ContextMenuRequested(menu)]),
         Message::TreemapPressed => state.preview_target().map_or_else(Vec::new, |target| {
             vec![Effect::AddonDragPressed {
-                card_id: target.path.display().to_string(),
+                card_id: CardId::from(target.path.display().to_string()),
                 workshop_id: target.workshop_id,
             }]
         }),
@@ -76,6 +77,7 @@ fn append_preview_url_effect(effects: &mut Vec<Effect>, state: &mut State) {
 
 #[cfg(test)]
 mod tests {
+    use crate::widgets::grid_rows::CardId;
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
@@ -87,6 +89,7 @@ mod tests {
         gma::{GmaHeader, GmaMeta, GmaMetadata},
         library::{LibraryRefreshReason, LibrarySnapshot},
     };
+    use crate::generation::Generation;
     use iced::{Point, Size};
 
     use super::{Effect, Message, State, update};
@@ -148,9 +151,7 @@ mod tests {
             effects,
             vec![
                 Effect::ThumbnailDemandsChanged,
-                Effect::PreviewUrlsResolveRequested(vec![
-                    PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-                ]),
+                Effect::PreviewUrlsResolveRequested(vec![PublishedFileId::fixture(123)]),
             ]
         );
         assert_eq!(state.load_status(), &LoadStatus::Ready);
@@ -196,7 +197,7 @@ mod tests {
             ),
         );
         assert!(effects.contains(&Effect::PreviewUrlsResolveRequested(vec![
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero")
+            PublishedFileId::fixture(123)
         ])));
 
         // A metadata-only change (rename, same sizes) is still a content
@@ -209,7 +210,7 @@ mod tests {
             ),
         );
         assert!(effects.contains(&Effect::PreviewUrlsResolveRequested(vec![
-            PublishedFileId::new(123).expect("test fixture ids are always nonzero")
+            PublishedFileId::fixture(123)
         ])));
     }
 
@@ -228,7 +229,7 @@ mod tests {
             update(
                 &mut state,
                 Message::PreviewUrlsResolved(HashMap::from([(
-                    PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+                    PublishedFileId::fixture(123),
                     "https://example.invalid/preview.jpg".to_owned(),
                 )])),
             ),
@@ -265,7 +266,7 @@ mod tests {
             effects.as_slice(),
             [Effect::PreviewRequested(target)]
                 if target.path == Path::new("tool-a.gma")
-                    && target.workshop_id == Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+                    && target.workshop_id == Some(PublishedFileId::fixture(123))
         ));
 
         hover_workshop_leaf(&mut state);
@@ -277,17 +278,15 @@ mod tests {
             effects.as_slice(),
             [Effect::ContextMenuRequested(menu)]
                 if menu.position == Point::new(20.0, 20.0)
-                    && menu.target().workshop_id() == Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
+                    && menu.target().workshop_id() == Some(PublishedFileId::fixture(123))
         ));
 
         hover_workshop_leaf(&mut state);
         assert_eq!(
             update(&mut state, Message::TreemapPressed),
             vec![Effect::AddonDragPressed {
-                card_id: "tool-a.gma".to_owned(),
-                workshop_id: Some(
-                    PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-                ),
+                card_id: CardId::from("tool-a.gma"),
+                workshop_id: Some(PublishedFileId::fixture(123)),
             }]
         );
         assert_eq!(
@@ -316,10 +315,7 @@ mod tests {
             .unwrap()
             .leaf_rects()
             .into_iter()
-            .find(|leaf| {
-                leaf.addon.workshop_id
-                    == Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero"))
-            })
+            .find(|leaf| leaf.addon.workshop_id == Some(PublishedFileId::fixture(123)))
             .expect("workshop leaf should exist");
         let point = Point::new(
             (leaf.rect.x + leaf.rect.width / 2.0) as f32,
@@ -337,7 +333,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             ),
-            epoch,
+            epoch: Generation::from_raw(epoch),
         }
     }
 
@@ -352,7 +348,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             ),
-            epoch,
+            epoch: Generation::from_raw(epoch),
         }
     }
 
@@ -367,7 +363,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             ),
-            epoch,
+            epoch: Generation::from_raw(epoch),
         }
     }
 

@@ -7,34 +7,21 @@ use iced::animation::Easing;
 use iced::widget::{image, svg};
 
 use crate::features::steam_session::{ConnectionStatus, SteamIdentity};
-use crate::theme::{Tokens, motion};
+use crate::theme::{self, Tokens, motion};
 
-/// Route identifiers owned by the shell.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Route {
-    MyWorkshop,
-    InstalledAddons,
-    Downloader,
-    SizeAnalyzer,
+mapped_enum_with_all! {
+    /// Route identifiers owned by the shell.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Route {
+        MyWorkshop => "my-workshop",
+        InstalledAddons => "installed-addons",
+        Downloader => "downloader",
+        SizeAnalyzer => "size-analyzer",
+    }
+    label_key -> &'static str
 }
 
 impl Route {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::MyWorkshop,
-        Self::InstalledAddons,
-        Self::Downloader,
-        Self::SizeAnalyzer,
-    ];
-
-    pub(crate) const fn label_key(self) -> &'static str {
-        match self {
-            Self::MyWorkshop => "my-workshop",
-            Self::InstalledAddons => "installed-addons",
-            Self::Downloader => "downloader",
-            Self::SizeAnalyzer => "size-analyzer",
-        }
-    }
-
     pub(crate) fn icon(self) -> svg::Handle {
         match self {
             Self::MyWorkshop => assets::icons::route_my_workshop(),
@@ -105,7 +92,7 @@ pub fn traffic_light_center_y(tokens: &Tokens) -> f32 {
 }
 
 /// Root shell state owned by the Iced app.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "hover, drop-target, and menu open/visible flags are independent UI state, not mutually exclusive"
@@ -113,7 +100,7 @@ pub fn traffic_light_center_y(tokens: &Tokens) -> f32 {
 pub struct State {
     app_version: &'static str,
     route: Route,
-    update_nag: UpdateNag,
+    update_nag: Option<UpdateRelease>,
     steam: SteamStatus,
     account_name: Option<String>,
     downloader_jobs: u32,
@@ -127,11 +114,11 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let tokens = Tokens::dark();
+        let tokens = theme::invariant();
         Self {
             app_version: app_version_text(),
             route: Route::MyWorkshop,
-            update_nag: UpdateNag::default(),
+            update_nag: None,
             steam: SteamStatus::default(),
             account_name: None,
             downloader_jobs: 0,
@@ -150,8 +137,6 @@ impl Default for State {
     }
 }
 
-impl Eq for State {}
-
 impl State {
     pub(crate) const fn app_version(&self) -> &'static str {
         self.app_version
@@ -167,15 +152,19 @@ impl State {
     }
 
     pub(crate) const fn update_available(&self) -> bool {
-        self.update_nag.available
+        self.update_nag.is_some()
     }
 
     pub(crate) fn update_version(&self) -> &str {
-        &self.update_nag.version
+        self.update_nag
+            .as_ref()
+            .map_or("", |release| release.version.as_str())
     }
 
     pub(crate) fn update_release_url(&self) -> &str {
-        &self.update_nag.url
+        self.update_nag
+            .as_ref()
+            .map_or("", |release| release.url.as_str())
     }
 
     pub(crate) const fn steam_status(&self) -> ConnectionStatus {
@@ -272,9 +261,7 @@ impl State {
     }
 
     pub(super) fn apply_update_release(&mut self, release: UpdateRelease) {
-        self.update_nag.available = true;
-        self.update_nag.version = release.version;
-        self.update_nag.url = release.url;
+        self.update_nag = Some(release);
     }
 
     pub(super) fn apply_steam_status(&mut self, status: ConnectionStatus) {
@@ -321,7 +308,7 @@ impl Default for BadgeMotion {
             visible: false,
             opacity: motion::boolean(
                 false,
-                Tokens::dark().motion.fast_duration(),
+                theme::invariant().motion.fast_duration(),
                 Easing::EaseInOut,
             ),
         }
@@ -359,13 +346,6 @@ impl BadgeMotion {
     fn needs_ticks(&self) -> bool {
         self.opacity.needs_ticks()
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct UpdateNag {
-    available: bool,
-    version: String,
-    url: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

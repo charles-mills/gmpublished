@@ -1,22 +1,17 @@
-// Only reachable through materials.rs's asset-studio-gated call paths (the
-// 3D model viewer); building with --no-default-features compiles this file
-// but never calls into it.
-#![cfg_attr(not(feature = "asset-studio"), allow(dead_code))]
-
 use std::path::Path;
 
 use gmpublished_backend::vpk::{VpkEntry, VpkFile};
 
 pub use gmpublished_backend::vpk::VpkError;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VpkArchiveEntry {
     pub(crate) path: String,
     pub(crate) size: u64,
     pub(crate) crc32: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VpkArchive {
     file: VpkFile,
     entries: Vec<VpkArchiveEntry>,

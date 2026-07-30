@@ -13,15 +13,76 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     compress_bundled_fonts()?;
+    compress_bundled_catalogs()?;
     Ok(())
 }
 
-const FONT_SOURCES: &[&str] = &[
-    "ui/fonts/Inter-Regular.ttf",
-    "ui/fonts/Inter-SemiBold.ttf",
-    "ui/fonts/Inter-Bold.ttf",
-    "ui/fonts/GMPCJKSCUI-Regular.otf",
-    "ui/fonts/GMPCJKKRUI-Regular.otf",
+/// Locale ids, in the order [`CATALOGS`](../src/i18n/mod.rs) declares them.
+/// The generated table is keyed by id rather than position, so this order is
+/// cosmetic — unlike `FONT_SOURCES`, adding or reordering an entry here cannot
+/// silently mis-map a catalog.
+const CATALOG_LOCALE_IDS: &[&str] = &[
+    "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
+];
+
+/// Concatenates the Fluent catalogs and stores one LZMA blob plus an
+/// id-keyed table of the byte ranges needed to recover each one at runtime.
+///
+/// The catalogs are ~232 KiB of highly repetitive UTF-8 and compress by about
+/// 80%, which is worth having in a binary that ships as an ~8 MB AppImage.
+fn compress_bundled_catalogs() -> Result<(), Box<dyn Error>> {
+    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("no manifest dir")?);
+    let mut concatenated = Vec::new();
+    let mut segments = String::new();
+
+    for id in CATALOG_LOCALE_IDS {
+        let path = manifest_dir.join("i18n").join(format!("{id}.ftl"));
+        println!("cargo:rerun-if-changed={}", path.display());
+
+        let bytes = fs::read(&path)?;
+        let _ = writeln!(
+            segments,
+            "    ({:?}, {}, {}),",
+            id,
+            concatenated.len(),
+            bytes.len()
+        );
+        concatenated.extend_from_slice(&bytes);
+    }
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("no OUT_DIR")?);
+    let options = lzma_rust2::LzmaOptions::with_preset(9);
+    let mut encoder = lzma_rust2::LzmaWriter::new_use_header(
+        Vec::new(),
+        &options,
+        Some(concatenated.len() as u64),
+    )?;
+    encoder.write_all(&concatenated)?;
+    fs::write(out_dir.join("bundled_catalogs.lzma"), encoder.finish()?)?;
+
+    fs::write(
+        out_dir.join("catalog_segments.rs"),
+        format!(
+            "const CATALOG_SEGMENTS: &[(&str, usize, usize)] = &[\n{segments}];\n\
+             const CATALOGS_UNCOMPRESSED_LEN: usize = {};\n",
+            concatenated.len()
+        ),
+    )?;
+
+    Ok(())
+}
+
+/// The bundled faces, and the constant each is reachable by at runtime.
+///
+/// The generated constants are what `assets.rs` uses, so reordering this list
+/// moves the *names* with the faces rather than silently repointing a
+/// hardcoded index at a different font.
+const FONT_SOURCES: &[(&str, &str)] = &[
+    ("INTER_REGULAR", "ui/fonts/Inter-Regular.ttf"),
+    ("INTER_SEMI_BOLD", "ui/fonts/Inter-SemiBold.ttf"),
+    ("INTER_BOLD", "ui/fonts/Inter-Bold.ttf"),
+    ("CJK_SC_REGULAR", "ui/fonts/GMPCJKSCUI-Regular.otf"),
+    ("CJK_KR_REGULAR", "ui/fonts/GMPCJKKRUI-Regular.otf"),
 ];
 
 /// Concatenates the bundled font faces and stores one LZMA blob plus the
@@ -31,12 +92,19 @@ fn compress_bundled_fonts() -> Result<(), Box<dyn Error>> {
     let mut concatenated = Vec::new();
     let mut segments = String::new();
 
-    for relative_path in FONT_SOURCES {
+    let mut constants = String::new();
+    for (index, (name, relative_path)) in FONT_SOURCES.iter().enumerate() {
         let path = manifest_dir.join(relative_path);
         println!("cargo:rerun-if-changed={}", path.display());
 
         let bytes = fs::read(path)?;
-        let _ = writeln!(segments, "    ({}, {}),", concatenated.len(), bytes.len());
+        let _ = writeln!(
+            segments,
+            "    FontSegment {{ start: {}, len: {} }},",
+            concatenated.len(),
+            bytes.len()
+        );
+        let _ = writeln!(constants, "pub const {name}: usize = {index};");
         concatenated.extend_from_slice(&bytes);
     }
 
@@ -53,8 +121,14 @@ fn compress_bundled_fonts() -> Result<(), Box<dyn Error>> {
     fs::write(
         out_dir.join("font_segments.rs"),
         format!(
-            "const FONT_SEGMENTS: &[(usize, usize)] = &[\n{segments}];\n\
-             const FONTS_UNCOMPRESSED_LEN: usize = {};\n",
+            "/// Where one bundled face sits in the decompressed blob. Named\n\
+             /// fields because `start` and `len` are both `usize` and a swap\n\
+             /// would yield a valid-looking range over the wrong bytes.\n\
+             struct FontSegment {{\n    start: usize,\n    len: usize,\n}}\n\n\
+             const FONT_SEGMENTS: &[FontSegment] = &[\n{segments}];\n\
+             pub const FONT_COUNT: usize = {};\n\
+             const FONTS_UNCOMPRESSED_LEN: usize = {};\n\n{constants}",
+            FONT_SOURCES.len(),
             concatenated.len()
         ),
     )?;

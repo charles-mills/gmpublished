@@ -1509,9 +1509,11 @@ dependencies = [
 name = "gmpublished"
 version = "0.2.3"
 dependencies = [
+ "arc-swap",
  "block2 0.6.2",
  "bytemuck",
  "bytes",
+ "clap",
  "cosmic-text",
  "crc32fast",
  "dispatch2",
@@ -1521,6 +1523,7 @@ dependencies = [
  "futures",
  "gif 0.14.2",
  "gmpublished-backend",
+ "gmpublished-domain",
  "iced",
  "iced_test",
  "image",
@@ -1555,14 +1558,13 @@ name = "gmpublished-backend"
 version = "0.2.3"
 dependencies = [
  "arc-swap",
- "clap",
  "crc32fast",
  "dirs",
  "dunce",
+ "gmpublished-backend",
  "image",
  "log",
  "lzma-rust2",
- "memmap2",
  "nucleo-matcher",
  "opener",
  "parking_lot",
@@ -1578,6 +1580,18 @@ dependencies = [
  "ureq",
  "vformats",
  "walkdir",
+]
+
+[[package]]
+name = "gmpublished-domain"
+version = "0.2.3"
+dependencies = [
+ "bytemuck",
+ "gmpublished-domain",
+ "log",
+ "rayon",
+ "thiserror 2.0.19",
+ "vformats",
 ]
 
 [[package]]

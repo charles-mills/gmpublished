@@ -1,32 +1,15 @@
-#[cfg(target_os = "macos")]
 use super::shell;
 use super::{
-    App, NativeOpenTarget, PathBuf, Point, PublishedFileId, RootMessage, Task, UiError,
+    App, NativeOpenTarget, PathBuf, Point, PublishedFileId, RootMessage, Task, UpdateContext,
     context_menu, destination_select, downloader, file_preview, flatten_blocking_ui_result,
     installed_addons, modal_stack, my_workshop, open_modal_message, prepare_publish, preview_gma,
     schedule_native_open_target, settings, size_analyzer, window, workshop_url,
 };
-
-/// A local addon (installed library or size-analyzer leaf), which shares the
-/// same context-menu shape regardless of which route hovered it.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct LocalMenuTarget {
-    pub(super) path: PathBuf,
-    pub(super) path_text: String,
-    pub(super) workshop_id: Option<PublishedFileId>,
-    pub(super) workshop_url: Option<String>,
-    pub(super) preview_url: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum ContextMenuTarget {
-    Local(LocalMenuTarget),
-    MyWorkshop {
-        workshop_id: PublishedFileId,
-        workshop_url: String,
-        preview_url: Option<String>,
-    },
-}
+#[cfg(feature = "debug")]
+use crate::bridge::tasks::TransactionStatus;
+#[cfg(target_os = "macos")]
+use crate::bridge::ui_error::ResultExt as _;
+use crate::features::context_menu::{ContextMenuTarget, LocalMenuTarget};
 
 impl App {
     pub(super) fn finish_modal_close_task(
@@ -37,12 +20,14 @@ impl App {
             modal_stack::ActiveModal::DestinationSelect => Task::done(
                 RootMessage::DestinationSelect(destination_select::Message::CloseFinished),
             ),
-            modal_stack::ActiveModal::PreviewGma => {
-                self.apply_preview_gma_message(preview_gma::Message::CloseFinished)
-            }
-            modal_stack::ActiveModal::PreparePublish => {
-                self.apply_prepare_publish_message(prepare_publish::Message::CloseRequested)
-            }
+            modal_stack::ActiveModal::PreviewGma => self.apply_preview_gma_message(
+                preview_gma::Message::CloseFinished,
+                self.update_context,
+            ),
+            modal_stack::ActiveModal::PreparePublish => self.apply_prepare_publish_message(
+                prepare_publish::Message::CloseRequested,
+                self.update_context,
+            ),
             modal_stack::ActiveModal::Settings => {
                 self.apply_settings_message(settings::Message::CloseFinished)
             }
@@ -52,34 +37,35 @@ impl App {
     pub(super) fn apply_modal_stack_message(
         &mut self,
         message: &modal_stack::Message,
+        update: UpdateContext,
     ) -> Task<RootMessage> {
         if matches!(message, modal_stack::Message::CloseRequested) {
-            self.modal_stack_close_requested_task()
+            self.modal_stack_close_requested_task(update)
         } else {
-            self.modal_stack_task(message)
+            self.modal_stack_task(message, update)
         }
     }
 
-    fn modal_stack_close_requested_task(&mut self) -> Task<RootMessage> {
-        if self.state.modal_stack.overlay_active() {
-            return self.modal_stack_task(&modal_stack::Message::CloseRequested);
+    fn modal_stack_close_requested_task(&mut self, update: UpdateContext) -> Task<RootMessage> {
+        if self.state.features.modal_stack.overlay_active() {
+            return self.modal_stack_task(&modal_stack::Message::CloseRequested, update);
         }
 
         // Settings only shields itself while it is the TOPMOST layer; with
         // the Destination Select overlay above it, close requests target the
         // overlay.
-        if self.state.modal_stack.active() == Some(modal_stack::ActiveModal::Settings)
-            && self.state.settings.blocks_scrim_close()
+        if self.state.features.modal_stack.active() == Some(modal_stack::ActiveModal::Settings)
+            && self.state.features.settings.blocks_scrim_close()
         {
             return Task::none();
         }
 
         if matches!(
-            self.state.modal_stack.active(),
+            self.state.features.modal_stack.active(),
             Some(modal_stack::ActiveModal::PreviewGma | modal_stack::ActiveModal::PreparePublish)
-        ) && self.state.file_preview.is_open()
+        ) && self.state.features.file_preview.is_open()
         {
-            let message = if self.state.file_preview.expanded() {
+            let message = if self.state.features.file_preview.expanded() {
                 file_preview::Message::ExpandToggled
             } else {
                 file_preview::Message::BackRequested
@@ -87,12 +73,19 @@ impl App {
             return self.apply_file_preview_message(message);
         }
 
-        self.modal_stack_task(&modal_stack::Message::CloseRequested)
+        self.modal_stack_task(&modal_stack::Message::CloseRequested, update)
     }
 
-    pub(super) fn modal_stack_task(&mut self, message: &modal_stack::Message) -> Task<RootMessage> {
-        let effects = modal_stack::update(&mut self.state.modal_stack, message);
-        self.batch_effects(effects, |_app, effect| match effect {})
+    pub(super) fn modal_stack_task(
+        &mut self,
+        message: &modal_stack::Message,
+        update: UpdateContext,
+    ) -> Task<RootMessage> {
+        let effects =
+            modal_stack::update_at(&mut self.state.features.modal_stack, message, update.now);
+        self.batch_effects(effects, |app, effect| match effect {
+            modal_stack::Effect::Displaced(modal) => app.finish_modal_close_task(modal),
+        })
     }
 
     pub(super) fn open_modal_stack_task(
@@ -100,14 +93,14 @@ impl App {
         modal: modal_stack::ActiveModal,
     ) -> Task<RootMessage> {
         Task::batch([
-            self.dismiss_account_menu_task(),
+            self.dismiss_account_menu_task(self.update_context),
             self.dismiss_search_palette_task(),
-            self.modal_stack_task(&open_modal_message(modal)),
+            self.modal_stack_task(&open_modal_message(modal), self.update_context),
         ])
     }
 
     pub(super) fn close_modal_stack_task(&mut self) -> Task<RootMessage> {
-        self.modal_stack_task(&modal_stack::Message::CloseRequested)
+        self.modal_stack_task(&modal_stack::Message::CloseRequested, self.update_context)
     }
 
     pub(super) fn window_event_task(
@@ -158,54 +151,48 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn traffic_light_position_task(&self, id: window::Id) -> Task<RootMessage> {
         if !self.state.chrome_strategy.mac_native_inset() {
             return Task::none();
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let tokens = self.state.tokens;
-            window::run(
-                id,
-                crate::platform_chrome::position_traffic_lights(
-                    shell::traffic_light_origin_x(&tokens) as f64,
-                    shell::traffic_light_center_y(&tokens) as f64,
-                ),
-            )
-            .discard()
-        }
+        let tokens = self.state.tokens;
+        window::run(
+            id,
+            crate::platform_chrome::position_traffic_lights(
+                shell::traffic_light_origin_x(&tokens) as f64,
+                shell::traffic_light_center_y(&tokens) as f64,
+            ),
+        )
+        .discard()
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = id;
-            Task::none()
-        }
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn traffic_light_position_task(&self, _id: window::Id) -> Task<RootMessage> {
+        Task::none()
     }
 
     /// Installs the native observer that keeps the traffic-light treatment
     /// applied through live resizes. Installed unconditionally (once, at
     /// window open) because the titlebar mode can be switched at runtime;
     /// the observer itself no-ops while the system titlebar is active.
+    #[cfg(target_os = "macos")]
     fn traffic_light_keepalive_task(&self, id: window::Id) -> Task<RootMessage> {
-        #[cfg(target_os = "macos")]
-        {
-            let tokens = self.state.tokens;
-            window::run(
-                id,
-                crate::platform_chrome::install_resize_keepalive(
-                    shell::traffic_light_origin_x(&tokens) as f64,
-                    shell::traffic_light_center_y(&tokens) as f64,
-                ),
-            )
-            .discard()
-        }
+        let tokens = self.state.tokens;
+        window::run(
+            id,
+            crate::platform_chrome::install_resize_keepalive(
+                shell::traffic_light_origin_x(&tokens) as f64,
+                shell::traffic_light_center_y(&tokens) as f64,
+            ),
+        )
+        .discard()
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = id;
-            Task::none()
-        }
+    #[cfg(not(target_os = "macos"))]
+    fn traffic_light_keepalive_task(&self, _id: window::Id) -> Task<RootMessage> {
+        Task::none()
     }
 
     pub(super) fn apply_window_scale_factor(
@@ -218,12 +205,12 @@ impl App {
         }
 
         self.window_id = Some(id);
-        let analyzer_task = if self.state.size_analyzer.set_scale_factor(scale_factor) {
+        let analyzer_task = if self.state.set_scale_factor(scale_factor) {
             self.apply_size_analyzer_message(size_analyzer::Message::ScaleFactorChanged)
         } else {
             Task::none()
         };
-        let thumbnail_task = if self.thumbnails.set_scale_factor(scale_factor) {
+        let thumbnail_task = if self.environment.thumbnails.set_scale_factor(scale_factor) {
             self.thumbnail_scale_changed_task()
         } else {
             Task::none()
@@ -249,7 +236,7 @@ impl App {
         name: &'static str,
         target: NativeOpenTarget,
     ) -> Task<RootMessage> {
-        let ctx = self.ctx.clone();
+        let ctx = self.environment.ctx.clone();
         Task::future(async move {
             schedule_native_open_target(&ctx, name, target);
         })
@@ -266,7 +253,7 @@ impl App {
         &mut self,
         context: destination_select::OpenContext,
     ) -> Task<RootMessage> {
-        let (settings, paths) = self.ctx.settings_and_paths_snapshot();
+        let (settings, paths) = self.environment.ctx.settings_and_paths_snapshot();
         self.apply_destination_select_message(destination_select::Message::OpenRequested {
             snapshot: Box::new(destination_select::SettingsSnapshot::new(settings, paths)),
             context,
@@ -276,18 +263,20 @@ impl App {
     /// Persists the create-folder checkbox immediately without closing the
     /// chooser or touching the pending destination choice.
     pub(super) fn destination_select_create_folder_task(&self, enabled: bool) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("destination-create-folder-save", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    settings.create_folder_on_extract = enabled;
-                })
-                .map(|()| {
-                    Box::new(destination_select::SettingsSnapshot::new(
-                        app.settings_snapshot(),
-                        app.paths(),
-                    ))
-                })
-                .map_err(|error| UiError::from(&error))
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        settings.backend.create_folder_on_extract = enabled;
+                    })
+                    .map(|()| {
+                        Box::new(destination_select::SettingsSnapshot::new(
+                            app.config().settings_snapshot(),
+                            app.config().paths(),
+                        ))
+                    })
+                    .ui_err()
             })
             .map(|result| {
                 RootMessage::DestinationSelect(destination_select::Message::CreateFolderSaved(
@@ -320,18 +309,20 @@ impl App {
         &self,
         request: destination_select::DestinationPersistRequest,
     ) -> Task<RootMessage> {
-        self.ctx
+        self.environment
+            .ctx
             .run_blocking("destination-select-save", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    destination_select::apply_persist_request(settings, request);
-                })
-                .map(|()| {
-                    Box::new(destination_select::SettingsSnapshot::new(
-                        app.settings_snapshot(),
-                        app.paths(),
-                    ))
-                })
-                .map_err(|error| UiError::from(&error))
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        destination_select::apply_persist_request(settings, request);
+                    })
+                    .map(|()| {
+                        Box::new(destination_select::SettingsSnapshot::new(
+                            app.config().settings_snapshot(),
+                            app.config().paths(),
+                        ))
+                    })
+                    .ui_err()
             })
             .map(|result| {
                 let result = flatten_blocking_ui_result(result);
@@ -352,16 +343,15 @@ impl App {
             ..
         } = menu;
         if entries.is_empty() {
-            self.state.context_menu_target = None;
             return Task::none();
         }
 
-        self.state.context_menu_target = Some(ContextMenuTarget::MyWorkshop {
+        let target = ContextMenuTarget::MyWorkshop {
             workshop_id,
             workshop_url,
             preview_url,
-        });
-        self.open_context_menu(context_menu::Owner::MyWorkshop, position, entries)
+        };
+        self.open_context_menu(position, entries, target)
     }
 
     pub(super) fn open_installed_addons_context_menu(
@@ -379,18 +369,17 @@ impl App {
             ..
         } = menu;
         if entries.is_empty() {
-            self.state.context_menu_target = None;
             return Task::none();
         }
 
-        self.state.context_menu_target = Some(ContextMenuTarget::Local(LocalMenuTarget {
+        let target = ContextMenuTarget::Local(LocalMenuTarget {
             path,
             path_text,
             workshop_id,
             workshop_url,
             preview_url,
-        }));
-        self.open_context_menu(context_menu::Owner::InstalledAddons, position, entries)
+        });
+        self.open_context_menu(position, entries, target)
     }
 
     pub(super) fn open_size_analyzer_context_menu(
@@ -399,31 +388,30 @@ impl App {
     ) -> Task<RootMessage> {
         let entries = menu.entries().to_vec();
         if entries.is_empty() {
-            self.state.context_menu_target = None;
             return Task::none();
         }
 
         let target = menu.target();
         let workshop_id = target.workshop_id();
-        self.state.context_menu_target = Some(ContextMenuTarget::Local(LocalMenuTarget {
+        let target = ContextMenuTarget::Local(LocalMenuTarget {
             path: target.path().to_path_buf(),
             path_text: target.path().display().to_string(),
             workshop_id,
             workshop_url: workshop_id.map(workshop_url::workshop_item_url),
             preview_url: target.preview_url().map(str::to_owned),
-        }));
-        self.open_context_menu(context_menu::Owner::SizeAnalyzer, menu.position, entries)
+        });
+        self.open_context_menu(menu.position, entries, target)
     }
 
     pub(super) fn open_context_menu(
         &self,
-        owner: context_menu::Owner,
         position: Point,
         entries: Vec<context_menu::Entry>,
+        target: ContextMenuTarget,
     ) -> Task<RootMessage> {
         Task::done(RootMessage::ContextMenu(
             context_menu::Message::OpenRequested(context_menu::OpenRequest::new(
-                owner, position, entries,
+                position, entries, target,
             )),
         ))
     }
@@ -431,18 +419,17 @@ impl App {
     pub(super) fn apply_context_menu_message(
         &mut self,
         message: context_menu::Message,
+        update: UpdateContext,
     ) -> Task<RootMessage> {
-        let effects = context_menu::update(&mut self.state.context_menu, message);
+        let effects =
+            context_menu::update_at(&mut self.state.features.context_menu, message, update.now);
         self.batch_effects(effects, Self::run_context_menu_effect)
     }
 
     fn run_context_menu_effect(&mut self, effect: context_menu::Effect) -> Task<RootMessage> {
         match effect {
             context_menu::Effect::ActionSelected(action) => self.route_context_menu_action(action),
-            context_menu::Effect::Dismissed => {
-                self.state.context_menu_target = None;
-                Task::none()
-            }
+            context_menu::Effect::Dismissed => Task::none(),
         }
     }
 
@@ -452,11 +439,10 @@ impl App {
     ) -> Task<RootMessage> {
         #[cfg(feature = "debug")]
         if let context_menu::ContextMenuAction::SimulateToast(kind) = action {
-            self.state.context_menu_target = None;
             return self.simulate_toast_task(kind);
         }
 
-        let Some(target) = self.state.context_menu_target.take() else {
+        let Some(target) = self.state.features.context_menu.take_target() else {
             return Task::none();
         };
 
@@ -502,8 +488,8 @@ impl App {
     /// cancellation included.
     #[cfg(feature = "debug")]
     fn simulate_toast_task(&self, kind: context_menu::SimulatedToast) -> Task<RootMessage> {
-        use gmpublished_backend::error_key::keys;
-        use gmpublished_backend::events::TransactionPayload;
+        use gmpublished_backend::TransactionPayload;
+        use gmpublished_backend::error_keys as keys;
 
         use crate::bridge::tasks::TaskKind;
         use context_menu::SimulatedToast;
@@ -512,35 +498,41 @@ impl App {
 
         if matches!(kind, SimulatedToast::Notice) {
             let task = self
+                .environment
                 .ctx
-                .create_task(TaskKind::Notice, "context-menu-debug-toast-notice");
+                .create_task(TaskKind::Notice, TransactionStatus::Notice);
             task.finished();
             return Task::none();
         }
 
-        let ctx = self.ctx.clone();
-        std::thread::spawn(move || {
-            let transaction = ctx.begin_transaction();
-            let task = ctx.create_task(TaskKind::OverlayExtract, downloader::EXTRACT_STATUS);
-            task.total(SIMULATED_TOTAL_BYTES);
-            ctx.correlate_backend_transaction(transaction.id, task);
+        let ctx = self.environment.ctx.clone();
+        let schedule = ctx
+            .clone()
+            .spawn_blocking_detached("simulate-toast", move |_| {
+                let transaction = ctx.begin_transaction();
+                let task = ctx.create_task(TaskKind::OverlayExtract, TransactionStatus::Extracting);
+                task.total(SIMULATED_TOTAL_BYTES);
+                ctx.correlate_backend_transaction(transaction.id(), task);
 
-            let last_step = match kind {
-                SimulatedToast::Error => 40,
-                _ => 100,
-            };
-            for step in 0..=last_step {
-                if transaction.aborted() {
-                    return;
+                let last_step = match kind {
+                    SimulatedToast::Error => 40,
+                    _ => 100,
+                };
+                for step in 0..=last_step {
+                    if transaction.aborted() {
+                        return;
+                    }
+                    transaction.progress(f64::from(step) / 100.0);
+                    std::thread::sleep(std::time::Duration::from_millis(60));
                 }
-                transaction.progress(f64::from(step) / 100.0);
-                std::thread::sleep(std::time::Duration::from_millis(60));
-            }
-            match kind {
-                SimulatedToast::Error => transaction.error(keys::IO_ERROR),
-                _ => transaction.finished(TransactionPayload::None),
-            }
-        });
+                let _ = match kind {
+                    SimulatedToast::Error => transaction.error(keys::IO_ERROR),
+                    _ => transaction.finished(TransactionPayload::None),
+                };
+            });
+        if let Err(error) = schedule {
+            log::warn!("failed to schedule simulated toast: {error}");
+        }
         Task::none()
     }
 
@@ -551,25 +543,28 @@ impl App {
             ContextMenuTarget::Local(local) => (local.workshop_id, Some(local.path)),
         };
 
+        self.state.hidden_addons.hide(workshop_id, path.as_deref());
         if let Some(workshop_id) = workshop_id {
-            self.state.hidden_workshop_ids.insert(workshop_id);
-            self.state.my_workshop.hide_workshop_id(workshop_id);
-        }
-        if let Some(path) = path.as_ref() {
-            self.state.hidden_addon_paths.insert(path.clone());
+            self.state
+                .features
+                .my_workshop
+                .hide_workshop_id(workshop_id);
         }
         self.state
+            .features
             .installed_addons
             .hide_addon(workshop_id, path.as_deref());
         self.state
+            .features
             .size_analyzer
             .hide_addon(workshop_id, path.as_deref());
 
         let snapshot = self
+            .environment
             .ctx
             .library_snapshot()
-            .map(|snapshot| self.visible_library_snapshot(&snapshot));
-        super::sync_search_installed_addons(&self.ctx.backend().search, snapshot.as_ref());
+            .map(|snapshot| self.state.hidden_addons.visible(&snapshot));
+        super::sync_search_installed_addons(&self.environment.ctx, snapshot.as_ref());
 
         Task::batch([
             self.my_workshop_thumbnail_demands(),
@@ -671,7 +666,7 @@ impl App {
             .and_then(|path| path.file_stem())
             .map(|stem| stem.to_string_lossy().into_owned())
             .filter(|stem| !stem.is_empty());
-        self.state.context_menu_extract_paths = Some(paths);
+        self.state.context_menu_extraction.begin(paths);
         let context = destination_select::OpenContext {
             confirm_label_key: "destination-extract",
             extracted_name,
@@ -684,33 +679,14 @@ impl App {
     /// dismissing it drops the queued paths, a successful save extracts
     /// them, and a failed save leaves the overlay open showing the error.
     pub(super) fn context_menu_destination_dismissed_task(&mut self) -> Task<RootMessage> {
-        self.state.context_menu_extract_paths = None;
+        self.state.context_menu_extraction.clear();
         Task::none()
     }
 
     pub(super) fn context_menu_destination_persisted_task(&mut self) -> Task<RootMessage> {
-        let Some(paths) = self.state.context_menu_extract_paths.take() else {
+        let Some(paths) = self.state.context_menu_extraction.take_paths() else {
             return Task::none();
         };
         self.downloader_local_extraction_task(paths)
-    }
-}
-
-#[cfg(not(feature = "asset-studio"))]
-impl App {
-    pub(super) fn apply_file_preview_message(
-        &mut self,
-        message: file_preview::Message,
-    ) -> Task<RootMessage> {
-        let effects = file_preview::update(&mut self.state.file_preview, message);
-        self.batch_effects(effects, |app, effect| match effect {
-            file_preview::Effect::ModalCloseRequested => app.file_preview_close_finished_task(),
-            file_preview::Effect::LoadRequested(_)
-            | file_preview::Effect::ExtractRequested { .. } => Task::none(),
-        })
-    }
-
-    pub(super) fn file_preview_close_finished_task(&mut self) -> Task<RootMessage> {
-        self.apply_file_preview_message(file_preview::Message::CloseFinished)
     }
 }

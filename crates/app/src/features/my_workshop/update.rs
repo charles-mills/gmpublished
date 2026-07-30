@@ -1,8 +1,21 @@
 use crate::widgets::{addon_grid, grid_rows};
 
 use super::{Effect, Message, State};
+use crate::generation::Generation;
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    let mut effects = update_message(state, message);
+    // Asked after every message rather than delivered as one: the grid latches
+    // the request when it decides, and a state sync that discarded the message
+    // would leave the latch suppressing every later page.
+    if state.grid_mut().take_next_page_request() {
+        append_page_request_effect(state.begin_next_page(), &mut effects);
+        effects.push(Effect::ThumbnailDemandsChanged);
+    }
+    effects
+}
+
+fn update_message(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::RouteEntered => {
             let mut effects = Vec::new();
@@ -70,10 +83,6 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
                 effects.push(Effect::ContextMenuRequested(menu));
             }
         }
-        addon_grid::Message::NextPageRequested => {
-            append_page_request_effect(state.begin_next_page(), effects);
-            effects.push(Effect::ThumbnailDemandsChanged);
-        }
         addon_grid::Message::VisibleRangeChanged(_, _) => {
             state.reconcile_visible_counts();
             effects.push(Effect::ThumbnailDemandsChanged);
@@ -93,13 +102,13 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
     }
 }
 
-fn append_page_request_effect(request: Option<(u64, u32)>, effects: &mut Vec<Effect>) {
+fn append_page_request_effect(request: Option<(Generation, u32)>, effects: &mut Vec<Effect>) {
     if let Some((generation, page)) = request {
         effects.push(Effect::PageRequested { generation, page });
     }
 }
 
-fn append_stats_refresh_effect(request: Option<(u64, u32)>, effects: &mut Vec<Effect>) {
+fn append_stats_refresh_effect(request: Option<(Generation, u32)>, effects: &mut Vec<Effect>) {
     if let Some((generation, pages)) = request {
         effects.push(Effect::StatsRefreshRequested { generation, pages });
     }
@@ -113,6 +122,8 @@ fn stats_refresh_effects(state: &mut State) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
+    use crate::generation::Generation;
+    use crate::widgets::grid_rows::CardId;
     use std::collections::HashMap;
 
     use super::super::model::{PUBLISH_NEW_ROW_ID, PageResult, PreparePublishTarget, Row};
@@ -131,7 +142,7 @@ mod tests {
             effects,
             vec![
                 Effect::PageRequested {
-                    generation: 1,
+                    generation: Generation::from_raw(1),
                     page: 1,
                 },
                 Effect::ThumbnailDemandsChanged,
@@ -168,7 +179,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::PageCompleted(
-                1,
+                Generation::from_raw(1),
                 1,
                 Ok(PageResult {
                     page: 1,
@@ -193,7 +204,7 @@ mod tests {
         assert_eq!(
             effects,
             vec![Effect::StatsRefreshRequested {
-                generation: 1,
+                generation: Generation::from_raw(1),
                 pages: 1,
             }]
         );
@@ -212,11 +223,8 @@ mod tests {
         let effects = update(
             &mut state,
             Message::StatsRefreshCompleted(
-                1,
-                Ok(HashMap::from([(
-                    PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-                    25,
-                )])),
+                Generation::from_raw(1),
+                Ok(HashMap::from([(PublishedFileId::fixture(42), 25)])),
             ),
         );
 
@@ -237,9 +245,9 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::Grid(addon_grid::Message::CardClicked(
-                PUBLISH_NEW_ROW_ID.to_owned(),
-            )),
+            Message::Grid(addon_grid::Message::CardClicked(CardId::from(
+                PUBLISH_NEW_ROW_ID,
+            ))),
         );
 
         assert_eq!(
@@ -255,15 +263,12 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::Grid(addon_grid::Message::CardClicked("42".to_owned())),
+            Message::Grid(addon_grid::Message::CardClicked(CardId::from("42"))),
         );
 
         match effects.as_slice() {
             [Effect::PreparePublishRequested(PreparePublishTarget::Update(update))] => {
-                assert_eq!(
-                    update.workshop_id,
-                    PublishedFileId::new(42).expect("test fixture ids are always nonzero")
-                );
+                assert_eq!(update.workshop_id, PublishedFileId::fixture(42));
                 assert_eq!(update.title, "Addon");
             }
             other => panic!("expected update target effect, got {other:?}"),
@@ -278,7 +283,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::Grid(addon_grid::Message::CardContextRequested(
-                "42".to_owned(),
+                CardId::from("42"),
                 iced::Point::new(10.0, 20.0),
             )),
         );
@@ -286,7 +291,7 @@ mod tests {
         assert!(matches!(
             effects.as_slice(),
             [Effect::ContextMenuRequested(menu)]
-                if menu.workshop_id == PublishedFileId::new(42).expect("test fixture ids are always nonzero") && menu.position == iced::Point::new(10.0, 20.0)
+                if menu.workshop_id == PublishedFileId::fixture(42) && menu.position == iced::Point::new(10.0, 20.0)
         ));
     }
 
@@ -299,7 +304,7 @@ mod tests {
         let effects = update(
             &mut state,
             Message::DebugSubscribersAdjusted {
-                workshop_id: PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                workshop_id: PublishedFileId::fixture(42),
                 delta: 1_000_000,
             },
         );
@@ -322,7 +327,7 @@ mod tests {
         assert!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardClicked("missing".to_owned())),
+                Message::Grid(addon_grid::Message::CardClicked(CardId::from("missing"))),
             )
             .is_empty()
         );
@@ -330,7 +335,7 @@ mod tests {
             update(
                 &mut state,
                 Message::Grid(addon_grid::Message::CardContextRequested(
-                    "missing".to_owned(),
+                    CardId::from("missing"),
                     iced::Point::ORIGIN,
                 )),
             )
@@ -338,25 +343,37 @@ mod tests {
         );
     }
 
+    /// A page that does not overflow the viewport never scrolls, so nothing
+    /// but this request advances it. The grid must not latch the request
+    /// inside `sync_grid_items`, whose messages are discarded — a latch set
+    /// there suppresses every later request and pagination stops for good.
     #[test]
-    fn next_page_request_emits_page_request_and_thumbnail_sync() {
+    fn a_page_that_fits_the_viewport_requests_the_next_one() {
         let mut state = State::default();
-        state.push_rows_for_test(vec![Row::for_test(42, "Addon", 10)], 2);
+        let _ = addon_grid::apply(
+            state.grid_mut(),
+            addon_grid::Message::ViewportResized(800, 600),
+        );
+        state.push_rows_for_test(vec![Row::for_test(42, "Addon", 10)], 50);
 
-        let effects = update(
-            &mut state,
-            Message::Grid(addon_grid::Message::NextPageRequested),
+        let effects = update(&mut state, Message::StatsRefreshTick);
+
+        assert!(
+            effects.contains(&Effect::PageRequested {
+                generation: Generation::from_raw(1),
+                page: 2,
+            }),
+            "the next page must be requested without waiting for a scroll: {effects:?}"
         );
 
-        assert_eq!(
-            effects,
-            vec![
-                Effect::PageRequested {
-                    generation: 1,
-                    page: 2,
-                },
-                Effect::ThumbnailDemandsChanged,
-            ]
+        // Claimed once: a second message must not re-request while the fetch
+        // is still in flight.
+        let again = update(&mut state, Message::StatsRefreshTick);
+        assert!(
+            !again
+                .iter()
+                .any(|effect| matches!(effect, Effect::PageRequested { .. })),
+            "{again:?}"
         );
     }
 
@@ -367,7 +384,7 @@ mod tests {
         let _effects = update(
             &mut state,
             Message::PageCompleted(
-                1,
+                Generation::from_raw(1),
                 1,
                 Ok(PageResult {
                     page: 1,
@@ -393,19 +410,17 @@ mod tests {
         assert_eq!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardPressed("42".to_owned())),
+                Message::Grid(addon_grid::Message::CardPressed(CardId::from("42"))),
             ),
             vec![Effect::AddonDragPressed {
-                card_id: "42".to_owned(),
-                workshop_id: Some(
-                    PublishedFileId::new(42).expect("test fixture ids are always nonzero")
-                ),
+                card_id: CardId::from("42"),
+                workshop_id: Some(PublishedFileId::fixture(42)),
             }]
         );
         assert_eq!(
             update(
                 &mut state,
-                Message::Grid(addon_grid::Message::CardReleased("42".to_owned())),
+                Message::Grid(addon_grid::Message::CardReleased(CardId::from("42"))),
             ),
             vec![Effect::AddonDragReleased]
         );
@@ -428,7 +443,10 @@ mod tests {
 
         let effects = update(
             &mut state,
-            Message::Grid(addon_grid::Message::CardHoverChanged("42".to_owned(), true)),
+            Message::Grid(addon_grid::Message::CardHoverChanged(
+                CardId::from("42"),
+                true,
+            )),
         );
 
         assert!(state.has_active_animations());
@@ -448,10 +466,10 @@ mod tests {
         );
         assert!(state.has_active_animations());
 
-        assert!(state.set_window_focused(false));
+        state.set_window_focused(false);
         assert!(!state.has_active_animations());
 
-        assert!(state.set_window_focused(true));
+        state.set_window_focused(true);
         assert!(state.has_active_animations());
     }
 }

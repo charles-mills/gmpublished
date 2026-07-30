@@ -17,7 +17,7 @@ const DAY_SECONDS: i64 = 24 * HOUR_SECONDS;
 const MONTH_SECONDS: i64 = 30 * DAY_SECONDS;
 const YEAR_SECONDS: i64 = 365 * DAY_SECONDS;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Details {
     pub(crate) title: String,
     pub(crate) archive_path: String,
@@ -46,7 +46,7 @@ pub struct MetadataRow {
 }
 
 /// Author row projection: a resolved profile or the Steam2 placeholder.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorDisplay {
     pub(crate) name: String,
     /// `None` renders the anonymous placeholder avatar.
@@ -376,6 +376,7 @@ fn avatar_handle_from_rgba(avatar: &AvatarRgba) -> Option<image::Handle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::domain::SteamId;
     use crate::bridge::gma::PreviewArchive;
     use crate::test_support::GmaFixtureBuilder;
 
@@ -421,10 +422,10 @@ mod tests {
         )
         .expect("fixture archive should load");
         let mut workshop = WorkshopMetadata {
-            id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            id: PublishedFileId::fixture(123),
             title: "Remote Title".to_owned(),
             author: Some("Ada".to_owned()),
-            steamid64: Some(76_561_197_990_735_296),
+            steamid64: Some(SteamId::new(76_561_197_990_735_296)),
             avatar: None,
             time_created: 1_717_171_717,
             time_updated: 1_717_181_717,
@@ -502,10 +503,10 @@ mod tests {
         )
         .expect("fixture archive should load");
         let workshop = WorkshopMetadata {
-            id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            id: PublishedFileId::fixture(123),
             title: "Remote".to_owned(),
             author: None,
-            steamid64: Some(76_561_197_990_735_296),
+            steamid64: Some(SteamId::new(76_561_197_990_735_296)),
             avatar: None,
             time_created: 0,
             time_updated: 0,

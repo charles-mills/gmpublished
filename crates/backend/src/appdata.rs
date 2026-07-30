@@ -1,34 +1,35 @@
+//! Where the app keeps its state on disk, and the settings living there.
+//!
+//! One [`AppData`] owns every derived path (settings file, temp, user data,
+//! downloads) so nothing else has to re-derive them, and it resolves the
+//! Garry's Mod directory — configured, discovered through Steam, or absent.
+//! Every root is overridable, which is what lets tests run against a private
+//! tempdir instead of the developer's real profile.
+
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::gma::{ExtractDestination, ExtractionOverwriteMode};
 
-use crate::GMOD_APP_ID;
+use crate::WorkshopId;
 use crate::events::BackendEvent;
 use crate::steam::Steam;
 use crate::transactions::Transactions;
+use crate::{GMOD_APP_ID, STEAM_GMOD_APP_ID};
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
-use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-pub use steamworks::PublishedFileId as SettingsPublishedFileId;
-use steamworks::PublishedFileId;
 
 /// Environment-derived roots `AppData` resolves paths against. Production
 /// builds derive these from `dirs`/`std::env`; tests supply a private
 /// tempdir root so parallel tests never share a settings file.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct AppDataPaths {
     pub settings_file: PathBuf,
-    /// Upstream gmpublisher's settings file: read once to seed a fresh
-    /// install, never written. Sharing the path would be lossy — upstream's
-    /// save rewrites the file without the fields this fork added (theme,
-    /// …), so an upstream run would silently erase them.
-    pub legacy_settings_file: PathBuf,
     pub default_user_data_dir: PathBuf,
     pub default_temp_dir: PathBuf,
     pub default_downloads_dir: Option<PathBuf>,
@@ -37,18 +38,17 @@ pub struct AppDataPaths {
 impl AppDataPaths {
     #[must_use]
     pub fn production() -> Self {
-        let user_data_dir = dirs::data_dir()
-            .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| std::env::temp_dir()))
-            .join("gmpublisher");
-        let settings_root = dirs::config_dir().unwrap_or_else(|| {
-            dirs::data_dir()
-                .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| std::env::temp_dir()))
-        });
+        // `current_exe()` names a file, not a directory, and its parent may
+        // be read-only (notably for packaged installs). If the platform does
+        // not expose a persistent data root, the system temp directory is the
+        // only environment-provided location with directory semantics and a
+        // reasonable expectation of writability.
+        let data_root = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
+        let settings_root = dirs::config_dir().unwrap_or_else(|| data_root.clone());
 
         Self {
             settings_file: settings_root.join("gmpublished/settings.json"),
-            legacy_settings_file: settings_root.join("gmpublisher/settings.json"),
-            default_user_data_dir: user_data_dir,
+            default_user_data_dir: data_root.join("gmpublisher"),
             default_temp_dir: default_temp_dir(),
             default_downloads_dir: dirs::download_dir(),
         }
@@ -61,7 +61,6 @@ impl AppDataPaths {
     pub fn for_test_root(root: &Path) -> Self {
         Self {
             settings_file: root.join("gmpublished/settings.json"),
-            legacy_settings_file: root.join("gmpublisher/settings.json"),
             default_user_data_dir: root.join("default-user-data"),
             default_temp_dir: root.join("default-temp"),
             default_downloads_dir: None,
@@ -99,45 +98,33 @@ pub fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("gmpublished"))
 }
 
-#[derive(Debug)]
-pub struct OpenCount(AtomicU32);
-impl OpenCount {
-    fn new() -> Self {
-        Self(AtomicU32::new(0))
-    }
-
-    fn get(&self) -> u32 {
-        self.0.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    fn set(&self, value: u32) {
-        self.0.store(value, Ordering::Release);
-    }
-}
-impl serde::Serialize for OpenCount {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u32(self.get())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TitlebarPreference {
     #[default]
     Auto,
     System,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each bool is an independent, orthogonal user setting, not a mode"
 )]
 pub struct Settings {
+    /// The schema version that wrote the file.
+    ///
+    /// A file with no `schema` predates versioning and is by definition the
+    /// original shape, so it reads as `1` rather than as whatever this build
+    /// writes — otherwise a future bump would mistake every pre-versioning
+    /// file for a current one and skip its migration. Serializing always
+    /// writes the schema this build produces, whatever was loaded.
+    #[serde(
+        default = "original_settings_schema",
+        serialize_with = "serialize_current_schema"
+    )]
+    pub schema: u32,
+
     pub temp: Option<PathBuf>,
     pub gmod: Option<PathBuf>,
     pub user_data: Option<PathBuf>,
@@ -156,7 +143,8 @@ pub struct Settings {
 
     pub ignore_globs: Vec<String>,
 
-    pub my_workshop_local_paths: HashMap<PublishedFileId, PathBuf>,
+    #[serde(deserialize_with = "deserialize_workshop_local_paths")]
+    pub my_workshop_local_paths: HashMap<WorkshopId, PathBuf>,
     pub upscale_addon_icon: bool,
 
     pub language: Option<String>,
@@ -166,17 +154,24 @@ pub struct Settings {
     pub color_neutral: u32,
     pub color_error: u32,
     pub color_success: u32,
+
+    /// App-owned settings that the backend deliberately does not interpret.
+    /// Backend-only writes preserve this versioned document verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppDataSnapshot {
     pub settings: Settings,
+    /// Process-local ordering for settings publications. Path-only refreshes
+    /// keep the same revision; durable settings writes advance it.
+    pub settings_revision: u64,
     pub version: &'static str,
-    pub open_count: u32,
     pub paths: AppDataPathsSnapshot,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppDataPathsSnapshot {
     pub settings_file: PathBuf,
     pub default_user_data_dir: PathBuf,
@@ -188,9 +183,59 @@ pub struct AppDataPathsSnapshot {
     pub gmod_dir: Option<PathBuf>,
 }
 
+/// The shape [`Settings`] is written in today.
+///
+/// Schema 2 makes the app-owned `ui` section part of this authoritative file.
+/// Although serde could absorb that additive field, the bump is intentional:
+/// a schema-1 binary must reject the combined document rather than accept it,
+/// discard `ui`, and later rewrite the file in its older shape.
+pub(crate) const SETTINGS_SCHEMA: u32 = 2;
+
+const fn original_settings_schema() -> u32 {
+    1
+}
+
+fn serialize_current_schema<S: serde::Serializer>(
+    _loaded: &u32,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u32(SETTINGS_SCHEMA)
+}
+
+/// Reads the map through raw ids and drops any key of zero, rather than
+/// letting [`WorkshopId`]'s own rejection abort the parse.
+///
+/// A settings file is loaded as a whole: a single unusable key failing the
+/// field would fail `Settings`, and the caller's recovery from that is to
+/// replace every setting the user has with defaults. Dropping the one entry
+/// that names no item costs a path this build could not have used anyway.
+fn deserialize_workshop_local_paths<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<WorkshopId, PathBuf>, D::Error> {
+    let raw = HashMap::<u64, PathBuf>::deserialize(deserializer)?;
+
+    let total = raw.len();
+    let kept: HashMap<WorkshopId, PathBuf> = raw
+        .into_iter()
+        .filter_map(|(id, path)| Some((WorkshopId::new(id)?, path)))
+        .collect();
+
+    // The next save rewrites the file without them, so this line is the only
+    // trace a dropped key leaves.
+    if kept.len() < total {
+        log::warn!(
+            "settings held {} workshop local path(s) under an id of zero, which names no item; dropping them",
+            total - kept.len()
+        );
+    }
+
+    Ok(kept)
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            schema: SETTINGS_SCHEMA,
             temp: None,
             gmod: None,
             user_data: None,
@@ -217,14 +262,26 @@ impl Default for Settings {
             color_neutral: 28103,
             color_error: 11010048,
             color_success: 3188321,
+
+            ui: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct SettingsSanitizeContext {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SettingsEnvironment {
     downloads_dir_available: bool,
     gmod_dir_available: bool,
+}
+
+impl SettingsEnvironment {
+    #[must_use]
+    pub const fn new(downloads_dir_available: bool, gmod_dir_available: bool) -> Self {
+        Self {
+            downloads_dir_available,
+            gmod_dir_available,
+        }
+    }
 }
 
 /// Errors that can occur while loading or saving the settings file.
@@ -234,6 +291,8 @@ pub enum SettingsError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("settings schema {found} is newer than the supported {SETTINGS_SCHEMA}")]
+    UnsupportedSchema { found: u32 },
 }
 impl crate::error_key::HasErrorKey for SettingsError {
     fn error_key(&self) -> crate::error_key::ErrorKey {
@@ -245,27 +304,23 @@ impl crate::error_key::HasErrorKey for SettingsError {
     }
 }
 
+/// Makes a preceding rename durable on filesystems that require directory
+/// metadata to be flushed separately from file contents.
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 impl Settings {
     pub fn load_or_default(paths: &AppDataPaths) -> Self {
         log::info!("initializing settings");
         match Self::load(paths) {
-            Ok(settings) => {
-                if !paths.settings_file.exists() {
-                    // Loaded via the legacy fallback: persist to our own path
-                    // now so the settings survive the upstream install being
-                    // removed.
-                    match settings.save(paths) {
-                        Ok(()) => log::info!(
-                            "migrated settings from legacy path {}",
-                            paths.legacy_settings_file.display()
-                        ),
-                        Err(error) => {
-                            log::warn!("failed to persist migrated legacy settings: {error}");
-                        }
-                    }
-                }
-                settings
-            }
+            Ok(settings) => settings,
             Err(error) => {
                 if matches!(&error, SettingsError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
                 {
@@ -273,30 +328,93 @@ impl Settings {
                         "settings file {} was not found; using defaults",
                         paths.settings_file.display()
                     );
+                } else if let SettingsError::UnsupportedSchema { found } = error {
+                    log::warn!(
+                        "settings file {} was written by a newer version (schema {found}); \
+                         keeping it aside and starting from defaults",
+                        paths.settings_file.display()
+                    );
+                    Self::back_up_unreadable(paths);
                 } else {
                     log::warn!(
                         "failed to load settings from {}: {error}; using defaults",
                         paths.settings_file.display()
                     );
+                    // Defaults are about to be written back over this file on
+                    // the next save, so keep the unreadable original: a parse
+                    // failure must not silently discard the user's settings.
+                    Self::back_up_unreadable(paths);
                 }
                 Self::default()
             }
         }
     }
 
+    /// Moves an unreadable settings file to `<name>.bak` so the defaults that
+    /// replace it do not destroy the only copy. Best-effort: a failure here
+    /// must not stop the app from starting.
+    fn back_up_unreadable(paths: &AppDataPaths) {
+        let source = &paths.settings_file;
+        if !source.exists() {
+            return;
+        }
+
+        let backup = source.with_extension("json.bak");
+        // Never over an existing backup: the first unusable file is the one
+        // closest to what the user configured, and a later failure must not
+        // overwrite it with a file that is already a copy of defaults.
+        if backup.exists() {
+            log::warn!(
+                "leaving {} in place; {} is not preserved",
+                backup.display(),
+                source.display()
+            );
+            return;
+        }
+        match fs::rename(source, &backup) {
+            Ok(()) => log::warn!("kept the unusable settings at {}", backup.display()),
+            Err(error) => log::warn!("could not preserve {}: {error}", source.display()),
+        }
+    }
+
     fn load(paths: &AppDataPaths) -> Result<Self, SettingsError> {
-        let contents = match fs::read_to_string(&paths.settings_file) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::read_to_string(&paths.legacy_settings_file)?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let settings: Self = serde_json::de::from_str(&contents)?;
+        let contents = fs::read_to_string(&paths.settings_file)?;
+        let mut settings: Self = serde_json::de::from_str(&contents)?;
+        settings.migrate()?;
         Ok(settings)
     }
 
+    /// Brings a parsed file up to [`SETTINGS_SCHEMA`], or refuses it.
+    ///
+    /// A file from a newer build is an error rather than a silent downgrade:
+    /// serde has already dropped the fields this build does not know, and
+    /// saving would write that truncated shape back over the user's config.
+    fn migrate(&mut self) -> Result<(), SettingsError> {
+        if self.schema > SETTINGS_SCHEMA {
+            return Err(SettingsError::UnsupportedSchema { found: self.schema });
+        }
+
+        match self.schema {
+            // Schema 2 adds the optional, opaque UI document. Serde has
+            // already supplied `None` for schema 1; stamping 2 provides the
+            // downgrade barrier even when there is no UI section yet.
+            0 | 1 => {}
+            2 => {}
+            _ => unreachable!("newer schemas returned above"),
+        }
+        self.schema = SETTINGS_SCHEMA;
+        Ok(())
+    }
+
     pub fn save(&self, paths: &AppDataPaths) -> Result<(), SettingsError> {
+        self.save_with_directory_sync(paths, sync_directory)
+    }
+
+    fn save_with_directory_sync(
+        &self,
+        paths: &AppDataPaths,
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), SettingsError> {
         let parent = paths.settings_file.parent();
         if let Some(parent) = parent {
             std::fs::create_dir_all(parent)?;
@@ -310,13 +428,30 @@ impl Settings {
             None => tempfile::NamedTempFile::new()?,
         };
         serde_json::ser::to_writer(&mut tmp, self)?;
+        // The rename is atomic, but without this the renamed file can still
+        // reference unwritten blocks after a power loss.
+        tmp.as_file().sync_all()?;
         tmp.persist(&paths.settings_file)
             .map_err(|error| SettingsError::Io(error.error))?;
+        if let Some(parent) = parent {
+            // The rename above is the logical commit point: returning an
+            // error now would leave disk holding the new value while the live
+            // store kept the old one. Directory sync only strengthens crash
+            // durability, so report degradation without rolling back the
+            // already-committed update.
+            if let Err(error) = sync_parent(parent) {
+                log::warn!(
+                    "settings {} were committed, but directory {} could not be synced: {error}",
+                    paths.settings_file.display(),
+                    parent.display()
+                );
+            }
+        }
 
         Ok(())
     }
 
-    fn sanitize_with_context(&mut self, context: &SettingsSanitizeContext) {
+    pub fn sanitize(&mut self, context: SettingsEnvironment) {
         self.destinations
             .retain(|dir| dir.is_absolute() && dir.is_dir());
         self.my_workshop_local_paths
@@ -348,9 +483,14 @@ impl Settings {
 
 #[derive(Debug)]
 pub struct AppData {
-    pub settings: ArcSwap<Settings>,
+    settings: ArcSwap<Settings>,
+    /// Even values are stable snapshots; odd values mean a writer is between
+    /// publishing settings and completing their revision.
+    settings_sequence: AtomicU64,
+    /// Serializes persistence and publication. Readers load an immutable
+    /// `Arc` and never take this lock.
+    settings_writer: Mutex<()>,
     pub version: &'static str,
-    pub open_count: OpenCount,
     /// Populated the first time [`Self::discover_gmod_dir`] finds a path via
     /// Steam, so the cheap [`Self::gmod_dir`] accessor (and therefore
     /// `Serialize`/`snapshot`) can report it without blocking.
@@ -358,30 +498,25 @@ pub struct AppData {
     paths: AppDataPaths,
     transactions: Transactions,
 }
-impl Serialize for AppData {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("AppData", 7)?;
-        state.serialize_field("settings", &**self.settings.load())?;
-        state.serialize_field("version", self.version)?;
-        state.serialize_field("open_count", &self.open_count)?;
-        state.serialize_field("temp_dir", &self.temp_dir())?;
-        state.serialize_field("gmod_dir", &self.gmod_dir())?;
-        state.serialize_field("user_data_dir", &self.user_data_dir())?;
-        state.serialize_field("downloads_dir", &self.downloads_dir())?;
-        state.end()
-    }
-}
 impl AppData {
     #[must_use]
     pub fn load(paths: AppDataPaths, transactions: Transactions) -> Self {
-        let settings = Settings::load_or_default(&paths);
+        let mut settings = Settings::load_or_default(&paths);
+        let environment = SettingsEnvironment::new(
+            settings
+                .downloads
+                .as_ref()
+                .filter(|path| path.is_dir())
+                .or(paths.default_downloads_dir.as_ref())
+                .is_some(),
+            settings.gmod.as_ref().is_some_and(|path| path.is_dir()),
+        );
+        settings.sanitize(environment);
         Self {
             settings: ArcSwap::from_pointee(settings),
+            settings_sequence: AtomicU64::new(0),
+            settings_writer: Mutex::new(()),
             version: env!("CARGO_PKG_VERSION"),
-            open_count: OpenCount::new(),
             discovered_gmod_dir: Mutex::new(None),
             paths,
             transactions,
@@ -394,27 +529,68 @@ impl AppData {
     }
 
     pub fn snapshot(&self) -> AppDataSnapshot {
-        let settings = Settings::clone(&self.settings.load());
-        let temp_dir = self.temp_dir();
-        let user_data_dir = self.user_data_dir();
-        let downloads_dir = self.downloads_dir();
-        let gmod_dir = self.gmod_dir();
+        loop {
+            let sequence = self.settings_sequence.load(Ordering::Acquire);
+            if sequence % 2 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
 
-        AppDataSnapshot {
-            settings,
-            version: self.version,
-            open_count: self.open_count.get(),
-            paths: AppDataPathsSnapshot {
-                settings_file: self.paths.settings_file.clone(),
-                default_user_data_dir: self.paths.default_user_data_dir.clone(),
-                default_temp_dir: self.paths.default_temp_dir.clone(),
-                default_downloads_dir: self.paths.default_downloads_dir.clone(),
-                temp_dir,
-                user_data_dir,
-                downloads_dir,
-                gmod_dir,
-            },
+            let settings = Settings::clone(&self.settings.load());
+            let temp_dir = settings
+                .temp
+                .as_ref()
+                .filter(|path| path.is_dir())
+                .cloned()
+                .unwrap_or_else(|| self.paths.default_temp_dir.clone());
+            let user_data_dir = settings
+                .user_data
+                .as_ref()
+                .filter(|path| path.is_dir())
+                .cloned()
+                .unwrap_or_else(|| self.paths.default_user_data_dir.clone());
+            let downloads_dir = settings
+                .downloads
+                .as_ref()
+                .filter(|path| path.is_dir())
+                .cloned()
+                .or_else(|| self.paths.default_downloads_dir.clone());
+            let gmod_dir = settings
+                .gmod
+                .as_ref()
+                .filter(|path| path.is_dir())
+                .cloned()
+                .or_else(|| self.discovered_gmod_dir.lock().clone());
+
+            if self.settings_sequence.load(Ordering::Acquire) != sequence {
+                continue;
+            }
+
+            return AppDataSnapshot {
+                settings,
+                settings_revision: sequence / 2,
+                version: self.version,
+                paths: AppDataPathsSnapshot {
+                    settings_file: self.paths.settings_file.clone(),
+                    default_user_data_dir: self.paths.default_user_data_dir.clone(),
+                    default_temp_dir: self.paths.default_temp_dir.clone(),
+                    default_downloads_dir: self.paths.default_downloads_dir.clone(),
+                    temp_dir,
+                    user_data_dir,
+                    downloads_dir,
+                    gmod_dir,
+                },
+            };
         }
+    }
+
+    fn publish_settings(&self, settings: Settings) {
+        let settings = std::sync::Arc::new(settings);
+        // AcqRel at entry prevents the settings publication below from
+        // becoming visible before readers can observe the odd writer marker.
+        self.settings_sequence.fetch_add(1, Ordering::AcqRel);
+        self.settings.store(settings);
+        self.settings_sequence.fetch_add(1, Ordering::Release);
     }
 
     /// Cheap snapshot accessor: the user-configured path, else a previously
@@ -439,10 +615,28 @@ impl AppData {
     /// perform I/O; never call from a path that must not block (accessors,
     /// `Serialize`). A discovered path is cached for [`Self::gmod_dir`].
     pub fn discover_gmod_dir(&self, steam: &Steam) -> Option<PathBuf> {
-        log::info!("Locating Garry's Mod...");
+        let configured = self.settings.load().gmod.clone();
+        self.discover_gmod_dir_for_settings(configured.as_deref(), steam)
+    }
 
-        if let Some(gmod) = self.gmod_dir() {
+    /// Resolves Garry's Mod against a proposed settings value rather than the
+    /// currently published one. Configuration writers use this before they
+    /// persist the proposal, so an old configured path cannot leak into the
+    /// new snapshot's resolution.
+    pub fn discover_gmod_dir_for_settings(
+        &self,
+        configured: Option<&Path>,
+        steam: &Steam,
+    ) -> Option<PathBuf> {
+        log::info!("Locating Garry's Mod...");
+        if let Some(gmod) = configured.filter(|path| path.is_dir()) {
             log::info!("Using user-defined or previously discovered path");
+            return Some(gmod.to_path_buf());
+        }
+        if let Some(gmod) = self.discovered_gmod_dir.lock().clone()
+            && gmod.is_dir()
+        {
+            log::info!("Using previously discovered path");
             return Some(gmod);
         }
 
@@ -458,7 +652,7 @@ impl AppData {
             log::info!("Steam is not connected, parsing Steam library folders...");
             if let Some(path) = steamlocate::SteamDir::locate().ok().and_then(|steam_dir| {
                 steam_dir
-                    .find_app(GMOD_APP_ID.0)
+                    .find_app(GMOD_APP_ID)
                     .ok()
                     .flatten()
                     .map(|(app, library)| library.resolve_app_dir(&app))
@@ -467,15 +661,11 @@ impl AppData {
                 return Some(path);
             }
             log::warn!("Failed to parse Steam library folders. Waiting for Steam...");
-            for i in 0..3_u8 {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if steam.connected() {
-                    log::info!("Steam connected!");
-                    break;
-                } else if i == 2 {
-                    log::warn!("Gave up.");
-                    return None;
-                }
+            if steam.wait_for_connected(std::time::Duration::from_secs(3)) {
+                log::info!("Steam connected!");
+            } else {
+                log::warn!("Gave up.");
+                return None;
             }
         }
 
@@ -483,8 +673,9 @@ impl AppData {
         let gmod: PathBuf = steam
             .client()
             .ok()?
+            .client()
             .apps()
-            .app_install_dir(GMOD_APP_ID)
+            .app_install_dir(STEAM_GMOD_APP_ID)
             .into();
         if gmod.is_dir() {
             log::info!("Located!");
@@ -564,49 +755,22 @@ impl AppData {
         self.settings.load().ignore_globs.clone()
     }
 
-    pub(crate) fn apply_publish_settings_snapshot(
-        &self,
-        temp: Option<&Path>,
-        ignore_globs: &[String],
-    ) {
-        self.settings.rcu(|settings| {
-            let mut settings = Settings::clone(settings);
-            settings.temp = temp.map(Path::to_path_buf);
-            settings.ignore_globs = ignore_globs.to_vec();
-            settings
-        });
+    /// The live settings. Runtime mutations go through
+    /// [`Self::update_settings`], which sanitizes, persists and emits.
+    #[must_use]
+    pub fn settings(&self) -> arc_swap::Guard<std::sync::Arc<Settings>> {
+        self.settings.load()
     }
 
-    /// Clones the current settings, lets `mutate` edit the copy, and
-    /// publishes it atomically. Readers are never blocked; concurrent
-    /// mutations retry (rcu).
-    pub fn mutate_settings(&self, mut mutate: impl FnMut(&mut Settings)) {
+    /// Edits the settings in place without sanitizing, saving or emitting.
+    /// Test-only: production changes must go through [`Self::update_settings`].
+    #[cfg(test)]
+    pub(crate) fn mutate_settings(&self, mut mutate: impl FnMut(&mut Settings)) {
         self.settings.rcu(|settings| {
             let mut settings = Settings::clone(settings);
             mutate(&mut settings);
             settings
         });
-    }
-
-    pub(crate) fn record_published_local_path(
-        &self,
-        published_file_id: PublishedFileId,
-        content_path_src: &Path,
-    ) {
-        self.settings.rcu(|settings| {
-            let mut settings = Settings::clone(settings);
-            settings
-                .my_workshop_local_paths
-                .insert(published_file_id, content_path_src.to_path_buf());
-            settings
-        });
-        if let Err(error) = self.settings.load().save(&self.paths) {
-            log::warn!(
-                "failed to save settings to {} after recording workshop item local path: {error}",
-                self.paths.settings_file.display()
-            );
-        }
-        self.send();
     }
 
     fn should_send_after_steam_init_if_gmod_unset(&self) -> bool {
@@ -622,56 +786,29 @@ impl AppData {
         }
     }
 
-    /// Sanitizes and persists `settings`, then installs it as the live
-    /// state. Persistence happens first: a failed save leaves the live
-    /// `ArcSwap` (and the file on disk) exactly as they were.
+    /// Serializes the complete clone -> mutate -> sanitize -> persist ->
+    /// publish transaction. The mutation returns environment facts it
+    /// resolved explicitly; saving itself never performs Steam discovery.
+    /// Persistence happens first, so a failed save leaves live state intact.
     pub fn update_settings(
         &self,
-        mut settings: Settings,
-        steam: &Steam,
+        update: impl FnOnce(&mut Settings) -> SettingsEnvironment,
     ) -> Result<(), SettingsError> {
-        let context = self.sanitize_context(&settings.extract_destination, steam);
-        settings.sanitize_with_context(&context);
-
+        let writer = self.settings_writer.lock();
+        let mut settings = Settings::clone(&self.settings.load());
+        let environment = update(&mut settings);
+        settings.sanitize(environment);
         settings.save(&self.paths)?;
-
         let rediscover_addons = self.settings.load().gmod != settings.gmod;
-
-        self.settings.store(std::sync::Arc::new(settings));
+        self.publish_settings(settings);
+        drop(writer);
 
         if rediscover_addons {
             self.transactions
                 .emit(BackendEvent::InstalledAddonsRefreshed);
         }
-
         self.send();
-
         Ok(())
-    }
-
-    fn sanitize_context(
-        &self,
-        destination: &ExtractDestination,
-        steam: &Steam,
-    ) -> SettingsSanitizeContext {
-        if !matches!(
-            destination,
-            ExtractDestination::Downloads | ExtractDestination::Addons
-        ) {
-            return SettingsSanitizeContext::default();
-        }
-
-        match destination {
-            ExtractDestination::Downloads => SettingsSanitizeContext {
-                downloads_dir_available: self.downloads_dir().is_some(),
-                ..SettingsSanitizeContext::default()
-            },
-            ExtractDestination::Addons => SettingsSanitizeContext {
-                gmod_dir_available: self.discover_gmod_dir(steam).is_some(),
-                ..SettingsSanitizeContext::default()
-            },
-            _ => SettingsSanitizeContext::default(),
-        }
     }
 }
 

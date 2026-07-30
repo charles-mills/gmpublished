@@ -1,15 +1,17 @@
 use super::model::{ContextMenuRequest, PreviewTarget};
 use crate::bridge::domain::PublishedFileId;
+use crate::generation::Generation;
+use crate::widgets::grid_rows::CardId;
 
 /// Outward consequences of an Installed Addons state transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     MetadataRequested {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
     MetadataRefreshRequested {
-        generation: u64,
+        generation: Generation,
         item_ids: Vec<PublishedFileId>,
     },
     PreviewRequested(PreviewTarget),
@@ -20,7 +22,7 @@ pub enum Effect {
     /// this relative delta so content does not jump under the user.
     GridScrollAnchored(f32),
     AddonDragPressed {
-        card_id: String,
+        card_id: CardId,
         workshop_id: Option<PublishedFileId>,
     },
     AddonDragReleased,

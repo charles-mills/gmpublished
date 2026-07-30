@@ -10,13 +10,14 @@ use iced::{
 
 use crate::{
     assets,
+    bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset},
     features::modal_stack::ResponsiveSize,
     i18n::{self, I18n},
     theme::{self, Tokens, ViewCtx},
     widgets::{select, tooltip as tooltip_widget},
 };
 
-use super::state::{self, ColorChannel, ColorSetting, PathSetting, ResetAction, SelectOption, Tab};
+use super::state::{self, ColorChannel, ColorSetting, PathSetting, ResetAction, Tab};
 use super::{Message, State};
 
 const TAB_RAIL_WIDTH: f32 = 200.0;
@@ -233,13 +234,13 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     let mut content = column![
         switch_row(
             i18n.tr("settings-general-sounds"),
-            state.settings().sounds,
+            state.settings().backend.sounds,
             Message::SoundsToggled,
             &tokens,
         ),
         switch_row(
             i18n.tr("settings-general-play-gifs-by-default"),
-            state.settings().play_gifs_by_default,
+            state.settings().ui.play_gifs_by_default,
             Message::PlayGifsByDefaultToggled,
             &tokens,
         ),
@@ -249,7 +250,7 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     {
         content = content.push(switch_row(
             i18n.tr("settings-system-titlebar"),
-            state.settings().titlebar == crate::bridge::TitlebarPreference::System,
+            state.settings().backend.titlebar == crate::bridge::TitlebarPreference::System,
             Message::SystemTitlebarToggled,
             &tokens,
         ));
@@ -259,15 +260,15 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
         i18n.tr("settings-general-language"),
         None,
         language_options(i18n),
-        &state.language_value(),
-        Message::LanguageSelected,
+        &state.language(),
+        |language| Message::LanguageSelected(language.map(str::to_owned)),
         &tokens,
     ));
     content = content.push(select_field(
         i18n.tr("settings-download-count-format-label"),
         None,
         download_count_options(i18n),
-        state.download_count_format_value(),
+        &state.download_count_format(),
         Message::DownloadCountFormatSelected,
         &tokens,
     ));
@@ -275,7 +276,7 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
         i18n.tr("settings-theme-label"),
         None,
         theme_options(i18n),
-        state.theme_value(),
+        &state.theme_preset(),
         Message::ThemeSelected,
         &tokens,
     ));
@@ -283,7 +284,7 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
         i18n.tr("settings-overwrite-label"),
         Some(i18n.tr("settings-overwrite-tooltip")),
         overwrite_options(i18n),
-        state.overwrite_mode_value(),
+        &state.overwrite_mode(),
         Message::OverwriteModeSelected,
         &tokens,
     ));
@@ -316,35 +317,47 @@ fn switch_row<'a>(
     .into()
 }
 
-/// A labelled dropdown. `hint` is attached to the shut face only: with the menu
-/// down, a tooltip would hang across the options it is meant to explain.
-fn select_field<'a>(
+/// A labelled dropdown over a domain type. `options` pairs each value with its
+/// translated label; falling back to the first entry keeps a control that has
+/// drifted out of range showing something rather than blank. `hint` is
+/// attached to the shut face only: with the menu down, a tooltip would hang
+/// across the options it is meant to explain.
+fn select_field<'a, T: Clone + Eq>(
     label: String,
     hint: Option<String>,
-    options: Vec<SelectOption>,
-    selected_value: &str,
-    on_selected: impl Fn(SelectOption) -> Message + 'a,
+    options: Vec<(T, String)>,
+    selected: &T,
+    on_selected: impl Fn(T) -> Message + 'a,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let current = selected_option(&options, selected_value)
-        .map(|option| option.label)
+    let current = options
+        .iter()
+        .find(|(value, _)| value == selected)
+        .or_else(|| options.first())
+        .map(|(_, label)| label.clone())
         .unwrap_or_default();
     let metrics = select_metrics(&tokens);
     let geometry = select::geometry(options.len(), metrics, &tokens);
 
     let rows = options
         .into_iter()
-        .map(|option| select::Row {
-            selected: option.value == selected_value,
-            label: option.label.clone(),
-            on_select: on_selected(option),
+        .map(|(value, label)| select::Row {
+            selected: &value == selected,
+            label,
+            on_select: on_selected(value),
         })
         .collect();
 
     select::select(
-        select_field_face(label.clone(), current.clone(), false, hint, &tokens),
-        select_field_face(label, current, true, None, &tokens),
+        select_field_face(
+            label.clone(),
+            current.clone(),
+            select::Face::Collapsed,
+            hint,
+            &tokens,
+        ),
+        select_field_face(label, current, select::Face::Expanded, None, &tokens),
         select::menu(rows, metrics, &tokens),
         geometry,
     )
@@ -354,13 +367,13 @@ fn select_field<'a>(
 fn select_field_face<'a>(
     label: String,
     current: String,
-    open: bool,
+    face: select::Face,
     hint: Option<String>,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let field = column![
         field_label(label, tokens),
-        select_face(current, open, tokens),
+        select_face(current, face, tokens),
     ]
     .spacing(FIELD_LABEL_GAP)
     .width(Length::Fill);
@@ -372,8 +385,9 @@ fn select_field_face<'a>(
 }
 
 /// The control itself: centered label with a chevron parked on the right edge.
-/// `open` squares off the bottom corners so the menu joins it flush.
-fn select_face<'a>(label: String, open: bool, tokens: &Tokens) -> Element<'a, Message> {
+/// [`select::Face::Expanded`] squares off the bottom corners so the menu joins
+/// it flush.
+fn select_face<'a>(label: String, face: select::Face, tokens: &Tokens) -> Element<'a, Message> {
     let tokens = *tokens;
     let label_layer = container(
         text(label)
@@ -408,7 +422,7 @@ fn select_face<'a>(label: String, open: bool, tokens: &Tokens) -> Element<'a, Me
         .width(Length::Fill)
         .height(Length::Fixed(CONTROL_HEIGHT))
         .clip(true)
-        .style(move |_| theme::styles::select_face(&tokens, open))
+        .style(move |_| theme::styles::select_face(&tokens, face.is_expanded()))
         .into()
 }
 
@@ -841,56 +855,70 @@ fn primary_button<'a>(
     .style(move |_, status| primary_button_style(&tokens, danger, status))
 }
 
-fn language_options(i18n: &I18n) -> Vec<SelectOption> {
+/// `None` is "follow the system language".
+fn language_options(i18n: &I18n) -> Vec<(Option<&'static str>, String)> {
     let mut options = Vec::with_capacity(i18n::available_languages().len() + 1);
-    options.push(SelectOption::new(
-        i18n.tr("settings-general-language-default"),
-        state::default_language_value(),
-    ));
+    options.push((None, i18n.tr("settings-general-language-default")));
     options.extend(
         i18n::available_languages()
             .iter()
-            .map(|language| SelectOption::new(language.name.clone(), language.id)),
+            .map(|language| (Some(language.id), language.name.clone())),
     );
     options
 }
 
-fn theme_options(i18n: &I18n) -> Vec<SelectOption> {
+fn theme_options(i18n: &I18n) -> Vec<(ThemePreset, String)> {
     vec![
-        SelectOption::new(i18n.tr("settings-theme-auto"), "auto"),
-        SelectOption::new(i18n.tr("settings-theme-dark"), "dark"),
-        SelectOption::new(i18n.tr("settings-theme-light"), "light"),
-        SelectOption::new(i18n.tr("settings-theme-classic-source"), "classic_source"),
-    ]
-}
-
-fn download_count_options(i18n: &I18n) -> Vec<SelectOption> {
-    vec![
-        SelectOption::new(
-            i18n.tr("settings-download-count-format-automatic"),
-            "automatic",
+        (ThemePreset::Auto, i18n.tr("settings-theme-auto")),
+        (ThemePreset::Dark, i18n.tr("settings-theme-dark")),
+        (ThemePreset::Light, i18n.tr("settings-theme-light")),
+        (
+            ThemePreset::ClassicSource,
+            i18n.tr("settings-theme-classic-source"),
         ),
-        SelectOption::new(i18n.tr("settings-download-count-format-comma"), "comma"),
-        SelectOption::new(i18n.tr("settings-download-count-format-period"), "period"),
-        SelectOption::new(i18n.tr("settings-download-count-format-space"), "space"),
-        SelectOption::new(i18n.tr("settings-download-count-format-plain"), "plain"),
     ]
 }
 
-fn overwrite_options(i18n: &I18n) -> Vec<SelectOption> {
+fn download_count_options(i18n: &I18n) -> Vec<(DownloadCountFormat, String)> {
     vec![
-        SelectOption::new(i18n.tr("settings-overwrite-recycle"), "recycle"),
-        SelectOption::new(i18n.tr("settings-overwrite-delete"), "delete"),
-        SelectOption::new(i18n.tr("settings-overwrite-overwrite"), "overwrite"),
+        (
+            DownloadCountFormat::Automatic,
+            i18n.tr("settings-download-count-format-automatic"),
+        ),
+        (
+            DownloadCountFormat::Comma,
+            i18n.tr("settings-download-count-format-comma"),
+        ),
+        (
+            DownloadCountFormat::Period,
+            i18n.tr("settings-download-count-format-period"),
+        ),
+        (
+            DownloadCountFormat::Space,
+            i18n.tr("settings-download-count-format-space"),
+        ),
+        (
+            DownloadCountFormat::Plain,
+            i18n.tr("settings-download-count-format-plain"),
+        ),
     ]
 }
 
-fn selected_option(options: &[SelectOption], value: &str) -> Option<SelectOption> {
-    options
-        .iter()
-        .find(|option| option.value == value)
-        .cloned()
-        .or_else(|| options.first().cloned())
+fn overwrite_options(i18n: &I18n) -> Vec<(ExtractionOverwriteMode, String)> {
+    vec![
+        (
+            ExtractionOverwriteMode::Recycle,
+            i18n.tr("settings-overwrite-recycle"),
+        ),
+        (
+            ExtractionOverwriteMode::Delete,
+            i18n.tr("settings-overwrite-delete"),
+        ),
+        (
+            ExtractionOverwriteMode::Overwrite,
+            i18n.tr("settings-overwrite-overwrite"),
+        ),
+    ]
 }
 
 fn settings_modal_style(tokens: &Tokens) -> container::Style {
@@ -898,7 +926,7 @@ fn settings_modal_style(tokens: &Tokens) -> container::Style {
         background: Some(Color::from(tokens.colors.bg).into()),
         text_color: Some(tokens.colors.text.into()),
         border: Border {
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
             ..Border::default()
         },
         shadow: Shadow {
@@ -913,7 +941,7 @@ fn settings_modal_style(tokens: &Tokens) -> container::Style {
 fn desktop_tab_rail_style(tokens: &Tokens) -> container::Style {
     rail_style_with_radius(
         tokens,
-        border::radius(tokens.radii.md)
+        border::radius(tokens.radii.lg)
             .top_right(0.0)
             .bottom_right(0.0),
     )
@@ -922,7 +950,7 @@ fn desktop_tab_rail_style(tokens: &Tokens) -> container::Style {
 fn compact_tab_rail_style(tokens: &Tokens) -> container::Style {
     rail_style_with_radius(
         tokens,
-        border::radius(tokens.radii.md)
+        border::radius(tokens.radii.lg)
             .bottom_left(0.0)
             .bottom_right(0.0),
     )
@@ -930,9 +958,9 @@ fn compact_tab_rail_style(tokens: &Tokens) -> container::Style {
 
 fn content_panel_style(tokens: &Tokens, compact: bool) -> container::Style {
     let radius = if compact {
-        border::radius(tokens.radii.md).top_left(0.0).top_right(0.0)
+        border::radius(tokens.radii.lg).top_left(0.0).top_right(0.0)
     } else {
-        border::radius(tokens.radii.md)
+        border::radius(tokens.radii.lg)
             .top_left(0.0)
             .bottom_left(0.0)
     };
@@ -950,9 +978,9 @@ fn content_panel_style(tokens: &Tokens, compact: bool) -> container::Style {
 
 fn status_rail_style(tokens: &Tokens, compact: bool) -> container::Style {
     let radius = if compact {
-        border::radius(tokens.radii.md).top_left(0.0).top_right(0.0)
+        border::radius(tokens.radii.lg).top_left(0.0).top_right(0.0)
     } else {
-        border::radius(0.0).bottom_right(tokens.radii.md)
+        border::radius(0.0).bottom_right(tokens.radii.lg)
     };
     rail_style_with_radius(tokens, radius)
 }
@@ -982,7 +1010,7 @@ fn tab_button_style(tokens: &Tokens, active: bool, status: button::Status) -> bu
         background: Some(Color::from(background).into()),
         text_color: tokens.colors.text.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -1025,7 +1053,7 @@ fn select_metrics(tokens: &Tokens) -> select::Metrics {
     select::Metrics {
         text_size: tokens.typography.body,
         padding: Padding::from([SELECT_PAD_Y, tokens.spacing.pad_sm]),
-        radius: tokens.radii.md,
+        radius: tokens.radii.lg,
         max_rows: select::MAX_ROWS,
     }
 }
@@ -1056,7 +1084,7 @@ fn input_style(tokens: &Tokens, error: bool, status: text_input::Status) -> text
             } else {
                 0.0
             },
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         icon: tokens.colors.icon_muted.into(),
         placeholder: tokens.colors.text_dim.into(),
@@ -1079,7 +1107,7 @@ fn swatch_style(tokens: &Tokens, rgb: u32, expanded: bool) -> container::Style {
             } else {
                 tokens.dims.border_width
             },
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
         },
         ..container::Style::default()
     }
@@ -1092,7 +1120,7 @@ fn color_picker_popover_style(tokens: &Tokens) -> container::Style {
         border: Border {
             color: tokens.colors.border_subtle.into(),
             width: tokens.dims.border_width,
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
         },
         shadow: Shadow {
             color: tokens.colors.shadow_dropdown.into(),
@@ -1111,7 +1139,7 @@ fn hsv_slider_style(tokens: &Tokens, rail: Background, _status: slider::Status) 
             border: Border {
                 color: tokens.colors.border_subtle.into(),
                 width: tokens.dims.border_width,
-                radius: tokens.radii.base.into(),
+                radius: tokens.radii.sm.into(),
             },
         },
         handle: slider::Handle {
@@ -1141,7 +1169,7 @@ fn text_button_style(tokens: &Tokens, status: button::Status) -> button::Style {
         background: Some(Color::from(background).into()),
         text_color: tokens.colors.text.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -1175,7 +1203,7 @@ fn primary_button_style(tokens: &Tokens, danger: bool, status: button::Status) -
         background: Some(Color::from(background).into()),
         text_color: text_color.into(),
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
@@ -1188,7 +1216,7 @@ fn confirm_dialog_style(tokens: &Tokens) -> container::Style {
         background: Some(Color::from(tokens.colors.surface).into()),
         text_color: Some(tokens.colors.text.into()),
         border: Border {
-            radius: tokens.radii.md.into(),
+            radius: tokens.radii.lg.into(),
             ..Border::default()
         },
         shadow: Shadow {
@@ -1232,4 +1260,32 @@ fn hsv_to_color(hue: f32, saturation: f32, value: f32) -> Color {
 fn rgb_color(rgb: u32) -> Color {
     let [_, red, green, blue] = (rgb & 0xFF_FFFF).to_be_bytes();
     Color::from_rgb8(red, green, blue)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The row that clears an explicit language is the one carrying `None`,
+    /// and it has to be first: `select_field` falls back to the first entry
+    /// for a value it cannot find, so any other order would silently rewrite
+    /// an unknown stored language into a real one.
+    #[test]
+    fn the_language_list_leads_with_the_follow_the_system_row() {
+        let i18n = I18n::for_locale(Some("en"));
+
+        let options = language_options(&i18n);
+
+        let (first_value, first_label) = options.first().expect("language options are non-empty");
+        assert_eq!(*first_value, None);
+        assert_eq!(
+            *first_label,
+            i18n.tr("settings-general-language-default"),
+            "the row must be translated, not the raw key"
+        );
+        assert!(
+            options.iter().skip(1).all(|(value, _)| value.is_some()),
+            "only the leading row clears the setting"
+        );
+    }
 }

@@ -9,7 +9,6 @@ use gmpublished_backend::bbcode::SpoilerId;
 use iced::widget::image;
 use iced::widget::pane_grid;
 
-#[cfg(feature = "asset-studio")]
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::bridge::gma::PreviewArchive;
 use crate::bridge::ui_error::UiError;
@@ -22,8 +21,7 @@ use crate::media::{
 use crate::widgets::file_browser::{Row as FileBrowserRowData, State as FileBrowserState};
 use crate::widgets::split_pane;
 
-#[cfg(feature = "asset-studio")]
-use crate::features::file_preview::PreviewRequest;
+use crate::media::preview_model::PreviewRequest;
 
 use crate::bridge::domain::PublishedFileId;
 
@@ -32,9 +30,10 @@ use super::model::{
     AuthorInfo, AuthorRequest, ExtractionIntent, ExtractionRequest, LoadedArchive, MetadataRequest,
     OpenRequest, OpenSeed, OpenTarget, WorkshopMetadata, workshop_url,
 };
+use crate::bridge::domain::SteamId;
+use crate::generation::Generation;
 
 const PREVIEW_THUMBNAIL_MAX_EDGE: u32 = 256;
-const PREVIEW_THUMBNAIL_DEMAND_ID: &str = "preview-gma";
 const DEFAULT_SIDEBAR_RATIO: f32 = 272.0 / 1008.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,7 +46,7 @@ pub(super) enum Pane {
     clippy::struct_excessive_bools,
     reason = "each flag independently tracks one async fetch/UI concern, not a mode enum"
 )]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct State {
     open: bool,
     loading: bool,
@@ -56,7 +55,7 @@ pub struct State {
     archive_path: Option<PathBuf>,
     workshop_id: Option<PublishedFileId>,
     seed: OpenSeed,
-    request_id: u64,
+    request_id: Generation,
     archive: Option<Arc<PreviewArchive>>,
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
@@ -89,7 +88,7 @@ impl Default for State {
             archive_path: None,
             workshop_id: None,
             seed: OpenSeed::default(),
-            request_id: 0,
+            request_id: Generation::INITIAL,
             archive: None,
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
@@ -157,19 +156,15 @@ impl State {
         self.workshop_link_url().is_some()
     }
 
-    pub(crate) fn set_download_count_formatter(
-        &mut self,
-        formatter: DownloadCountFormatter,
-    ) -> bool {
+    pub(crate) fn set_download_count_formatter(&mut self, formatter: DownloadCountFormatter) {
         if self.download_count_formatter == formatter {
-            return false;
+            return;
         }
 
         self.download_count_formatter = formatter;
         if self.open && self.archive.is_some() {
             self.refresh_details();
         }
-        true
     }
 
     pub(crate) fn can_copy_current_path(&self) -> bool {
@@ -271,14 +266,13 @@ impl State {
 
     /// GIF playback pauses on the current frame while the window is
     /// unfocused, so the clock subscription can drop to idle.
-    pub(crate) fn set_window_focused(&mut self, focused: bool) -> bool {
+    pub(crate) fn set_window_focused(&mut self, focused: bool) {
         if self.window_focused == focused {
-            return false;
+            return;
         }
 
         self.window_focused = focused;
         self.last_animation_tick = None;
-        true
     }
 
     pub(crate) fn has_active_animation(&self) -> bool {
@@ -306,16 +300,17 @@ impl State {
             generation: self.request_id,
             replace: thumbnail_demand::ReplaceMode::Owner,
             demands: vec![thumbnail_demand::Demand {
-                id: thumbnail_demand::DemandId::new(PREVIEW_THUMBNAIL_DEMAND_ID),
+                id: thumbnail_demand::DemandId::Singleton,
                 input: ThumbnailInput::from_url(url),
                 logical_max_edge: PREVIEW_THUMBNAIL_MAX_EDGE,
                 priority: thumbnail_demand::Priority::ActiveDetail,
+                capabilities: thumbnail_demand::DemandCapabilities::SURFACE,
             }],
         }
     }
 
-    pub(super) fn begin_open(&mut self, target: OpenTarget) -> OpenRequest {
-        self.request_id = self.request_id.saturating_add(1);
+    pub(super) fn begin_open_at(&mut self, target: OpenTarget, now: Instant) -> OpenRequest {
+        self.request_id.bump();
         self.open = true;
         self.loading = true;
         self.error = None;
@@ -333,7 +328,7 @@ impl State {
         self.workshop_metadata_requested = self.workshop_id.is_none();
         self.author_requested = false;
         self.author_fetch_failed = false;
-        self.spinner_started_at = Some(Instant::now());
+        self.spinner_started_at = Some(now);
         self.spinner_now = None;
         // Seed the preview from the click source so the pipeline can serve
         // the grid's cached image immediately; otherwise reserve the square
@@ -356,9 +351,14 @@ impl State {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn begin_open(&mut self, target: OpenTarget) -> OpenRequest {
+        self.begin_open_at(target, Instant::now())
+    }
+
     pub(super) fn apply_archive_opened(
         &mut self,
-        request_id: u64,
+        request_id: Generation,
         result: Result<LoadedArchive, UiError>,
     ) -> bool {
         if !self.open || self.request_id != request_id {
@@ -388,7 +388,6 @@ impl State {
         true
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(super) fn take_initial_entry_preview_request(&mut self) -> Option<PreviewRequest> {
         let entry_path = self.pending_initial_entry_preview.take()?;
         self.entry_preview_request(&entry_path)
@@ -413,8 +412,8 @@ impl State {
 
     pub(super) fn apply_author_result(
         &mut self,
-        request_id: u64,
-        steamid64: u64,
+        request_id: Generation,
+        steamid64: SteamId,
         result: Result<AuthorInfo, UiError>,
     ) -> bool {
         if !self.open
@@ -492,7 +491,7 @@ impl State {
 
     pub(super) fn apply_workshop_metadata(
         &mut self,
-        request_id: u64,
+        request_id: Generation,
         workshop_id: PublishedFileId,
         result: Result<Option<WorkshopMetadata>, UiError>,
     ) -> bool {
@@ -561,7 +560,7 @@ impl State {
     ) -> bool {
         if delivery.owner != thumbnail_owner()
             || delivery.generation != self.request_id
-            || delivery.id.as_str() != PREVIEW_THUMBNAIL_DEMAND_ID
+            || !delivery.id.is_singleton()
         {
             return false;
         }
@@ -629,7 +628,7 @@ impl State {
         if !self.open && !self.loading && self.archive.is_none() && self.browser.is_none() {
             return;
         }
-        self.request_id = self.request_id.saturating_add(1);
+        self.request_id.bump();
         self.open = false;
         self.loading = false;
         self.error = None;
@@ -682,12 +681,11 @@ impl State {
         })
     }
 
-    #[cfg(feature = "asset-studio")]
     pub(super) fn entry_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
         let archive = self.ready_archive()?;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {
-            request_id: 0,
+            request_id: Generation::INITIAL,
             archive: PreviewArchiveSource::from_gma(Arc::clone(archive)),
             entry_path: entry_path.to_owned(),
             display_name: entry

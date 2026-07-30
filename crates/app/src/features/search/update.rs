@@ -7,7 +7,7 @@ use crate::bridge::tasks::TaskId;
 
 pub const SEARCH_INPUT_ID: &str = "search-palette-input";
 
-pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
     match message {
         Message::QueryEdited(query) => {
             let palette_open_before = state.palette_open();
@@ -26,7 +26,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::FocusRequested => {
             let palette_open_before = state.palette_open();
-            let _changed = state.focus(Instant::now());
+            let _changed = state.focus(now);
             let mut effects = vec![Effect::FocusInputRequested];
             let _palette_changed =
                 append_palette_transition_effect(&mut effects, palette_open_before, state);
@@ -35,7 +35,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::ModeFocusRequested(mode) => {
             let palette_open_before = state.palette_open();
-            let outcome = state.focus_mode(mode, Instant::now());
+            let outcome = state.focus_mode(mode, now);
             let mut effects = vec![Effect::FocusInputRequested];
             let palette_changed =
                 append_palette_transition_effect(&mut effects, palette_open_before, state);
@@ -102,18 +102,18 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::ResultActivated(row_id) => {
             let mut effects = vec![Effect::ResultActivated(row_id)];
-            append_dismiss_effects(&mut effects, state);
+            append_dismiss_effects(&mut effects, state, now);
             effects
         }
         Message::DismissRequested => {
             let mut effects = Vec::new();
-            append_dismiss_effects(&mut effects, state);
+            append_dismiss_effects(&mut effects, state, now);
             effects
         }
         Message::EscapePressed => {
             let mut effects = Vec::new();
             if state.input().is_empty() {
-                append_dismiss_effects(&mut effects, state);
+                append_dismiss_effects(&mut effects, state, now);
             } else {
                 append_cancel_effect(&mut effects, state.clear());
                 effects.push(Effect::ThumbnailDemandsChanged);
@@ -136,11 +136,16 @@ pub fn subscription(state: &State) -> Subscription<Message> {
     }
 }
 
-fn append_dismiss_effects(effects: &mut Vec<Effect>, state: &mut State) {
+fn append_dismiss_effects(effects: &mut Vec<Effect>, state: &mut State, now: Instant) {
     let palette_open_before = state.palette_open();
-    let cancel_task = state.dismiss(Instant::now());
+    let cancel_task = state.dismiss(now);
     append_palette_transition_effect(effects, palette_open_before, state);
     append_cancel_effect(effects, cancel_task);
+}
+
+#[cfg(test)]
+fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    update_at(state, message, Instant::now())
 }
 
 fn append_cancel_effect(effects: &mut Vec<Effect>, task_id: Option<TaskId>) {
@@ -193,7 +198,6 @@ fn keyboard_event(
 mod tests {
     use crate::bridge::domain::{
         PublishedFileId, SearchHit, SearchItem, SearchItemSource, SearchQuickBatch,
-        SearchQuickCarry,
     };
     use crate::bridge::tasks::TaskId;
     use crate::features::search::state::{MetadataPatch, MetadataResolution};
@@ -229,12 +233,7 @@ mod tests {
         let mut state = State::default();
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
         let _effects = update(
             &mut state,
             Message::QuickSearchCompleted(request.key().clone(), Ok(batch)),
@@ -335,12 +334,7 @@ mod tests {
         let mut state = State::default();
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
 
         let effects = update(
             &mut state,
@@ -362,12 +356,7 @@ mod tests {
             &mut state,
             Message::QueryEdited("second".to_owned()),
         ));
-        let batch = SearchQuickBatch::new(
-            first.key().clone(),
-            vec![hit("First", 1)],
-            true,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(first.key().clone(), vec![hit("First", 1)], true);
 
         assert!(
             update(
@@ -387,12 +376,7 @@ mod tests {
         let mut state = State::default();
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            false,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], false);
         let _effects = update(
             &mut state,
             Message::QuickSearchCompleted(request.key().clone(), Ok(batch)),
@@ -408,12 +392,10 @@ mod tests {
                 ids,
                 Ok(MetadataResolution {
                     patches: vec![MetadataPatch::for_test(
-                        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+                        PublishedFileId::fixture(42),
                         Some("https://example.test/alpha.png"),
                     )],
-                    stale_ids: vec![
-                        PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
-                    ],
+                    stale_ids: vec![PublishedFileId::fixture(42)],
                 }),
             ),
         );
@@ -423,9 +405,7 @@ mod tests {
             vec![
                 Effect::MetadataRefreshRequested {
                     generation,
-                    item_ids: vec![
-                        PublishedFileId::new(42).expect("test fixture ids are always nonzero")
-                    ],
+                    item_ids: vec![PublishedFileId::fixture(42)],
                 },
                 Effect::ThumbnailDemandsChanged,
             ]
@@ -439,12 +419,7 @@ mod tests {
 
         let request =
             quick_request_from(update(&mut state, Message::QueryEdited("alpha".to_owned())));
-        let batch = SearchQuickBatch::new(
-            request.key().clone(),
-            vec![hit("Alpha", 42)],
-            true,
-            SearchQuickCarry::default(),
-        );
+        let batch = SearchQuickBatch::new(request.key().clone(), vec![hit("Alpha", 42)], true);
         let _effects = update(
             &mut state,
             Message::QuickSearchCompleted(request.key().clone(), Ok(batch)),
@@ -491,9 +466,7 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::WorkshopItem(
-                    PublishedFileId::new(workshop_id).expect("test fixture ids are always nonzero"),
-                ),
+                SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
                 label,
                 Vec::<String>::new(),
                 0,

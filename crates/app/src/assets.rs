@@ -38,27 +38,67 @@ pub mod fonts {
     }
 
     fn font_bytes(index: usize) -> &'static [u8] {
-        let (start, len) = FONT_SEGMENTS[index];
+        let FontSegment { start, len } = FONT_SEGMENTS[index];
         &unpacked_fonts()[start..start + len]
     }
 
     pub fn inter_regular_bytes() -> &'static [u8] {
-        font_bytes(0)
+        font_bytes(INTER_REGULAR)
     }
 
     pub const fn default_font() -> Font {
         Font::with_name("Inter")
     }
 
-    /// All bundled font byte slices in builder registration order.
-    pub fn bundled_fonts() -> [&'static [u8]; 5] {
+    /// Every bundled face, in builder registration order.
+    ///
+    /// Named rather than `from_fn(font_bytes)`: the array length is
+    /// `FONT_COUNT`, which the build script derives from `FONT_SOURCES`, so
+    /// adding a face there fails to compile until it is registered here too.
+    pub fn bundled_fonts() -> [&'static [u8]; FONT_COUNT] {
         [
-            font_bytes(0),
-            font_bytes(1),
-            font_bytes(2),
-            font_bytes(3),
-            font_bytes(4),
+            font_bytes(INTER_REGULAR),
+            font_bytes(INTER_SEMI_BOLD),
+            font_bytes(INTER_BOLD),
+            font_bytes(CJK_SC_REGULAR),
+            font_bytes(CJK_KR_REGULAR),
         ]
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Each generated constant must name the face it indexes. The build
+        /// script derives both from one list, so this fails only if that list
+        /// and these expectations disagree — which is what a reader checking
+        /// "is `INTER_REGULAR` really Inter Regular?" needs pinned.
+        #[test]
+        fn the_generated_indices_name_distinct_faces() {
+            let indices = [
+                INTER_REGULAR,
+                INTER_SEMI_BOLD,
+                INTER_BOLD,
+                CJK_SC_REGULAR,
+                CJK_KR_REGULAR,
+            ];
+
+            assert_eq!(indices.len(), FONT_COUNT);
+            for (position, index) in indices.into_iter().enumerate() {
+                assert_eq!(index, position, "the constants are out of order");
+            }
+
+            // Distinct faces, so a duplicated path in FONT_SOURCES shows up.
+            for (left, right) in (0..FONT_COUNT)
+                .flat_map(|left| ((left + 1)..FONT_COUNT).map(move |right| (left, right)))
+            {
+                assert_ne!(
+                    font_bytes(left),
+                    font_bytes(right),
+                    "faces {left} and {right} are the same file"
+                );
+            }
+        }
     }
 }
 
@@ -126,9 +166,7 @@ pub mod icons {
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
     svg_icon!(package_open, "../ui/images/package-open.svg");
 
-    #[cfg(feature = "asset-studio")]
     svg_icon!(mode_fly, "../ui/images/mode-fly.svg");
-    #[cfg(feature = "asset-studio")]
     svg_icon!(mode_walk, "../ui/images/mode-walk.svg");
 
     svg_icon!(route_downloader, "../ui/images/route-downloader.svg");
@@ -156,72 +194,17 @@ pub mod silkicons {
     use crate::widgets::file_types::SilkIcon;
 
     const SILKICON_MAX_EDGE: u32 = 16;
-    const SILKICON_COUNT: usize = 13;
-
-    const BYTES: [(&str, &[u8]); SILKICON_COUNT] = [
-        (
-            "bricks",
-            include_bytes!("../ui/images/silkicons/bricks.png"),
-        ),
-        (
-            "comments",
-            include_bytes!("../ui/images/silkicons/comments.png"),
-        ),
-        (
-            "folder",
-            include_bytes!("../ui/images/silkicons/folder.png"),
-        ),
-        ("font", include_bytes!("../ui/images/silkicons/font.png")),
-        ("map", include_bytes!("../ui/images/silkicons/map.png")),
-        (
-            "page_white",
-            include_bytes!("../ui/images/silkicons/page_white.png"),
-        ),
-        (
-            "page_white_text",
-            include_bytes!("../ui/images/silkicons/page_white_text.png"),
-        ),
-        (
-            "page_white_wrench",
-            include_bytes!("../ui/images/silkicons/page_white_wrench.png"),
-        ),
-        ("photo", include_bytes!("../ui/images/silkicons/photo.png")),
-        (
-            "picture_link",
-            include_bytes!("../ui/images/silkicons/picture_link.png"),
-        ),
-        (
-            "script_code",
-            include_bytes!("../ui/images/silkicons/script_code.png"),
-        ),
-        ("sound", include_bytes!("../ui/images/silkicons/sound.png")),
-        ("wand", include_bytes!("../ui/images/silkicons/wand.png")),
-    ];
+    const SILKICON_COUNT: usize = SilkIcon::ALL.len();
 
     static HANDLES: OnceLock<[image::Handle; SILKICON_COUNT]> = OnceLock::new();
 
     pub fn silkicon(icon: SilkIcon) -> image::Handle {
-        let index = match icon {
-            SilkIcon::Bricks => 0,
-            SilkIcon::Comments => 1,
-            SilkIcon::Folder => 2,
-            SilkIcon::Font => 3,
-            SilkIcon::Map => 4,
-            SilkIcon::PageWhite => 5,
-            SilkIcon::PageWhiteText => 6,
-            SilkIcon::PageWhiteWrench => 7,
-            SilkIcon::Photo => 8,
-            SilkIcon::PictureLink => 9,
-            SilkIcon::ScriptCode => 10,
-            SilkIcon::Sound => 11,
-            SilkIcon::Wand => 12,
-        };
-        HANDLES.get_or_init(decode_all)[index].clone()
+        HANDLES.get_or_init(decode_all)[icon.index()].clone()
     }
 
     fn decode_all() -> [image::Handle; SILKICON_COUNT] {
         std::array::from_fn(|index| {
-            let (name, bytes) = BYTES[index];
+            let (name, bytes) = SilkIcon::ALL[index].bytes();
             let mut decoder = ThumbnailDecoder::new();
             let thumbnail = decoder
                 .decode_and_resize_bytes(bytes, SILKICON_MAX_EDGE)
@@ -355,9 +338,7 @@ mod tests {
             (icons::gear(), icons::gear()),
             (icons::gmod_logo(), icons::gmod_logo()),
             (icons::link_chain(), icons::link_chain()),
-            #[cfg(feature = "asset-studio")]
             (icons::mode_fly(), icons::mode_fly()),
-            #[cfg(feature = "asset-studio")]
             (icons::mode_walk(), icons::mode_walk()),
             (icons::route_downloader(), icons::route_downloader()),
             (

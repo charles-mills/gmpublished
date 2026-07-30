@@ -1,4 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, sync::Arc, time::Instant};
+//! One addon tile in a grid: thumbnail, title, and the badges and hover
+//! affordances that vary by which route is showing it.
+//!
+//! Text measurement is cached per card, since a grid re-lays out on every
+//! resize and shaping the same title repeatedly is the expensive part of a
+//! scroll.
+
+use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, time::Instant};
 
 use iced::advanced::graphics::text::Paragraph as IcedParagraph;
 use iced::advanced::text::Paragraph as _;
@@ -12,9 +19,10 @@ use iced::{
 };
 
 use crate::assets;
-use crate::theme::{self, Tokens, motion};
+use crate::theme::{self, InvariantTokens, Tokens, motion};
 use crate::widgets::context_area::context_area;
 use crate::widgets::download_count_icon::download_count_icon;
+use crate::widgets::grid_rows::CardId;
 use crate::widgets::star_rating::star_rating;
 
 const PUBLISH_NEW_FALLBACK: &str = "Publish new";
@@ -31,7 +39,7 @@ pub enum Kind {
     PublishNew,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Thumbnail {
     Loading,
     Dead,
@@ -54,7 +62,7 @@ pub struct SubscriptionRoll {
 
 #[derive(Clone, Debug)]
 pub struct Data {
-    id: Arc<str>,
+    id: CardId,
     kind: Kind,
     title: String,
     subscriptions: String,
@@ -98,9 +106,9 @@ impl PartialEq for Data {
 }
 
 impl Data {
-    pub(crate) fn addon(id: impl Into<String>, title: impl Into<String>) -> Self {
+    pub(crate) fn addon(id: CardId, title: impl Into<String>) -> Self {
         Self {
-            id: Arc::from(id.into()),
+            id,
             kind: Kind::Addon,
             title: title.into(),
             subscriptions: "0".to_owned(),
@@ -118,14 +126,14 @@ impl Data {
         }
     }
 
-    pub(crate) fn publish_new(id: impl Into<String>, title: impl Into<String>) -> Self {
+    pub(crate) fn publish_new(id: CardId, title: impl Into<String>) -> Self {
         Self {
             kind: Kind::PublishNew,
             ..Self::addon(id, title)
         }
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub(crate) const fn id(&self) -> &CardId {
         &self.id
     }
 
@@ -269,23 +277,27 @@ impl Data {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
-    Pressed(Arc<str>),
-    Released(Arc<str>),
-    ContextRequested(Arc<str>, Point),
+    Pressed(CardId),
+    Released(CardId),
+    ContextRequested(CardId, Point),
 }
 
 #[cfg(test)]
-pub fn preferred_height(data: &Data, width: f32, tokens: &Tokens) -> f32 {
+pub fn preferred_height(data: &Data, width: f32, tokens: &InvariantTokens) -> f32 {
     let measured_title_height = measure_title_height(data.display_title(), width, tokens);
 
     preferred_height_for_title_height(width, measured_title_height, tokens)
 }
 
-pub fn preferred_height_for_title_height(width: f32, title_height: f32, tokens: &Tokens) -> f32 {
+pub fn preferred_height_for_title_height(
+    width: f32,
+    title_height: f32,
+    tokens: &InvariantTokens,
+) -> f32 {
     fixed_content_height(width, tokens) + clamp_title_height(title_height, tokens)
 }
 
-fn fixed_content_height(width: f32, tokens: &Tokens) -> f32 {
+fn fixed_content_height(width: f32, tokens: &InvariantTokens) -> f32 {
     let preview_size = preview_size(width, tokens);
 
     tokens.dims.card_padding * 2.0
@@ -304,9 +316,10 @@ pub fn view<'a>(
     now: Instant,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let content_width = content_width(width, &tokens);
-    let preview_size = preview_size(width, &tokens);
-    let title_height = title_height_from_content_height(content_height, width, &tokens);
+    let layout = theme::invariant();
+    let content_width = content_width(width, layout);
+    let preview_size = preview_size(width, layout);
+    let title_height = title_height_from_content_height(content_height, width, layout);
     let hover_progress = data.hover_progress(now);
 
     let stats = stats_row(data, content_width, &tokens);
@@ -314,7 +327,7 @@ pub fn view<'a>(
     let title = title(data, title_height, &tokens);
 
     let body = column![stats, preview, title]
-        .spacing(tokens.dims.card_inner_gap)
+        .spacing(layout.dims.card_inner_gap)
         .width(Length::Fixed(content_width))
         .height(Length::Shrink);
 
@@ -326,7 +339,7 @@ pub fn view<'a>(
     let content = container(body)
         .width(Length::Fixed(width))
         .height(Length::Fixed(content_height))
-        .padding(tokens.dims.card_padding)
+        .padding(layout.dims.card_padding)
         .align_y(alignment::Vertical::Top)
         .clip(true)
         .style(move |_| card_style(&tokens, hover_progress, hovered, enabled));
@@ -666,22 +679,22 @@ fn title<'a>(data: &Data, height: f32, tokens: &Tokens) -> Element<'a, Message> 
         .into()
 }
 
-fn content_width(width: f32, tokens: &Tokens) -> f32 {
+fn content_width(width: f32, tokens: &InvariantTokens) -> f32 {
     (width - tokens.dims.card_padding * 2.0).max(1.0)
 }
 
-fn preview_size(width: f32, tokens: &Tokens) -> f32 {
+fn preview_size(width: f32, tokens: &InvariantTokens) -> f32 {
     content_width(width, tokens).max(1.0)
 }
 
 /// The exact measured height of any title that lays out as a single line,
 /// at any card width. Exposed so the grid's measurement cache can resolve
 /// known single-line titles without shaping them again.
-pub fn single_line_title_height(tokens: &Tokens) -> f32 {
+pub fn single_line_title_height(tokens: &InvariantTokens) -> f32 {
     title_line_height(tokens)
 }
 
-pub fn measure_title_height(title: &str, width: f32, tokens: &Tokens) -> f32 {
+pub fn measure_title_height(title: &str, width: f32, tokens: &InvariantTokens) -> f32 {
     let line_height = title_line_height(tokens);
     let measured = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let paragraph = IcedParagraph::with_text(iced::advanced::Text {
@@ -764,11 +777,15 @@ fn measure_stats_text_width_uncached(content: &str, size: f32, line_height: f32)
     })
 }
 
-fn title_height_from_content_height(content_height: f32, width: f32, tokens: &Tokens) -> f32 {
+fn title_height_from_content_height(
+    content_height: f32,
+    width: f32,
+    tokens: &InvariantTokens,
+) -> f32 {
     clamp_title_height(content_height - fixed_content_height(width, tokens), tokens)
 }
 
-fn clamp_title_height(height: f32, tokens: &Tokens) -> f32 {
+fn clamp_title_height(height: f32, tokens: &InvariantTokens) -> f32 {
     let height = if height.is_finite() && height > 0.0 {
         height
     } else {
@@ -778,11 +795,11 @@ fn clamp_title_height(height: f32, tokens: &Tokens) -> f32 {
     height.clamp(title_line_height(tokens), max_title_height(tokens))
 }
 
-fn title_line_height(tokens: &Tokens) -> f32 {
+fn title_line_height(tokens: &InvariantTokens) -> f32 {
     tokens.typography.body * TITLE_LINE_HEIGHT
 }
 
-fn max_title_height(tokens: &Tokens) -> f32 {
+fn max_title_height(tokens: &InvariantTokens) -> f32 {
     (title_line_height(tokens) * MAX_TITLE_LINES as f32).min(tokens.dims.card_title_height)
 }
 
@@ -842,7 +859,7 @@ fn card_style(
         text_color: Some(text_color(enabled, tokens).into()),
         background,
         border: Border {
-            radius: tokens.radii.base.into(),
+            radius: tokens.radii.sm.into(),
             ..Border::default()
         },
         shadow: if (hovered || hover_progress > 0.0) && enabled {
@@ -893,17 +910,18 @@ fn preview_style(tokens: &Tokens) -> container_widget::Style {
 
 #[cfg(test)]
 mod tests {
+    use crate::widgets::grid_rows::CardId;
     use iced::widget::image;
 
     use super::{
         Data, Kind, Thumbnail, measure_title_height, preferred_height,
         preferred_height_for_title_height,
     };
-    use crate::theme::Tokens;
+    use crate::theme;
 
     #[test]
     fn publish_new_uses_fallback_title_when_empty() {
-        let card = Data::publish_new("publish", "");
+        let card = Data::publish_new(CardId::from("publish"), "");
 
         assert_eq!(card.display_title(), "Publish new");
         assert_eq!(card.kind, Kind::PublishNew);
@@ -911,7 +929,7 @@ mod tests {
 
     #[test]
     fn hover_state_is_explicit_card_data() {
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
 
         assert!(!card.is_hovered());
         card.set_hovered(true);
@@ -922,7 +940,7 @@ mod tests {
     #[test]
     fn hover_animation_tracks_target_state() {
         let started = std::time::Instant::now();
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
 
         card.set_hovered_at(true, started);
 
@@ -948,9 +966,9 @@ mod tests {
     #[test]
     fn motion_state_can_be_preserved_across_rebuilt_cards() {
         let started = std::time::Instant::now();
-        let mut previous = Data::addon("1", "Old");
+        let mut previous = Data::addon(CardId::from("1"), "Old");
         previous.set_hovered_at(true, started);
-        let mut next = Data::addon("1", "New");
+        let mut next = Data::addon(CardId::from("1"), "New");
 
         next.preserve_motion_from(&previous);
 
@@ -960,7 +978,7 @@ mod tests {
 
     #[test]
     fn subscriptions_fall_back_to_raw_count() {
-        let card = Data::addon("1", "Addon").with_subscriptions("", 42);
+        let card = Data::addon(CardId::from("1"), "Addon").with_subscriptions("", 42);
 
         assert_eq!(card.subscriptions_label(), "42");
     }
@@ -969,12 +987,12 @@ mod tests {
     fn arriving_pixels_fade_in_over_the_stand_in() {
         let placeholder = image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]);
         let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
-        let mut card =
-            Data::addon("1", "Addon").with_thumbnail(Thumbnail::Placeholder(placeholder.clone()));
+        let mut card = Data::addon(CardId::from("1"), "Addon")
+            .with_thumbnail(Thumbnail::Placeholder(placeholder.clone()));
 
         // Building a card straight to Ready is not an arrival.
         assert!(
-            !Data::addon("2", "Cached")
+            !Data::addon(CardId::from("2"), "Cached")
                 .with_thumbnail(Thumbnail::Ready(sharp.clone()))
                 .needs_motion_ticks()
         );
@@ -998,7 +1016,7 @@ mod tests {
     #[test]
     fn rehydrated_pixels_snap_back_without_replaying_the_reveal() {
         let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
         card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
         card.tick_motion(std::time::Instant::now() + std::time::Duration::from_millis(300));
         assert!(!card.needs_motion_ticks());
@@ -1013,9 +1031,11 @@ mod tests {
         assert_eq!(card.reveal_progress(std::time::Instant::now()), 1.0);
 
         // The same holds when the release and the return straddle a rebuild.
-        let mut released = Data::addon("1", "Addon").with_thumbnail(Thumbnail::Loading);
+        let mut released =
+            Data::addon(CardId::from("1"), "Addon").with_thumbnail(Thumbnail::Loading);
         released.preserve_motion_from(&card);
-        let mut returned = Data::addon("1", "Addon").with_thumbnail(Thumbnail::Ready(sharp));
+        let mut returned =
+            Data::addon(CardId::from("1"), "Addon").with_thumbnail(Thumbnail::Ready(sharp));
         returned.preserve_motion_from(&released);
 
         assert!(!returned.needs_motion_ticks());
@@ -1026,7 +1046,7 @@ mod tests {
     fn a_reveal_cut_short_by_a_release_does_not_resume_on_return() {
         let started = std::time::Instant::now();
         let sharp = image::Handle::from_rgba(1, 1, vec![255, 255, 255, 255]);
-        let mut card = Data::addon("1", "Addon");
+        let mut card = Data::addon(CardId::from("1"), "Addon");
         card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
 
         // Released mid-fade, before any tick retires the crossfade.
@@ -1040,7 +1060,7 @@ mod tests {
 
     #[test]
     fn preferred_height_composes_square_preview_and_clamped_title() {
-        let tokens = Tokens::dark();
+        let tokens = theme::invariant();
         let width = 200.0;
         let preview = width - tokens.dims.card_padding * 2.0;
         let base = tokens.dims.card_padding * 2.0
@@ -1048,33 +1068,33 @@ mod tests {
             + tokens.dims.card_inner_gap
             + preview
             + tokens.dims.card_inner_gap;
-        let one_line = super::title_line_height(&tokens);
+        let one_line = super::title_line_height(tokens);
 
         assert_eq!(
-            preferred_height_for_title_height(width, one_line, &tokens),
+            preferred_height_for_title_height(width, one_line, tokens),
             base + one_line
         );
 
         assert_eq!(
-            preferred_height_for_title_height(width, tokens.dims.card_title_height * 2.0, &tokens),
-            base + super::max_title_height(&tokens)
+            preferred_height_for_title_height(width, tokens.dims.card_title_height * 2.0, tokens),
+            base + super::max_title_height(tokens)
         );
     }
 
     #[test]
     fn measured_title_height_is_total_and_clamped() {
-        let tokens = Tokens::dark();
-        let line = super::title_line_height(&tokens);
+        let tokens = theme::invariant();
+        let line = super::title_line_height(tokens);
         let measured = measure_title_height(
             "A very long addon name that may wrap when the font system is populated",
             120.0,
-            &tokens,
+            tokens,
         );
 
         assert!(measured >= line);
         assert!(measured <= tokens.dims.card_title_height);
 
-        let preferred = preferred_height(&Data::addon("1", "Short"), 200.0, &tokens);
+        let preferred = preferred_height(&Data::addon(CardId::from("1"), "Short"), 200.0, tokens);
         assert!(preferred.is_finite());
     }
 }

@@ -1,30 +1,28 @@
-use std::{ops::Range, path::PathBuf};
+use std::path::PathBuf;
 
 use iced::widget::image;
 
 use crate::bridge::gma::is_gma_path;
-use crate::bridge::tasks::BackendServices;
-use crate::bridge::ui_error::UiError;
 use crate::bridge::{
     domain::{InstalledAddon, PublishedFileId, WorkshopMetadata, workshop_url::workshop_item_url},
     library::LibrarySnapshot,
 };
 use crate::features::context_menu;
 use crate::format::DownloadCountFormatter;
+use crate::generation::Generation;
 use crate::media::{thumbnail_animation, thumbnail_demand, thumbnail_worker::ThumbnailInput};
 use crate::widgets::{
     addon_card, addon_grid,
     grid_rows::{self, GridRow},
 };
 
-const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
-const OWNER_LABEL: &str = "Installed Addons";
-const THUMBNAIL_PLAY_POLICY: thumbnail_animation::PlayPolicy =
-    thumbnail_animation::PlayPolicy::OnHover;
+use crate::widgets::grid_rows::{
+    ADDON_THUMBNAIL_MAX_EDGE, CardId, RowThumbnail, THUMBNAIL_PLAY_POLICY,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
-    id: String,
+    id: CardId,
     title: String,
     path: PathBuf,
     workshop_id: Option<PublishedFileId>,
@@ -41,7 +39,7 @@ pub struct Row {
 impl Row {
     fn from_installed(addon: &InstalledAddon) -> Self {
         Self {
-            id: addon.path.to_string_lossy().into_owned(),
+            id: CardId::from(addon.path.to_string_lossy().into_owned()),
             title: addon.display_title(),
             path: addon.path.clone(),
             workshop_id: addon.workshop_id,
@@ -56,10 +54,6 @@ impl Row {
         }
     }
 
-    pub(crate) fn id(&self) -> &str {
-        &self.id
-    }
-
     pub(crate) const fn workshop_id(&self) -> Option<PublishedFileId> {
         self.workshop_id
     }
@@ -69,7 +63,7 @@ impl Row {
             && self.modified_epoch_seconds == other.modified_epoch_seconds
     }
 
-    pub(crate) fn card_thumbnail(&self, play_gifs_by_default: bool) -> addon_card::Thumbnail {
+    fn card_thumbnail_inner(&self, play_gifs_by_default: bool) -> addon_card::Thumbnail {
         match &self.thumbnail {
             RowThumbnail::Loading => addon_card::Thumbnail::Loading,
             RowThumbnail::Dead => addon_card::Thumbnail::Dead,
@@ -96,7 +90,7 @@ impl Row {
         }
     }
 
-    pub(crate) fn to_grid_item(
+    fn to_grid_item_inner(
         &self,
         play_gifs_by_default: bool,
         formatter: DownloadCountFormatter,
@@ -173,7 +167,7 @@ impl Row {
             position: iced::Point::ORIGIN,
             row_id: self.id.clone(),
             path: self.path.clone(),
-            path_text: self.id.clone(),
+            path_text: self.id.to_string(),
             workshop_id: self.workshop_id,
             workshop_url,
             preview_url: self.preview_url.clone(),
@@ -207,11 +201,11 @@ impl Row {
 
     pub(super) fn apply_thumbnail_delivery(
         &mut self,
-        generation: u64,
+        generation: Generation,
         delivery: &thumbnail_demand::Delivery,
-        current_generation: u64,
+        current_generation: Generation,
     ) -> bool {
-        if generation != current_generation || delivery.id.as_str() != self.id {
+        if generation != current_generation || delivery.id.row_key() != Some(self.id.as_str()) {
             return false;
         }
 
@@ -238,11 +232,16 @@ impl Row {
         true
     }
 
+    /// Whether this row would animate right now, given the user's default.
+    /// The pane reaches the same decision inside `advance_animation`; this
+    /// exposes it for the policy tests below.
+    #[cfg(test)]
     pub(super) fn has_active_animation(&self, play_gifs_by_default: bool) -> bool {
-        self.thumbnail_should_play(play_gifs_by_default) && self.has_animation()
+        self.holds_animation() && self.thumbnail_should_play(play_gifs_by_default)
     }
 
-    pub(super) fn has_animation(&self) -> bool {
+    /// Whether a playable animation exists at all, regardless of policy.
+    pub(super) fn holds_animation(&self) -> bool {
         matches!(
             self.thumbnail,
             RowThumbnail::Ready {
@@ -252,7 +251,7 @@ impl Row {
         )
     }
 
-    pub(super) fn advance_animation(
+    fn advance_animation_inner(
         &mut self,
         elapsed: std::time::Duration,
         play_gifs_by_default: bool,
@@ -283,7 +282,7 @@ impl Row {
     #[cfg(test)]
     pub(crate) fn for_test(id: &str, title: &str, workshop_id: Option<PublishedFileId>) -> Self {
         Self {
-            id: id.to_owned(),
+            id: CardId::from(id),
             title: title.to_owned(),
             path: PathBuf::from(id),
             workshop_id,
@@ -330,6 +329,34 @@ impl Row {
 }
 
 impl GridRow for Row {
+    fn id(&self) -> &CardId {
+        &self.id
+    }
+
+    fn to_grid_item(
+        &self,
+        play_gifs_by_default: bool,
+        formatter: DownloadCountFormatter,
+    ) -> addon_grid::Item {
+        self.to_grid_item_inner(play_gifs_by_default, formatter)
+    }
+
+    fn card_thumbnail(&self, play_gifs_by_default: bool) -> addon_card::Thumbnail {
+        self.card_thumbnail_inner(play_gifs_by_default)
+    }
+
+    fn is_animating(&self, play_gifs_by_default: bool) -> bool {
+        self.holds_animation() && self.thumbnail_should_play(play_gifs_by_default)
+    }
+
+    fn advance_animation(
+        &mut self,
+        elapsed: std::time::Duration,
+        play_gifs_by_default: bool,
+    ) -> bool {
+        self.advance_animation_inner(elapsed, play_gifs_by_default)
+    }
+
     fn thumbnail_demand(
         &self,
         priority: thumbnail_demand::Priority,
@@ -347,10 +374,11 @@ impl GridRow for Row {
         }
 
         Some(thumbnail_demand::Demand {
-            id: thumbnail_demand::DemandId::new(self.id.clone()),
+            id: thumbnail_demand::DemandId::row(self.id.as_str()),
             input: ThumbnailInput::from_url(preview_url),
             logical_max_edge: ADDON_THUMBNAIL_MAX_EDGE,
             priority,
+            capabilities: thumbnail_demand::DemandCapabilities::SURFACE,
         })
     }
 
@@ -373,23 +401,9 @@ impl GridRow for Row {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum RowThumbnail {
-    Loading,
-    /// Blurred ThumbHash stand-in shown until the real pixels decode.
-    Placeholder(image::Handle),
-    Dead,
-    Ready {
-        still: image::Handle,
-        animation: Option<thumbnail_animation::Playback>,
-    },
-}
-
-impl RowThumbnail {}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewTarget {
-    pub(crate) row_id: String,
+    pub(crate) row_id: CardId,
     pub(crate) path: PathBuf,
     pub(crate) title: String,
     pub(crate) workshop_id: Option<PublishedFileId>,
@@ -402,7 +416,7 @@ pub struct PreviewTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextMenuRequest {
     pub(crate) position: iced::Point,
-    pub(crate) row_id: String,
+    pub(crate) row_id: CardId,
     pub(crate) path: PathBuf,
     pub(crate) path_text: String,
     pub(crate) workshop_id: Option<PublishedFileId>,
@@ -476,8 +490,10 @@ pub fn rows_from_snapshot(snapshot: &LibrarySnapshot) -> Vec<Row> {
     snapshot.addons.iter().map(Row::from_installed).collect()
 }
 
-pub fn resolve_metadata(ctx: &BackendServices, item_ids: &[PublishedFileId]) -> MetadataResolution {
-    let (metadata, stale_ids) = ctx.resolve_workshop_metadata(item_ids);
+pub fn resolve_metadata(
+    metadata: &[WorkshopMetadata],
+    stale_ids: Vec<PublishedFileId>,
+) -> MetadataResolution {
     MetadataResolution {
         patches: metadata
             .iter()
@@ -487,44 +503,14 @@ pub fn resolve_metadata(ctx: &BackendServices, item_ids: &[PublishedFileId]) -> 
     }
 }
 
-/// Streams metadata as each Workshop query chunk lands, handing `on_batch`
-/// the patches for that chunk so visible rows hydrate after one round trip
-/// rather than waiting on the slowest chunk.
-pub fn refresh_metadata_streaming(
-    ctx: &BackendServices,
-    item_ids: &[PublishedFileId],
-    mut on_batch: impl FnMut(Vec<MetadataPatch>),
-) -> Result<(), UiError> {
-    ctx.refresh_workshop_metadata_streaming(item_ids, |metadata| {
-        let patches = metadata
-            .iter()
-            .filter_map(MetadataPatch::from_metadata)
-            .collect::<Vec<_>>();
-        if !patches.is_empty() {
-            on_batch(patches);
-        }
-    })
-}
-
-pub fn thumbnail_demands(
-    rows: &[Row],
-    visible_range: Range<usize>,
-    generation: u64,
-) -> thumbnail_demand::DemandSet {
-    grid_rows::thumbnail_demands(rows, visible_range, generation, thumbnail_owner())
-}
-
-/// Releases Ready thumbnails outside visible+prefetch so scrolled-away rows
-/// stop pinning decoded RGBA; the demand/cache path re-delivers on return.
-pub fn release_offscreen_thumbnails(
-    rows: &mut [Row],
-    visible_range: std::ops::Range<usize>,
-) -> Vec<usize> {
-    grid_rows::release_offscreen_thumbnails(rows, visible_range)
-}
-
-pub fn invalidate_ready_thumbnails(rows: &mut [Row]) -> bool {
-    grid_rows::invalidate_ready_thumbnails(rows)
+/// Projects Workshop metadata into the patches understood by installed rows.
+/// Streaming and chunk scheduling belong to the caller; this function only
+/// performs the per-batch conversion.
+pub fn metadata_patches(metadata: &[WorkshopMetadata]) -> Vec<MetadataPatch> {
+    metadata
+        .iter()
+        .filter_map(MetadataPatch::from_metadata)
+        .collect()
 }
 
 pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {
@@ -532,13 +518,14 @@ pub fn empty_thumbnail_demands() -> thumbnail_demand::DemandSet {
 }
 
 pub fn thumbnail_owner() -> thumbnail_demand::Owner {
-    grid_rows::thumbnail_owner(OWNER_LABEL)
+    thumbnail_demand::Owner::InstalledAddons
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bridge::DownloadCountFormat;
+    use crate::generation::Generation;
 
     #[test]
     fn placeholder_paints_a_loading_row_and_real_pixels_replace_it() {
@@ -547,7 +534,7 @@ mod tests {
         };
         use crate::media::thumbnail_worker::ThumbnailMetadata;
 
-        let workshop_id = PublishedFileId::new(42).expect("test fixture ids are always nonzero");
+        let workshop_id = PublishedFileId::fixture(42);
         let mut row = Row::for_test("/tmp/addon.gma", "Addon", Some(workshop_id));
         row.apply_metadata_patch(&MetadataPatch::for_test(
             workshop_id,
@@ -559,18 +546,18 @@ mod tests {
         let key = ThumbnailInput::from_url("https://example.test/a.jpg").cache_key(256);
         let delivery = |result| Delivery {
             owner: thumbnail_owner(),
-            generation: 0,
-            id: DemandId::new("/tmp/addon.gma"),
+            generation: Generation::INITIAL,
+            id: DemandId::row("/tmp/addon.gma"),
             key: key.clone(),
             result,
         };
 
         assert!(row.apply_thumbnail_delivery(
-            0,
+            Generation::INITIAL,
             &delivery(DeliveryResult::Placeholder(PlaceholderImage::for_test(
                 6, 6
             ))),
-            0,
+            Generation::INITIAL,
         ));
         assert!(matches!(row.thumbnail, RowThumbnail::Placeholder(_)));
         // Still demanding the sharp image while the placeholder paints.
@@ -587,13 +574,13 @@ mod tests {
             max_edge: 256,
         };
         assert!(row.apply_thumbnail_delivery(
-            0,
+            Generation::INITIAL,
             &delivery(DeliveryResult::Ready(ReadyThumbnail::for_test(
                 key.clone(),
                 metadata,
                 vec![0; 8 * 8 * 4],
             ))),
-            0,
+            Generation::INITIAL,
         ));
         assert!(matches!(row.thumbnail, RowThumbnail::Ready { .. }));
     }
@@ -603,10 +590,10 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/addon.gma",
             "Local title",
-            Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(42)),
         );
         let patch = MetadataPatch::for_test(
-            PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(42),
             "Workshop title",
             Some("https://example.test/a.jpg"),
         );
@@ -624,10 +611,10 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/addon.gma",
             "Local title",
-            Some(PublishedFileId::new(42).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(42)),
         );
         let patch = MetadataPatch::for_test(
-            PublishedFileId::new(42).expect("test fixture ids are always nonzero"),
+            PublishedFileId::fixture(42),
             "Workshop title",
             Some("https://example.test/a.jpg"),
         );
@@ -646,7 +633,7 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/addon.gma",
             "Addon",
-            Some(PublishedFileId::new(123).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(123)),
         );
         row.preview_url = Some("https://example.test/preview.jpg".to_owned());
 
@@ -656,8 +643,10 @@ mod tests {
         let actions = menu
             .entries
             .iter()
-            .filter(|entry| !entry.separator_row())
-            .filter_map(context_menu::Entry::action)
+            .filter_map(|entry| match entry {
+                context_menu::Entry::Separator => None,
+                context_menu::Entry::Item { action, .. } => Some(*action),
+            })
             .collect::<Vec<_>>();
 
         let expected = vec![
@@ -679,9 +668,7 @@ mod tests {
         assert_eq!(actions, expected);
         assert_eq!(
             menu.workshop_url,
-            Some(workshop_item_url(
-                PublishedFileId::new(123).expect("test fixture ids are always nonzero")
-            ))
+            Some(workshop_item_url(PublishedFileId::fixture(123)))
         );
     }
 
@@ -690,22 +677,23 @@ mod tests {
         let mut loading = Row::for_test(
             "/tmp/loading.gma",
             "Loading",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(1)),
         );
         loading.preview_url = Some("https://example.test/loading.jpg".to_owned());
         loading.thumbnail = RowThumbnail::Loading;
-        let dead = Row::for_test(
-            "/tmp/dead.gma",
-            "Dead",
-            Some(PublishedFileId::new(2).expect("test fixture ids are always nonzero")),
+        let dead = Row::for_test("/tmp/dead.gma", "Dead", Some(PublishedFileId::fixture(2)));
+
+        let set = grid_rows::thumbnail_demands(
+            &[loading, dead],
+            0..2,
+            Generation::from_raw(7),
+            thumbnail_owner(),
         );
 
-        let set = thumbnail_demands(&[loading, dead], 0..2, 7);
-
         assert_eq!(set.owner, thumbnail_owner());
-        assert_eq!(set.generation, 7);
+        assert_eq!(set.generation, Generation::from_raw(7));
         assert_eq!(set.demands.len(), 1);
-        assert_eq!(set.demands[0].id.as_str(), "/tmp/loading.gma");
+        assert_eq!(set.demands[0].id.row_key(), Some("/tmp/loading.gma"));
     }
 
     #[test]
@@ -713,7 +701,7 @@ mod tests {
         let mut row = Row::for_test(
             "/tmp/animated.gma",
             "Animated",
-            Some(PublishedFileId::new(1).expect("test fixture ids are always nonzero")),
+            Some(PublishedFileId::fixture(1)),
         )
         .with_ready_animation_for_test();
 

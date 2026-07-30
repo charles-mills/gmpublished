@@ -2,8 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::bridge::{AppPaths, Settings};
-
 /// Renders `path` for display, lossily substituting any non-UTF-8 bytes.
 pub fn path_to_display(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().into_owned()
@@ -16,22 +14,4 @@ pub fn fallback_current_dir() -> PathBuf {
         log::debug!("current_dir failed while resolving a fallback path: {error}");
         std::env::temp_dir()
     })
-}
-
-/// Best-effort [`AppPaths`] rooted at the temp directory, used when the real
-/// paths haven't resolved yet (e.g. before startup finishes).
-pub fn fallback_paths(settings: &Settings) -> AppPaths {
-    AppPaths::resolve_with_defaults(
-        settings,
-        AppPaths {
-            settings_file: std::env::temp_dir().join("gmpublished-settings.json"),
-            default_user_data_dir: std::env::temp_dir(),
-            default_temp_dir: std::env::temp_dir(),
-            default_downloads_dir: None,
-            temp_dir: std::env::temp_dir(),
-            user_data_dir: std::env::temp_dir(),
-            downloads_dir: None,
-            gmod_dir: None,
-        },
-    )
 }

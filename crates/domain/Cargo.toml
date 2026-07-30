@@ -1,0 +1,30 @@
+[package]
+name = "gmpublished-domain"
+description = "Shared preview, scene, and renderer domain for gmpublished."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+test-support = []
+
+[lib]
+name = "gmpublished_domain"
+path = "src/lib.rs"
+
+[dependencies]
+bytemuck.workspace = true
+log.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+vformats.workspace = true
+
+[dev-dependencies]
+gmpublished-domain = { path = ".", features = ["test-support"] }
+
+[lints]
+workspace = true

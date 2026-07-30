@@ -1,13 +1,20 @@
+use super::super::state::{FlyPose, MovementMode, OrbitPose};
+use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
 
 use super::*;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
-use crate::features::file_preview::model::{
+use crate::generation::Generation;
+use crate::media::preview_model::{
     InfoReason, PreviewContent, PreviewData, RelatedPreviewKind, RelatedPreviewTarget,
 };
 use crate::test_support::GmaFixtureBuilder;
 
-fn request() -> crate::features::file_preview::PreviewRequest {
+fn request() -> crate::media::preview_model::PreviewRequest {
+    request_for("data/blob.bin")
+}
+
+fn request_for(entry_path: &str) -> crate::media::preview_model::PreviewRequest {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Fixture")
             .entry("data/blob.bin", vec![1, 2, 3])
@@ -15,15 +22,27 @@ fn request() -> crate::features::file_preview::PreviewRequest {
     )
     .expect("fixture archive should load");
 
-    crate::features::file_preview::PreviewRequest {
-        request_id: 0,
+    crate::media::preview_model::PreviewRequest {
+        request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
-        entry_path: "data/blob.bin".to_owned(),
-        display_name: "blob.bin".to_owned(),
+        entry_path: entry_path.to_owned(),
+        display_name: entry_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(entry_path)
+            .to_owned(),
         size_bytes: 3,
         crc32: 0x1234_5678,
         bypass_size_limits: false,
     }
+}
+
+fn map_request() -> crate::media::preview_model::PreviewRequest {
+    request_for("maps/test.bsp")
+}
+
+fn model_request() -> crate::media::preview_model::PreviewRequest {
+    request_for("models/test.mdl")
 }
 
 fn request_from_archive(
@@ -31,9 +50,9 @@ fn request_from_archive(
     entry_path: &str,
     size_bytes: u64,
     crc32: u32,
-) -> crate::features::file_preview::PreviewRequest {
-    crate::features::file_preview::PreviewRequest {
-        request_id: 0,
+) -> crate::media::preview_model::PreviewRequest {
+    crate::media::preview_model::PreviewRequest {
+        request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(archive),
         entry_path: entry_path.to_owned(),
         display_name: entry_path
@@ -54,20 +73,12 @@ fn open_requested_emits_load_effects_without_modal_stack_work() {
     let effects = update(&mut state, Message::OpenRequested(request()));
 
     assert!(state.loading());
-    #[cfg(feature = "asset-studio")]
     assert!(matches!(
         effects.as_slice(),
         [
             Effect::AudioStopRequested,
             Effect::LoadRequested(request)
-        ] if request.request_id == 1
-    ));
-    #[cfg(not(feature = "asset-studio"))]
-    assert!(matches!(
-        effects.as_slice(),
-        [
-            Effect::LoadRequested(request)
-        ] if request.request_id == 1
+        ] if request.request_id == Generation::from_raw(1)
     ));
 }
 
@@ -87,7 +98,7 @@ fn load_anyway_reloads_the_current_entry_without_size_gates() {
         })
         .expect("load anyway should re-request the entry");
     assert!(load.bypass_size_limits);
-    assert_eq!(load.request_id, 2);
+    assert_eq!(load.request_id, Generation::from_raw(2));
 
     // Without a current request there is nothing to re-load.
     let mut state = State::default();
@@ -112,10 +123,7 @@ fn expand_toggled_updates_state_and_stops_door_audio_on_collapse() {
     assert!(state.expanded());
 
     let effects = update(&mut state, Message::ExpandToggled);
-    #[cfg(feature = "asset-studio")]
     assert_eq!(effects, vec![Effect::DoorAudioStopRequested]);
-    #[cfg(not(feature = "asset-studio"))]
-    assert!(effects.is_empty());
     assert!(!state.expanded());
 }
 
@@ -160,32 +168,21 @@ fn related_preview_requested_opens_related_entry() {
         state.request().map(|request| request.entry_path.as_str()),
         Some("materials/test/thing.vtf")
     );
-    #[cfg(feature = "asset-studio")]
     assert!(matches!(
         effects.as_slice(),
         [
             Effect::AudioStopRequested,
             Effect::LoadRequested(request)
-        ] if request.request_id == 2
-            && request.entry_path == "materials/test/thing.vtf"
-            && request.size_bytes == 3
-    ));
-    #[cfg(not(feature = "asset-studio"))]
-    assert!(matches!(
-        effects.as_slice(),
-        [
-            Effect::LoadRequested(request)
-        ] if request.request_id == 2
+        ] if request.request_id == Generation::from_raw(2)
             && request.entry_path == "materials/test/thing.vtf"
             && request.size_bytes == 3
     ));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_fog_toggle_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(update(&mut state, Message::MapFogToggled(false)).is_empty());
     assert!(!state.map_fog_enabled());
@@ -194,11 +191,10 @@ fn map_fog_toggle_round_trips_without_effects() {
     assert!(state.map_fog_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_skybox_toggle_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(update(&mut state, Message::MapSkyboxToggled(true)).is_empty());
     assert!(state.map_skybox_enabled());
@@ -207,11 +203,10 @@ fn map_skybox_toggle_round_trips_without_effects() {
     assert!(!state.map_skybox_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn map_visibility_toggle_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(update(&mut state, Message::MapVisibilityToggled(false)).is_empty());
     assert!(!state.map_visibility_enabled());
@@ -220,11 +215,10 @@ fn map_visibility_toggle_round_trips_without_effects() {
     assert!(state.map_visibility_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn phy_debug_toggle_defaults_off_and_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(!state.phy_debug_enabled());
     assert!(update(&mut state, Message::PhyDebugToggled(true)).is_empty());
@@ -234,18 +228,17 @@ fn phy_debug_toggle_defaults_off_and_round_trips_without_effects() {
     assert!(!state.phy_debug_enabled());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn pose_messages_update_state_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
-        position: [1.0, 2.0, 3.0],
+    let _request = state.begin_open(map_request());
+    let fly_pose = FlyPose {
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
     };
-    let orbit_pose = crate::features::file_preview::state::OrbitPose {
+    let orbit_pose = OrbitPose {
         yaw: 0.5,
         pitch: 0.25,
         distance: 3.0,
@@ -256,28 +249,25 @@ fn pose_messages_update_state_without_effects() {
             &mut state,
             Message::FlyCameraChanged {
                 pose: fly_pose,
-                mode: crate::features::file_preview::state::MovementMode::Walk,
+                mode: MovementMode::Walk,
             },
         )
         .is_empty()
     );
-    assert!(update(&mut state, Message::OrbitPoseChanged(orbit_pose)).is_empty());
-
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
+
+    let _request = state.begin_open(model_request());
+    assert!(update(&mut state, Message::OrbitPoseChanged(orbit_pose)).is_empty());
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn fly_speed_changed_updates_pose_and_readout() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
-        position: [1.0, 2.0, 3.0],
+    let _request = state.begin_open(map_request());
+    let fly_pose = FlyPose {
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
@@ -288,103 +278,80 @@ fn fly_speed_changed_updates_pose_and_readout() {
             &mut state,
             Message::FlySpeedChanged {
                 pose: fly_pose,
-                mode: crate::features::file_preview::state::MovementMode::Fly,
+                mode: MovementMode::Fly,
             },
         )
         .is_empty()
     );
 
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Fly)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Fly));
     assert_eq!(state.fly_speed_readout(), Some(2.0));
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn movement_mode_selected_requests_shader_mode_change() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(
         update(
             &mut state,
-            Message::MovementModeSelected(crate::features::file_preview::state::MovementMode::Walk)
+            Message::MovementModeSelected(MovementMode::Walk)
         )
         .is_empty()
     );
 
-    assert_eq!(
-        state.requested_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
-    );
+    assert_eq!(state.requested_movement_mode(), Some(MovementMode::Walk));
     assert_eq!(state.fly_movement_mode(), None);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn movement_mode_selected_is_noop_for_active_mode() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
-        position: [1.0, 2.0, 3.0],
+    let _request = state.begin_open(map_request());
+    let fly_pose = FlyPose {
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
     };
-    state.set_fly_camera(
-        fly_pose,
-        crate::features::file_preview::state::MovementMode::Walk,
-    );
+    state.set_fly_camera(fly_pose, MovementMode::Walk);
 
     assert!(
         update(
             &mut state,
-            Message::MovementModeSelected(crate::features::file_preview::state::MovementMode::Walk)
+            Message::MovementModeSelected(MovementMode::Walk)
         )
         .is_empty()
     );
 
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
     assert_eq!(state.requested_movement_mode(), None);
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn expanded_round_trip_preserves_viewer_poses() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
-    let fly_pose = crate::features::file_preview::state::FlyPose {
-        position: [1.0, 2.0, 3.0],
+    let _request = state.begin_open(map_request());
+    let fly_pose = FlyPose {
+        position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
         pitch: -0.5,
         speed: 2.0,
     };
-    let orbit_pose = crate::features::file_preview::state::OrbitPose {
+    let orbit_pose = OrbitPose {
         yaw: 0.5,
         pitch: 0.25,
         distance: 3.0,
     };
-    state.set_fly_camera(
-        fly_pose,
-        crate::features::file_preview::state::MovementMode::Walk,
-    );
-    state.set_orbit_pose(orbit_pose);
+    state.set_fly_camera(fly_pose, MovementMode::Walk);
 
     assert!(update(&mut state, Message::ExpandToggled).is_empty());
     assert!(state.expanded());
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
-    );
-    assert_eq!(state.orbit_pose(), Some(orbit_pose));
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
 
     assert_eq!(
         update(&mut state, Message::ExpandToggled),
@@ -392,10 +359,11 @@ fn expanded_round_trip_preserves_viewer_poses() {
     );
     assert!(!state.expanded());
     assert_eq!(state.fly_pose(), Some(fly_pose));
-    assert_eq!(
-        state.fly_movement_mode(),
-        Some(crate::features::file_preview::state::MovementMode::Walk)
-    );
+    assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
+
+    let _request = state.begin_open(model_request());
+    state.set_orbit_pose(orbit_pose);
+    assert!(update(&mut state, Message::ExpandToggled).is_empty());
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
 
@@ -421,12 +389,11 @@ fn extract_requested_emits_current_info_path() {
     );
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn audio_toggle_requests_play_then_pause_via_state_messages() {
     let mut state = State::default();
     let request = state.begin_open(request());
-    let bytes = Arc::new(vec![1, 2, 3]);
+    let bytes: Arc<[u8]> = Arc::from(vec![1, 2, 3]);
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Audio {
@@ -435,31 +402,40 @@ fn audio_toggle_requests_play_then_pause_via_state_messages() {
         },
     );
     state.apply_loaded(request.request_id, Ok(data));
-    state.update_audio_position(1.25);
+    state.update_audio_position(request.request_id, 1.25);
 
     let effects = update(&mut state, Message::AudioToggleRequested);
 
     assert_eq!(
         effects,
         vec![Effect::AudioPlayRequested {
+            request_id: request.request_id,
             bytes,
             resume_at: 1.25,
         }]
     );
     assert!(!state.audio_playing());
 
-    assert!(update(&mut state, Message::AudioPlaybackStarted).is_empty());
+    assert!(
+        update(
+            &mut state,
+            Message::AudioPlaybackStarted(request.request_id)
+        )
+        .is_empty()
+    );
     assert!(state.audio_playing());
 
     let effects = update(&mut state, Message::AudioToggleRequested);
 
-    assert_eq!(effects, vec![Effect::AudioPauseRequested]);
+    assert_eq!(
+        effects,
+        vec![Effect::AudioPauseRequested(request.request_id)]
+    );
 
-    assert!(update(&mut state, Message::AudioPlaybackPaused).is_empty());
+    assert!(update(&mut state, Message::AudioPlaybackPaused(request.request_id)).is_empty());
     assert!(!state.audio_playing());
 }
 
-#[cfg(feature = "asset-studio")]
 #[test]
 fn animation_tick_polls_audio_position_only_while_playing() {
     let mut state = State::default();
@@ -467,7 +443,7 @@ fn animation_tick_polls_audio_position_only_while_playing() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Audio {
-            bytes: Arc::new(vec![1, 2, 3]),
+            bytes: Arc::from(vec![1, 2, 3]),
             duration_secs: None,
         },
     );
@@ -476,14 +452,47 @@ fn animation_tick_polls_audio_position_only_while_playing() {
 
     assert!(update(&mut state, Message::AnimationTick(now)).is_empty());
 
-    assert!(update(&mut state, Message::AudioPlaybackStarted).is_empty());
+    assert!(
+        update(
+            &mut state,
+            Message::AudioPlaybackStarted(request.request_id)
+        )
+        .is_empty()
+    );
     assert_eq!(
         update(&mut state, Message::AnimationTick(now)),
-        vec![Effect::AudioPositionPollRequested]
+        vec![Effect::AudioPositionPollRequested(request.request_id)]
     );
 }
 
-#[cfg(feature = "asset-studio")]
+#[test]
+fn stale_audio_callback_cannot_start_a_new_loading_preview() {
+    let mut state = State::default();
+    let first = state.begin_open(request_for("sound/first.wav"));
+    let data = PreviewData::from_request(
+        &first,
+        PreviewContent::Audio {
+            bytes: Arc::from(vec![1, 2, 3]),
+            duration_secs: None,
+        },
+    );
+    assert!(state.apply_loaded(first.request_id, Ok(data)));
+    assert_eq!(
+        update(&mut state, Message::AudioToggleRequested),
+        vec![Effect::AudioPlayRequested {
+            request_id: first.request_id,
+            bytes: Arc::from(vec![1, 2, 3]),
+            resume_at: 0.0,
+        }]
+    );
+
+    let second = state.begin_open(request_for("sound/second.wav"));
+    assert_ne!(first.request_id, second.request_id);
+    assert!(update(&mut state, Message::AudioPlaybackStarted(first.request_id)).is_empty());
+
+    assert!(!state.audio_playing());
+}
+
 #[test]
 fn inspector_ratio_clamps_to_layout_and_survives_modal_close() {
     let mut state = State::default();

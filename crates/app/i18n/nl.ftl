@@ -42,19 +42,19 @@ gmod-broken-title = Garry's Mod-map ontbreekt
 gmod-broken-body = De opgeslagen locatie bevat niet langer GarrysMod/addons.
 gmod-broken-research = Opnieuw zoeken
 account-update-title = Update beschikbaar
-account-update-caption = {$arg0} · klik om te downloaden
+account-update-caption = {$version} · klik om te downloaden
 my-workshop = Mijn Workshop
 publish-new = Nieuwe publiceren...
 my-workshop-loading = Laden...
 my-workshop-empty-title = Nog geen addons gepubliceerd
 my-workshop-empty-body = Alles wat je publiceert naar de Workshop verschijnt hier.
-my-workshop-error = Mijn Workshop laden mislukt: {$arg0}
-my-workshop-count = Geeft {$arg0} van de {$arg1} addons weer
+my-workshop-error = Mijn Workshop laden mislukt: {$error}
+my-workshop-count = Geeft {$loaded} van de {$total} addons weer
 installed-addons = Geïnstalleerde Addons
 installed-addons-loading = Laden...
 installed-addons-empty-title = Geen addons geïnstalleerd
 installed-addons-empty-body = Abonneer je op iets in de Workshop, of zet hier een .gma neer.
-installed-addons-error = Zoeken naar geïnstalleerde addons mislukt: {$arg0}
+installed-addons-error = Zoeken naar geïnstalleerde addons mislukt: {$error}
 downloader = Downloader
 downloader-workshop-input = Plak Workshop IDs, links, collecties hierin...
 downloader-bulk-extract = Pak massaal GMA's uit
@@ -68,8 +68,13 @@ downloader-open-all = Open Alles
 downloader-remove-all = Verwijder Alles
 downloader-status-finished = Klaar
 downloader-status-error = Fout
-downloader-progress-percent = {$arg0}% {$arg1}
-downloader-workshop-id = Workshop {$arg0}
+downloader-progress-percent = {$percent}% {$speed}
+downloader-column-addon = Add-on
+downloader-column-speed = Snelheid
+downloader-column-total = Totaal
+downloader-column-progress = Voortgang
+workshop-item = Workshop-item
+downloader-workshop-id = Workshop {$id}
 destination-where-to = Waarheen?
 destination-overwrite-warning = Bestaande bestanden worden overgeschreven.
 destination-browse = Bladeren...
@@ -84,76 +89,78 @@ destination-invalid-path = Kies een bestaande absolute map.
 relative-time-now = zojuist
 relative-time-past-year = 1 jaar geleden
 relative-time-past-years =
-    { $arg0 ->
-       *[other] {$arg0} jaar geleden
+    { $count ->
+       *[other] {$count} jaar geleden
     }
 relative-time-past-month = 1 maand geleden
 relative-time-past-months =
-    { $arg0 ->
-       *[other] {$arg0} maanden geleden
+    { $count ->
+       *[other] {$count} maanden geleden
     }
 relative-time-past-day = 1 dag geleden
 relative-time-past-days =
-    { $arg0 ->
-       *[other] {$arg0} dagen geleden
+    { $count ->
+       *[other] {$count} dagen geleden
     }
 relative-time-past-hour = 1 uur geleden
 relative-time-past-hours =
-    { $arg0 ->
-       *[other] {$arg0} uur geleden
+    { $count ->
+       *[other] {$count} uur geleden
     }
 relative-time-past-minute = 1 minuut geleden
 relative-time-past-minutes =
-    { $arg0 ->
-       *[other] {$arg0} minuten geleden
+    { $count ->
+       *[other] {$count} minuten geleden
     }
 relative-time-past-second = 1 seconde geleden
 relative-time-past-seconds =
-    { $arg0 ->
-       *[other] {$arg0} seconden geleden
+    { $count ->
+       *[other] {$count} seconden geleden
     }
 relative-time-future-year = over 1 jaar
 relative-time-future-years =
-    { $arg0 ->
-       *[other] over {$arg0} jaar
+    { $count ->
+       *[other] over {$count} jaar
     }
 relative-time-future-month = over 1 maand
 relative-time-future-months =
-    { $arg0 ->
-       *[other] over {$arg0} maanden
+    { $count ->
+       *[other] over {$count} maanden
     }
 relative-time-future-day = over 1 dag
 relative-time-future-days =
-    { $arg0 ->
-       *[other] over {$arg0} dagen
+    { $count ->
+       *[other] over {$count} dagen
     }
 relative-time-future-hour = over 1 uur
 relative-time-future-hours =
-    { $arg0 ->
-       *[other] over {$arg0} uur
+    { $count ->
+       *[other] over {$count} uur
     }
 relative-time-future-minute = over 1 minuut
 relative-time-future-minutes =
-    { $arg0 ->
-       *[other] over {$arg0} minuten
+    { $count ->
+       *[other] over {$count} minuten
     }
 relative-time-future-second = over 1 seconde
 relative-time-future-seconds =
-    { $arg0 ->
-       *[other] over {$arg0} seconden
+    { $count ->
+       *[other] over {$count} seconden
     }
 downloading = Downloaden
 locating = Wachten
 decompressing = Uitpakken
-extracting_progress = {$arg0}% uitgepakt ({$arg1} / {$arg2})
+reading_metadata = Metadata lezen
+searching = Zoeken...
+extracting_progress = {$percent}% uitgepakt ({$done} / {$total})
 size-analyzer = Addon Grootte Analysator
 size-analyzer-waiting = Wachten op de treemap-viewport...
 size-analyzer-loading = Berekenen...
 size-analyzer-empty = Geen addons met een positieve grootte gevonden.
 size-analyzer-empty-title = Niets om te meten
 size-analyzer-empty-body = Elke addon in je bibliotheek is leeg, dus er is niets om weer te geven.
-size-analyzer-error = Addon Grootte Analysator mislukt: {$arg0}
-size-analyzer-summary-cells = {$arg0} items
+size-analyzer-error = Addon Grootte Analysator mislukt: {$error}
+size-analyzer-summary-cells = {$count} items
 size-analyzer-name = Naam
 size-analyzer-type = Type
 size-analyzer-size = Grootte
@@ -223,7 +230,7 @@ context-menu-debug-simulate-minus = Simuleer -10
 context-menu-debug-simulate-plus-million = Simuleer +1 miljoen
 context-menu-debug-simulate-minus-million = Simuleer -1 miljoen
 publish-processing-icon = Workshop-icoon verwerken...
-publish-packing = Inpakken {$arg0}% ({$arg1} / {$arg2})
+publish-packing = Inpakken {$percent}% ({$done} / {$total})
 PUBLISH_STARTING = Publiceren Starten
 PUBLISH_PREPARING_CONFIG = Config Voorbereiden
 PUBLISH_PREPARING_CONTENT = Content Voorbereiden
@@ -233,7 +240,6 @@ PUBLISH_COMMITTING_CHANGES = Veranderingen Vastleggen
 context-menu-debug-toast-success = Simuleer melding: succes
 context-menu-debug-toast-error = Simuleer melding: fout
 context-menu-debug-toast-notice = Gesimuleerde melding
-ERR_CANCELLED = Geannuleerd
 err-cancelled = Geannuleerd
 err-whitelist = Sommige geselecteerde bestanden zijn niet toegestaan.
 err-whitelist-detail =
@@ -241,10 +247,10 @@ err-whitelist-detail =
 
     Als je deze bestanden wilt filteren van je GMA's, voeg ze toe aan je genegeerde bestandspatronen.
 
-    {$arg0}
+    {$detail}
 err-no-entries = Er zijn geen bestanden in deze content pad.
-err-duplicate-entries = Er is een identiek bestand ({$arg0}) in deze contentpad. Alle paden moeten uniek zijn en in kleine letters. i use arch btw
-err-duplicate-entries-detail = Er is een identiek bestand ({$arg0}) in deze contentpad. Alle paden moeten uniek zijn en in kleine letters. i use arch btw
+err-duplicate-entries = Er is een identiek bestand in deze contentpad. Alle paden moeten uniek zijn en in kleine letters. i use arch btw
+err-duplicate-entries-detail = Er is een identiek bestand ({$detail}) in deze contentpad. Alle paden moeten uniek zijn en in kleine letters. i use arch btw
 err-invalid-content-path = Deze content pad bestaat niet, is geen map of gmpublished heeft geen rechten om het te openen
 err-multiple-gmas = Meerdere GMA bestanden gevonden in deze content pad
 err-icon-too-large = Icoon te groot (> 1 MB)
@@ -252,12 +258,37 @@ err-icon-too-small = Icoon to klein (< 16 B)
 err-icon-invalid-format = Icoon moet een JPG, PNG of GIF zijn
 err-icon-cannot-optimize = Kon dit icoon niet onder Steam's voorvertoningslimiet krijgen.
 err-io-error = I/O-fout
-err-image-error = Afbeeldingsfout: {$arg0}
-err-image-error-detail = Afbeeldingsfout: {$arg0}
-err-steam-error = Steam-fout: {$arg0}
-err-steam-error-detail = Steam-fout: {$arg0}
-byte-format = {$arg0} {$arg1}
-byte-rate-per-second = {$arg0}/s
+err-path-io-error = Een bestandssysteembewerking is mislukt.
+err-path-io-error-detail = Een bestandssysteembewerking is mislukt: {$detail}
+err-gma-format-error = Het GMA-archief is beschadigd.
+err-gma-invalid-header = De GMA-header is ongeldig.
+err-gma-entry-not-found = Het gevraagde GMA-item is niet gevonden.
+err-lzma = LZMA-decompressie is mislukt.
+err-gma-extraction-failed = De addon kon niet volledig worden uitgepakt.
+err-gma-destination-unavailable = Er kon geen beschikbare uitpaklocatie worden gemaakt.
+err-vpk-format-error = Het VPK-archief is beschadigd.
+err-vpk-invalid-header = De VPK-header is ongeldig.
+err-vpk-entry-not-found = Het gevraagde VPK-item is niet gevonden.
+err-vpk-unsafe-path = Het VPK-archief bevat een onveilig pad.
+err-vpk-missing-archive = Een vereist VPK-archief ontbreekt.
+err-download-missing = De gedownloade addonbestanden ontbreken.
+err-download-failed = Het downloaden van de addon is mislukt.
+err-item-not-found = Het Workshop-item is niet gevonden.
+err-search-event-sink-unavailable = Zoekresultaten kunnen momenteel niet worden afgeleverd.
+err-search-event-sink-disconnected = De levering van zoekresultaten is onverwacht gestopt.
+err-search-data-shape = De zoekopdracht gaf ongeldige resultaatgegevens terug.
+err-unknown = Er is iets misgegaan
+err-worker-queue-full = De app is bezig. Probeer het zo opnieuw.
+err-worker-pool-stopped = Achtergrondwerk is niet beschikbaar.
+err-worker-dropped = Achtergrondwerk is onverwacht gestopt.
+err-gmod-path-missing = De Garry's Mod-map is niet ingesteld
+err-no-addons-found = Geen addons gevonden
+err-image-error = Afbeeldingsfout
+err-image-error-detail = Afbeeldingsfout: {$detail}
+err-steam-error = Steam-fout
+err-steam-error-detail = Steam-fout: {$detail}
+byte-format = {$value} {$unit}
+byte-rate-per-second = {$rate}/s
 byte-unit-b = B
 byte-unit-kb = KB
 byte-unit-mb = MB
@@ -291,7 +322,7 @@ file-type-txt = Tekst
 file-type-properties = Eigenschappen
 file-type-audio = Audio
 file-type-image = Afbeelding
-file-type-unknown = Onbekend ({$arg0})
+file-type-unknown = Onbekend ({$extension})
 file-preview-loading = Voorvertoning laden...
 file-preview-stage-reading-archive = Archief lezen...
 file-preview-stage-reading-bsp = BSP lezen...
@@ -303,7 +334,7 @@ file-preview-expand = Voorvertoning vergroten
 file-preview-collapse = Voorvertoning verkleinen
 file-preview-open-material = Materiaal openen
 file-preview-open-texture = Textuur openen
-file-preview-error = Voorvertoning mislukt: {$arg0}
+file-preview-error = Voorvertoning mislukt: {$error}
 file-preview-path = Pad
 file-preview-size = Grootte
 file-preview-crc = CRC
@@ -325,7 +356,7 @@ file-preview-particle-level-approximate = Benaderd — kan er in het spel anders
 file-preview-particle-level-inert = Vereist een map of entity — geen effect in deze voorvertoning
 file-preview-particle-level-unsupported = Niet gesimuleerd in deze voorvertoning
 file-preview-truncated = Voorvertoning ingekort — het volledige bestand is groter dan getoond.
-file-preview-image-dimensions = {$arg0}×{$arg1}
+file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Meshes
 file-preview-model-bones = Botten
 file-preview-model-sequences = Sequenties
@@ -333,8 +364,8 @@ file-preview-model-vertices = Hoekpunten
 file-preview-model-triangles = Driehoeken
 file-preview-model-materials = Materialen opgelost
 file-preview-model-skin = Skin
-file-preview-model-skin-option = Skin {$arg0}
-file-preview-model-bodygroup = Lichaamsgroep {$arg0}
+file-preview-model-skin-option = Skin {$index}
+file-preview-model-bodygroup = Lichaamsgroep {$index}
 file-preview-model-bounds-min = Grenzen min.
 file-preview-model-bounds-max = Grenzen max.
 file-preview-map-controls = Sleep om te kijken · WASD om te vliegen · Shift voor snelheid · scroll om snelheid aan te passen
@@ -366,7 +397,7 @@ prepare-publish-tag-2 = Tag 2
 prepare-publish-tag-3 = Tag 3
 prepare-publish-update-exclamation = Bijwerken!
 prepare-publish-publish-exclamation = Publiceer!
-prepare-publish-update-warning = Je bent een update aan het pushen naar {$arg0} ({$arg1})
+prepare-publish-update-warning = Je bent een update aan het pushen naar {$title} ({$id})
 prepare-publish-still-needed = Nog nodig:
 prepare-publish-needs-addon-path = Addon-pad
 prepare-publish-needs-title = Titel
@@ -378,8 +409,8 @@ prepare-publish-file-browser = Bestandsverkenner
 prepare-publish-browser-select = Sleep hier een bestand of klik om te bladeren
 prepare-publish-no-files = Geen bestanden gevonden
 prepare-publish-items-one = 1 item
-prepare-publish-items-num = {$arg0} items
-prepare-publish-items-shown = {$arg0} weergegeven
+prepare-publish-items-num = {$count} items
+prepare-publish-items-shown = {$count} weergegeven
 prepare-publish-ignored-patterns = Bestandspatronen genegeerd
 prepare-publish-ignore-placeholder = Voeg toe...
 prepare-publish-ignored-for-convenience = Dit bestandspatroon wordt standaard genegeerd om het makkelijker te maken.

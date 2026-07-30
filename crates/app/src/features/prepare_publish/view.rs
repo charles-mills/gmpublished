@@ -1,3 +1,4 @@
+use crate::i18n::Arg;
 use std::time::Instant;
 
 use iced::widget::{
@@ -14,14 +15,12 @@ use crate::{
     i18n::translated_error,
     theme::{self, Tokens, ViewCtx},
     widgets::file_browser::{self, Row as FileBrowserRowData, RowKind as FileBrowserEntryKind},
+    widgets::icon::svg_icon as icon,
     widgets::select,
-    widgets::select_option::SelectOption,
     widgets::tooltip as tooltip_widget,
 };
 
 use super::{Message, State};
-
-const TOOLTIP_MAX_WIDTH: f32 = 320.0;
 
 pub fn view<'a>(
     state: &'a State,
@@ -96,7 +95,6 @@ fn embedded_preview_body<'a>(
     expanded: bool,
     modal_width: f32,
 ) -> Option<Element<'a, Message>> {
-    #[cfg(feature = "asset-studio")]
     {
         let tokens = *ctx.tokens;
         if !file_preview_state.is_open() {
@@ -123,11 +121,6 @@ fn embedded_preview_body<'a>(
                 .into(),
             )
         }
-    }
-    #[cfg(not(feature = "asset-studio"))]
-    {
-        let _ = (state, file_preview_state, ctx, expanded, modal_width);
-        None
     }
 }
 
@@ -251,7 +244,7 @@ fn icon_preview<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
             preview,
             translated_error(i18n, error),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ),
         None => preview.into(),
     }
@@ -320,7 +313,7 @@ fn icon_controls<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message>
             upload,
             i18n.tr("prepare-publish-publish-icon"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ));
     }
 
@@ -367,7 +360,7 @@ fn addon_path_row<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message
             field,
             translated_error(i18n, error),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         ),
         None => field.into(),
     };
@@ -408,7 +401,7 @@ fn title_input<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             field,
             i18n.tr("prepare-publish-title-locked"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         )
     } else {
         field.into()
@@ -419,23 +412,23 @@ fn select_metrics(tokens: &Tokens) -> select::Metrics {
     select::Metrics {
         text_size: tokens.typography.caption,
         padding: Padding::new(tokens.spacing.pad_control),
-        radius: tokens.radii.base,
+        radius: tokens.radii.sm,
         max_rows: select::MAX_ROWS,
     }
 }
 
 /// Turns the state's labelled options into menu rows, marking the current one.
-fn select_rows(
-    options: Vec<SelectOption>,
-    selected: &SelectOption,
-    on_select: impl Fn(SelectOption) -> Message,
+fn select_rows<T: Eq>(
+    options: Vec<(T, String)>,
+    selected: &T,
+    on_select: impl Fn(T) -> Message,
 ) -> Vec<select::Row<Message>> {
     options
         .into_iter()
-        .map(|option| select::Row {
-            selected: option == *selected,
-            label: option.label.clone(),
-            on_select: on_select(option),
+        .map(|(value, label)| select::Row {
+            selected: value == *selected,
+            label,
+            on_select: on_select(value),
         })
         .collect()
 }
@@ -443,13 +436,11 @@ fn select_rows(
 fn addon_type_select<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    let selected = state.selected_addon_type_option(i18n);
-
     select::field(
-        selected.label.clone(),
+        state.addon_type_label(i18n),
         select_rows(
             state.addon_type_options(i18n),
-            &selected,
+            &state.addon_type(),
             Message::AddonTypeSelected,
         ),
         select_metrics(&tokens),
@@ -463,12 +454,13 @@ fn tag_selects<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let i18n = ctx.i18n;
     let mut tag_row = row![].spacing(tokens.spacing.gap);
     for index in 0..3 {
-        let selected = state.selected_tag_option(index, i18n);
         tag_row = tag_row.push(select::field(
-            selected.label.clone(),
-            select_rows(state.tag_options(index, i18n), &selected, move |option| {
-                Message::TagSelected(index, option)
-            }),
+            state.tag_label(index, i18n),
+            select_rows(
+                state.tag_options(index, i18n),
+                &state.selected_tag(index),
+                move |option| Message::TagSelected(index, option),
+            ),
             select_metrics(&tokens),
             select::Chevron::Hidden,
             &tokens,
@@ -514,7 +506,7 @@ fn submit_button<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message>
         .style(move |_, status| theme::styles::action_button(&tokens, status));
 
     match state.submit_tooltip(i18n) {
-        Some(label) => tooltip_widget::below(submit, label, &tokens, TOOLTIP_MAX_WIDTH),
+        Some(label) => tooltip_widget::below(submit, label, &tokens, tokens.dims.tooltip_max_width),
         None => submit.into(),
     }
 }
@@ -682,24 +674,10 @@ fn browser_rows<'a>(
 
 fn file_row<'a>(row_data: &'a FileBrowserRowData, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let message = match row_data.kind {
-        FileBrowserEntryKind::Directory => Some(Message::DirectoryOpened(row_data.shared_path())),
-        FileBrowserEntryKind::File => file_activation_message(row_data.shared_path()),
+        FileBrowserEntryKind::Directory => Message::DirectoryOpened(row_data.shared_path()),
+        FileBrowserEntryKind::File => Message::PreviewEntryRequested(row_data.shared_path()),
     };
-    file_browser::row_view(row_data, message, ctx)
-}
-
-#[cfg(feature = "asset-studio")]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "signature is shared with the non-asset-studio variant, which returns None"
-)]
-fn file_activation_message(path: std::sync::Arc<String>) -> Option<Message> {
-    Some(Message::PreviewEntryRequested(path))
-}
-
-#[cfg(not(feature = "asset-studio"))]
-fn file_activation_message(_path: std::sync::Arc<String>) -> Option<Message> {
-    None
+    file_browser::row_view(row_data, Some(message), ctx)
 }
 
 fn browser_footer<'a>(
@@ -713,10 +691,16 @@ fn browser_footer<'a>(
         i18n.tr("prepare-publish-items-one")
     } else {
         let total = total.to_string();
-        i18n.trn("prepare-publish-items-num", &[("arg0", total.as_str())])
+        i18n.trn(
+            "prepare-publish-items-num",
+            &[("count", Arg::Number(total.as_str()))],
+        )
     };
     let shown = browser.shown_count().to_string();
-    let shown = i18n.trn("prepare-publish-items-shown", &[("arg0", shown.as_str())]);
+    let shown = i18n.trn(
+        "prepare-publish-items-shown",
+        &[("count", Arg::Number(shown.as_str()))],
+    );
     let size = format_bytes(browser.total_size_bytes(), i18n);
 
     text(format!("{items}  \u{2223}  {shown}  \u{2223}  {size}"))
@@ -842,7 +826,7 @@ fn ignored_pattern_row(
             cell,
             i18n.tr("prepare-publish-ignored-for-convenience"),
             &tokens,
-            TOOLTIP_MAX_WIDTH,
+            tokens.dims.tooltip_max_width,
         )
     } else {
         mouse_area(cell)
@@ -850,12 +834,4 @@ fn ignored_pattern_row(
             .interaction(iced::mouse::Interaction::Pointer)
             .into()
     }
-}
-
-fn icon<'a>(handle: svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
 }

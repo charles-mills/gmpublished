@@ -1,12 +1,11 @@
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
+use crate::bridge::tasks::TransactionStatus;
 use crate::bridge::ui_error::UiError;
 use std::path::{Path, PathBuf};
 
 use super::domain::PublishedFileId;
 
-pub const PUBLISH_PROCESSING_ICON: &str = "PUBLISH_PROCESSING_ICON";
-pub const PUBLISH_PACKING: &str = "PUBLISH_PACKING";
 pub const DEFAULT_WORKSHOP_ICON_FILE_NAME: &str = "gmpublished_default_icon.png";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,8 +41,9 @@ pub enum PublishSubmitMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PublishSelectedPreview {
-    Source { path: PathBuf, upscale: bool },
+pub struct PublishSelectedPreview {
+    pub(crate) path: PathBuf,
+    pub(crate) upscale: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,10 +67,10 @@ pub struct PublishSubmitRequest {
 }
 
 impl PublishSubmitRequest {
-    pub(crate) const fn initial_status(&self) -> &'static str {
+    pub(crate) const fn initial_status(&self) -> TransactionStatus {
         match &self.preview {
-            Some(PublishSubmitPreview::Selected(_)) => PUBLISH_PROCESSING_ICON,
-            Some(PublishSubmitPreview::Default(_)) | None => PUBLISH_PACKING,
+            Some(PublishSubmitPreview::Selected(_)) => TransactionStatus::PublishProcessingIcon,
+            Some(PublishSubmitPreview::Default(_)) | None => TransactionStatus::PublishPacking,
         }
     }
 }

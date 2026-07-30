@@ -6,7 +6,10 @@ use crate::media::thumbnail_demand::ReadyThumbnail;
 
 pub const ANIMATION_TICK_INTERVAL: Duration = Duration::from_millis(16);
 
-const MIN_FRAME_DELAY: Duration = Duration::from_millis(1);
+/// Floor for a playback frame's delay. Distinct from the GIF decoder's own
+/// minimum: this only has to keep a zero-delay frame from spinning the
+/// animation loop, and applies to every source, not just GIFs.
+const NON_ZERO_FRAME_DELAY: Duration = Duration::from_millis(1);
 
 /// Playback policy chosen by each animated thumbnail use site.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +46,7 @@ impl Playback {
             .into_iter()
             .map(|(handle, delay)| Frame {
                 handle,
-                delay: delay.max(MIN_FRAME_DELAY),
+                delay: delay.max(NON_ZERO_FRAME_DELAY),
             })
             .collect::<Vec<_>>();
         if frames.len() <= 1 {
@@ -68,7 +71,7 @@ impl Playback {
             .iter()
             .map(|frame| Frame {
                 handle: frame.handle().clone(),
-                delay: frame.delay().max(MIN_FRAME_DELAY),
+                delay: frame.delay().max(NON_ZERO_FRAME_DELAY),
             })
             .collect::<Vec<_>>();
         if frames.len() <= 1 {
@@ -167,7 +170,7 @@ mod tests {
         ])
         .expect("two cached handles should produce playback");
 
-        assert_eq!(playback.frames[0].delay, MIN_FRAME_DELAY);
+        assert_eq!(playback.frames[0].delay, NON_ZERO_FRAME_DELAY);
         assert_eq!(playback.frames.len(), 2);
     }
 }

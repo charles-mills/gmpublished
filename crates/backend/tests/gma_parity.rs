@@ -5,13 +5,12 @@ use std::{
 };
 
 use gmpublished_backend::{
-    GMAFile, GMAMetadata,
-    appdata::{AppData, AppDataPaths},
-    events::{BackendEvent, BackendEventCollector, NullEventSink, TransactionEvent},
-    gma::extract::{ExtractOptions, Whitelist},
-    gma::{self, ExtractDestination, read::GmaView, whitelist::AddonWhitelist},
-    steam::Steam,
-    transactions::Transactions,
+    ExtractDestination, ExtractOptions, ExtractionContext, GmaError, GmaFile, GmaMetadata, GmaView,
+    HasErrorKey, Whitelist,
+    test_support::{
+        AddonWhitelist, AppData, AppDataPaths, BackendEventCollector, NullEventSink, Steam,
+        Transactions, is_default_ignored, is_ignored, is_whitelisted_in,
+    },
 };
 use lzma_rust2::{LzmaOptions, LzmaWriter};
 use std::sync::Arc;
@@ -25,14 +24,14 @@ struct Fixture {
     steam: Steam,
     whitelist: AddonWhitelist,
     transactions: Transactions,
-    collector: BackendEventCollector,
+    cpu: gmpublished_backend::CpuExecutor,
     _temp: TempDir,
 }
 
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let transactions = Transactions::new(Arc::new(NullEventSink), false);
+        let transactions = Transactions::new(Arc::new(NullEventSink));
         let app_data = AppData::load(
             AppDataPaths::for_test_root(temp.path()),
             transactions.clone(),
@@ -42,18 +41,22 @@ impl Fixture {
             steam: Steam::new(transactions.clone()),
             whitelist: AddonWhitelist::new(),
             transactions,
-            collector: BackendEventCollector::default(),
+            cpu: gmpublished_backend::CpuExecutor::build(2).expect("test CPU executor"),
             _temp: temp,
         }
     }
 
-    /// Same as [`Self::new`], but transaction events go to `collector`
-    /// instead of a null sink, for tests that need to inspect an emitted
-    /// error's key/detail.
+    /// Same as [`Self::new`], but with a live event sink attached, so a test
+    /// exercising a transaction path runs against real emission rather than a
+    /// null sink.
+    ///
+    /// The collector is not retained: packing reports failure by *returning*
+    /// an error, and the tests below assert on that. Emission is the publish
+    /// layer's job and is covered where it happens.
     fn with_collected_events() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let collector = BackendEventCollector::default();
-        let transactions = Transactions::new(Arc::new(collector.clone()), false);
+        let transactions = Transactions::new(Arc::new(collector));
         let app_data = AppData::load(
             AppDataPaths::for_test_root(temp.path()),
             transactions.clone(),
@@ -63,9 +66,26 @@ impl Fixture {
             steam: Steam::new(transactions.clone()),
             whitelist: AddonWhitelist::new(),
             transactions,
-            collector,
+            cpu: gmpublished_backend::CpuExecutor::build(2).expect("test CPU executor"),
             _temp: temp,
         }
+    }
+
+    fn extraction_context(
+        &self,
+        handle: &GmaFile,
+        destination: ExtractDestination,
+        options: ExtractOptions,
+    ) -> ExtractionContext {
+        ExtractionContext::resolve(
+            handle,
+            destination,
+            options,
+            &self.whitelist,
+            &self.app_data,
+            &self.steam,
+        )
+        .expect("resolve extraction")
     }
 }
 
@@ -81,8 +101,8 @@ fn write_fixture_source(root: &Path) {
     fs::write(lua_dir.join("ignored.lua"), b"print('ignored')\n").unwrap();
 }
 
-fn fixture_metadata(title: &str) -> GMAMetadata {
-    GMAMetadata::Standard {
+fn fixture_metadata(title: &str) -> GmaMetadata {
+    GmaMetadata::Standard {
         title: title.to_string(),
         addon_type: "tool".to_string(),
         tags: vec!["build".to_string(), "fun".to_string()],
@@ -95,26 +115,18 @@ fn create_fixture_gma(fixture: &Fixture, dir: &TempDir, title: &str) -> PathBuf 
     write_fixture_source(&source);
 
     let gma_path = dir.path().join("fixture.gma");
-    let gma = GMAFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata(title),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata(title));
 
     let transaction = fixture.transactions.begin();
-    gma.create(&source, &transaction, &fixture.whitelist)
+    gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu)
         .unwrap();
     transaction.cancel();
 
     gma_path
 }
 
-fn read_generated_gma(path: &Path) -> (GMAFile, GmaView) {
-    let gma = GMAFile::open(path).unwrap();
+fn read_generated_gma(path: &Path) -> (GmaFile, GmaView) {
+    let gma = GmaFile::open(path).unwrap();
     let view = gma.view().unwrap();
     (gma, view)
 }
@@ -170,11 +182,11 @@ fn gma_write_read_extract_round_trip_from_generated_fixture() {
     let gma_path = create_fixture_gma(&fixture, &dir, "Round Trip Fixture");
 
     let (gma, view) = read_generated_gma(&gma_path);
-    assert_eq!(gma.version, 3);
-    assert_eq!(gma.metadata.title(), "Round Trip Fixture");
-    assert_eq!(gma.metadata.addon_type(), Some("tool"));
+    assert_eq!(gma.version(), 3);
+    assert_eq!(gma.metadata().title(), "Round Trip Fixture");
+    assert_eq!(gma.metadata().addon_type(), Some("tool"));
     assert_eq!(
-        gma.metadata.tags().unwrap(),
+        gma.metadata().tags().unwrap(),
         &vec!["build".to_string(), "fun".to_string()]
     );
 
@@ -184,19 +196,16 @@ fn gma_write_read_extract_round_trip_from_generated_fixture() {
 
     let extract_dir = dir.path().join("extract");
     let transaction = fixture.transactions.begin();
+    let context = fixture.extraction_context(
+        &gma,
+        ExtractDestination::Directory(extract_dir.clone()),
+        ExtractOptions {
+            open_after: false,
+            whitelist: Whitelist::Enforce,
+        },
+    );
     let extracted_path = view
-        .extract(
-            &gma,
-            ExtractDestination::Directory(extract_dir.clone()),
-            &transaction,
-            ExtractOptions {
-                open_after: false,
-                whitelist: Whitelist::Enforce,
-            },
-            &fixture.whitelist,
-            &fixture.app_data,
-            &fixture.steam,
-        )
+        .extract(&gma, &transaction, context, &fixture.cpu)
         .unwrap();
 
     assert_eq!(extracted_path, extract_dir);
@@ -231,17 +240,9 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
     fs::write(lua_dir.join("z_after.lua"), b"print('after')\n").unwrap();
 
     let gma_path = dir.path().join("large.gma");
-    let gma = GMAFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Large Stream Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Large Stream Fixture"));
     let transaction = fixture.transactions.begin();
-    gma.create(&source, &transaction, &fixture.whitelist)
+    gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu)
         .unwrap();
     transaction.cancel();
 
@@ -255,19 +256,16 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
 
     let extract_dir = dir.path().join("extract");
     let transaction = fixture.transactions.begin();
-    view.extract(
+    let context = fixture.extraction_context(
         &gma,
         ExtractDestination::Directory(extract_dir.clone()),
-        &transaction,
         ExtractOptions {
             open_after: false,
             whitelist: Whitelist::Enforce,
         },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    )
-    .unwrap();
+    );
+    view.extract(&gma, &transaction, context, &fixture.cpu)
+        .unwrap();
     assert_eq!(fs::read(extract_dir.join("lua/big.lua")).unwrap(), big);
     assert_eq!(
         fs::read_to_string(extract_dir.join("lua/a_before.lua")).unwrap(),
@@ -310,18 +308,10 @@ fn gma_create_failure_leaves_nothing_at_the_final_path() {
     let gma_path = dir.path().join("blocked.gma");
     fs::create_dir_all(&gma_path).unwrap();
 
-    let gma = GMAFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Blocked Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Blocked Fixture"));
 
     let transaction = fixture.transactions.begin();
-    let result = gma.create(&source, &transaction, &fixture.whitelist);
+    let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
     transaction.cancel();
 
     assert!(result.is_err());
@@ -356,36 +346,32 @@ fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
     let gma_path = dir.path().join("walk-error.gma");
-    let gma = GMAFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Walk Error Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Walk Error Fixture"));
 
     let transaction = fixture.transactions.begin();
-    let transaction_id = transaction.id;
-    let result = gma.create(&source, &transaction, &fixture.whitelist);
+    let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
     transaction.cancel();
 
     // Restore permissions so the tempdir can clean itself up regardless of
     // whether the assertions below pass.
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
-    assert!(result.is_err());
     assert!(!gma_path.exists());
 
-    let events = fixture.collector.drain();
+    // The path travels on the error, not alongside it: whoever receives this
+    // can report it, and a caller that reports nothing loses nothing that was
+    // already reported behind its back.
+    let error = result.expect_err("an unreadable directory must fail the pack");
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Transaction(TransactionEvent::Error { id, error })
-                if *id == transaction_id && error.key.as_str() == "ERR_PATH_IO_ERROR"
-        )),
-        "expected a path-naming error for the unreadable directory, got {events:?}"
+        matches!(&error, GmaError::PathIo { path } if path.starts_with(&source)),
+        "expected a path-naming error for the unreadable directory, got {error:?}"
+    );
+    assert_eq!(error.error_key().as_str(), "ERR_PATH_IO_ERROR");
+    assert!(
+        error
+            .error_detail()
+            .is_some_and(|detail| detail.contains("locked")),
+        "the failing path must survive into the reportable detail"
     );
 }
 
@@ -408,33 +394,20 @@ fn gma_create_non_utf8_entry_name_errors_naming_the_path() {
     fs::write(source.join(bad_name), b"print('bad name')\n").unwrap();
 
     let gma_path = dir.path().join("non-utf8.gma");
-    let gma = GMAFile {
-        path: gma_path.clone(),
-        size: 0,
-        id: None,
-        metadata: fixture_metadata("Non-UTF8 Fixture"),
-        version: 0,
-        extracted_name: String::new(),
-        modified: None,
-    };
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Non-UTF8 Fixture"));
 
     let transaction = fixture.transactions.begin();
-    let transaction_id = transaction.id;
-    let result = gma.create(&source, &transaction, &fixture.whitelist);
+    let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
     transaction.cancel();
 
-    assert!(result.is_err());
     assert!(!gma_path.exists());
 
-    let events = fixture.collector.drain();
+    let error = result.expect_err("a non-UTF8 entry name must fail the pack");
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            BackendEvent::Transaction(TransactionEvent::Error { id, error })
-                if *id == transaction_id && error.key.as_str() == "ERR_PATH_IO_ERROR"
-        )),
-        "expected a path-naming error for the non-UTF8 entry, got {events:?}"
+        matches!(&error, GmaError::PathIo { path } if path.starts_with(&source)),
+        "expected a path-naming error for the non-UTF8 entry, got {error:?}"
     );
+    assert_eq!(error.error_key().as_str(), "ERR_PATH_IO_ERROR");
 }
 
 #[test]
@@ -447,17 +420,23 @@ fn gma_lzma_bin_decompresses_generated_gma_payload() {
     fs::write(&bin_path, encoded).unwrap();
 
     let transaction = fixture.transactions.begin();
-    let (decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+    let (mut decompressed, view) =
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
 
-    assert_eq!(decompressed.metadata.title(), "LZMA Fixture");
+    assert_eq!(decompressed.metadata().title(), "LZMA Fixture");
+    decompressed.set_workshop_id(gmpublished_backend::WorkshopId::new(4242).unwrap());
+    assert_eq!(
+        decompressed.extracted_name(),
+        "lzma_fixture_4242",
+        "assigning the downloaded item id must refresh a legacy .bin's extraction name"
+    );
     assert!(
         view.entries()
             .unwrap()
             .contains_key("lua/autorun/round_trip.lua")
     );
-    assert_eq!(decompressed.size, fs::metadata(&gma_path).unwrap().len());
+    assert_eq!(decompressed.size(), fs::metadata(&gma_path).unwrap().len());
 }
 
 #[test]
@@ -477,13 +456,13 @@ fn gma_lzma_bin_with_known_size_decompresses_in_memory() {
 
     let transaction = fixture.transactions.begin();
     let (decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
 
     assert!(!view.is_temp_backed());
 
-    assert_eq!(decompressed.metadata.title(), "LZMA Sized Fixture");
-    assert_eq!(decompressed.size, raw.len() as u64);
+    assert_eq!(decompressed.metadata().title(), "LZMA Sized Fixture");
+    assert_eq!(decompressed.size(), raw.len() as u64);
 }
 
 #[test]
@@ -516,7 +495,7 @@ fn gma_read_entry_bytes_round_trips_from_lzma_membuffer_archive() {
 
     let transaction = fixture.transactions.begin();
     let (_decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
     assert!(!view.is_temp_backed());
 
@@ -538,7 +517,7 @@ fn gma_lzma_bin_with_unknown_size_spills_to_disk_and_cleans_up_on_drop() {
 
     let transaction = fixture.transactions.begin();
     let (decompressed, view) =
-        GMAFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
+        GmaFile::decompress(&bin_path, &transaction, &fixture.app_data, &fixture.steam).unwrap();
     transaction.cancel();
 
     assert!(view.is_temp_backed());
@@ -548,7 +527,7 @@ fn gma_lzma_bin_with_unknown_size_spills_to_disk_and_cleans_up_on_drop() {
         .to_path_buf();
     assert!(spill_path.is_file());
 
-    assert_eq!(decompressed.metadata.title(), "LZMA Spill Fixture");
+    assert_eq!(decompressed.metadata().title(), "LZMA Spill Fixture");
 
     drop((decompressed, view));
     assert!(!spill_path.exists());
@@ -581,19 +560,16 @@ fn gma_unsafe_entry_paths_are_skipped_without_shifting_following_data() {
 
     let extract_dir = dir.path().join("extract");
     let transaction = fixture.transactions.begin();
-    view.extract(
+    let context = fixture.extraction_context(
         &gma,
         ExtractDestination::Directory(extract_dir.clone()),
-        &transaction,
         ExtractOptions {
             open_after: false,
             whitelist: Whitelist::Ignore,
         },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    )
-    .unwrap();
+    );
+    view.extract(&gma, &transaction, context, &fixture.cpu)
+        .unwrap();
 
     assert_eq!(
         fs::read_to_string(extract_dir.join("lua/autorun/safe.lua")).unwrap(),
@@ -608,7 +584,7 @@ fn gma_header_projects_full_fields_matching_the_constructed_handle() {
     let gma_path = dir.path().join("header-projection.gma");
     write_raw_gma(&gma_path, &[("lua/autorun/safe.lua", b"safe")]);
 
-    let gma = GMAFile::open(&gma_path).unwrap();
+    let gma = GmaFile::open(&gma_path).unwrap();
     let header = gma.header().unwrap();
 
     assert_eq!(header.version, 3);
@@ -622,27 +598,50 @@ fn gma_header_projects_full_fields_matching_the_constructed_handle() {
     // `header()` independently re-derives fields the handle doesn't keep
     // (timestamp, author, addon_version); its title still agrees with the
     // one `open()` already stamped onto the handle.
-    assert_eq!(gma.metadata.title(), header.metadata.title());
+    assert_eq!(gma.metadata().title(), header.metadata.title());
 }
 
 #[test]
 fn gma_whitelist_and_default_ignore_match_expected_paths() {
     let whitelist = AddonWhitelist::new();
     let snapshot = whitelist.snapshot();
-    assert!(gma::whitelist::is_whitelisted_in(
-        &snapshot,
-        "lua/autorun/round_trip.lua"
-    ));
-    assert!(!gma::whitelist::is_whitelisted_in(
-        &snapshot,
-        "lua/autorun/round_trip.exe"
-    ));
-    assert!(gma::whitelist::is_default_ignored("addon.json"));
-    assert!(!gma::whitelist::is_default_ignored(
-        "lua/autorun/round_trip.lua"
-    ));
-    assert!(gma::whitelist::is_ignored(
+    assert!(is_whitelisted_in(&snapshot, "lua/autorun/round_trip.lua"));
+    assert!(!is_whitelisted_in(&snapshot, "lua/autorun/round_trip.exe"));
+    assert!(is_default_ignored("addon.json"));
+    assert!(!is_default_ignored("lua/autorun/round_trip.lua"));
+    assert!(is_ignored(
         "lua/autorun/ignored.lua",
         &["lua/autorun/ignored.lua".to_string()]
     ));
+}
+
+/// `data_offset` is a byte offset into the mapped view, produced by pointer
+/// arithmetic against the parsed payload. Nothing else re-derives it, so if it
+/// is wrong the preview modal serves one entry's bytes for another.
+#[test]
+fn indexed_entry_offsets_address_their_own_payload() {
+    let fixture = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let gma_path = create_fixture_gma(&fixture, &dir, "Offset Round Trip");
+
+    let bundle = GmaFile::open_meta(&gma_path).unwrap();
+    let view = GmaView::open(&gma_path).unwrap();
+    let entries = view.entries().unwrap();
+
+    assert!(
+        !bundle.entries.is_empty(),
+        "fixture should contain at least one entry"
+    );
+    for indexed in &bundle.entries {
+        let by_offset = view
+            .read_payload_bytes(indexed.data_offset, indexed.size)
+            .unwrap();
+        let expected = entries
+            .get(&indexed.path)
+            .unwrap_or_else(|| panic!("entry {} missing from the map", indexed.path));
+
+        assert_eq!(by_offset.len() as u64, indexed.size);
+        assert_eq!(indexed.crc, expected.crc);
+        assert_eq!(crc32fast::hash(&by_offset), indexed.crc, "{}", indexed.path);
+    }
 }
