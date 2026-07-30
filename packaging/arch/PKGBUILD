@@ -42,7 +42,7 @@ source=(
   "${_pkgname}-${pkgver}-${CARCH}-linux.zip::\
 ${url}/releases/download/${_release_tag}/${_pkgname}-${pkgver}-${CARCH}-linux.zip"
 )
-sha256sums=('477699c7188154d2c175c50951ab00b712c7a7a02a29a7190d2c06f2d2aa22f6')
+sha256sums=('8d6cde8b1637ec9c8bbf94b35bdb137e0c5e2429be10e66484025a8dbaed630f')
 
 check() {
   desktop-file-validate "${srcdir}/share/applications/${_pkgname}.desktop"

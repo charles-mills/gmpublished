@@ -1,6 +1,6 @@
 pkgbase = gmpublished-bin
 	pkgdesc = Native Workshop publishing and addon inspection utility for Garry's Mod
-	pkgver = 0.2.3
+	pkgver = 0.2.4
 	pkgrel = 1
 	url = https://github.com/charles-mills/gmpublished
 	arch = x86_64
@@ -26,11 +26,11 @@ pkgbase = gmpublished-bin
 	optdepends = vulkan-driver: hardware-accelerated rendering; falls back to the OpenGL backend without one
 	optdepends = xdg-desktop-portal: required for open/save dialogs, with a backend such as xdg-desktop-portal-gtk
 	optdepends = xdg-utils: open files and folders in the file manager
-	provides = gmpublished=0.2.3
+	provides = gmpublished=0.2.4
 	conflicts = gmpublished
 	options = !strip
 	options = !debug
-	source = gmpublished-0.2.3-x86_64-linux.zip::https://github.com/charles-mills/gmpublished/releases/download/v0.2.3/gmpublished-0.2.3-x86_64-linux.zip
-	sha256sums = 477699c7188154d2c175c50951ab00b712c7a7a02a29a7190d2c06f2d2aa22f6
+	source = gmpublished-0.2.4-x86_64-linux.zip::https://github.com/charles-mills/gmpublished/releases/download/v0.2.4/gmpublished-0.2.4-x86_64-linux.zip
+	sha256sums = 8d6cde8b1637ec9c8bbf94b35bdb137e0c5e2429be10e66484025a8dbaed630f
 
 pkgname = gmpublished-bin
