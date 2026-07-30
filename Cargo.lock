@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "gmpublished"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "arc-swap",
  "block2 0.6.2",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "gmpublished-backend"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "arc-swap",
  "crc32fast",
@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "gmpublished-domain"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bytemuck",
  "gmpublished-domain",
