@@ -18,7 +18,7 @@ use gmpublished_backend::{
 /// `None` means no CLI-style arguments were supplied and the GUI should
 /// start. A failed request remains a process failure for scripts and file
 /// association handlers.
-pub(crate) fn run() -> Option<Result<(), CliError>> {
+pub fn run() -> Option<Result<(), CliError>> {
     if std::env::args_os().len() <= 1 {
         return None;
     }
@@ -29,7 +29,7 @@ pub(crate) fn run() -> Option<Result<(), CliError>> {
 
 /// Why a CLI invocation failed, as the shell should see it.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum CliError {
+pub enum CliError {
     #[error("{} is not a file", .0.display())]
     NotAFile(PathBuf),
     #[error("backend initialization failed: {0}")]

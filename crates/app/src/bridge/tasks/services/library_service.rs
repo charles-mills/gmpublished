@@ -3,7 +3,7 @@ use crate::bridge::library::{LibraryRefresh, LibraryRefreshReason, LibrarySnapsh
 
 /// Installed-addon library capability exposed to app features.
 #[derive(Clone, Copy)]
-pub(crate) struct LibraryService<'a> {
+pub struct LibraryService<'a> {
     inner: &'a BackendServices,
 }
 

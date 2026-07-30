@@ -18,7 +18,7 @@ use std::{collections::HashMap, sync::Arc};
 
 /// Steam session, Workshop browsing, metadata, and download capability.
 #[derive(Clone, Copy)]
-pub(crate) struct WorkshopService<'a> {
+pub struct WorkshopService<'a> {
     inner: &'a BackendServices,
 }
 

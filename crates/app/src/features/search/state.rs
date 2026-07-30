@@ -6,6 +6,10 @@
 //! memory, and a full search that runs as a cancellable backend task. Both are
 //! generation-stamped so a slower earlier query cannot overwrite a newer one.
 
+// The submodules below are one module split across files: each holds a slice
+// of the state's impl and reaches the shared types through `super::*`.
+#![allow(clippy::wildcard_imports)]
+
 use std::{
     collections::HashSet,
     ops::Range,

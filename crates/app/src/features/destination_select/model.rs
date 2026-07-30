@@ -182,7 +182,7 @@ pub(super) fn selected_base_path<'a>(
     }
 }
 
-pub(crate) fn probe_custom_path(path: &Path) -> bool {
+pub fn probe_custom_path(path: &Path) -> bool {
     path.is_absolute() && path.is_dir()
 }
 

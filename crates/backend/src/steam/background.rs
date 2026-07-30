@@ -50,8 +50,7 @@ pub(crate) enum SteamBackgroundStart {
 
 impl std::fmt::Debug for SteamBackgroundRuntime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.state.lock();
-        let state = match &*state {
+        let state = match &*self.state.lock() {
             RuntimeState::Disabled => "disabled",
             RuntimeState::Dormant => "dormant",
             RuntimeState::Running(_) => "running",
@@ -104,10 +103,11 @@ impl SteamBackgroundRuntime {
             move || downloads.wake_watchdog()
         });
         control.spawn(CONNECT_THREAD, move |control| {
-            connect(control, steam, app_data, search, downloads);
+            connect(&control, &steam, &app_data, &search, &downloads);
         })?;
 
         *state = RuntimeState::Running(control);
+        drop(state);
         Ok(SteamBackgroundStart::Started)
     }
 
@@ -189,6 +189,7 @@ impl BackgroundControl {
                 source,
             })?;
         handles.push(handle);
+        drop(handles);
         Ok(())
     }
 
@@ -214,11 +215,11 @@ impl BackgroundControl {
 }
 
 fn connect(
-    control: Arc<BackgroundControl>,
-    steam: Arc<Steam>,
-    app_data: Arc<AppData>,
-    search: Arc<Search>,
-    downloads: Arc<Downloads>,
+    control: &Arc<BackgroundControl>,
+    steam: &Arc<Steam>,
+    app_data: &Arc<AppData>,
+    search: &Arc<Search>,
+    downloads: &Arc<Downloads>,
 ) {
     let mut client = None;
     retry_until_shutdown(
@@ -249,10 +250,10 @@ fn connect(
     steam.set_connected(true);
 
     if let Err(error) = start_connected_workers(
-        &control,
-        Arc::clone(&steam),
-        Arc::clone(&search),
-        Arc::clone(&downloads),
+        control,
+        Arc::clone(steam),
+        Arc::clone(search),
+        Arc::clone(downloads),
         pump,
     ) {
         log::error!("{error}");
@@ -261,7 +262,7 @@ fn connect(
         return;
     }
 
-    app_data.send_after_steam_init_if_gmod_unset(&steam);
+    app_data.send_after_steam_init_if_gmod_unset(steam);
 }
 
 fn start_connected_workers(
@@ -279,11 +280,11 @@ fn start_connected_workers(
 
     let workshop_client = pump.clone();
     control.spawn(WORKSHOP_THREAD, move |control| {
-        Steam::workshop_fetcher(&steam, &search, workshop_client, &control.shutdown);
+        Steam::workshop_fetcher(&steam, &search, &workshop_client, &control.shutdown);
     })?;
 
     control.spawn(DOWNLOADS_THREAD, move |control| {
-        Downloads::watchdog(&downloads, pump, &control.shutdown);
+        Downloads::watchdog(&downloads, &pump, &control.shutdown);
     })?;
     Ok(())
 }

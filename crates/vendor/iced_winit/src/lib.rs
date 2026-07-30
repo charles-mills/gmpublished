@@ -18,6 +18,9 @@
     html_logo_url = "https://raw.githubusercontent.com/iced-rs/iced/9ab6923e943f784985e9ef9ca28b10278297225d/docs/logo.svg"
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Vendored upstream source, kept diffable against it: `-D warnings` in CI would
+// otherwise force local rewrites of code that upstream still has to change.
+#![allow(deprecated)]
 pub use iced_debug as debug;
 pub use iced_program as program;
 pub use program::core;

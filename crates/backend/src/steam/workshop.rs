@@ -155,7 +155,7 @@ impl Steam {
     pub(super) fn workshop_fetcher(
         steam: &Arc<Self>,
         search: &Arc<Search>,
-        client: steamworks::Client,
+        client: &steamworks::Client,
         shutdown: &crate::signal::Signal,
     ) {
         loop {

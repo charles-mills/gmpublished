@@ -12,7 +12,7 @@ use gmpublished_backend::{Transaction, TransactionId, TransactionPayload};
 
 /// Installed-content search capability exposed to app features.
 #[derive(Clone, Copy)]
-pub(crate) struct SearchService<'a> {
+pub struct SearchService<'a> {
     inner: &'a BackendServices,
 }
 

@@ -22,7 +22,7 @@ impl App {
     }
 
     pub(super) fn size_analyzer_context_menu_task(
-        &mut self,
+        &self,
         menu: &size_analyzer::ContextMenuRequest,
     ) -> Task<RootMessage> {
         log::debug!(

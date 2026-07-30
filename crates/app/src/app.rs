@@ -482,7 +482,7 @@ impl UpdateContext {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum UpdateCheckOutcome {
+pub enum UpdateCheckOutcome {
     ReleaseAvailable(shell::UpdateRelease),
     UpToDate,
     CheckFailed(Arc<shell::UpdateCheckError>),

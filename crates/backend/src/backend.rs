@@ -476,7 +476,7 @@ impl Backend {
         if let Err(error) = self
             .execution
             .spawn_network("GMA whitelist warm-up", move || {
-                whitelist.refresh_from_remote()
+                whitelist.refresh_from_remote();
             })
         {
             // The built-in list stays in force; only the remote refresh is lost.

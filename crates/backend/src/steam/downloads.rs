@@ -923,7 +923,7 @@ impl Downloads {
     #[expect(clippy::significant_drop_tightening)]
     pub(super) fn watchdog(
         downloads: &Arc<Self>,
-        client: steamworks::Client,
+        client: &steamworks::Client,
         shutdown: &crate::signal::Signal,
     ) {
         // `Option`, not a map: the Steam client downloads workshop items

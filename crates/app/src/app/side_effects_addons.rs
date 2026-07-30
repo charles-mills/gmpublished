@@ -107,7 +107,7 @@ impl App {
     }
 
     pub(super) fn my_workshop_context_menu_task(
-        &mut self,
+        &self,
         menu: my_workshop::ContextMenuRequest,
     ) -> Task<RootMessage> {
         log::debug!(
@@ -218,7 +218,7 @@ impl App {
     }
 
     pub(super) fn installed_addons_context_menu_task(
-        &mut self,
+        &self,
         menu: installed_addons::ContextMenuRequest,
     ) -> Task<RootMessage> {
         log::debug!(

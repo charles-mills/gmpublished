@@ -831,7 +831,7 @@ impl State {
 
         match result {
             Ok(verified) => {
-                self.addon_path = verified.display_path().to_owned();
+                verified.display_path().clone_into(&mut self.addon_path);
                 self.content_path = Verification::Verified(VerifiedContentPathState {
                     display_path: verified.display_path().to_owned(),
                     path: verified.path().to_owned(),

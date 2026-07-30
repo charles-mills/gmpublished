@@ -48,7 +48,7 @@ pub use runtime_events::{
     BackendRuntimeAction, BackendRuntimeEvent, BackendRuntimeEventEffects,
     BackendRuntimeEventSubscription, TransactionRuntimeEvent,
 };
-pub(crate) use services::{
+pub use services::{
     ArchiveService, BackendServices, ConfigService, PublishService, WorkshopService,
 };
 #[cfg(test)]

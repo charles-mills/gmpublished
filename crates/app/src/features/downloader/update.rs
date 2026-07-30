@@ -101,7 +101,7 @@ pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effec
 }
 
 #[cfg(test)]
-pub(crate) fn update(state: &mut State, message: Message) -> Vec<Effect> {
+pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     update_at(state, message, Instant::now())
 }
 

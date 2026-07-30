@@ -531,7 +531,7 @@ impl AppData {
     pub fn snapshot(&self) -> AppDataSnapshot {
         loop {
             let sequence = self.settings_sequence.load(Ordering::Acquire);
-            if sequence % 2 != 0 {
+            if !sequence.is_multiple_of(2) {
                 std::hint::spin_loop();
                 continue;
             }

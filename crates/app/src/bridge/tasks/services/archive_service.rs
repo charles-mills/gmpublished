@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 /// GMA inspection and extraction capability exposed to app features.
 #[derive(Clone, Copy)]
-pub(crate) struct ArchiveService<'a> {
+pub struct ArchiveService<'a> {
     inner: &'a BackendServices,
 }
 

@@ -359,9 +359,9 @@ fn entries_from_parsed(parsed: &ParsedGma) -> HashMap<String, GmaEntry> {
             continue;
         }
         entries.insert(
-            entry.path.to_string(),
+            entry.path.clone(),
             GmaEntry {
-                path: entry.path.to_string(),
+                path: entry.path.clone(),
                 size: entry.size,
                 crc: entry.crc,
                 index: index as u64,

@@ -116,11 +116,10 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     }
 
     let bsp_started = Instant::now();
-    let map = match if let Some(pool) = map_pool {
-        gmpublished_domain::scene::map::load_map_with_pool(bsp_bytes, pool)
-    } else {
-        gmpublished_domain::scene::map::load_map(bsp_bytes)
-    } {
+    let map = match map_pool.map_or_else(
+        || gmpublished_domain::scene::map::load_map(bsp_bytes),
+        |pool| gmpublished_domain::scene::map::load_map_with_pool(bsp_bytes, pool),
+    ) {
         Ok(map) => map,
         Err(error) => {
             log::debug!("file preview bsp decode failed: {error}");

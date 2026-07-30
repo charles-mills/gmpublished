@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Workshop publishing capability exposed to app features.
 #[derive(Clone, Copy)]
-pub(crate) struct PublishService<'a> {
+pub struct PublishService<'a> {
     inner: &'a BackendServices,
 }
 

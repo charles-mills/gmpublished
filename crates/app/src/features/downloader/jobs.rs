@@ -302,7 +302,7 @@ pub enum JobProgress {
     Error(UiError),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Jobs {
     downloading: Vec<DownloaderJob>,
     extracting: Vec<DownloaderJob>,
@@ -318,25 +318,6 @@ pub struct Jobs {
     /// the update layer into a cancellation effect so they abort at birth.
     pending_cancellations: Vec<TaskId>,
     next_synthetic_row_sequence: u64,
-}
-
-impl Default for Jobs {
-    fn default() -> Self {
-        Self {
-            downloading: Vec::new(),
-            extracting: Vec::new(),
-            active_items: HashSet::new(),
-            hidden_active_items: HashSet::new(),
-            task_rows: HashMap::new(),
-            task_row_index: HashMap::new(),
-            workshop_row_index: HashMap::new(),
-            pending_task_updates: HashMap::new(),
-            ignored_task_ids: HashSet::new(),
-            workshop_title_requests: HashSet::new(),
-            pending_cancellations: Vec::new(),
-            next_synthetic_row_sequence: 0,
-        }
-    }
 }
 
 impl Jobs {

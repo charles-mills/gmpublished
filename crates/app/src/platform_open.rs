@@ -53,7 +53,6 @@ pub fn install() {
 }
 
 /// Subscribes to document-open batches delivered by the native handlers.
-#[must_use]
 pub fn subscription() -> Subscription<Vec<PathBuf>> {
     Subscription::run(document_open_stream)
 }

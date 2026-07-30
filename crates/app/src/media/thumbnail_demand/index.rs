@@ -139,22 +139,11 @@ impl DemandIndex {
     /// delivered results would look wrong; it would simply be slow.
     pub(super) fn reprioritise_existing(
         &mut self,
-        owner: &Owner,
-        generation: Generation,
-        id: &DemandId,
-        key: &ThumbnailKey,
-        capabilities: DemandCapabilities,
+        interest: &InterestKey,
         priority: Priority,
         promoted_sequence: u64,
     ) -> bool {
-        let interest = InterestKey {
-            owner: *owner,
-            generation,
-            id: id.clone(),
-            key: key.clone(),
-            capabilities,
-        };
-        let Some(entry) = self.entries.get_mut(&interest) else {
+        let Some(entry) = self.entries.get_mut(interest) else {
             return false;
         };
 
@@ -165,7 +154,7 @@ impl DemandIndex {
             if state == DemandState::Queued {
                 // The old heap candidate still carries the old priority and
                 // sequence; it is skipped on pop by the sequence check.
-                self.enqueue(&interest, priority, sequence, capabilities);
+                self.enqueue(interest, priority, sequence, capabilities);
             }
         }
         true

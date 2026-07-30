@@ -164,17 +164,19 @@ impl TaskExecutor {
         job_name: Arc<str>,
         job: impl FnOnce() + Send + 'static,
     ) -> Result<(), ExecutionScheduleError> {
-        let sender = self.0.sender.lock();
-        let Some(sender) = sender.as_ref() else {
-            return Err(ExecutionScheduleError::Stopped {
-                executor: self.0.name,
-                job: Arc::clone(&job_name),
-            });
+        let sent = match self.0.sender.lock().as_ref() {
+            Some(sender) => sender.try_send(Job {
+                name: Arc::clone(&job_name),
+                work: Box::new(job),
+            }),
+            None => {
+                return Err(ExecutionScheduleError::Stopped {
+                    executor: self.0.name,
+                    job: Arc::clone(&job_name),
+                });
+            }
         };
-        match sender.try_send(Job {
-            name: Arc::clone(&job_name),
-            work: Box::new(job),
-        }) {
+        match sent {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(ExecutionScheduleError::Full {
                 executor: self.0.name,

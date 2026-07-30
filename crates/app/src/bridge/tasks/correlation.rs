@@ -149,14 +149,16 @@ impl BackendTransactionTasks {
         task_id: TaskId,
         cancel_transaction: impl FnOnce(TransactionId) -> Option<FinalizeOutcome>,
     ) -> BackendTaskCancelResult {
-        let transaction_id = {
-            let state = self.state.lock();
-            let Some(transaction_id) = state.active.iter().find_map(|(transaction_id, task)| {
+        let correlated = self
+            .state
+            .lock()
+            .active
+            .iter()
+            .find_map(|(transaction_id, task)| {
                 (task.task_id() == task_id).then_some(*transaction_id)
-            }) else {
-                return BackendTaskCancelResult::Uncorrelated;
-            };
-            transaction_id
+            });
+        let Some(transaction_id) = correlated else {
+            return BackendTaskCancelResult::Uncorrelated;
         };
 
         if cancel_transaction(transaction_id) != Some(FinalizeOutcome::Finalized) {

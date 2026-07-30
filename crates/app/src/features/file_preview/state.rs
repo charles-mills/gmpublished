@@ -118,7 +118,7 @@ struct AudioUiState {
     duration_secs: Option<f32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ModelUiState {
     selected_skin: usize,
     bodygroup_choices: Vec<usize>,
@@ -126,6 +126,9 @@ struct ModelUiState {
     phy_debug_enabled: bool,
 }
 
+// Four independent render toggles the map viewport exposes one-for-one; they
+// share no state, so grouping them would only add a layer to read through.
+#[expect(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct MapUiState {
     fog_enabled: bool,
@@ -154,17 +157,6 @@ impl Default for AudioUiState {
             playing: false,
             position_secs: 0.0,
             duration_secs: None,
-        }
-    }
-}
-
-impl Default for ModelUiState {
-    fn default() -> Self {
-        Self {
-            selected_skin: 0,
-            bodygroup_choices: Vec::new(),
-            orbit_pose: None,
-            phy_debug_enabled: false,
         }
     }
 }

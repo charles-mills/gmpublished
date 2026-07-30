@@ -113,21 +113,18 @@ impl<R: Read> IndexReader<R> {
                     return Err(GmaError::FormatError);
                 }
 
-                match available.iter().position(|byte| *byte == 0) {
-                    Some(nul) => {
-                        if value.len().saturating_add(nul) > MAX_STRING_BYTES {
-                            return Err(GmaError::FormatError);
-                        }
-                        value.extend_from_slice(&available[..nul]);
-                        (nul + 1, true)
+                if let Some(nul) = available.iter().position(|byte| *byte == 0) {
+                    if value.len().saturating_add(nul) > MAX_STRING_BYTES {
+                        return Err(GmaError::FormatError);
                     }
-                    None => {
-                        if value.len().saturating_add(available.len()) > MAX_STRING_BYTES {
-                            return Err(GmaError::FormatError);
-                        }
-                        value.extend_from_slice(available);
-                        (available.len(), false)
+                    value.extend_from_slice(&available[..nul]);
+                    (nul + 1, true)
+                } else {
+                    if value.len().saturating_add(available.len()) > MAX_STRING_BYTES {
+                        return Err(GmaError::FormatError);
                     }
+                    value.extend_from_slice(available);
+                    (available.len(), false)
                 }
             };
 

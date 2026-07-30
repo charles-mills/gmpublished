@@ -19,7 +19,7 @@ const LEGACY_UI_SETTINGS_FILE_NAME: &str = "ui-settings.json";
 /// One immutable, internally consistent view of persisted settings and every
 /// path derived from them.
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedConfig {
+pub struct ResolvedConfig {
     pub(crate) settings: Settings,
     pub(crate) paths: AppPaths,
     backend_revision: u64,
@@ -30,7 +30,7 @@ pub(crate) struct ResolvedConfig {
 /// Readers load an `Arc` without locking. Writers serialize the complete
 /// mutate -> resolve -> persist -> publish transaction under `writer`.
 #[derive(Debug)]
-pub(crate) struct ConfigStore {
+pub struct ConfigStore {
     current: ArcSwap<ResolvedConfig>,
     writer: Mutex<()>,
     persist: bool,

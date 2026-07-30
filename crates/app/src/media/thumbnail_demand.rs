@@ -255,15 +255,17 @@ impl Manager {
             // free-running counter, so spending one on a demand that turns out
             // to be new is cheaper than borrowing `self` twice to defer it.
             let promoted_sequence = self.allocate_sequence();
-            if self.index.reprioritise_existing(
-                &set.owner,
-                set.generation,
-                &demand.id,
-                &key,
-                demand.capabilities,
-                demand.priority,
-                promoted_sequence,
-            ) {
+            let interest = index::InterestKey {
+                owner: set.owner,
+                generation: set.generation,
+                id: demand.id.clone(),
+                key: key.clone(),
+                capabilities: demand.capabilities,
+            };
+            if self
+                .index
+                .reprioritise_existing(&interest, demand.priority, promoted_sequence)
+            {
                 continue;
             }
 

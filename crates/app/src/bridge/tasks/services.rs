@@ -28,17 +28,17 @@ mod publish_service;
 mod search_service;
 mod workshop_service;
 
-pub(crate) use archive_service::ArchiveService;
-pub(crate) use config_service::ConfigService;
-pub(crate) use library_service::LibraryService;
-pub(crate) use publish_service::PublishService;
-pub(crate) use search_service::SearchService;
-pub(crate) use workshop_service::WorkshopService;
+pub use archive_service::ArchiveService;
+pub use config_service::ConfigService;
+pub use library_service::LibraryService;
+pub use publish_service::PublishService;
+pub use search_service::SearchService;
+pub use workshop_service::WorkshopService;
 
 /// App composition root. Features receive one of its narrow borrowed service
 /// capabilities; scheduler and lifecycle code alone retain this registry.
 #[derive(Debug)]
-pub(crate) struct BackendServices {
+pub struct BackendServices {
     backend: Arc<Backend>,
     configuration: ConfigStore,
     steam_runtime: SteamRuntime,

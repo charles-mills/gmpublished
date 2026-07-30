@@ -12,7 +12,7 @@ pub mod library_watch;
 pub mod materials;
 pub mod metadata_snapshot;
 pub mod native;
-pub(crate) mod prepare_publish;
+pub mod prepare_publish;
 pub mod publish;
 pub mod snapshot;
 pub mod tasks;

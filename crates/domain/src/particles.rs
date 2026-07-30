@@ -12,6 +12,10 @@
 //! that derive a value from age recompute it from the spawn-time initial
 //! value each step, so operator order cannot accumulate drift.
 
+// The submodules below are one module split across files: each holds a slice
+// of `ParticleEngine`'s impl and reaches the shared types through `super::*`.
+#![allow(clippy::wildcard_imports)]
+
 use crate::scene::pcf::{PcfAttributes, PcfFile, PcfFunction, PcfSystem};
 
 mod compiler;

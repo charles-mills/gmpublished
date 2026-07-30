@@ -551,7 +551,7 @@ fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
     // The terminal event must still get through. Emit it from another
     // thread: with the queue already saturated, a blocking send would
     // otherwise deadlock this test until the drain loop below catches up.
-    let emitter_context = ctx.clone();
+    let emitter_context = ctx;
     let emitter = std::thread::spawn(move || {
         emitter_context.emit_backend_event_for_test(
             gmpublished_backend::BackendEvent::Transaction(

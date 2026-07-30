@@ -331,7 +331,7 @@ impl App {
     }
 
     pub(super) fn open_my_workshop_context_menu(
-        &mut self,
+        &self,
         menu: my_workshop::ContextMenuRequest,
     ) -> Task<RootMessage> {
         let my_workshop::ContextMenuRequest {
@@ -355,7 +355,7 @@ impl App {
     }
 
     pub(super) fn open_installed_addons_context_menu(
-        &mut self,
+        &self,
         menu: installed_addons::ContextMenuRequest,
     ) -> Task<RootMessage> {
         let installed_addons::ContextMenuRequest {
@@ -383,7 +383,7 @@ impl App {
     }
 
     pub(super) fn open_size_analyzer_context_menu(
-        &mut self,
+        &self,
         menu: &size_analyzer::ContextMenuRequest,
     ) -> Task<RootMessage> {
         let entries = menu.entries().to_vec();

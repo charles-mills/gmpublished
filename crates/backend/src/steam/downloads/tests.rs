@@ -90,7 +90,7 @@ fn rejected_extraction_schedule_emits_a_correlated_terminal_error() {
         .spawn_blocking("fill-queue", || {})
         .expect("fill blocking queue");
 
-    let (downloads, collector) = downloads_for_test_with_execution(temp.path(), execution.clone());
+    let (downloads, collector) = downloads_for_test_with_execution(temp.path(), execution);
     let item = id(918_273);
     let request_id = WorkshopSnapshotId::new(44);
     downloads.extract(

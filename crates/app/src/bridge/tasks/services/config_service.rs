@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Configuration capability exposed to app features.
 #[derive(Clone, Copy)]
-pub(crate) struct ConfigService<'a> {
+pub struct ConfigService<'a> {
     inner: &'a BackendServices,
 }
 

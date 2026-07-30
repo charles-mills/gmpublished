@@ -9,7 +9,7 @@ use iced::{Subscription, time};
 
 pub use effect::Effect;
 pub use message::Message;
-pub(crate) use model::PublishIconSubmitResult;
+pub use model::PublishIconSubmitResult;
 pub use model::{
     ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation, IgnoredPattern,
     PublishIconSubmitRequestEnvelope, PublishSubmitContext, PublishSubmitRequestEnvelope,

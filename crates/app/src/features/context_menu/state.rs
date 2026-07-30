@@ -6,7 +6,7 @@ use iced::animation::Easing;
 use crate::bridge::domain::PublishedFileId;
 use crate::theme::{self, motion};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalMenuTarget {
     pub(crate) path: PathBuf,
     pub(crate) path_text: String,
@@ -15,7 +15,7 @@ pub struct LocalMenuTarget {
     pub(crate) preview_url: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextMenuTarget {
     Local(LocalMenuTarget),
     MyWorkshop {
