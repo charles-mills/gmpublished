@@ -121,7 +121,7 @@ impl AudioPlayback {
         match event.kind {
             preview_model::DoorAudioEventKind::MoveStarted => {
                 self.stop_door_loop(key);
-                if door.class == gmpublished_backend::scene::map::MapDoorClass::PropDoorRotating {
+                if door.class == gmpublished_domain::scene::map::MapDoorClass::PropDoorRotating {
                     if let Some(sound) = door.sounds.move_sound.as_ref() {
                         self.play_door_one_shot(sound, event.gain);
                     }
@@ -139,7 +139,7 @@ impl AudioPlayback {
             preview_model::DoorAudioEventKind::MotionEnded { open } => {
                 self.stop_door_loop(key);
                 let sound = if door.class
-                    == gmpublished_backend::scene::map::MapDoorClass::PropDoorRotating
+                    == gmpublished_domain::scene::map::MapDoorClass::PropDoorRotating
                 {
                     if open {
                         door.sounds.open_sound.as_ref()

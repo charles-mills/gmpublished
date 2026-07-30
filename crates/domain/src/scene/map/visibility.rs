@@ -1,3 +1,5 @@
+//! BSP visibility partitioning.
+
 use super::{
     BoundsBuilder, BspModel, GeometryPartition, MapBounds, MapBsp, MapLeafLocator, MapPlayerStart,
     MapPropVisibility, MapSkyCamera, MapVisibilityBucket, SKYBOX_COMPLETION_AABB_EXPANSION,

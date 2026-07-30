@@ -1,4 +1,4 @@
-//! Preview-quality BSP map decoding: geometry, static/detail props,
+//! Shared preview-quality BSP map decoding: geometry, static/detail props,
 //! lighting, visibility, and walk collision, built on
 //! [`vformats::bsp`]. A handful of small algorithms here (the leaf
 //! tree walk in `walk_to_leaf`, the invalid-vertex face tolerance in
@@ -146,9 +146,25 @@ pub fn load_map(bytes: &[u8]) -> Result<MapData, BspError> {
     load_map_with_skybox_partition(bytes, true)
 }
 
+/// Loads a map using a caller-owned Rayon pool for independent lump decodes.
+///
+/// Requiring the pool at this boundary keeps the domain crate from silently
+/// initializing or borrowing Rayon's process-global executor.
+pub fn load_map_with_pool(bytes: &[u8], pool: &rayon::ThreadPool) -> Result<MapData, BspError> {
+    load_map_impl(bytes, true, Some(pool))
+}
+
 fn load_map_with_skybox_partition(
     bytes: &[u8],
     partition_skybox: bool,
+) -> Result<MapData, BspError> {
+    load_map_impl(bytes, partition_skybox, None)
+}
+
+fn load_map_impl(
+    bytes: &[u8],
+    partition_skybox: bool,
+    pool: Option<&rayon::ThreadPool>,
 ) -> Result<MapData, BspError> {
     let version = bsp_version(bytes)?;
     if !matches!(version, 19 | 20) {
@@ -161,7 +177,7 @@ fn load_map_with_skybox_partition(
         max_input_bytes: u64::MAX,
         ..Limits::default()
     };
-    let bsp = MapBsp::parse(bytes, &limits)?;
+    let bsp = MapBsp::parse(bytes, &limits, pool)?;
     let mut stats = MapStatsRaw {
         face_count: count_to_u32(bsp.faces.len()),
         displacement_count: count_to_u32(bsp.displacements.len()),

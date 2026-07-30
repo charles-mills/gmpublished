@@ -1,5 +1,5 @@
-use gmpublished_backend::math::Vec3;
-use gmpublished_backend::scene::map::{
+use gmpublished_domain::math::Vec3;
+use gmpublished_domain::scene::map::{
     AmbientCube, MapAmbientLighting, MapDoorGeometry, MapPropVisibility, StaticPropPlacement,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -403,7 +403,7 @@ fn model_companion_load_previews_the_parent_entry() {
     )
     .expect("fixture archive should load");
     let request = request_from_archive(archive, "Models/Test/Thing.VVD".to_owned(), 9, 123);
-    let data = load_preview_data(request, &test_tokens(), None, &mut |_stage| {})
+    let data = load_preview_data(request, &test_tokens(), None, None, &mut |_stage| {})
         .expect("companion load should resolve through the parent");
 
     assert_eq!(data.entry_path, "Models/Test/Thing.MDL");
@@ -419,7 +419,7 @@ fn model_companion_load_without_parent_reports_the_companion_itself() {
     )
     .expect("fixture archive should load");
     let request = request_from_archive(archive, "models/test/orphan.dx80.vtx".to_owned(), 9, 123);
-    let data = load_preview_data(request, &test_tokens(), None, &mut |_stage| {})
+    let data = load_preview_data(request, &test_tokens(), None, None, &mut |_stage| {})
         .expect("orphaned companion should still produce an info preview");
 
     assert_eq!(data.entry_path, "models/test/orphan.dx80.vtx");
@@ -1076,8 +1076,8 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
             render_mode: RenderMode::Opaque,
         },
     );
-    let door = gmpublished_backend::scene::map::MapDoor {
-        class: gmpublished_backend::scene::map::MapDoorClass::PropDoorRotating,
+    let door = gmpublished_domain::scene::map::MapDoor {
+        class: gmpublished_domain::scene::map::MapDoorClass::PropDoorRotating,
         origin: Vec3::splat(0.0),
         angles: Vec3::splat(0.0),
         local_bounds_min: Vec3::splat(0.0),
@@ -1085,13 +1085,13 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
         visibility: MapVisibilityBucket::Always,
         auto_close_after: Some(0.0),
         initial_progress: 0.0,
-        motion: gmpublished_backend::scene::map::MapDoorMotion::Rotating {
+        motion: gmpublished_domain::scene::map::MapDoorMotion::Rotating {
             angle_delta: Vec3::new(0.0, 90.0, 0.0),
             degrees: 90.0,
             speed: 100.0,
-            open_direction: gmpublished_backend::scene::map::MapDoorOpenDirection::Both,
+            open_direction: gmpublished_domain::scene::map::MapDoorOpenDirection::Both,
         },
-        sounds: gmpublished_backend::scene::map::MapDoorSounds::default(),
+        sounds: gmpublished_domain::scene::map::MapDoorSounds::default(),
         geometry: MapDoorGeometry::Prop {
             placement: prop_placement(
                 "models/test/door.mdl",
@@ -1615,10 +1615,14 @@ fn missing_static_prop_model_is_skipped_and_counted() {
 fn map_preview_with_panicking_static_prop_model_still_returns_map() {
     let bytes = static_prop_bsp_fixture_bytes();
     let request = request("maps/test.bsp", &bytes);
-    let data =
-        map_preview_data_with_prop_model_loader(&request, &bytes, None, &mut |_| {}, &|_, _| {
-            panic!("fixture model panic")
-        });
+    let data = map_preview_data_with_prop_model_loader(
+        &request,
+        &bytes,
+        None,
+        None,
+        &mut |_| {},
+        &|_, _| panic!("fixture model panic"),
+    );
 
     assert!(matches!(
         data.content,
@@ -1685,7 +1689,7 @@ fn prop_placement_with_visibility(
         angles,
         skin,
         scale: 1.0,
-        solid: gmpublished_backend::scene::map::MapPropSolid::None,
+        solid: gmpublished_domain::scene::map::MapPropSolid::None,
         visibility: visibility.into(),
     }
 }
@@ -1849,7 +1853,7 @@ fn static_prop_bsp_fixture_bytes() -> Vec<u8> {
 }
 
 fn test_ambient_from_bsp_fixture() -> MapAmbientLighting {
-    gmpublished_backend::scene::map::load_map(&ambient_static_prop_bsp_fixture_bytes())
+    gmpublished_domain::scene::map::load_map(&ambient_static_prop_bsp_fixture_bytes())
         .expect("ambient fixture bsp should load")
         .ambient
 }

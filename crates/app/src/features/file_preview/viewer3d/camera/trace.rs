@@ -4,8 +4,8 @@
 use super::super::super::state::MovementMode;
 use super::super::{MapTrace, bounds_intersect, expand_bounds, trace_aabb_against_aabb};
 use super::{FlyCamera, WALK_STEP_HEIGHT, WalkHull};
-use gmpublished_backend::math::Vec3;
-use gmpublished_backend::scene::map::MapWalkCollision;
+use gmpublished_domain::math::Vec3;
+use gmpublished_domain::scene::map::MapWalkCollision;
 
 const WALK_UNSTICK_STEPS: usize = 16;
 

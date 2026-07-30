@@ -360,7 +360,7 @@ mod tests {
             Message::SaveCompleted(
                 generation,
                 Err(crate::bridge::ui_error::UiError::detailed(
-                    gmpublished_backend::error_key::keys::IO_ERROR,
+                    gmpublished_backend::error_keys::IO_ERROR,
                     Some("failed".to_owned()),
                 )),
             ),

@@ -7,7 +7,7 @@ use crate::bridge::{
     },
     ui_error::UiError,
 };
-use gmpublished_backend::error_key::ErrorKey;
+use gmpublished_backend::ErrorKey;
 use iced::widget::image;
 
 use super::ChangelogContent;

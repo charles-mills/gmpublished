@@ -4,7 +4,7 @@
 //!
 //! Features never reach each other or the backend directly. Each `update`
 //! returns plain `Effect` values, and the runners in the `side_effects_*`
-//! modules are the only place those become work — a task on a worker pool, a
+//! modules are the only place those become work — a task on a shared executor, a
 //! window operation, a native dialog. That is what keeps the features testable
 //! without a backend and keeps every side effect enumerable in one place.
 
@@ -106,6 +106,7 @@ use view_support::{addon_drag_ghost, resolve_tokens, system_scheme_from_mode};
 pub struct App {
     ctx: BackendContext,
     thumbnails: thumbnail_demand::Manager,
+    workshop_snapshot_sequence: std::cell::Cell<u64>,
     state: State,
     window_id: Option<window::Id>,
     startup_phase: StartupPhase,
@@ -113,11 +114,11 @@ pub struct App {
     library_warm_kicked: bool,
     audio_playback: Option<AudioPlayback>,
     /// App-data snapshots arrive in backend order but are sanitized on a
-    /// parallel worker pool. Keep exactly one such job in flight so an older
+    /// CPU executor. Keep exactly one such job in flight so an older
     /// snapshot can never finish after, and overwrite, a newer one. While it
     /// runs, only the newest queued snapshot matters.
     appdata_snapshot_in_flight: bool,
-    pending_appdata_snapshot: Option<Box<gmpublished_backend::appdata::AppDataSnapshot>>,
+    pending_appdata_snapshot: Option<Box<gmpublished_backend::AppDataSnapshot>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,11 +147,10 @@ impl Drop for App {
     /// rather than leaving process exit to race a still-running connect retry,
     /// callback pump, or archive write.
     ///
-    /// Transactions are cancelled first. The worker pools are joined under a
-    /// deadline, so a job still running when that expires is abandoned where it
-    /// stands — mid-write, for an extraction that streams each entry straight
-    /// to its destination. Cancelling gives every such job the chance to stop
-    /// at its own next checkpoint instead.
+    /// Transactions are cancelled first. When the model's remaining fields are
+    /// dropped after this hook, the shared executors stop accepting work and
+    /// release their workers under a bounded deadline. Cancelling gives active
+    /// jobs the chance to stop at their own next checkpoint first.
     fn drop(&mut self) {
         let cancelled = self.ctx.shutdown();
         if cancelled > 0 {
@@ -470,9 +470,7 @@ fn first_frame_presented_event(
     }
 }
 
-fn search_items_from_library(
-    snapshot: &LibrarySnapshot,
-) -> Vec<gmpublished_backend::search::SearchItem> {
+fn search_items_from_library(snapshot: &LibrarySnapshot) -> Vec<gmpublished_backend::SearchItem> {
     snapshot
         .addons
         .iter()
@@ -486,7 +484,7 @@ fn search_items_from_library(
                 terms.push(workshop_id.get().to_string());
             }
 
-            gmpublished_backend::search::SearchItem::new_installed_addon(
+            gmpublished_backend::SearchItem::new_installed_addon(
                 addon.canonical_path.clone(),
                 addon.workshop_id.map(PublishedFileId::get),
                 addon.display_title(),
@@ -499,7 +497,7 @@ fn search_items_from_library(
 
 fn search_file_items_from_library(
     snapshot: &LibrarySnapshot,
-) -> Vec<gmpublished_backend::search::SearchItem> {
+) -> Vec<gmpublished_backend::SearchItem> {
     let entry_count = snapshot
         .addons
         .iter()
@@ -510,13 +508,13 @@ fn search_file_items_from_library(
         // One shared identity per addon; every file item Arc-shares it
         // instead of copying the path/title/id per file. Label and
         // extension derive from the entry path inside the backend.
-        let shared = gmpublished_backend::search::FileSearchAddon::new(
+        let shared = gmpublished_backend::FileSearchAddon::new(
             addon.canonical_path.clone(),
             addon.display_title(),
             addon.workshop_id.map(Into::into),
         );
         items.extend(addon.meta.entries.iter().map(move |entry| {
-            gmpublished_backend::search::SearchItem::new_installed_addon_file(
+            gmpublished_backend::SearchItem::new_installed_addon_file(
                 shared.clone(),
                 entry.path.clone(),
                 entry.size,
@@ -552,6 +550,7 @@ impl App {
             ctx: &self.ctx,
             i18n: &self.state.i18n,
             tokens: &self.state.tokens,
+            workshop_snapshot_sequence: &self.workshop_snapshot_sequence,
         }
     }
 
@@ -579,8 +578,7 @@ impl App {
     /// state/effect tests never launch HTTP, discovery, or warm-up jobs.
     fn from_context(ctx: BackendContext, startup_phase: StartupPhase) -> Self {
         let thumbnails = thumbnail_demand::Manager::new(thumbnail_demand::Config {
-            disk_cache_dir: gmpublished_backend::appdata::cache_dir()
-                .map(|dir| dir.join("thumbnails")),
+            disk_cache_dir: gmpublished_backend::cache_dir().map(|dir| dir.join("thumbnails")),
             ..thumbnail_demand::Config::default()
         });
         let mut state = State::default();
@@ -589,6 +587,7 @@ impl App {
         let app = Self {
             ctx,
             thumbnails,
+            workshop_snapshot_sequence: std::cell::Cell::new(0),
             state,
             window_id: None,
             startup_phase,
@@ -608,7 +607,12 @@ impl App {
             return Task::none();
         }
 
-        let _started = self.ctx.activate_startup_services();
+        if let Err(error) = self.ctx.activate_startup_services() {
+            // Local browsing and archive operations remain usable without
+            // Steam, so a supervisor startup failure is reported but does not
+            // tear down the already-visible application.
+            log::error!("could not start backend background services: {error}");
+        }
         // Seed placeholders from the persisted metadata snapshot so grids
         // paint blurred-then-sharp instead of blank while decoding.
         self.thumbnails.seed_thumbhashes(self.ctx.thumbhash_seed());
@@ -1628,7 +1632,7 @@ impl App {
         let rows = visible_snapshot.as_ref().map_or_else(
             || {
                 Err(UiError::new(
-                    gmpublished_backend::error_key::keys::GMOD_PATH_MISSING,
+                    gmpublished_backend::error_keys::GMOD_PATH_MISSING,
                 ))
             },
             |snapshot| Ok(installed_addons::rows_from_snapshot(snapshot)),

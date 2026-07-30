@@ -1,3 +1,5 @@
+//! BSP pakfile data and extraction limits.
+
 use super::{BspError, Limits, ZipReader, fmt, normalize_source_path};
 
 pub const MAX_PAKFILE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;

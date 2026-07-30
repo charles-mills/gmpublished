@@ -1,41 +1,29 @@
 //! Composition root: constructs every backend service, wires their
-//! dependencies together explicitly, and spawns the process-lifetime
-//! background threads (Steam connect/watchdog, workshop fetcher, downloads
-//! watchdog, whitelist warm-up). Services take their dependencies as
-//! constructor parameters or fields set here rather than reaching for each
-//! other.
-//!
-//! Process globals are the exception: four `LazyLock` rayon pools
-//! (`steam::downloads`, `gma::write`, `gma::extract`) and two `AtomicU64`
-//! counters are statics rather than services, and none of them observes
-//! shutdown.
-//!
-//! The whitelist warm-up is the one background thread deliberately left
-//! detached rather than joined at shutdown, because it has nothing to leave
-//! half-finished: it performs one HTTP GET behind a two-second deadline and
-//! publishes the result into an `ArcSwap`, touching no disk and no external
-//! state. Joining it would put that deadline on the exit path to protect a
-//! write that does not exist. It is named so it stays identifiable in a
-//! panic or a thread dump.
+//! dependencies together explicitly, and owns the process-lifetime execution
+//! and background runtimes. Services take dependencies as constructor
+//! parameters or fields set here rather than reaching for each other.
 
 use std::{
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
 
 use crate::{
     appdata::{AppData, AppDataPaths},
     events::{BackendEventSink, NullEventSink},
+    execution::{ExecutionConfig, ExecutionResources},
     gma::{
-        ExtractDestination, ExtractOptions, ExtractionContext, GmaFile, whitelist::AddonWhitelist,
+        ExtractDestination, ExtractOptions, ExtractionContext, GmaFile, read::GmaView,
+        whitelist::AddonWhitelist,
     },
     search::Search,
-    steam::{Steam, downloads::Downloads},
+    steam::{
+        Steam,
+        background::{SteamBackgroundRuntime, SteamBackgroundStart},
+        downloads::Downloads,
+    },
     transactions::Transactions,
 };
 
@@ -57,6 +45,9 @@ pub struct BackendConfig {
     /// directory. Test backends disable it because many isolated roots coexist
     /// in one process and only the first can own the global sink.
     pub file_logging: bool,
+    /// Process-wide execution budgets. Calculated once by the composition
+    /// root rather than independently by each subsystem.
+    pub execution: ExecutionConfig,
 }
 
 /// Controls process-lifetime services independently from construction of the
@@ -77,6 +68,7 @@ impl Default for BackendConfig {
             data_root: None,
             background_services: BackgroundServices::Enabled,
             file_logging: true,
+            execution: ExecutionConfig::for_machine(),
         }
     }
 }
@@ -92,41 +84,25 @@ impl BackendConfig {
             data_root: Some(data_root.to_path_buf()),
             background_services: BackgroundServices::Disabled,
             file_logging: false,
+            execution: ExecutionConfig {
+                cpu_threads: 2,
+                blocking_threads: 2,
+                network_threads: 2,
+                queue_capacity: 64,
+            },
         }
     }
 }
 
 pub struct Backend {
-    pub transactions: Transactions,
-    pub app_data: Arc<AppData>,
-    pub steam: Arc<Steam>,
-    pub search: Arc<Search>,
-    pub downloads: Arc<Downloads>,
-    pub whitelist: AddonWhitelist,
-    background_services: BackgroundServiceGate,
-}
-
-#[derive(Debug)]
-struct BackgroundServiceGate {
-    enabled: bool,
-    started: AtomicBool,
-}
-
-impl BackgroundServiceGate {
-    const fn new(mode: BackgroundServices) -> Self {
-        Self {
-            enabled: matches!(mode, BackgroundServices::Enabled),
-            started: AtomicBool::new(false),
-        }
-    }
-
-    fn try_start(&self) -> bool {
-        self.enabled
-            && self
-                .started
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-    }
+    execution: ExecutionResources,
+    transactions: Transactions,
+    app_data: Arc<AppData>,
+    steam: Arc<Steam>,
+    search: Arc<Search>,
+    downloads: Arc<Downloads>,
+    whitelist: AddonWhitelist,
+    background_runtime: SteamBackgroundRuntime,
 }
 
 impl fmt::Debug for Backend {
@@ -136,14 +112,11 @@ impl fmt::Debug for Backend {
 }
 
 impl Drop for Backend {
-    /// A safety net for anything that owns a `Backend` outside the iced app
-    /// (tests, CLI mode): the app's own exit path calls
-    /// [`Steam::shutdown`](crate::steam::Steam::shutdown) explicitly rather
-    /// than waiting on this, since other clones of the services `Arc` this
-    /// is reached through can keep it alive past the moment the window
-    /// closes.
+    /// A safety net for non-app owners. The app also shuts the runtime down
+    /// explicitly because worker-held `Arc<Backend>` clones can outlive its
+    /// root model.
     fn drop(&mut self) {
-        self.steam.shutdown();
+        self.background_runtime.shutdown();
     }
 }
 
@@ -153,6 +126,8 @@ impl Drop for Backend {
 pub enum BackendInitError {
     #[error("failed to install backend logger: {0}")]
     LoggerInstall(String),
+    #[error(transparent)]
+    Execution(#[from] crate::execution::ExecutionInitError),
     #[error("backend initialization stage '{stage}' panicked: {message}")]
     StagePanic {
         stage: &'static str,
@@ -160,7 +135,229 @@ pub enum BackendInitError {
     },
 }
 
+/// Failure to start a process-lifetime background service.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to start backend background services: {source}")]
+pub struct BackgroundStartError {
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+/// Result of asking the process-lifetime services to start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundStartOutcome {
+    Started,
+    AlreadyRunning,
+    Disabled,
+    Stopped,
+}
+
 impl Backend {
+    #[must_use]
+    pub fn execution_resources(&self) -> ExecutionResources {
+        self.execution.clone()
+    }
+
+    #[must_use]
+    pub fn cpu_executor(&self) -> &crate::CpuExecutor {
+        self.execution.cpu()
+    }
+
+    #[must_use]
+    pub fn begin_transaction(&self) -> crate::Transaction {
+        self.transactions.begin()
+    }
+
+    #[must_use]
+    pub fn cancel_all_transactions(&self) -> usize {
+        self.transactions.cancel_all()
+    }
+
+    pub fn cancel_transaction(
+        &self,
+        id: crate::transactions::TransactionId,
+    ) -> Option<crate::transactions::FinalizeOutcome> {
+        self.transactions.cancel_by_id(id)
+    }
+
+    #[must_use]
+    pub fn app_data_snapshot(&self) -> crate::appdata::AppDataSnapshot {
+        self.app_data.snapshot()
+    }
+
+    pub fn update_settings(
+        &self,
+        update: impl FnOnce(&mut crate::appdata::Settings) -> crate::appdata::SettingsEnvironment,
+    ) -> Result<(), crate::appdata::SettingsError> {
+        self.app_data.update_settings(update)
+    }
+
+    #[must_use]
+    pub fn discover_gmod_dir(&self) -> Option<PathBuf> {
+        self.app_data.discover_gmod_dir(&self.steam)
+    }
+
+    #[must_use]
+    pub fn discover_gmod_dir_for_settings(
+        &self,
+        configured: Option<&std::path::Path>,
+    ) -> Option<PathBuf> {
+        self.app_data
+            .discover_gmod_dir_for_settings(configured, &self.steam)
+    }
+
+    #[must_use]
+    pub fn steam_runtime(&self) -> crate::steam::SteamRuntime {
+        crate::steam::SteamRuntime::new(Arc::clone(&self.steam))
+    }
+
+    pub fn connected_steam(
+        &self,
+    ) -> Result<crate::steam::ConnectedSteam<'_>, crate::steam::SteamRuntimeError> {
+        self.steam.require_client()
+    }
+
+    #[must_use]
+    pub fn steam_connected(&self) -> bool {
+        self.steam.connected()
+    }
+
+    pub fn sync_installed_search(
+        &self,
+        addons: Vec<crate::search::SearchItem>,
+        files: Vec<crate::search::SearchItem>,
+    ) {
+        self.search.sync_installed_addons(addons);
+        self.search.sync_installed_addon_files(files);
+    }
+
+    #[must_use]
+    pub fn quick_search(
+        &self,
+        query: String,
+        scope: crate::search::SearchScope,
+    ) -> crate::search::QuickSearchResult {
+        self.search.quick_search_with_scope(query, scope)
+    }
+
+    pub fn full_search(
+        &self,
+        query: String,
+        scope: crate::search::SearchScope,
+        transaction: crate::Transaction,
+    ) -> crate::transactions::TransactionId {
+        self.search
+            .full_with_transaction_scope(query, scope, transaction)
+    }
+
+    pub fn cancel_all_downloads(&self) {
+        self.downloads.cancel_all();
+    }
+
+    pub fn queue_workshop_downloads(
+        &self,
+        ids: impl IntoIterator<Item = crate::WorkshopId>,
+    ) -> Result<(), crate::steam::SteamRuntimeError> {
+        crate::steam::downloads::queue_workshop_downloads(&self.downloads, ids)
+    }
+
+    pub fn queue_workshop_download_to(
+        &self,
+        item: crate::WorkshopId,
+        destination: ExtractDestination,
+        request_id: crate::events::WorkshopSnapshotId,
+    ) -> Result<(), crate::steam::SteamRuntimeError> {
+        crate::steam::downloads::queue_workshop_download_to(
+            &self.downloads,
+            item,
+            destination,
+            request_id,
+        )
+    }
+
+    #[must_use]
+    pub fn browse_my_workshop_page(
+        &self,
+        page: u32,
+    ) -> Option<crate::steam::workshop::WorkshopPage> {
+        crate::steam::workshop::browse_my_workshop_page(&self.steam, &self.search, page)
+    }
+
+    #[must_use]
+    pub fn whitelist_snapshot(&self) -> Arc<Vec<String>> {
+        self.whitelist.snapshot()
+    }
+
+    pub fn refresh_whitelist(&self) {
+        self.whitelist.refresh_from_remote();
+    }
+
+    pub fn submit_publish(
+        &self,
+        submission: crate::steam::publishing::PublishSubmission,
+        transaction: &crate::Transaction,
+    ) -> Result<
+        crate::steam::publishing::PublishSubmissionOutcome,
+        crate::steam::publishing::PublishError,
+    > {
+        crate::steam::publishing::submit_with_transaction(
+            submission,
+            transaction,
+            &self.app_data,
+            &self.steam,
+            &self.whitelist,
+            self.execution.cpu(),
+        )
+    }
+
+    pub fn update_publish_icon(
+        &self,
+        workshop_id: crate::WorkshopId,
+        icon: crate::steam::publishing::WorkshopIcon,
+        transaction: &crate::Transaction,
+    ) -> Result<bool, crate::steam::publishing::PublishError> {
+        self.steam
+            .require_client()?
+            .update_icon(workshop_id, icon, transaction, &self.app_data)
+    }
+
+    pub fn extract_gma_entry(
+        &self,
+        view: &GmaView,
+        gma: &GmaFile,
+        entry_path: String,
+        transaction: &crate::Transaction,
+        options: ExtractOptions,
+    ) -> Result<PathBuf, crate::GmaError> {
+        view.extract_entry(
+            gma,
+            entry_path,
+            transaction,
+            options,
+            &self.app_data,
+            &self.steam,
+        )
+    }
+
+    pub fn extract_gma(
+        &self,
+        view: &GmaView,
+        gma: &GmaFile,
+        transaction: &crate::Transaction,
+        context: ExtractionContext,
+    ) -> Result<PathBuf, crate::GmaError> {
+        view.extract(gma, transaction, context, self.execution.cpu())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn emit_test_event(&self, event: crate::events::BackendEvent) {
+        self.transactions.emit(event);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn clear_search_for_test(&self) {
+        self.search.clear();
+    }
+
     /// Constructs every service in dependency order. Process-lifetime work
     /// remains dormant until the caller explicitly releases it with
     /// [`Self::start_background_services`].
@@ -170,6 +367,7 @@ impl Backend {
             data_root,
             background_services,
             file_logging,
+            execution,
         } = config;
 
         initialize_stage("logging", || {
@@ -184,6 +382,7 @@ impl Backend {
             });
 
         let transactions = Transactions::new(event_sink);
+        let execution = initialize_stage("execution", || ExecutionResources::build(execution))??;
 
         log::info!("initializing appdata");
         let app_data = initialize_stage("appdata", || {
@@ -197,7 +396,7 @@ impl Backend {
         let steam = initialize_stage("steamworks", || Arc::new(Steam::new(transactions.clone())))?;
 
         log::info!("initializing search");
-        let search = initialize_stage("search", || Arc::new(Search::new()))?;
+        let search = initialize_stage("search", || Arc::new(Search::new(execution.cpu().clone())))?;
 
         let whitelist = AddonWhitelist::new();
 
@@ -207,17 +406,22 @@ impl Backend {
                 Arc::clone(&steam),
                 whitelist.clone(),
                 transactions.clone(),
+                execution.clone(),
             ))
         })?;
 
         let backend = Arc::new(Self {
+            execution,
             transactions,
             app_data,
             steam,
             search,
             downloads,
             whitelist,
-            background_services: BackgroundServiceGate::new(background_services),
+            background_runtime: SteamBackgroundRuntime::new(matches!(
+                background_services,
+                BackgroundServices::Enabled
+            )),
         });
 
         Ok(backend)
@@ -241,28 +445,50 @@ impl Backend {
         )
     }
 
-    /// Starts process-lifetime services at most once. Returns whether this
-    /// call won the start gate; disabled backends always return `false`.
-    pub fn start_background_services(self: &Arc<Self>) -> bool {
-        if !self.background_services.try_start() {
-            return false;
+    /// Starts process-lifetime services at most once and reports the exact
+    /// lifecycle state observed by the request.
+    pub fn start_background_services(
+        self: &Arc<Self>,
+    ) -> Result<BackgroundStartOutcome, BackgroundStartError> {
+        let outcome = self
+            .background_runtime
+            .start(
+                Arc::clone(&self.steam),
+                Arc::clone(&self.app_data),
+                Arc::clone(&self.search),
+                Arc::clone(&self.downloads),
+            )
+            .map_err(|error| BackgroundStartError {
+                source: Box::new(error),
+            })?;
+        let outcome = match outcome {
+            SteamBackgroundStart::Started => BackgroundStartOutcome::Started,
+            SteamBackgroundStart::AlreadyRunning => BackgroundStartOutcome::AlreadyRunning,
+            SteamBackgroundStart::Disabled => BackgroundStartOutcome::Disabled,
+            SteamBackgroundStart::Stopped => BackgroundStartOutcome::Stopped,
+        };
+        if outcome != BackgroundStartOutcome::Started {
+            return Ok(outcome);
         }
-
-        Steam::spawn_background_threads(&self.steam, &self.app_data, &self.search, &self.downloads);
 
         log::info!("warming GMA whitelist");
-        // A plain thread keeps the 12-thread rayon pool lazy; spawning here
-        // would build the whole pool at startup for a one-shot warm-up.
-        // Detached on purpose — see the module doc.
         let whitelist = self.whitelist.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("gmpublished-whitelist".to_owned())
-            .spawn(move || whitelist.refresh_from_remote())
+        if let Err(error) = self
+            .execution
+            .spawn_network("GMA whitelist warm-up", move || {
+                whitelist.refresh_from_remote()
+            })
         {
             // The built-in list stays in force; only the remote refresh is lost.
-            log::warn!("could not start the GMA whitelist warm-up: {error}");
+            log::warn!("could not schedule the GMA whitelist warm-up: {error}");
         }
-        true
+        Ok(BackgroundStartOutcome::Started)
+    }
+
+    /// Cooperatively stops every process-lifetime service and joins its
+    /// workers under one bounded deadline. Idempotent.
+    pub fn shutdown_background_services(&self) {
+        self.background_runtime.shutdown();
     }
 }
 
@@ -308,18 +534,19 @@ mod tests {
     }
 
     #[test]
-    fn enabled_background_service_gate_opens_once() {
-        let gate = BackgroundServiceGate::new(BackgroundServices::Enabled);
+    fn disabled_background_services_never_start() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backend = Backend::init(BackendConfig::for_test(temp.path())).expect("backend init");
 
-        assert!(gate.try_start());
-        assert!(!gate.try_start());
-    }
-
-    #[test]
-    fn disabled_background_service_gate_never_opens() {
-        let gate = BackgroundServiceGate::new(BackgroundServices::Disabled);
-
-        assert!(!gate.try_start());
-        assert!(!gate.try_start());
+        assert_eq!(
+            backend.start_background_services().expect("disabled start"),
+            BackgroundStartOutcome::Disabled
+        );
+        assert_eq!(
+            backend
+                .start_background_services()
+                .expect("repeated disabled start"),
+            BackgroundStartOutcome::Disabled
+        );
     }
 }

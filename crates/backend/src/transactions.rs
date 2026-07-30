@@ -2,12 +2,15 @@
 //! an operation reports status, progress and completion through, and
 //! [`Transactions`] mints them and routes their events to the app.
 //!
-//! Cancellation is cooperative and one-way: setting the flag is all this
-//! module does, and each operation decides where its own checkpoints are.
+//! Each transaction has one serialized event stream: zero or more running
+//! events, exactly one terminal event, then nothing. Cancellation is
+//! cooperative and one-way; operations decide where to poll their own
+//! checkpoints, while this module guarantees the cancellation error is the
+//! last event if cancellation wins.
 
 mod payload;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use std::sync::{
     Arc, Weak,
@@ -189,6 +192,7 @@ impl Transactions {
         let transaction = Arc::new(TransactionInner {
             id,
             state: AtomicU8::new(State::Running as u8),
+            emission: Mutex::new(()),
             shared: Arc::clone(&self.shared),
         });
 
@@ -201,11 +205,10 @@ impl Transactions {
     #[must_use]
     pub fn find(&self, transaction_id: TransactionId) -> Option<Transaction> {
         let registry = self.shared.registry.read();
-        // A failed upgrade is not a leak: the entry is removed by
-        // `try_finalize`, which `Drop` reaches only after the last strong
-        // reference is already gone. A concurrent lookup in that window sees
-        // a live entry it cannot upgrade, and "already finished" is the right
-        // answer for it.
+        // A failed upgrade is not a leak: `Drop` can reach finalization only
+        // after the last strong reference is already gone. A concurrent
+        // lookup in that window sees a live entry it cannot upgrade, and
+        // "already finished" is the right answer for it.
         registry
             .live
             .get(&transaction_id)
@@ -222,8 +225,8 @@ impl Transactions {
     /// pools are joined. Extraction writes each entry straight to its
     /// destination, so "abandoned mid-write" means a truncated file.
     pub fn cancel_all(&self) -> usize {
-        // Bind before cancelling: `cancel` can finalize a transaction, whose
-        // `Drop` takes the registry write lock to remove itself.
+        // Collect before cancelling: finalization takes the registry write
+        // lock to retire each transaction.
         let live: Vec<Transaction> = {
             let registry = self.shared.registry.read();
             registry
@@ -234,15 +237,16 @@ impl Transactions {
         };
 
         live.iter()
-            .filter(|transaction| transaction.cancel())
+            .filter(|transaction| transaction.cancel() == FinalizeOutcome::Finalized)
             .count()
     }
 
-    pub fn cancel_by_id(&self, id: TransactionId) -> bool {
-        let Some(transaction) = self.find(id) else {
-            return false;
-        };
-        transaction.cancel()
+    /// Attempts to cancel a registered transaction.
+    ///
+    /// `None` means the id is no longer registered (or never existed). A
+    /// present value reports which side won a concurrent terminal race.
+    pub fn cancel_by_id(&self, id: TransactionId) -> Option<FinalizeOutcome> {
+        self.find(id).map(|transaction| transaction.cancel())
     }
 }
 
@@ -251,7 +255,9 @@ fn progress_as_int(progress: f64) -> u16 {
     u16::min((progress * 10000.) as u16, 10000)
 }
 
-/// The one-way `Running -> terminal` lifecycle, stored in an [`AtomicU8`].
+/// The one-way `Running -> terminal` lifecycle, stored in an [`AtomicU8`] for
+/// cheap cooperative cancellation checks. Transitions are serialized by the
+/// transaction's emission mutex.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum State {
@@ -262,9 +268,8 @@ enum State {
 }
 
 impl State {
-    /// Only ever fed a discriminant this module wrote — the initial
-    /// `State::Running` or a `try_finalize` `compare_exchange` — so the
-    /// catch-all arm is `Running` itself, not a fallback for unknown input.
+    /// Only ever fed a discriminant this module wrote, so the catch-all arm is
+    /// `Running` itself, not a fallback for unknown input.
     const fn from_raw(raw: u8) -> Self {
         debug_assert!(raw <= Self::Cancelled as u8, "state came from elsewhere");
         match raw {
@@ -274,6 +279,26 @@ impl State {
             _ => Self::Running,
         }
     }
+}
+
+/// Result of attempting to emit a non-terminal transaction event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmitOutcome {
+    /// The transaction was running and the event was emitted.
+    Emitted,
+    /// A terminal transition won first, so the event was rejected.
+    AlreadyFinalized,
+}
+
+/// Result of attempting a one-way `Running -> terminal` transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinalizeOutcome {
+    /// This call performed the terminal transition and emitted its event.
+    Finalized,
+    /// Cancellation had already performed the terminal transition.
+    AlreadyCancelled,
+    /// Successful or failed completion had already performed the transition.
+    AlreadyCompleted,
 }
 
 /// Identifies one transaction for its whole lifetime. The correlation key the
@@ -319,6 +344,10 @@ impl std::fmt::Debug for Transaction {
 struct TransactionInner {
     id: TransactionId,
     state: AtomicU8,
+    /// Serializes the running-state check with every event emission. This is
+    /// the structural guarantee that a terminal event is last, even when a
+    /// worker clone races cancellation.
+    emission: Mutex<()>,
     shared: Arc<TransactionsShared>,
 }
 impl TransactionInner {
@@ -326,117 +355,95 @@ impl TransactionInner {
         self.shared.sink.emit(BackendEvent::Transaction(event));
     }
 
-    /// Attempts the one-way Running -> Terminal transition. Returns `Ok(())`
-    /// if this call won it (the caller may now emit its terminal message);
-    /// `Err(existing)` if another call already finalized the transaction
-    /// first, naming the state that won.
-    fn try_finalize(&self, target: State) -> Result<(), State> {
-        self.state
-            .compare_exchange(
-                State::Running as u8,
-                target as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map_err(State::from_raw)
-            .map(|_| {
-                let mut registry = self.shared.registry.write();
-                registry.live.remove(&self.id);
-            })
+    fn emit_while_running(&self, event: TransactionEvent) -> EmitOutcome {
+        let _emission = self.emission.lock();
+        if self.aborted() {
+            return EmitOutcome::AlreadyFinalized;
+        }
+
+        self.emit(event);
+        EmitOutcome::Emitted
     }
 
-    fn data(&self, payload: TransactionPayload) {
-        self.emit(TransactionEvent::Data {
+    fn finalize(&self, target: State, event: TransactionEvent) -> FinalizeOutcome {
+        debug_assert_ne!(target, State::Running);
+
+        let _emission = self.emission.lock();
+        match State::from_raw(self.state.load(Ordering::Acquire)) {
+            State::Running => {
+                // The mutex is the sole writer discipline. Store the terminal
+                // state before publishing the terminal event so cancellation
+                // polling observes completion no later than event consumers.
+                self.state.store(target as u8, Ordering::Release);
+                self.shared.registry.write().live.remove(&self.id);
+                self.emit(event);
+                FinalizeOutcome::Finalized
+            }
+            State::Cancelled => FinalizeOutcome::AlreadyCancelled,
+            State::Finished | State::Errored => FinalizeOutcome::AlreadyCompleted,
+        }
+    }
+
+    fn data(&self, payload: TransactionPayload) -> EmitOutcome {
+        self.emit_while_running(TransactionEvent::Data {
             id: self.id,
             payload,
-        });
+        })
     }
 
-    fn status(&self, status: TransactionStatus) {
-        self.emit(TransactionEvent::Status {
+    fn status(&self, status: TransactionStatus) -> EmitOutcome {
+        self.emit_while_running(TransactionEvent::Status {
             id: self.id,
             status,
-        });
+        })
     }
 
-    fn progress(&self, progress: f64) {
-        if self.aborted() {
-            log::warn!("Tried to progress an aborted transaction!");
-        } else {
-            self.emit(TransactionEvent::Progress {
+    fn progress(&self, progress: f64) -> EmitOutcome {
+        self.emit_while_running(TransactionEvent::Progress {
+            id: self.id,
+            progress: progress_as_int(progress),
+        })
+    }
+
+    fn progress_incr(&self, progress: f64) -> EmitOutcome {
+        self.emit_while_running(TransactionEvent::IncrProgress {
+            id: self.id,
+            incr: progress_as_int(progress),
+        })
+    }
+
+    fn progress_reset(&self) -> EmitOutcome {
+        self.emit_while_running(TransactionEvent::ResetProgress { id: self.id })
+    }
+
+    fn error(&self, error: impl Into<TransactionError>) -> FinalizeOutcome {
+        self.finalize(
+            State::Errored,
+            TransactionEvent::Error {
                 id: self.id,
-                progress: progress_as_int(progress),
-            });
-        }
+                error: error.into(),
+            },
+        )
     }
 
-    fn progress_incr(&self, progress: f64) {
-        if self.aborted() {
-            log::warn!("Tried to progress an aborted transaction!");
-        } else {
-            self.emit(TransactionEvent::IncrProgress {
+    fn finished(&self, payload: TransactionPayload) -> FinalizeOutcome {
+        self.finalize(
+            State::Finished,
+            TransactionEvent::Finished {
                 id: self.id,
-                incr: progress_as_int(progress),
-            });
-        }
+                payload,
+            },
+        )
     }
 
-    fn progress_reset(&self) {
-        if self.aborted() {
-            log::warn!("Tried to reset the progress of an aborted transaction!");
-        } else {
-            self.emit(TransactionEvent::ResetProgress { id: self.id });
-        }
-    }
-
-    /// Finalizes with an error. A no-op if the transaction is already
-    /// terminal: only a concurrent [`Self::cancel`] is a legitimate reason
-    /// for that (asserted below), everything else double-finalizing is a bug.
-    fn error(&self, error: impl Into<TransactionError>) {
-        if let Err(existing) = self.try_finalize(State::Errored) {
-            debug_assert_eq!(
-                existing,
-                State::Cancelled,
-                "Tried to error an already-finished transaction!"
-            );
-            return;
-        }
-        self.emit(TransactionEvent::Error {
-            id: self.id,
-            error: error.into(),
-        });
-    }
-
-    /// Finalizes as finished. Same no-op-unless-cancelled contract as
-    /// [`Self::error`].
-    fn finished(&self, payload: TransactionPayload) {
-        if let Err(existing) = self.try_finalize(State::Finished) {
-            debug_assert_eq!(
-                existing,
-                State::Cancelled,
-                "Tried to finish an already-finished transaction!"
-            );
-            return;
-        }
-        self.emit(TransactionEvent::Finished {
-            id: self.id,
-            payload,
-        });
-    }
-
-    /// Requests cancellation. Returns whether this call actually finalized
-    /// the transaction: losing the race to a concurrent [`Self::finished`]
-    /// or [`Self::error`] is expected (the work already completed) and not
-    /// a bug, so callers get a plain `bool` rather than an assertion.
-    fn cancel(&self) -> bool {
-        let Ok(()) = self.try_finalize(State::Cancelled) else {
-            return false;
-        };
-        self.emit(TransactionEvent::Error {
-            id: self.id,
-            error: TransactionError::new(crate::error_key::keys::CANCELLED),
-        });
-        true
+    fn cancel(&self) -> FinalizeOutcome {
+        self.finalize(
+            State::Cancelled,
+            TransactionEvent::Error {
+                id: self.id,
+                error: TransactionError::new(crate::error_key::keys::CANCELLED),
+            },
+        )
     }
 
     fn aborted(&self) -> bool {
@@ -449,37 +456,43 @@ impl Transaction {
         self.0.id
     }
 
-    pub fn data(&self, payload: TransactionPayload) {
-        self.0.data(payload);
+    /// Emits data if this transaction is still running.
+    pub fn data(&self, payload: TransactionPayload) -> EmitOutcome {
+        self.0.data(payload)
     }
 
-    pub fn status(&self, status: TransactionStatus) {
-        self.0.status(status);
+    /// Emits a status if this transaction is still running.
+    pub fn status(&self, status: TransactionStatus) -> EmitOutcome {
+        self.0.status(status)
     }
 
-    pub fn progress(&self, progress: f64) {
-        self.0.progress(progress);
+    /// Sets progress if this transaction is still running.
+    pub fn progress(&self, progress: f64) -> EmitOutcome {
+        self.0.progress(progress)
     }
 
-    pub fn progress_incr(&self, progress: f64) {
-        self.0.progress_incr(progress);
+    /// Increments progress if this transaction is still running.
+    pub fn progress_incr(&self, progress: f64) -> EmitOutcome {
+        self.0.progress_incr(progress)
     }
 
-    pub fn progress_reset(&self) {
-        self.0.progress_reset();
+    /// Resets progress if this transaction is still running.
+    pub fn progress_reset(&self) -> EmitOutcome {
+        self.0.progress_reset()
     }
 
-    pub fn error(&self, error: impl Into<TransactionError>) {
-        self.0.error(error);
+    /// Attempts to finish this transaction with an error.
+    pub fn error(&self, error: impl Into<TransactionError>) -> FinalizeOutcome {
+        self.0.error(error)
     }
 
-    pub fn finished(&self, payload: TransactionPayload) {
-        self.0.finished(payload);
+    /// Attempts to finish this transaction successfully.
+    pub fn finished(&self, payload: TransactionPayload) -> FinalizeOutcome {
+        self.0.finished(payload)
     }
 
-    /// Returns whether this call won the race to finalize; losing to a
-    /// concurrent completion is expected, not an error.
-    pub fn cancel(&self) -> bool {
+    /// Attempts to cancel this transaction.
+    pub fn cancel(&self) -> FinalizeOutcome {
         self.0.cancel()
     }
 
@@ -492,7 +505,8 @@ impl Transaction {
 impl Drop for TransactionInner {
     fn drop(&mut self) {
         if !self.aborted() {
-            self.error(crate::error_key::keys::UNKNOWN);
+            let outcome = self.error(crate::error_key::keys::UNKNOWN);
+            debug_assert_eq!(outcome, FinalizeOutcome::Finalized);
 
             #[cfg(debug_assertions)]
             log::debug!("{}", std::backtrace::Backtrace::force_capture());
@@ -514,11 +528,11 @@ pub(crate) fn detail_from_serialize<D: Serialize>(data: D) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicU8};
+    use std::sync::{Arc, Barrier, atomic::AtomicU8};
 
     use super::{
-        State, TransactionId, TransactionInner, TransactionRegistry, TransactionStatus,
-        Transactions, TransactionsShared, progress_as_int,
+        EmitOutcome, FinalizeOutcome, State, TransactionId, TransactionInner, TransactionRegistry,
+        TransactionStatus, Transactions, TransactionsShared, progress_as_int,
     };
 
     use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};
@@ -605,12 +619,13 @@ mod tests {
         let transaction = TransactionInner {
             id: TransactionId(42),
             state: AtomicU8::new(State::Running as u8),
+            emission: parking_lot::Mutex::new(()),
             shared: shared_for_test(collector.clone()),
         };
-        transaction.emit(TransactionEvent::Status {
-            id: transaction.id,
-            status: TransactionStatus::PublishPacking,
-        });
+        assert_eq!(
+            transaction.status(TransactionStatus::PublishPacking),
+            EmitOutcome::Emitted
+        );
 
         assert_eq!(
             collector.drain(),
@@ -626,22 +641,28 @@ mod tests {
         let transactions = super::Transactions::new(Arc::new(BackendEventCollector::default()));
         let transaction = transactions.begin();
 
-        assert!(transactions.cancel_by_id(transaction.id()));
+        assert_eq!(
+            transactions.cancel_by_id(transaction.id()),
+            Some(FinalizeOutcome::Finalized)
+        );
         assert!(transaction.aborted());
-        assert!(!transactions.cancel_by_id(transaction.id()));
-        assert!(!transactions.cancel_by_id(TransactionId(u32::MAX)));
+        assert_eq!(transactions.cancel_by_id(transaction.id()), None);
+        assert_eq!(transactions.cancel_by_id(TransactionId(u32::MAX)), None);
     }
 
     #[test]
-    #[should_panic(expected = "Tried to error an already-finished transaction")]
-    fn erroring_an_already_finished_transaction_is_flagged_as_misuse() {
+    fn repeated_completion_reports_an_explicit_outcome() {
         let transactions = super::Transactions::new(Arc::new(BackendEventCollector::default()));
         let transaction = transactions.begin();
 
-        transaction.finished(super::TransactionPayload::None);
-        // Not a race with `cancel`: nothing should have called this a second
-        // time, and the debug assertion exists to catch exactly that.
-        transaction.error(crate::error_key::keys::UNKNOWN);
+        assert_eq!(
+            transaction.finished(super::TransactionPayload::None),
+            FinalizeOutcome::Finalized
+        );
+        assert_eq!(
+            transaction.error(crate::error_key::keys::UNKNOWN),
+            FinalizeOutcome::AlreadyCompleted
+        );
     }
 
     #[test]
@@ -649,12 +670,16 @@ mod tests {
         let transaction = TransactionInner {
             id: TransactionId(7),
             state: AtomicU8::new(State::Running as u8),
+            emission: parking_lot::Mutex::new(()),
             shared: shared_for_test(BackendEventCollector::default()),
         };
 
-        transaction.finished(super::TransactionPayload::None);
+        assert_eq!(
+            transaction.finished(super::TransactionPayload::None),
+            FinalizeOutcome::Finalized
+        );
 
-        assert!(!transaction.cancel());
+        assert_eq!(transaction.cancel(), FinalizeOutcome::AlreadyCompleted);
         assert!(transaction.aborted());
     }
 
@@ -664,13 +689,17 @@ mod tests {
         let transaction = TransactionInner {
             id: TransactionId(9),
             state: AtomicU8::new(State::Running as u8),
+            emission: parking_lot::Mutex::new(()),
             shared: shared_for_test(collector.clone()),
         };
 
-        assert!(transaction.cancel());
+        assert_eq!(transaction.cancel(), FinalizeOutcome::Finalized);
         // A worker that only notices cancellation after the fact must not
         // also deliver a contradicting Finished.
-        transaction.finished(super::TransactionPayload::None);
+        assert_eq!(
+            transaction.finished(super::TransactionPayload::None),
+            FinalizeOutcome::AlreadyCancelled
+        );
 
         assert_eq!(
             collector.drain(),
@@ -678,6 +707,89 @@ mod tests {
                 id: transaction.id,
                 error: super::TransactionError::new(crate::error_key::keys::CANCELLED),
             })]
+        );
+    }
+
+    #[test]
+    fn every_ongoing_event_is_rejected_after_termination() {
+        let collector = BackendEventCollector::default();
+        let transaction = TransactionInner {
+            id: TransactionId(10),
+            state: AtomicU8::new(State::Running as u8),
+            emission: parking_lot::Mutex::new(()),
+            shared: shared_for_test(collector.clone()),
+        };
+
+        assert_eq!(
+            transaction.finished(super::TransactionPayload::None),
+            FinalizeOutcome::Finalized
+        );
+        assert_eq!(
+            transaction.data(super::TransactionPayload::None),
+            EmitOutcome::AlreadyFinalized
+        );
+        assert_eq!(
+            transaction.status(TransactionStatus::PublishPacking),
+            EmitOutcome::AlreadyFinalized
+        );
+        assert_eq!(transaction.progress(0.5), EmitOutcome::AlreadyFinalized);
+        assert_eq!(
+            transaction.progress_incr(0.1),
+            EmitOutcome::AlreadyFinalized
+        );
+        assert_eq!(transaction.progress_reset(), EmitOutcome::AlreadyFinalized);
+
+        assert_eq!(collector.drain().len(), 1);
+    }
+
+    #[test]
+    fn terminal_event_is_structurally_last_when_emissions_race() {
+        let collector = BackendEventCollector::default();
+        let transaction = Arc::new(TransactionInner {
+            id: TransactionId(11),
+            state: AtomicU8::new(State::Running as u8),
+            emission: parking_lot::Mutex::new(()),
+            shared: shared_for_test(collector.clone()),
+        });
+        let start = Arc::new(Barrier::new(5));
+        let mut workers = Vec::new();
+
+        for _ in 0..4 {
+            let transaction = Arc::clone(&transaction);
+            let start = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                for _ in 0..1_000 {
+                    let _outcome = transaction.status(TransactionStatus::PublishPacking);
+                }
+            }));
+        }
+
+        start.wait();
+        assert_eq!(
+            transaction.finished(super::TransactionPayload::None),
+            FinalizeOutcome::Finalized
+        );
+        for worker in workers {
+            worker.join().expect("emission worker");
+        }
+
+        let events = collector.drain();
+        assert!(matches!(
+            events.last(),
+            Some(BackendEvent::Transaction(TransactionEvent::Finished { .. }))
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    BackendEvent::Transaction(
+                        TransactionEvent::Finished { .. } | TransactionEvent::Error { .. }
+                    )
+                ))
+                .count(),
+            1
         );
     }
 }

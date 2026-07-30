@@ -9,7 +9,7 @@ use super::{
     MATERIAL_ANISOTROPY_CLAMP, MODEL_VERTEX_ATTRIBUTES, MSAA_SAMPLE_COUNT, ModelVertex,
     SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SkyboxFace, WATER_SHADER_SOURCE, wgpu,
 };
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 
 #[derive(Debug)]
 pub struct RenderResources {

@@ -1,3 +1,5 @@
+//! Source path normalization for map assets.
+
 pub(super) fn normalize_skyname(value: &str) -> Option<String> {
     let value = value.trim().replace('\\', "/");
     let value = value.trim_matches('/');

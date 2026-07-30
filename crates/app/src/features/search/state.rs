@@ -21,7 +21,7 @@ use crate::bridge::{
         SearchHit, SearchItem, SearchItemSource, SearchMode, SearchQuickBatch, SearchQuickRequest,
         SearchRequestKey, SearchSession, WorkshopMetadata, workshop_url::workshop_item_url,
     },
-    tasks::BackendServices,
+    tasks::WorkshopService,
 };
 use iced::{animation::Easing, widget::image};
 
@@ -966,8 +966,11 @@ fn finite_nonnegative(value: f32) -> f32 {
     }
 }
 
-pub fn resolve_metadata(ctx: &BackendServices, item_ids: &[PublishedFileId]) -> MetadataResolution {
-    let (metadata, stale_ids) = ctx.resolve_workshop_metadata(item_ids);
+pub fn resolve_metadata(
+    ctx: WorkshopService<'_>,
+    item_ids: &[PublishedFileId],
+) -> MetadataResolution {
+    let (metadata, stale_ids) = ctx.resolve_metadata(item_ids);
     MetadataResolution {
         patches: metadata.iter().map(MetadataPatch::from_metadata).collect(),
         stale_ids,
@@ -975,11 +978,11 @@ pub fn resolve_metadata(ctx: &BackendServices, item_ids: &[PublishedFileId]) -> 
 }
 
 pub fn refresh_metadata(
-    ctx: &BackendServices,
+    ctx: WorkshopService<'_>,
     item_ids: &[PublishedFileId],
 ) -> Result<Vec<MetadataPatch>, UiError> {
     Ok(ctx
-        .refresh_workshop_metadata(item_ids)?
+        .refresh_metadata(item_ids)?
         .iter()
         .map(MetadataPatch::from_metadata)
         .collect())

@@ -1,4 +1,4 @@
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use super::{
     Arc, BackendContext, BackendRuntimeAction, BackendRuntimeEvent, BackendServices, Duration,
@@ -9,7 +9,7 @@ use super::{
 };
 use crate::bridge::tasks::TransactionStatus;
 use crate::generation::Generation;
-use gmpublished_backend::transactions::TransactionId;
+use gmpublished_backend::TransactionId;
 
 pub(super) fn flatten_blocking_ui_result<T>(
     result: Result<Result<T, UiError>, RunBlockingError>,
@@ -39,7 +39,7 @@ pub(super) fn run_search_full(
     let transaction = app.begin_transaction();
     let transaction_id = transaction.id();
     ctx.correlate_backend_transaction(transaction_id, task);
-    let started_id = app.start_search_full(&request, transaction);
+    let started_id = app.search().start_full(&request, transaction);
     debug_assert_eq!(started_id, transaction_id);
 
     let mut sequence = 0;
@@ -50,9 +50,10 @@ pub(super) fn run_search_full(
             {
                 match event {
                     tasks::TransactionRuntimeEvent::Data { payload, .. } => {
-                        match app.search_full_batch_from_transaction_payload(
-                            &request, sequence, &payload,
-                        ) {
+                        match app
+                            .search()
+                            .full_batch_from_transaction_payload(&request, sequence, &payload)
+                        {
                             Ok(batch) => {
                                 sequence = sequence.wrapping_add(1);
                                 let _sent = send_root_message(
@@ -117,17 +118,18 @@ pub(super) fn run_installed_metadata_refresh(
     item_ids: &[PublishedFileId],
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let result = installed_addons::refresh_metadata_streaming(app, item_ids, |patches| {
-        let _sent = send_root_message(
-            &mut output,
-            RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
-                generation,
-                // A landed batch needs no re-queue bookkeeping.
-                Vec::new(),
-                Ok(patches),
-            )),
-        );
-    });
+    let result =
+        installed_addons::refresh_metadata_streaming(app.workshop(), item_ids, |patches| {
+            let _sent = send_root_message(
+                &mut output,
+                RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
+                    generation,
+                    // A landed batch needs no re-queue bookkeeping.
+                    Vec::new(),
+                    Ok(patches),
+                )),
+            );
+        });
     if let Err(error) = result {
         let _sent = send_root_message(
             &mut output,
@@ -145,13 +147,15 @@ pub(super) fn run_size_analyzer_preview_urls(
     ids: &[PublishedFileId],
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let (cached_metadata, stale_ids) = app.resolve_workshop_metadata(ids);
+    let (cached_metadata, stale_ids) = app.workshop().resolve_metadata(ids);
     send_preview_urls(&mut output, preview_urls_from_metadata(cached_metadata));
 
-    if !stale_ids.is_empty() && app.steam_connected() {
-        let result = app.refresh_workshop_metadata_streaming(&stale_ids, |metadata| {
-            send_preview_urls(&mut output, preview_urls_from_metadata(metadata));
-        });
+    if !stale_ids.is_empty() && app.workshop().connected() {
+        let result = app
+            .workshop()
+            .refresh_metadata_streaming(&stale_ids, |metadata| {
+                send_preview_urls(&mut output, preview_urls_from_metadata(metadata));
+            });
         if let Err(error) = result {
             log::debug!("Size Analyzer preview URL refresh failed: {error}");
         }
@@ -202,8 +206,8 @@ pub(super) fn run_downloader_local_extraction(
     paths: Vec<PathBuf>,
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let (settings, path_snapshot) = app.settings_and_paths_snapshot();
-    let plan = gma::build_preview_extract_request(settings, &path_snapshot);
+    let settings = app.config().settings_snapshot();
+    let plan = gma::build_preview_extract_request(settings);
     let paths = paths
         .into_iter()
         .filter(|path| path.is_file() && gma::is_gma_path(path))
@@ -486,7 +490,7 @@ pub(super) fn run_downloader_submission(
     item_ids: Vec<PublishedFileId>,
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let attempt = steam_session::connect_context_for_operation(app);
+    let attempt = steam_session::connect_context_for_operation(app.workshop());
     let connected = attempt.connected();
     let connection_error = attempt.error().cloned();
     if !send_root_message(
@@ -505,7 +509,7 @@ pub(super) fn run_downloader_submission(
         return;
     }
 
-    if let Err(error) = app.submit_workshop_downloads(item_ids.clone()) {
+    if let Err(error) = app.workshop().submit_downloads(item_ids.clone()) {
         send_downloader_submission_failed(&mut output, item_ids, error);
     }
 }

@@ -1,17 +1,17 @@
-use gmpublished_backend::events::BackendEventSink;
+use gmpublished_backend::BackendEventSink;
 
 use super::{
     PublishedFileId, TaskId, TransactionStatus, UiError, WorkshopDownloadTaskKind,
     WorkshopSnapshotId,
 };
-use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
-use gmpublished_backend::events::BackendEvent as BackendSinkEvent;
-use gmpublished_backend::events::DownloadStartedEvent as BackendDownloadStartedEvent;
-use gmpublished_backend::events::ExtractionStartedEvent as BackendExtractionStartedEvent;
-use gmpublished_backend::events::TransactionError;
-use gmpublished_backend::events::TransactionEvent as BackendTransactionEvent;
-use gmpublished_backend::events::TransactionPayload;
-use gmpublished_backend::transactions::TransactionId;
+use gmpublished_backend::AppDataSnapshot as BackendAppDataSnapshot;
+use gmpublished_backend::BackendEvent as BackendSinkEvent;
+use gmpublished_backend::DownloadStartedEvent as BackendDownloadStartedEvent;
+use gmpublished_backend::ExtractionStartedEvent as BackendExtractionStartedEvent;
+use gmpublished_backend::TransactionError;
+use gmpublished_backend::TransactionEvent as BackendTransactionEvent;
+use gmpublished_backend::TransactionId;
+use gmpublished_backend::TransactionPayload;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -364,5 +364,9 @@ impl TransactionRuntimeEvent {
             self,
             Self::Status { status, .. } if *status == TransactionStatus::Locating
         )
+    }
+
+    pub(super) const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished { .. } | Self::Error { .. })
     }
 }

@@ -3,8 +3,8 @@
 
 use super::super::super::state::MovementMode;
 use super::{DuckViewAnimation, FlyCamera, PLAYER_START_EYE_NUDGE, WALK_DUCK_EYE_HEIGHT, WalkHull};
-use gmpublished_backend::math::{Vec3, simple_spline};
-use gmpublished_backend::scene::map::MapWalkCollision;
+use gmpublished_domain::math::{Vec3, simple_spline};
+use gmpublished_domain::scene::map::MapWalkCollision;
 
 const WALK_DUCK_VIEW_DURATION: f32 = 0.2;
 

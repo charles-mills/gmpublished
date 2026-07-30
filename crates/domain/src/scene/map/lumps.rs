@@ -1,3 +1,5 @@
+//! Typed BSP lump access used during scene assembly.
+
 use super::{
     BTreeSet, Brush, BrushSide, BspError, BspModel, ColorRgbExp, Cow, DetailProp, DetailProps,
     DispInfo, DispVert, Face, KvValue, Leaf, LeafAmbientIndex, LeafAmbientSample, Limits, Node,
@@ -108,13 +110,18 @@ impl MapBsp {
     /// Decodes every lump the scene builder needs. The per-lump decodes are
     /// independent passes over disjoint byte ranges — and on repacked
     /// workshop maps each one is an LZMA decompression that dominates load
-    /// time — so they run in one `rayon::scope`. Only the *selected*
+    /// time — so, when an explicit pool is supplied, they run in one scoped
+    /// batch on that pool. Without a pool they decode serially. Only the *selected*
     /// lighting set is decoded: `selected_lightmap_samples` /
     /// `selected_ambient_lighting` prefer LDR and use exactly one of each
     /// pair, and the preference is decidable from raw lump lengths (an
     /// empty raw lump decodes to an empty vec) before decompressing
     /// anything.
-    pub(super) fn parse(bytes: &[u8], limits: &Limits) -> Result<Self, BspError> {
+    pub(super) fn parse(
+        bytes: &[u8],
+        limits: &Limits,
+        pool: Option<&rayon::ThreadPool>,
+    ) -> Result<Self, BspError> {
         use bsp::lump_ids as ids;
         let bsp = bsp::parse(bytes, limits).map_err(decode_error)?;
 
@@ -127,17 +134,21 @@ impl MapBsp {
             && raw_len(ids::LEAF_AMBIENT_LIGHTING_HDR) > 0
             && raw_len(ids::LEAF_AMBIENT_INDEX_HDR) > 0;
 
-        macro_rules! par_decode {
+        macro_rules! decode_lumps {
             ($( $slot:ident = $decode:expr; )+) => {
                 $( let mut $slot = None; )+
-                rayon::scope(|s| {
-                    $( s.spawn(|_| $slot = Some($decode)); )+
-                });
-                $( let $slot = $slot.expect("rayon scope runs every spawn to completion"); )+
+                if let Some(pool) = pool {
+                    pool.scope(|scope| {
+                        $( scope.spawn(|_| $slot = Some($decode)); )+
+                    });
+                } else {
+                    $( $slot = Some($decode); )+
+                }
+                $( let $slot = $slot.expect("every lump decode assigns its result"); )+
             };
         }
 
-        par_decode! {
+        decode_lumps! {
             entities = bsp.entities(limits);
             visibility = bsp.visibility(limits);
             faces = bsp.faces(limits);
@@ -531,7 +542,7 @@ pub(super) fn bsp_version(bytes: &[u8]) -> Result<u32, BspError> {
     ))
 }
 
-/// Index into [`MapBsp::models`] — a brush model ("bmodel"), the geometry a
+/// Index into `MapBsp::models` — a brush model ("bmodel"), the geometry a
 /// brush entity like a door refers to as `*3`.
 ///
 /// Distinct from [`BrushIndex`] and from a static prop's model index, which
@@ -581,7 +592,7 @@ impl NodeChild {
     }
 }
 
-/// Index into [`MapBsp::brushes`].
+/// Index into `MapBsp::brushes`.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BrushIndex(usize);
 

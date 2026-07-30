@@ -1,3 +1,5 @@
+//! Render-facing map entity data.
+
 use super::{MapEntity, normalize_material_name, normalize_skyname};
 use crate::math::Vec3;
 

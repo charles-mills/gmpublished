@@ -2,7 +2,7 @@
 //! modal. Damage-driven: redraws happen only on orbit/zoom input, so an idle
 //! open viewer costs zero CPU/GPU.
 
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
 
 use iced::mouse;
@@ -12,7 +12,7 @@ use iced::{Event, Point, Rectangle};
 
 use crate::bridge::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
 use crate::media::preview_model::ModelVertex;
-use gmpublished_backend::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDirection};
+use gmpublished_domain::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDirection};
 use vformats::vtf::BcFormat;
 
 use super::Message;

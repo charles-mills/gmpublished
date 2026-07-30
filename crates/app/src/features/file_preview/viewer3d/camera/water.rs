@@ -6,8 +6,8 @@ use super::{
     FlyCamera, LAND_BOB_DURATION, WALK_GROUND_SNAP, WALK_STEP_HEIGHT, WALK_SWIM_STOP_SPEED,
     WaterLevel,
 };
-use gmpublished_backend::math::Vec3;
-use gmpublished_backend::scene::map::MapWalkCollision;
+use gmpublished_domain::math::Vec3;
+use gmpublished_domain::scene::map::MapWalkCollision;
 
 const WALK_SWIM_SPEED: f32 = 150.0;
 

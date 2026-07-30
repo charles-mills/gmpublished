@@ -1,11 +1,9 @@
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub mod archive;
+mod config_store;
 pub mod content_path;
 pub mod domain;
 pub mod gma;
@@ -21,12 +19,10 @@ pub mod ui_error;
 pub mod vpk;
 
 pub use self::gma::{ExtractDestination, ExtractionOverwriteMode};
-pub use gmpublished_backend::appdata::{
+pub use gmpublished_backend::{
     AppDataSnapshot as BackendAppDataSnapshot, Settings as BackendSettings, TitlebarPreference,
 };
 
-const MAX_DESTINATIONS: usize = 20;
-const UI_SETTINGS_FILE_NAME: &str = "ui-settings.json";
 const UI_SETTINGS_SCHEMA_VERSION: u64 = 1;
 
 /// Iced-only preferences that are not part of the shared backend appdata settings.
@@ -48,55 +44,13 @@ impl Default for UiSettings {
 }
 
 impl UiSettings {
+    #[cfg(test)]
     pub(crate) fn from_settings(settings: &Settings) -> Self {
         Self {
             play_gifs_by_default: settings.ui.play_gifs_by_default,
             download_count_format: settings.ui.download_count_format,
             theme_preset: settings.ui.theme_preset,
         }
-    }
-
-    pub(crate) fn load_from_file_or_default(path: &Path) -> Self {
-        match fs::read_to_string(path) {
-            Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(value) => Self::from_json_value(&value).unwrap_or_else(|| {
-                    log::warn!(
-                        "UI settings at {} are from a newer version; starting from defaults \
-                         rather than rewriting them in this build's shape",
-                        path.display()
-                    );
-                    Self::default()
-                }),
-                Err(error) => {
-                    log::warn!(
-                        "failed to parse UI settings from {}: {error}",
-                        path.display()
-                    );
-                    Self::default()
-                }
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
-            Err(error) => {
-                log::warn!(
-                    "failed to load UI settings from {}: {error}",
-                    path.display()
-                );
-                Self::default()
-            }
-        }
-    }
-
-    pub(crate) fn save_to_file(&self, path: &Path) -> Result<(), SettingsPersistError> {
-        let bytes = serde_json::to_vec_pretty(&self.to_json_value()).map_err(|source| {
-            SettingsPersistError::Serialize {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
-        crate::util::fs::atomic_write(path, &bytes).map_err(|source| SettingsPersistError::Write {
-            path: path.to_path_buf(),
-            source,
-        })
     }
 
     /// Converts a parsed JSON value into settings, falling back to the
@@ -171,7 +125,7 @@ where
     Ok(serde_json::from_value(value).ok())
 }
 
-/// The two settings files the app reads as one value.
+/// The settings document the app reads as one value.
 ///
 /// Composed rather than flattened. Mirroring [`BackendSettings`] field by
 /// field would mean a new backend setting needs a field here and a line in
@@ -179,77 +133,50 @@ where
 /// silently dropping the value on the next save. Holding the backend's own
 /// struct leaves nothing to keep in step.
 ///
-/// Which half a setting lives in is which file it persists to, so
-/// `settings.backend` / `settings.ui` at a call site is information, not noise.
+/// The backend owns the atomic file and preserves `ui` as an opaque versioned
+/// JSON section; this crate owns the typed interpretation of that section.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub(crate) backend: BackendSettings,
     pub(crate) ui: UiSettings,
+    persisted_ui: Option<PersistedUi>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PersistedUi {
+    value: serde_json::Value,
+    decoded: UiSettings,
 }
 
 impl Settings {
-    pub(crate) fn from_backend(backend: BackendSettings, ui: &UiSettings) -> Self {
+    pub(crate) fn from_backend(backend: BackendSettings) -> Self {
+        let persisted_ui = backend.ui.as_ref().map(|value| {
+            let decoded = UiSettings::from_json_value(value).unwrap_or_default();
+            PersistedUi {
+                value: value.clone(),
+                decoded,
+            }
+        });
+        let ui = persisted_ui
+            .as_ref()
+            .map_or_else(UiSettings::default, |source| source.decoded.clone());
         Self {
             backend,
-            ui: ui.clone(),
+            ui,
+            persisted_ui,
         }
     }
 
     pub(crate) fn to_backend(&self) -> BackendSettings {
-        self.backend.clone()
+        let mut backend = self.backend.clone();
+        backend.ui = Some(
+            self.persisted_ui
+                .as_ref()
+                .filter(|source| source.decoded == self.ui)
+                .map_or_else(|| self.ui.to_json_value(), |source| source.value.clone()),
+        );
+        backend
     }
-
-    pub(crate) fn apply_ui_settings(&mut self, ui: &UiSettings) {
-        self.ui = ui.clone();
-    }
-
-    pub(crate) fn sanitize(&mut self, paths: &AppPaths) {
-        self.backend
-            .destinations
-            .retain(|dir| dir.is_absolute() && dir.is_dir());
-        self.backend
-            .my_workshop_local_paths
-            .retain(|_, dir| dir.is_absolute() && dir.is_dir());
-        self.backend.extract_destination = self.sanitized_extract_destination(paths);
-        self.backend.destinations.truncate(MAX_DESTINATIONS);
-    }
-
-    /// The `extract_destination` `sanitize` would settle on, without
-    /// touching `destinations`/`my_workshop_local_paths` or requiring a
-    /// mutable (or cloned) `Settings` — for read-only callers such as a
-    /// status label that only care about the resolved destination.
-    pub(crate) fn sanitized_extract_destination(&self, paths: &AppPaths) -> ExtractDestination {
-        match &self.backend.extract_destination {
-            ExtractDestination::Directory(path) => {
-                if self.backend.create_folder_on_extract || !path.is_dir() {
-                    ExtractDestination::NamedDirectory(path.to_owned())
-                } else {
-                    self.backend.extract_destination.clone()
-                }
-            }
-            ExtractDestination::NamedDirectory(path) => {
-                if !self.backend.create_folder_on_extract || !path.is_dir() {
-                    ExtractDestination::Directory(path.to_owned())
-                } else {
-                    self.backend.extract_destination.clone()
-                }
-            }
-            ExtractDestination::Downloads if paths.downloads_dir.is_none() => {
-                ExtractDestination::default()
-            }
-            ExtractDestination::Addons if paths.gmod_dir.is_none() => ExtractDestination::default(),
-            ExtractDestination::Downloads
-            | ExtractDestination::Addons
-            | ExtractDestination::Temp => self.backend.extract_destination.clone(),
-        }
-    }
-}
-
-pub fn ui_settings_file_for(settings_file: &Path) -> PathBuf {
-    settings_file.parent().map_or_else(
-        || PathBuf::from(UI_SETTINGS_FILE_NAME),
-        |parent| parent.join(UI_SETTINGS_FILE_NAME),
-    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,13 +220,9 @@ impl AppPaths {
     }
 }
 
-pub fn appdata_snapshot_from_backend(
-    snapshot: BackendAppDataSnapshot,
-    ui: &UiSettings,
-) -> (Settings, AppPaths) {
+pub fn appdata_snapshot_from_backend(snapshot: BackendAppDataSnapshot) -> (Settings, AppPaths) {
     let paths = AppPaths::from_backend(&snapshot);
-    let mut settings = Settings::from_backend(snapshot.settings, ui);
-    settings.sanitize(&paths);
+    let settings = Settings::from_backend(snapshot.settings);
     (settings, paths)
 }
 
@@ -308,7 +231,7 @@ fn valid_dir(path: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn validate_gmod(path: impl AsRef<Path>) -> bool {
-    gmpublished_backend::appdata::validate_gmod(path.as_ref().to_path_buf())
+    gmpublished_backend::validate_gmod(path.as_ref().to_path_buf())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -414,6 +337,7 @@ impl DownloadCountFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// Crossing the bridge must lose nothing. Holding the backend's own struct
     /// is what guarantees it: there is no per-field list to fall out of step
@@ -433,38 +357,10 @@ mod tests {
             PathBuf::from("/addons/mine"),
         );
 
-        let settings = Settings::from_backend(backend.clone(), &UiSettings::default());
+        let settings = Settings::from_backend(backend.clone());
+        backend.ui = Some(UiSettings::default().to_json_value());
 
         assert_eq!(settings.to_backend(), backend);
-    }
-
-    /// The UI half is replaced wholesale for the same reason.
-    #[test]
-    fn applying_ui_settings_replaces_every_ui_field_and_no_backend_field() {
-        let backend = BackendSettings::default();
-        let mut settings = Settings::from_backend(backend.clone(), &UiSettings::default());
-        let ui = UiSettings {
-            play_gifs_by_default: false,
-            download_count_format: DownloadCountFormat::default(),
-            theme_preset: ThemePreset::Light,
-        };
-
-        settings.apply_ui_settings(&ui);
-
-        assert_eq!(settings.ui, ui);
-        assert_eq!(settings.to_backend(), backend);
-    }
-
-    #[test]
-    fn ui_settings_file_path_stays_next_to_upstream_settings() {
-        assert_eq!(
-            ui_settings_file_for(Path::new("/tmp/gmpublisher/settings.json")),
-            PathBuf::from("/tmp/gmpublisher/ui-settings.json")
-        );
-        assert_eq!(
-            ui_settings_file_for(Path::new("settings.json")),
-            PathBuf::from("ui-settings.json")
-        );
     }
 
     #[test]
@@ -503,31 +399,40 @@ mod tests {
     }
 
     #[test]
-    fn ui_settings_round_trip_to_separate_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("config/gmpublisher/ui-settings.json");
-
-        assert_eq!(
-            UiSettings::load_from_file_or_default(&path),
-            UiSettings::default()
-        );
-
+    fn ui_settings_round_trip_through_combined_document() {
         let settings = UiSettings {
             play_gifs_by_default: false,
             download_count_format: DownloadCountFormat::Period,
             theme_preset: ThemePreset::ClassicSource,
         };
-        settings.save_to_file(&path).expect("save UI settings");
+        let value = settings.to_json_value();
+        let backend = BackendSettings {
+            ui: Some(value.clone()),
+            ..BackendSettings::default()
+        };
 
-        assert_eq!(UiSettings::load_from_file_or_default(&path), settings);
-        let value: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&path).expect("persisted UI settings should be readable"),
-        )
-        .expect("persisted UI settings should be JSON");
+        assert_eq!(Settings::from_backend(backend).ui, settings);
         assert_eq!(value["version"], UI_SETTINGS_SCHEMA_VERSION);
         assert_eq!(value["play_gifs_by_default"], false);
         assert_eq!(value["download_count_format"], "period");
         assert_eq!(value["theme_preset"], "classic_source");
+    }
+
+    #[test]
+    fn untouched_newer_ui_document_is_preserved_by_backend_changes() {
+        let newer_ui = serde_json::json!({
+            "version": UI_SETTINGS_SCHEMA_VERSION + 1,
+            "future_theme_engine": { "contrast": 1.25 },
+        });
+        let backend = BackendSettings {
+            ui: Some(newer_ui.clone()),
+            ..BackendSettings::default()
+        };
+        let mut settings = Settings::from_backend(backend);
+
+        settings.backend.sounds = false;
+
+        assert_eq!(settings.to_backend().ui, Some(newer_ui));
     }
 
     #[test]
@@ -540,23 +445,21 @@ mod tests {
         fs::create_dir_all(&temp_dir).expect("temp dir");
         fs::create_dir_all(&user_data_dir).expect("user data dir");
 
-        let (settings, paths) = appdata_snapshot_from_backend(
-            BackendAppDataSnapshot {
-                settings: BackendSettings::default(),
-                version: "test",
-                paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
-                    settings_file: temp.path().join("settings.json"),
-                    default_user_data_dir: user_data_dir.clone(),
-                    default_temp_dir: temp_dir.clone(),
-                    default_downloads_dir: None,
-                    temp_dir,
-                    user_data_dir,
-                    downloads_dir: None,
-                    gmod_dir: Some(gmod_dir.clone()),
-                },
+        let (settings, paths) = appdata_snapshot_from_backend(BackendAppDataSnapshot {
+            settings: BackendSettings::default(),
+            settings_revision: 0,
+            version: "test",
+            paths: gmpublished_backend::AppDataPathsSnapshot {
+                settings_file: temp.path().join("settings.json"),
+                default_user_data_dir: user_data_dir.clone(),
+                default_temp_dir: temp_dir.clone(),
+                default_downloads_dir: None,
+                temp_dir,
+                user_data_dir,
+                downloads_dir: None,
+                gmod_dir: Some(gmod_dir.clone()),
             },
-            &UiSettings::default(),
-        );
+        });
 
         assert!(settings.backend.gmod.is_none());
         assert_eq!(paths.gmod_dir, Some(gmod_dir));
@@ -572,23 +475,21 @@ mod tests {
         fs::create_dir_all(&temp_dir).expect("temp dir");
         fs::create_dir_all(&user_data_dir).expect("user data dir");
 
-        let (settings, paths) = appdata_snapshot_from_backend(
-            BackendAppDataSnapshot {
-                settings: BackendSettings::default(),
-                version: "test",
-                paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
-                    settings_file: temp.path().join("settings.json"),
-                    default_user_data_dir: user_data_dir.clone(),
-                    default_temp_dir: temp_dir.clone(),
-                    default_downloads_dir: Some(downloads_dir.clone()),
-                    temp_dir,
-                    user_data_dir,
-                    downloads_dir: Some(downloads_dir.clone()),
-                    gmod_dir: None,
-                },
+        let (settings, paths) = appdata_snapshot_from_backend(BackendAppDataSnapshot {
+            settings: BackendSettings::default(),
+            settings_revision: 0,
+            version: "test",
+            paths: gmpublished_backend::AppDataPathsSnapshot {
+                settings_file: temp.path().join("settings.json"),
+                default_user_data_dir: user_data_dir.clone(),
+                default_temp_dir: temp_dir.clone(),
+                default_downloads_dir: Some(downloads_dir.clone()),
+                temp_dir,
+                user_data_dir,
+                downloads_dir: Some(downloads_dir.clone()),
+                gmod_dir: None,
             },
-            &UiSettings::default(),
-        );
+        });
 
         assert!(settings.backend.downloads.is_none());
         assert_eq!(paths.default_downloads_dir, Some(downloads_dir.clone()));
@@ -604,25 +505,13 @@ mod tests {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsPersistError {
-    #[error("failed to serialize UI settings for {}: {source}", path.display())]
-    Serialize {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("failed to write UI settings to {}: {source}", path.display())]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error(transparent)]
-    AppData(#[from] gmpublished_backend::appdata::SettingsError),
+    AppData(#[from] gmpublished_backend::SettingsError),
 }
 
-impl gmpublished_backend::error_key::HasErrorKey for SettingsPersistError {
-    fn error_key(&self) -> gmpublished_backend::error_key::ErrorKey {
-        gmpublished_backend::error_key::keys::IO_ERROR
+impl gmpublished_backend::HasErrorKey for SettingsPersistError {
+    fn error_key(&self) -> gmpublished_backend::ErrorKey {
+        gmpublished_backend::error_keys::IO_ERROR
     }
 
     fn error_detail(&self) -> Option<String> {

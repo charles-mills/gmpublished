@@ -277,16 +277,17 @@ impl App {
     pub(super) fn destination_select_create_folder_task(&self, enabled: bool) -> Task<RootMessage> {
         self.ctx
             .run_blocking("destination-create-folder-save", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    settings.backend.create_folder_on_extract = enabled;
-                })
-                .map(|()| {
-                    Box::new(destination_select::SettingsSnapshot::new(
-                        app.settings_snapshot(),
-                        app.paths(),
-                    ))
-                })
-                .ui_err()
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        settings.backend.create_folder_on_extract = enabled;
+                    })
+                    .map(|()| {
+                        Box::new(destination_select::SettingsSnapshot::new(
+                            app.config().settings_snapshot(),
+                            app.config().paths(),
+                        ))
+                    })
+                    .ui_err()
             })
             .map(|result| {
                 RootMessage::DestinationSelect(destination_select::Message::CreateFolderSaved(
@@ -321,16 +322,17 @@ impl App {
     ) -> Task<RootMessage> {
         self.ctx
             .run_blocking("destination-select-save", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    destination_select::apply_persist_request(settings, request);
-                })
-                .map(|()| {
-                    Box::new(destination_select::SettingsSnapshot::new(
-                        app.settings_snapshot(),
-                        app.paths(),
-                    ))
-                })
-                .ui_err()
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        destination_select::apply_persist_request(settings, request);
+                    })
+                    .map(|()| {
+                        Box::new(destination_select::SettingsSnapshot::new(
+                            app.config().settings_snapshot(),
+                            app.config().paths(),
+                        ))
+                    })
+                    .ui_err()
             })
             .map(|result| {
                 let result = flatten_blocking_ui_result(result);
@@ -501,8 +503,8 @@ impl App {
     /// cancellation included.
     #[cfg(feature = "debug")]
     fn simulate_toast_task(&self, kind: context_menu::SimulatedToast) -> Task<RootMessage> {
-        use gmpublished_backend::error_key::keys;
-        use gmpublished_backend::events::TransactionPayload;
+        use gmpublished_backend::TransactionPayload;
+        use gmpublished_backend::error_keys as keys;
 
         use crate::bridge::tasks::TaskKind;
         use context_menu::SimulatedToast;
@@ -518,28 +520,33 @@ impl App {
         }
 
         let ctx = self.ctx.clone();
-        std::thread::spawn(move || {
-            let transaction = ctx.begin_transaction();
-            let task = ctx.create_task(TaskKind::OverlayExtract, TransactionStatus::Extracting);
-            task.total(SIMULATED_TOTAL_BYTES);
-            ctx.correlate_backend_transaction(transaction.id(), task);
+        let schedule = ctx
+            .clone()
+            .spawn_blocking_detached("simulate-toast", move |_| {
+                let transaction = ctx.begin_transaction();
+                let task = ctx.create_task(TaskKind::OverlayExtract, TransactionStatus::Extracting);
+                task.total(SIMULATED_TOTAL_BYTES);
+                ctx.correlate_backend_transaction(transaction.id(), task);
 
-            let last_step = match kind {
-                SimulatedToast::Error => 40,
-                _ => 100,
-            };
-            for step in 0..=last_step {
-                if transaction.aborted() {
-                    return;
+                let last_step = match kind {
+                    SimulatedToast::Error => 40,
+                    _ => 100,
+                };
+                for step in 0..=last_step {
+                    if transaction.aborted() {
+                        return;
+                    }
+                    transaction.progress(f64::from(step) / 100.0);
+                    std::thread::sleep(std::time::Duration::from_millis(60));
                 }
-                transaction.progress(f64::from(step) / 100.0);
-                std::thread::sleep(std::time::Duration::from_millis(60));
-            }
-            match kind {
-                SimulatedToast::Error => transaction.error(keys::IO_ERROR),
-                _ => transaction.finished(TransactionPayload::None),
-            }
-        });
+                match kind {
+                    SimulatedToast::Error => transaction.error(keys::IO_ERROR),
+                    _ => transaction.finished(TransactionPayload::None),
+                }
+            });
+        if let Err(error) = schedule {
+            log::warn!("failed to schedule simulated toast: {error}");
+        }
         Task::none()
     }
 

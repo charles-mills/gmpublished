@@ -135,7 +135,7 @@ fn run_extraction(request: ExtractionRequest) -> Result<(), CliError> {
     // Extraction needs the whitelist and the transaction sink, so a failed
     // init is fatal here rather than something to continue past.
     let backend = backend?;
-    backend.whitelist.refresh_from_remote();
+    backend.refresh_whitelist();
 
     let gma = GmaFile::open(request.path)?;
     gma.view().and_then(|view| {
@@ -147,7 +147,12 @@ fn run_extraction(request: ExtractionRequest) -> Result<(), CliError> {
                 whitelist: Whitelist::Ignore,
             },
         )?;
-        view.extract(&gma, &backend.transactions.begin(), context)
+        view.extract(
+            &gma,
+            &backend.begin_transaction(),
+            context,
+            backend.cpu_executor(),
+        )
     })?;
     Ok(())
 }

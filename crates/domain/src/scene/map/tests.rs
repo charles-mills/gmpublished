@@ -1,3 +1,5 @@
+//! BSP scene assembly tests.
+
 #[test]
 fn overlay_quad_uses_packed_u_basis_and_v_flip_flag() {
     // Wall overlay: normal +X. vbsp packs BasisU into the UV points'
@@ -161,6 +163,19 @@ fn load_map_uses_white_ambient_when_lumps_are_absent() {
 
     assert_eq!(map.ambient.source(), AmbientLightSource::Neutral);
     assert_eq!(map.ambient.cube_at(Vec3::splat(0.0)), AmbientCube::WHITE);
+}
+
+#[test]
+fn explicit_pool_decode_matches_the_serial_domain_path() {
+    let bytes = bsp_fixture(None);
+    let serial = load_map(&bytes).expect("serial fixture decode");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("caller-owned test pool");
+    let parallel = load_map_with_pool(&bytes, &pool).expect("parallel fixture decode");
+
+    assert_eq!(parallel, serial);
 }
 
 #[test]
@@ -2135,7 +2150,7 @@ fn pending_doors_from_fixture(entities: &str) -> Vec<PendingMapDoor> {
 }
 
 fn read_fixture_bsp(bytes: &[u8]) -> MapBsp {
-    MapBsp::parse(bytes, &Limits::default()).expect("fixture bsp should parse")
+    MapBsp::parse(bytes, &Limits::default(), None).expect("fixture bsp should parse")
 }
 
 fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {

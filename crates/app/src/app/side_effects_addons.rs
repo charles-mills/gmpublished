@@ -1,5 +1,5 @@
 use crate::bridge::ui_error::ResultExt as _;
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use super::{
     App, PublishedFileId, RootMessage, Task, UiError, flatten_blocking_ui_result, installed_addons,
@@ -29,7 +29,7 @@ impl App {
     ) -> Task<RootMessage> {
         self.ctx
             .run_blocking("my-workshop-page", move |app| {
-                my_workshop::browse_page(app, page)
+                my_workshop::browse_page(app.workshop(), page)
             })
             .map(move |result| {
                 RootMessage::MyWorkshop(my_workshop::Message::PageCompleted(
@@ -63,7 +63,7 @@ impl App {
     ) -> Task<RootMessage> {
         self.ctx
             .run_blocking("my-workshop-stats-refresh", move |app| {
-                my_workshop::refresh_subscription_counts(app, pages)
+                my_workshop::refresh_subscription_counts(app.workshop(), pages)
             })
             .map(move |result| {
                 RootMessage::MyWorkshop(my_workshop::Message::StatsRefreshCompleted(
@@ -131,7 +131,7 @@ impl App {
         let delivery_item_ids = item_ids;
         self.ctx
             .run_blocking("installed-addons-metadata", move |app| {
-                installed_addons::resolve_metadata(app, &worker_item_ids)
+                installed_addons::resolve_metadata(app.workshop(), &worker_item_ids)
             })
             .map(move |result| {
                 RootMessage::InstalledAddons(installed_addons::Message::MetadataCompleted(

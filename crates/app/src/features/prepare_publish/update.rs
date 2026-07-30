@@ -360,7 +360,7 @@ mod tests {
             &mut state,
             Message::PathVerificationCompleted(
                 generation,
-                Err(UiError::new(gmpublished_backend::error_key::keys::IO_ERROR)),
+                Err(UiError::new(gmpublished_backend::error_keys::IO_ERROR)),
             ),
         );
 

@@ -1,28 +1,20 @@
-use rayon::{
-    ThreadPool,
-    iter::{IntoParallelRefIterator, ParallelIterator},
-};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::{BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
-    sync::LazyLock,
     time::SystemTime,
 };
 
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
-use crate::{GmaFile, transactions::Transaction, write_nt_string};
+use crate::{CpuExecutor, GmaFile, transactions::Transaction, write_nt_string};
 
 use super::{GmaError, GmaMetadata, whitelist, whitelist::AddonWhitelist};
 
 use super::GMA_HEADER;
-use crate::util::thread_pool;
-
-static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
-
 /// Small files are read in parallel batches of at most this many bytes, so
 /// peak memory stays bounded no matter how large the addon is.
 const BATCH_MAX_BYTES: u64 = 32 * 1024 * 1024;
@@ -83,6 +75,7 @@ impl GmaFile {
         src_path: P,
         transaction: &Transaction,
         whitelist: &AddonWhitelist,
+        cpu: &CpuExecutor,
     ) -> Result<(), GmaError> {
         let temp = create_temp_file(&self.path)?;
         let mut f = BufWriter::new(temp.as_file());
@@ -282,7 +275,7 @@ impl GmaFile {
                 }
 
                 let batch = &file_list[i..batch_end];
-                let results: Vec<Result<(Vec<u8>, u32), PathBuf>> = THREAD_POOL.install(|| {
+                let results: Vec<Result<(Vec<u8>, u32), PathBuf>> = cpu.install(|| {
                     batch
                         .par_iter()
                         .map(|(_, pending)| {
@@ -363,7 +356,10 @@ mod tests {
 
         let transactions = Transactions::new(Arc::new(BackendEventCollector::default()));
         let transaction = transactions.begin();
-        assert!(transaction.cancel());
+        assert_eq!(
+            transaction.cancel(),
+            crate::transactions::FinalizeOutcome::Finalized
+        );
 
         let gma = GmaFile {
             path: gma_path.clone(),
@@ -379,7 +375,12 @@ mod tests {
         };
 
         assert!(matches!(
-            gma.create(source.path(), &transaction, &AddonWhitelist::builtin_only()),
+            gma.create(
+                source.path(),
+                &transaction,
+                &AddonWhitelist::builtin_only(),
+                &crate::execution::CpuExecutor::build(2).expect("test CPU executor"),
+            ),
             Err(GmaError::Cancelled)
         ));
         assert!(

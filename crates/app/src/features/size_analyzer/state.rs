@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 use iced::widget::{canvas, image};
 use iced::{Point, Size};
 

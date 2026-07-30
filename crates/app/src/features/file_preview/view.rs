@@ -9,7 +9,7 @@
 //! [`PreviewContent`]: crate::media::preview_model::PreviewContent
 
 use crate::i18n::Arg;
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use iced::widget::{
     Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
     sensor, stack, text,
@@ -35,7 +35,7 @@ use crate::media::preview_model::{
     CodeLine, InfoReason, PreviewContent, PreviewData, PreviewRequest, RelatedPreviewKind,
 };
 use crate::media::preview_model::{MapPreview, MapStats, ModelPreview, ParticlePreview};
-use gmpublished_backend::particles::SupportLevel;
+use gmpublished_domain::particles::SupportLevel;
 
 fn count_text(count: impl std::fmt::Display) -> String {
     count.to_string()
@@ -1016,7 +1016,7 @@ fn particle_inspector_rows<'a>(
 
 /// One operator line in the fidelity panel: a support-level dot + name.
 fn coverage_row<'a>(
-    entry: &'a gmpublished_backend::particles::CoverageEntry,
+    entry: &'a gmpublished_domain::particles::CoverageEntry,
     ctx: ViewCtx<'a>,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;

@@ -122,7 +122,7 @@ impl App {
                 if let Some(cache) = &disk_cache {
                     cache.prime_index();
                 }
-                let (cached, _stale) = app.resolve_workshop_metadata(&ids);
+                let (cached, _stale) = app.workshop().resolve_metadata(&ids);
                 cached
                     .into_iter()
                     .filter_map(|metadata| {

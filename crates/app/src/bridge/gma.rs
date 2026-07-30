@@ -4,14 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use gmpublished_backend::{
-    GmaFile, Transaction,
-    gma::{is_unsafe_entry_path, read::GmaView},
-};
+use gmpublished_backend::{GmaFile, GmaView, Transaction, is_unsafe_entry_path};
 
 pub use gmpublished_backend::{
-    GmaError,
-    gma::{ExtractDestination, ExtractOptions, ExtractionOverwriteMode, Whitelist, whitelist},
+    ExtractDestination, ExtractOptions, ExtractionOverwriteMode, GmaError, Whitelist, whitelist,
 };
 
 #[cfg(test)]
@@ -341,7 +337,8 @@ impl PreviewArchive {
         backend: &gmpublished_backend::Backend,
     ) -> Result<PathBuf, GmaError> {
         self.entry(entry_path)?;
-        self.view.extract_entry(
+        backend.extract_gma_entry(
+            &self.view,
             &self.gma,
             entry_path.to_owned(),
             transaction,
@@ -349,8 +346,6 @@ impl PreviewArchive {
                 open_after: false,
                 whitelist: Whitelist::Ignore,
             },
-            &backend.app_data,
-            &backend.steam,
         )
     }
 
@@ -373,7 +368,7 @@ impl PreviewArchive {
                 },
             },
         )?;
-        self.view.extract(&self.gma, transaction, context)
+        backend.extract_gma(&self.view, &self.gma, transaction, context)
     }
 }
 
@@ -396,11 +391,7 @@ impl Default for PreviewExtractOptions {
     }
 }
 
-pub fn build_preview_extract_request(
-    mut settings: super::Settings,
-    paths: &super::AppPaths,
-) -> PreviewExtractRequest {
-    settings.sanitize(paths);
+pub fn build_preview_extract_request(settings: super::Settings) -> PreviewExtractRequest {
     PreviewExtractRequest {
         destination: settings.backend.extract_destination,
         options: PreviewExtractOptions::default(),
@@ -430,8 +421,7 @@ fn workshop_id_from_path(path: &Path) -> Option<u64> {
 }
 
 pub fn workshop_id_from_filename(file_name: impl AsRef<str>) -> Option<u64> {
-    gmpublished_backend::gma::ws_id_from_file_name(file_name)
-        .map(gmpublished_backend::WorkshopId::get)
+    gmpublished_backend::ws_id_from_file_name(file_name).map(gmpublished_backend::WorkshopId::get)
 }
 
 #[cfg(test)]

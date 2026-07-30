@@ -12,7 +12,7 @@ use crate::bridge::domain::{
     AvatarRgba, InstalledAddon, PublishedFileId, SearchHit, SearchItem, SearchItemSource,
     SearchQuickBatch, SearchQuickRequest, SteamUser, WorkshopDownloadSuccess, workshop_url,
 };
-use gmpublished_backend::appdata::{
+use gmpublished_backend::{
     AppDataPathsSnapshot as BackendAppDataPathsSnapshot, AppDataSnapshot as BackendAppDataSnapshot,
     Settings as BackendSettings,
 };
@@ -36,7 +36,7 @@ use crate::{
     test_support::GmaFixtureBuilder,
     theme::AccentInputs,
 };
-use gmpublished_backend::transactions::TransactionId;
+use gmpublished_backend::TransactionId;
 
 #[test]
 fn staged_startup_activates_exactly_once_after_first_frame() {
@@ -379,7 +379,7 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
         .handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             crate::bridge::tasks::TransactionRuntimeEvent::Data {
                 id: transaction.id(),
-                payload: gmpublished_backend::events::TransactionPayload::WorkshopItem(
+                payload: gmpublished_backend::TransactionPayload::WorkshopItem(
                     gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
                 ),
             },
@@ -2080,6 +2080,7 @@ fn backend_appdata_snapshot_for_test(
 
     BackendAppDataSnapshot {
         settings,
+        settings_revision: 1,
         version: "test",
         paths: BackendAppDataPathsSnapshot {
             settings_file: root.join("settings.json"),
@@ -2210,7 +2211,7 @@ fn download_count_format_mutation_updates_runtime_formatter() {
 #[test]
 fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
     let mut app = App::new_for_test();
-    app.ctx.search_for_test().clear();
+    app.ctx.clear_search_for_test();
     let snapshot = LibrarySnapshot {
         addons: Arc::from(
             vec![installed_addon_for_library(
@@ -2237,8 +2238,7 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
     assert_eq!(app.state.installed_addons.row_count(), 1);
     let result = app
         .ctx
-        .search_for_test()
-        .quick_search("root-needle".to_owned());
+        .quick_addon_search_for_test("root-needle".to_owned());
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].item.label(), "Root Fanout Addon");
 
@@ -2416,7 +2416,7 @@ fn failed_steam_connection_clears_pending_retry() {
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionAttemptCompleted(
             steam_session::ConnectionAttempt::unavailable(UiError::detailed(
-                gmpublished_backend::error_key::keys::STEAM_ERROR,
+                gmpublished_backend::error_keys::STEAM_ERROR,
                 Some("steam unavailable".to_owned()),
             )),
         ),
@@ -2527,7 +2527,7 @@ fn steam_identity_fetch_failure_restores_anonymous_shell_identity() {
         steam_session::Message::IdentityFetched(
             Generation::from_raw(1),
             Err(UiError::detailed(
-                gmpublished_backend::error_key::keys::STEAM_ERROR,
+                gmpublished_backend::error_keys::STEAM_ERROR,
                 Some("steam unavailable".to_owned()),
             )),
         ),
@@ -3018,7 +3018,7 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
             Generation::from_raw(1),
             1,
             Err(UiError::detailed(
-                gmpublished_backend::error_key::keys::STEAM_ERROR,
+                gmpublished_backend::error_keys::STEAM_ERROR,
                 Some("STEAM_UNAVAILABLE".to_owned()),
             )),
         ),
@@ -3088,7 +3088,7 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
             Generation::from_raw(1),
             vec![workshop_id],
             Err(UiError::detailed(
-                gmpublished_backend::error_key::keys::STEAM_ERROR,
+                gmpublished_backend::error_keys::STEAM_ERROR,
                 Some("STEAM_UNAVAILABLE".to_owned()),
             )),
         ),

@@ -1,4 +1,4 @@
-//! Vector maths shared by the scene, particle and viewer code.
+//! Vector maths shared by backend decoding and application rendering.
 //!
 //! [`Vec3`] is `repr(transparent)` over `[f32; 3]` and `Pod`, so it is the
 //! same bytes as the array it wraps and crosses the wgpu and steamworks

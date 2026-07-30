@@ -51,10 +51,11 @@ pub struct LibraryRefresh {
     pub(crate) rerun_after: Option<LibraryRefreshReason>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LibraryStore {
     state: Mutex<LibraryState>,
     header_cache: Arc<Mutex<HeaderCacheStore>>,
+    execution: gmpublished_backend::ExecutionResources,
 }
 
 #[derive(Debug, Default)]
@@ -156,12 +157,16 @@ impl PersistTestHook {
 }
 
 pub fn header_snapshot_path() -> Option<PathBuf> {
-    gmpublished_backend::appdata::cache_dir().map(|dir| dir.join(HEADER_SNAPSHOT_FILE_NAME))
+    gmpublished_backend::cache_dir().map(|dir| dir.join(HEADER_SNAPSHOT_FILE_NAME))
 }
 
 impl LibraryStore {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(execution: gmpublished_backend::ExecutionResources) -> Self {
+        Self {
+            state: Mutex::new(LibraryState::default()),
+            header_cache: Arc::new(Mutex::new(HeaderCacheStore::default())),
+            execution,
+        }
     }
 
     pub(crate) fn set_header_snapshot_file(&self, path: PathBuf) {
@@ -207,14 +212,18 @@ impl LibraryStore {
         paths: &AppPaths,
         reason: LibraryRefreshReason,
     ) -> LibraryRefresh {
-        let snapshot = discover(paths, &self.header_cache).map_or_else(
+        let discovered = self
+            .execution
+            .cpu()
+            .install(|| discover(paths, &self.header_cache));
+        let snapshot = discovered.map_or_else(
             || {
                 self.clear_snapshot_and_cache();
                 None
             },
             |addons| Some(self.commit_snapshot(addons)),
         );
-        persist_header_cache_if_dirty(&self.header_cache);
+        persist_header_cache_if_dirty(&self.header_cache, &self.execution);
         let rerun_after = self.finish_refresh();
 
         LibraryRefresh {
@@ -525,7 +534,10 @@ fn prune_header_cache(header_cache: &Mutex<HeaderCacheStore>, seen_keys: &HashSe
     }
 }
 
-fn persist_header_cache_if_dirty(header_cache: &Arc<Mutex<HeaderCacheStore>>) {
+fn persist_header_cache_if_dirty(
+    header_cache: &Arc<Mutex<HeaderCacheStore>>,
+    execution: &gmpublished_backend::ExecutionResources,
+) {
     #[cfg(test)]
     let hook;
     {
@@ -553,15 +565,8 @@ fn persist_header_cache_if_dirty(header_cache: &Arc<Mutex<HeaderCacheStore>>) {
     }
 
     let spawn_cache = Arc::clone(header_cache);
-    // A blocking disk write, so not `rayon::spawn` — its pool is CPU-bound and
-    // `process_candidates` has just saturated it. Not inline either: the
-    // snapshot must reach the UI without waiting for the disk. `Running` above
-    // keeps this to one thread at a time.
     let spawn = |job: Box<dyn FnOnce() + Send + 'static>| {
-        if let Err(error) = std::thread::Builder::new()
-            .name("library-header-persist".to_owned())
-            .spawn(job)
-        {
+        if let Err(error) = execution.spawn_blocking("library-header-persist", job) {
             // Release the slot the claim above took, or `Running` with no
             // thread to drain it stops persistence for good. `dirty` survives,
             // so the next mutation retries.
@@ -675,7 +680,7 @@ fn modified_epoch_nanos(metadata: &Metadata) -> u128 {
 }
 
 fn workshop_id_from_name(name: &str) -> Option<PublishedFileId> {
-    gmpublished_backend::gma::ws_id_from_file_name(name).map(PublishedFileId::from)
+    gmpublished_backend::ws_id_from_file_name(name).map(PublishedFileId::from)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -977,6 +982,16 @@ mod tests {
     use crate::bridge::gma::{GmaError, GmaHeader, GmaMetadata};
     use crate::test_support::{GmaFixtureBuilder, TestDir, write_gma_fixture};
 
+    fn test_execution() -> gmpublished_backend::ExecutionResources {
+        gmpublished_backend::ExecutionResources::build(gmpublished_backend::ExecutionConfig {
+            cpu_threads: 2,
+            blocking_threads: 1,
+            network_threads: 1,
+            queue_capacity: 8,
+        })
+        .expect("test execution resources")
+    }
+
     fn test_meta(title: &str) -> GmaMeta {
         test_meta_at(PathBuf::from(format!("/tmp/{title}.gma")), title)
     }
@@ -1088,7 +1103,7 @@ mod tests {
 
     #[test]
     fn refresh_coalesces_pending_requests_into_one_rerun() {
-        let store = LibraryStore::new();
+        let store = LibraryStore::new(test_execution());
 
         assert!(store.begin_refresh(LibraryRefreshReason::DiskChanged));
         assert!(!store.begin_refresh(LibraryRefreshReason::DiskChanged));
@@ -1206,7 +1221,7 @@ mod tests {
         let gmod_dir = temp.dir("steamapps/common/GarrysMod");
         write_installed_gma(&gmod_dir, "addon.gma");
         let paths = paths_with_gmod(gmod_dir);
-        let store = LibraryStore::new();
+        let store = LibraryStore::new(test_execution());
 
         let refresh = store.refresh_blocking(&paths, LibraryRefreshReason::Startup);
         let snapshot = refresh.snapshot.expect("gmod dir should produce snapshot");
@@ -1279,7 +1294,7 @@ mod tests {
         write_installed_gma(&gmod_dir, "addon.gma");
         let paths = paths_with_gmod(gmod_dir);
         let snapshot_file = temp.join("cache/library-headers.json");
-        let store = LibraryStore::new();
+        let store = LibraryStore::new(test_execution());
         store.set_header_snapshot_file(snapshot_file.clone());
         let hook = Arc::new(PersistTestHook::blocked());
         store.set_header_snapshot_persist_hook_for_test(Arc::clone(&hook));
@@ -1303,7 +1318,7 @@ mod tests {
         write_installed_gma(&gmod_dir, "addon.gma");
         let paths = paths_with_gmod(gmod_dir);
         let snapshot_file = temp.join("cache/library-headers.json");
-        let store = LibraryStore::new();
+        let store = LibraryStore::new(test_execution());
         store.set_header_snapshot_file(snapshot_file.clone());
         let hook = Arc::new(PersistTestHook::default());
         store.set_header_snapshot_persist_hook_for_test(Arc::clone(&hook));
@@ -1321,7 +1336,7 @@ mod tests {
 
     #[test]
     fn committed_snapshot_epochs_are_monotonic() {
-        let store = LibraryStore::new();
+        let store = LibraryStore::new(test_execution());
 
         let first = store.commit_snapshot(Vec::new());
         let second = store.commit_snapshot(Vec::new());

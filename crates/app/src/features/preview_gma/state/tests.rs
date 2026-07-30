@@ -241,9 +241,7 @@ fn pending_image_square_is_reserved_until_metadata_settles() {
     assert!(state.apply_workshop_metadata(
         request.request_id,
         PublishedFileId::fixture(42),
-        Err(UiError::new(gmpublished_backend::error_key::ErrorKey::new(
-            "ERR_TEST"
-        )))
+        Err(UiError::new(gmpublished_backend::ErrorKey::new("ERR_TEST")))
     ));
     assert!(!state.thumbnail_loading());
     assert!(state.thumbnail_handle().is_none());
@@ -391,9 +389,7 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     assert!(state.apply_workshop_metadata(
         request.request_id,
         PublishedFileId::fixture(42),
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR
-        )),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     ));
     assert_eq!(
         state.details().description.plain_text(),
@@ -428,9 +424,7 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
     assert!(failed_state.apply_author_result(
         author_request.request_id,
         author_request.steamid64,
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR
-        )),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     ));
     let author = failed_state.details().author.as_ref().expect("author row");
     assert_eq!(author.name, "STEAM_1:0:15234784");

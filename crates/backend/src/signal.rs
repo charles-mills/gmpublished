@@ -13,19 +13,19 @@ use parking_lot::{Condvar, Mutex};
 /// notify must follow the store and must happen with the lock released, and to
 /// spell the wait-while predicate correctly each time.
 #[derive(Debug, Default)]
-pub struct Signal {
+pub(crate) struct Signal {
     state: Mutex<bool>,
     changed: Condvar,
 }
 
 impl Signal {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Sets the flag and wakes every waiter. Idempotent.
-    pub fn set(&self) {
+    pub(crate) fn set(&self) {
         self.store(true);
     }
 
@@ -33,7 +33,7 @@ impl Signal {
     ///
     /// Clearing exists for state that can genuinely go back — a Steam
     /// connection dropping — rather than for a latch.
-    pub fn store(&self, value: bool) {
+    pub(crate) fn store(&self, value: bool) {
         {
             let mut state = self.state.lock();
             *state = value;
@@ -44,7 +44,7 @@ impl Signal {
     }
 
     #[must_use]
-    pub fn is_set(&self) -> bool {
+    pub(crate) fn is_set(&self) -> bool {
         *self.state.lock()
     }
 
@@ -52,7 +52,7 @@ impl Signal {
     /// is set. Returns immediately if it already was.
     // The guard is handed to `wait_while_for`, so it cannot be tightened.
     #[expect(clippy::significant_drop_tightening)]
-    pub fn wait_until_set(&self, timeout: Duration) -> bool {
+    pub(crate) fn wait_until_set(&self, timeout: Duration) -> bool {
         let mut state = self.state.lock();
         if *state {
             return true;

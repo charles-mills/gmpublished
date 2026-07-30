@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::WorkshopId;
 
 use crate::appdata::AppDataSnapshot;
-pub use crate::transactions::{
+pub(crate) use crate::transactions::{
     TransactionError, TransactionId, TransactionPayload, TransactionStatus,
 };
 
@@ -162,6 +162,7 @@ mod tests {
         let root = std::env::temp_dir().join("gmpublished-backend-event-test");
         AppDataSnapshot {
             settings: Settings::default(),
+            settings_revision: 0,
             version: "test",
             paths: AppDataPathsSnapshot {
                 settings_file: root.join("settings.json"),

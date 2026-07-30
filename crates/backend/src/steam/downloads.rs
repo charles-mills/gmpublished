@@ -1,12 +1,11 @@
 use parking_lot::{Condvar, Mutex, MutexGuard};
-use rayon::ThreadPool;
 
 use std::{
     collections::{HashSet, VecDeque},
     io::{Read, Write},
     path::PathBuf,
     sync::{
-        Arc, LazyLock,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -17,11 +16,11 @@ use steamworks::{ItemState, QueryResults, UGC};
 
 use crate::WorkshopId;
 
-use crate::util::thread_pool;
 use crate::{
     GMOD_APP_ID, GmaError, GmaFile,
     appdata::AppData,
     events::{BackendEvent, DownloadStartedEvent, ExtractionStartedEvent, WorkshopSnapshotId},
+    execution::ExecutionResources,
     gma::{
         ExtractDestination, ExtractOptions, ExtractionContext, Whitelist, read::GmaView,
         whitelist::AddonWhitelist,
@@ -29,13 +28,6 @@ use crate::{
     steam::{CALLBACK_RESULT_TIMEOUT, ConnectedSteam, Steam, runtime::SteamRuntimeError},
     transactions::Transactions,
 };
-
-static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
-
-/// Pool for parallel legacy-CDN payload downloads. Separate from
-/// [`THREAD_POOL`] so completed downloads pipeline straight into extraction
-/// instead of queueing behind the remaining (slow, network-bound) downloads.
-static HTTP_DOWNLOAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!(8));
 
 /// Cadence `Downloads::watchdog` re-checks in-progress download callbacks at.
 const CALLBACK_PUMP_INTERVAL: Duration = Duration::from_millis(50);
@@ -217,7 +209,7 @@ mod batch_token_tests {
     }
 }
 
-pub struct Downloads {
+pub(crate) struct Downloads {
     pending: Mutex<Vec<Download>>,
     downloading: Mutex<WatchdogQueue>,
     /// Signals the watchdog that [`Self::downloading`] changed. It parks here
@@ -233,14 +225,16 @@ pub struct Downloads {
     steam: Arc<Steam>,
     whitelist: AddonWhitelist,
     transactions: Transactions,
+    execution: ExecutionResources,
 }
 impl Downloads {
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         app_data: Arc<AppData>,
         steam: Arc<Steam>,
         whitelist: AddonWhitelist,
         transactions: Transactions,
+        execution: ExecutionResources,
     ) -> Self {
         Self {
             pending: Mutex::new(Vec::new()),
@@ -251,13 +245,14 @@ impl Downloads {
             steam,
             whitelist,
             transactions,
+            execution,
         }
     }
 
     /// Stops in-flight submission batches from queueing any further
     /// downloads. Already-queued items are cancelled through their
     /// individual transactions, not here.
-    pub fn cancel_all(&self) {
+    pub(crate) fn cancel_all(&self) {
         self.cancel_epoch.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -290,98 +285,127 @@ impl Downloads {
         temp_guard: Option<tempfile::TempPath>,
     ) {
         let downloads = Arc::clone(self);
-        THREAD_POOL.spawn(move || {
-            // Keeps a downloaded temp payload alive until extraction is done.
-            let _temp_guard = temp_guard;
+        let transaction = self.transactions.begin();
+        transaction.status(crate::transactions::TransactionStatus::Locating);
+        let worker_transaction = transaction.clone();
+        let schedule = self
+            .execution
+            .spawn_blocking("workshop-extraction", move || {
+                // Keeps a downloaded temp payload alive until extraction is done.
+                let _temp_guard = temp_guard;
+                let transaction = worker_transaction;
 
-            let transaction = downloads.transactions.begin();
-            transaction.status(crate::transactions::TransactionStatus::Locating);
+                // Installed workshop content keeps its .gma on disk after
+                // extraction, so the started event advertises it as a
+                // previewable source. Temp payloads (the .bin branch below) are
+                // deleted once extraction finishes, so they stay anonymous.
+                let source_gma = if folder.is_dir() {
+                    unique_gma_in_dir(&folder)
+                } else {
+                    None
+                };
 
-            // Installed workshop content keeps its .gma on disk after
-            // extraction, so the started event advertises it as a
-            // previewable source. Temp payloads (the .bin branch below) are
-            // deleted once extraction finishes, so they stay anonymous.
-            let source_gma = if folder.is_dir() {
-                unique_gma_in_dir(&folder)
-            } else {
-                None
-            };
+                downloads.transactions.emit(BackendEvent::ExtractionStarted(
+                    ExtractionStartedEvent {
+                        transaction_id: transaction.id(),
+                        source_path: source_gma.clone(),
+                        file_name: None,
+                        workshop_id: Some(item),
+                        request_id,
+                    },
+                ));
 
-            downloads
-                .transactions
+                let open_on_disk = |path: PathBuf| -> Result<(GmaFile, GmaView), GmaError> {
+                    let gma = GmaFile::open(path)?;
+                    let view = gma.view()?;
+                    Ok((gma, view))
+                };
+
+                let (mut gma, view) = if folder.is_dir() {
+                    if let Some(path) = source_gma {
+                        match open_on_disk(path) {
+                            Ok(gma) => gma,
+                            Err(err) => {
+                                transaction.error(&err);
+                                return;
+                            }
+                        }
+                    } else {
+                        transaction.error(crate::error_key::keys::DOWNLOAD_MISSING);
+                        return;
+                    }
+                } else if folder.is_file() && crate::path::has_extension(&folder, "bin") {
+                    if let Ok(gma) = open_on_disk(folder.clone()) {
+                        gma
+                    } else {
+                        transaction.status(crate::transactions::TransactionStatus::Decompressing);
+                        match GmaFile::decompress(
+                            folder,
+                            &transaction,
+                            &downloads.app_data,
+                            &downloads.steam,
+                        ) {
+                            Ok(gma) => {
+                                transaction.progress_reset();
+                                gma
+                            }
+                            Err(err) => {
+                                transaction.error(&err);
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    transaction.error(crate::error_key::keys::DOWNLOAD_MISSING);
+                    return;
+                };
+
+                gma.id = Some(item);
+
+                transaction.status(crate::transactions::TransactionStatus::ReadingMetadata);
+                transaction.data(crate::transactions::TransactionPayload::ByteSize {
+                    source: Some(gma.metadata.title().to_owned()),
+                    bytes: gma.size,
+                });
+
+                let extraction = match ExtractionContext::resolve(
+                    &gma,
+                    extract_destination,
+                    ExtractOptions {
+                        open_after: false,
+                        whitelist: Whitelist::Ignore,
+                    },
+                    &downloads.whitelist,
+                    &downloads.app_data,
+                    &downloads.steam,
+                ) {
+                    Ok(extraction) => extraction,
+                    Err(error) => {
+                        transaction.error(&error);
+                        return;
+                    }
+                };
+
+                // `GmaView::extract` owns the terminal transaction event; the
+                // returned error is only for synchronous callers that need the
+                // cause as a value as well.
+                let _ = view.extract(&gma, &transaction, extraction, downloads.execution.cpu());
+            });
+        if let Err(error) = schedule {
+            log::error!("could not schedule Workshop extraction: {error}");
+            self.transactions
                 .emit(BackendEvent::ExtractionStarted(ExtractionStartedEvent {
                     transaction_id: transaction.id(),
-                    source_path: source_gma.clone(),
+                    source_path: None,
                     file_name: None,
                     workshop_id: Some(item),
                     request_id,
                 }));
-
-            let open_on_disk = |path: PathBuf| -> Result<(GmaFile, GmaView), GmaError> {
-                let gma = GmaFile::open(path)?;
-                let view = gma.view()?;
-                Ok((gma, view))
-            };
-
-            let (mut gma, view) = if folder.is_dir() {
-                if let Some(path) = source_gma {
-                    match open_on_disk(path) {
-                        Ok(gma) => gma,
-                        Err(err) => return transaction.error(&err),
-                    }
-                } else {
-                    return transaction.error(crate::error_key::keys::DOWNLOAD_MISSING);
-                }
-            } else if folder.is_file() && crate::path::has_extension(&folder, "bin") {
-                if let Ok(gma) = open_on_disk(folder.clone()) {
-                    gma
-                } else {
-                    transaction.status(crate::transactions::TransactionStatus::Decompressing);
-                    match GmaFile::decompress(
-                        folder,
-                        &transaction,
-                        &downloads.app_data,
-                        &downloads.steam,
-                    ) {
-                        Ok(gma) => {
-                            transaction.progress_reset();
-                            gma
-                        }
-                        Err(err) => return transaction.error(&err),
-                    }
-                }
-            } else {
-                return transaction.error(crate::error_key::keys::DOWNLOAD_MISSING);
-            };
-
-            gma.id = Some(item);
-
-            transaction.status(crate::transactions::TransactionStatus::ReadingMetadata);
-            transaction.data(crate::transactions::TransactionPayload::ByteSize {
-                source: Some(gma.metadata.title().to_owned()),
-                bytes: gma.size,
-            });
-
-            let extraction = match ExtractionContext::resolve(
-                &gma,
-                extract_destination,
-                ExtractOptions {
-                    open_after: false,
-                    whitelist: Whitelist::Ignore,
-                },
-                &downloads.whitelist,
-                &downloads.app_data,
-                &downloads.steam,
-            ) {
-                Ok(extraction) => extraction,
-                Err(error) => return transaction.error(&error),
-            };
-
-            // `GmaView::extract` owns the terminal transaction event; the
-            // returned error is only for synchronous callers that need the
-            // cause as a value as well.
-            let _ = view.extract(&gma, &transaction, extraction);
-        });
+            transaction.error(crate::transactions::TransactionError::detailed(
+                crate::error_key::keys::UNKNOWN,
+                Some(error.to_string()),
+            ));
+        }
     }
 
     fn push_download(
@@ -453,14 +477,14 @@ impl Downloads {
         transaction.error(crate::error_key::keys::ITEM_NOT_FOUND);
     }
 
-    pub fn download(
+    pub(crate) fn download(
         self: &Arc<Self>,
         ids: impl IntoIterator<Item = WorkshopId>,
     ) -> Result<(), SteamRuntimeError> {
         self.download_many(ids, self.app_data.extract_destination_snapshot(), None)
     }
 
-    pub fn download_one_to(
+    pub(crate) fn download_one_to(
         self: &Arc<Self>,
         item: WorkshopId,
         extract_destination: ExtractDestination,
@@ -594,29 +618,39 @@ impl Downloads {
 
         let downloads = Arc::clone(self);
         let extract_destination = (**extract_destination).clone();
-        HTTP_DOWNLOAD_POOL.spawn(move || {
-            match downloads.http_download(&url, file_size, &transaction) {
-                Ok(Some(temp_path)) => {
-                    log::info!("Legacy CDN download SUCCESS: {item:?}");
-                    transaction.finished(crate::transactions::TransactionPayload::None);
-                    downloads.extract_with_cleanup(
-                        temp_path.to_path_buf(),
-                        item,
-                        extract_destination,
-                        token.request_id,
-                        Some(temp_path),
-                    );
+        let scheduling_transaction = transaction.clone();
+        let schedule = self
+            .execution
+            .spawn_network("legacy-cdn-download", move || {
+                match downloads.http_download(&url, file_size, &transaction) {
+                    Ok(Some(temp_path)) => {
+                        log::info!("Legacy CDN download SUCCESS: {item:?}");
+                        transaction.finished(crate::transactions::TransactionPayload::None);
+                        downloads.extract_with_cleanup(
+                            temp_path.to_path_buf(),
+                            item,
+                            extract_destination,
+                            token.request_id,
+                            Some(temp_path),
+                        );
+                    }
+                    Ok(None) => {} // aborted by the user; the row is already gone
+                    Err(error) => {
+                        log::error!("Legacy CDN download ERROR for {item:?}: {error}");
+                        transaction.error(crate::transactions::TransactionError::detailed(
+                            crate::error_key::keys::DOWNLOAD_FAILED,
+                            crate::transactions::detail_from_serialize(error.to_string()),
+                        ));
+                    }
                 }
-                Ok(None) => {} // aborted by the user; the row is already gone
-                Err(error) => {
-                    log::error!("Legacy CDN download ERROR for {item:?}: {error}");
-                    transaction.error(crate::transactions::TransactionError::detailed(
-                        crate::error_key::keys::DOWNLOAD_FAILED,
-                        crate::transactions::detail_from_serialize(error.to_string()),
-                    ));
-                }
-            }
-        });
+            });
+        if let Err(error) = schedule {
+            log::error!("could not schedule legacy CDN download for {item:?}: {error}");
+            scheduling_transaction.error(crate::transactions::TransactionError::detailed(
+                crate::error_key::keys::DOWNLOAD_FAILED,
+                Some(error.to_string()),
+            ));
+        }
     }
 
     /// Streams one legacy CDN payload to a temp `.bin`. Returns `Ok(None)`
@@ -868,7 +902,7 @@ impl Downloads {
         }
     }
 
-    pub fn start(&self) {
+    pub(crate) fn start(&self) {
         {
             let mut downloading = self.downloading.lock();
             append_pending_batch(&mut downloading.ready, &mut self.pending.lock());
@@ -887,7 +921,11 @@ impl Downloads {
     // Condvar pairings in the drain loop: the guards are handed to
     // `wait_while` (the idle park) and `wait_for` (the in-flight poll).
     #[expect(clippy::significant_drop_tightening)]
-    pub(super) fn watchdog(downloads: &Arc<Self>, steam: &Arc<Steam>, client: steamworks::Client) {
+    pub(super) fn watchdog(
+        downloads: &Arc<Self>,
+        client: steamworks::Client,
+        shutdown: &crate::signal::Signal,
+    ) {
         // `Option`, not a map: the Steam client downloads workshop items
         // serially, so exactly one can be in flight. The loop below only ever
         // started a download when the map was empty — which made "at most one"
@@ -952,7 +990,7 @@ impl Downloads {
             // Checked here rather than only at the idle park: a shutdown
             // landing mid-batch should stop feeding new items to the Steam
             // client, not finish the queue first.
-            if steam.shutting_down() {
+            if shutdown.is_set() {
                 return;
             }
 
@@ -1028,14 +1066,14 @@ impl Downloads {
     }
 }
 
-pub fn queue_workshop_downloads(
+pub(crate) fn queue_workshop_downloads(
     downloads: &Arc<Downloads>,
     ids: impl IntoIterator<Item = WorkshopId>,
 ) -> Result<(), SteamRuntimeError> {
     downloads.download(ids)
 }
 
-pub fn queue_workshop_download_to(
+pub(crate) fn queue_workshop_download_to(
     downloads: &Arc<Downloads>,
     item: WorkshopId,
     destination: ExtractDestination,

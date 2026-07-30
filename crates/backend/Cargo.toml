@@ -14,11 +14,6 @@ name = "gmpublished_backend"
 path = "src/lib.rs"
 
 [features]
-# Gates `scene` (BSP map preview decoding) and its tests. Carries no optional
-# dependency of its own: the BSP path runs on `vformats`, which is always
-# available.
-scene = []
-
 # Surface that exists only for tests to reach: probes that observe state no
 # real operation needs (the `GmaView` spill-file pair), constructors for
 # states production never builds (`SteamRuntime::unavailable_for_tests`,
@@ -32,9 +27,6 @@ test-support = []
 [dependencies]
 vformats.workspace = true
 arc-swap.workspace = true
-# `math::Vec3` is `repr(transparent)` + `Pod` so it crosses the wgpu and
-# steamworks boundaries as the bare `[f32; 3]` it wraps.
-bytemuck.workspace = true
 clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 crc32fast.workspace = true
 dirs.workspace = true
@@ -57,10 +49,7 @@ ureq.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
-# Also enables `scene`, without which `cargo test -p gmpublished-backend`
-# silently skips the entire BSP and particle decode suite — 96 tests that
-# compile only when the feature is on.
-gmpublished-backend = { path = ".", features = ["test-support", "scene"] }
+gmpublished-backend = { path = ".", features = ["test-support"] }
 # The encoder feature is only needed to build LZMA-alone test fixtures.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 steamworks-sys = "0.13.0"

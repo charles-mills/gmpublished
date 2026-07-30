@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::bridge::materials::MaterialResolver;
-use gmpublished_backend::scene::map::{
+use gmpublished_domain::scene::map::{
     MapAmbientLighting, MapDoor, MapEnvironmentLighting, MapStatsRaw, MapVisibility,
     MapWalkCollision, StaticPropPlacement,
 };

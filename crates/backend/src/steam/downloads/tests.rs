@@ -4,6 +4,7 @@ use crate::transactions::{TransactionId, TransactionStatus};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{Barrier, mpsc},
     time::{Duration, Instant},
 };
 
@@ -17,6 +18,21 @@ struct InstalledExtractFixture {
 }
 
 fn downloads_for_test(temp_root: &Path) -> (Arc<Downloads>, BackendEventCollector) {
+    let execution =
+        crate::execution::ExecutionResources::build(crate::execution::ExecutionConfig {
+            cpu_threads: 2,
+            blocking_threads: 2,
+            network_threads: 2,
+            queue_capacity: 64,
+        })
+        .expect("test execution resources");
+    downloads_for_test_with_execution(temp_root, execution)
+}
+
+fn downloads_for_test_with_execution(
+    temp_root: &Path,
+    execution: crate::execution::ExecutionResources,
+) -> (Arc<Downloads>, BackendEventCollector) {
     let collector = BackendEventCollector::default();
     let transactions = Transactions::new(Arc::new(collector.clone()));
     let app_data = Arc::new(AppData::load(
@@ -26,7 +42,13 @@ fn downloads_for_test(temp_root: &Path) -> (Arc<Downloads>, BackendEventCollecto
     let steam = Arc::new(Steam::new(transactions.clone()));
     let whitelist = AddonWhitelist::builtin_only();
     (
-        Arc::new(Downloads::new(app_data, steam, whitelist, transactions)),
+        Arc::new(Downloads::new(
+            app_data,
+            steam,
+            whitelist,
+            transactions,
+            execution,
+        )),
         collector,
     )
 }
@@ -40,6 +62,65 @@ fn download_requires_a_connected_steam_capability() {
         downloads.download([id(1)]),
         Err(SteamRuntimeError::NotConnected)
     ));
+}
+
+#[test]
+fn rejected_extraction_schedule_emits_a_correlated_terminal_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let execution =
+        crate::execution::ExecutionResources::build(crate::execution::ExecutionConfig {
+            cpu_threads: 1,
+            blocking_threads: 1,
+            network_threads: 1,
+            queue_capacity: 1,
+        })
+        .expect("test execution resources");
+
+    let gate = Arc::new(Barrier::new(2));
+    let worker_gate = Arc::clone(&gate);
+    let (started_tx, started_rx) = mpsc::channel();
+    execution
+        .spawn_blocking("occupy-worker", move || {
+            started_tx.send(()).expect("announce occupied worker");
+            worker_gate.wait();
+        })
+        .expect("occupy blocking worker");
+    started_rx.recv().expect("blocking worker started");
+    execution
+        .spawn_blocking("fill-queue", || {})
+        .expect("fill blocking queue");
+
+    let (downloads, collector) = downloads_for_test_with_execution(temp.path(), execution.clone());
+    let item = id(918_273);
+    let request_id = WorkshopSnapshotId::new(44);
+    downloads.extract(
+        temp.path().join("never-opened"),
+        item,
+        ExtractDestination::Directory(temp.path().join("extract")),
+        Some(request_id),
+    );
+
+    let events = collector.snapshot();
+    let transaction_id = events
+        .iter()
+        .find_map(|event| match event {
+            BackendEvent::ExtractionStarted(event)
+                if event.workshop_id == Some(item) && event.request_id == Some(request_id) =>
+            {
+                Some(event.transaction_id)
+            }
+            _ => None,
+        })
+        .expect("rejected extraction is still correlated");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        BackendEvent::Transaction(TransactionEvent::Error { id, error })
+            if *id == transaction_id
+                && error.key == crate::error_key::keys::UNKNOWN
+                && error.detail.as_deref().is_some_and(|detail| detail.contains("queue is full"))
+    )));
+
+    gate.wait();
 }
 
 fn with_installed_extract_events<T>(
@@ -93,8 +174,13 @@ fn write_installed_gma(
         modified: None,
     };
     let transaction = downloads.transactions.begin();
-    gma.create(&source, &transaction, &downloads.whitelist)
-        .expect("write fixture gma");
+    gma.create(
+        &source,
+        &transaction,
+        &downloads.whitelist,
+        downloads.execution.cpu(),
+    )
+    .expect("write fixture gma");
     transaction.finished(crate::transactions::TransactionPayload::None);
     gma_path
 }

@@ -24,43 +24,22 @@ fn test_steam() -> Steam {
 }
 
 #[test]
-fn settings_load_falls_back_to_legacy_gmpublisher_path_read_only() {
+fn a_post_rename_directory_sync_failure_does_not_report_the_commit_as_failed() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = AppDataPaths::for_test_root(temp.path());
-
-    let legacy = Settings {
-        language: Some("legacy-marker".to_owned()),
+    let settings = Settings {
+        language: Some("committed".to_owned()),
         ..Settings::default()
     };
-    if let Some(parent) = paths.legacy_settings_file.parent() {
-        fs::create_dir_all(parent).expect("legacy settings dir");
-    }
-    fs::write(
-        &paths.legacy_settings_file,
-        serde_json::to_string(&legacy).expect("serialize legacy settings"),
-    )
-    .expect("write legacy settings");
-    let legacy_bytes = fs::read(&paths.legacy_settings_file).expect("legacy bytes");
 
-    let loaded = Settings::load(&paths).expect("load falls back to legacy path");
-    assert_eq!(loaded.language.as_deref(), Some("legacy-marker"));
+    settings
+        .save_with_directory_sync(&paths, |_| {
+            Err(std::io::Error::other("injected directory sync failure"))
+        })
+        .expect("rename is the logical commit point");
 
-    // The fallback is read-only: loading must not create our file or
-    // touch the legacy one.
-    assert!(!paths.settings_file.exists());
-    assert_eq!(
-        fs::read(&paths.legacy_settings_file).expect("legacy bytes after"),
-        legacy_bytes
-    );
-
-    // load_or_default() migrates: settings persist to our path, legacy untouched.
-    let migrated = Settings::load_or_default(&paths);
-    assert_eq!(migrated.language.as_deref(), Some("legacy-marker"));
-    assert!(paths.settings_file.exists());
-    assert_eq!(
-        fs::read(&paths.legacy_settings_file).expect("legacy bytes after init"),
-        legacy_bytes
-    );
+    let loaded = Settings::load(&paths).expect("committed settings remain readable");
+    assert_eq!(loaded.language.as_deref(), Some("committed"));
 }
 
 #[test]
@@ -139,7 +118,6 @@ fn update_settings_saves_and_emits_appdata_snapshot() {
     let collector = BackendEventCollector::default();
     let transactions = Transactions::new(Arc::new(collector.clone()));
     let app_data = test_app_data_with_transactions(&temp, transactions);
-    let steam = test_steam();
 
     let temp_dir = temp.path().join("temp");
     fs::create_dir_all(&temp_dir).expect("temp dir");
@@ -148,15 +126,23 @@ fn update_settings_saves_and_emits_appdata_snapshot() {
     updated.temp = Some(temp_dir.clone());
     updated.sounds = !updated.sounds;
     updated.language = Some("en-US".to_owned());
+    updated.ui = Some(serde_json::json!({
+        "version": 7,
+        "backend_must_preserve_this": true,
+    }));
 
     app_data
-        .update_settings(updated.clone(), &steam)
+        .update_settings(|settings| {
+            settings.clone_from(&updated);
+            SettingsEnvironment::default()
+        })
         .expect("settings save");
 
     let stored = Settings::load(&app_data.paths).expect("stored settings");
     assert_eq!(stored.temp, Some(temp_dir.clone()));
     assert_eq!(stored.sounds, updated.sounds);
     assert_eq!(stored.language.as_deref(), Some("en-US"));
+    assert_eq!(stored.ui, updated.ui);
 
     let events = collector.drain();
     assert_eq!(events.len(), 1);
@@ -169,18 +155,62 @@ fn update_settings_saves_and_emits_appdata_snapshot() {
 }
 
 #[test]
+fn concurrent_backend_mutations_cannot_erase_each_other() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app_data = Arc::new(test_app_data(&temp));
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+
+    let sounds_writer = {
+        let app_data = Arc::clone(&app_data);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            app_data
+                .update_settings(|settings| {
+                    settings.sounds = false;
+                    SettingsEnvironment::default()
+                })
+                .expect("sounds update");
+        })
+    };
+    let language_writer = {
+        let app_data = Arc::clone(&app_data);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            app_data
+                .update_settings(|settings| {
+                    settings.language = Some("fr".to_owned());
+                    SettingsEnvironment::default()
+                })
+                .expect("language update");
+        })
+    };
+
+    barrier.wait();
+    sounds_writer.join().expect("sounds writer");
+    language_writer.join().expect("language writer");
+
+    let settings = app_data.settings();
+    assert!(!settings.sounds);
+    assert_eq!(settings.language.as_deref(), Some("fr"));
+}
+
+#[test]
 #[cfg(unix)]
 fn update_settings_failed_save_leaves_live_state_and_disk_untouched() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let app_data = test_app_data(&temp);
-    let steam = test_steam();
 
     let mut previous = app_data.settings.load().as_ref().clone();
     previous.language = Some("previous".to_owned());
     app_data
-        .update_settings(previous.clone(), &steam)
+        .update_settings(|settings| {
+            settings.clone_from(&previous);
+            SettingsEnvironment::default()
+        })
         .expect("seed settings save");
 
     let settings_dir = app_data.paths.settings_file.parent().expect("settings dir");
@@ -192,7 +222,10 @@ fn update_settings_failed_save_leaves_live_state_and_disk_untouched() {
 
     let mut attempted = previous;
     attempted.language = Some("unsaved".to_owned());
-    let result = app_data.update_settings(attempted, &steam);
+    let result = app_data.update_settings(|settings| {
+        *settings = attempted;
+        SettingsEnvironment::default()
+    });
 
     // Restore before asserting so a failed assertion doesn't leave the
     // tempdir behind in a state the OS refuses to clean up.
@@ -374,7 +407,7 @@ fn appdata_sanitize_retains_valid_paths_and_normalizes_extract_destination() {
         path
     }));
 
-    settings.sanitize_with_context(&SettingsSanitizeContext::default());
+    settings.sanitize(SettingsEnvironment::default());
 
     assert!(
         settings
@@ -398,7 +431,7 @@ fn appdata_sanitize_retains_valid_paths_and_normalizes_extract_destination() {
 
     settings.create_folder_on_extract = false;
     settings.extract_destination = ExtractDestination::NamedDirectory(valid_a.clone());
-    settings.sanitize_with_context(&SettingsSanitizeContext::default());
+    settings.sanitize(SettingsEnvironment::default());
     assert!(
         matches!(&settings.extract_destination, ExtractDestination::Directory(path) if path == &valid_a)
     );
@@ -406,13 +439,13 @@ fn appdata_sanitize_retains_valid_paths_and_normalizes_extract_destination() {
 
 #[test]
 fn appdata_sanitize_context_defaults_unavailable_downloads_and_addons() {
-    let unavailable = SettingsSanitizeContext::default();
+    let unavailable = SettingsEnvironment::default();
 
     let mut downloads = Settings {
         extract_destination: ExtractDestination::Downloads,
         ..Settings::default()
     };
-    downloads.sanitize_with_context(&unavailable);
+    downloads.sanitize(unavailable);
     assert!(matches!(
         downloads.extract_destination,
         ExtractDestination::Temp
@@ -422,7 +455,7 @@ fn appdata_sanitize_context_defaults_unavailable_downloads_and_addons() {
         extract_destination: ExtractDestination::Addons,
         ..Settings::default()
     };
-    addons.sanitize_with_context(&unavailable);
+    addons.sanitize(unavailable);
     assert!(matches!(
         addons.extract_destination,
         ExtractDestination::Temp
@@ -431,7 +464,7 @@ fn appdata_sanitize_context_defaults_unavailable_downloads_and_addons() {
 
 #[test]
 fn appdata_sanitize_context_retains_available_downloads_and_addons() {
-    let available = SettingsSanitizeContext {
+    let available = SettingsEnvironment {
         downloads_dir_available: true,
         gmod_dir_available: true,
     };
@@ -440,7 +473,7 @@ fn appdata_sanitize_context_retains_available_downloads_and_addons() {
         extract_destination: ExtractDestination::Downloads,
         ..Settings::default()
     };
-    downloads.sanitize_with_context(&available);
+    downloads.sanitize(available);
     assert!(matches!(
         downloads.extract_destination,
         ExtractDestination::Downloads
@@ -450,7 +483,7 @@ fn appdata_sanitize_context_retains_available_downloads_and_addons() {
         extract_destination: ExtractDestination::Addons,
         ..Settings::default()
     };
-    addons.sanitize_with_context(&available);
+    addons.sanitize(available);
     assert!(matches!(
         addons.extract_destination,
         ExtractDestination::Addons
@@ -682,6 +715,27 @@ fn settings_without_a_schema_load_as_the_original_shape() {
         !paths.settings_file.with_extension("json.bak").exists(),
         "a pre-versioning file is readable, not corrupt"
     );
+}
+
+#[test]
+fn schema_one_settings_explicitly_migrate_to_the_combined_schema() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = AppDataPaths::for_test_root(temp.path());
+    fs::create_dir_all(paths.settings_file.parent().expect("settings parent"))
+        .expect("settings parent");
+    let mut value = serde_json::to_value(Settings::default()).expect("settings JSON");
+    value["schema"] = serde_json::json!(1);
+    fs::write(
+        &paths.settings_file,
+        serde_json::to_vec(&value).expect("settings bytes"),
+    )
+    .expect("schema-one settings");
+
+    let settings = Settings::load(&paths).expect("schema-one settings load");
+
+    assert_eq!(settings.schema, SETTINGS_SCHEMA);
+    assert_eq!(SETTINGS_SCHEMA, 2);
+    assert!(settings.ui.is_none());
 }
 
 /// Serde drops the fields a newer build wrote, so accepting the file would

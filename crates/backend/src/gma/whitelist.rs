@@ -298,8 +298,8 @@ fn globber(wild: &str, str: &str) -> bool {
     w == wild.len()
 }
 
-/// Check if a path is allowed in a GMA file, against a whitelist snapshot
-/// obtained from [`snapshot`].
+/// Check if a path is allowed in a GMA file, against the backend's current
+/// whitelist snapshot.
 pub fn is_whitelisted_in(whitelist: &[String], str: &str) -> bool {
     let mut valid = false;
 

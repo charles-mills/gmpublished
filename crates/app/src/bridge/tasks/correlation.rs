@@ -1,23 +1,54 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use super::{
-    BackendRuntimeAction, BackendRuntimeEventEffects, MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION,
-    MAX_PENDING_PRE_START_TRANSACTIONS, PublishedFileId, TRANSACTION_PROGRESS_SCALE, TaskHandle,
-    TaskId, TransactionRuntimeEvent, UiError, WorkshopDownloadTaskKind, WorkshopSnapshotId,
+    BackendRuntimeAction, BackendRuntimeEventEffects, MAX_COMPLETED_TRANSACTION_TOMBSTONES,
+    MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION, MAX_PENDING_PRE_START_TRANSACTIONS,
+    PublishedFileId, TRANSACTION_PROGRESS_SCALE, TaskHandle, TaskId, TransactionRuntimeEvent,
+    UiError, WorkshopDownloadTaskKind, WorkshopSnapshotId,
 };
-use gmpublished_backend::events::TransactionPayload;
-use gmpublished_backend::transactions;
-use gmpublished_backend::transactions::TransactionId;
+use gmpublished_backend::TransactionPayload;
+use gmpublished_backend::{FinalizeOutcome, TransactionId};
 use parking_lot::Mutex;
-use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub(super) struct BackendTransactionTasks {
-    active: Mutex<HashMap<TransactionId, CorrelatedBackendTask>>,
-    pub(super) pending_pre_start: Mutex<HashMap<TransactionId, VecDeque<TransactionRuntimeEvent>>>,
+    state: Mutex<BackendTransactionTaskState>,
+}
+
+#[derive(Debug, Default)]
+struct BackendTransactionTaskState {
+    active: HashMap<TransactionId, CorrelatedBackendTask>,
+    pending_pre_start: HashMap<TransactionId, VecDeque<TransactionRuntimeEvent>>,
+    completed: CompletedTransactionTombstones,
+}
+
+#[derive(Debug, Default)]
+struct CompletedTransactionTombstones {
+    ids: HashSet<TransactionId>,
+    insertion_order: VecDeque<TransactionId>,
+}
+
+impl CompletedTransactionTombstones {
+    fn contains(&self, transaction_id: TransactionId) -> bool {
+        self.ids.contains(&transaction_id)
+    }
+
+    fn insert(&mut self, transaction_id: TransactionId) {
+        if !self.ids.insert(transaction_id) {
+            return;
+        }
+        self.insertion_order.push_back(transaction_id);
+
+        while self.ids.len() > MAX_COMPLETED_TRANSACTION_TOMBSTONES {
+            let Some(stale_id) = self.insertion_order.pop_front() else {
+                break;
+            };
+            self.ids.remove(&stale_id);
+        }
+    }
 }
 
 impl BackendTransactionTasks {
@@ -32,11 +63,29 @@ impl BackendTransactionTasks {
             handle: task,
             source,
         };
-        let mut actions = task.take_ready_actions();
-        self.active.lock().insert(transaction_id, task);
-        for pending_event in self.take_pending_pre_start(transaction_id) {
-            actions.extend(self.apply(&pending_event).into_actions());
+        let mut state = self.state.lock();
+
+        if state.completed.contains(transaction_id) {
+            drop(state);
+            log::warn!("Ignoring a late start for completed transaction {transaction_id}");
+            task.handle.error(keys::UNKNOWN);
+            return Vec::new();
         }
+
+        let mut actions = task.take_ready_actions();
+        for pending_event in state
+            .pending_pre_start
+            .remove(&transaction_id)
+            .unwrap_or_default()
+        {
+            let applied = apply_transaction_event_to_task(&mut task, &pending_event);
+            debug_assert!(!applied.terminal, "only ongoing events are buffered");
+            actions.extend(applied.actions);
+        }
+        let replaced = state.active.insert(transaction_id, task);
+        debug_assert!(replaced.is_none(), "transaction correlated twice");
+        drop(state);
+
         debug_assert!(
             actions
                 .iter()
@@ -47,12 +96,20 @@ impl BackendTransactionTasks {
 
     pub(super) fn apply(&self, event: &TransactionRuntimeEvent) -> BackendRuntimeEventEffects {
         let transaction_id = event.transaction_id();
-        let mut active = self.active.lock();
+        let mut state = self.state.lock();
+        if state.completed.contains(transaction_id) {
+            return BackendRuntimeEventEffects::ignored();
+        }
+
         let AppliedEvent { terminal, actions } = {
-            let Some(task) = active.get_mut(&transaction_id) else {
+            let Some(task) = state.active.get_mut(&transaction_id) else {
+                if event.is_terminal() {
+                    state.pending_pre_start.remove(&transaction_id);
+                    state.completed.insert(transaction_id);
+                    return BackendRuntimeEventEffects::ignored();
+                }
                 if event.is_bufferable_pre_start() {
-                    drop(active);
-                    self.buffer_pre_start(event.clone());
+                    state.buffer_pre_start(event.clone());
                     return BackendRuntimeEventEffects::handled();
                 }
                 return BackendRuntimeEventEffects::ignored();
@@ -61,74 +118,96 @@ impl BackendTransactionTasks {
         };
 
         if terminal {
-            active.remove(&transaction_id);
+            state.active.remove(&transaction_id);
+            state.pending_pre_start.remove(&transaction_id);
+            state.completed.insert(transaction_id);
         }
-        drop(active);
+        drop(state);
 
         BackendRuntimeEventEffects::handled_with(actions)
     }
 
-    fn buffer_pre_start(&self, event: TransactionRuntimeEvent) {
-        let transaction_id = event.transaction_id();
-        let mut pending = self.pending_pre_start.lock();
-        if pending.len() >= MAX_PENDING_PRE_START_TRANSACTIONS
-            && !pending.contains_key(&transaction_id)
-            && let Some(stale_transaction_id) = pending.keys().next().copied()
-        {
-            pending.remove(&stale_transaction_id);
-        }
-        let events = pending.entry(transaction_id).or_default();
-        if events.len() >= MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION {
-            events.pop_front();
-        }
-        events.push_back(event);
-        drop(pending);
-    }
-
-    fn take_pending_pre_start(
-        &self,
-        transaction_id: TransactionId,
-    ) -> VecDeque<TransactionRuntimeEvent> {
-        self.pending_pre_start
-            .lock()
-            .remove(&transaction_id)
-            .unwrap_or_default()
-    }
-
     pub(super) fn error(&self, transaction_id: TransactionId, error: UiError) -> bool {
-        let Some(task) = self.active.lock().remove(&transaction_id) else {
+        let mut state = self.state.lock();
+        let Some(task) = state.active.remove(&transaction_id) else {
             return false;
         };
+        state.pending_pre_start.remove(&transaction_id);
+        state.completed.insert(transaction_id);
+        drop(state);
+
         task.handle.error(error);
         true
     }
 
     pub(super) fn is_active(&self, transaction_id: TransactionId) -> bool {
-        self.active.lock().contains_key(&transaction_id)
+        self.state.lock().active.contains_key(&transaction_id)
     }
 
     pub(super) fn cancel_task(
         &self,
         task_id: TaskId,
-        transactions: &transactions::Transactions,
+        cancel_transaction: impl FnOnce(TransactionId) -> Option<FinalizeOutcome>,
     ) -> BackendTaskCancelResult {
-        let mut active = self.active.lock();
-        let Some(transaction_id) = active.iter().find_map(|(transaction_id, task)| {
-            (task.task_id() == task_id).then_some(*transaction_id)
-        }) else {
-            return BackendTaskCancelResult::Uncorrelated;
+        let transaction_id = {
+            let state = self.state.lock();
+            let Some(transaction_id) = state.active.iter().find_map(|(transaction_id, task)| {
+                (task.task_id() == task_id).then_some(*transaction_id)
+            }) else {
+                return BackendTaskCancelResult::Uncorrelated;
+            };
+            transaction_id
         };
 
-        if !transactions.cancel_by_id(transaction_id) {
+        if cancel_transaction(transaction_id) != Some(FinalizeOutcome::Finalized) {
             return BackendTaskCancelResult::NotCancellable;
         }
 
-        if let Some(task) = active.remove(&transaction_id) {
+        let mut state = self.state.lock();
+        let task = state.active.remove(&transaction_id);
+        state.pending_pre_start.remove(&transaction_id);
+        state.completed.insert(transaction_id);
+        drop(state);
+
+        if let Some(task) = task {
             task.cancelled();
         }
-        drop(active);
 
         BackendTaskCancelResult::Cancelled
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_pre_start_snapshot(
+        &self,
+    ) -> HashMap<TransactionId, VecDeque<TransactionRuntimeEvent>> {
+        self.state.lock().pending_pre_start.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn completed_count(&self) -> usize {
+        self.state.lock().completed.ids.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_completed(&self, transaction_id: TransactionId) -> bool {
+        self.state.lock().completed.contains(transaction_id)
+    }
+}
+
+impl BackendTransactionTaskState {
+    fn buffer_pre_start(&mut self, event: TransactionRuntimeEvent) {
+        let transaction_id = event.transaction_id();
+        if self.pending_pre_start.len() >= MAX_PENDING_PRE_START_TRANSACTIONS
+            && !self.pending_pre_start.contains_key(&transaction_id)
+            && let Some(stale_transaction_id) = self.pending_pre_start.keys().next().copied()
+        {
+            self.pending_pre_start.remove(&stale_transaction_id);
+        }
+        let events = self.pending_pre_start.entry(transaction_id).or_default();
+        if events.len() >= MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION {
+            events.pop_front();
+        }
+        events.push_back(event);
     }
 }
 

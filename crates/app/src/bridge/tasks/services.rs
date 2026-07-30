@@ -1,57 +1,46 @@
-use crate::bridge::ui_error::ResultExt as _;
-use gmpublished_backend::transactions::TransactionId;
-use std::path::Path;
+use gmpublished_backend::TransactionId;
 use std::sync::Arc;
 
-use gmpublished_backend::error_key::keys;
-
+#[cfg(test)]
+use super::WorkshopMetadata;
 use super::{
-    AppPaths, BackendEventSinkRegistration, BackendRuntimeEventSubscription,
-    CachedWorkshopMetadata, LibraryRefresh, LibraryRefreshReason, LibrarySnapshot, LibraryStore,
-    NativeOpenTarget, PublishSubmitOutcome, PublishSubmitRequest, PublishedFileId, SearchFullBatch,
-    SearchFullRequest, SearchMode, SearchQuickBatch, SearchQuickRequest, Settings,
-    SettingsPersistError, SteamUser, UiError, UiSettings, WorkshopItem, WorkshopMetadata,
-    WorkshopPage, WorkshopSnapshotId, appdata_snapshot_from_backend, clear_directory_contents,
-    fallback_paths, library, metadata_snapshot, native, publish_submission_from_app_request,
-    search_full_batch_from_transaction_payload, search_quick_batch_from_backend,
-    steam_user_from_backend, steam_user_from_workshop_backend, subscription_counts_from_items,
-    ui_settings_file_for, workshop_item_from_backend,
+    BackendEventSinkRegistration, BackendRuntimeEventSubscription, CachedWorkshopMetadata,
+    LibraryStore, NativeOpenTarget, PublishedFileId, UiError, library, metadata_snapshot, native,
 };
+use crate::bridge::config_store::ConfigStore;
 use crate::bridge::domain::SteamId;
+#[cfg(test)]
+use gmpublished_backend::AppDataSnapshot as BackendAppDataSnapshot;
 use gmpublished_backend::Backend;
-use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
-use gmpublished_backend::events::TransactionPayload;
-use gmpublished_backend::steam::SteamRuntime;
-use gmpublished_backend::steam::SteamRuntimeError;
-use gmpublished_backend::steam::downloads;
-use gmpublished_backend::steam::publishing as steam_publishing;
-use gmpublished_backend::steam::users as steam_users;
-use gmpublished_backend::steam::workshop as steam_workshop;
-use gmpublished_backend::transactions;
+use gmpublished_backend::SteamRuntime;
+use gmpublished_backend::SteamRuntimeError;
+use gmpublished_backend::Transaction;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+#[cfg(test)]
+use std::path::Path;
 use std::path::PathBuf;
 
-/// The settings in force and the paths they resolve to.
-///
-/// One value under one lock because they are one fact: `AppPaths` is derived
-/// from `Settings`, so a reader that took them from separate locks could
-/// observe a pairing that was never authoritative — a freshly saved Garry's
-/// Mod path beside the directory the previous one resolved to. Publishing
-/// both in a single assignment is what makes that unrepresentable.
-#[derive(Debug)]
-struct RuntimeConfiguration {
-    settings: Settings,
-    paths: AppPaths,
-}
+mod archive_service;
+mod config_service;
+mod library_service;
+mod publish_service;
+mod search_service;
+mod workshop_service;
 
+pub(crate) use archive_service::ArchiveService;
+pub(crate) use config_service::ConfigService;
+pub(crate) use library_service::LibraryService;
+pub(crate) use publish_service::PublishService;
+pub(crate) use search_service::SearchService;
+pub(crate) use workshop_service::WorkshopService;
+
+/// App composition root. Features receive one of its narrow borrowed service
+/// capabilities; scheduler and lifecycle code alone retain this registry.
 #[derive(Debug)]
-pub struct BackendServices {
-    pub(super) backend: Arc<Backend>,
-    configuration: Mutex<RuntimeConfiguration>,
-    persist_appdata_settings: bool,
-    persist_ui_settings: bool,
-    ui_settings_file: PathBuf,
+pub(crate) struct BackendServices {
+    backend: Arc<Backend>,
+    configuration: ConfigStore,
     steam_runtime: SteamRuntime,
     library: LibraryStore,
     workshop_metadata: Mutex<HashMap<PublishedFileId, CachedWorkshopMetadata>>,
@@ -73,27 +62,20 @@ fn steam_not_connected() -> UiError {
 /// making a production-only bug invisible to the suite.
 pub(super) struct BackendServicesConfig {
     /// Whether settings changes are written back to the backend's store.
-    persist_appdata_settings: bool,
-    /// Whether UI settings are loaded from, and written to, their file.
-    persist_ui_settings: bool,
+    persist_settings: bool,
     /// Where the Workshop metadata snapshot lives; `None` keeps it in memory.
     metadata_snapshot_file: Option<PathBuf>,
     /// Where the library header snapshot lives; `None` keeps it in memory.
     header_snapshot_file: Option<PathBuf>,
-    /// Overrides the UI settings file derived from `paths.settings_file`.
-    /// Tests point this at a private file; production derives it.
-    ui_settings_file: Option<PathBuf>,
 }
 
 impl BackendServicesConfig {
     /// Reads and writes the real user directories.
     fn production() -> Self {
         Self {
-            persist_appdata_settings: true,
-            persist_ui_settings: true,
+            persist_settings: true,
             metadata_snapshot_file: metadata_snapshot::snapshot_path(),
             header_snapshot_file: library::header_snapshot_path(),
-            ui_settings_file: None,
         }
     }
 
@@ -102,16 +84,44 @@ impl BackendServicesConfig {
     #[cfg(test)]
     fn isolated() -> Self {
         Self {
-            persist_appdata_settings: false,
-            persist_ui_settings: false,
+            persist_settings: false,
             metadata_snapshot_file: None,
             header_snapshot_file: None,
-            ui_settings_file: None,
         }
     }
 }
 
 impl BackendServices {
+    #[must_use]
+    pub(crate) fn config(&self) -> ConfigService<'_> {
+        ConfigService::new(self)
+    }
+
+    #[must_use]
+    pub(crate) fn library(&self) -> LibraryService<'_> {
+        LibraryService::new(self)
+    }
+
+    #[must_use]
+    pub(crate) fn workshop(&self) -> WorkshopService<'_> {
+        WorkshopService::new(self)
+    }
+
+    #[must_use]
+    pub(crate) fn publish(&self) -> PublishService<'_> {
+        PublishService::new(self)
+    }
+
+    #[must_use]
+    pub(crate) fn search(&self) -> SearchService<'_> {
+        SearchService::new(self)
+    }
+
+    #[must_use]
+    pub(crate) fn archive(&self) -> ArchiveService<'_> {
+        ArchiveService::new(self)
+    }
+
     /// The default entry point every `App::new()` (production) or
     /// `BackendContext::new()` (tests) goes through. Builds one `Backend`
     /// (with explicitly-started background services in production; a
@@ -122,20 +132,16 @@ impl BackendServices {
         backend_event_sink: Option<BackendEventSinkRegistration>,
     ) -> Result<Self, gmpublished_backend::BackendInitError> {
         let event_sink = backend_event_sink.as_ref().map_or_else(
-            || Arc::new(gmpublished_backend::events::NullEventSink) as _,
+            || Arc::new(gmpublished_backend::NullEventSink) as _,
             BackendEventSinkRegistration::sink,
         );
         #[cfg(not(test))]
         let backend = build_default_backend(event_sink)?;
         #[cfg(test)]
         let (backend, test_data_root) = build_default_backend(event_sink)?;
-        let (settings, paths) =
-            appdata_snapshot_from_backend(backend.app_data.snapshot(), &UiSettings::default());
-        let steam_runtime = SteamRuntime::new(Arc::clone(&backend.steam));
+        let steam_runtime = backend.steam_runtime();
         let services = Self::with_steam_runtime(
             backend,
-            settings,
-            paths,
             steam_runtime,
             backend_event_sink,
             BackendServicesConfig::production(),
@@ -151,31 +157,20 @@ impl BackendServices {
 
     fn with_steam_runtime(
         backend: Arc<Backend>,
-        settings: Settings,
-        paths: AppPaths,
         steam_runtime: SteamRuntime,
         backend_event_sink: Option<BackendEventSinkRegistration>,
         config: BackendServicesConfig,
     ) -> Self {
-        let ui_settings_file = config
-            .ui_settings_file
-            .unwrap_or_else(|| ui_settings_file_for(&paths.settings_file));
-        let mut settings = settings;
-        if config.persist_ui_settings {
-            settings.apply_ui_settings(&UiSettings::load_from_file_or_default(&ui_settings_file));
-        }
+        let configuration = ConfigStore::from_backend(&backend, config.persist_settings);
 
-        let library = LibraryStore::new();
+        let library = LibraryStore::new(backend.execution_resources());
         if let Some(path) = config.header_snapshot_file {
             library.set_header_snapshot_file(path);
         }
 
         Self {
             backend,
-            configuration: Mutex::new(RuntimeConfiguration { settings, paths }),
-            persist_appdata_settings: config.persist_appdata_settings,
-            persist_ui_settings: config.persist_ui_settings,
-            ui_settings_file,
+            configuration,
             steam_runtime,
             library,
             workshop_metadata: Mutex::new(HashMap::new()),
@@ -186,19 +181,9 @@ impl BackendServices {
         }
     }
 
-    pub(super) fn hydrate_workshop_metadata_snapshot(&self) {
-        let Some(path) = self.metadata_snapshot_file.as_deref() else {
-            return;
-        };
-        let loaded = metadata_snapshot::load(path);
-        if !loaded.is_empty() {
-            *self.workshop_metadata.lock() = loaded;
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
-        Self::for_test_with_event_sink(Arc::new(gmpublished_backend::events::NullEventSink))
+        Self::for_test_with_event_sink(Arc::new(gmpublished_backend::NullEventSink))
     }
 
     /// Like [`Self::for_test`], but with the real `AppData`-backed settings
@@ -206,9 +191,20 @@ impl BackendServices {
     /// can exercise `update_settings_snapshot`'s actual disk write and its
     /// failure propagation.
     #[cfg(test)]
-    pub(crate) fn for_test_with_appdata_persist_enabled() -> Self {
-        let mut services = Self::for_test();
-        services.persist_appdata_settings = true;
+    pub(crate) fn for_test_with_settings_persist_enabled() -> Self {
+        let (backend, test_data_root) =
+            build_default_backend(Arc::new(gmpublished_backend::NullEventSink))
+                .expect("test backend init");
+        let mut services = Self::with_steam_runtime(
+            backend,
+            SteamRuntime::unavailable_for_tests(),
+            None,
+            BackendServicesConfig {
+                persist_settings: true,
+                ..BackendServicesConfig::isolated()
+            },
+        );
+        services._test_data_root = Some(test_data_root);
         services
     }
 
@@ -217,16 +213,12 @@ impl BackendServices {
     /// the backend emits directly, without going through a `BackendContext`.
     #[cfg(test)]
     pub(crate) fn for_test_with_event_sink(
-        event_sink: Arc<dyn gmpublished_backend::events::BackendEventSink>,
+        event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
     ) -> Self {
         let (backend, test_data_root) =
             build_default_backend(event_sink).expect("test backend init");
-        let settings = Settings::default();
-        let paths = fallback_paths(&settings);
         let mut services = Self::with_steam_runtime(
             backend,
-            settings,
-            paths,
             SteamRuntime::unavailable_for_tests(),
             None,
             BackendServicesConfig::isolated(),
@@ -235,68 +227,34 @@ impl BackendServices {
         services
     }
 
+    pub(crate) fn begin_transaction(&self) -> Transaction {
+        self.backend.begin_transaction()
+    }
+
+    pub(crate) fn cpu_executor(&self) -> &gmpublished_backend::CpuExecutor {
+        self.backend.cpu_executor()
+    }
+
+    pub(super) fn execution_resources(&self) -> gmpublished_backend::ExecutionResources {
+        self.backend.execution_resources()
+    }
+
     #[cfg(test)]
-    pub(super) fn for_test_with_ui_settings_file(ui_settings_file: PathBuf) -> Self {
-        let (backend, test_data_root) =
-            build_default_backend(Arc::new(gmpublished_backend::events::NullEventSink))
-                .expect("test backend init");
-        let ui = UiSettings::load_from_file_or_default(&ui_settings_file);
-        let mut settings = Settings::default();
-        settings.apply_ui_settings(&ui);
-        let paths = fallback_paths(&settings);
-        let mut services = Self::with_steam_runtime(
+    pub(super) fn for_test_with_data_root(root: &Path) -> Self {
+        let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
+            event_sink: Arc::new(gmpublished_backend::NullEventSink),
+            ..gmpublished_backend::BackendConfig::for_test(root)
+        })
+        .expect("test backend init");
+        Self::with_steam_runtime(
             backend,
-            settings,
-            paths,
             SteamRuntime::unavailable_for_tests(),
             None,
             BackendServicesConfig {
-                persist_ui_settings: true,
-                ui_settings_file: Some(ui_settings_file),
+                persist_settings: true,
                 ..BackendServicesConfig::isolated()
             },
-        );
-        services._test_data_root = Some(test_data_root);
-        services
-    }
-
-    pub(crate) fn begin_transaction(&self) -> transactions::Transaction {
-        self.backend.transactions.begin()
-    }
-
-    /// Republishes the installed-addon and installed-file search corpora.
-    ///
-    /// Both halves in one call because they describe one library: a caller
-    /// that refreshed only the addons would leave file search answering from
-    /// the previous snapshot.
-    pub(crate) fn sync_installed_addon_search(
-        &self,
-        addons: Vec<gmpublished_backend::search::SearchItem>,
-        files: Vec<gmpublished_backend::search::SearchItem>,
-    ) {
-        self.backend.search.sync_installed_addons(addons);
-        self.backend.search.sync_installed_addon_files(files);
-    }
-
-    /// Extracts every entry of an opened preview archive.
-    pub(crate) fn extract_preview_archive(
-        &self,
-        archive: &super::super::gma::PreviewArchive,
-        destination: super::super::gma::ExtractDestination,
-        options: &super::super::gma::PreviewExtractOptions,
-        transaction: &transactions::Transaction,
-    ) -> Result<PathBuf, super::super::gma::GmaError> {
-        archive.extract_all_with_transaction(destination, options, transaction, &self.backend)
-    }
-
-    /// Extracts one entry of an opened preview archive to the temp directory.
-    pub(crate) fn extract_preview_archive_entry(
-        &self,
-        archive: &super::super::gma::PreviewArchive,
-        entry_path: &str,
-        transaction: &transactions::Transaction,
-    ) -> Result<PathBuf, super::super::gma::GmaError> {
-        archive.extract_entry_with_transaction(entry_path, transaction, &self.backend)
+        )
     }
 
     /// Stops every background service this process owns, for app exit.
@@ -305,463 +263,66 @@ impl BackendServices {
     /// running gets the chance to stop at its own next checkpoint rather than
     /// being abandoned mid-write. Returns how many were cancelled.
     pub(crate) fn shutdown(&self) -> usize {
-        let cancelled = self.backend.transactions.cancel_all();
-        self.backend.steam.shutdown();
+        let cancelled = self.backend.cancel_all_transactions();
+        self.backend.shutdown_background_services();
         cancelled
     }
 
-    pub(crate) fn whitelist_snapshot(&self) -> Arc<Vec<String>> {
-        self.backend.whitelist.snapshot()
-    }
-
-    pub(crate) fn settings_snapshot(&self) -> Settings {
-        self.configuration.lock().settings.clone()
-    }
-
-    pub(crate) fn sounds_enabled(&self) -> bool {
-        self.configuration.lock().settings.backend.sounds
-    }
-
-    pub(crate) fn paths(&self) -> AppPaths {
-        self.configuration.lock().paths.clone()
-    }
-
-    pub(crate) fn settings_and_paths_snapshot(&self) -> (Settings, AppPaths) {
-        let configuration = self.configuration.lock();
-        (configuration.settings.clone(), configuration.paths.clone())
-    }
-
-    /// The configured Garry's Mod path and the one that actually resolved.
-    /// The pair is what tells "never set up" apart from "set up and since
-    /// broken", so both halves travel together.
-    pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
-        let configuration = self.configuration.lock();
-        (
-            configuration.settings.backend.gmod.clone(),
-            configuration.paths.gmod_dir.clone(),
-        )
-    }
-
-    /// Full discovery — Steam library folders, then the Steamworks
-    /// install-dir query — republishing the cached path with whatever it
-    /// found. Blocking, and may wait several seconds on Steam.
-    pub(crate) fn rediscover_gmod_dir(&self) -> Option<PathBuf> {
-        let discovered = self.backend.app_data.discover_gmod_dir(&self.backend.steam);
-        self.configuration
-            .lock()
-            .paths
-            .gmod_dir
-            .clone_from(&discovered);
-        discovered
-    }
-
-    /// Mutates a copy of the current settings, persists it, and only then
-    /// publishes it as live state. The configuration lock is held for the
-    /// whole mutate-persist-publish sequence, so a slower concurrent save can
-    /// never land after (and overwrite) a faster later one, and a failed
-    /// persist never leaves an unsaved draft installed as live state.
-    pub(crate) fn update_settings_snapshot(
+    pub(super) fn start_background_services(
         &self,
-        update: impl FnOnce(&mut Settings),
-    ) -> Result<(), SettingsPersistError> {
-        let mut guard = self.configuration.lock();
-        let mut settings = guard.settings.clone();
-        update(&mut settings);
-        let ui = UiSettings::from_settings(&settings);
-        let backend_settings = settings.to_backend();
-        if self.persist_appdata_settings {
-            self.persist_ui_settings(&ui)?;
-            self.backend
-                .app_data
-                .update_settings(backend_settings, &self.backend.steam)?;
-            let (settings, paths) =
-                appdata_snapshot_from_backend(self.backend.app_data.snapshot(), &ui);
-            *guard = RuntimeConfiguration { settings, paths };
-        } else {
-            self.persist_ui_settings(&ui)?;
-            let paths = AppPaths::resolve_with_defaults(&settings, fallback_paths(&settings));
-            *guard = RuntimeConfiguration { settings, paths };
-        }
-        drop(guard);
-        Ok(())
+    ) -> Result<
+        gmpublished_backend::BackgroundStartOutcome,
+        gmpublished_backend::BackgroundStartError,
+    > {
+        self.backend.start_background_services()
     }
 
-    /// Same held-lock discipline as [`Self::update_settings_snapshot`]: the
-    /// default settings are only published once they're confirmed persisted.
-    pub(crate) fn reset_settings(&self) -> Result<Settings, SettingsPersistError> {
-        let mut guard = self.configuration.lock();
-        self.persist_ui_settings(&UiSettings::default())?;
-        if self.persist_appdata_settings {
-            self.backend
-                .app_data
-                .update_settings(Settings::default().to_backend(), &self.backend.steam)?;
-            let (settings, paths) = appdata_snapshot_from_backend(
-                self.backend.app_data.snapshot(),
-                &UiSettings::default(),
-            );
-            *guard = RuntimeConfiguration {
-                settings: settings.clone(),
-                paths,
-            };
-            drop(guard);
-            Ok(settings)
-        } else {
-            let settings = Settings::default();
-            let paths = AppPaths::resolve_with_defaults(&settings, fallback_paths(&settings));
-            *guard = RuntimeConfiguration {
-                settings: settings.clone(),
-                paths,
-            };
-            drop(guard);
-            Ok(settings)
-        }
+    pub(super) fn cancel_all_downloads(&self) {
+        self.backend.cancel_all_downloads();
     }
 
-    pub(crate) fn apply_appdata_snapshot(
+    pub(super) fn cancel_transaction(
         &self,
-        snapshot: BackendAppDataSnapshot,
-    ) -> (Settings, AppPaths) {
-        let ui = {
-            let configuration = self.configuration.lock();
-            UiSettings::from_settings(&configuration.settings)
-        };
-        self.apply_appdata_snapshot_with_ui(snapshot, &ui)
-    }
-
-    fn apply_appdata_snapshot_with_ui(
-        &self,
-        snapshot: BackendAppDataSnapshot,
-        ui: &UiSettings,
-    ) -> (Settings, AppPaths) {
-        let (settings, paths) = appdata_snapshot_from_backend(snapshot, ui);
-        *self.configuration.lock() = RuntimeConfiguration {
-            settings: settings.clone(),
-            paths: paths.clone(),
-        };
-        (settings, paths)
-    }
-
-    fn persist_ui_settings(&self, ui: &UiSettings) -> Result<(), SettingsPersistError> {
-        if self.persist_ui_settings {
-            ui.save_to_file(&self.ui_settings_file)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn clear_temp_files(&self) -> Result<(), UiError> {
-        let temp_dir = self.paths().temp_dir;
-        clear_directory_contents(&temp_dir).ui_err()
-    }
-
-    pub(crate) fn clear_user_data(&self) -> Result<(), UiError> {
-        let user_data_dir = self.paths().user_data_dir;
-        clear_directory_contents(&user_data_dir).ui_err()
-    }
-
-    pub(crate) fn library_snapshot(&self) -> Option<LibrarySnapshot> {
-        self.library.snapshot()
-    }
-
-    pub(crate) fn begin_library_refresh(&self, reason: LibraryRefreshReason) -> bool {
-        self.library.begin_refresh(reason)
-    }
-
-    pub(crate) fn refresh_library(&self, reason: LibraryRefreshReason) -> LibraryRefresh {
-        self.library.refresh_blocking(&self.paths(), reason)
-    }
-
-    pub(crate) fn abort_library_refresh(&self) -> Option<LibraryRefreshReason> {
-        self.library.abort_refresh()
-    }
-
-    pub(crate) fn browse_my_workshop_page(&self, page: u32) -> Result<WorkshopPage, UiError> {
-        if !self.steam_connected() {
-            return Err(steam_not_connected());
-        }
-
-        let page = self.fetch_my_workshop_page_connected(page)?;
-        // One user-paced page fetch = one discrete snapshot write.
-        if !page.items.is_empty() {
-            self.write_metadata_snapshot_best_effort();
-        }
-        Ok(page)
-    }
-
-    pub(crate) fn refresh_my_workshop_subscription_counts(
-        &self,
-        pages: u32,
-    ) -> Result<HashMap<PublishedFileId, u64>, UiError> {
-        if pages == 0 {
-            return Ok(HashMap::new());
-        }
-
-        if !self.steam_connected() {
-            return Err(steam_not_connected());
-        }
-
-        let mut counts = HashMap::new();
-        for page in 1..=pages {
-            let page = self.fetch_my_workshop_page_connected(page)?;
-            counts.extend(subscription_counts_from_items(&page.items));
-        }
-        // Coalesce the multi-page refresh into a single snapshot write.
-        if !counts.is_empty() {
-            self.write_metadata_snapshot_best_effort();
-        }
-
-        Ok(counts)
-    }
-
-    pub(crate) fn resolve_workshop_metadata(
-        &self,
-        item_ids: &[PublishedFileId],
-    ) -> (Vec<WorkshopMetadata>, Vec<PublishedFileId>) {
-        let now_unix_seconds = metadata_snapshot::now_unix_seconds();
-        let cache = self.workshop_metadata.lock();
-        let mut metadata = Vec::new();
-        let mut stale = Vec::new();
-        for id in item_ids.iter().copied() {
-            match cache.get(&id) {
-                Some(cached) => {
-                    // Stale-while-revalidate: aged entries keep rendering but
-                    // are re-queued for the existing background refresh.
-                    metadata.push(cached.metadata.clone());
-                    if !cached.is_fresh_at(now_unix_seconds) {
-                        stale.push(id);
-                    }
-                }
-                None => stale.push(id),
-            }
-        }
-        (metadata, stale)
-    }
-
-    pub(crate) fn refresh_workshop_metadata(
-        &self,
-        item_ids: &[PublishedFileId],
-    ) -> Result<Vec<WorkshopMetadata>, UiError> {
-        let items = self.fetch_workshop_items(item_ids)?;
-        let metadata = self.cache_workshop_items(&items);
-        if !metadata.is_empty() {
-            self.write_metadata_snapshot_best_effort();
-        }
-        Ok(metadata)
-    }
-
-    /// Like [`Self::refresh_workshop_metadata`], but hands each Workshop query
-    /// chunk to `on_batch` as it lands so callers hydrate incrementally after
-    /// a single round trip. Each chunk is cached on arrival (making it visible
-    /// to every surface); the snapshot is persisted once after the whole
-    /// query, preserving the once-per-query write granularity.
-    pub(crate) fn refresh_workshop_metadata_streaming(
-        &self,
-        item_ids: &[PublishedFileId],
-        mut on_batch: impl FnMut(Vec<WorkshopMetadata>),
-    ) -> Result<(), UiError> {
-        if item_ids.is_empty() {
-            return Ok(());
-        }
-
-        let steam = self.require_steam_client()?;
-
-        let mut cached_any = false;
-        let ids = backend_workshop_ids(item_ids);
-        let result = steam_workshop::query_workshop_items_streaming(steam, &ids, |items| {
-            let items = items
-                .into_iter()
-                .map(workshop_item_from_backend)
-                .collect::<Vec<_>>();
-            let metadata = self.cache_workshop_items(&items);
-            if !metadata.is_empty() {
-                cached_any = true;
-                on_batch(metadata);
-            }
-        });
-
-        if cached_any {
-            self.write_metadata_snapshot_best_effort();
-        }
-        result.ui_err()
-    }
-
-    pub(crate) fn workshop_item_details(
-        &self,
-        id: PublishedFileId,
-    ) -> Result<crate::bridge::domain::WorkshopItem, UiError> {
-        let steam = self.require_steam_client()?;
-
-        let item = steam_workshop::query_workshop_item_details(steam, backend_workshop_id(id))
-            .map(workshop_item_from_backend)
-            .ui_err()?;
-        self.cache_workshop_item_details(&item);
-        Ok(item)
-    }
-
-    pub(crate) fn cached_workshop_item_details(
-        &self,
-        id: PublishedFileId,
-    ) -> Option<WorkshopMetadata> {
-        self.workshop_metadata
-            .lock()
-            .get(&id)
-            .map(|cached| cached.metadata.clone())
-            .filter(|metadata| metadata.full_description.is_some())
+        transaction_id: TransactionId,
+    ) -> Option<gmpublished_backend::FinalizeOutcome> {
+        self.backend.cancel_transaction(transaction_id)
     }
 
     #[cfg(test)]
-    pub(crate) fn steam_user_details(&self, steamid: SteamId) -> Result<SteamUser, UiError> {
-        Ok(steam_user_from_workshop_backend(
-            steam_users::fetch_steam_user(self.require_steam_client()?, backend_steam_id(steamid)),
-        ))
+    pub(super) fn app_data_snapshot_for_test(&self) -> BackendAppDataSnapshot {
+        self.backend.app_data_snapshot()
     }
 
-    pub(crate) fn steam_user_details_streaming(
+    #[cfg(test)]
+    pub(super) fn emit_backend_event_for_test(&self, event: gmpublished_backend::BackendEvent) {
+        self.backend.emit_test_event(event);
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_search_for_test(&self) {
+        self.backend.clear_search_for_test();
+    }
+
+    #[cfg(test)]
+    pub(super) fn quick_addon_search_for_test(
         &self,
-        steamid: SteamId,
-        mut on_user: impl FnMut(SteamUser),
-    ) -> Result<(), UiError> {
-        steam_users::fetch_steam_user_streaming(
-            self.require_steam_client()?,
-            backend_steam_id(steamid),
-            |user| {
-                on_user(steam_user_from_workshop_backend(user));
-            },
-        );
-        Ok(())
+        query: String,
+    ) -> gmpublished_backend::QuickSearchResult {
+        self.backend
+            .quick_search(query, gmpublished_backend::SearchScope::Addons)
     }
 
-    fn require_steam_client(
+    #[cfg(test)]
+    pub(super) fn extract_gma_for_test(
         &self,
-    ) -> Result<gmpublished_backend::steam::ConnectedSteam<'_>, UiError> {
-        self.backend.steam.require_client().ui_err()
-    }
-
-    pub(crate) fn steam_connected(&self) -> bool {
-        self.steam_runtime.is_connected()
-    }
-
-    pub(crate) fn connect_steam(&self) -> Result<(), UiError> {
-        self.steam_runtime.connect().ui_err()
-    }
-
-    pub(crate) fn current_steam_user(&self) -> Result<SteamUser, UiError> {
-        self.steam_runtime
-            .current_user()
-            .map(steam_user_from_backend)
-            .ui_err()
-    }
-
-    pub(crate) fn submit_workshop_downloads(
-        &self,
-        item_ids: Vec<PublishedFileId>,
-    ) -> Result<(), UiError> {
-        downloads::queue_workshop_downloads(
-            &self.backend.downloads,
-            item_ids.into_iter().map(Into::into),
-        )
-        .ui_err()
-    }
-
-    pub(crate) fn submit_workshop_snapshot(
-        &self,
-        item_id: PublishedFileId,
-        destination: crate::bridge::gma::ExtractDestination,
-        request_id: WorkshopSnapshotId,
-    ) -> Result<(), UiError> {
-        downloads::queue_workshop_download_to(
-            &self.backend.downloads,
-            item_id.into(),
-            destination,
-            request_id,
-        )
-        .ui_err()
-    }
-
-    pub(crate) fn submit_publish_request(
-        &self,
-        request: PublishSubmitRequest,
-        transaction: &transactions::Transaction,
-    ) -> Result<PublishSubmitOutcome, UiError> {
-        if !self.steam_connected() {
-            transaction.error(&SteamRuntimeError::NotConnected);
-            return Err(steam_not_connected());
-        }
-
-        let content_source_path = request.content_source_path.clone();
-        let submission = publish_submission_from_app_request(request);
-        let outcome = steam_publishing::submit_with_transaction(
-            submission,
-            transaction,
-            &self.backend.app_data,
-            &self.backend.steam,
-            &self.backend.whitelist,
-        )
-        .ui_err()?;
-        let outcome = PublishSubmitOutcome {
-            published_file_id: PublishedFileId::from(outcome.published_file_id),
-            legal_agreement_required: outcome.legal_agreement_required,
-        };
-        self.record_published_local_path(outcome.published_file_id, content_source_path);
-        Ok(outcome)
-    }
-
-    pub(crate) fn submit_publish_icon_request(
-        &self,
-        icon_source_path: &Path,
-        upscale: bool,
-        workshop_id: PublishedFileId,
-        transaction: &transactions::Transaction,
-    ) -> Result<bool, UiError> {
-        let steam = self.require_steam_client().inspect_err(|_| {
-            transaction.error(&SteamRuntimeError::NotConnected);
-        })?;
-        let icon = steam_publishing::WorkshopIcon::new(icon_source_path, upscale).ui_err()?;
-        steam
-            .update_icon(
-                workshop_id.into(),
-                icon,
-                transaction,
-                &self.backend.app_data,
-            )
-            .ui_err()
-    }
-
-    pub(crate) fn search_quick(&self, request: &SearchQuickRequest) -> SearchQuickBatch {
-        let result = match request.mode() {
-            SearchMode::Addons => self.backend.search.quick_search(request.query().to_owned()),
-            SearchMode::Files => self.backend.search.quick_search_with_scope(
-                request.query().to_owned(),
-                gmpublished_backend::search::SearchScope::Files,
-            ),
-        };
-        search_quick_batch_from_backend(request, &result)
-    }
-
-    pub(crate) fn start_search_full(
-        &self,
-        request: &SearchFullRequest,
-        transaction: transactions::Transaction,
-    ) -> TransactionId {
-        match request.mode() {
-            SearchMode::Addons => self
-                .backend
-                .search
-                .full_with_transaction(request.query().to_owned(), transaction),
-            SearchMode::Files => self.backend.search.full_with_transaction_scope(
-                request.query().to_owned(),
-                gmpublished_backend::search::SearchScope::Files,
-                transaction,
-            ),
-        }
-    }
-
-    pub(crate) fn search_full_batch_from_transaction_payload(
-        &self,
-        request: &SearchFullRequest,
-        sequence: u64,
-        payload: &TransactionPayload,
-    ) -> Result<SearchFullBatch, UiError> {
-        search_full_batch_from_transaction_payload(request, sequence, payload)
+        view: &gmpublished_backend::GmaView,
+        gma: &gmpublished_backend::GmaFile,
+        destination: gmpublished_backend::ExtractDestination,
+        options: gmpublished_backend::ExtractOptions,
+        transaction: &Transaction,
+    ) -> Result<PathBuf, gmpublished_backend::GmaError> {
+        let extraction = self.backend.resolve_extraction(gma, destination, options)?;
+        self.backend.extract_gma(view, gma, transaction, extraction)
     }
 
     pub(crate) fn open_native_target(
@@ -777,181 +338,9 @@ impl BackendServices {
             .map(BackendEventSinkRegistration::subscribe)
     }
 
-    fn record_published_local_path(&self, id: PublishedFileId, content_source_path: PathBuf) {
-        self.configuration
-            .lock()
-            .settings
-            .backend
-            .my_workshop_local_paths
-            .insert(id.into(), content_source_path.clone());
-        steam_publishing::record_published_local_path(
-            &self.backend.app_data,
-            id.into(),
-            content_source_path,
-        );
-    }
-
-    fn fetch_workshop_items(
-        &self,
-        item_ids: &[PublishedFileId],
-    ) -> Result<Vec<WorkshopItem>, UiError> {
-        if item_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let steam = self.require_steam_client()?;
-
-        let ids = backend_workshop_ids(item_ids);
-        steam_workshop::query_workshop_items(steam, &ids)
-            .map(|items| items.into_iter().map(workshop_item_from_backend).collect())
-            .ui_err()
-    }
-
-    fn fetch_my_workshop_page_connected(&self, page: u32) -> Result<WorkshopPage, UiError> {
-        let page = steam_workshop::browse_my_workshop_page(
-            &self.backend.steam,
-            &self.backend.search,
-            page,
-        )
-        .ok_or_else(|| UiError::new(keys::STEAM_ERROR))?;
-        let items = page
-            .items
-            .into_iter()
-            .map(workshop_item_from_backend)
-            .collect::<Vec<_>>();
-        self.cache_workshop_items(&items);
-
-        Ok(WorkshopPage {
-            total: page.total_results,
-            items,
-        })
-    }
-
-    pub(super) fn cache_workshop_items(&self, items: &[WorkshopItem]) -> Vec<WorkshopMetadata> {
-        let mut metadata = items
-            .iter()
-            .filter_map(WorkshopMetadata::from_workshop_item)
-            .collect::<Vec<_>>();
-        if !metadata.is_empty() {
-            let fetched_at = metadata_snapshot::now_unix_seconds();
-            let mut cache = self.workshop_metadata.lock();
-            for item in &mut metadata {
-                // Steam never returns a ThumbHash; carry forward one we already
-                // computed so a metadata refresh doesn't wipe placeholders.
-                if item.thumbhash.is_none()
-                    && let Some(existing) = cache.get(&item.id)
-                {
-                    item.thumbhash.clone_from(&existing.metadata.thumbhash);
-                }
-                if let Some(existing) = cache.get(&item.id) {
-                    if item.full_description.is_none() {
-                        item.full_description
-                            .clone_from(&existing.metadata.full_description);
-                    }
-                    if item.owner_steamid.is_none() {
-                        item.owner_steamid = existing.metadata.owner_steamid;
-                    }
-                }
-                cache.insert(
-                    item.id,
-                    CachedWorkshopMetadata {
-                        metadata: item.clone(),
-                        fetched_at,
-                    },
-                );
-            }
-        }
-        metadata
-    }
-
-    pub(super) fn cache_workshop_item_details(&self, item: &WorkshopItem) {
-        let Some(mut metadata) = WorkshopMetadata::from_workshop_item(item) else {
-            return;
-        };
-        metadata.full_description = Some(
-            item.description
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or_default()
-                .to_owned(),
-        );
-        metadata.owner_steamid = item.steamid;
-
-        let fetched_at = metadata_snapshot::now_unix_seconds();
-        let mut cache = self.workshop_metadata.lock();
-        if let Some(existing) = cache.get(&metadata.id)
-            && metadata.thumbhash.is_none()
-        {
-            metadata.thumbhash.clone_from(&existing.metadata.thumbhash);
-        }
-        cache.insert(
-            metadata.id,
-            CachedWorkshopMetadata {
-                metadata,
-                fetched_at,
-            },
-        );
-    }
-
-    /// Records the ThumbHash a media worker computed for a preview URL into the
-    /// live metadata cache. RAM-only: the next ordinary snapshot write (metadata
-    /// refresh, page browse) flushes accumulated hashes, keeping this off the UI
-    /// thread's I/O path.
-    pub(crate) fn record_thumbhash(&self, url: &str, hash: &[u8]) {
-        let url = url.trim();
-        let mut cache = self.workshop_metadata.lock();
-        record_thumbhash_in_cache(&mut cache, url, hash);
-    }
-
-    /// Preview-URL/ThumbHash pairs for every cached entry that has both, used to
-    /// seed the thumbnail manager so placeholders paint on the first demand.
-    pub(crate) fn thumbhash_seed(&self) -> Vec<(String, Arc<[u8]>)> {
-        self.workshop_metadata
-            .lock()
-            .values()
-            .filter_map(|cached| {
-                let url = cached.metadata.preview_url.as_deref()?;
-                Some((url.to_owned(), cached.metadata.thumbhash.clone()?))
-            })
-            .collect()
-    }
-
-    pub(super) fn write_metadata_snapshot_best_effort(&self) {
-        let Some(path) = self.metadata_snapshot_file.as_deref() else {
-            return;
-        };
-        let snapshot = metadata_snapshot::prepare(&self.workshop_metadata.lock());
-        if let Err(error) = metadata_snapshot::write_prepared(path, &snapshot) {
-            log::warn!(
-                "failed to write Workshop metadata snapshot {}: {error}",
-                path.display()
-            );
-        }
-    }
-
-    pub(crate) fn persist_workshop_metadata_cache(&self) {
-        self.write_metadata_snapshot_best_effort();
-    }
-
     #[cfg(test)]
     pub(super) fn set_metadata_snapshot_file_for_test(&mut self, path: PathBuf) {
         self.metadata_snapshot_file = Some(path);
-    }
-
-    #[cfg(test)]
-    pub(super) fn hydrate_workshop_metadata_snapshot_for_test(&self) {
-        self.hydrate_workshop_metadata_snapshot();
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_workshop_metadata_fetched_at_for_test(
-        &self,
-        id: PublishedFileId,
-        fetched_at: u64,
-    ) {
-        if let Some(cached) = self.workshop_metadata.lock().get_mut(&id) {
-            cached.fetched_at = fetched_at;
-        }
     }
 }
 
@@ -1021,7 +410,7 @@ mod performance_tests {
 /// fetch) — so every test is fully isolated.
 #[cfg(not(test))]
 fn build_default_backend(
-    event_sink: Arc<dyn gmpublished_backend::events::BackendEventSink>,
+    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
 ) -> Result<Arc<Backend>, gmpublished_backend::BackendInitError> {
     gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
         event_sink,
@@ -1031,7 +420,7 @@ fn build_default_backend(
 
 #[cfg(test)]
 fn build_default_backend(
-    event_sink: Arc<dyn gmpublished_backend::events::BackendEventSink>,
+    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
 ) -> Result<(Arc<Backend>, tempfile::TempDir), gmpublished_backend::BackendInitError> {
     let root = tempfile::tempdir().expect("test backend tempdir");
     let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
@@ -1050,6 +439,6 @@ fn backend_workshop_ids(ids: &[PublishedFileId]) -> Vec<gmpublished_backend::Wor
     ids.iter().copied().map(backend_workshop_id).collect()
 }
 
-fn backend_steam_id(id: SteamId) -> gmpublished_backend::steam::SteamId {
-    gmpublished_backend::steam::SteamId::from_raw(id.get())
+fn backend_steam_id(id: SteamId) -> gmpublished_backend::SteamId {
+    gmpublished_backend::SteamId::from_raw(id.get())
 }

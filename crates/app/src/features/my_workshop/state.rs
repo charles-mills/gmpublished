@@ -10,7 +10,7 @@ use crate::bridge::ui_error::UiError;
 use crate::format::DownloadCountFormatter;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use super::model::{
     self, COUNT_ROLL_TICK_INTERVAL, ContextMenuRequest, FIRST_WORKSHOP_PAGE, PUBLISH_NEW_ROW_ID,

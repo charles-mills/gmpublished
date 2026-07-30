@@ -4,7 +4,7 @@ use super::{
     spawn_blocking_detached_or_warn, stream,
 };
 
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 use iced::widget::operation;
 
 impl App {
@@ -58,7 +58,9 @@ impl App {
                 "Preview GMA Workshop metadata",
                 move |app| {
                     let mut output = output;
-                    if let Some(cached) = preview_gma::cached_workshop_metadata(&app, workshop_id) {
+                    if let Some(cached) =
+                        preview_gma::cached_workshop_metadata(app.workshop(), workshop_id)
+                    {
                         let _sent = send_root_message(
                             &mut output,
                             RootMessage::PreviewGma(
@@ -71,7 +73,7 @@ impl App {
                         );
                     }
 
-                    let result = preview_gma::query_workshop_metadata(&app, workshop_id);
+                    let result = preview_gma::query_workshop_metadata(app.workshop(), workshop_id);
                     let should_persist = matches!(&result, Ok(Some(_)));
                     let _sent = send_root_message(
                         &mut output,
@@ -84,7 +86,7 @@ impl App {
                     // Keep snapshot I/O behind delivery so a cold detail query
                     // can paint as soon as Steam responds.
                     if should_persist {
-                        app.persist_workshop_metadata_cache();
+                        app.workshop().persist_metadata_cache();
                     }
                 },
             );
@@ -116,8 +118,10 @@ impl App {
                 "Preview GMA author",
                 move |app| {
                     let mut output = output;
-                    let result =
-                        preview_gma::query_steam_user_streaming(&app, steamid64, |result| {
+                    let result = preview_gma::query_steam_user_streaming(
+                        app.workshop(),
+                        steamid64,
+                        |result| {
                             let _sent = send_root_message(
                                 &mut output,
                                 RootMessage::PreviewGma(
@@ -126,7 +130,8 @@ impl App {
                                     ),
                                 ),
                             );
-                        });
+                        },
+                    );
                     if let Err(error) = result {
                         let _sent = send_root_message(
                             &mut output,
@@ -191,7 +196,6 @@ impl App {
         };
 
         let settings = self.state.destination_select.settings().clone();
-        let paths = self.state.destination_select.paths().clone();
 
         let ctx = self.ctx.clone();
         Task::future(async move {
@@ -202,7 +206,7 @@ impl App {
                 "Preview GMA archive extraction",
                 move |app| {
                     let _app = app;
-                    let plan = gma::build_preview_extract_request(settings, &paths);
+                    let plan = gma::build_preview_extract_request(settings);
                     run_preview_gma_archive_extraction(
                         &worker_ctx,
                         &request,

@@ -4,12 +4,13 @@ use std::{
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, LazyLock, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
 use crate::appdata::AppData;
+use crate::execution::CpuExecutor;
 use crate::steam::Steam;
 use crate::transactions::Transaction;
 
@@ -19,15 +20,10 @@ use super::{
     whitelist::{self, AddonWhitelist},
 };
 
-use crate::util::{main_thread_forbidden, thread_pool};
+use crate::util::main_thread_forbidden;
 use parking_lot::Mutex;
-use rayon::{
-    ThreadPool,
-    iter::{IntoParallelRefIterator, ParallelIterator},
-};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-
-static THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| thread_pool!());
 
 /// What to do when a GMA's extraction directory already exists.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -546,6 +542,7 @@ impl GmaView {
         handle: &GmaFile,
         transaction: &Transaction,
         context: ExtractionContext,
+        cpu: &CpuExecutor,
     ) -> Result<PathBuf, GmaError> {
         let context = match context.prepare_destination() {
             Ok(context) => context,
@@ -564,7 +561,7 @@ impl GmaView {
             whitelist: whitelist_snapshot,
         } = context;
 
-        let result = THREAD_POOL.install(|| -> Result<PathBuf, GmaError> {
+        let result = cpu.install(|| -> Result<PathBuf, GmaError> {
             // Only a destination that survived cleanup (or was never
             // touched, e.g. an explicit `Directory`) can carry out-of-band
             // symlinks; a freshly allocated one has nothing planted in it.

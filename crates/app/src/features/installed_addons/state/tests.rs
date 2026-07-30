@@ -333,7 +333,7 @@ fn quiet_error_keeps_current_rows_on_screen() {
     state.apply_snapshot(
         LibraryRefreshReason::DiskChanged,
         Err(UiError::detailed(
-            gmpublished_backend::error_key::ErrorKey::new("ERR_TEST"),
+            gmpublished_backend::ErrorKey::new("ERR_TEST"),
             Some("scan raced a file move".to_owned()),
         )),
     );
@@ -380,9 +380,7 @@ fn failed_metadata_lookup_is_retried_once_steam_returns() {
     let follow_up = state.finish_metadata_request(
         generation,
         &requested,
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR,
-        )),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     );
     assert!(follow_up.is_none());
 
@@ -432,9 +430,7 @@ fn failed_metadata_refresh_requeues_its_ids() {
     state.apply_metadata_refresh(
         refresh_generation,
         &refresh_ids,
-        Err(UiError::new(
-            gmpublished_backend::error_key::keys::STEAM_ERROR,
-        )),
+        Err(UiError::new(gmpublished_backend::error_keys::STEAM_ERROR)),
     );
 
     assert!(state.retry_failed_metadata());

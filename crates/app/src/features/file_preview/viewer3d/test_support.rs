@@ -2,7 +2,7 @@
 
 use super::{MapPreview, ModelPreview, RenderScene};
 use crate::media::preview_model::ModelStats;
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
 
 fn empty_render_scene(bounds_min: Vec3, bounds_max: Vec3) -> Arc<RenderScene> {
@@ -51,7 +51,7 @@ pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> MapPreview {
 
 use super::super::state::MovementMode;
 use super::camera::FlyCamera;
-use gmpublished_backend::scene::map::MapWalkCollision;
+use gmpublished_domain::scene::map::MapWalkCollision;
 
 pub(super) fn floor_scene() -> MapPreview {
     let mut scene = empty_preview(Vec3::splat(0.0), Vec3::splat(1024.0));

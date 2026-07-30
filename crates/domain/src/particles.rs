@@ -1,4 +1,4 @@
-//! Source engine particle system simulation.
+//! Shared Source engine particle system simulation.
 //!
 //! Compiles [`crate::scene::pcf`] definitions into typed operators
 //! and steps them on the CPU. Coverage is honest: every function name in the

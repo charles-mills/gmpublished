@@ -1,3 +1,5 @@
+//! Render-facing BSP scene data.
+
 use super::{
     LightmapAtlas, MapAmbientLighting, MapDetailSprite, MapDoor, MapEnvironmentLighting, MapFog,
     MapOverlay, MapPakFile, MapPlayerStart, MapSkyCamera, MapVisibility, MapWalkCollision,

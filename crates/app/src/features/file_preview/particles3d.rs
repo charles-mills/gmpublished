@@ -5,7 +5,7 @@
 //! pose and control point positions round-trip through feature state so they
 //! survive expand/collapse rebuilds.
 
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,7 +16,7 @@ use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
 use super::orbit::{Orbit, ZoomFloor};
-use gmpublished_backend::particles::{
+use gmpublished_domain::particles::{
     ControlPointIndex, MAX_CONTROL_POINTS, ParticleEngine, RendererKind,
 };
 
@@ -439,8 +439,8 @@ impl shader::Program<Message> for ParticleViewer {
 }
 
 fn build_instances(
-    system: &gmpublished_backend::particles::CompiledSystem,
-    particles: gmpublished_backend::particles::RenderParticles<'_>,
+    system: &gmpublished_domain::particles::CompiledSystem,
+    particles: gmpublished_domain::particles::RenderParticles<'_>,
     frame: &CameraFrame,
     sheet: Option<&vformats::vtf::SpriteSheet>,
 ) -> Vec<GpuInstance> {
@@ -560,7 +560,7 @@ impl GpuInstance {
         )
     }
 
-    fn linear_color(particle: &gmpublished_backend::particles::RenderParticle) -> [f32; 4] {
+    fn linear_color(particle: &gmpublished_domain::particles::RenderParticle) -> [f32; 4] {
         [
             srgb_to_linear(particle.color[0]),
             srgb_to_linear(particle.color[1]),
@@ -570,7 +570,7 @@ impl GpuInstance {
     }
 
     fn billboard(
-        particle: &gmpublished_backend::particles::RenderParticle,
+        particle: &gmpublished_domain::particles::RenderParticle,
         uv_rect: [f32; 4],
     ) -> Self {
         Self {
@@ -596,8 +596,8 @@ impl GpuInstance {
 /// Atlas rect (as offset+scale) for a particle's current animation frame.
 fn sheet_uv_rect(
     sheet: Option<&vformats::vtf::SpriteSheet>,
-    renderer: &gmpublished_backend::particles::RendererInfo,
-    particle: &gmpublished_backend::particles::RenderParticle,
+    renderer: &gmpublished_domain::particles::RendererInfo,
+    particle: &gmpublished_domain::particles::RenderParticle,
 ) -> [f32; 4] {
     let Some(sequence) = sheet.and_then(|sheet| sheet.sequence(particle.sequence)) else {
         return FULL_UV_RECT;

@@ -1,3 +1,5 @@
+//! Door geometry and motion data.
+
 use super::{
     BspError, BspModel, BuildMesh, BuildMeshes, FaceAppendContext, FaceAttributions, MapBounds,
     MapBsp, MapEntity, MapFaceVisibility, MapMesh, MapPropSolid, MapVisibilityBucket, ModelIndex,

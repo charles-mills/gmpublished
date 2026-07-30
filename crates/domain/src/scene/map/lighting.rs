@@ -1,3 +1,5 @@
+//! Render-facing BSP lighting data and assembly.
+
 use crate::math::Vec3;
 use crate::scene::QAngle;
 

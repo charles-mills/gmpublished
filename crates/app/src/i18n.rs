@@ -625,7 +625,7 @@ mod tests {
     /// not configured")` would do.
     #[test]
     fn error_keys_resolve_to_their_own_message_not_the_fallback() {
-        use gmpublished_backend::error_key::keys;
+        use gmpublished_backend::error_keys as keys;
 
         let i18n = I18n::for_locale(Some("en"));
         let fallback = i18n.tr("err-unknown");

@@ -10,12 +10,12 @@ use crate::bridge::domain::{
 
 use crate::bridge::domain::SteamId;
 use crate::bridge::gma::PreviewArchive;
-use crate::bridge::tasks::BackendServices;
+use crate::bridge::tasks::WorkshopService;
 use crate::bridge::ui_error::UiError;
 use crate::features::steam_session;
 use crate::generation::Generation;
 use crate::widgets::file_browser::{Entry as FileBrowserEntry, State as FileBrowserState};
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 /// Data the click source already rendered, seeded for the first frame.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -98,11 +98,11 @@ pub fn steam2_rendered_id(steamid64: SteamId) -> String {
 }
 
 pub fn query_steam_user_streaming(
-    ctx: &BackendServices,
+    ctx: WorkshopService<'_>,
     steamid64: SteamId,
     mut on_author: impl FnMut(Result<AuthorInfo, UiError>),
 ) -> Result<(), UiError> {
-    ctx.steam_user_details_streaming(steamid64, |user| {
+    ctx.user_details_streaming(steamid64, |user| {
         on_author(author_info_from_user(user));
     })
 }
@@ -189,7 +189,7 @@ impl LoadedArchive {
 }
 
 pub fn query_workshop_metadata(
-    ctx: &BackendServices,
+    ctx: WorkshopService<'_>,
     workshop_id: PublishedFileId,
 ) -> Result<Option<WorkshopMetadata>, UiError> {
     let attempt = steam_session::connect_context_for_operation(ctx);
@@ -200,7 +200,7 @@ pub fn query_workshop_metadata(
             .unwrap_or_else(|| UiError::new(keys::STEAM_ERROR)));
     }
 
-    let item = ctx.workshop_item_details(workshop_id)?;
+    let item = ctx.item_details(workshop_id)?;
     // Author resolution stays asynchronous: when the item lacks a live owner
     // the modal shows the Steam2 placeholder and fetches the profile
     // separately.
@@ -210,10 +210,10 @@ pub fn query_workshop_metadata(
 }
 
 pub fn cached_workshop_metadata(
-    ctx: &BackendServices,
+    ctx: WorkshopService<'_>,
     workshop_id: PublishedFileId,
 ) -> Option<WorkshopMetadata> {
-    let metadata = ctx.cached_workshop_item_details(workshop_id)?;
+    let metadata = ctx.cached_item_details(workshop_id)?;
     Some(WorkshopMetadata {
         id: metadata.id,
         title: metadata.title.trim().to_owned(),

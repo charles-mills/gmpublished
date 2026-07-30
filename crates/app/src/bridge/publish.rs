@@ -1,4 +1,4 @@
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use crate::bridge::tasks::TransactionStatus;
 use crate::bridge::ui_error::UiError;

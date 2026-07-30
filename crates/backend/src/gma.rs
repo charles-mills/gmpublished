@@ -151,7 +151,8 @@ impl crate::error_key::HasErrorKey for GmaError {
 /// Deserialized in code, not by `#[serde(untagged)]`: with every `Standard`
 /// field defaulted, untagged matched `Standard` for *any* JSON object, so a
 /// legacy description that happened to be one silently lost its text and
-/// `Legacy` was unreachable. See [`metadata_from_embedded_fields`].
+/// `Legacy` was unreachable. The archive reader's embedded-field projection
+/// owns this compatibility distinction.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum GmaMetadata {
@@ -374,16 +375,16 @@ fn id_from_path(path: &Path) -> Option<WorkshopId> {
     ws_id_from_file_name(path.file_stem()?.to_string_lossy())
 }
 
-pub mod whitelist;
+pub(crate) mod whitelist;
 
-pub mod extract;
-pub use extract::{
+pub(crate) mod extract;
+pub(crate) use extract::{
     ExtractDestination, ExtractOptions, ExtractionContext, ExtractionOverwriteMode, Whitelist,
 };
 
-pub mod read;
+pub(crate) mod read;
 
-pub mod write;
+pub(crate) mod write;
 
 #[cfg(test)]
 mod tests {

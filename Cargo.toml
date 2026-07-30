@@ -2,6 +2,7 @@
 members = [
     "crates/app",
     "crates/backend",
+    "crates/domain",
 ]
 # Vendored crates that are consumed as external inputs rather than maintained
 # as workspace crates.

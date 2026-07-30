@@ -1,4 +1,4 @@
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use crate::bridge::domain::SteamId;
 
@@ -7,11 +7,11 @@ use super::{
     PublishedFileId, SearchFullBatch, SearchFullRequest, SearchHit, SearchItem, SearchItemSource,
     SearchQuickBatch, SearchQuickRequest, SteamUser, UiError, WorkshopItem,
 };
-use gmpublished_backend::events::TransactionPayload;
-use gmpublished_backend::steam::SteamAvatarRgba;
-use gmpublished_backend::steam::SteamRuntimeUser;
-use gmpublished_backend::steam::publishing as steam_publishing;
-use gmpublished_backend::steam::users as steam_users;
+use gmpublished_backend::SteamAvatarRgba;
+use gmpublished_backend::SteamRuntimeUser;
+use gmpublished_backend::TransactionPayload;
+use gmpublished_backend::publishing as steam_publishing;
+use gmpublished_backend::steam_users;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -68,7 +68,7 @@ pub(super) fn publish_preview_from_app_request(
 
 pub(super) fn search_quick_batch_from_backend(
     request: &SearchQuickRequest,
-    result: &gmpublished_backend::search::QuickSearchResult,
+    result: &gmpublished_backend::QuickSearchResult,
 ) -> SearchQuickBatch {
     let hits = result.hits.iter().map(search_hit_from_backend).collect();
     let key = request.key().clone();
@@ -91,18 +91,14 @@ pub(super) fn search_full_batch_from_transaction_payload(
     ))
 }
 
-pub(super) fn search_hit_from_backend(
-    hit: &gmpublished_backend::search::QuickSearchHit,
-) -> SearchHit {
+pub(super) fn search_hit_from_backend(hit: &gmpublished_backend::QuickSearchHit) -> SearchHit {
     SearchHit {
         score: hit.score,
         item: search_item_from_backend(&hit.item),
     }
 }
 
-pub(super) fn search_item_from_backend(
-    item: &gmpublished_backend::search::SearchItem,
-) -> SearchItem {
+pub(super) fn search_item_from_backend(item: &gmpublished_backend::SearchItem) -> SearchItem {
     SearchItem {
         label: item.label().to_owned(),
         terms: item.terms().to_vec(),
@@ -113,16 +109,16 @@ pub(super) fn search_item_from_backend(
 }
 
 pub(super) fn search_item_source_from_backend(
-    source: &gmpublished_backend::search::SearchItemSource,
+    source: &gmpublished_backend::SearchItemSource,
 ) -> SearchItemSource {
     match source {
         // The backend's own `PublishedFileId` already excludes zero (see
         // its `nonzero_workshop_id` helper), so every id it hands us
         // converts cleanly.
-        gmpublished_backend::search::SearchItemSource::InstalledAddons(path, id) => {
+        gmpublished_backend::SearchItemSource::InstalledAddons(path, id) => {
             SearchItemSource::InstalledAddons(path.clone(), id.map(PublishedFileId::from))
         }
-        gmpublished_backend::search::SearchItemSource::InstalledAddonFile {
+        gmpublished_backend::SearchItemSource::InstalledAddonFile {
             addon,
             entry_path,
             size_bytes,
@@ -135,10 +131,10 @@ pub(super) fn search_item_source_from_backend(
             size_bytes: *size_bytes,
             crc32: *crc32,
         },
-        gmpublished_backend::search::SearchItemSource::MyWorkshop(id) => {
+        gmpublished_backend::SearchItemSource::MyWorkshop(id) => {
             SearchItemSource::MyWorkshop(PublishedFileId::from(*id))
         }
-        gmpublished_backend::search::SearchItemSource::WorkshopItem(id) => {
+        gmpublished_backend::SearchItemSource::WorkshopItem(id) => {
             SearchItemSource::WorkshopItem(PublishedFileId::from(*id))
         }
     }
@@ -193,9 +189,9 @@ pub(super) fn avatar_from_backend(
 #[error(transparent)]
 pub(super) struct ClearDirectoryError(#[from] std::io::Error);
 
-impl gmpublished_backend::error_key::HasErrorKey for ClearDirectoryError {
-    fn error_key(&self) -> gmpublished_backend::error_key::ErrorKey {
-        gmpublished_backend::error_key::keys::IO_ERROR
+impl gmpublished_backend::HasErrorKey for ClearDirectoryError {
+    fn error_key(&self) -> gmpublished_backend::ErrorKey {
+        gmpublished_backend::error_keys::IO_ERROR
     }
 
     fn error_detail(&self) -> Option<String> {

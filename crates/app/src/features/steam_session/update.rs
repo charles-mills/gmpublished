@@ -87,7 +87,7 @@ mod tests {
         let mut state = State::default();
         let attempt = crate::features::steam_session::ConnectionAttempt::unavailable(
             crate::bridge::ui_error::UiError::detailed(
-                gmpublished_backend::error_key::keys::STEAM_ERROR,
+                gmpublished_backend::error_keys::STEAM_ERROR,
                 Some("down".to_owned()),
             ),
         );

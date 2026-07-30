@@ -2,7 +2,7 @@
 //! overlay, and skybox buffers plus material bind groups, and the cache
 //! that keeps an upload alive only while its preview still draws.
 
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 
 use super::materials::{MaterialTextureViews, MaterialUploadMode, WHITE_RGBA};

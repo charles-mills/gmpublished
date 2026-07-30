@@ -1,16 +1,16 @@
 use super::*;
 use crate::bridge::domain::SteamId;
 use crate::bridge::{DownloadCountFormat, ThemePreset};
-use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
-use gmpublished_backend::events::{TransactionError, TransactionPayload};
-use gmpublished_backend::steam::SteamRuntimeError;
-use gmpublished_backend::steam::publishing as steam_publishing;
-use gmpublished_backend::transactions::TransactionId;
+use gmpublished_backend::AppDataSnapshot as BackendAppDataSnapshot;
+use gmpublished_backend::SteamRuntimeError;
+use gmpublished_backend::TransactionId;
+use gmpublished_backend::publishing as steam_publishing;
+use gmpublished_backend::{TransactionError, TransactionPayload};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::time::Duration;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -25,12 +25,13 @@ fn drain_updates(receiver: &mpsc::Receiver<TaskEvent>) -> Vec<(TaskId, TaskUpdat
         .collect()
 }
 
-fn appdata_snapshot_event_payload_for_test() -> gmpublished_backend::appdata::AppDataSnapshot {
+fn appdata_snapshot_event_payload_for_test() -> gmpublished_backend::AppDataSnapshot {
     let root = std::env::temp_dir().join("gmpublished-appdata-event-test");
-    gmpublished_backend::appdata::AppDataSnapshot {
-        settings: gmpublished_backend::appdata::Settings::default(),
+    gmpublished_backend::AppDataSnapshot {
+        settings: gmpublished_backend::Settings::default(),
+        settings_revision: 0,
         version: "test",
-        paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
+        paths: gmpublished_backend::AppDataPathsSnapshot {
             settings_file: root.join("settings.json"),
             default_user_data_dir: root.join("default-user-data"),
             default_temp_dir: root.join("default-temp"),
@@ -44,48 +45,51 @@ fn appdata_snapshot_event_payload_for_test() -> gmpublished_backend::appdata::Ap
 }
 
 #[test]
-fn worker_count_bounds_blocking_threads() {
-    assert_eq!(blocking_worker_count(NonZeroUsize::new(1)), 2);
-    assert_eq!(blocking_worker_count(NonZeroUsize::new(4)), 4);
-    assert_eq!(blocking_worker_count(NonZeroUsize::new(64)), 8);
-    assert_eq!(blocking_worker_count(None), 4);
-}
-
-#[test]
-fn runtime_pools_start_lazily() {
-    let runtime = AppWorkerRuntime::with_config(RuntimeConfig {
-        blocking_threads: 1,
-        blocking_queue_capacity: 4,
-        media_threads: 1,
-        media_queue_capacity: 4,
-    });
-
-    assert!(!runtime.blocking.started());
-    assert!(!runtime.media.started());
+fn app_scheduler_uses_the_process_owned_blocking_and_network_executors() {
+    let execution =
+        gmpublished_backend::ExecutionResources::build(gmpublished_backend::ExecutionConfig {
+            cpu_threads: 1,
+            blocking_threads: 1,
+            network_threads: 1,
+            queue_capacity: 4,
+        })
+        .expect("test execution resources");
+    let runtime = AppWorkerRuntime::new(execution);
 
     let (done_tx, done_rx) = mpsc::channel();
     runtime
-        .spawn_blocking("first-lazy-job", move || {
-            done_tx.send(()).unwrap();
+        .spawn_blocking("blocking-job", move || {
+            done_tx
+                .send(std::thread::current().name().map(str::to_owned))
+                .unwrap();
         })
         .unwrap();
 
-    done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(runtime.blocking.started());
-    assert!(!runtime.media.started());
+    assert!(
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_some_and(|name| name.starts_with("gmpublished-blocking-"))
+    );
 
     let (media_done_tx, media_done_rx) = mpsc::channel();
     runtime
         .spawn_media_job(
             std::sync::Arc::from("first-media-job"),
             Box::new(move || {
-                media_done_tx.send(()).unwrap();
+                media_done_tx
+                    .send(std::thread::current().name().map(str::to_owned))
+                    .unwrap();
             }),
         )
         .unwrap();
 
-    media_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(runtime.media.started());
+    assert!(
+        media_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_some_and(|name| name.starts_with("gmpublished-network-"))
+    );
 }
 
 #[test]
@@ -211,59 +215,57 @@ fn backend_context_unit_tests_use_disconnected_steam_runtime() {
 }
 
 #[test]
-fn ui_settings_persist_across_service_restart_separately_from_backend_settings() {
+fn standalone_ui_settings_are_migrated_before_the_old_file_is_retired() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let ui_settings_file = temp.path().join("config/gmpublisher/ui-settings.json");
-    let services = BackendServices::for_test_with_ui_settings_file(ui_settings_file.clone());
+    let settings_dir = temp.path().join("gmpublished");
+    let legacy_file = settings_dir.join("ui-settings.json");
+    fs::create_dir_all(&settings_dir).expect("settings dir");
+    fs::write(
+        &legacy_file,
+        r#"{"version":1,"play_gifs_by_default":false,"download_count_format":"comma","theme_preset":"light"}"#,
+    )
+    .expect("legacy UI settings");
 
-    services
-        .update_settings_snapshot(|settings| {
-            settings.backend.sounds = false;
-            settings.ui.play_gifs_by_default = false;
-            settings.ui.download_count_format = DownloadCountFormat::Comma;
-            settings.ui.theme_preset = ThemePreset::Light;
-        })
-        .expect("settings update");
-
-    let persisted_value: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&ui_settings_file).expect("UI settings file"))
-            .expect("UI settings JSON");
-    assert_eq!(persisted_value["play_gifs_by_default"], false);
-    assert_eq!(persisted_value["download_count_format"], "comma");
-    assert_eq!(persisted_value["theme_preset"], "light");
-    assert!(persisted_value.get("sounds").is_none());
-
-    let restarted = BackendServices::for_test_with_ui_settings_file(ui_settings_file);
-    let settings = restarted.settings_snapshot();
-
-    assert_eq!(settings.backend.sounds, Settings::default().backend.sounds);
+    let services = BackendServices::for_test_with_data_root(temp.path());
+    let settings = services.config().settings_snapshot();
     assert!(!settings.ui.play_gifs_by_default);
     assert_eq!(
         settings.ui.download_count_format,
         DownloadCountFormat::Comma
     );
     assert_eq!(settings.ui.theme_preset, ThemePreset::Light);
+
+    let persisted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(settings_dir.join("settings.json")).expect("unified settings"),
+    )
+    .expect("unified settings JSON");
+    assert_eq!(persisted["ui"]["theme_preset"], "light");
+    assert!(
+        !legacy_file.exists(),
+        "the old file is retired only after the unified write succeeds"
+    );
 }
 
 #[test]
 fn resetting_settings_persists_default_ui_settings() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let ui_settings_file = temp.path().join("config/gmpublisher/ui-settings.json");
-    let services = BackendServices::for_test_with_ui_settings_file(ui_settings_file.clone());
+    let services = BackendServices::for_test_with_data_root(temp.path());
 
     services
+        .config()
         .update_settings_snapshot(|settings| {
             settings.ui.play_gifs_by_default = false;
             settings.ui.download_count_format = DownloadCountFormat::Period;
             settings.ui.theme_preset = ThemePreset::ClassicSource;
         })
         .expect("non-default UI settings update");
-    services.reset_settings().expect("reset settings");
+    services.config().reset_settings().expect("reset settings");
 
-    let settings = services.settings_snapshot();
+    let settings = services.config().settings_snapshot();
     assert_eq!(UiSettings::from_settings(&settings), UiSettings::default());
+    let restarted = BackendServices::for_test_with_data_root(temp.path());
     assert_eq!(
-        UiSettings::load_from_file_or_default(&ui_settings_file),
+        UiSettings::from_settings(&restarted.config().settings_snapshot()),
         UiSettings::default()
     );
 }
@@ -271,9 +273,9 @@ fn resetting_settings_persists_default_ui_settings() {
 #[test]
 fn appdata_refresh_preserves_persisted_ui_settings() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let ui_settings_file = temp.path().join("config/gmpublisher/ui-settings.json");
-    let services = BackendServices::for_test_with_ui_settings_file(ui_settings_file.clone());
+    let services = BackendServices::for_test_with_data_root(temp.path());
     services
+        .config()
         .update_settings_snapshot(|settings| {
             settings.ui.play_gifs_by_default = false;
             settings.ui.download_count_format = DownloadCountFormat::Space;
@@ -288,25 +290,28 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
     fs::create_dir_all(&user_data_dir).expect("user data dir");
     fs::create_dir_all(&downloads_dir).expect("downloads dir");
 
-    let backend_settings = gmpublished_backend::appdata::Settings {
+    let backend_settings = gmpublished_backend::Settings {
         sounds: false,
         language: Some("fr".to_owned()),
         ..Default::default()
     };
-    let (settings, paths) = services.apply_appdata_snapshot(BackendAppDataSnapshot {
-        settings: backend_settings,
-        version: "test",
-        paths: gmpublished_backend::appdata::AppDataPathsSnapshot {
-            settings_file: temp.path().join("settings.json"),
-            default_user_data_dir: temp.path().join("default-user-data"),
-            default_temp_dir: temp.path().join("default-temp"),
-            default_downloads_dir: Some(temp.path().join("default-downloads")),
-            temp_dir: temp_dir.clone(),
-            user_data_dir,
-            downloads_dir: Some(downloads_dir),
-            gmod_dir: None,
-        },
-    });
+    let (settings, paths) = services
+        .config()
+        .apply_appdata_snapshot(BackendAppDataSnapshot {
+            settings: backend_settings,
+            settings_revision: 2,
+            version: "test",
+            paths: gmpublished_backend::AppDataPathsSnapshot {
+                settings_file: temp.path().join("settings.json"),
+                default_user_data_dir: temp.path().join("default-user-data"),
+                default_temp_dir: temp.path().join("default-temp"),
+                default_downloads_dir: Some(temp.path().join("default-downloads")),
+                temp_dir: temp_dir.clone(),
+                user_data_dir,
+                downloads_dir: Some(downloads_dir),
+                gmod_dir: None,
+            },
+        });
 
     assert!(!settings.backend.sounds);
     assert_eq!(settings.backend.language.as_deref(), Some("fr"));
@@ -317,10 +322,6 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
         DownloadCountFormat::Space
     );
     assert_eq!(settings.ui.theme_preset, ThemePreset::ClassicSource);
-    assert_eq!(
-        UiSettings::load_from_file_or_default(&ui_settings_file),
-        UiSettings::from_settings(&settings)
-    );
 }
 
 #[test]
@@ -328,10 +329,10 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
 fn failed_backend_settings_save_leaves_snapshot_and_live_appdata_unchanged() {
     use std::os::unix::fs::PermissionsExt;
 
-    let services = BackendServices::for_test_with_appdata_persist_enabled();
-    let before = services.settings_snapshot();
+    let services = BackendServices::for_test_with_settings_persist_enabled();
+    let before = services.config().settings_snapshot();
 
-    let settings_file = services.backend.app_data.snapshot().paths.settings_file;
+    let settings_file = services.app_data_snapshot_for_test().paths.settings_file;
     let settings_dir = settings_file.parent().expect("settings dir");
     fs::create_dir_all(settings_dir).expect("settings dir");
     let original_mode = fs::metadata(settings_dir)
@@ -340,7 +341,7 @@ fn failed_backend_settings_save_leaves_snapshot_and_live_appdata_unchanged() {
     fs::set_permissions(settings_dir, fs::Permissions::from_mode(0o555))
         .expect("lock down settings dir");
 
-    let result = services.update_settings_snapshot(|settings| {
+    let result = services.config().update_settings_snapshot(|settings| {
         settings.backend.sounds = !settings.backend.sounds;
         settings.backend.language = Some("unsaved".to_owned());
     });
@@ -353,7 +354,62 @@ fn failed_backend_settings_save_leaves_snapshot_and_live_appdata_unchanged() {
     );
     // The mutation happened on a private copy; a failed persist must never
     // publish it to the settings snapshot BackendServices hands out.
-    assert_eq!(services.settings_snapshot(), before);
+    assert_eq!(services.config().settings_snapshot(), before);
+}
+
+#[test]
+fn concurrent_settings_mutations_are_serialized_without_lost_fields() {
+    let services = Arc::new(BackendServices::for_test());
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+
+    let backend_writer = {
+        let services = Arc::clone(&services);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            services
+                .config()
+                .update_settings_snapshot(|settings| settings.backend.sounds = false)
+                .expect("backend setting update");
+        })
+    };
+    let ui_writer = {
+        let services = Arc::clone(&services);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            services
+                .config()
+                .update_settings_snapshot(|settings| {
+                    settings.ui.theme_preset = ThemePreset::Light;
+                })
+                .expect("UI setting update");
+        })
+    };
+
+    barrier.wait();
+    backend_writer.join().expect("backend writer");
+    ui_writer.join().expect("UI writer");
+
+    let settings = services.config().settings_snapshot();
+    assert!(!settings.backend.sounds);
+    assert_eq!(settings.ui.theme_preset, ThemePreset::Light);
+}
+
+#[test]
+fn stale_backend_settings_events_cannot_replace_a_newer_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let services = BackendServices::for_test_with_data_root(temp.path());
+    let stale = services.app_data_snapshot_for_test();
+
+    services
+        .config()
+        .update_settings_snapshot(|settings| settings.backend.sounds = false)
+        .expect("newer settings update");
+    let applied = services.config().apply_appdata_snapshot(stale).0;
+
+    assert!(!applied.backend.sounds);
+    assert!(!services.config().settings_snapshot().backend.sounds);
 }
 
 #[test]
@@ -365,50 +421,36 @@ fn backend_context_forwards_installed_backend_events() {
         .take_receiver()
         .expect("backend event receiver");
 
-    ctx.backend()
-        .transactions
-        .emit(gmpublished_backend::events::BackendEvent::SteamConnected);
-    ctx.backend()
-        .transactions
-        .emit(gmpublished_backend::events::BackendEvent::SteamDisconnected);
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::SteamConnected);
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::SteamDisconnected);
     let appdata_snapshot = appdata_snapshot_event_payload_for_test();
-    ctx.backend()
-        .transactions
-        .emit(gmpublished_backend::events::BackendEvent::AppDataUpdated(
-            Box::new(appdata_snapshot.clone()),
-        ));
-    ctx.backend()
-        .transactions
-        .emit(gmpublished_backend::events::BackendEvent::InstalledAddonsRefreshed);
-    ctx.backend()
-        .transactions
-        .emit(gmpublished_backend::events::BackendEvent::DownloadStarted(
-            gmpublished_backend::events::DownloadStartedEvent {
-                transaction_id: TransactionId::from_raw(40),
-                request_id: None,
-            },
-        ));
-    ctx.backend().transactions.emit(
-        gmpublished_backend::events::BackendEvent::ExtractionStarted(
-            gmpublished_backend::events::ExtractionStartedEvent {
-                transaction_id: TransactionId::from_raw(41),
-                source_path: Some(PathBuf::from("/tmp/addon.gma")),
-                file_name: Some("addon.gma".to_owned()),
-                workshop_id: Some(
-                    gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
-                ),
-                request_id: None,
-            },
-        ),
-    );
-    ctx.backend()
-        .transactions
-        .emit(gmpublished_backend::events::BackendEvent::Transaction(
-            gmpublished_backend::events::TransactionEvent::Status {
-                id: TransactionId::from_raw(42),
-                status: TransactionStatus::PublishPacking,
-            },
-        ));
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::AppDataUpdated(Box::new(
+        appdata_snapshot.clone(),
+    )));
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::InstalledAddonsRefreshed);
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::DownloadStarted(
+        gmpublished_backend::DownloadStartedEvent {
+            transaction_id: TransactionId::from_raw(40),
+            request_id: None,
+        },
+    ));
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::ExtractionStarted(
+        gmpublished_backend::ExtractionStartedEvent {
+            transaction_id: TransactionId::from_raw(41),
+            source_path: Some(PathBuf::from("/tmp/addon.gma")),
+            file_name: Some("addon.gma".to_owned()),
+            workshop_id: Some(
+                gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
+            ),
+            request_id: None,
+        },
+    ));
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::Transaction(
+        gmpublished_backend::TransactionEvent::Status {
+            id: TransactionId::from_raw(42),
+            status: TransactionStatus::PublishPacking,
+        },
+    ));
 
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -465,14 +507,12 @@ fn backend_event_sink_fans_out_to_worker_subscriptions() {
         .subscribe_backend_events()
         .expect("worker event subscription");
 
-    ctx.backend()
-        .transactions
-        .emit(gmpublished_backend::events::BackendEvent::Transaction(
-            gmpublished_backend::events::TransactionEvent::Progress {
-                id: TransactionId::from_raw(81),
-                progress: 5000,
-            },
-        ));
+    ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::Transaction(
+        gmpublished_backend::TransactionEvent::Progress {
+            id: TransactionId::from_raw(81),
+            progress: 5000,
+        },
+    ));
 
     let expected = BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Progress {
         id: TransactionId::from_raw(81),
@@ -500,29 +540,27 @@ fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
     // Flood well past the bounded root queue's capacity with progress
     // events; these must be dropped under backpressure rather than block.
     for progress in 0..u16::try_from(BACKEND_EVENT_QUEUE_CAPACITY + 50).unwrap() {
-        ctx.backend()
-            .transactions
-            .emit(gmpublished_backend::events::BackendEvent::Transaction(
-                gmpublished_backend::events::TransactionEvent::Progress {
-                    id: TransactionId::from_raw(900),
-                    progress,
-                },
-            ));
+        ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::Transaction(
+            gmpublished_backend::TransactionEvent::Progress {
+                id: TransactionId::from_raw(900),
+                progress,
+            },
+        ));
     }
 
     // The terminal event must still get through. Emit it from another
     // thread: with the queue already saturated, a blocking send would
     // otherwise deadlock this test until the drain loop below catches up.
-    let backend = Arc::clone(ctx.backend());
+    let emitter_context = ctx.clone();
     let emitter = std::thread::spawn(move || {
-        backend
-            .transactions
-            .emit(gmpublished_backend::events::BackendEvent::Transaction(
-                gmpublished_backend::events::TransactionEvent::Finished {
+        emitter_context.emit_backend_event_for_test(
+            gmpublished_backend::BackendEvent::Transaction(
+                gmpublished_backend::TransactionEvent::Finished {
                     id: TransactionId::from_raw(900),
                     payload: TransactionPayload::None,
                 },
-            ));
+            ),
+        );
     });
 
     let mut saw_finished = false;
@@ -670,7 +708,7 @@ fn correlated_backend_transaction_error_finishes_task_with_error() {
             TransactionRuntimeEvent::Error {
                 id: TransactionId::from_raw(501),
                 error: TransactionError::detailed(
-                    gmpublished_backend::error_key::ErrorKey::new("ERR_TEST"),
+                    gmpublished_backend::ErrorKey::new("ERR_TEST"),
                     Some("detail".to_owned()),
                 ),
             },
@@ -701,7 +739,7 @@ fn direct_correlated_backend_transaction_error_removes_task() {
 
     assert!(ctx.error_backend_transaction_task(
         TransactionId::from_raw(502),
-        UiError::new(gmpublished_backend::error_key::ErrorKey::new("ERR_DIRECT"))
+        UiError::new(gmpublished_backend::ErrorKey::new("ERR_DIRECT"))
     ));
     assert!(
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
@@ -894,7 +932,7 @@ fn workshop_snapshot_error_is_request_scoped() {
         TransactionRuntimeEvent::Error {
             id: TransactionId::from_raw(623),
             error: TransactionError::detailed(
-                gmpublished_backend::error_key::ErrorKey::new("ERR_TEST"),
+                gmpublished_backend::ErrorKey::new("ERR_TEST"),
                 Some("detail".to_owned()),
             ),
         },
@@ -1038,7 +1076,7 @@ fn extraction_pre_start_buffer_is_globally_bounded() {
         assert!(effects.handled_event());
     }
 
-    let pending = ctx.transaction_tasks.pending_pre_start.lock();
+    let pending = ctx.transaction_tasks.pending_pre_start_snapshot();
     assert!(pending.len() <= MAX_PENDING_PRE_START_TRANSACTIONS);
     assert_eq!(
         pending
@@ -1053,7 +1091,81 @@ fn extraction_pre_start_buffer_is_globally_bounded() {
             .values()
             .all(|events| events.len() <= MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION)
     );
-    drop(pending);
+}
+
+#[test]
+fn completed_transaction_never_rebuffers_a_late_pre_start_event() {
+    let ctx = BackendContext::new().expect("test backend context");
+    let transaction_id = TransactionId::from_raw(640);
+
+    assert!(
+        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
+            transaction_id,
+            source_path: None,
+            file_name: None,
+            workshop_id: None,
+            request_id: None,
+        })
+        .handled_event()
+    );
+    assert!(
+        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+            TransactionRuntimeEvent::Finished {
+                id: transaction_id,
+                payload: TransactionPayload::None,
+            },
+        ))
+        .handled_event()
+    );
+    assert!(ctx.transaction_tasks.is_completed(transaction_id));
+
+    let late = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+        TransactionRuntimeEvent::Status {
+            id: transaction_id,
+            status: TransactionStatus::Locating,
+        },
+    ));
+    assert!(!late.handled_event());
+    assert!(
+        !ctx.transaction_tasks
+            .pending_pre_start_snapshot()
+            .contains_key(&transaction_id)
+    );
+
+    let duplicate_start =
+        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
+            transaction_id,
+            source_path: None,
+            file_name: None,
+            workshop_id: None,
+            request_id: None,
+        });
+    assert!(duplicate_start.handled_event());
+    assert!(duplicate_start.into_actions().is_empty());
+    assert!(!ctx.transaction_tasks.is_active(transaction_id));
+    assert!(ctx.transaction_tasks.is_completed(transaction_id));
+}
+
+#[test]
+fn completed_transaction_tombstones_are_bounded() {
+    let ctx = BackendContext::new().expect("test backend context");
+
+    for offset in 0..(MAX_COMPLETED_TRANSACTION_TOMBSTONES + 4) {
+        let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+            TransactionRuntimeEvent::Finished {
+                id: TransactionId::from_raw(
+                    20_000 + u32::try_from(offset).expect("test offset fits u32"),
+                ),
+                payload: TransactionPayload::None,
+            },
+        ));
+        assert!(!effects.handled_event());
+    }
+
+    assert_eq!(
+        ctx.transaction_tasks.completed_count(),
+        MAX_COMPLETED_TRANSACTION_TOMBSTONES
+    );
 }
 
 /// `game_paths` reports the configured Garry's Mod path beside the one that
@@ -1069,15 +1181,16 @@ fn a_settings_save_publishes_the_configured_and_resolved_game_paths_together() {
     std::fs::create_dir_all(&gmod_dir).expect("gmod dir");
     let services = BackendServices::for_test();
 
-    assert_eq!(services.game_paths(), (None, None));
+    assert_eq!(services.config().game_paths(), (None, None));
 
     services
+        .config()
         .update_settings_snapshot(|settings| {
             settings.backend.gmod = Some(gmod_dir.clone());
         })
         .expect("settings should persist");
 
-    let (configured, resolved) = services.game_paths();
+    let (configured, resolved) = services.config().game_paths();
     assert_eq!(configured.as_deref(), Some(gmod_dir.as_path()));
     assert_eq!(
         resolved.as_deref(),
@@ -1085,7 +1198,7 @@ fn a_settings_save_publishes_the_configured_and_resolved_game_paths_together() {
         "the resolved path must reflect the settings published in the same write"
     );
     // The same pairing, whichever accessor a caller reaches for.
-    let (settings, paths) = services.settings_and_paths_snapshot();
+    let (settings, paths) = services.config().settings_and_paths_snapshot();
     assert_eq!(settings.backend.gmod, configured);
     assert_eq!(paths.gmod_dir, resolved);
 }
@@ -1096,7 +1209,8 @@ fn downloader_workshop_submission_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .submit_workshop_downloads(vec![PublishedFileId::fixture(123)])
+            .workshop()
+            .submit_downloads(vec![PublishedFileId::fixture(123)])
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
@@ -1108,19 +1222,22 @@ fn workshop_metadata_refresh_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .refresh_workshop_metadata(&[PublishedFileId::fixture(123)])
+            .workshop()
+            .refresh_metadata(&[PublishedFileId::fixture(123)])
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
     assert_eq!(
         services
-            .workshop_item_details(PublishedFileId::fixture(123))
+            .workshop()
+            .item_details(PublishedFileId::fixture(123))
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
     assert_eq!(
         services
-            .steam_user_details(SteamId::new(76561198000000000))
+            .workshop()
+            .user_details(SteamId::new(76561198000000000))
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
@@ -1132,13 +1249,15 @@ fn my_workshop_page_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .browse_my_workshop_page(1)
+            .workshop()
+            .browse_my_page(1)
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
     assert_eq!(
         services
-            .refresh_my_workshop_subscription_counts(1)
+            .workshop()
+            .refresh_subscription_counts(1)
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
@@ -1149,7 +1268,7 @@ fn my_workshop_zero_page_stats_refresh_is_noop_without_steam() {
     let services = BackendServices::for_test();
 
     assert_eq!(
-        services.refresh_my_workshop_subscription_counts(0),
+        services.workshop().refresh_subscription_counts(0),
         Ok(HashMap::new())
     );
 }
@@ -1230,12 +1349,12 @@ fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
 
 #[test]
 fn publish_submit_requires_connected_steam_runtime_and_errors_transaction() {
-    let collector = gmpublished_backend::events::BackendEventCollector::default();
+    let collector = gmpublished_backend::BackendEventCollector::default();
     let services = BackendServices::for_test_with_event_sink(Arc::new(collector.clone()));
     let transaction = services.begin_transaction();
     let transaction_id = transaction.id();
 
-    let result = services.submit_publish_request(
+    let result = services.publish().submit(
         PublishSubmitRequest {
             mode: PublishSubmitMode::New,
             content_source_path: PathBuf::from("/tmp/source-addon"),
@@ -1258,8 +1377,8 @@ fn publish_submit_requires_connected_steam_runtime_and_errors_transaction() {
     let events = collector.drain();
     assert!(events.iter().any(|event| matches!(
         event,
-        gmpublished_backend::events::BackendEvent::Transaction(
-            gmpublished_backend::events::TransactionEvent::Error { id, error }
+        gmpublished_backend::BackendEvent::Transaction(
+            gmpublished_backend::TransactionEvent::Error { id, error }
         ) if *id == transaction_id
             && error.key.as_str() == "ERR_STEAM_ERROR"
             && error.detail.as_deref() == Some("STEAM_NOT_CONNECTED")
@@ -1321,8 +1440,8 @@ fn quick_search_backend_result_maps_to_app_batch() {
         .begin_query("needle", SearchMode::Addons)
         .quick_request
         .expect("quick request");
-    let backend_item = gmpublished_backend::search::SearchItem::new(
-        gmpublished_backend::search::SearchItemSource::InstalledAddons(
+    let backend_item = gmpublished_backend::SearchItem::new(
+        gmpublished_backend::SearchItemSource::InstalledAddons(
             PathBuf::from("/tmp/needle.gma"),
             None,
         ),
@@ -1332,8 +1451,8 @@ fn quick_search_backend_result_maps_to_app_batch() {
     );
     let batch = search_quick_batch_from_backend(
         &request,
-        &gmpublished_backend::search::QuickSearchResult {
-            hits: vec![gmpublished_backend::search::QuickSearchHit {
+        &gmpublished_backend::QuickSearchResult {
+            hits: vec![gmpublished_backend::QuickSearchHit {
                 score: 123,
                 item: Arc::new(backend_item),
             }],
@@ -1386,8 +1505,8 @@ fn full_search_transaction_payload_maps_to_app_batch() {
     let full = session
         .begin_full_search(TaskId::from_raw(77), SearchMode::Addons)
         .expect("full search start");
-    let backend_item = gmpublished_backend::search::SearchItem::new(
-        gmpublished_backend::search::SearchItemSource::InstalledAddons(
+    let backend_item = gmpublished_backend::SearchItem::new(
+        gmpublished_backend::SearchItemSource::InstalledAddons(
             PathBuf::from("/tmp/needle-full.gma"),
             None,
         ),
@@ -1395,11 +1514,10 @@ fn full_search_transaction_payload_maps_to_app_batch() {
         vec!["needle".to_owned()],
         42_u64,
     );
-    let payload =
-        TransactionPayload::SearchHits(vec![gmpublished_backend::search::QuickSearchHit {
-            score: 456,
-            item: Arc::new(backend_item),
-        }]);
+    let payload = TransactionPayload::SearchHits(vec![gmpublished_backend::QuickSearchHit {
+        score: 456,
+        item: Arc::new(backend_item),
+    }]);
 
     let batch = search_full_batch_from_transaction_payload(&full.request, 9, &payload)
         .expect("full batch projection");
@@ -1437,7 +1555,9 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
     };
     let dead_item = WorkshopItem::dead(PublishedFileId::fixture(456));
 
-    let metadata = services.cache_workshop_items(&[live_item, dead_item]);
+    let metadata = services
+        .workshop()
+        .cache_items_for_test(&[live_item, dead_item]);
 
     assert_eq!(
         metadata,
@@ -1456,7 +1576,7 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
         }]
     );
 
-    let (cached, stale) = services.resolve_workshop_metadata(&[
+    let (cached, stale) = services.workshop().resolve_metadata(&[
         PublishedFileId::fixture(123),
         PublishedFileId::fixture(456),
         PublishedFileId::fixture(789),
@@ -1474,10 +1594,11 @@ fn workshop_detail_cache_persists_full_description_across_summary_refreshes() {
     let mut item = live_workshop_item_for_metadata_tests(123);
     item.description = Some("  Full Workshop description  ".to_owned());
 
-    services.cache_workshop_item_details(&item);
+    services.workshop().cache_item_details_for_test(&item);
     let id = item.id;
     let cached = services
-        .cached_workshop_item_details(id)
+        .workshop()
+        .cached_item_details(id)
         .expect("detail query should populate the detail cache");
     assert_eq!(
         cached.full_description.as_deref(),
@@ -1486,9 +1607,10 @@ fn workshop_detail_cache_persists_full_description_across_summary_refreshes() {
     assert_eq!(cached.owner_steamid, item.steamid);
 
     item.description = Some("short summary".to_owned());
-    services.cache_workshop_items(&[item]);
+    services.workshop().cache_items_for_test(&[item]);
     let cached = services
-        .cached_workshop_item_details(id)
+        .workshop()
+        .cached_item_details(id)
         .expect("summary refresh should retain full details");
     assert_eq!(
         cached.full_description.as_deref(),
@@ -1517,19 +1639,27 @@ fn live_workshop_item_for_metadata_tests(id: u64) -> WorkshopItem {
 #[test]
 fn workshop_metadata_older_than_ttl_serves_stale_while_marking_for_refresh() {
     let services = BackendServices::for_test();
-    let metadata = services.cache_workshop_items(&[live_workshop_item_for_metadata_tests(123)]);
+    let metadata = services
+        .workshop()
+        .cache_items_for_test(&[live_workshop_item_for_metadata_tests(123)]);
 
-    let (cached, stale) = services.resolve_workshop_metadata(&[PublishedFileId::fixture(123)]);
+    let (cached, stale) = services
+        .workshop()
+        .resolve_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, metadata);
     assert!(stale.is_empty());
 
     let aged =
         metadata_snapshot::now_unix_seconds() - metadata_snapshot::METADATA_TTL.as_secs() - 1;
-    services.set_workshop_metadata_fetched_at_for_test(PublishedFileId::fixture(123), aged);
+    services
+        .workshop()
+        .set_metadata_fetched_at_for_test(PublishedFileId::fixture(123), aged);
 
     // Stale-while-revalidate: the aged entry still renders AND is re-queued
     // for the background refresh.
-    let (cached, stale) = services.resolve_workshop_metadata(&[PublishedFileId::fixture(123)]);
+    let (cached, stale) = services
+        .workshop()
+        .resolve_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, metadata);
     assert_eq!(stale, vec![PublishedFileId::fixture(123)]);
 }
@@ -1541,15 +1671,19 @@ fn workshop_metadata_snapshot_write_hydrates_across_restart() {
 
     let mut services = BackendServices::for_test();
     services.set_metadata_snapshot_file_for_test(snapshot_file.clone());
-    let written = services.cache_workshop_items(&[live_workshop_item_for_metadata_tests(123)]);
-    services.write_metadata_snapshot_best_effort();
+    let written = services
+        .workshop()
+        .cache_items_for_test(&[live_workshop_item_for_metadata_tests(123)]);
+    services.workshop().persist_metadata_cache();
     assert!(snapshot_file.is_file());
 
     let mut restarted = BackendServices::for_test();
     restarted.set_metadata_snapshot_file_for_test(snapshot_file);
-    restarted.hydrate_workshop_metadata_snapshot_for_test();
+    restarted.workshop().hydrate_metadata_snapshot();
 
-    let (cached, stale) = restarted.resolve_workshop_metadata(&[PublishedFileId::fixture(123)]);
+    let (cached, stale) = restarted
+        .workshop()
+        .resolve_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, written);
     assert!(stale.is_empty());
 }
@@ -1636,10 +1770,7 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
 
 #[test]
 fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events() {
-    use gmpublished_backend::{
-        GmaFile,
-        gma::{ExtractDestination, ExtractOptions, Whitelist},
-    };
+    use gmpublished_backend::{ExtractDestination, ExtractOptions, GmaFile, Whitelist};
 
     let _lock = BACKEND_EVENT_SINK_TEST_LOCK.lock();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1663,19 +1794,17 @@ fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events(
     ctx.correlate_backend_transaction(transaction.id(), task);
 
     let extract_dir = temp.path().join("extract");
-    let backend = ctx.backend();
-    let extraction = backend
-        .resolve_extraction(
-            &gma,
-            ExtractDestination::Directory(extract_dir.clone()),
-            ExtractOptions {
-                open_after: false,
-                whitelist: Whitelist::Ignore,
-            },
-        )
-        .expect("resolve extraction fixture");
-    view.extract(&gma, &transaction, extraction)
-        .expect("extract fixture");
+    ctx.extract_gma_for_test(
+        &view,
+        &gma,
+        ExtractDestination::Directory(extract_dir.clone()),
+        ExtractOptions {
+            open_after: false,
+            whitelist: Whitelist::Ignore,
+        },
+        &transaction,
+    )
+    .expect("extract fixture");
 
     for event in backend_receiver.try_iter() {
         ctx.handle_backend_runtime_event(&event);

@@ -1,4 +1,4 @@
-//! Model loading: the wire formats (`.mdl`/`.vvd`/`.vtx`) and geometry
+//! Shared model loading: the wire formats (`.mdl`/`.vvd`/`.vtx`) and geometry
 //! assembly live in [`vformats::mdl`]; this is the one-shot the app
 //! consumes, plus degradation-stats logging.
 

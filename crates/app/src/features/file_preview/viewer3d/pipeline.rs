@@ -19,7 +19,7 @@ use super::{
     look_at, mat_mul, mid, perspective, prepare_draw_plans, shader, skybox_eye,
     transform_door_vertices, wgpu, write_bc_texture_level, write_texture_level,
 };
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 
 mod draw;
 mod materials;

@@ -1,17 +1,13 @@
 use super::ports::Ports;
 use super::{
-    App, BackendServices, PathBuf, PublishedFileId, RootMessage, Task, TaskKind, UiError,
-    WORKSHOP_LEGAL_URL, flatten_blocking_ui_result, modal_stack, prepare_publish, sounds,
-    steam_session, workshop_url,
+    App, PathBuf, PublishedFileId, RootMessage, Task, TaskKind, UiError, WORKSHOP_LEGAL_URL,
+    flatten_blocking_ui_result, modal_stack, prepare_publish, sounds, steam_session, workshop_url,
 };
 use crate::bridge::tasks::TransactionStatus;
 use crate::bridge::tasks::WorkshopSnapshotId;
 use crate::bridge::ui_error::ResultExt as _;
 use crate::features::file_preview;
-use gmpublished_backend::error_key::keys;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static WORKSHOP_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+use gmpublished_backend::error_keys as keys;
 
 impl App {
     pub(super) fn apply_prepare_publish_message(
@@ -136,8 +132,10 @@ impl App {
     }
 }
 
-pub(super) fn prepare_publish_connect_steam(app: &BackendServices) -> Result<(), UiError> {
-    let attempt = steam_session::connect_context_for_operation(app);
+pub(super) fn prepare_publish_connect_steam(
+    workshop: crate::bridge::tasks::WorkshopService<'_>,
+) -> Result<(), UiError> {
+    let attempt = steam_session::connect_context_for_operation(workshop);
     if attempt.connected() {
         Ok(())
     } else {
@@ -201,8 +199,11 @@ impl<'a> PublishRunner<'a> {
         workshop_id: PublishedFileId,
     ) -> (WorkshopSnapshotId, PathBuf) {
         let (_settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
-        let request_id =
-            WorkshopSnapshotId::new(WORKSHOP_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let sequence = self.ports.workshop_snapshot_sequence.get();
+        self.ports
+            .workshop_snapshot_sequence
+            .set(sequence.wrapping_add(1));
+        let request_id = WorkshopSnapshotId::new(sequence);
         let path = paths
             .temp_dir
             .join("prepare-publish-workshop")
@@ -223,8 +224,8 @@ impl<'a> PublishRunner<'a> {
                         UiError::detailed(keys::IO_ERROR, Some(error.to_string()))
                     })?;
                 }
-                prepare_publish_connect_steam(app)?;
-                app.submit_workshop_snapshot(
+                prepare_publish_connect_steam(app.workshop())?;
+                app.workshop().submit_snapshot(
                     request.workshop_id,
                     crate::bridge::gma::ExtractDestination::Directory(request.destination),
                     request_id,
@@ -266,7 +267,7 @@ impl<'a> PublishRunner<'a> {
         self.ports
             .ctx
             .run_blocking("prepare-publish-verify", move |app| {
-                prepare_publish::verify_content_path(app, request)
+                prepare_publish::verify_content_path(app.config(), app.archive(), request)
             })
             .map(move |result| {
                 RootMessage::PreparePublish(prepare_publish::Message::PathVerificationCompleted(
@@ -302,7 +303,7 @@ impl<'a> PublishRunner<'a> {
         self.ports
             .ctx
             .run_blocking(worker_name, move |app| {
-                prepare_publish::apply_ignore_pattern_mutation(app, mutation)
+                prepare_publish::apply_ignore_pattern_mutation(app.config(), mutation)
             })
             .map(move |result| {
                 RootMessage::PreparePublish(
@@ -339,7 +340,8 @@ impl<'a> PublishRunner<'a> {
             .run_blocking("prepare-publish-submit", move |app| {
                 prepare_publish::run_publish_submit(
                     &ctx,
-                    app,
+                    app.publish(),
+                    app.workshop(),
                     prepare_publish_connect_steam,
                     task,
                     envelope.request,
@@ -368,7 +370,8 @@ impl<'a> PublishRunner<'a> {
             .run_blocking("prepare-publish-icon-submit", move |app| {
                 prepare_publish::run_publish_icon_submit(
                     &ctx,
-                    app,
+                    app.publish(),
+                    app.workshop(),
                     prepare_publish_connect_steam,
                     task,
                     &request,

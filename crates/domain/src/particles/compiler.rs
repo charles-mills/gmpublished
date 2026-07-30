@@ -1,4 +1,4 @@
-//! Compiles a parsed PCF definition into the fixed-shape system the runtime
+//! Compiles a parsed PCF definition into the fixed-shape shared runtime
 //! simulates: typed initializers, operators and emitters with their attribute
 //! lookups already resolved.
 //!

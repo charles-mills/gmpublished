@@ -6,7 +6,7 @@
 //! belongs to neither — a decoder that imported the feature, or a feature that
 //! owned the decoder's output type, would point the dependency the wrong way.
 
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
 
 use iced::widget::image;
@@ -15,7 +15,7 @@ use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
-pub use gmpublished_backend::scene::map::{
+pub use gmpublished_domain::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
     MapVisibilityBucket, MapWalkCollision,
 };
@@ -199,7 +199,7 @@ pub enum PreviewContent {
 /// system coverage/metadata and the de-duplicated sprite materials.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParticlePreview {
-    pub(crate) file: gmpublished_backend::scene::pcf::PcfFile,
+    pub(crate) file: gmpublished_domain::scene::pcf::PcfFile,
     pub(crate) systems: Vec<ParticleSystemInfo>,
     pub(crate) materials: Vec<ParticleMaterialSlot>,
 }
@@ -208,7 +208,7 @@ pub struct ParticlePreview {
 pub struct ParticleSystemInfo {
     pub(crate) name: String,
     /// Deduplicated operator coverage across the system and its children.
-    pub(crate) coverage: Vec<gmpublished_backend::particles::CoverageEntry>,
+    pub(crate) coverage: Vec<gmpublished_domain::particles::CoverageEntry>,
     /// Highest control point index the compiled effect reads.
     pub(crate) highest_control_point: usize,
 }
@@ -226,7 +226,7 @@ pub struct ParticleMaterialSlot {
 /// PCF material references are inconsistent ("effects\\spark.vmt",
 /// "particle/foo"); loader keys and renderer lookups share this form.
 pub fn normalize_particle_material(name: &str) -> String {
-    gmpublished_backend::particles::normalize_material_name(name)
+    gmpublished_domain::particles::normalize_material_name(name)
 }
 
 #[cfg(test)]
@@ -698,7 +698,7 @@ mod tests {
     fn cluster_visibility(cluster: u32, face: u32) -> MapMeshVisibility {
         MapMeshVisibility {
             always_visible: Vec::new(),
-            clusters: vec![gmpublished_backend::scene::map::MapMeshClusterRanges {
+            clusters: vec![gmpublished_domain::scene::map::MapMeshClusterRanges {
                 cluster,
                 ranges: vec![MapMeshIndexRange {
                     face,
@@ -795,7 +795,7 @@ mod tests {
         let mut visibility = cluster_visibility(0, 42);
         visibility
             .clusters
-            .push(gmpublished_backend::scene::map::MapMeshClusterRanges {
+            .push(gmpublished_domain::scene::map::MapMeshClusterRanges {
                 cluster: 1,
                 ranges: vec![MapMeshIndexRange {
                     face: 42,

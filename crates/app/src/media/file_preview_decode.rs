@@ -5,7 +5,7 @@
 //! translation of what comes back into application messages — nothing here
 //! touches the message loop.
 
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::{
     collections::{HashMap, HashSet},
     panic::{self, AssertUnwindSafe},
@@ -18,8 +18,8 @@ use cosmic_text::{
     SwashCache, fontdb,
 };
 #[cfg(test)]
-use gmpublished_backend::scene::map::MapVisibilityBucket;
-use gmpublished_backend::scene::map::{MapDetailSprite, MapOverlay};
+use gmpublished_domain::scene::map::MapVisibilityBucket;
+use gmpublished_domain::scene::map::{MapDetailSprite, MapOverlay};
 use iced::widget::image as iced_image;
 use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
@@ -71,7 +71,7 @@ const TEXT_TOO_LARGE_BYTES: usize = 4 * 1024 * 1024;
 const IMAGE_TOO_LARGE_BYTES: usize = 32 * 1024 * 1024;
 const FONT_TOO_LARGE_BYTES: usize = 8 * 1024 * 1024;
 const AUDIO_TOO_LARGE_BYTES: usize = 64 * 1024 * 1024;
-const MAP_TOO_LARGE_BYTES: usize = gmpublished_backend::scene::map::MAX_BSP_BYTES;
+const MAP_TOO_LARGE_BYTES: usize = gmpublished_domain::scene::map::MAX_BSP_BYTES;
 const PARTICLE_TOO_LARGE_BYTES: usize = 16 * 1024 * 1024;
 const MAP_TEXTURE_DECODE_BUDGET_BYTES: usize = 1024 * 1024 * 1024;
 const MAP_TEXTURE_MAX_DIMENSION: u32 = 512;
@@ -92,10 +92,19 @@ pub fn load_preview(
     request: &PreviewRequest,
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
-    on_stage: &mut dyn FnMut(PreviewLoadStage),
+    cpu: &gmpublished_backend::CpuExecutor,
+    on_stage: &mut (dyn FnMut(PreviewLoadStage) + Send),
 ) -> Result<PreviewData, PreviewLoadError> {
-    catch_preview_build_result(request, || {
-        load_preview_data(request.clone(), tokens, gmod_dir, on_stage)
+    cpu.install(|| {
+        catch_preview_build_result(request, || {
+            load_preview_data(
+                request.clone(),
+                tokens,
+                gmod_dir,
+                Some(cpu.rayon_pool()),
+                on_stage,
+            )
+        })
     })
 }
 
@@ -103,6 +112,7 @@ fn load_preview_data(
     mut request: PreviewRequest,
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
+    map_pool: Option<&rayon::ThreadPool>,
     on_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> Result<PreviewData, PreviewLoadError> {
     let entry_class = match classify_entry_path(&request.entry_path) {
@@ -135,6 +145,7 @@ fn load_preview_data(
         tokens,
         gmod_dir,
         entry_class,
+        map_pool,
         on_stage,
     ))
 }
@@ -197,7 +208,15 @@ pub fn preview_data_from_bytes(
         ),
     };
     catch_preview_build_data(request, || {
-        preview_data_from_bytes_inner(request, bytes, tokens, gmod_dir, entry_class, &mut |_| {})
+        preview_data_from_bytes_inner(
+            request,
+            bytes,
+            tokens,
+            gmod_dir,
+            entry_class,
+            None,
+            &mut |_| {},
+        )
     })
 }
 
@@ -207,10 +226,19 @@ fn preview_data_from_bytes_with_stages(
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
     entry_class: PreviewClass,
+    map_pool: Option<&rayon::ThreadPool>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
     catch_preview_build_data(request, || {
-        preview_data_from_bytes_inner(request, bytes, tokens, gmod_dir, entry_class, emit_stage)
+        preview_data_from_bytes_inner(
+            request,
+            bytes,
+            tokens,
+            gmod_dir,
+            entry_class,
+            map_pool,
+            emit_stage,
+        )
     })
 }
 
@@ -220,6 +248,7 @@ fn preview_data_from_bytes_inner(
     tokens: &Tokens,
     gmod_dir: Option<std::path::PathBuf>,
     entry_class: PreviewClass,
+    map_pool: Option<&rayon::ThreadPool>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
     let mut data = match entry_class {
@@ -229,7 +258,7 @@ fn preview_data_from_bytes_inner(
         PreviewClass::Font => font_preview_data(request, bytes, tokens),
         PreviewClass::Audio => audio_preview_data(request, bytes),
         PreviewClass::Model => model_preview_data(request, bytes, gmod_dir),
-        PreviewClass::Map => map_preview_data(request, bytes, gmod_dir, emit_stage),
+        PreviewClass::Map => map_preview_data(request, bytes, gmod_dir, map_pool, emit_stage),
         PreviewClass::Particle => particle_preview_data(request, bytes, gmod_dir, emit_stage),
         PreviewClass::Info => info_preview_data(request, InfoReason::Binary),
     };
@@ -443,8 +472,8 @@ fn particle_preview_data(
     gmod_dir: Option<std::path::PathBuf>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
-    use gmpublished_backend::particles::ParticleEngine;
-    use gmpublished_backend::scene::pcf;
+    use gmpublished_domain::particles::ParticleEngine;
+    use gmpublished_domain::scene::pcf;
 
     if !request.bypass_size_limits && bytes.len() > PARTICLE_TOO_LARGE_BYTES {
         return info_preview_data(request, InfoReason::TooLarge);
@@ -669,7 +698,7 @@ fn load_model_catching_panic(
     vtx_bytes: &[u8],
 ) -> Option<ModelData> {
     match catch_asset_decode(context, || {
-        gmpublished_backend::scene::model::load_model(mdl_bytes, vvd_bytes, vtx_bytes)
+        gmpublished_domain::scene::model::load_model(mdl_bytes, vvd_bytes, vtx_bytes)
     }) {
         Some(Ok(model)) => Some(ModelData::from(model)),
         Some(Err(error)) => {

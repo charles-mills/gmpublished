@@ -21,7 +21,7 @@ fn agent_builder(
     connect: Duration,
     response: Duration,
 ) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
-    gmpublished_backend::net::tls_agent_builder()
+    gmpublished_backend::tls_agent_builder()
         .http_status_as_error(true)
         .timeout_global(Some(global))
         .timeout_connect(Some(connect))

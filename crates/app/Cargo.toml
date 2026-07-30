@@ -20,6 +20,7 @@ path = "src/main.rs"
 debug = []
 
 [dependencies]
+arc-swap.workspace = true
 bytemuck.workspace = true
 vformats.workspace = true
 # pinned to match iced 0.14's internal version — do not bump independently
@@ -28,7 +29,8 @@ fast_image_resize.workspace = true
 fluent-bundle.workspace = true
 fluent-langneg.workspace = true
 gif.workspace = true
-gmpublished-backend = { path = "../backend", features = ["scene"] }
+gmpublished-backend = { path = "../backend" }
+gmpublished-domain = { path = "../domain" }
 iced.workspace = true
 image.workspace = true
 jiff.workspace = true
@@ -76,7 +78,8 @@ lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [dev-dependencies]
 crc32fast.workspace = true
-gmpublished-backend = { path = "../backend", features = ["scene", "test-support"] }
+gmpublished-backend = { path = "../backend", features = ["test-support"] }
+gmpublished-domain = { path = "../domain", features = ["test-support"] }
 # Headless widget-tree simulator for click-through view tests.
 iced_test = "0.14.0"
 lzma-rust2 = { workspace = true, features = ["encoder"] }

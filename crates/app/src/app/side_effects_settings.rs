@@ -170,17 +170,18 @@ impl App {
         let system_scheme = self.state.system_scheme;
         self.ctx
             .run_blocking("settings-save", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    settings::apply_settings_mutation(settings, mutation);
-                })
-                .map(|()| {
-                    Box::new(settings::SettingsSnapshot::new(
-                        app.settings_snapshot(),
-                        app.paths(),
-                        system_scheme,
-                    ))
-                })
-                .ui_err()
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        settings::apply_settings_mutation(settings, mutation);
+                    })
+                    .map(|()| {
+                        Box::new(settings::SettingsSnapshot::new(
+                            app.config().settings_snapshot(),
+                            app.config().paths(),
+                            system_scheme,
+                        ))
+                    })
+                    .ui_err()
             })
             .map(move |result| {
                 RootMessage::Settings(settings::Message::SaveCompleted(
@@ -195,14 +196,20 @@ impl App {
         self.ctx
             .run_blocking("settings-reset", move |app| {
                 let settings = match action {
-                    settings::ResetAction::Settings => app.reset_settings().map(Some).ui_err()?,
-                    settings::ResetAction::TempFiles => app.clear_temp_files().map(|()| None)?,
-                    settings::ResetAction::UserData => app.clear_user_data().map(|()| None)?,
+                    settings::ResetAction::Settings => {
+                        app.config().reset_settings().map(Some).ui_err()?
+                    }
+                    settings::ResetAction::TempFiles => {
+                        app.config().clear_temp_files().map(|()| None)?
+                    }
+                    settings::ResetAction::UserData => {
+                        app.config().clear_user_data().map(|()| None)?
+                    }
                 };
                 Ok(settings.map(|settings| {
                     Box::new(settings::SettingsSnapshot::new(
                         settings,
-                        app.paths(),
+                        app.config().paths(),
                         system_scheme,
                     ))
                 }))

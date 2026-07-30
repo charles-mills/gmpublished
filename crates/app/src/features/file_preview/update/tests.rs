@@ -1,5 +1,5 @@
 use super::super::state::{FlyPose, MovementMode, OrbitPose};
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
 
 use super::*;

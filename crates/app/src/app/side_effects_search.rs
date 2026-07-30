@@ -27,7 +27,7 @@ impl App {
     pub(super) fn search_quick_task(&self, request: SearchQuickRequest) -> Task<RootMessage> {
         let key = request.key().clone();
         self.ctx
-            .run_blocking("search-quick", move |app| app.search_quick(&request))
+            .run_blocking("search-quick", move |app| app.search().quick(&request))
             .map(move |result| {
                 RootMessage::Search(search::Message::QuickSearchCompleted(
                     key.clone(),
@@ -45,7 +45,7 @@ impl App {
         let delivery_item_ids = item_ids;
         self.ctx
             .run_blocking("search-metadata", move |app| {
-                search::resolve_metadata(app, &worker_item_ids)
+                search::resolve_metadata(app.workshop(), &worker_item_ids)
             })
             .map(move |result| {
                 RootMessage::Search(search::Message::MetadataCompleted(
@@ -74,7 +74,7 @@ impl App {
         let delivery_item_ids = item_ids;
         self.ctx
             .run_blocking("search-metadata-refresh", move |app| {
-                search::refresh_metadata(app, &worker_item_ids)
+                search::refresh_metadata(app.workshop(), &worker_item_ids)
             })
             .map(move |result| {
                 RootMessage::Search(search::Message::MetadataRefreshCompleted(
@@ -90,7 +90,7 @@ impl App {
             .ctx
             .create_task(TaskKind::Search, TransactionStatus::Searching);
         let Some(start) = self.state.search.begin_full_search(task.id()) else {
-            task.error(gmpublished_backend::error_key::keys::CANCELLED);
+            task.error(gmpublished_backend::error_keys::CANCELLED);
             return Task::none();
         };
 

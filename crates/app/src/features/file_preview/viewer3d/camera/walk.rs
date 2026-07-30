@@ -7,8 +7,8 @@ use super::{
     FlyCamera, LAND_BOB_AMPLITUDE, LAND_BOB_DURATION, WALK_GROUND_SNAP, WALK_SPEED,
     WALK_STEP_HEIGHT, WalkHull, WaterLevel, clip_along_plane, horizontal_length_squared,
 };
-use gmpublished_backend::math::Vec3;
-use gmpublished_backend::scene::map::MapWalkCollision;
+use gmpublished_domain::math::Vec3;
+use gmpublished_domain::scene::map::MapWalkCollision;
 
 const WALK_DUCK_SPEED: f32 = WALK_SPEED / 3.0;
 

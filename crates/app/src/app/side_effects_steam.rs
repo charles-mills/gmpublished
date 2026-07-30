@@ -1,4 +1,4 @@
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use super::{
     App, BackendRuntimeEvent, LibraryRefreshReason, RootMessage, RouteLifecycle, Task, UiError,
@@ -161,14 +161,14 @@ impl App {
 
     pub(super) fn start_appdata_snapshot_task(
         &mut self,
-        snapshot: Box<gmpublished_backend::appdata::AppDataSnapshot>,
+        snapshot: Box<gmpublished_backend::AppDataSnapshot>,
     ) -> Task<RootMessage> {
         debug_assert!(!self.appdata_snapshot_in_flight);
         self.appdata_snapshot_in_flight = true;
         let system_scheme = self.state.system_scheme;
         self.ctx
             .run_blocking("apply-appdata-snapshot", move |services| {
-                let (settings, paths) = services.apply_appdata_snapshot(*snapshot);
+                let (settings, paths) = services.config().apply_appdata_snapshot(*snapshot);
                 Box::new(settings::SettingsSnapshot::new(
                     settings,
                     paths,
@@ -203,10 +203,9 @@ impl App {
 
     pub(super) fn steam_connect_task(&self) -> Task<RootMessage> {
         self.ctx
-            .run_blocking(
-                "steam-connect",
-                steam_session::connect_context_for_operation,
-            )
+            .run_blocking("steam-connect", |app| {
+                steam_session::connect_context_for_operation(app.workshop())
+            })
             .map(|result| {
                 let attempt = match result {
                     Ok(attempt) => attempt,
@@ -224,7 +223,8 @@ impl App {
     pub(super) fn steam_identity_task(&self, generation: Generation) -> Task<RootMessage> {
         self.ctx
             .run_blocking("steam-current-user", |app| {
-                app.current_steam_user()
+                app.workshop()
+                    .current_user()
                     .map(steam_session::SteamIdentity::from_user)
             })
             .map(move |result| {

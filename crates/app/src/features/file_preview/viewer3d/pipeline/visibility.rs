@@ -4,7 +4,7 @@
 
 use super::upload::UploadedDetailSprites;
 use super::{DETAIL_VERTEX_FLOAT_COUNT, WorldVisibilityPlan, wgpu};
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 
 #[derive(Debug)]
 pub struct UploadedVisibleIndices {

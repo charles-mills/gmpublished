@@ -15,6 +15,7 @@ struct Fixture {
     whitelist: AddonWhitelist,
     transactions: Transactions,
     collector: BackendEventCollector,
+    cpu: crate::execution::CpuExecutor,
     _temp: tempfile::TempDir,
 }
 
@@ -33,6 +34,7 @@ impl Fixture {
             whitelist: AddonWhitelist::builtin_only(),
             transactions,
             collector,
+            cpu: crate::execution::CpuExecutor::build(2).expect("test CPU executor"),
             _temp: temp,
         }
     }
@@ -56,7 +58,7 @@ impl Fixture {
                 whitelist: Whitelist::Ignore,
             },
         )?;
-        view.extract(handle, &transaction, context)
+        view.extract(handle, &transaction, context, &self.cpu)
     }
 
     fn extraction_context(
@@ -151,7 +153,10 @@ fn cancelled_entry_write_keeps_existing_destination_intact() {
     let destination = temp.path().join("existing.lua");
     std::fs::write(&destination, b"old contents").expect("existing destination");
     let transaction = fixture.transactions.begin();
-    assert!(transaction.cancel());
+    assert_eq!(
+        transaction.cancel(),
+        crate::transactions::FinalizeOutcome::Finalized
+    );
 
     assert!(write_entry(&view, &entry, &destination, Some(&transaction)).is_err());
     assert_eq!(
@@ -278,7 +283,10 @@ fn cancelling_before_extraction_stops_it_with_no_finish() {
     let destination = temp.path().join("cancelled-extract");
 
     let transaction = fixture.transactions.begin();
-    assert!(transaction.cancel());
+    assert_eq!(
+        transaction.cancel(),
+        crate::transactions::FinalizeOutcome::Finalized
+    );
 
     let context = fixture
         .extraction_context(
@@ -290,7 +298,7 @@ fn cancelling_before_extraction_stops_it_with_no_finish() {
             },
         )
         .expect("resolve extraction");
-    let result = view.extract(handle, &transaction, context);
+    let result = view.extract(handle, &transaction, context, &fixture.cpu);
 
     assert!(matches!(result, Err(GmaError::Cancelled)));
     assert!(!destination.exists());
@@ -624,7 +632,7 @@ fn partial_entry_failure_reports_error_with_counts() {
             },
         )
         .expect("resolve extraction");
-    let result = view.extract(&gma, &transaction, context);
+    let result = view.extract(&gma, &transaction, context, &fixture.cpu);
 
     match result {
         Err(GmaError::ExtractionFailed {
@@ -671,7 +679,7 @@ fn all_entries_rejected_by_whitelist_reports_error() {
             },
         )
         .expect("resolve extraction");
-    let result = view.extract(&gma, &transaction, context);
+    let result = view.extract(&gma, &transaction, context, &fixture.cpu);
 
     match result {
         Err(GmaError::ExtractionFailed {
@@ -716,7 +724,7 @@ fn refuses_to_extract_through_a_pre_existing_symlinked_directory() {
             },
         )
         .expect("resolve extraction");
-    let result = view.extract(&gma, &transaction, context);
+    let result = view.extract(&gma, &transaction, context, &fixture.cpu);
 
     match result {
         Err(GmaError::ExtractionFailed {
@@ -779,7 +787,12 @@ fn addon_json_exists_before_finished_event_fires() {
     )
     .expect("resolve extraction fixture");
     let extracted = view
-        .extract(handle, &transaction, context)
+        .extract(
+            handle,
+            &transaction,
+            context,
+            &crate::execution::CpuExecutor::build(2).expect("test CPU executor"),
+        )
         .expect("extract fixture");
 
     assert_eq!(extracted, expected_dest);

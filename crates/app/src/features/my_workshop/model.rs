@@ -4,7 +4,7 @@ use iced::widget::image;
 
 use crate::bridge::{
     domain::{PublishedFileId, WorkshopItem, WorkshopPage, workshop_url::workshop_item_url},
-    tasks::BackendServices,
+    tasks::WorkshopService,
     ui_error::UiError,
 };
 use crate::features::context_menu;
@@ -487,16 +487,16 @@ impl PageResult {
     }
 }
 
-pub fn browse_page(ctx: &BackendServices, page: u32) -> Result<PageResult, UiError> {
-    ctx.browse_my_workshop_page(page)
+pub fn browse_page(ctx: WorkshopService<'_>, page: u32) -> Result<PageResult, UiError> {
+    ctx.browse_my_page(page)
         .map(|result| PageResult::from_page(page, &result))
 }
 
 pub fn refresh_subscription_counts(
-    ctx: &BackendServices,
+    ctx: WorkshopService<'_>,
     pages: u32,
 ) -> Result<HashMap<PublishedFileId, u64>, UiError> {
-    ctx.refresh_my_workshop_subscription_counts(pages)
+    ctx.refresh_subscription_counts(pages)
 }
 
 /// The "publish new" tile that leads this route's grid.

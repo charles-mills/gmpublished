@@ -75,7 +75,7 @@ impl App {
     /// pick is rejected by the one validator that already knows what a
     /// Garry's Mod folder looks like.
     fn game_folder_chosen_task(&mut self, path: PathBuf) -> Task<RootMessage> {
-        if !gmpublished_backend::appdata::validate_gmod(path.clone()) {
+        if !gmpublished_backend::validate_gmod(path.clone()) {
             // Nothing was persisted, so there is nothing to re-evaluate: the
             // panel stays as it was rather than reporting a second, different
             // failure for what was really a mis-click.
@@ -85,11 +85,12 @@ impl App {
         self.state.prerequisites.begin_game_search();
         self.ctx
             .run_blocking_ui("prerequisites-set-gmod-dir", move |app| {
-                app.update_settings_snapshot(|settings| {
-                    settings.backend.gmod = Some(path);
-                })
-                .map(|()| app.paths().gmod_dir)
-                .ui_err()
+                app.config()
+                    .update_settings_snapshot(|settings| {
+                        settings.backend.gmod = Some(path);
+                    })
+                    .map(|()| app.config().paths().gmod_dir)
+                    .ui_err()
             })
             .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
@@ -100,7 +101,7 @@ impl App {
         self.state.prerequisites.begin_game_search();
         self.ctx
             .run_blocking_ui("prerequisites-discover-gmod-dir", |app| {
-                Ok(app.rediscover_gmod_dir())
+                Ok(app.config().rediscover_gmod_dir())
             })
             .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
@@ -157,7 +158,7 @@ impl App {
     pub(super) fn steam_installed_probe_task(&self) -> Task<RootMessage> {
         self.ctx
             .run_blocking("prerequisites-steam-installed", |_app| {
-                gmpublished_backend::appdata::steam_client_installed()
+                gmpublished_backend::steam_client_installed()
             })
             .map(|result| RootMessage::SteamClientInstalledProbed(result.unwrap_or(true)))
     }

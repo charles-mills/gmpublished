@@ -5,7 +5,7 @@ use super::{
     MapDoorOpenDirection, MapPreview, MapTrace, MapVisibilityBucket, ModelVertex, mid,
     normalize_or_up,
 };
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 
 pub(super) const DOOR_USE_REACH: f32 = 80.0;
 pub(super) const DOOR_PROGRESS_EPSILON: f32 = 1.0e-4;
@@ -623,7 +623,7 @@ mod tests {
     use super::super::{FlyCamera, FlyPose, MapPreview, MapVisibilityBucket, MovementMode};
     use super::*;
     use crate::media::preview_model::DoorSounds;
-    use gmpublished_backend::scene::map::MapWalkCollision;
+    use gmpublished_domain::scene::map::MapWalkCollision;
 
     fn door_scene(doors: Vec<DoorInstance>) -> MapPreview {
         let mut scene = empty_preview(

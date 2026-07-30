@@ -3,7 +3,7 @@
 
 use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
 
-use gmpublished_backend::error_key::{ErrorKey, HasErrorKey, keys};
+use gmpublished_backend::{ErrorKey, HasErrorKey, error_keys as keys};
 use thiserror::Error;
 
 use crate::bridge::domain::{InstalledAddon, PublishedFileId};

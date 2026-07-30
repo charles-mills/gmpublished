@@ -4,6 +4,10 @@ use std::fs;
 
 use crate::events::{BackendEvent, TransactionEvent, TransactionPayload};
 
+fn test_cpu() -> crate::execution::CpuExecutor {
+    crate::execution::CpuExecutor::build(2).expect("test CPU executor")
+}
+
 fn gma_for_search(
     path: PathBuf,
     title: &str,
@@ -96,7 +100,7 @@ fn search_add_bulk_indexes_installed_addons_and_deduplicates_workshop_ids() {
         Some(2),
     );
     let local_only = gma_for_search(dir.path().join("local.gma"), "Local", None, Some(3));
-    let search = Search::new();
+    let search = Search::new(test_cpu());
 
     search.add_bulk(&[first, second, local_only]);
     search.ensure_sorted();
@@ -113,7 +117,7 @@ fn search_add_bulk_indexes_installed_addons_and_deduplicates_workshop_ids() {
 
 #[test]
 fn sync_installed_addons_replaces_installed_subset_only() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add(&search_fixture(11, "Workshop Survivor", ["survivor"], 1));
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/old.gma"),
@@ -146,7 +150,7 @@ fn sync_installed_addons_replaces_installed_subset_only() {
 
 #[test]
 fn sync_installed_addons_added_addon_is_findable_immediately() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
 
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/live.gma"),
@@ -163,7 +167,7 @@ fn sync_installed_addons_added_addon_is_findable_immediately() {
 
 #[test]
 fn sync_installed_addons_removed_addon_stops_matching() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/removed.gma"),
         Some(55),
@@ -181,7 +185,7 @@ fn sync_installed_addons_removed_addon_stops_matching() {
 
 #[test]
 fn sync_installed_addon_files_searches_file_scope_only() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/riverden.gma"),
         Some(66),
@@ -240,7 +244,7 @@ fn sync_installed_addon_files_searches_file_scope_only() {
 
 #[test]
 fn ensure_sorted_sorts_once_then_singular_adds_replace_by_identity() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&[
         search_fixture(1, "Alpha", ["tool"], 100),
         search_fixture(2, "Beta", ["tool"], 200),
@@ -298,7 +302,7 @@ fn search_fixture(
 
 #[test]
 fn search_quick_matches_terms_when_label_does_not_match() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&[search_fixture(501, "Completely Different", ["needle"], 1)]);
     search.ensure_sorted();
 
@@ -311,7 +315,7 @@ fn search_quick_matches_terms_when_label_does_not_match() {
 
 #[test]
 fn search_quick_multi_word_query_requires_all_atoms() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&[
         search_fixture(510, "Wire Model Pack", Vec::<String>::new(), 1),
         search_fixture(511, "Wire Extras", Vec::<String>::new(), 2),
@@ -337,7 +341,7 @@ fn search_quick_caps_results_reports_has_more_and_orders_by_score() {
             )
         })
         .collect::<Vec<_>>();
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&fixtures);
     search.ensure_sorted();
 
@@ -374,7 +378,7 @@ fn search_quick_caps_results_reports_has_more_and_orders_by_score() {
 fn full_search_emits_progress_data_and_finished_transaction_events() {
     let collector = crate::events::BackendEventCollector::default();
     let transactions = crate::transactions::Transactions::new(Arc::new(collector.clone()));
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add_bulk(&[
         search_fixture(701, "Needle One", ["servercontent"], 1),
         search_fixture(702, "Other", ["needle"], 2),
@@ -451,7 +455,7 @@ fn eq_matches_ord_across_a_matrix_of_key_components() {
 
 #[test]
 fn refresh_installed_addon_labels_replaces_stale_label_everywhere() {
-    let search = Search::new();
+    let search = Search::new(test_cpu());
     search.add(&gma_for_search(
         PathBuf::from("/tmp/refresh.gma"),
         "Old Title",

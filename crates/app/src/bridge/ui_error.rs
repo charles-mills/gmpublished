@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
-use gmpublished_backend::error_key::{ErrorKey, HasErrorKey};
-use gmpublished_backend::transactions::TransactionError;
+use gmpublished_backend::TransactionError;
+use gmpublished_backend::{ErrorKey, HasErrorKey};
 
 /// Value-semantic error carried through Iced messages and feature state:
 /// a stable [`ErrorKey`] plus optional contextual payload. Rich errors (with

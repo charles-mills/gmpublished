@@ -56,19 +56,25 @@ impl App {
         let ctx = self.ctx.clone();
         Task::stream(stream::channel(100, async move |output| {
             let mut schedule_error_output = output.clone();
-            let schedule = ctx.spawn_blocking_detached("file-preview-load", move |_app| {
+            let schedule = ctx.spawn_blocking_detached("file-preview-load", move |app| {
                 // The decoder reports progress as plain stages; turning those
                 // into messages is this layer's job, not its.
                 let mut stage_output = output.clone();
                 let mut output = output;
-                let result = load_preview(&request, &tokens, gmod_dir, &mut |stage| {
-                    let _ = send_root_message(
-                        &mut stage_output,
-                        RootMessage::FilePreview(file_preview::Message::LoadStageChanged(
-                            request_id, stage,
-                        )),
-                    );
-                });
+                let result = load_preview(
+                    &request,
+                    &tokens,
+                    gmod_dir,
+                    app.cpu_executor(),
+                    &mut |stage| {
+                        let _ = send_root_message(
+                            &mut stage_output,
+                            RootMessage::FilePreview(file_preview::Message::LoadStageChanged(
+                                request_id, stage,
+                            )),
+                        );
+                    },
+                );
                 let _ = send_root_message(
                     &mut output,
                     RootMessage::FilePreview(file_preview::Message::Loaded(

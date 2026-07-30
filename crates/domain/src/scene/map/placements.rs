@@ -1,3 +1,5 @@
+//! Render-facing BSP prop, sprite, and overlay placements.
+
 use super::{
     BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropSolid, MapPropVisibility,
     MapVisibilityBucket, Overlay, SkyboxPartition, StaticProp, StaticPropPlacement,

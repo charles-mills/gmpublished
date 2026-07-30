@@ -1,4 +1,4 @@
-//! Source engine particle file (.pcf) parser.
+//! Shared Source engine particle file (.pcf) parser.
 //!
 //! PCF files are binary DMX documents whose root holds an array of
 //! `DmeParticleSystemDefinition` elements. Each definition carries scalar

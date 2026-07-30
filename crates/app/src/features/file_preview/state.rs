@@ -1,4 +1,4 @@
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::time::{Duration, Instant};
 
 use iced::widget::pane_grid;
@@ -9,7 +9,7 @@ use crate::media::preview_model::{
 };
 use crate::spinner_clock::SpinnerClock;
 use crate::widgets::split_pane;
-use gmpublished_backend::particles::{ControlPointIndex, MAX_CONTROL_POINTS};
+use gmpublished_domain::particles::{ControlPointIndex, MAX_CONTROL_POINTS};
 
 const FLY_SPEED_READOUT_VISIBLE_FOR: Duration = Duration::from_millis(800);
 const DEFAULT_VIEWER_RATIO: f32 = (704.0 - 236.0) / 704.0;

@@ -6,8 +6,8 @@ use super::{
     ModelPrimitive, MovementMode, OrbitPose, Point, Rectangle, SOURCE_UP, Uniforms,
     door_world_bounds, half_extent, initial_door_swing, mid, mouse, shader,
 };
-use gmpublished_backend::math::QAngle;
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::QAngle;
+use gmpublished_domain::math::Vec3;
 
 /// Shader-widget program: owns nothing but a handle to the loaded model;
 /// camera state lives in the widget tree so it survives redraws.

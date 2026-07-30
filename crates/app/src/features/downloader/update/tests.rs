@@ -6,7 +6,7 @@ use crate::bridge::tasks::{
     SharedTaskUpdate, TaskId, TaskKind, TaskUpdate, TransactionStatus, WorkshopDownloadTaskKind,
 };
 use crate::bridge::ui_error::UiError;
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 
 use super::super::jobs::{
     DownloaderEvent, JobProgress, LocalExtractionOutcome, RowId, Section, workshop_result_success,

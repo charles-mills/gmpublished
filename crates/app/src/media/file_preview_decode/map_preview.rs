@@ -29,15 +29,15 @@ use crate::media::preview_model::{
     ModelData, ModelStats, ModelVertex, PHY_DEBUG_MATERIAL_NAME, PreviewContent, PreviewData,
     PreviewLoadStage, PreviewRequest, RenderScene,
 };
-use gmpublished_backend::math::Vec3;
-use gmpublished_backend::scene::map::{
+use gmpublished_domain::math::Vec3;
+use gmpublished_domain::scene::map::{
     AmbientCube, ConvexHull, MapAmbientLighting, MapDoor, MapDoorGeometry, MapEnvironmentLighting,
     MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapPropVisibility, MapVisibility,
     MapWalkCollision, MapWalkPropModel, MapWalkPropModelPlacement, StaticPropPlacement,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vformats::phy::{ConvexLedge, ReadStats, SkipReason};
 
@@ -51,12 +51,14 @@ pub(super) fn map_preview_data(
     request: &PreviewRequest,
     bsp_bytes: &[u8],
     gmod_dir: Option<std::path::PathBuf>,
+    pool: Option<&rayon::ThreadPool>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
 ) -> PreviewData {
     map_preview_data_with_prop_model_loader(
         request,
         bsp_bytes,
         gmod_dir,
+        pool,
         emit_stage,
         &load_prop_model,
     )
@@ -66,6 +68,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     request: &PreviewRequest,
     bsp_bytes: &[u8],
     gmod_dir: Option<std::path::PathBuf>,
+    pool: Option<&rayon::ThreadPool>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
 ) -> PreviewData {
@@ -74,7 +77,10 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     }
 
     let bsp_started = Instant::now();
-    let map = match gmpublished_backend::scene::map::load_map(bsp_bytes) {
+    let map = match pool.map_or_else(
+        || gmpublished_domain::scene::map::load_map(bsp_bytes),
+        |pool| gmpublished_domain::scene::map::load_map_with_pool(bsp_bytes, pool),
+    ) {
         Ok(map) => map,
         Err(error) => {
             log::debug!("file preview bsp decode failed: {error}");
@@ -83,7 +89,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     };
     let bsp_timing = bsp_started.elapsed();
 
-    let gmpublished_backend::scene::map::MapData {
+    let gmpublished_domain::scene::map::MapData {
         meshes: map_meshes,
         skybox_meshes: map_skybox_meshes,
         material_names,
@@ -328,30 +334,6 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     )
 }
 
-/// The pool every parallel step of a preview decode runs on.
-///
-/// Capped rather than rayon's global pool: these run on a worker thread while
-/// the UI is live, and saturating every core makes the window stutter during a
-/// map load. Shared rather than built per call: a decode calls
-/// [`parallel_collect`] several times, and standing a pool up and tearing it
-/// down around each one spawns and joins its whole thread set every time.
-///
-/// `None` when the pool cannot be built, which callers treat as "map serially"
-/// rather than as a failure — a preview that decodes slowly still decodes.
-static PREVIEW_POOL: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
-    match rayon::ThreadPoolBuilder::new()
-        .num_threads(preview_worker_count())
-        .thread_name(|index| format!("gmpublished-preview-{index}"))
-        .build()
-    {
-        Ok(pool) => Some(pool),
-        Err(error) => {
-            log::debug!("preview thread pool unavailable, decoding serially: {error}");
-            None
-        }
-    }
-});
-
 /// Maps `work` over `items` in parallel, preserving order.
 pub(super) fn parallel_collect<T, R, F>(items: &[T], work: F) -> Vec<R>
 where
@@ -363,27 +345,14 @@ where
         return items.iter().map(work).collect();
     }
 
-    PREVIEW_POOL.as_ref().map_or_else(
-        || items.iter().map(&work).collect(),
-        |pool| pool.install(|| items.par_iter().map(&work).collect()),
-    )
-}
-
-/// Width of [`PREVIEW_POOL`], and the chunk count for the prop bake's own
-/// scoped threads.
-///
-/// Not a function of the item count: a shared pool leaves surplus threads
-/// parked, so sizing it per batch would only mean rebuilding it per batch.
-pub(super) fn preview_worker_count() -> usize {
-    let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
-    parallelism.clamp(1, 8)
+    items.par_iter().map(&work).collect()
 }
 
 pub(super) fn duration_ms(duration: Duration) -> u128 {
     duration.as_millis()
 }
 
-pub(super) fn map_fog_to_preview(fog: gmpublished_backend::scene::map::MapFog) -> MapFog {
+pub(super) fn map_fog_to_preview(fog: gmpublished_domain::scene::map::MapFog) -> MapFog {
     MapFog {
         color_linear: Vec3::from(fog.color_srgb.map(srgb_byte_to_linear)),
         start: fog.start,
@@ -393,7 +362,7 @@ pub(super) fn map_fog_to_preview(fog: gmpublished_backend::scene::map::MapFog) -
 }
 
 pub(super) fn map_sky_camera_to_preview(
-    camera: gmpublished_backend::scene::map::MapSkyCamera,
+    camera: gmpublished_domain::scene::map::MapSkyCamera,
 ) -> MapSkyCamera {
     MapSkyCamera {
         origin: camera.origin,
@@ -403,7 +372,7 @@ pub(super) fn map_sky_camera_to_preview(
 }
 
 pub(super) fn map_spawn_to_preview(
-    spawn: gmpublished_backend::scene::map::MapPlayerStart,
+    spawn: gmpublished_domain::scene::map::MapPlayerStart,
 ) -> MapSpawn {
     MapSpawn {
         origin: spawn.origin,
@@ -1340,29 +1309,19 @@ pub(super) fn bake_selected_prop_placements_parallel(
         return BTreeMap::new();
     }
 
-    // Bounded by the batch as well as the cap: these are scoped threads, one
-    // per chunk, so asking for more workers than placements would spawn
-    // threads with nothing to chunk to them.
-    let worker_count = preview_worker_count().min(selected.len()).max(1);
+    let worker_count = rayon::current_num_threads().min(selected.len()).max(1);
     if worker_count == 1 {
         return bake_selected_prop_placements_serial(selected);
     }
 
     let chunk_size = selected.len().div_ceil(worker_count);
-    let mut prop_meshes = BTreeMap::<usize, PropBuildMesh>::new();
-    std::thread::scope(|scope| {
-        let handles = selected
-            .chunks(chunk_size)
-            .map(|chunk| scope.spawn(move || bake_selected_prop_placements_serial(chunk)))
-            .collect::<Vec<_>>();
-        for handle in handles {
-            merge_prop_meshes(
-                &mut prop_meshes,
-                handle.join().expect("prop bake worker panicked"),
-            );
-        }
-    });
-    prop_meshes
+    selected
+        .par_chunks(chunk_size)
+        .map(bake_selected_prop_placements_serial)
+        .reduce(BTreeMap::new, |mut merged, chunk| {
+            merge_prop_meshes(&mut merged, chunk);
+            merged
+        })
 }
 
 pub(super) fn bake_selected_prop_placements_serial(
@@ -2086,7 +2045,7 @@ pub(super) fn transform_prop_normal(normal: Vec3, placement: &StaticPropPlacemen
 }
 
 pub(super) fn map_mesh_to_model_mesh(
-    mesh: &gmpublished_backend::scene::map::MapMesh,
+    mesh: &gmpublished_domain::scene::map::MapMesh,
     materials: &[MaterialSlot],
 ) -> MeshData {
     let (width, height) = material_dimensions(materials, mesh.material_index);
@@ -2128,14 +2087,14 @@ pub(super) fn bounds_from_model_meshes(meshes: &[MeshData]) -> Option<(Vec3, Vec
 }
 
 pub(super) fn lightmap_status(
-    lightmap: Option<&gmpublished_backend::scene::map::LightmapAtlas>,
+    lightmap: Option<&gmpublished_domain::scene::map::LightmapAtlas>,
 ) -> String {
     lightmap.map_or_else(
         || "lightmap none".to_owned(),
         |lightmap| {
             let source = match lightmap.source {
-                gmpublished_backend::scene::map::LightmapSource::Ldr => "LDR",
-                gmpublished_backend::scene::map::LightmapSource::Hdr => "HDR",
+                gmpublished_domain::scene::map::LightmapSource::Ldr => "LDR",
+                gmpublished_domain::scene::map::LightmapSource::Hdr => "HDR",
             };
             format!("lightmap {}x{} ({source})", lightmap.width, lightmap.height)
         },

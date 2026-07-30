@@ -1,4 +1,4 @@
-//! Collision the preview's walk mode moves against: brush hulls, displacement
+//! Shared collision used by the preview's walk mode: brush hulls, displacement
 //! triangles and prop hulls, plus the swept-AABB traces over them.
 //!
 //! Brushes are expanded by the player's half-extents rather than the trace

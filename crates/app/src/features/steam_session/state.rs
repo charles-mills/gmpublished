@@ -1,5 +1,5 @@
 use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
-use crate::bridge::tasks::BackendServices;
+use crate::bridge::tasks::WorkshopService;
 use crate::bridge::ui_error::UiError;
 use crate::generation::Generation;
 
@@ -417,8 +417,8 @@ impl ConnectionAttempt {
 }
 
 /// Connects the core Steam service for a Steam-backed operation.
-pub fn connect_context_for_operation(ctx: &BackendServices) -> ConnectionAttempt {
-    connect_for_operation_with(|| ctx.steam_connected(), || ctx.connect_steam())
+pub fn connect_context_for_operation(ctx: WorkshopService<'_>) -> ConnectionAttempt {
+    connect_for_operation_with(|| ctx.connected(), || ctx.connect())
 }
 
 /// Runs the connection check/connect seam without binding it to a concrete UI runtime.
@@ -459,7 +459,7 @@ where
 mod tests {
     use crate::bridge::domain::SteamId;
     use crate::generation::Generation;
-    use gmpublished_backend::error_key::keys;
+    use gmpublished_backend::error_keys as keys;
     use std::{cell::Cell, sync::Arc};
 
     use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};

@@ -16,12 +16,12 @@ use crate::bridge::{
         PublishSubmitRequest,
     },
     tasks::{
-        BackendContext, BackendRuntimeEvent, BackendServices, TaskHandle, TransactionRuntimeEvent,
-        WorkshopSnapshotId,
+        ArchiveService, BackendContext, BackendRuntimeEvent, ConfigService, PublishService,
+        TaskHandle, TransactionRuntimeEvent, WorkshopService, WorkshopSnapshotId,
     },
 };
 use ::image::GenericImageView;
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 use iced::widget::image;
 
 use crate::generation::Generation;
@@ -162,16 +162,18 @@ pub struct PublishIconSubmitResult {
 }
 
 pub fn verify_content_path(
-    ctx: &BackendServices,
+    config: ConfigService<'_>,
+    archive: ArchiveService<'_>,
     request: ContentPathVerificationRequest,
 ) -> Result<Arc<VerifiedContentPath>, UiError> {
-    let settings = ctx.settings_snapshot();
+    let settings = config.settings_snapshot();
+    let whitelist = archive.whitelist_snapshot();
     verify_content_tree(
         request.display_path,
         request.path,
         ContentCollectionPolicy::Publish {
             ignore_globs: &settings.backend.ignore_globs,
-            whitelist: &ctx.whitelist_snapshot(),
+            whitelist: &whitelist,
         },
     )
     .map(Arc::new)
@@ -195,12 +197,12 @@ pub fn verify_icon_preview(
 }
 
 pub fn apply_ignore_pattern_mutation(
-    ctx: &BackendServices,
+    config: ConfigService<'_>,
     mutation: IgnorePatternMutation,
 ) -> IgnorePatternMutationResult {
     let mut changed = false;
     let mut save_error = None;
-    if let Err(error) = ctx.update_settings_snapshot(|settings| match mutation {
+    if let Err(error) = config.update_settings_snapshot(|settings| match mutation {
         IgnorePatternMutation::Add(pattern) => {
             let pattern = pattern.trim();
             if !pattern.is_empty()
@@ -225,7 +227,7 @@ pub fn apply_ignore_pattern_mutation(
     }) {
         save_error = Some(error.to_string());
     }
-    let settings = ctx.settings_snapshot();
+    let settings = config.settings_snapshot();
 
     IgnorePatternMutationResult {
         changed,
@@ -236,27 +238,28 @@ pub fn apply_ignore_pattern_mutation(
 
 pub fn run_publish_submit(
     backend_ctx: &BackendContext,
-    services: &BackendServices,
-    connect_steam: impl FnOnce(&BackendServices) -> Result<(), UiError>,
+    publish: PublishService<'_>,
+    workshop: WorkshopService<'_>,
+    connect_steam: impl FnOnce(WorkshopService<'_>) -> Result<(), UiError>,
     task: TaskHandle,
     request: PublishSubmitRequest,
 ) -> Result<PublishSubmitResult, UiError> {
     task.status(TransactionStatus::PublishStarting);
-    if let Err(error) = connect_steam(services) {
+    if let Err(error) = connect_steam(workshop) {
         task.error(error.clone());
         return Err(error);
     }
 
-    let transaction = services.begin_transaction();
+    let transaction = backend_ctx.begin_transaction();
     let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
-    match services.submit_publish_request(request, &transaction) {
+    match publish.submit(request, &transaction) {
         Ok(outcome) => {
             let _effects = backend_ctx.handle_backend_runtime_event(
                 &BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished {
                     id: transaction_id,
-                    payload: gmpublished_backend::events::TransactionPayload::None,
+                    payload: gmpublished_backend::TransactionPayload::None,
                 }),
             );
             Ok(outcome.into())
@@ -271,22 +274,23 @@ pub fn run_publish_submit(
 
 pub fn run_publish_icon_submit(
     backend_ctx: &BackendContext,
-    services: &BackendServices,
-    connect_steam: impl FnOnce(&BackendServices) -> Result<(), UiError>,
+    publish: PublishService<'_>,
+    workshop: WorkshopService<'_>,
+    connect_steam: impl FnOnce(WorkshopService<'_>) -> Result<(), UiError>,
     task: TaskHandle,
     request: &PublishIconSubmitRequestEnvelope,
 ) -> Result<PublishIconSubmitResult, UiError> {
     task.status(TransactionStatus::PublishProcessingIcon);
-    if let Err(error) = connect_steam(services) {
+    if let Err(error) = connect_steam(workshop) {
         task.error(error.clone());
         return Err(error);
     }
 
-    let transaction = services.begin_transaction();
+    let transaction = backend_ctx.begin_transaction();
     let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
-    match services.submit_publish_icon_request(
+    match publish.update_icon(
         &request.icon_source_path,
         request.upscale,
         request.workshop_id,
@@ -296,7 +300,7 @@ pub fn run_publish_icon_submit(
             let _effects = backend_ctx.handle_backend_runtime_event(
                 &BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished {
                     id: transaction_id,
-                    payload: gmpublished_backend::events::TransactionPayload::None,
+                    payload: gmpublished_backend::TransactionPayload::None,
                 }),
             );
             Ok(PublishIconSubmitResult {
@@ -749,8 +753,10 @@ mod tests {
         let root = TestDir::new("prepare-publish-verify");
         root.file("lua/autorun/init.lua", b"print('ready')");
 
+        let services = BackendServices::for_test();
         let verified = verify_content_path(
-            &BackendServices::for_test(),
+            services.config(),
+            services.archive(),
             ContentPathVerificationRequest {
                 generation: Generation::from_raw(1),
                 display_path: root.path_text(),
@@ -767,8 +773,10 @@ mod tests {
 
     #[test]
     fn verify_content_path_rejects_relative_paths() {
+        let services = BackendServices::for_test();
         let result = verify_content_path(
-            &BackendServices::for_test(),
+            services.config(),
+            services.archive(),
             ContentPathVerificationRequest {
                 generation: Generation::from_raw(1),
                 display_path: "relative".to_owned(),

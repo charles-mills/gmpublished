@@ -8,7 +8,7 @@
 //! Decoding is budgeted: textures are downscaled to fit a per-preview byte
 //! ceiling, because a map can reference more texture data than the GPU has.
 
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs, io,
@@ -50,7 +50,7 @@ use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
 use crate::bridge::content_path::{ContentPath, normalize_archive_path};
 use crate::bridge::gma::PreviewArchive;
 use crate::bridge::vpk::{VpkArchive, VpkError};
-use gmpublished_backend::scene::map::MapPakFile;
+use gmpublished_domain::scene::map::MapPakFile;
 use vformats::vtf::BcFormat;
 use vformats::{Limits, soundscript};
 

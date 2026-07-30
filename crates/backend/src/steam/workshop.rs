@@ -17,6 +17,8 @@ use crate::util::main_thread_forbidden;
 use crate::{GMOD_APP_ID, search::Search};
 
 type WorkshopChunkQueryResult = Result<Vec<WorkshopItem>, WorkshopQueryError>;
+const WORKSHOP_DEDUP_LOCK_TIMEOUT: Duration = Duration::from_millis(51);
+const BACKGROUND_CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DescriptionLength {
@@ -126,8 +128,8 @@ pub enum WorkshopQueryError {
     #[error("could not create a Workshop query")]
     QueryCreateFailed,
     /// steamworks never delivered a result for the query — it dropped the
-    /// callback without invoking it, or held it past
-    /// [`CALLBACK_RESULT_TIMEOUT`]. Distinct from [`Self::Steam`], which is a
+    /// callback without invoking it, or held it past the callback-result
+    /// timeout. Distinct from [`Self::Steam`], which is a
     /// result Steam did return.
     #[error("Steam did not answer the Workshop query")]
     Abandoned,
@@ -150,7 +152,12 @@ impl crate::error_key::HasErrorKey for WorkshopQueryError {
 }
 
 impl Steam {
-    pub fn workshop_fetcher(steam: &Arc<Self>, search: &Arc<Search>, client: steamworks::Client) {
+    pub(super) fn workshop_fetcher(
+        steam: &Arc<Self>,
+        search: &Arc<Search>,
+        client: steamworks::Client,
+        shutdown: &crate::signal::Signal,
+    ) {
         loop {
             let rx = steam.workshop_queue_rx.lock();
             let Ok(mut queue) = rx.recv() else {
@@ -162,12 +169,12 @@ impl Steam {
             }
             drop(rx);
 
-            // `Steam::shutdown` pushes an empty batch purely to unblock the
+            // The background runtime pushes an empty batch purely to unblock the
             // `recv` above — this thread parks there with no timeout, and the
             // sender lives on the `Steam` its own `Arc` clone keeps alive, so
             // the channel never disconnects on its own. Anything still queued
             // at this point is abandoned.
-            if steam.shutting_down() {
+            if shutdown.is_set() {
                 return;
             }
 
@@ -223,9 +230,15 @@ impl Steam {
                     let _ = done_tx.send(());
                 }
 
-                let _ = done_rx.recv_timeout(CALLBACK_RESULT_TIMEOUT);
+                if !wait_for_background_callback(&done_rx, shutdown) {
+                    return;
+                }
             }
         }
+    }
+
+    pub(super) fn wake_workshop_fetcher(&self) {
+        let _ = self.workshop_queue_tx.send(Vec::new());
     }
 
     /// Runs `use_cache` against the set of Workshop ids the metadata fetcher
@@ -241,7 +254,7 @@ impl Steam {
     ) -> R {
         let cache = self
             .workshop_dedup
-            .try_lock_for(super::CALLBACK_PUMP_INTERVAL + Duration::from_millis(1));
+            .try_lock_for(WORKSHOP_DEDUP_LOCK_TIMEOUT);
         use_cache(cache.as_deref())
     }
 
@@ -315,8 +328,25 @@ impl Steam {
     }
 }
 
-pub fn fetch_workshop_items(steam: &Steam, items: Vec<WorkshopId>) {
-    steam.fetch_workshop_items(items);
+/// Waits for the metadata callback without making runtime shutdown pay the
+/// callback's full deadline. `false` means shutdown won the race.
+fn wait_for_background_callback(
+    done: &mpsc::Receiver<()>,
+    shutdown: &crate::signal::Signal,
+) -> bool {
+    let deadline = Instant::now() + CALLBACK_RESULT_TIMEOUT;
+    loop {
+        if shutdown.is_set() {
+            return false;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return true;
+        };
+        match done.recv_timeout(remaining.min(BACKGROUND_CALLBACK_POLL_INTERVAL)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return true,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 fn workshop_item_id_chunks(ids: &[WorkshopId]) -> Vec<Vec<WorkshopId>> {
@@ -585,7 +615,7 @@ pub fn query_workshop_items_streaming(
     steam.query_workshop_items_streaming(ids, on_chunk)
 }
 
-pub fn browse_my_workshop_page(
+pub(crate) fn browse_my_workshop_page(
     steam: &Steam,
     search: &Arc<Search>,
     page: u32,
@@ -603,7 +633,7 @@ mod tests {
     use super::{
         DescriptionLength, Instant, WorkshopChunkQueryResult, WorkshopItem, WorkshopQueryError,
         combine_workshop_chunk_results, drain_workshop_chunk_results, filter_new_workshop_ids,
-        workshop_item_id_chunks,
+        wait_for_background_callback, workshop_item_id_chunks,
     };
 
     /// Every drain in these tests is fed a channel that is already closed or
@@ -617,6 +647,26 @@ mod tests {
     fn detail_queries_request_full_descriptions() {
         assert!(DescriptionLength::Full.returns_full_description());
         assert!(!DescriptionLength::Summary.returns_full_description());
+    }
+
+    #[test]
+    fn background_callback_wait_yields_immediately_to_shutdown() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let shutdown = crate::signal::Signal::new();
+        shutdown.set();
+
+        assert!(!wait_for_background_callback(&rx, &shutdown));
+    }
+
+    #[test]
+    fn background_callback_wait_accepts_a_delivered_result() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(()).unwrap();
+
+        assert!(wait_for_background_callback(
+            &rx,
+            &crate::signal::Signal::new()
+        ));
     }
 
     /// An empty id list must reach steamworks zero times.

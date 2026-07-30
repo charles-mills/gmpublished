@@ -50,7 +50,7 @@ pub fn now_unix_seconds() -> u64 {
 }
 
 pub fn snapshot_path() -> Option<PathBuf> {
-    gmpublished_backend::appdata::cache_dir().map(|dir| dir.join(SNAPSHOT_FILE_NAME))
+    gmpublished_backend::cache_dir().map(|dir| dir.join(SNAPSHOT_FILE_NAME))
 }
 
 /// Versioned snapshot DTOs: a stable schema decoupled from the live structs.

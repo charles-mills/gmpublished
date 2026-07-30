@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::SettingsPersistError;
 use super::{
     AppPaths, AppWorkerRuntime, BACKEND_EVENT_QUEUE_CAPACITY, BackendEventSinkRegistration,
     BackendEventStreamFactory, BackendRuntimeEvent, BackendRuntimeEventEffects, BackendServices,
@@ -9,7 +7,9 @@ use super::{
     TransactionStatus, UiError, WorkerPoolSpawner, install_backend_event_sink_by_default,
     show_native_open_error_dialog,
 };
-use gmpublished_backend::transactions::TransactionId;
+#[cfg(test)]
+use crate::bridge::SettingsPersistError;
+use gmpublished_backend::TransactionId;
 use iced::Subscription;
 use iced::Task;
 use iced::futures::channel::oneshot;
@@ -37,9 +37,9 @@ impl BackendContext {
     #[cfg(test)]
     pub(crate) fn apply_appdata_snapshot_for_test(
         &self,
-        snapshot: gmpublished_backend::appdata::AppDataSnapshot,
+        snapshot: gmpublished_backend::AppDataSnapshot,
     ) -> (Settings, AppPaths) {
-        self.services.apply_appdata_snapshot(snapshot)
+        self.services.config().apply_appdata_snapshot(snapshot)
     }
 
     fn with_backend_event_sink(
@@ -54,13 +54,13 @@ impl BackendContext {
             Option<BackendEventSinkRegistration>,
         ) -> Result<BackendServices, gmpublished_backend::BackendInitError>,
     ) -> Result<Self, gmpublished_backend::BackendInitError> {
-        let runtime = Arc::new(AppWorkerRuntime::new());
         let transaction_tasks = Arc::new(BackendTransactionTasks::default());
         let (backend_event_sender, backend_event_receiver) =
             mpsc::sync_channel(BACKEND_EVENT_QUEUE_CAPACITY);
         let backend_event_sink = install_backend_event_sink
             .then(|| BackendEventSinkRegistration::new(backend_event_sender));
         let services = Arc::new(services(backend_event_sink)?);
+        let runtime = Arc::new(AppWorkerRuntime::new(services.execution_resources()));
         let (tasks, receiver) = Tasks::channel();
         let task_events = TaskEventStreamFactory::new(Some(receiver));
         let backend_events = BackendEventStreamFactory::new(Some(backend_event_receiver));
@@ -161,48 +161,42 @@ impl BackendContext {
     }
 
     pub(crate) fn sounds_enabled(&self) -> bool {
-        self.services.sounds_enabled()
+        self.services.config().sounds_enabled()
     }
 
     pub(crate) fn settings_and_paths_snapshot(&self) -> (Settings, AppPaths) {
-        self.services.settings_and_paths_snapshot()
+        self.services.config().settings_and_paths_snapshot()
     }
 
     /// The configured Garry's Mod path paired with the one that resolved.
     pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
-        self.services.game_paths()
+        self.services.config().game_paths()
     }
 
     pub(crate) fn begin_transaction(&self) -> gmpublished_backend::Transaction {
         self.services.begin_transaction()
     }
 
-    /// The whole backend, for this module's own tests.
-    ///
-    /// No production caller: reaching a service through here would bypass
-    /// [`BackendServices`], so what the app can ask the backend for stays
-    /// enumerable as the capability methods below rather than being whatever
-    /// any call site happens to reach for.
     #[cfg(test)]
-    pub(super) fn backend(&self) -> &Arc<gmpublished_backend::Backend> {
-        &self.services.backend
+    pub(crate) fn clear_search_for_test(&self) {
+        self.services.clear_search_for_test();
     }
 
-    /// The search corpus itself, for tests asserting that a library refresh
-    /// reached it. Production syncs through [`Self::sync_installed_addon_search`]
-    /// and queries through `search_quick`.
     #[cfg(test)]
-    pub(crate) fn search_for_test(&self) -> &gmpublished_backend::search::Search {
-        &self.services.backend.search
+    pub(crate) fn quick_addon_search_for_test(
+        &self,
+        query: String,
+    ) -> gmpublished_backend::QuickSearchResult {
+        self.services.quick_addon_search_for_test(query)
     }
 
     /// Republishes the installed-addon and installed-file search corpora.
     pub(crate) fn sync_installed_addon_search(
         &self,
-        addons: Vec<gmpublished_backend::search::SearchItem>,
-        files: Vec<gmpublished_backend::search::SearchItem>,
+        addons: Vec<gmpublished_backend::SearchItem>,
+        files: Vec<gmpublished_backend::SearchItem>,
     ) {
-        self.services.sync_installed_addon_search(addons, files);
+        self.services.search().sync_installed(addons, files);
     }
 
     /// Extracts every entry of an opened preview archive.
@@ -214,6 +208,7 @@ impl BackendContext {
         transaction: &gmpublished_backend::Transaction,
     ) -> Result<PathBuf, super::super::gma::GmaError> {
         self.services
+            .archive()
             .extract_preview_archive(archive, destination, options, transaction)
     }
 
@@ -225,6 +220,7 @@ impl BackendContext {
         transaction: &gmpublished_backend::Transaction,
     ) -> Result<PathBuf, super::super::gma::GmaError> {
         self.services
+            .archive()
             .extract_preview_archive_entry(archive, entry_path, transaction)
     }
 
@@ -235,32 +231,32 @@ impl BackendContext {
     }
 
     pub(crate) fn library_snapshot(&self) -> Option<LibrarySnapshot> {
-        self.services.library_snapshot()
+        self.services.library().snapshot()
     }
 
     pub(crate) fn record_thumbhash(&self, url: &str, hash: &[u8]) {
-        self.services.record_thumbhash(url, hash);
+        self.services.workshop().record_thumbhash(url, hash);
     }
 
     pub(crate) fn thumbhash_seed(&self) -> Vec<(String, Arc<[u8]>)> {
-        self.services.thumbhash_seed()
+        self.services.workshop().thumbhash_seed()
     }
 
     pub(crate) fn begin_library_refresh(
         &self,
         reason: LibraryRefreshReason,
     ) -> Option<Task<Result<LibraryRefresh, RunBlockingError>>> {
-        if !self.services.begin_library_refresh(reason) {
+        if !self.services.library().begin_refresh(reason) {
             return None;
         }
 
         Some(self.run_blocking("library-refresh", move |services| {
-            services.refresh_library(reason)
+            services.library().refresh(reason)
         }))
     }
 
     pub(crate) fn abort_library_refresh(&self) -> Option<LibraryRefreshReason> {
-        self.services.abort_library_refresh()
+        self.services.library().abort_refresh()
     }
 
     #[cfg(test)]
@@ -268,29 +264,34 @@ impl BackendContext {
         &self,
         update: impl FnOnce(&mut Settings),
     ) -> Result<(), SettingsPersistError> {
-        self.services.update_settings_snapshot(update)
+        self.services.config().update_settings_snapshot(update)
     }
 
     pub(crate) fn steam_connected(&self) -> bool {
-        self.services.steam_connected()
+        self.services.workshop().connected()
     }
 
-    pub(crate) fn activate_startup_services(&self) -> bool {
+    pub(crate) fn activate_startup_services(
+        &self,
+    ) -> Result<
+        gmpublished_backend::BackgroundStartOutcome,
+        gmpublished_backend::BackgroundStartError,
+    > {
         // Hydrate before starting Steam so a live metadata response cannot be
         // overwritten by the persisted snapshot loaded a moment later.
-        self.services.hydrate_workshop_metadata_snapshot();
-        self.services.backend.start_background_services()
+        self.services.workshop().hydrate_metadata_snapshot();
+        self.services.start_background_services()
     }
 
     #[cfg(test)]
     pub(crate) fn connect_steam(&self) -> Result<(), UiError> {
-        self.services.connect_steam()
+        self.services.workshop().connect()
     }
 
     /// Stops in-flight Workshop submission batches from queueing further
     /// downloads; already-queued work is cancelled per-task instead.
     pub(crate) fn cancel_all_workshop_downloads(&self) {
-        self.services.backend.downloads.cancel_all();
+        self.services.cancel_all_downloads();
     }
 
     /// Cancels a task if it is correlated with a live backend transaction.
@@ -298,10 +299,29 @@ impl BackendContext {
     /// event) has no mechanism to cancel and reports `false`.
     pub(crate) fn cancel_task(&self, id: TaskId) -> bool {
         matches!(
-            self.transaction_tasks
-                .cancel_task(id, &self.services.backend.transactions),
+            self.transaction_tasks.cancel_task(id, |transaction_id| {
+                self.services.cancel_transaction(transaction_id)
+            }),
             BackendTaskCancelResult::Cancelled
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn emit_backend_event_for_test(&self, event: gmpublished_backend::BackendEvent) {
+        self.services.emit_backend_event_for_test(event);
+    }
+
+    #[cfg(test)]
+    pub(super) fn extract_gma_for_test(
+        &self,
+        view: &gmpublished_backend::GmaView,
+        gma: &gmpublished_backend::GmaFile,
+        destination: super::super::gma::ExtractDestination,
+        options: gmpublished_backend::ExtractOptions,
+        transaction: &gmpublished_backend::Transaction,
+    ) -> Result<PathBuf, super::super::gma::GmaError> {
+        self.services
+            .extract_gma_for_test(view, gma, destination, options, transaction)
     }
 
     pub(crate) fn create_task(&self, kind: TaskKind, status: TransactionStatus) -> TaskHandle {

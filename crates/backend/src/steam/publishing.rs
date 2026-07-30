@@ -10,7 +10,7 @@ use crate::transactions::TransactionStatus;
 use crate::{
     GMOD_APP_ID, Transaction,
     appdata::AppData,
-    gma::{GmaEntry, GmaFile, GmaMetadata, whitelist::AddonWhitelist},
+    gma::{GmaFile, GmaMetadata, whitelist::AddonWhitelist},
 };
 use image::{DynamicImage, ImageError, ImageFormat};
 use std::{
@@ -26,6 +26,7 @@ use std::{
 use steamworks::SteamError;
 
 use crate::WorkshopId;
+#[cfg(test)]
 use walkdir::WalkDir;
 
 /// Item updates can legitimately spend a long time preparing or committing
@@ -34,7 +35,9 @@ use walkdir::WalkDir;
 /// progress inactivity as proof that the upload stopped.
 const PUBLISH_RESULT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(test)]
+use crate::gma::GmaEntry;
+#[cfg(test)]
 use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error)]
@@ -771,12 +774,13 @@ impl ConnectedSteam<'_> {
     }
 }
 
-pub fn submit_with_transaction(
+pub(crate) fn submit_with_transaction(
     submission: PublishSubmission,
     transaction: &Transaction,
     app_data: &AppData,
     steam: &Steam,
     whitelist: &AddonWhitelist,
+    cpu: &crate::execution::CpuExecutor,
 ) -> Result<PublishSubmissionOutcome, PublishError> {
     let PublishSubmission {
         content_path_src,
@@ -841,7 +845,7 @@ pub fn submit_with_transaction(
             modified: None,
         };
 
-        if let Err(error) = gma.create(&content_path_src, transaction, whitelist) {
+        if let Err(error) = gma.create(&content_path_src, transaction, whitelist, cpu) {
             // The pack reports cancellation as its own error, so this reads the
             // cause rather than re-observing the transaction and hoping the two
             // agree — an I/O failure that happens to coincide with a cancel is
@@ -936,19 +940,8 @@ fn emit_publish_error(
     Err(error)
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "the app-layer caller across the crate boundary already owns and moves this path in"
-)]
-pub fn record_published_local_path(
-    app_data: &AppData,
-    published_file_id: WorkshopId,
-    content_path_src: PathBuf,
-) {
-    app_data.record_published_local_path(published_file_id, &content_path_src);
-}
-
-pub fn verify_whitelist(
+#[cfg(test)]
+pub(crate) fn verify_whitelist(
     path: &Path,
     ignore_globs: &[String],
     whitelist: &AddonWhitelist,
@@ -1572,6 +1565,7 @@ mod tests {
             &fixture.app_data,
             &fixture.steam,
             &fixture.whitelist,
+            &crate::execution::CpuExecutor::build(2).expect("test CPU executor"),
         );
 
         assert!(matches!(result, Err(PublishError::IconInvalidFormat)));

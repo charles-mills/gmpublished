@@ -420,21 +420,17 @@ impl Searchable for std::sync::Arc<crate::Addon> {
 }
 
 pub struct Search {
+    cpu: crate::execution::CpuExecutor,
     dirty: AtomicBool,
     items: RwLock<Vec<Arc<SearchItem>>>,
 
     installed_addons: RwLock<BTreeMap<WorkshopId, Arc<SearchItem>>>,
 }
-impl Default for Search {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Search {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(cpu: crate::execution::CpuExecutor) -> Self {
         Self {
+            cpu,
             items: RwLock::new(Vec::new()),
             dirty: AtomicBool::new(false),
 
@@ -443,6 +439,10 @@ impl Search {
     }
 
     pub fn ensure_sorted(&self) {
+        self.cpu.install(|| self.ensure_sorted_on_cpu());
+    }
+
+    fn ensure_sorted_on_cpu(&self) {
         // Cheap check before contending for the write lock; the swap below
         // is the one that actually matters.
         if !self.dirty.load(std::sync::atomic::Ordering::Acquire) {
@@ -566,8 +566,10 @@ impl Search {
         reason = "app-layer callers across the crate boundary already own this string"
     )]
     pub fn quick_search_with_scope(&self, query: String, scope: SearchScope) -> QuickSearchResult {
-        self.ensure_sorted();
-        self.quick_scored(&query, scope)
+        self.cpu.install(|| {
+            self.ensure_sorted_on_cpu();
+            self.quick_scored(&query, scope)
+        })
     }
 
     fn quick_scored(&self, query: &str, scope: SearchScope) -> QuickSearchResult {
@@ -622,12 +624,11 @@ impl Search {
         scope: SearchScope,
         transaction: Transaction,
     ) -> TransactionId {
-        self.ensure_sorted();
-
         let id = transaction.id();
         let search = Arc::clone(self);
 
-        rayon::spawn(move || {
+        self.cpu.spawn(move || {
+            search.ensure_sorted_on_cpu();
             search.full_scored(&query, scope, &transaction);
         });
 

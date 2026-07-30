@@ -17,7 +17,11 @@ use std::{
 /// still complete, on the helper threads spawned here. Giving up only stops a
 /// thread that ignored its shutdown signal from blocking the caller, which is
 /// process exit often enough that an unbounded join is never the right default.
-pub fn join_all_within(handles: Vec<JoinHandle<()>>, timeout: Duration, context: &'static str) {
+pub(crate) fn join_all_within(
+    handles: Vec<JoinHandle<()>>,
+    timeout: Duration,
+    context: &'static str,
+) {
     let expected = handles.len();
     if expected == 0 {
         return;
@@ -25,20 +29,31 @@ pub fn join_all_within(handles: Vec<JoinHandle<()>>, timeout: Duration, context:
     let deadline = Instant::now() + timeout;
 
     let (done_tx, done_rx) = mpsc::channel();
-    for handle in handles {
+    let mut awaiting = 0;
+    for (index, handle) in handles.into_iter().enumerate() {
         let done_tx = done_tx.clone();
-        std::thread::spawn(move || {
-            if handle.join().is_err() {
-                log::error!("[{context}] a background thread panicked during shutdown");
+        let thread_name = format!("gmpublished-join-{index}");
+        match std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                if handle.join().is_err() {
+                    log::error!("[{context}] a background thread panicked during shutdown");
+                }
+                let _ = done_tx.send(());
+            }) {
+            Ok(_) => awaiting += 1,
+            Err(error) => {
+                // Dropping the captured join handle detaches the worker. A
+                // failed helper must not turn shutdown into an unbounded join.
+                log::warn!("[{context}] could not start bounded-join helper: {error}");
             }
-            let _ = done_tx.send(());
-        });
+        }
     }
     // Otherwise the receiver below never sees a disconnect.
     drop(done_tx);
 
     let mut exited = 0;
-    while exited < expected {
+    while exited < awaiting {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             break;
         };
@@ -48,10 +63,10 @@ pub fn join_all_within(handles: Vec<JoinHandle<()>>, timeout: Duration, context:
         exited += 1;
     }
 
-    if exited < expected {
+    if exited < awaiting {
         log::warn!(
             "[{context}] {} background thread(s) did not exit within {timeout:?} of shutdown; detaching them",
-            expected - exited
+            awaiting - exited
         );
     }
 }

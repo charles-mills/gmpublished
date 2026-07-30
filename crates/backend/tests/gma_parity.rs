@@ -5,14 +5,12 @@ use std::{
 };
 
 use gmpublished_backend::{
-    GmaError, GmaFile, GmaMetadata,
-    appdata::{AppData, AppDataPaths},
-    error_key::HasErrorKey,
-    events::{BackendEventCollector, NullEventSink},
-    gma::extract::{ExtractOptions, Whitelist},
-    gma::{self, ExtractDestination, ExtractionContext, read::GmaView, whitelist::AddonWhitelist},
-    steam::Steam,
-    transactions::Transactions,
+    ExtractDestination, ExtractOptions, ExtractionContext, GmaError, GmaFile, GmaMetadata, GmaView,
+    HasErrorKey, Whitelist,
+    test_support::{
+        AddonWhitelist, AppData, AppDataPaths, BackendEventCollector, NullEventSink, Steam,
+        Transactions, is_default_ignored, is_ignored, is_whitelisted_in,
+    },
 };
 use lzma_rust2::{LzmaOptions, LzmaWriter};
 use std::sync::Arc;
@@ -26,6 +24,7 @@ struct Fixture {
     steam: Steam,
     whitelist: AddonWhitelist,
     transactions: Transactions,
+    cpu: gmpublished_backend::CpuExecutor,
     _temp: TempDir,
 }
 
@@ -42,6 +41,7 @@ impl Fixture {
             steam: Steam::new(transactions.clone()),
             whitelist: AddonWhitelist::new(),
             transactions,
+            cpu: gmpublished_backend::CpuExecutor::build(2).expect("test CPU executor"),
             _temp: temp,
         }
     }
@@ -66,6 +66,7 @@ impl Fixture {
             steam: Steam::new(transactions.clone()),
             whitelist: AddonWhitelist::new(),
             transactions,
+            cpu: gmpublished_backend::CpuExecutor::build(2).expect("test CPU executor"),
             _temp: temp,
         }
     }
@@ -125,7 +126,7 @@ fn create_fixture_gma(fixture: &Fixture, dir: &TempDir, title: &str) -> PathBuf 
     };
 
     let transaction = fixture.transactions.begin();
-    gma.create(&source, &transaction, &fixture.whitelist)
+    gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu)
         .unwrap();
     transaction.cancel();
 
@@ -211,7 +212,9 @@ fn gma_write_read_extract_round_trip_from_generated_fixture() {
             whitelist: Whitelist::Enforce,
         },
     );
-    let extracted_path = view.extract(&gma, &transaction, context).unwrap();
+    let extracted_path = view
+        .extract(&gma, &transaction, context, &fixture.cpu)
+        .unwrap();
 
     assert_eq!(extracted_path, extract_dir);
     assert_eq!(
@@ -255,7 +258,7 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
         modified: None,
     };
     let transaction = fixture.transactions.begin();
-    gma.create(&source, &transaction, &fixture.whitelist)
+    gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu)
         .unwrap();
     transaction.cancel();
 
@@ -277,7 +280,8 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
             whitelist: Whitelist::Enforce,
         },
     );
-    view.extract(&gma, &transaction, context).unwrap();
+    view.extract(&gma, &transaction, context, &fixture.cpu)
+        .unwrap();
     assert_eq!(fs::read(extract_dir.join("lua/big.lua")).unwrap(), big);
     assert_eq!(
         fs::read_to_string(extract_dir.join("lua/a_before.lua")).unwrap(),
@@ -331,7 +335,7 @@ fn gma_create_failure_leaves_nothing_at_the_final_path() {
     };
 
     let transaction = fixture.transactions.begin();
-    let result = gma.create(&source, &transaction, &fixture.whitelist);
+    let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
     transaction.cancel();
 
     assert!(result.is_err());
@@ -377,7 +381,7 @@ fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
     };
 
     let transaction = fixture.transactions.begin();
-    let result = gma.create(&source, &transaction, &fixture.whitelist);
+    let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
     transaction.cancel();
 
     // Restore permissions so the tempdir can clean itself up regardless of
@@ -433,7 +437,7 @@ fn gma_create_non_utf8_entry_name_errors_naming_the_path() {
     };
 
     let transaction = fixture.transactions.begin();
-    let result = gma.create(&source, &transaction, &fixture.whitelist);
+    let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
     transaction.cancel();
 
     assert!(!gma_path.exists());
@@ -598,7 +602,8 @@ fn gma_unsafe_entry_paths_are_skipped_without_shifting_following_data() {
             whitelist: Whitelist::Ignore,
         },
     );
-    view.extract(&gma, &transaction, context).unwrap();
+    view.extract(&gma, &transaction, context, &fixture.cpu)
+        .unwrap();
 
     assert_eq!(
         fs::read_to_string(extract_dir.join("lua/autorun/safe.lua")).unwrap(),
@@ -634,19 +639,11 @@ fn gma_header_projects_full_fields_matching_the_constructed_handle() {
 fn gma_whitelist_and_default_ignore_match_expected_paths() {
     let whitelist = AddonWhitelist::new();
     let snapshot = whitelist.snapshot();
-    assert!(gma::whitelist::is_whitelisted_in(
-        &snapshot,
-        "lua/autorun/round_trip.lua"
-    ));
-    assert!(!gma::whitelist::is_whitelisted_in(
-        &snapshot,
-        "lua/autorun/round_trip.exe"
-    ));
-    assert!(gma::whitelist::is_default_ignored("addon.json"));
-    assert!(!gma::whitelist::is_default_ignored(
-        "lua/autorun/round_trip.lua"
-    ));
-    assert!(gma::whitelist::is_ignored(
+    assert!(is_whitelisted_in(&snapshot, "lua/autorun/round_trip.lua"));
+    assert!(!is_whitelisted_in(&snapshot, "lua/autorun/round_trip.exe"));
+    assert!(is_default_ignored("addon.json"));
+    assert!(!is_default_ignored("lua/autorun/round_trip.lua"));
+    assert!(is_ignored(
         "lua/autorun/ignored.lua",
         &["lua/autorun/ignored.lua".to_string()]
     ));

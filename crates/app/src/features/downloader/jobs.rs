@@ -19,7 +19,7 @@ use crate::bridge::tasks::{
 };
 use crate::bridge::ui_error::UiError;
 use crate::theme::motion;
-use gmpublished_backend::error_key::keys;
+use gmpublished_backend::error_keys as keys;
 use iced::animation::Easing;
 
 const PROGRESS_SMOOTH_DURATION: std::time::Duration = std::time::Duration::from_millis(250);

@@ -8,7 +8,7 @@ use super::{
     mat_mul, mid, perspective, skybox_eye,
 };
 use crate::media::preview_model::ModelPreview;
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]

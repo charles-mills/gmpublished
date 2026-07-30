@@ -1,4 +1,4 @@
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 use std::time::Instant;
 
 use iced::widget::pane_grid;
@@ -8,7 +8,7 @@ use crate::generation::Generation;
 use crate::media::preview_model::{
     DoorAudioEvent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest,
 };
-use gmpublished_backend::particles::ControlPointIndex;
+use gmpublished_domain::particles::ControlPointIndex;
 
 /// Facts emitted by the in-archive file preview modal.
 #[derive(Clone, Debug, PartialEq)]

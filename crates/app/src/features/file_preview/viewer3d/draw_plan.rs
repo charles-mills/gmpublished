@@ -1,6 +1,6 @@
 use super::pipeline::UploadedModel;
 use super::{MapVisibilityBucket, RenderMode, WorldVisibilityPlan};
-use gmpublished_backend::math::Vec3;
+use gmpublished_domain::math::Vec3;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawPlans {
