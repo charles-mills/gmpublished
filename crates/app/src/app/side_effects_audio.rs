@@ -1,3 +1,4 @@
+use crate::generation::Generation;
 use crate::media::preview_model;
 use std::sync::Arc;
 
@@ -22,35 +23,39 @@ impl App {
 
     pub(super) fn file_preview_audio_play_task(
         &mut self,
+        request_id: Generation,
         bytes: Arc<Vec<u8>>,
         resume_at: f32,
     ) -> Task<RootMessage> {
         let Some(playback) = self.ensure_audio_playback() else {
             return Task::done(RootMessage::FilePreview(
-                file_preview::Message::AudioPlaybackEnded,
+                file_preview::Message::AudioPlaybackEnded(request_id),
             ));
         };
 
         match playback.play(bytes, resume_at) {
             Ok(()) => Task::done(RootMessage::FilePreview(
-                file_preview::Message::AudioPlaybackStarted,
+                file_preview::Message::AudioPlaybackStarted(request_id),
             )),
             Err(error) => {
                 log::debug!("file preview audio playback failed: {error}");
                 self.audio_playback = None;
                 Task::done(RootMessage::FilePreview(
-                    file_preview::Message::AudioPlaybackEnded,
+                    file_preview::Message::AudioPlaybackEnded(request_id),
                 ))
             }
         }
     }
 
-    pub(super) fn file_preview_audio_pause_task(&self) -> Task<RootMessage> {
+    pub(super) fn file_preview_audio_pause_task(
+        &self,
+        request_id: Generation,
+    ) -> Task<RootMessage> {
         if let Some(playback) = self.audio_playback.as_ref() {
             playback.pause();
         }
         Task::done(RootMessage::FilePreview(
-            file_preview::Message::AudioPlaybackPaused,
+            file_preview::Message::AudioPlaybackPaused(request_id),
         ))
     }
 
@@ -81,21 +86,24 @@ impl App {
         Task::none()
     }
 
-    pub(super) fn file_preview_audio_position_poll_task(&mut self) -> Task<RootMessage> {
+    pub(super) fn file_preview_audio_position_poll_task(
+        &mut self,
+        request_id: Generation,
+    ) -> Task<RootMessage> {
         let Some(playback) = self.audio_playback.as_ref() else {
             return Task::done(RootMessage::FilePreview(
-                file_preview::Message::AudioPlaybackEnded,
+                file_preview::Message::AudioPlaybackEnded(request_id),
             ));
         };
 
         if playback.empty() {
             self.audio_playback = None;
             Task::done(RootMessage::FilePreview(
-                file_preview::Message::AudioPlaybackEnded,
+                file_preview::Message::AudioPlaybackEnded(request_id),
             ))
         } else {
             Task::done(RootMessage::FilePreview(
-                file_preview::Message::AudioPositionUpdated(playback.position_secs()),
+                file_preview::Message::AudioPositionUpdated(request_id, playback.position_secs()),
             ))
         }
     }

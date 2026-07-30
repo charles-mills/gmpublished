@@ -1,6 +1,9 @@
 use gmpublished_backend::events::BackendEventSink;
 
-use super::{PublishedFileId, TaskId, TransactionStatus, UiError, WorkshopDownloadTaskKind};
+use super::{
+    PublishedFileId, TaskId, TransactionStatus, UiError, WorkshopDownloadTaskKind,
+    WorkshopSnapshotId,
+};
 use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
 use gmpublished_backend::events::BackendEvent as BackendSinkEvent;
 use gmpublished_backend::events::DownloadStartedEvent as BackendDownloadStartedEvent;
@@ -134,14 +137,14 @@ pub enum BackendRuntimeEvent {
     InstalledAddonsRefreshed,
     DownloadStarted {
         transaction_id: TransactionId,
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
     },
     ExtractionStarted {
         transaction_id: TransactionId,
         source_path: Option<PathBuf>,
         file_name: Option<String>,
         workshop_id: Option<PublishedFileId>,
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
     },
     Transaction(TransactionRuntimeEvent),
 }
@@ -230,13 +233,13 @@ pub enum BackendRuntimeAction {
         task_id: TaskId,
     },
     DownloadFinished {
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
         item_id: PublishedFileId,
         installed_path: Option<PathBuf>,
         extracted_path: PathBuf,
     },
     SnapshotFailed {
-        request_id: u64,
+        request_id: WorkshopSnapshotId,
         error: UiError,
     },
 }

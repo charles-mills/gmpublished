@@ -2,7 +2,7 @@
 //! wish-direction, step-up and ground snapping.
 
 use super::super::super::state::MovementMode;
-use super::super::{ModelPreview, SOURCE_UP, normalize_or_up};
+use super::super::{MapPreview, SOURCE_UP, normalize_or_up};
 use super::{
     FlyCamera, LAND_BOB_AMPLITUDE, LAND_BOB_DURATION, WALK_GROUND_SNAP, WALK_SPEED,
     WALK_STEP_HEIGHT, WalkHull, WaterLevel, clip_along_plane, horizontal_length_squared,
@@ -34,7 +34,7 @@ impl FlyCamera {
         self.reset_walk_state();
     }
 
-    pub(super) fn toggle_walk(&mut self, scene: &ModelPreview) -> bool {
+    pub(super) fn toggle_walk(&mut self, scene: &MapPreview) -> bool {
         let target = if self.mode == MovementMode::Walk {
             MovementMode::Fly
         } else {
@@ -43,7 +43,7 @@ impl FlyCamera {
         self.select_mode(scene, target)
     }
 
-    pub(super) fn enter_walk(&mut self, scene: &ModelPreview) -> bool {
+    pub(super) fn enter_walk(&mut self, scene: &MapPreview) -> bool {
         let Some(collision) = scene
             .walk_collision
             .as_ref()
@@ -104,7 +104,7 @@ impl FlyCamera {
         }
     }
 
-    pub(super) fn integrate_walk(&mut self, scene: &ModelPreview, dt: f32) {
+    pub(super) fn integrate_walk(&mut self, scene: &MapPreview, dt: f32) {
         let Some(collision) = scene
             .walk_collision
             .as_ref()
@@ -135,7 +135,7 @@ impl FlyCamera {
         // the camera back to fly once we're clearly below all geometry.
         if let Some(position) = self.position
             && position[2] - self.walk_hull.eye_height()
-                < scene.bounds_min[2] - WALK_VOID_EXIT_MARGIN
+                < scene.scene.bounds_min[2] - WALK_VOID_EXIT_MARGIN
         {
             self.exit_walk();
         }

@@ -9,6 +9,7 @@ use iced::{
     font, mouse,
 };
 
+use crate::widgets::icon::svg_icon_with_opacity as svg_icon;
 use crate::{
     assets,
     features::steam_session::ConnectionStatus,
@@ -242,8 +243,8 @@ fn rail_route_item<'a>(
     let control = button(
         container(svg_icon(
             route.icon(),
-            tokens.dims.sidebar_rail_icon_glyph,
             icon_color.into(),
+            tokens.dims.sidebar_rail_icon_glyph,
             1.0,
         ))
         .center(Length::Fixed(tokens.dims.sidebar_rail_icon_button_size)),
@@ -508,7 +509,7 @@ fn sidebar_icon_button<'a>(
 ) -> Element<'a, Message> {
     let tokens = *tokens;
     let control = button(
-        container(svg_icon(handle, glyph_size, tokens.colors.text.into(), 1.0))
+        container(svg_icon(handle, tokens.colors.text.into(), glyph_size, 1.0))
             .center(Length::Fixed(button_size)),
     )
     .on_press_maybe(message)
@@ -567,10 +568,11 @@ fn settings_row(ctx: ViewCtx<'_>, interactive: bool, opacity: f32) -> Element<'_
         menu_icon_slot(
             svg_icon(
                 assets::icons::gear(),
-                tokens.dims.icon_size,
                 tokens.colors.text_dim.into(),
+                tokens.dims.icon_size,
                 opacity,
-            ),
+            )
+            .into(),
             &tokens,
         ),
         text(i18n.tr("settings-settings"))
@@ -613,10 +615,11 @@ fn update_row<'a>(
         menu_icon_slot(
             svg_icon(
                 assets::icons::cloud_download(),
-                tokens.dims.icon_size,
                 tokens.colors.link.into(),
+                tokens.dims.icon_size,
                 opacity,
-            ),
+            )
+            .into(),
             &tokens,
         ),
         column![
@@ -712,21 +715,6 @@ fn menu_icon_slot<'a>(content: Element<'a, Message>, tokens: &Tokens) -> Element
     container(content)
         .center_x(Length::Fixed(tokens.dims.account_menu_icon_column_width))
         .center_y(Length::Fixed(tokens.dims.icon_size))
-        .into()
-}
-
-fn svg_icon<'a>(
-    handle: svg::Handle,
-    size: f32,
-    color: Color,
-    opacity: f32,
-) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .content_fit(ContentFit::Contain)
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .opacity(opacity)
         .into()
 }
 

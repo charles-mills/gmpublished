@@ -183,7 +183,7 @@ pub enum PreviewContent {
     },
     Model(Arc<ModelPreview>),
     Map {
-        scene: Arc<ModelPreview>,
+        scene: Arc<MapPreview>,
         stats: MapStats,
         fog: Option<MapFog>,
         sky_camera: Option<MapSkyCamera>,
@@ -247,11 +247,28 @@ mod particle_material_tests {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ModelPreview {
+pub struct RenderScene {
     pub(crate) meshes: Vec<MeshData>,
+    pub(crate) materials: Vec<MaterialSlot>,
+    pub(crate) phy_debug_meshes: Vec<MeshData>,
+    pub(crate) stats: ModelStats,
+    pub(crate) bounds_min: Vec3,
+    pub(crate) bounds_max: Vec3,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelPreview {
+    pub(crate) scene: Arc<RenderScene>,
+    pub(crate) skin_tables: Vec<Vec<u16>>,
+    /// Choice count per bodygroup, in bodypart order.
+    pub(crate) bodygroups: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapPreview {
+    pub(crate) scene: Arc<RenderScene>,
     pub(crate) mesh_visibility: Vec<MapMeshVisibility>,
     pub(crate) map_skybox_meshes: Vec<MeshData>,
-    pub(crate) materials: Vec<MaterialSlot>,
     pub(crate) lightmap: Option<LightmapSlot>,
     pub(crate) skybox: Option<Skybox>,
     pub(crate) detail_sprites: Vec<DetailSprite>,
@@ -259,13 +276,6 @@ pub struct ModelPreview {
     pub(crate) overlays: Vec<OverlayPrimitive>,
     pub(crate) map_skybox_overlays: Vec<OverlayPrimitive>,
     pub(crate) doors: Vec<DoorInstance>,
-    pub(crate) phy_debug_meshes: Vec<MeshData>,
-    pub(crate) skin_tables: Vec<Vec<u16>>,
-    /// Choice count per bodygroup, in bodypart order.
-    pub(crate) bodygroups: Vec<usize>,
-    pub(crate) stats: ModelStats,
-    pub(crate) bounds_min: Vec3,
-    pub(crate) bounds_max: Vec3,
     pub(crate) visibility: Option<MapVisibility>,
     pub(crate) walk_collision: Option<MapWalkCollision>,
 }
@@ -346,9 +356,10 @@ pub struct WorldVisibilityPlan {
 }
 
 impl WorldVisibilityPlan {
-    pub(crate) fn from_visible_clusters(scene: &ModelPreview, visible_clusters: &[bool]) -> Self {
+    pub(crate) fn from_visible_clusters(scene: &MapPreview, visible_clusters: &[bool]) -> Self {
         Self {
             mesh_indices: scene
+                .scene
                 .meshes
                 .iter()
                 .enumerate()
@@ -516,36 +527,29 @@ pub struct OverlayVertex {
     pub(crate) uv: [f32; 2],
 }
 
-pub const SKYBOX_FACE_COUNT: usize = 6;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Skybox {
     pub(crate) faces: [Option<Arc<ResolvedTexture>>; SKYBOX_FACE_COUNT],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SkyboxFace {
-    Rt,
-    Lf,
-    Bk,
-    Ft,
-    Up,
-    Dn,
+enum_with_all! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(usize)]
+    pub enum SkyboxFace {
+        Rt,
+        Lf,
+        Bk,
+        Ft,
+        Up,
+        Dn,
+    }
 }
 
-impl SkyboxFace {
-    pub(crate) const ALL: [Self; SKYBOX_FACE_COUNT] =
-        [Self::Rt, Self::Lf, Self::Bk, Self::Ft, Self::Up, Self::Dn];
+pub const SKYBOX_FACE_COUNT: usize = SkyboxFace::ALL.len();
 
+impl SkyboxFace {
     pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::Rt => 0,
-            Self::Lf => 1,
-            Self::Bk => 2,
-            Self::Ft => 3,
-            Self::Up => 4,
-            Self::Dn => 5,
-        }
+        self as usize
     }
 
     pub(crate) const fn suffix(self) -> &'static str {
@@ -705,27 +709,41 @@ mod tests {
         }
     }
 
-    fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> ModelPreview {
-        ModelPreview {
-            meshes: vec![mesh(0), mesh(1)],
+    fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> MapPreview {
+        MapPreview {
+            scene: Arc::new(RenderScene {
+                meshes: vec![mesh(0), mesh(1)],
+                materials: vec![
+                    MaterialSlot {
+                        name: "a".to_owned(),
+                        texture: None,
+                        texture2: None,
+                        force_opaque: true,
+                        render_mode: RenderMode::Opaque,
+                    },
+                    MaterialSlot {
+                        name: "b".to_owned(),
+                        texture: None,
+                        texture2: None,
+                        force_opaque: true,
+                        render_mode: RenderMode::Opaque,
+                    },
+                ],
+                phy_debug_meshes: Vec::new(),
+                stats: ModelStats {
+                    bone_count: 0,
+                    sequence_count: 0,
+                    vertex_count: 6,
+                    triangle_count: 2,
+                    mesh_count: 2,
+                    material_count: 2,
+                    resolved_material_count: 0,
+                },
+                bounds_min: Vec3::splat(0.0),
+                bounds_max: Vec3::new(2.0, 0.0, 0.0),
+            }),
             mesh_visibility,
             map_skybox_meshes: Vec::new(),
-            materials: vec![
-                MaterialSlot {
-                    name: "a".to_owned(),
-                    texture: None,
-                    texture2: None,
-                    force_opaque: true,
-                    render_mode: RenderMode::Opaque,
-                },
-                MaterialSlot {
-                    name: "b".to_owned(),
-                    texture: None,
-                    texture2: None,
-                    force_opaque: true,
-                    render_mode: RenderMode::Opaque,
-                },
-            ],
             lightmap: None,
             skybox: None,
             detail_sprites: vec![DetailSprite {
@@ -749,20 +767,6 @@ mod tests {
             }],
             map_skybox_overlays: Vec::new(),
             doors: Vec::new(),
-            phy_debug_meshes: Vec::new(),
-            skin_tables: vec![vec![0, 1]],
-            bodygroups: Vec::new(),
-            stats: ModelStats {
-                bone_count: 0,
-                sequence_count: 0,
-                vertex_count: 6,
-                triangle_count: 2,
-                mesh_count: 2,
-                material_count: 2,
-                resolved_material_count: 0,
-            },
-            bounds_min: Vec3::splat(0.0),
-            bounds_max: Vec3::new(2.0, 0.0, 0.0),
             visibility: None,
             walk_collision: None,
         }

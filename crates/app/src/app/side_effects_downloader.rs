@@ -4,10 +4,9 @@ use gmpublished_backend::error_key::keys;
 use super::run_document_open_extraction;
 use super::{
     App, NativeOpenTarget, PathBuf, PublishedFileId, RootMessage, Task, UiError,
-    destination_select, downloader, flatten_blocking_ui_result, gma, modal_stack,
-    parse_dropped_workshop_ids, prepare_publish, run_downloader_local_extraction,
-    run_downloader_submission, schedule_native_open_target, send_root_message,
-    spawn_blocking_detached_or_warn, stream,
+    destination_select, downloader, gma, modal_stack, parse_dropped_workshop_ids, prepare_publish,
+    run_downloader_local_extraction, run_downloader_submission, schedule_native_open_target,
+    send_root_message, spawn_blocking_detached_or_warn, stream,
 };
 
 impl App {
@@ -20,40 +19,35 @@ impl App {
     }
 
     pub(super) fn handle_file_drop(&self, path: PathBuf) -> Task<RootMessage> {
-        // An open Prepare Publish modal accepts a dropped folder as the
-        // addon path.
-        if self.state.modal_stack.active() == Some(modal_stack::ActiveModal::PreparePublish)
-            && self.state.prepare_publish.open()
-            && path.is_dir()
-        {
-            return Task::done(RootMessage::PreparePublish(
-                prepare_publish::Message::AddonPathBrowseCompleted(Some(path)),
-            ));
-        }
-
-        if path.is_file() && gma::is_gma_path(&path) {
-            return Task::done(RootMessage::Downloader(
-                downloader::Message::BulkExtractPathsSelected(vec![path]),
-            ));
-        }
-
-        if !self.state.shell.downloader_drop_target_hovered() {
+        let prepare_publish_accepts = self.state.modal_stack.active()
+            == Some(modal_stack::ActiveModal::PreparePublish)
+            && self.state.prepare_publish.open();
+        let downloader_accepts = self.state.shell.downloader_drop_target_hovered();
+        if !prepare_publish_accepts && !downloader_accepts && !gma::is_gma_path(&path) {
             return Task::none();
         }
 
         self.ctx
             .run_blocking("workshop-drag-drop", move |_app| {
-                Ok::<_, UiError>(parse_dropped_workshop_ids(&path))
+                if prepare_publish_accepts && path.is_dir() {
+                    return FileDropAction::PreparePublishPath(path);
+                }
+                if path.is_file() && gma::is_gma_path(&path) {
+                    return FileDropAction::ExtractGma(path);
+                }
+                if downloader_accepts {
+                    return FileDropAction::SubmitWorkshopIds(parse_dropped_workshop_ids(&path));
+                }
+                FileDropAction::Ignore
             })
             .map(|result| {
-                let item_ids = match flatten_blocking_ui_result(result) {
-                    Ok(ids) => ids,
-                    Err(error) => {
-                        log::warn!("failed to parse dropped Workshop payload: {error}");
-                        Vec::new()
-                    }
-                };
-                RootMessage::Downloader(downloader::Message::WorkshopIdsSubmitted(item_ids))
+                result.map_or_else(
+                    |error| {
+                        log::warn!("failed to inspect dropped path: {error}");
+                        RootMessage::Noop
+                    },
+                    FileDropAction::into_message,
+                )
             })
     }
 
@@ -207,6 +201,30 @@ impl App {
                 .map(|file| file.path().to_path_buf())
         })
         .map(|path| RootMessage::Platform(crate::platform::Message::MenuOpenGmaCompleted(path)))
+    }
+}
+
+enum FileDropAction {
+    PreparePublishPath(PathBuf),
+    ExtractGma(PathBuf),
+    SubmitWorkshopIds(Vec<PublishedFileId>),
+    Ignore,
+}
+
+impl FileDropAction {
+    fn into_message(self) -> RootMessage {
+        match self {
+            Self::PreparePublishPath(path) => RootMessage::PreparePublish(
+                prepare_publish::Message::AddonPathBrowseCompleted(Some(path)),
+            ),
+            Self::ExtractGma(path) => {
+                RootMessage::Downloader(downloader::Message::BulkExtractPathsSelected(vec![path]))
+            }
+            Self::SubmitWorkshopIds(ids) => {
+                RootMessage::Downloader(downloader::Message::WorkshopIdsSubmitted(ids))
+            }
+            Self::Ignore => RootMessage::Noop,
+        }
     }
 }
 

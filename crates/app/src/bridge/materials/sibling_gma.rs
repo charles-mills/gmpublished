@@ -126,8 +126,7 @@ pub(super) struct SiblingGmaArchive {
     kind: SiblingGmaArchiveKind,
 }
 
-/// `view` has no `Debug` of its own (it wraps a memory map); the derive
-/// on this enum only needs `gma`.
+/// `view` has no `Debug` of its own; the derive on this enum only needs `gma`.
 pub(super) enum SiblingGmaArchiveKind {
     Plain {
         gma: Box<gmpublished_backend::GmaFile>,
@@ -231,7 +230,7 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
         .par_iter()
         .map(|path| match path.kind {
             SiblingGmaPathKind::Plain => {
-                // One mmap + one parse for the entry table; the view is
+                // One file open + one parse for the entry table; the view is
                 // retained for entry fetches.
                 let view = match GmaView::open(&path.path) {
                     Ok(view) => view,

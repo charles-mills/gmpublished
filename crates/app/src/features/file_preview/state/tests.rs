@@ -7,7 +7,7 @@ use crate::generation::Generation;
 use crate::media::preview_model::ModelVertex;
 use crate::media::preview_model::{InfoReason, PreviewContent};
 use crate::media::preview_model::{
-    MapFog, MapStats, MaterialSlot, MeshData, ModelPreview, ModelStats,
+    MapFog, MapPreview, MapStats, MaterialSlot, MeshData, ModelPreview, ModelStats, RenderScene,
 };
 use crate::test_support::GmaFixtureBuilder;
 
@@ -43,6 +43,78 @@ fn info_data(request: &PreviewRequest) -> PreviewData {
     )
 }
 
+fn load_audio_state(state: &mut State, duration_secs: f32, position_secs: f32) {
+    let request = state.begin_open(request("sound/music.wav"));
+    let data = PreviewData::from_request(
+        &request,
+        PreviewContent::Audio {
+            bytes: Arc::new(Vec::new()),
+            duration_secs: Some(duration_secs),
+        },
+    );
+    assert!(state.apply_loaded(request.request_id, Ok(data)));
+    state.start_audio(request.request_id);
+    state.update_audio_position(request.request_id, position_secs);
+}
+
+fn empty_stats() -> ModelStats {
+    ModelStats {
+        bone_count: 0,
+        sequence_count: 0,
+        vertex_count: 0,
+        triangle_count: 0,
+        mesh_count: 0,
+        material_count: 0,
+        resolved_material_count: 0,
+    }
+}
+
+fn render_scene(
+    meshes: Vec<MeshData>,
+    materials: Vec<MaterialSlot>,
+    phy_debug_meshes: Vec<MeshData>,
+    stats: ModelStats,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+) -> Arc<RenderScene> {
+    Arc::new(RenderScene {
+        meshes,
+        materials,
+        phy_debug_meshes,
+        stats,
+        bounds_min,
+        bounds_max,
+    })
+}
+
+fn empty_map(scene: Arc<RenderScene>) -> MapPreview {
+    MapPreview {
+        scene,
+        mesh_visibility: Vec::new(),
+        map_skybox_meshes: Vec::new(),
+        lightmap: None,
+        skybox: None,
+        detail_sprites: Vec::new(),
+        map_skybox_detail_sprites: Vec::new(),
+        overlays: Vec::new(),
+        map_skybox_overlays: Vec::new(),
+        doors: Vec::new(),
+        visibility: None,
+        walk_collision: None,
+    }
+}
+
+fn blank_scene() -> Arc<RenderScene> {
+    render_scene(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        empty_stats(),
+        Vec3::splat(0.0),
+        Vec3::splat(0.0),
+    )
+}
+
 #[test]
 fn begin_open_marks_modal_loading_and_stamps_request_id() {
     let mut state = State::default();
@@ -71,12 +143,8 @@ fn begin_open_resets_expanded_state() {
 
 #[test]
 fn begin_open_clears_audio_state() {
-    let mut state = State {
-        audio_playing: true,
-        audio_position_secs: 12.5,
-        audio_duration_secs: Some(30.0),
-        ..State::default()
-    };
+    let mut state = State::default();
+    load_audio_state(&mut state, 30.0, 12.5);
 
     let _request = state.begin_open(request("sound/music.wav"));
 
@@ -245,17 +313,8 @@ fn close_clears_viewer_poses() {
 
 #[test]
 fn close_clears_audio_state() {
-    let mut state = State {
-        audio_playing: true,
-        audio_position_secs: 8.0,
-        audio_duration_secs: Some(16.0),
-        ..State::default()
-    };
-    let _request = state.begin_open(request("sound/music.wav"));
-
-    state.audio_playing = true;
-    state.audio_position_secs = 8.0;
-    state.audio_duration_secs = Some(16.0);
+    let mut state = State::default();
+    load_audio_state(&mut state, 16.0, 8.0);
     state.close();
 
     assert!(!state.audio_playing());
@@ -296,52 +355,43 @@ fn model_loaded_state_round_trips_through_apply_loaded() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Model(Arc::new(ModelPreview {
-            meshes: vec![MeshData {
-                vertices: vec![ModelVertex {
-                    position: Vec3::new(0.0, 1.0, 2.0),
-                    normal: Vec3::new(0.0, 0.0, 1.0),
-                    uv: [0.5, 0.75],
-                    lightmap_uv: [0.0; 2],
-                    color: Vec3::splat(1.0),
-                    blend_alpha: 0.0,
+            scene: render_scene(
+                vec![MeshData {
+                    vertices: vec![ModelVertex {
+                        position: Vec3::new(0.0, 1.0, 2.0),
+                        normal: Vec3::new(0.0, 0.0, 1.0),
+                        uv: [0.5, 0.75],
+                        lightmap_uv: [0.0; 2],
+                        color: Vec3::splat(1.0),
+                        blend_alpha: 0.0,
+                    }],
+                    indices: vec![0],
+                    material_index: 0,
+                    bodygroup: 0,
+                    bodygroup_choice: 0,
                 }],
-                indices: vec![0],
-                material_index: 0,
-                bodygroup: 0,
-                bodygroup_choice: 0,
-            }],
-            mesh_visibility: Vec::new(),
-            map_skybox_meshes: Vec::new(),
-            materials: vec![MaterialSlot {
-                name: "models/test/thing".to_owned(),
-                texture: None,
-                texture2: None,
-                force_opaque: true,
-                render_mode: RenderMode::Opaque,
-            }],
-            lightmap: None,
-            skybox: None,
-            detail_sprites: Vec::new(),
-            map_skybox_detail_sprites: Vec::new(),
-            overlays: Vec::new(),
-            map_skybox_overlays: Vec::new(),
-            doors: Vec::new(),
-            phy_debug_meshes: Vec::new(),
+                vec![MaterialSlot {
+                    name: "models/test/thing".to_owned(),
+                    texture: None,
+                    texture2: None,
+                    force_opaque: true,
+                    render_mode: RenderMode::Opaque,
+                }],
+                Vec::new(),
+                ModelStats {
+                    bone_count: 1,
+                    sequence_count: 2,
+                    vertex_count: 1,
+                    triangle_count: 0,
+                    mesh_count: 1,
+                    material_count: 1,
+                    resolved_material_count: 0,
+                },
+                Vec3::new(0.0, 1.0, 2.0),
+                Vec3::new(0.0, 1.0, 2.0),
+            ),
             skin_tables: vec![vec![0], vec![0]],
             bodygroups: vec![2],
-            stats: ModelStats {
-                bone_count: 1,
-                sequence_count: 2,
-                vertex_count: 1,
-                triangle_count: 0,
-                mesh_count: 1,
-                material_count: 1,
-                resolved_material_count: 0,
-            },
-            bounds_min: Vec3::new(0.0, 1.0, 2.0),
-            bounds_max: Vec3::new(0.0, 1.0, 2.0),
-            visibility: None,
-            walk_collision: None,
         })),
     );
 
@@ -356,8 +406,8 @@ fn model_loaded_state_round_trips_through_apply_loaded() {
 fn map_loaded_state_round_trips_through_apply_loaded() {
     let mut state = State::default();
     let request = state.begin_open(request("maps/test.bsp"));
-    let scene = Arc::new(ModelPreview {
-        meshes: vec![MeshData {
+    let scene = Arc::new(empty_map(render_scene(
+        vec![MeshData {
             vertices: vec![ModelVertex {
                 position: Vec3::new(0.0, 1.0, 2.0),
                 normal: Vec3::new(0.0, 0.0, 1.0),
@@ -371,26 +421,15 @@ fn map_loaded_state_round_trips_through_apply_loaded() {
             bodygroup: 0,
             bodygroup_choice: 0,
         }],
-        mesh_visibility: Vec::new(),
-        map_skybox_meshes: Vec::new(),
-        materials: vec![MaterialSlot {
+        vec![MaterialSlot {
             name: "brick/wall".to_owned(),
             texture: None,
             texture2: None,
             force_opaque: true,
             render_mode: RenderMode::Opaque,
         }],
-        lightmap: None,
-        skybox: None,
-        detail_sprites: Vec::new(),
-        map_skybox_detail_sprites: Vec::new(),
-        overlays: Vec::new(),
-        map_skybox_overlays: Vec::new(),
-        doors: Vec::new(),
-        phy_debug_meshes: Vec::new(),
-        skin_tables: vec![vec![0]],
-        bodygroups: Vec::new(),
-        stats: ModelStats {
+        Vec::new(),
+        ModelStats {
             bone_count: 0,
             sequence_count: 0,
             vertex_count: 1,
@@ -399,11 +438,9 @@ fn map_loaded_state_round_trips_through_apply_loaded() {
             material_count: 1,
             resolved_material_count: 0,
         },
-        bounds_min: Vec3::new(0.0, 1.0, 2.0),
-        bounds_max: Vec3::new(0.0, 1.0, 2.0),
-        visibility: None,
-        walk_collision: None,
-    });
+        Vec3::new(0.0, 1.0, 2.0),
+        Vec3::new(0.0, 1.0, 2.0),
+    )));
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Map {
@@ -457,35 +494,7 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
     assert!(!state.map_skybox_control_visible());
 
     let map_request = state.begin_open(request("maps/test.bsp"));
-    let scene = Arc::new(ModelPreview {
-        meshes: Vec::new(),
-        mesh_visibility: Vec::new(),
-        map_skybox_meshes: Vec::new(),
-        materials: Vec::new(),
-        lightmap: None,
-        skybox: None,
-        detail_sprites: Vec::new(),
-        map_skybox_detail_sprites: Vec::new(),
-        overlays: Vec::new(),
-        map_skybox_overlays: Vec::new(),
-        doors: Vec::new(),
-        phy_debug_meshes: Vec::new(),
-        skin_tables: vec![vec![0]],
-        bodygroups: Vec::new(),
-        stats: ModelStats {
-            bone_count: 0,
-            sequence_count: 0,
-            vertex_count: 0,
-            triangle_count: 0,
-            mesh_count: 0,
-            material_count: 0,
-            resolved_material_count: 0,
-        },
-        bounds_min: Vec3::splat(0.0),
-        bounds_max: Vec3::splat(0.0),
-        visibility: None,
-        walk_collision: None,
-    });
+    let scene = Arc::new(empty_map(blank_scene()));
     let map = PreviewData::from_request(
         &map_request,
         PreviewContent::Map {
@@ -525,42 +534,26 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
 fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
     let mut state = State::default();
     let map_request = state.begin_open(request("maps/test.bsp"));
-    let scene = Arc::new(ModelPreview {
-        meshes: Vec::new(),
-        mesh_visibility: Vec::new(),
-        map_skybox_meshes: Vec::new(),
-        materials: Vec::new(),
-        lightmap: None,
-        skybox: None,
-        detail_sprites: Vec::new(),
-        map_skybox_detail_sprites: Vec::new(),
-        overlays: Vec::new(),
-        map_skybox_overlays: Vec::new(),
-        doors: Vec::new(),
-        phy_debug_meshes: vec![MeshData {
+    let render_scene = render_scene(
+        Vec::new(),
+        Vec::new(),
+        vec![MeshData {
             vertices: Vec::new(),
             indices: Vec::new(),
             material_index: 0,
             bodygroup: 0,
             bodygroup_choice: 0,
         }],
+        empty_stats(),
+        Vec3::splat(0.0),
+        Vec3::splat(0.0),
+    );
+    let scene = Arc::new(empty_map(Arc::clone(&render_scene)));
+    let model_scene = Arc::new(ModelPreview {
+        scene: render_scene,
         skin_tables: vec![vec![0]],
         bodygroups: Vec::new(),
-        stats: ModelStats {
-            bone_count: 0,
-            sequence_count: 0,
-            vertex_count: 0,
-            triangle_count: 0,
-            mesh_count: 0,
-            material_count: 0,
-            resolved_material_count: 0,
-        },
-        bounds_min: Vec3::splat(0.0),
-        bounds_max: Vec3::splat(0.0),
-        visibility: None,
-        walk_collision: None,
     });
-    let model_scene = Arc::clone(&scene);
     let map = PreviewData::from_request(
         &map_request,
         PreviewContent::Map {
@@ -608,33 +601,9 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Model(Arc::new(ModelPreview {
-            meshes: Vec::new(),
-            mesh_visibility: Vec::new(),
-            map_skybox_meshes: Vec::new(),
-            materials: Vec::new(),
-            lightmap: None,
-            skybox: None,
-            detail_sprites: Vec::new(),
-            map_skybox_detail_sprites: Vec::new(),
-            overlays: Vec::new(),
-            map_skybox_overlays: Vec::new(),
-            doors: Vec::new(),
-            phy_debug_meshes: Vec::new(),
+            scene: blank_scene(),
             skin_tables: vec![vec![0], vec![0]],
             bodygroups: vec![3],
-            stats: ModelStats {
-                bone_count: 0,
-                sequence_count: 0,
-                vertex_count: 0,
-                triangle_count: 0,
-                mesh_count: 0,
-                material_count: 0,
-                resolved_material_count: 0,
-            },
-            bounds_min: Vec3::splat(0.0),
-            bounds_max: Vec3::splat(0.0),
-            visibility: None,
-            walk_collision: None,
         })),
     );
     state.apply_loaded(request.request_id, Ok(data));

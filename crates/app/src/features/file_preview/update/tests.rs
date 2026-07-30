@@ -11,6 +11,10 @@ use crate::media::preview_model::{
 use crate::test_support::GmaFixtureBuilder;
 
 fn request() -> crate::media::preview_model::PreviewRequest {
+    request_for("data/blob.bin")
+}
+
+fn request_for(entry_path: &str) -> crate::media::preview_model::PreviewRequest {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Fixture")
             .entry("data/blob.bin", vec![1, 2, 3])
@@ -21,12 +25,24 @@ fn request() -> crate::media::preview_model::PreviewRequest {
     crate::media::preview_model::PreviewRequest {
         request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
-        entry_path: "data/blob.bin".to_owned(),
-        display_name: "blob.bin".to_owned(),
+        entry_path: entry_path.to_owned(),
+        display_name: entry_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(entry_path)
+            .to_owned(),
         size_bytes: 3,
         crc32: 0x1234_5678,
         bypass_size_limits: false,
     }
+}
+
+fn map_request() -> crate::media::preview_model::PreviewRequest {
+    request_for("maps/test.bsp")
+}
+
+fn model_request() -> crate::media::preview_model::PreviewRequest {
+    request_for("models/test.mdl")
 }
 
 fn request_from_archive(
@@ -166,7 +182,7 @@ fn related_preview_requested_opens_related_entry() {
 #[test]
 fn map_fog_toggle_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(update(&mut state, Message::MapFogToggled(false)).is_empty());
     assert!(!state.map_fog_enabled());
@@ -178,7 +194,7 @@ fn map_fog_toggle_round_trips_without_effects() {
 #[test]
 fn map_skybox_toggle_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(update(&mut state, Message::MapSkyboxToggled(true)).is_empty());
     assert!(state.map_skybox_enabled());
@@ -190,7 +206,7 @@ fn map_skybox_toggle_round_trips_without_effects() {
 #[test]
 fn map_visibility_toggle_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(update(&mut state, Message::MapVisibilityToggled(false)).is_empty());
     assert!(!state.map_visibility_enabled());
@@ -202,7 +218,7 @@ fn map_visibility_toggle_round_trips_without_effects() {
 #[test]
 fn phy_debug_toggle_defaults_off_and_round_trips_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(!state.phy_debug_enabled());
     assert!(update(&mut state, Message::PhyDebugToggled(true)).is_empty());
@@ -215,7 +231,7 @@ fn phy_debug_toggle_defaults_off_and_round_trips_without_effects() {
 #[test]
 fn pose_messages_update_state_without_effects() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
     let fly_pose = FlyPose {
         position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
@@ -238,17 +254,18 @@ fn pose_messages_update_state_without_effects() {
         )
         .is_empty()
     );
-    assert!(update(&mut state, Message::OrbitPoseChanged(orbit_pose)).is_empty());
-
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
+
+    let _request = state.begin_open(model_request());
+    assert!(update(&mut state, Message::OrbitPoseChanged(orbit_pose)).is_empty());
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
 
 #[test]
 fn fly_speed_changed_updates_pose_and_readout() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
     let fly_pose = FlyPose {
         position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
@@ -275,7 +292,7 @@ fn fly_speed_changed_updates_pose_and_readout() {
 #[test]
 fn movement_mode_selected_requests_shader_mode_change() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
 
     assert!(
         update(
@@ -292,7 +309,7 @@ fn movement_mode_selected_requests_shader_mode_change() {
 #[test]
 fn movement_mode_selected_is_noop_for_active_mode() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
     let fly_pose = FlyPose {
         position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
@@ -317,7 +334,7 @@ fn movement_mode_selected_is_noop_for_active_mode() {
 #[test]
 fn expanded_round_trip_preserves_viewer_poses() {
     let mut state = State::default();
-    let _request = state.begin_open(request());
+    let _request = state.begin_open(map_request());
     let fly_pose = FlyPose {
         position: Vec3::new(1.0, 2.0, 3.0),
         yaw: 0.25,
@@ -330,13 +347,11 @@ fn expanded_round_trip_preserves_viewer_poses() {
         distance: 3.0,
     };
     state.set_fly_camera(fly_pose, MovementMode::Walk);
-    state.set_orbit_pose(orbit_pose);
 
     assert!(update(&mut state, Message::ExpandToggled).is_empty());
     assert!(state.expanded());
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
-    assert_eq!(state.orbit_pose(), Some(orbit_pose));
 
     assert_eq!(
         update(&mut state, Message::ExpandToggled),
@@ -345,6 +360,10 @@ fn expanded_round_trip_preserves_viewer_poses() {
     assert!(!state.expanded());
     assert_eq!(state.fly_pose(), Some(fly_pose));
     assert_eq!(state.fly_movement_mode(), Some(MovementMode::Walk));
+
+    let _request = state.begin_open(model_request());
+    state.set_orbit_pose(orbit_pose);
+    assert!(update(&mut state, Message::ExpandToggled).is_empty());
     assert_eq!(state.orbit_pose(), Some(orbit_pose));
 }
 
@@ -383,27 +402,37 @@ fn audio_toggle_requests_play_then_pause_via_state_messages() {
         },
     );
     state.apply_loaded(request.request_id, Ok(data));
-    state.update_audio_position(1.25);
+    state.update_audio_position(request.request_id, 1.25);
 
     let effects = update(&mut state, Message::AudioToggleRequested);
 
     assert_eq!(
         effects,
         vec![Effect::AudioPlayRequested {
+            request_id: request.request_id,
             bytes,
             resume_at: 1.25,
         }]
     );
     assert!(!state.audio_playing());
 
-    assert!(update(&mut state, Message::AudioPlaybackStarted).is_empty());
+    assert!(
+        update(
+            &mut state,
+            Message::AudioPlaybackStarted(request.request_id)
+        )
+        .is_empty()
+    );
     assert!(state.audio_playing());
 
     let effects = update(&mut state, Message::AudioToggleRequested);
 
-    assert_eq!(effects, vec![Effect::AudioPauseRequested]);
+    assert_eq!(
+        effects,
+        vec![Effect::AudioPauseRequested(request.request_id)]
+    );
 
-    assert!(update(&mut state, Message::AudioPlaybackPaused).is_empty());
+    assert!(update(&mut state, Message::AudioPlaybackPaused(request.request_id)).is_empty());
     assert!(!state.audio_playing());
 }
 
@@ -423,11 +452,45 @@ fn animation_tick_polls_audio_position_only_while_playing() {
 
     assert!(update(&mut state, Message::AnimationTick(now)).is_empty());
 
-    assert!(update(&mut state, Message::AudioPlaybackStarted).is_empty());
+    assert!(
+        update(
+            &mut state,
+            Message::AudioPlaybackStarted(request.request_id)
+        )
+        .is_empty()
+    );
     assert_eq!(
         update(&mut state, Message::AnimationTick(now)),
-        vec![Effect::AudioPositionPollRequested]
+        vec![Effect::AudioPositionPollRequested(request.request_id)]
     );
+}
+
+#[test]
+fn stale_audio_callback_cannot_start_a_new_loading_preview() {
+    let mut state = State::default();
+    let first = state.begin_open(request_for("sound/first.wav"));
+    let data = PreviewData::from_request(
+        &first,
+        PreviewContent::Audio {
+            bytes: Arc::new(vec![1, 2, 3]),
+            duration_secs: None,
+        },
+    );
+    assert!(state.apply_loaded(first.request_id, Ok(data)));
+    assert_eq!(
+        update(&mut state, Message::AudioToggleRequested),
+        vec![Effect::AudioPlayRequested {
+            request_id: first.request_id,
+            bytes: Arc::new(vec![1, 2, 3]),
+            resume_at: 0.0,
+        }]
+    );
+
+    let second = state.begin_open(request_for("sound/second.wav"));
+    assert_ne!(first.request_id, second.request_id);
+    assert!(update(&mut state, Message::AudioPlaybackStarted(first.request_id)).is_empty());
+
+    assert!(!state.audio_playing());
 }
 
 #[test]

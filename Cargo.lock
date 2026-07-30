@@ -1564,7 +1564,6 @@ dependencies = [
  "image",
  "log",
  "lzma-rust2",
- "memmap2",
  "nucleo-matcher",
  "opener",
  "parking_lot",

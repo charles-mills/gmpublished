@@ -491,7 +491,7 @@ pub struct SearchFullStart {
     pub(crate) cancel_task: Option<TaskId>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchSession {
     generation: SearchGeneration,
     latest_mode: SearchMode,
@@ -503,14 +503,6 @@ pub struct SearchSession {
 }
 
 impl SearchSession {
-    pub(crate) const fn generation(&self) -> SearchGeneration {
-        self.generation
-    }
-
-    pub(crate) fn query(&self) -> &str {
-        &self.latest_query
-    }
-
     pub(crate) const fn loading(&self) -> bool {
         self.loading
     }
@@ -521,10 +513,6 @@ impl SearchSession {
 
     pub(crate) const fn active_full_task(&self) -> Option<TaskId> {
         self.active_full_task
-    }
-
-    pub(crate) const fn full_replace_pending(&self) -> bool {
-        self.full_replace_pending
     }
 
     pub(crate) fn begin_query(&mut self, input: &str, mode: SearchMode) -> SearchQueryChange {

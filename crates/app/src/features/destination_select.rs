@@ -7,6 +7,7 @@ mod view;
 
 pub use effect::Effect;
 pub use message::Message;
+pub(crate) use model::probe_custom_path;
 pub use model::{
     DestinationError, DestinationPersistRequest, SettingsSnapshot, apply_persist_request,
     destination_label,

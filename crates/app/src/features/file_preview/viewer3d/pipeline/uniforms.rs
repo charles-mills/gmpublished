@@ -3,10 +3,11 @@
 //! sky tint) feeding those values. Owns no GPU objects.
 
 use super::{
-    AMBIENT, Camera, FOV_Y, FlyCamera, MapFog, MapSkyCamera, ModelPreview, Rectangle, RenderMode,
-    ResolvedTexture, SOURCE_UP, Skybox, decode_bc_texture, half_extent, look_at, mat_mul, mid,
-    perspective, skybox_eye,
+    AMBIENT, Camera, FOV_Y, FlyCamera, MapFog, MapPreview, MapSkyCamera, Rectangle, RenderMode,
+    RenderScene, ResolvedTexture, SOURCE_UP, Skybox, decode_bc_texture, half_extent, look_at,
+    mat_mul, mid, perspective, skybox_eye,
 };
+use crate::media::preview_model::ModelPreview;
 use gmpublished_backend::math::Vec3;
 
 #[repr(C)]
@@ -42,18 +43,18 @@ impl MaterialUniform {
 
 impl Uniforms {
     pub fn for_fly(
-        scene: &ModelPreview,
+        scene: &MapPreview,
         camera: &FlyCamera,
         bounds: Rectangle,
         fog: Option<MapFog>,
         water_time: f32,
         submerged: bool,
     ) -> Self {
-        let frame = FlyCameraFrame::new(scene, camera, bounds);
+        let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
         let target = frame.eye + frame.forward;
         let view = look_at(frame.eye, target, SOURCE_UP);
         let (fog_color, fog_params) = if submerged {
-            let color = scene_water_fog_color(scene);
+            let color = scene_water_fog_color(&scene.scene);
             ([color[0], color[1], color[2], 0.0], [0.0, 2048.0, 1.0, 1.0])
         } else {
             (
@@ -82,8 +83,8 @@ impl Uniforms {
         }
     }
 
-    pub fn for_fly_sky(scene: &ModelPreview, camera: &FlyCamera, bounds: Rectangle) -> Self {
-        let frame = FlyCameraFrame::new(scene, camera, bounds);
+    pub fn for_fly_sky(scene: &MapPreview, camera: &FlyCamera, bounds: Rectangle) -> Self {
+        let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
         let target = frame.eye + frame.forward;
         let mut view = look_at(frame.eye, target, SOURCE_UP);
         view[3][0] = 0.0;
@@ -102,13 +103,13 @@ impl Uniforms {
     }
 
     pub fn for_fly_skybox_composite(
-        scene: &ModelPreview,
+        scene: &MapPreview,
         camera: &FlyCamera,
         bounds: Rectangle,
         sky_camera: MapSkyCamera,
         fog: Option<MapFog>,
     ) -> Self {
-        let frame = FlyCameraFrame::new(scene, camera, bounds);
+        let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
         let eye = skybox_eye(frame.eye, sky_camera.origin, sky_camera.scale);
         let view = look_at(eye, eye + frame.forward, SOURCE_UP);
 
@@ -133,8 +134,8 @@ impl Uniforms {
     }
 
     pub fn for_model(model: &ModelPreview, camera: &Camera, bounds: Rectangle) -> Self {
-        let center = mid(model.bounds_min, model.bounds_max);
-        let radius = half_extent(model.bounds_min, model.bounds_max).max(1.0);
+        let center = mid(model.scene.bounds_min, model.scene.bounds_max);
+        let radius = half_extent(model.scene.bounds_min, model.scene.bounds_max).max(1.0);
         let distance = radius * 2.2 * camera.orbit.distance();
 
         let eye = [
@@ -169,7 +170,7 @@ pub struct FlyCameraFrame {
 }
 
 impl FlyCameraFrame {
-    pub fn new(scene: &ModelPreview, camera: &FlyCamera, bounds: Rectangle) -> Self {
+    pub fn new(scene: &RenderScene, camera: &FlyCamera, bounds: Rectangle) -> Self {
         let radius = half_extent(scene.bounds_min, scene.bounds_max).max(1.0);
         let eye = camera.position.map_or_else(
             || mid(scene.bounds_min, scene.bounds_max),
@@ -197,7 +198,7 @@ impl FlyCameraFrame {
 
 pub const DEFAULT_SKY_TINT: Vec3 = Vec3::new(0.12, 0.18, 0.24);
 
-fn scene_water_fog_color(scene: &ModelPreview) -> Vec3 {
+fn scene_water_fog_color(scene: &RenderScene) -> Vec3 {
     scene
         .materials
         .iter()

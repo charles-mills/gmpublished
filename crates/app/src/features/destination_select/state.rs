@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use crate::bridge::tasks::fallback_paths;
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{AppPaths, Settings};
+use crate::generation::Generation;
 use crate::util::paths::{fallback_current_dir, path_to_display};
 
 use super::model::{
-    self, DestinationError, DestinationKind, DestinationPersistRequest, DestinationRoot,
-    DestinationSelection, ResolvedDestinations, SettingsSnapshot,
+    self, CustomPathValidationRequest, DestinationError, DestinationKind,
+    DestinationPersistRequest, DestinationRoot, DestinationSelection, ResolvedDestinations,
+    SettingsSnapshot,
 };
 
 /// Placeholder shown when the caller supplied no extracted name.
@@ -40,6 +42,8 @@ pub struct State {
     roots: ResolvedDestinations,
     selection: DestinationSelection,
     path_input: String,
+    path_validation_generation: Generation,
+    pending_path_validation: Option<Generation>,
     saving: bool,
     error: Option<DestinationError>,
     context: OpenContext,
@@ -47,9 +51,8 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let mut settings = Settings::default();
+        let settings = Settings::default();
         let paths = fallback_paths(&settings);
-        settings.sanitize(&paths);
         let roots = ResolvedDestinations::from_paths(&paths);
         Self {
             settings,
@@ -57,6 +60,8 @@ impl Default for State {
             roots,
             selection: DestinationSelection::None,
             path_input: String::new(),
+            path_validation_generation: Generation::INITIAL,
+            pending_path_validation: None,
             saving: false,
             error: None,
             context: OpenContext::default(),
@@ -67,6 +72,7 @@ impl Default for State {
 impl State {
     /// Resets from fresh settings; the chooser always opens UNSELECTED.
     pub(crate) fn reset_from_snapshot(&mut self, snapshot: SettingsSnapshot) {
+        self.invalidate_path_validation();
         self.absorb_snapshot(snapshot);
         self.selection = DestinationSelection::None;
         self.path_input.clear();
@@ -82,11 +88,7 @@ impl State {
     /// Refreshes settings/paths without touching the live selection; used
     /// when the create-folder checkbox persists mid-session.
     pub(crate) fn absorb_snapshot(&mut self, snapshot: SettingsSnapshot) {
-        let SettingsSnapshot {
-            mut settings,
-            paths,
-        } = snapshot;
-        settings.sanitize(&paths);
+        let SettingsSnapshot { settings, paths } = snapshot;
         self.roots = ResolvedDestinations::from_paths(&paths);
         self.settings = settings;
         self.paths = paths;
@@ -219,25 +221,28 @@ impl State {
             | DestinationKind::Addons => None,
         };
         if let Some(selection) = selection {
+            self.invalidate_path_validation();
             self.selection = selection;
             self.path_input.clear();
         }
     }
 
     pub(crate) fn deselect(&mut self) {
+        self.invalidate_path_validation();
         self.selection = DestinationSelection::None;
         self.path_input.clear();
         self.error = None;
     }
 
     pub(crate) fn edit_path_input(&mut self, value: String) {
+        self.invalidate_path_validation();
         self.error = None;
         self.path_input = value;
     }
 
-    /// Enter in the path input: trims trailing separators and selects the
-    /// typed path as a Browse destination; empty input deselects.
-    pub(crate) fn accept_path_input(&mut self) {
+    /// Returns the normalized path that needs validation. Empty input is a
+    /// synchronous deselection; filesystem validation belongs to an effect.
+    pub(crate) fn path_input_candidate(&mut self) -> Option<PathBuf> {
         let trimmed = self
             .path_input
             .trim()
@@ -245,13 +250,35 @@ impl State {
             .to_owned();
         if trimmed.is_empty() {
             self.deselect();
+            None
         } else {
-            self.select_custom(PathBuf::from(trimmed));
+            Some(PathBuf::from(trimmed))
         }
     }
 
-    pub(crate) fn select_custom(&mut self, path: PathBuf) {
-        if model::valid_custom_path(&path) {
+    pub(crate) fn begin_custom_path_validation(
+        &mut self,
+        path: PathBuf,
+    ) -> CustomPathValidationRequest {
+        let generation = self.path_validation_generation.bump();
+        self.pending_path_validation = Some(generation);
+        self.error = None;
+        CustomPathValidationRequest { generation, path }
+    }
+
+    pub(crate) fn apply_custom_path_validation(
+        &mut self,
+        generation: Generation,
+        path: PathBuf,
+        valid: bool,
+    ) -> bool {
+        if self.pending_path_validation != Some(generation)
+            || generation != self.path_validation_generation
+        {
+            return false;
+        }
+        self.pending_path_validation = None;
+        if valid {
             self.selection = DestinationSelection::Custom(path);
             self.path_input.clear();
             self.error = None;
@@ -260,6 +287,26 @@ impl State {
             self.selection = DestinationSelection::None;
             self.error = Some(DestinationError::InvalidPath);
         }
+        true
+    }
+
+    pub(crate) fn select_trusted_custom(&mut self, path: PathBuf) {
+        self.invalidate_path_validation();
+        self.selection = DestinationSelection::Custom(path);
+        self.path_input.clear();
+        self.error = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_custom(&mut self, path: PathBuf) {
+        let valid = model::probe_custom_path(&path);
+        let request = self.begin_custom_path_validation(path);
+        let _applied = self.apply_custom_path_validation(request.generation, request.path, valid);
+    }
+
+    fn invalidate_path_validation(&mut self) {
+        let _generation = self.path_validation_generation.bump();
+        self.pending_path_validation = None;
     }
 
     pub(crate) fn set_create_folder(&mut self, enabled: bool) {
@@ -287,6 +334,9 @@ impl State {
     }
 
     pub(crate) fn persist_request(&self) -> Option<DestinationPersistRequest> {
+        if self.pending_path_validation.is_some() {
+            return None;
+        }
         let destination = model::selection_to_extract_destination(
             &self.selection,
             self.settings.backend.create_folder_on_extract || self.context.force_create_folder,
@@ -464,7 +514,9 @@ mod tests {
         state.open(snapshot_with_roots(&temp), OpenContext::default());
 
         state.edit_path_input(format!("{}//", custom.to_string_lossy()));
-        state.accept_path_input();
+        let candidate = state.path_input_candidate().expect("path candidate");
+        let request = state.begin_custom_path_validation(candidate);
+        let _applied = state.apply_custom_path_validation(request.generation, request.path, true);
 
         assert!(state.kind_active(DestinationKind::Browse));
         assert!(state.is_history_selected(&custom));
@@ -478,7 +530,9 @@ mod tests {
         state.open(snapshot_with_roots(&temp), OpenContext::default());
 
         state.edit_path_input("/definitely/not/a/real/dir".to_owned());
-        state.accept_path_input();
+        let candidate = state.path_input_candidate().expect("path candidate");
+        let request = state.begin_custom_path_validation(candidate);
+        let _applied = state.apply_custom_path_validation(request.generation, request.path, false);
 
         assert_eq!(state.error(), Some(&DestinationError::InvalidPath));
         assert!(!state.can_confirm());

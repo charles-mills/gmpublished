@@ -14,23 +14,38 @@ use super::materials::{
     resolve_skybox, sky_log_status,
 };
 use super::{
-    AmbientCube, Arc, BTreeMap, BTreeSet, ContentSourceTier, ConvexHull, ConvexLedge,
-    DecodedTextureBudget, DoorInstance, DoorSound, DoorSoundSourceTier, DoorSoundWave, DoorSounds,
-    Duration, HashMap, HashSet, InfoReason, Instant, LightmapSlot, MAP_FALLBACK_TEXTURE_DIMENSION,
-    MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP, MAP_TEXTURE_DECODE_BUDGET_BYTES,
-    MAP_TEXTURE_MAX_DIMENSION, MAP_TOO_LARGE_BYTES, MapAmbientLighting, MapDoor, MapDoorGeometry,
-    MapEnvironmentLighting, MapFog, MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility,
-    MapPropVisibility, MapSkyCamera, MapSpawn, MapStats, MapVisibility, MapWalkCollision,
-    MapWalkPropModel, MapWalkPropModelPlacement, MaterialResolver, MaterialSlot, MeshData,
-    ModelData, ModelPreview, ModelStats, ModelVertex, PHY_DEBUG_MATERIAL_NAME,
-    PHY_DEBUG_TRIANGLE_CAP, PHY_DEBUG_VERTEX_COLOR, PreviewContent, PreviewData, PreviewLoadStage,
-    PreviewRequest, ReadStats, RenderMode, ResolvedPrimaryMaterial, ResolvedSoundReference,
-    SkipReason, StaticPropPlacement, catch_asset_decode, entry_stem, info_preview_data,
-    load_model_catching_panic, load_model_companions, srgb_byte_to_linear,
+    MAP_FALLBACK_TEXTURE_DIMENSION, MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP,
+    MAP_TEXTURE_DECODE_BUDGET_BYTES, MAP_TEXTURE_MAX_DIMENSION, MAP_TOO_LARGE_BYTES,
+    PHY_DEBUG_TRIANGLE_CAP, PHY_DEBUG_VERTEX_COLOR, catch_asset_decode, entry_stem,
+    info_preview_data, load_model_catching_panic, load_model_companions,
+};
+use crate::bridge::materials::{
+    ContentSourceTier, DecodedTextureBudget, MaterialResolver, RenderMode, ResolvedPrimaryMaterial,
+    ResolvedSoundReference, srgb_byte_to_linear,
+};
+use crate::media::preview_model::{
+    DoorInstance, DoorSound, DoorSoundSourceTier, DoorSoundWave, DoorSounds, InfoReason,
+    LightmapSlot, MapFog, MapPreview, MapSkyCamera, MapSpawn, MapStats, MaterialSlot, MeshData,
+    ModelData, ModelStats, ModelVertex, PHY_DEBUG_MATERIAL_NAME, PreviewContent, PreviewData,
+    PreviewLoadStage, PreviewRequest, RenderScene,
 };
 use gmpublished_backend::math::Vec3;
+use gmpublished_backend::scene::map::{
+    AmbientCube, ConvexHull, MapAmbientLighting, MapDoor, MapDoorGeometry, MapEnvironmentLighting,
+    MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapPropVisibility, MapVisibility,
+    MapWalkCollision, MapWalkPropModel, MapWalkPropModelPlacement, StaticPropPlacement,
+};
 use rayon::prelude::*;
-use std::sync::LazyLock;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+use vformats::phy::{ConvexLedge, ReadStats, SkipReason};
+
+mod build;
+mod diagnostics;
+
+use build::{PropBuildPhase, build_props};
+use diagnostics::{MapPreviewStatuses, MapPreviewTimings, log_map_preview_summary};
 
 pub(super) fn map_preview_data(
     request: &PreviewRequest,
@@ -89,7 +104,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         skybox_partition,
         skybox_completion_bounds: _,
         visibility,
-        mut walk_collision,
+        walk_collision,
         pakfile,
         lightmap,
         skyname,
@@ -131,88 +146,26 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .map(|mesh| map_mesh_to_model_mesh(mesh, table.slots()))
         .collect::<Vec<_>>();
     emit_stage(PreviewLoadStage::PlacingProps);
-    let props_started = Instant::now();
-    // Loaded once, up front, and threaded through the AABB passes, collision
-    // enrichment and the bake below. Each of those can build its own cache
-    // from the same placements, which parses every entity-prop model again.
-    let prop_load_started = Instant::now();
-    let loaded_model_cache =
-        load_unique_prop_models_parallel(&static_props, &material_resolver, load_model);
-    let skybox_loaded_model_cache =
-        load_unique_prop_models_parallel(&skybox_static_props, &material_resolver, load_model);
-    refresh_entity_prop_aabb_visibility(
-        &mut static_props,
-        usize::try_from(raw_stats.world_static_prop_count).unwrap_or(usize::MAX),
-        usize::try_from(raw_stats.world_entity_prop_count).unwrap_or(0),
-        visibility.as_ref(),
-        &loaded_model_cache,
-    );
-    refresh_entity_prop_aabb_visibility(
-        &mut skybox_static_props,
-        usize::try_from(raw_stats.skybox_static_prop_count).unwrap_or(usize::MAX),
-        usize::try_from(raw_stats.skybox_entity_prop_count).unwrap_or(0),
-        visibility.as_ref(),
-        &skybox_loaded_model_cache,
-    );
-    let (enriched_walk_collision, prop_collision_stats) = enrich_walk_collision_with_prop_collision(
+    let PropBuildPhase {
+        loaded_models: loaded_model_cache,
+        world: prop_bake,
+        skybox: skybox_prop_bake,
+        doors: door_bake,
         walk_collision,
-        &static_props,
-        &loaded_model_cache,
-    );
-    walk_collision = enriched_walk_collision;
-    log::debug!(
-        "map preview prop collision: solid placements {}, collidable {}, parsed models {}, hulls {}, memory {} bytes ({} MiB), skipped not-solid {}, model-load {}, missing-phy {}, unparseable-phy {}, phy reasons {:?}",
-        prop_collision_stats.solid_placements,
-        prop_collision_stats.collidable_placements,
-        prop_collision_stats.parsed_models,
-        prop_collision_stats.prop_hulls,
-        prop_collision_stats.memory_bytes,
-        format_mib(prop_collision_stats.memory_bytes),
-        prop_collision_stats.skipped_not_solid,
-        prop_collision_stats.skipped_model_load,
-        prop_collision_stats.skipped_missing_phy,
-        prop_collision_stats.skipped_unparseable_phy,
-        prop_collision_stats.skip_reasons
-    );
-    let prop_lighting = StaticPropLightingInputs {
-        ambient: &ambient,
-        environment_lighting: environment_lighting.as_ref(),
-        walk_collision: walk_collision.as_ref(),
-    };
-    let pre_resolved_prop_materials =
-        pre_resolve_prop_materials(&static_props, &loaded_model_cache, &material_resolver);
-    let prop_bake = bake_static_props_from_loaded_model_cache(
-        &static_props,
-        &material_resolver,
-        &mut table,
-        &loaded_model_cache,
-        Some(&pre_resolved_prop_materials),
-        prop_lighting,
-        prop_load_started,
-    );
-    let skybox_pre_resolved_prop_materials = pre_resolve_prop_materials(
-        &skybox_static_props,
-        &skybox_loaded_model_cache,
-        &material_resolver,
-    );
-    let skybox_prop_bake = bake_static_props_from_loaded_model_cache(
-        &skybox_static_props,
-        &material_resolver,
-        &mut table,
-        &skybox_loaded_model_cache,
-        Some(&skybox_pre_resolved_prop_materials),
-        prop_lighting,
-        prop_load_started,
-    );
-    let door_bake = bake_map_doors_with_prop_model_loader(
+        elapsed: props_timing,
+    } = build_props(
+        &mut static_props,
+        &mut skybox_static_props,
         &map_doors,
+        &raw_stats,
+        visibility.as_ref(),
+        walk_collision,
+        &ambient,
+        environment_lighting.as_ref(),
         &material_resolver,
         &mut table,
-        prop_lighting,
         load_model,
     );
-    log_prop_door_material_resolution(&door_bake.prop_material_resolutions);
-    let props_timing = props_started.elapsed();
     let placed_prop_count = prop_bake
         .placed_count
         .saturating_add(skybox_prop_bake.placed_count);
@@ -291,22 +244,26 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             render_mode: RenderMode::Translucent,
         });
     }
-    let skin_table = identity_skin_table(table.len());
-    let scene = Arc::new(ModelPreview {
-        stats: ModelStats {
-            bone_count: 0,
-            sequence_count: 0,
-            vertex_count: u32::try_from(vertex_count).unwrap_or(u32::MAX),
-            triangle_count: u32::try_from(triangle_count).unwrap_or(u32::MAX),
-            mesh_count: u32::try_from(meshes.len().saturating_add(map_skybox_meshes.len()))
-                .unwrap_or(u32::MAX),
-            material_count,
-            resolved_material_count,
-        },
-        meshes,
+    let scene = Arc::new(MapPreview {
+        scene: Arc::new(RenderScene {
+            stats: ModelStats {
+                bone_count: 0,
+                sequence_count: 0,
+                vertex_count: u32::try_from(vertex_count).unwrap_or(u32::MAX),
+                triangle_count: u32::try_from(triangle_count).unwrap_or(u32::MAX),
+                mesh_count: u32::try_from(meshes.len().saturating_add(map_skybox_meshes.len()))
+                    .unwrap_or(u32::MAX),
+                material_count,
+                resolved_material_count,
+            },
+            meshes,
+            materials: table.into_slots(),
+            phy_debug_meshes,
+            bounds_min,
+            bounds_max,
+        }),
         mesh_visibility,
         map_skybox_meshes,
-        materials: table.into_slots(),
         lightmap,
         skybox,
         detail_sprites,
@@ -314,11 +271,6 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         overlays: overlay_bake.overlays,
         map_skybox_overlays: skybox_overlay_bake.overlays,
         doors: door_bake.doors,
-        phy_debug_meshes,
-        skin_tables: vec![skin_table],
-        bodygroups: Vec::new(),
-        bounds_min,
-        bounds_max,
         visibility,
         walk_collision,
     });
@@ -1592,72 +1544,6 @@ pub(super) fn bake_prop_door_meshes(
         .collect()
 }
 
-/// The pre-formatted status fragments the summary line splices in, bundled so
-/// the call site is not six same-typed `&str` arguments in a row.
-struct MapPreviewStatuses<'a> {
-    water: &'a str,
-    render_mode: &'a str,
-    texture_mib: &'a str,
-    texture_payloads: &'a str,
-    lightmap: &'a str,
-    sky: &'a str,
-}
-
-/// How long each phase of the map build took.
-struct MapPreviewTimings {
-    bsp: Duration,
-    materials: Duration,
-    props: Duration,
-    prop_load: Duration,
-    prop_bake: Duration,
-    lightmap: Duration,
-}
-
-/// One line summarising a map build, at `info` because it is the first thing
-/// worth having when a user reports a map that looks wrong.
-fn log_map_preview_summary(
-    entry_path: &str,
-    stats: &MapStats,
-    statuses: &MapPreviewStatuses<'_>,
-    prop_skip_stats: &PropBakeSkipStats,
-    prop_mesh_bytes: usize,
-    skipped_overlay_count: u32,
-    timings: &MapPreviewTimings,
-) {
-    let MapPreviewStatuses {
-        water,
-        render_mode,
-        texture_mib,
-        texture_payloads,
-        lightmap,
-        sky,
-    } = statuses;
-    log::info!(
-        "map {entry_path}: materials resolved {}/{}{water}{render_mode}, textures {texture_mib} MiB{texture_payloads}, {lightmap}, {sky}, clusters {}, skybox faces {}, props {}, props placed {} (skipped {}: cap {}, triangles {}, load {}, invalid {}, empty {}), prop mesh {prop_mesh_bytes} bytes ({} MiB), detail sprites {}, overlays {} (skipped {skipped_overlay_count}), timings: bsp {}ms, materials {}ms, props {}ms, props load {}ms, bake {}ms, lightmap {}ms",
-        stats.resolved_material_count,
-        stats.material_count,
-        stats.cluster_count,
-        stats.skybox_face_count,
-        stats.skybox_prop_count,
-        stats.placed_prop_count,
-        stats.skipped_prop_count,
-        prop_skip_stats.placement_cap,
-        prop_skip_stats.triangle_cap,
-        prop_skip_stats.load_failure,
-        prop_skip_stats.invalid_model_path,
-        prop_skip_stats.no_bakeable_mesh,
-        format_mib(prop_mesh_bytes),
-        stats.detail_sprite_count,
-        stats.overlay_count,
-        duration_ms(timings.bsp),
-        duration_ms(timings.materials),
-        duration_ms(timings.props),
-        duration_ms(timings.prop_load),
-        duration_ms(timings.prop_bake),
-        duration_ms(timings.lightmap),
-    );
-}
-
 pub(super) struct PropMaterialContext<'a> {
     pub(super) resolver: &'a MaterialResolver,
     pub(super) pre_resolved_prop_materials:
@@ -2345,10 +2231,4 @@ pub(super) fn material_dimensions(materials: &[MaterialSlot], index: usize) -> (
 
 pub(super) fn normalize_map_uv(tex_s: f32, tex_t: f32, width: u32, height: u32) -> [f32; 2] {
     [tex_s / width.max(1) as f32, tex_t / height.max(1) as f32]
-}
-
-pub(super) fn identity_skin_table(material_count: usize) -> Vec<u16> {
-    (0..material_count)
-        .map(|index| u16::try_from(index).unwrap_or(u16::MAX))
-        .collect()
 }

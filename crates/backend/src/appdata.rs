@@ -42,18 +42,18 @@ pub struct AppDataPaths {
 impl AppDataPaths {
     #[must_use]
     pub fn production() -> Self {
-        let user_data_dir = dirs::data_dir()
-            .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| std::env::temp_dir()))
-            .join("gmpublisher");
-        let settings_root = dirs::config_dir().unwrap_or_else(|| {
-            dirs::data_dir()
-                .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| std::env::temp_dir()))
-        });
+        // `current_exe()` names a file, not a directory, and its parent may
+        // be read-only (notably for packaged installs). If the platform does
+        // not expose a persistent data root, the system temp directory is the
+        // only environment-provided location with directory semantics and a
+        // reasonable expectation of writability.
+        let data_root = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
+        let settings_root = dirs::config_dir().unwrap_or_else(|| data_root.clone());
 
         Self {
             settings_file: settings_root.join("gmpublished/settings.json"),
             legacy_settings_file: settings_root.join("gmpublisher/settings.json"),
-            default_user_data_dir: user_data_dir,
+            default_user_data_dir: data_root.join("gmpublisher"),
             default_temp_dir: default_temp_dir(),
             default_downloads_dir: dirs::download_dir(),
         }
@@ -557,15 +557,11 @@ impl AppData {
                 return Some(path);
             }
             log::warn!("Failed to parse Steam library folders. Waiting for Steam...");
-            for i in 0..3_u8 {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if steam.connected() {
-                    log::info!("Steam connected!");
-                    break;
-                } else if i == 2 {
-                    log::warn!("Gave up.");
-                    return None;
-                }
+            if steam.wait_for_connected(std::time::Duration::from_secs(3)) {
+                log::info!("Steam connected!");
+            } else {
+                log::warn!("Gave up.");
+                return None;
             }
         }
 

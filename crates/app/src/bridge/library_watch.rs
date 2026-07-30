@@ -14,6 +14,7 @@ use notify::{
 };
 
 use crate::bridge::gma::is_gma_path;
+use crate::generation::Generation;
 
 const QUIET_WINDOW: Duration = Duration::from_secs(1);
 /// Sustained disk churn (e.g. Steam mass-updating workshop items) never
@@ -26,7 +27,7 @@ const WATCH_EVENT_QUEUE: usize = 100;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct WatchSubscriptionKey {
     roots: WatchRoots,
-    arm_epoch: u64,
+    arm_epoch: Generation,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -62,7 +63,7 @@ pub enum Message {
     WatchArmed { degraded: bool },
 }
 
-pub fn subscription(gmod_dir: Option<&Path>, arm_epoch: u64) -> Subscription<Message> {
+pub fn subscription(gmod_dir: Option<&Path>, arm_epoch: Generation) -> Subscription<Message> {
     let Some(roots) = gmod_dir.and_then(WatchRoots::from_gmod_dir) else {
         return Subscription::none();
     };

@@ -99,7 +99,7 @@ fn search_add_bulk_indexes_installed_addons_and_deduplicates_workshop_ids() {
     let search = Search::new();
 
     search.add_bulk(&[first, second, local_only]);
-    search.dirty();
+    search.ensure_sorted();
 
     assert_eq!(search.items.read().len(), 3);
     assert_eq!(search.installed_addons.read().len(), 1);
@@ -122,7 +122,7 @@ fn sync_installed_addons_replaces_installed_subset_only() {
         vec!["oldterm".to_owned()],
         2_u64,
     )]);
-    search.dirty();
+    search.ensure_sorted();
 
     search.sync_installed_addons(vec![SearchItem::new_installed_addon(
         PathBuf::from("/tmp/new.gma"),
@@ -131,7 +131,7 @@ fn sync_installed_addons_replaces_installed_subset_only() {
         vec!["newterm".to_owned()],
         3_u64,
     )]);
-    search.dirty();
+    search.ensure_sorted();
 
     let labels = search
         .items
@@ -239,7 +239,7 @@ fn sync_installed_addon_files_searches_file_scope_only() {
 }
 
 #[test]
-fn dirty_sorts_once_then_singular_adds_replace_by_identity() {
+fn ensure_sorted_sorts_once_then_singular_adds_replace_by_identity() {
     let search = Search::new();
     search.add_bulk(&[
         search_fixture(1, "Alpha", ["tool"], 100),
@@ -247,7 +247,7 @@ fn dirty_sorts_once_then_singular_adds_replace_by_identity() {
     ]);
 
     // The first query sorts; the flag must clear so later queries skip it.
-    search.dirty();
+    search.ensure_sorted();
     assert!(!search.dirty.load(std::sync::atomic::Ordering::Acquire));
 
     // Same source, new timestamp: the old entry is replaced, not
@@ -300,7 +300,7 @@ fn search_fixture(
 fn search_quick_matches_terms_when_label_does_not_match() {
     let search = Search::new();
     search.add_bulk(&[search_fixture(501, "Completely Different", ["needle"], 1)]);
-    search.dirty();
+    search.ensure_sorted();
 
     let result = search.quick_scored("needle", SearchScope::Addons);
 
@@ -317,7 +317,7 @@ fn search_quick_multi_word_query_requires_all_atoms() {
         search_fixture(511, "Wire Extras", Vec::<String>::new(), 2),
         search_fixture(512, "Model Dump", Vec::<String>::new(), 3),
     ]);
-    search.dirty();
+    search.ensure_sorted();
 
     let result = search.quick_scored("wire model", SearchScope::Addons);
 
@@ -339,18 +339,35 @@ fn search_quick_caps_results_reports_has_more_and_orders_by_score() {
         .collect::<Vec<_>>();
     let search = Search::new();
     search.add_bulk(&fixtures);
-    search.dirty();
+    search.ensure_sorted();
+
+    let pattern = Pattern::parse("needle", CaseMatching::Ignore, Normalization::Smart);
+    let mut expected = search
+        .items
+        .read()
+        .iter()
+        .filter_map(|item| {
+            best_search_item_score(&pattern, "needle", item).map(|score| QuickSearchHit {
+                score,
+                item: item.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    expected.sort_by(quick_hit_order);
+    expected.truncate(MAX_QUICK_RESULTS);
 
     let result = search.quick_scored("needle", SearchScope::Addons);
 
-    assert_eq!(result.hits.len(), usize::from(MAX_QUICK_RESULTS));
+    assert_eq!(result.hits, expected);
     assert!(result.has_more);
-    assert!(
-        result
-            .hits
-            .windows(2)
-            .all(|window| window[0].score >= window[1].score)
-    );
+
+    // Rayon scheduling is deliberately outside the result contract.
+    for _ in 0..20 {
+        assert_eq!(
+            search.quick_scored("needle", SearchScope::Addons).hits,
+            expected
+        );
+    }
 }
 
 #[test]
@@ -363,7 +380,7 @@ fn full_search_emits_progress_data_and_finished_transaction_events() {
         search_fixture(702, "Other", ["needle"], 2),
         search_fixture(703, "Unrelated", ["sandbox"], 3),
     ]);
-    search.dirty();
+    search.ensure_sorted();
     let transaction = transactions.begin();
     let transaction_id = transaction.id();
 

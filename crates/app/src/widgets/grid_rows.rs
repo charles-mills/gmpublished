@@ -224,8 +224,9 @@ pub fn append_grid_follow_up_effects<S, E>(
 ///
 /// A route may place items before its rows (My Workshop's "publish new" tile),
 /// so a row index and its grid item index are not equal. That offset is
-/// *derived* by [`Self::sync_items`] from the lead it actually placed, rather
-/// than stored alongside as a number that could disagree with the grid.
+/// recalculated by [`Self::sync_items`] from the lead it actually placed,
+/// rather than accepted as a caller-supplied claim that could disagree with
+/// the grid.
 #[derive(Debug)]
 pub struct GridPane {
     grid: addon_grid::State,

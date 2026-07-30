@@ -9,13 +9,15 @@ use quick_cache::{DefaultHashBuilder, unsync::Cache};
 use crate::{
     bridge::tasks::BackendContext,
     media::thumbnail_worker::{
-        FetchProfile, PreparedThumbnail, ThumbnailError, ThumbnailKey, ThumbnailMode,
-        ThumbnailWorkerOutcome, WorkerDiskCache, run_prepared_thumbnail_request, validate_max_edge,
+        FetchProfile, PreparedThumbnail, ThumbnailError, ThumbnailKey, ThumbnailWorkerOutcome,
+        WorkerDiskCache, run_prepared_thumbnail_request, validate_max_edge,
     },
 };
 
 #[cfg(test)]
 use crate::generation::Generation;
+#[cfg(test)]
+use crate::media::thumbnail_worker::ThumbnailMode;
 #[cfg(test)]
 use crate::media::thumbnail_worker::{Thumbnail, ThumbnailInput, ThumbnailMetadata};
 
@@ -26,8 +28,8 @@ mod placeholders;
 
 pub use delivery::{Delivery, DeliveryResult, Message, ReadyThumbnail, ThumbnailDeliveryError};
 pub use demand::{
-    Demand, DemandId, DemandSet, Owner, Priority, ReplaceMode, bucketed_thumbnail_scale,
-    physical_thumbnail_edge, prefetch_ranges, retained_rows,
+    Demand, DemandCapabilities, DemandId, DemandSet, Owner, Priority, ReplaceMode,
+    bucketed_thumbnail_scale, physical_thumbnail_edge, prefetch_ranges, retained_rows,
 };
 pub use index::{JobId, RetryAttempt, RetryId};
 pub use placeholders::PlaceholderImage;
@@ -47,13 +49,13 @@ const DEFAULT_MAX_IN_FLIGHT: usize = 32;
 // quadratically with density.
 const DEFAULT_MEMORY_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_DISK_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
-/// Ceiling on background warm jobs in flight.
+/// Ceiling on cache-only jobs in flight.
 ///
-/// A cap on warm, not a reservation for it: the gate counts *total* in-flight
-/// work, so interactive jobs occupy the same pipe and warm gets whatever is
+/// A cap, not a reservation: the gate counts *total* in-flight work, so
+/// interactive jobs occupy the same pipe and cache-only work gets whatever is
 /// left under this number. That is the conservative direction — a scroll burst
-/// squeezes warming out rather than queueing behind it.
-const WARM_MAX_IN_FLIGHT: usize = 8;
+/// squeezes background work out rather than queueing behind it.
+const CACHE_ONLY_MAX_IN_FLIGHT: usize = 8;
 
 /// The cache deliberately uses `quick_cache`'s default lifecycle.
 ///
@@ -213,30 +215,18 @@ impl Manager {
         // queue position, in-flight job, and retry state all survive.
         let mut retained = HashSet::with_capacity(set.demands.len());
         let mut resolved = Vec::with_capacity(set.demands.len());
-        for mut demand in set.demands {
-            // The owner decides warm-ness; the priority carried by a demand is
-            // only its position within a tier. Five downstream sites classify a
-            // demand as warm by its priority and one by its owner, so they can
-            // only agree if the two are reconciled here, at the single point
-            // demands enter the manager.
-            if set.owner.is_warm() {
-                demand.priority = Priority::WarmLibrary;
-            }
-
+        for demand in set.demands {
             let physical_max_edge =
                 physical_thumbnail_edge(demand.logical_max_edge, self.scale_factor);
-            let key = if set.owner == Owner::SizeAnalyzer {
-                demand
-                    .input
-                    .cache_key_with_mode(physical_max_edge, ThumbnailMode::Static)
-            } else {
-                demand.input.cache_key(physical_max_edge)
-            };
+            let key = demand
+                .input
+                .cache_key_with_mode(physical_max_edge, demand.capabilities.mode());
             let interest = index::InterestKey {
                 owner: set.owner,
                 generation: set.generation,
                 id: demand.id.clone(),
                 key: key.clone(),
+                capabilities: demand.capabilities,
             };
             let _ = retained.insert(interest);
             resolved.push((demand, key, physical_max_edge));
@@ -245,12 +235,13 @@ impl Manager {
         match set.replace {
             ReplaceMode::Owner => self.index.retain_owner(&set.owner, &retained),
         }
-        if set.owner == Owner::SizeAnalyzer {
-            let ids = resolved
-                .iter()
-                .map(|(demand, _, _)| demand.id.clone())
-                .collect::<HashSet<_>>();
-            self.index.remove_queued_warm(&ids);
+        let superseding_ids = resolved
+            .iter()
+            .filter(|(demand, _, _)| demand.capabilities.supersedes_cache_only())
+            .map(|(demand, _, _)| demand.id.clone())
+            .collect::<HashSet<_>>();
+        if !superseding_ids.is_empty() {
+            self.index.remove_queued_cache_only(&superseding_ids);
         }
 
         let mut immediate = Vec::new();
@@ -269,6 +260,7 @@ impl Manager {
                 set.generation,
                 &demand.id,
                 &key,
+                demand.capabilities,
                 demand.priority,
                 promoted_sequence,
             ) {
@@ -276,33 +268,35 @@ impl Manager {
             }
 
             if let Err(error) = validate_max_edge(physical_max_edge) {
-                immediate.push(Message::Delivered(Box::new(Delivery::failed(
-                    set.owner,
-                    set.generation,
-                    demand.id,
-                    key,
-                    ThumbnailDeliveryError::Thumbnail(Arc::new(error)),
-                ))));
+                if !demand.capabilities.is_cache_only() {
+                    immediate.push(Message::Delivered(Box::new(Delivery::failed(
+                        set.owner,
+                        set.generation,
+                        demand.id,
+                        key,
+                        ThumbnailDeliveryError::Thumbnail(Arc::new(error)),
+                    ))));
+                }
                 continue;
             }
 
-            // Warm is resolved *before* the memory cache is consulted, because
-            // the two ask different questions. Warm's product is bytes on disk;
+            // Cache-only demand is resolved *before* the memory cache is
+            // consulted, because the two ask different questions. Its product is bytes on disk;
             // resident pixels do not imply a banked source (a legacy
             // derived-tier hit has pixels and no source), and a memory hit here
-            // would both skip the banking warm exists to do and emit a
-            // `Delivered` to `Owner::WarmLibrary`, which nothing consumes. It
-            // would also drag the whole warm sweep through `quick_cache`'s
+            // would both skip the requested banking and emit a `Delivered`
+            // that no cache-only consumer expects. It would also drag the
+            // whole background sweep through `quick_cache`'s
             // recency window on the way past.
-            if demand.priority == Priority::WarmLibrary {
-                // Warming only exists to fill the disk cache; a URL already on
-                // disk needs no job, and nothing paints for the warm owner so
+            if demand.capabilities.is_cache_only() {
+                // Cache-only work exists to fill the disk cache; a URL already on
+                // disk needs no job, and nothing paints for the requesting owner so
                 // no placeholder either. (A URL banked between this check and
                 // job start just costs one redundant `contains_source` probe in
                 // the worker.)
                 //
                 // The question is asked of the *source* tier, not the derived
-                // key. Warm writes no derived entries, so a derived-key check
+                // key. Cache-only work writes no derived entries, so a derived-key check
                 // could never hit — it would re-enqueue the entire library on
                 // every session after the first.
                 if let Some(url) = key.source_url()
@@ -341,7 +335,7 @@ impl Manager {
             // No pixels yet: paint a ThumbHash placeholder now if we know one for
             // this URL. Surfaces ignore a placeholder once they hold real pixels,
             // so re-emitting during the in-flight window is a harmless no-op.
-            if set.owner != Owner::SizeAnalyzer
+            if demand.capabilities.accepts_placeholders()
                 && let Some(placeholder) = self.placeholders.get(demand.input.source_url())
             {
                 immediate.push(Message::Delivered(Box::new(Delivery::placeholder(
@@ -384,11 +378,11 @@ impl Manager {
                     self.placeholders.remember(url, hash);
                 }
                 let ready = ready_thumbnail(key.clone(), thumbnail);
-                // Warm-only completions fill the disk cache without churning
+                // Cache-only completions fill the disk cache without churning
                 // the memory cache's recency window; everything else — even a
                 // completion nobody wants anymore — is kept, so a scroll-back
                 // hits memory instead of re-decoding.
-                if !self.index.interests_warm_only(key) {
+                if !self.index.interests_cache_only(key) {
                     self.cache.insert(key.clone(), ready.clone());
                 }
                 Some(ready)
@@ -405,6 +399,7 @@ impl Manager {
                 self.index
                     .complete_key(key)
                     .into_iter()
+                    .filter(|entry| !entry.capabilities.is_cache_only())
                     .map(|entry| {
                         Message::Delivered(Box::new(Delivery::ready(
                             entry.owner,
@@ -419,7 +414,7 @@ impl Manager {
                     .collect(),
             ),
             Ok(ThumbnailWorkerOutcome::SourceBanked) => {
-                self.index.retire_warm_interests(key);
+                self.index.retire_cache_only_interests(key);
                 CompletionEffects::default()
             }
             Ok(ThumbnailWorkerOutcome::Cancelled) => {
@@ -491,11 +486,11 @@ impl Manager {
     fn pump(&mut self, ctx: &BackendContext) -> Task<Message> {
         let mut tasks = Vec::new();
         while self.index.in_flight_count() < self.config.max_in_flight.max(1) {
-            // Warm jobs only take slots interactive tiers leave idle, so a
+            // Cache-only jobs only take slots interactive tiers leave idle, so a
             // scroll burst always finds most of the pipe free.
-            let allow_warm = self.index.in_flight_count() < WARM_MAX_IN_FLIGHT;
+            let allow_cache_only = self.index.in_flight_count() < CACHE_ONLY_MAX_IN_FLIGHT;
             let job_id = JobId(self.allocate_work_id());
-            let Some(candidate) = self.index.next_candidate(job_id, allow_warm) else {
+            let Some(candidate) = self.index.next_candidate(job_id, allow_cache_only) else {
                 break;
             };
             tasks.push(self.start_candidate(ctx, candidate));
@@ -508,8 +503,8 @@ impl Manager {
         let request = candidate.request;
         let key = request.key().clone();
         let message_key = key.clone();
-        let profile = if candidate.priority == Priority::WarmLibrary {
-            FetchProfile::BackgroundWarm
+        let profile = if candidate.capabilities.is_cache_only() {
+            FetchProfile::CacheOnly
         } else {
             FetchProfile::Interactive
         };
@@ -559,7 +554,7 @@ impl Manager {
         self.disk_cache.clone()
     }
 
-    /// Scales the disk-cache eviction budget to the library so a full warm
+    /// Scales the disk-cache eviction budget to the library so a full cache-only sweep
     /// actually fits (the 256 MB default thrashes below library size).
     pub(crate) fn scale_disk_cache_to_library(&self, addon_count: usize) {
         const PER_ADDON_BYTES: u64 = 1_310_720; // ~1.25 MiB decoded at 512px
@@ -733,7 +728,12 @@ mod tests {
             owner: Owner::SizeAnalyzer,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("row-1", input, 64, Priority::SizeAnalyzer)],
+            demands: vec![static_analysis(demand(
+                "row-1",
+                input,
+                64,
+                Priority::SizeAnalyzer,
+            ))],
         });
 
         assert!(messages.is_empty());
@@ -751,13 +751,23 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand(
+                "101",
+                input.clone(),
+                256,
+                Priority::Prefetch,
+            ))],
         });
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::SizeAnalyzer,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input, 64, Priority::SizeAnalyzer)],
+            demands: vec![static_analysis(demand(
+                "101",
+                input,
+                64,
+                Priority::SizeAnalyzer,
+            ))],
         });
 
         assert_eq!(manager.pending_count(), 1);
@@ -776,7 +786,12 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand(
+                "101",
+                input.clone(),
+                256,
+                Priority::Prefetch,
+            ))],
         });
         let warm = manager
             .next_candidate_for_test()
@@ -785,7 +800,12 @@ mod tests {
             owner: Owner::SizeAnalyzer,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input, 64, Priority::SizeAnalyzer)],
+            demands: vec![static_analysis(demand(
+                "101",
+                input,
+                64,
+                Priority::SizeAnalyzer,
+            ))],
         });
 
         assert!(manager.next_candidate_for_test().is_none());
@@ -813,7 +833,7 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand("101", input, 256, Priority::Prefetch))],
         });
         assert!(messages.is_empty(), "warm demands paint nothing up front");
 
@@ -845,7 +865,7 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand("101", input, 256, Priority::Prefetch))],
         });
         let candidate = manager.next_candidate_for_test().expect("warm job queued");
         let _ = manager.complete_job(
@@ -875,7 +895,12 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand(
+                "101",
+                input.clone(),
+                256,
+                Priority::Prefetch,
+            ))],
         });
         let warm = manager.next_candidate_for_test().expect("warm job queued");
 
@@ -1072,12 +1097,12 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand(
+            demands: vec![cache_only(demand(
                 "101",
                 ThumbnailInput::from_url(url),
                 256,
-                Priority::WarmLibrary,
-            )],
+                Priority::Prefetch,
+            ))],
         });
 
         assert!(
@@ -1109,7 +1134,7 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input, 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand("101", input, 256, Priority::Prefetch))],
         });
 
         assert!(
@@ -1128,7 +1153,12 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", input.clone(), 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand(
+                "101",
+                input.clone(),
+                256,
+                Priority::Prefetch,
+            ))],
         });
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::InstalledAddons,
@@ -1161,7 +1191,12 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("101", warm_input, 256, Priority::WarmLibrary)],
+            demands: vec![cache_only(demand(
+                "101",
+                warm_input,
+                256,
+                Priority::Prefetch,
+            ))],
         });
         assert!(
             manager.index.next_candidate(JobId(900), false).is_none(),
@@ -1637,11 +1672,8 @@ mod tests {
         );
     }
 
-    /// Warm-ness is asked of the priority at five sites and of the owner at
-    /// one. A set whose owner is warm but whose demands carry an interactive
-    /// priority must not be classified both ways.
     #[test]
-    fn a_warm_owner_overrides_an_interactive_demand_priority() {
+    fn cache_only_policy_is_independent_of_priority_and_owner() {
         let mut manager = Manager::new(Config::default());
         let input = ThumbnailInput::from_url("https://example.com/warm.png");
 
@@ -1649,32 +1681,40 @@ mod tests {
             owner: Owner::WarmLibrary,
             generation: Generation::INITIAL,
             replace: ReplaceMode::Owner,
-            demands: vec![demand("1", input, 256, Priority::VisibleRow)],
+            demands: vec![cache_only(demand("1", input, 256, Priority::VisibleRow))],
         });
 
         assert_eq!(manager.pending_count(), 1, "the demand should be queued");
-        assert!(
-            manager
-                .index
-                .priorities()
-                .iter()
-                .all(|priority| *priority == Priority::WarmLibrary),
-            "a warm owner's demands are warm regardless of the priority asked for"
-        );
+        assert_eq!(manager.index.priorities(), vec![Priority::VisibleRow]);
+        assert!(manager.index.next_candidate(JobId(1), false).is_none());
+        let candidate = manager
+            .index
+            .next_candidate(JobId(2), true)
+            .expect("cache-only work starts in background headroom");
+        assert!(candidate.capabilities.is_cache_only());
     }
 
     fn demand(
-        id: impl Into<String>,
+        id: impl Into<Arc<str>>,
         input: ThumbnailInput,
         max_edge: u32,
         priority: Priority,
     ) -> Demand {
         Demand {
-            id: DemandId::new(id),
+            id: DemandId::row(id),
             input,
             logical_max_edge: max_edge,
             priority,
+            capabilities: DemandCapabilities::SURFACE,
         }
+    }
+
+    fn cache_only(demand: Demand) -> Demand {
+        demand.with_capabilities(DemandCapabilities::CACHE_ONLY)
+    }
+
+    fn static_analysis(demand: Demand) -> Demand {
+        demand.with_capabilities(DemandCapabilities::STATIC_ANALYSIS)
     }
 
     fn solid_thumbnail(width: u32, height: u32, seed: u8) -> Thumbnail {

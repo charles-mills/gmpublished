@@ -18,7 +18,6 @@ pub const MIN_FRAME_DELAY: Duration = Duration::from_millis(10);
 /// Maximum width or height retained for decoded GIF preview frames in tests.
 #[cfg(test)]
 pub const GIF_PREVIEW_MAX_EDGE: u32 = 256;
-/// Maximum frame count retained in a baked display atlas before decimation.
 /// Frames retained in a baked display atlas.
 ///
 /// 32, not 64. Combined with the 256 px tile ceiling this halves the worst-case

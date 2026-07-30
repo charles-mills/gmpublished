@@ -7,6 +7,7 @@ pub mod file_browser;
 pub mod file_types;
 pub mod forward;
 pub mod grid_rows;
+pub mod icon;
 pub mod route_state;
 pub mod scaled;
 pub mod select;

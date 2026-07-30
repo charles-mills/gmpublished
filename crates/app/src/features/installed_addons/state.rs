@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use iced::widget::image;
@@ -28,7 +28,7 @@ pub struct State {
     watch_gmod_dir: Option<PathBuf>,
     watch_degraded: bool,
     watch_retry_attempted: bool,
-    watch_arm_epoch: u64,
+    watch_arm_epoch: Generation,
     /// The full local library and its scan state as one value; see [`Library`].
     /// The grid virtualizes rendering and windows hydration itself, so every
     /// row is handed to it at once — paging a fully-known local list only made
@@ -66,7 +66,7 @@ impl Default for State {
             watch_gmod_dir: None,
             watch_degraded: false,
             watch_retry_attempted: false,
-            watch_arm_epoch: 0,
+            watch_arm_epoch: Generation::INITIAL,
             library: Library::Unscanned,
             workshop_index: HashMap::new(),
             metadata_in_flight: HashSet::new(),
@@ -122,12 +122,12 @@ impl State {
         true
     }
 
-    pub(crate) const fn watch_arm_epoch(&self) -> u64 {
+    pub(crate) const fn watch_arm_epoch(&self) -> Generation {
         self.watch_arm_epoch
     }
 
-    pub(crate) fn watch_gmod_dir(&self) -> Option<&PathBuf> {
-        self.watch_gmod_dir.as_ref()
+    pub(crate) fn watch_gmod_dir(&self) -> Option<&Path> {
+        self.watch_gmod_dir.as_deref()
     }
 
     /// Points the library watcher at a (new) gmod dir. The subscription is
@@ -177,7 +177,10 @@ impl State {
             return false;
         }
 
-        let Some(index) = self.pane.index_of_str(delivery.id.as_str()) else {
+        let Some(row_key) = delivery.id.row_key() else {
+            return false;
+        };
+        let Some(index) = self.pane.index_of_str(row_key) else {
             return false;
         };
         let Some(row) = self.library.rows_mut().get_mut(index) else {
@@ -363,7 +366,7 @@ impl State {
     fn rearm_watch_on_route_entry(&mut self) {
         if self.watch_degraded && !self.watch_retry_attempted {
             self.watch_retry_attempted = true;
-            self.watch_arm_epoch = self.watch_arm_epoch.wrapping_add(1);
+            self.watch_arm_epoch.bump();
         }
     }
 
@@ -451,7 +454,7 @@ impl State {
         let (before, after) = thumbnail_demand::prefetch_ranges(visible.clone(), self.rows().len());
         for range in [visible, after, before] {
             for row in self.rows().get(range).unwrap_or_default() {
-                let Some(item_id) = row_workshop_id(row) else {
+                let Some(item_id) = row.workshop_id() else {
                     continue;
                 };
                 if self.metadata_in_flight.contains(&item_id)
@@ -756,10 +759,6 @@ impl Library {
             Self::Failed(_) => "failed",
         }
     }
-}
-
-fn row_workshop_id(row: &Row) -> Option<PublishedFileId> {
-    row.workshop_id()
 }
 
 /// Builds a `workshop_id -> row indices` lookup so metadata patches can be

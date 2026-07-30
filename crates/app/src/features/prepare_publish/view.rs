@@ -15,6 +15,7 @@ use crate::{
     i18n::translated_error,
     theme::{self, Tokens, ViewCtx},
     widgets::file_browser::{self, Row as FileBrowserRowData, RowKind as FileBrowserEntryKind},
+    widgets::icon::svg_icon as icon,
     widgets::select,
     widgets::tooltip as tooltip_widget,
 };
@@ -833,12 +834,4 @@ fn ignored_pattern_row(
             .interaction(iced::mouse::Interaction::Pointer)
             .into()
     }
-}
-
-fn icon<'a>(handle: svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
 }

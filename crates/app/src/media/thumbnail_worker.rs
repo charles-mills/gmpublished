@@ -47,8 +47,8 @@ impl ThumbnailCancellation {
 #[derive(Clone, Debug)]
 pub enum ThumbnailWorkerOutcome<T> {
     Completed(T),
-    /// A background-warm job that put the source bytes on disk and stopped
-    /// there. It carries no thumbnail because it decoded nothing: warming
+    /// A cache-only job that put the source bytes on disk and stopped there.
+    /// It carries no thumbnail because it decoded nothing: this policy
     /// exists to make the *next* request local, and nothing paints for it.
     SourceBanked,
     Cancelled,
@@ -81,15 +81,15 @@ pub enum FetchProfile {
     /// interactive fetch is a first fetch and a variant would put that
     /// rendition latency on screen.
     Interactive,
-    /// Bandwidth-first background warming: request a tile-sized CDN
+    /// Bandwidth-first cache-only fetch: request a tile-sized CDN
     /// rendition (10-100x fewer bytes), falling back to the bare URL for
     /// GIF re-encodes (byte-unpredictable, 0.6x-2.1x measured) and on any
     /// variant failure.
     ///
     /// Stops at bytes. It banks the source and returns
     /// [`ThumbnailWorkerOutcome::SourceBanked`] without decoding — see
-    /// [`run_warm_source_request`].
-    BackgroundWarm,
+    /// [`run_cache_only_source_request`].
+    CacheOnly,
 }
 
 pub fn run_thumbnail_request(
@@ -106,8 +106,8 @@ pub fn run_thumbnail_request(
         return Ok(ThumbnailWorkerOutcome::Cancelled);
     }
 
-    if profile == FetchProfile::BackgroundWarm {
-        return run_warm_source_request(disk_cache, request.input().clone(), cancellation);
+    if profile == FetchProfile::CacheOnly {
+        return run_cache_only_source_request(disk_cache, request.input().clone(), cancellation);
     }
 
     let key = request.key();
@@ -156,7 +156,7 @@ pub fn run_thumbnail_request(
                 //
                 // Through `remove_source_bytes`, never a bare `remove_file`:
                 // the index is what `contains_source` answers from, so an
-                // unindexed delete would leave the warm filter believing this
+                // unindexed delete would leave the cache-only filter believing this
                 // URL is banked and never repairing it.
                 log::debug!("cached thumbnail source for {url} failed to decode: {error}");
                 remove_source_bytes(cache, url.as_ref());
@@ -188,29 +188,29 @@ pub fn run_thumbnail_request(
     result
 }
 
-/// The whole of a background-warm job: get this URL's bytes into the source
+/// The whole of a cache-only job: get this URL's bytes into the source
 /// tier, and stop.
 ///
 /// Warm deliberately stops short of the full interactive pipeline (decode,
 /// resize, write a derived entry, hand back a `Thumbnail`) because it is
-/// warming a tile nothing is going to paint. A decode and resize here would be
-/// spent on a size chosen by the warm pass rather than by whatever eventually
+/// processing a tile nothing is going to paint. A decode and resize here would
+/// be spent on a size chosen by the background pass rather than by whatever eventually
 /// asks — a DPI change, or a different card size, invalidates every one of
 /// them — and the derived entry would sit in the same disk budget as the
 /// source it came from, evicting real sources to store a guess.
 ///
-/// What that costs: the first interactive request for a warmed URL pays a
+/// What that costs: the first interactive request for a banked URL pays a
 /// local decode (measured at 2.7 ms for a 512x512 JPEG, 11.5 ms for
 /// 1920x1080) instead of a disk read. What it buys: no network, which is the
 /// term that actually dominates.
-fn run_warm_source_request(
+fn run_cache_only_source_request(
     disk_cache: Option<&WorkerDiskCache>,
     input: ThumbnailInput,
     cancellation: &ThumbnailCancellation,
 ) -> ThumbnailResult<ThumbnailWorkerOutcome<Thumbnail>> {
     let ThumbnailInput::Url { url } = input;
 
-    // Without a disk cache there is nothing to warm into, so a fetch would be
+    // Without a disk cache there is nothing to bank into, so a fetch would be
     // pure network cost for bytes that go straight in the bin.
     let Some(cache) = disk_cache else {
         return Ok(ThumbnailWorkerOutcome::SourceBanked);
@@ -334,7 +334,7 @@ mod tests {
         let outcome = run_thumbnail_request(
             Some(&cache),
             &ThumbnailRequest::new(input, 256, key.mode()),
-            FetchProfile::BackgroundWarm,
+            FetchProfile::CacheOnly,
             &ThumbnailCancellation::default(),
         )
         .expect("a banked source needs no work");

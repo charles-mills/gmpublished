@@ -17,8 +17,9 @@ use std::{
 use iced::animation::Easing;
 use iced::widget::text_editor;
 
-use crate::theme::{Tokens, motion};
+use crate::theme::{self, motion};
 
+use crate::bridge::tasks::WorkshopSnapshotId;
 use crate::bridge::{
     domain::{PublishedFileId, WorkshopDownloadSuccess, workshop_url},
     publish::{PublishSubmitMode, PublishSubmitPreview, PublishSubmitRequest},
@@ -47,51 +48,26 @@ use crate::spinner_clock::SpinnerClock;
 
 const SEED_THUMBNAIL_MAX_EDGE: u32 = 512;
 
-/// Steam Workshop addon-type tag. The wire value (`as_str`) is the exact
-/// string the backend and workshop tags expect, not a Rust-cased rendering.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AddonType {
-    ServerContent,
-    Gamemode,
-    Map,
-    Weapon,
-    Vehicle,
-    Npc,
-    Tool,
-    Effects,
-    Model,
-    Entity,
+mapped_enum_with_all! {
+    /// Steam Workshop addon-type tag. The wire value (`as_str`) is the exact
+    /// string the backend and workshop tags expect, not a Rust-cased rendering.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AddonType {
+        ServerContent => "ServerContent",
+        Gamemode => "gamemode",
+        Map => "map",
+        Weapon => "weapon",
+        Vehicle => "vehicle",
+        Npc => "npc",
+        Tool => "tool",
+        Effects => "effects",
+        Model => "model",
+        Entity => "entity",
+    }
+    as_str -> &'static str
 }
 
 impl AddonType {
-    const ALL: [Self; 10] = [
-        Self::ServerContent,
-        Self::Gamemode,
-        Self::Map,
-        Self::Weapon,
-        Self::Vehicle,
-        Self::Npc,
-        Self::Tool,
-        Self::Effects,
-        Self::Model,
-        Self::Entity,
-    ];
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ServerContent => "ServerContent",
-            Self::Gamemode => "gamemode",
-            Self::Map => "map",
-            Self::Weapon => "weapon",
-            Self::Vehicle => "vehicle",
-            Self::Npc => "npc",
-            Self::Tool => "tool",
-            Self::Effects => "effects",
-            Self::Model => "model",
-            Self::Entity => "entity",
-        }
-    }
-
     fn from_workshop_tag(tag: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -99,47 +75,24 @@ impl AddonType {
     }
 }
 
-/// Steam Workshop content tag (up to three per addon).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AddonTag {
-    Fun,
-    Roleplay,
-    Scenic,
-    Movie,
-    Realism,
-    Cartoon,
-    Water,
-    Comic,
-    Build,
+mapped_enum_with_all! {
+    /// Steam Workshop content tag (up to three per addon).
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AddonTag {
+        Fun => "fun",
+        Roleplay => "roleplay",
+        Scenic => "scenic",
+        Movie => "movie",
+        Realism => "realism",
+        Cartoon => "cartoon",
+        Water => "water",
+        Comic => "comic",
+        Build => "build",
+    }
+    as_str -> &'static str
 }
 
 impl AddonTag {
-    const ALL: [Self; 9] = [
-        Self::Fun,
-        Self::Roleplay,
-        Self::Scenic,
-        Self::Movie,
-        Self::Realism,
-        Self::Cartoon,
-        Self::Water,
-        Self::Comic,
-        Self::Build,
-    ];
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Fun => "fun",
-            Self::Roleplay => "roleplay",
-            Self::Scenic => "scenic",
-            Self::Movie => "movie",
-            Self::Realism => "realism",
-            Self::Cartoon => "cartoon",
-            Self::Water => "water",
-            Self::Comic => "comic",
-            Self::Build => "build",
-        }
-    }
-
     fn from_workshop_tag(tag: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -159,7 +112,7 @@ pub struct UpdateTarget {
     pub(crate) title: String,
     pub(crate) tags: Vec<String>,
     pub(crate) preview_url: Option<String>,
-    pub(crate) snapshot_request_id: u64,
+    pub(crate) snapshot_request_id: WorkshopSnapshotId,
     pub(crate) snapshot_destination: PathBuf,
 }
 
@@ -183,8 +136,8 @@ impl Default for BrowserSelectHover {
     fn default() -> Self {
         Self(motion::asymmetric(
             false,
-            Tokens::dark().motion.hover_in_duration(),
-            Tokens::dark().motion.hover_out_duration(),
+            theme::invariant().motion.hover_in_duration(),
+            theme::invariant().motion.hover_out_duration(),
             Easing::EaseOut,
         ))
     }
@@ -234,44 +187,24 @@ impl PartialEq for ChangelogContent {
     }
 }
 
-/// A submit prerequisite the user supplies themselves, ordered as the modal
-/// lays them out.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Requirement {
-    AddonPath,
-    Title,
-    AddonType,
-    Tag,
-    Changelog,
+mapped_enum_with_all! {
+    /// A submit prerequisite the user supplies themselves, ordered as the modal
+    /// lays them out.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(u8)]
+    pub enum Requirement {
+        AddonPath => "prepare-publish-needs-addon-path",
+        Title => "prepare-publish-needs-title",
+        AddonType => "prepare-publish-needs-addon-type",
+        Tag => "prepare-publish-needs-tag",
+        Changelog => "prepare-publish-needs-changelog",
+    }
+    label_key -> &'static str
 }
 
 impl Requirement {
-    const ALL: [Self; 5] = [
-        Self::AddonPath,
-        Self::Title,
-        Self::AddonType,
-        Self::Tag,
-        Self::Changelog,
-    ];
-
     const fn bit(self) -> u8 {
-        match self {
-            Self::AddonPath => 1 << 0,
-            Self::Title => 1 << 1,
-            Self::AddonType => 1 << 2,
-            Self::Tag => 1 << 3,
-            Self::Changelog => 1 << 4,
-        }
-    }
-
-    const fn label_key(self) -> &'static str {
-        match self {
-            Self::AddonPath => "prepare-publish-needs-addon-path",
-            Self::Title => "prepare-publish-needs-title",
-            Self::AddonType => "prepare-publish-needs-addon-type",
-            Self::Tag => "prepare-publish-needs-tag",
-            Self::Changelog => "prepare-publish-needs-changelog",
-        }
+        1 << self as u8
     }
 }
 
@@ -359,8 +292,8 @@ pub struct State {
     open: bool,
     mode: Mode,
     request_generation: Generation,
-    workshop_loads: HashMap<u64, WorkshopContentLoad>,
-    active_workshop_request: Option<u64>,
+    workshop_loads: HashMap<WorkshopSnapshotId, WorkshopContentLoad>,
+    active_workshop_request: Option<WorkshopSnapshotId>,
     workshop_snapshot_path: Option<PathBuf>,
     pending_cleanup: Vec<PathBuf>,
     icon_generation: Generation,
@@ -603,10 +536,11 @@ impl State {
         };
 
         set.demands.push(thumbnail_demand::Demand {
-            id: thumbnail_demand::DemandId::new(target.workshop_id.to_string()),
+            id: thumbnail_demand::DemandId::workshop(target.workshop_id),
             input: ThumbnailInput::from_url(url),
             logical_max_edge: SEED_THUMBNAIL_MAX_EDGE,
             priority: thumbnail_demand::Priority::ActiveDetail,
+            capabilities: thumbnail_demand::DemandCapabilities::SURFACE,
         });
         set
     }
@@ -628,7 +562,7 @@ impl State {
         let Mode::Update(target) = &self.mode else {
             return false;
         };
-        if delivery.id.as_str() != target.workshop_id.to_string() {
+        if delivery.id.workshop_id() != Some(target.workshop_id) {
             return false;
         }
 
@@ -943,7 +877,7 @@ impl State {
 
     pub(super) fn apply_workshop_submission_result(
         &mut self,
-        request_id: u64,
+        request_id: WorkshopSnapshotId,
         result: Result<(), UiError>,
     ) {
         if result.is_ok() || !self.workshop_loads.contains_key(&request_id) {
@@ -961,7 +895,7 @@ impl State {
 
     pub(super) fn apply_workshop_download(
         &mut self,
-        request_id: u64,
+        request_id: WorkshopSnapshotId,
         success: WorkshopDownloadSuccess,
     ) -> Option<ContentPathVerificationRequest> {
         let load = self.workshop_loads.remove(&request_id)?;

@@ -3,7 +3,7 @@ use std::time::Instant;
 use iced::Point;
 use iced::animation::Easing;
 
-use crate::theme::{Tokens, motion};
+use crate::theme::{self, motion};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextMenuAction {
@@ -225,8 +225,8 @@ impl Default for State {
             entries: Vec::new(),
             presence: motion::asymmetric(
                 false,
-                Tokens::dark().motion.context_menu_enter_duration(),
-                Tokens::dark().motion.context_menu_exit_duration(),
+                theme::invariant().motion.context_menu_enter_duration(),
+                theme::invariant().motion.context_menu_exit_duration(),
                 Easing::EaseOut,
             ),
         }

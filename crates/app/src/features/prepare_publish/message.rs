@@ -13,6 +13,7 @@ use super::{
     },
     state::{AddonTag, AddonType, OpenTarget},
 };
+use crate::bridge::tasks::WorkshopSnapshotId;
 use crate::generation::Generation;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,9 +24,9 @@ pub enum Message {
         upscale_icon_default: bool,
     },
     CloseRequested,
-    WorkshopContentSubmissionCompleted(u64, Result<(), UiError>),
-    WorkshopContentDownloaded(u64, WorkshopDownloadSuccess),
-    WorkshopSnapshotFailed(u64, UiError),
+    WorkshopContentSubmissionCompleted(WorkshopSnapshotId, Result<(), UiError>),
+    WorkshopContentDownloaded(WorkshopSnapshotId, WorkshopDownloadSuccess),
+    WorkshopSnapshotFailed(WorkshopSnapshotId, UiError),
     WorkshopSnapshotInspected(Generation, Result<Arc<VerifiedContentPath>, UiError>),
     AddonPathEdited(String),
     AddonPathAccepted,

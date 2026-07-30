@@ -1,7 +1,8 @@
 use super::super::orbit::{MAX_PITCH, MIN_PITCH, Orbit, ZoomFloor};
+use super::pipeline::PreviewScene;
 use super::{
     Action, Arc, DOOR_PROGRESS_EPSILON, DoorAudioEvent, DoorMotion, DoorRenderPose, DoorRuntime,
-    DoorTarget, Event, FlyPose, MapFog, MapSkyCamera, MapSpawn, Message, ModelPreview,
+    DoorTarget, Event, FlyPose, MapFog, MapPreview, MapSkyCamera, MapSpawn, Message, ModelPreview,
     ModelPrimitive, MovementMode, OrbitPose, Point, Rectangle, SOURCE_UP, Uniforms,
     door_world_bounds, half_extent, initial_door_swing, mid, mouse, shader,
 };
@@ -98,7 +99,7 @@ impl shader::Program<Message> for Viewer3d {
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
-            model: Arc::clone(&self.model),
+            preview: PreviewScene::Model(Arc::clone(&self.model)),
             content_id: self.content_id,
             skin_remap: self.skin_remap.clone(),
             bodygroup_choices: self.bodygroup_choices.clone(),
@@ -137,7 +138,7 @@ impl shader::Program<Message> for Viewer3d {
     reason = "each flag toggles an independent map render layer, not a mode enum"
 )]
 pub struct FlyViewer {
-    pub scene: Arc<ModelPreview>,
+    pub scene: Arc<MapPreview>,
     pub content_id: u64,
     pub fog: Option<MapFog>,
     pub fog_enabled: bool,
@@ -337,7 +338,7 @@ mod water;
 impl FlyCamera {
     pub(super) fn ensure_spawn(
         &mut self,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         spawn: Option<MapSpawn>,
         content_id: u64,
         pose: Option<FlyPose>,
@@ -415,9 +416,9 @@ impl FlyCamera {
         self.pitch = (-angles.pitch).clamp(MIN_PITCH, MAX_PITCH);
     }
 
-    pub(super) fn seed_from_bounds(&mut self, scene: &ModelPreview) {
-        let center = mid(scene.bounds_min, scene.bounds_max);
-        let radius = half_extent(scene.bounds_min, scene.bounds_max).max(1.0);
+    pub(super) fn seed_from_bounds(&mut self, scene: &MapPreview) {
+        let center = mid(scene.scene.bounds_min, scene.scene.bounds_max);
+        let radius = half_extent(scene.scene.bounds_min, scene.scene.bounds_max).max(1.0);
         self.position = Some(Vec3::new(
             center[0] - radius * 0.6,
             center[1] - radius * 0.6,
@@ -465,7 +466,7 @@ impl FlyCamera {
 
     pub(super) fn integrate(
         &mut self,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         content_id: u64,
         dt: f32,
     ) -> Vec<DoorAudioEvent> {
@@ -481,7 +482,7 @@ impl FlyCamera {
         audio_events
     }
 
-    pub(super) fn integrate_fly(&mut self, scene: &ModelPreview, dt: f32) {
+    pub(super) fn integrate_fly(&mut self, scene: &MapPreview, dt: f32) {
         if self.held.any_movement() {
             self.move_factor = (self.move_factor + dt / FLY_ACCEL_SECONDS).clamp(0.0, 1.0);
         } else {
@@ -491,7 +492,7 @@ impl FlyCamera {
         let Some(position) = self.position.as_mut() else {
             return;
         };
-        let radius = half_extent(scene.bounds_min, scene.bounds_max).max(1.0);
+        let radius = half_extent(scene.scene.bounds_min, scene.scene.bounds_max).max(1.0);
         let mut speed = radius * 0.4 * self.speed * self.move_factor;
         if self.held.fast {
             speed *= 3.0;
@@ -529,7 +530,7 @@ impl FlyCamera {
         }
     }
 
-    pub(super) fn select_mode(&mut self, scene: &ModelPreview, target: MovementMode) -> bool {
+    pub(super) fn select_mode(&mut self, scene: &MapPreview, target: MovementMode) -> bool {
         if self.mode == target {
             return false;
         }
@@ -747,7 +748,7 @@ impl shader::Program<Message> for FlyViewer {
         bounds: Rectangle,
     ) -> ModelPrimitive {
         ModelPrimitive {
-            model: Arc::clone(&self.scene),
+            preview: PreviewScene::Map(Arc::clone(&self.scene)),
             content_id: self.content_id,
             skin_remap: Vec::new(),
             bodygroup_choices: Vec::new(),

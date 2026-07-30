@@ -245,7 +245,7 @@ fn thumbnail_demands_include_current_layout_workshop_leaves() {
     assert_eq!(set.owner, Owner::SizeAnalyzer);
     assert_eq!(set.generation, ANALYZER_THUMBNAIL_GENERATION);
     assert_eq!(set.demands.len(), 1);
-    assert_eq!(set.demands[0].id.as_str(), "123");
+    assert_eq!(set.demands[0].id.workshop_id(), Some(id(123)));
     assert_eq!(set.demands[0].logical_max_edge, ADDON_THUMBNAIL_MAX_EDGE);
 }
 
@@ -872,7 +872,7 @@ fn empty_snapshot(epoch: u64) -> LibrarySnapshot {
 fn snapshot_from_addons(epoch: u64, addons: Vec<InstalledAddon>) -> LibrarySnapshot {
     LibrarySnapshot {
         addons: Arc::from(addons.into_boxed_slice()),
-        epoch,
+        epoch: Generation::from_raw(epoch),
     }
 }
 
@@ -923,7 +923,7 @@ fn ready_delivery(generation: Generation, workshop_id: u64, color: [u8; 4]) -> D
     Delivery {
         owner: Owner::SizeAnalyzer,
         generation,
-        id: DemandId::new(workshop_id.to_string()),
+        id: DemandId::workshop(id(workshop_id)),
         key: key.clone(),
         result: DeliveryResult::Ready(ReadyThumbnail::for_test(
             key,
@@ -938,7 +938,7 @@ fn placeholder_delivery(generation: Generation, workshop_id: u64) -> Delivery {
     Delivery {
         owner: Owner::SizeAnalyzer,
         generation,
-        id: DemandId::new(workshop_id.to_string()),
+        id: DemandId::workshop(id(workshop_id)),
         key: input.cache_key(ADDON_THUMBNAIL_MAX_EDGE),
         result: DeliveryResult::Placeholder(PlaceholderImage::for_test(6, 6)),
     }
@@ -950,7 +950,7 @@ fn failed_delivery(generation: Generation, workshop_id: u64) -> Delivery {
     Delivery {
         owner: Owner::SizeAnalyzer,
         generation,
-        id: DemandId::new(workshop_id.to_string()),
+        id: DemandId::workshop(id(workshop_id)),
         key: input.cache_key(ADDON_THUMBNAIL_MAX_EDGE),
         result: DeliveryResult::Failed {
             error: ThumbnailDeliveryError::Thumbnail(Arc::new(ThumbnailError::Decode(

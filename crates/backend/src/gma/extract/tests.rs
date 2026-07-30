@@ -48,14 +48,27 @@ impl Fixture {
     ) -> Result<PathBuf, GmaError> {
         let (handle, view) = gma;
         let transaction = self.transactions.begin();
-        view.extract(
+        let context = self.extraction_context(
             handle,
             destination,
-            &transaction,
             ExtractOptions {
                 open_after: false,
                 whitelist: Whitelist::Ignore,
             },
+        )?;
+        view.extract(handle, &transaction, context)
+    }
+
+    fn extraction_context(
+        &self,
+        handle: &GmaFile,
+        destination: ExtractDestination,
+        options: ExtractOptions,
+    ) -> Result<ExtractionContext, GmaError> {
+        ExtractionContext::resolve(
+            handle,
+            destination,
+            options,
             &self.whitelist,
             &self.app_data,
             &self.steam,
@@ -121,6 +134,74 @@ fn write_fixture_gma(root: &Path) -> PathBuf {
         &[("lua/autorun/overwrite.lua", b"print('fresh')\n")],
     );
     gma_path
+}
+
+#[test]
+fn cancelled_entry_write_keeps_existing_destination_intact() {
+    let fixture = Fixture::new();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let gma_path = write_fixture_gma(temp.path());
+    let (_handle, view) = open_fixture_gma(&gma_path);
+    let entry = view
+        .extraction_entries()
+        .expect("entries")
+        .into_iter()
+        .next()
+        .expect("fixture entry");
+    let destination = temp.path().join("existing.lua");
+    std::fs::write(&destination, b"old contents").expect("existing destination");
+    let transaction = fixture.transactions.begin();
+    assert!(transaction.cancel());
+
+    assert!(write_entry(&view, &entry, &destination, Some(&transaction)).is_err());
+    assert_eq!(
+        std::fs::read(&destination).expect("destination survives"),
+        b"old contents"
+    );
+    assert_eq!(
+        std::fs::read_dir(temp.path())
+            .expect("temp dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("existing.lua"))
+            .count(),
+        1,
+        "the cancelled temp file should be removed"
+    );
+}
+
+#[test]
+fn atomic_entry_write_accepts_a_destination_name_near_the_component_limit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let gma_path = write_fixture_gma(temp.path());
+    let (_handle, view) = open_fixture_gma(&gma_path);
+    let entry = view
+        .extraction_entries()
+        .expect("entries")
+        .into_iter()
+        .next()
+        .expect("fixture entry");
+    // Common filesystems permit 255-byte components. This is a valid final
+    // name, but deriving the tempfile prefix from it would leave no room for
+    // tempfile's random characters and suffix.
+    let destination = temp.path().join("x".repeat(244));
+
+    write_entry(&view, &entry, &destination, None)
+        .expect("atomic write should not lengthen the destination component");
+
+    assert_eq!(
+        std::fs::read(&destination).expect("written destination"),
+        b"print('fresh')\n"
+    );
+    assert!(
+        std::fs::read_dir(temp.path())
+            .expect("temp dir")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gmpublished-entry.")),
+        "a successful persist must not leave its short-name tempfile behind"
+    );
 }
 
 fn existing_destination(root: &Path) -> PathBuf {
@@ -199,18 +280,17 @@ fn cancelling_before_extraction_stops_it_with_no_finish() {
     let transaction = fixture.transactions.begin();
     assert!(transaction.cancel());
 
-    let result = view.extract(
-        handle,
-        ExtractDestination::Directory(destination.clone()),
-        &transaction,
-        ExtractOptions {
-            open_after: false,
-            whitelist: Whitelist::Ignore,
-        },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    );
+    let context = fixture
+        .extraction_context(
+            handle,
+            ExtractDestination::Directory(destination.clone()),
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Ignore,
+            },
+        )
+        .expect("resolve extraction");
+    let result = view.extract(handle, &transaction, context);
 
     assert!(matches!(result, Err(GmaError::Cancelled)));
     assert!(!destination.exists());
@@ -277,13 +357,23 @@ fn recycle_cleanup_failure_uses_first_available_suffix_without_claiming_trash_su
         overwrite_mode: ExtractionOverwriteMode::Recycle,
     };
 
-    let prepared = ExtractDestination::NamedDirectory(extract_root.clone())
-        .prepare_with_context(FIXTURE_EXTRACTED_NAME, &context, |path, mode| {
-            assert_eq!(path, existing);
-            assert_eq!(mode, &ExtractionOverwriteMode::Recycle);
-            false
-        })
-        .expect("suffix fallback available");
+    let (destination, recycle_existing) = ExtractDestination::NamedDirectory(extract_root.clone())
+        .resolve_with_context(FIXTURE_EXTRACTED_NAME, &context)
+        .expect("resolve destination");
+    let prepared = ExtractionContext {
+        destination,
+        recycle_existing,
+        overwrite_mode: context.overwrite_mode,
+        open_after: false,
+        whitelist: None,
+    }
+    .prepare_destination_with(|path, mode| {
+        assert_eq!(path, existing);
+        assert_eq!(mode, &ExtractionOverwriteMode::Recycle);
+        false
+    })
+    .expect("suffix fallback available")
+    .destination;
 
     assert_eq!(
         prepared,
@@ -308,15 +398,21 @@ fn suffix_exhaustion_errors_instead_of_falling_back_to_parent() {
         overwrite_mode: ExtractionOverwriteMode::Recycle,
     };
 
-    let result = ExtractDestination::NamedDirectory(extract_root).prepare_with_context(
-        FIXTURE_EXTRACTED_NAME,
-        &context,
-        |path, mode| {
-            assert_eq!(path, existing);
-            assert_eq!(mode, &ExtractionOverwriteMode::Recycle);
-            false
-        },
-    );
+    let (destination, recycle_existing) = ExtractDestination::NamedDirectory(extract_root)
+        .resolve_with_context(FIXTURE_EXTRACTED_NAME, &context)
+        .expect("resolve destination");
+    let result = ExtractionContext {
+        destination,
+        recycle_existing,
+        overwrite_mode: context.overwrite_mode,
+        open_after: false,
+        whitelist: None,
+    }
+    .prepare_destination_with(|path, mode| {
+        assert_eq!(path, existing);
+        assert_eq!(mode, &ExtractionOverwriteMode::Recycle);
+        false
+    });
 
     assert!(matches!(result, Err(GmaError::DestinationUnavailable)));
     // The pre-existing destination is untouched: cleanup failed, so nothing
@@ -367,6 +463,60 @@ fn destination_roots_extract_under_appdata_temp_downloads_and_addons_paths() {
         assert_extracted_fixture_contents(&expected);
         assert_transaction_finished_with_full_progress(&fixture.collector, &expected);
     }
+}
+
+#[test]
+fn addons_destination_requires_a_resolved_gmod_directory() {
+    use crate::error_key::HasErrorKey;
+
+    let context = ExtractionAppDataContext {
+        temp_dir: PathBuf::from("/tmp/fallback-must-not-be-used"),
+        downloads_dir: None,
+        gmod_dir: None,
+        overwrite_mode: ExtractionOverwriteMode::Overwrite,
+    };
+
+    let error = ExtractDestination::Addons
+        .resolve_with_context(FIXTURE_EXTRACTED_NAME, &context)
+        .expect_err("Addons extraction must not fall back to temp");
+    assert_eq!(error, GmaError::GmodPathMissing);
+    assert_eq!(error.error_key(), crate::error_key::keys::GMOD_PATH_MISSING);
+}
+
+#[test]
+fn decompression_distinguishes_decoder_input_and_spill_output_failures() {
+    let decoder = classify_decoder_error(
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt stream"),
+        &Mutex::new(None),
+    );
+    assert!(matches!(decoder, GmaError::Lzma(_)));
+
+    let input_failure = Mutex::new(Some(
+        std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "truncated input").into(),
+    ));
+    let input = classify_decoder_error(
+        std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "decoder observed EOF"),
+        &input_failure,
+    );
+    assert!(matches!(input, GmaError::DecompressionInput(_)));
+
+    let temp = tempfile::NamedTempFile::new().expect("temp file");
+    let temp_path = temp.into_temp_path();
+    let read_only = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&temp_path)
+        .expect("read-only spill file");
+    let mut sink = DecompressionSink::Spill {
+        writer: BufWriter::new(read_only),
+        temp_path,
+        written: 0,
+    };
+    sink.write_chunk(b"buffered write")
+        .expect("buffer accepts data");
+    assert!(matches!(
+        sink.flush(),
+        Err(GmaError::DecompressionOutput(_))
+    ));
 }
 
 #[test]
@@ -464,18 +614,17 @@ fn partial_entry_failure_reports_error_with_counts() {
     std::fs::write(destination.join("blocked"), b"not a directory").expect("blocking file");
 
     let transaction = fixture.transactions.begin();
-    let result = view.extract(
-        &gma,
-        ExtractDestination::Directory(destination.clone()),
-        &transaction,
-        ExtractOptions {
-            open_after: false,
-            whitelist: Whitelist::Ignore,
-        },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    );
+    let context = fixture
+        .extraction_context(
+            &gma,
+            ExtractDestination::Directory(destination.clone()),
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Ignore,
+            },
+        )
+        .expect("resolve extraction");
+    let result = view.extract(&gma, &transaction, context);
 
     match result {
         Err(GmaError::ExtractionFailed {
@@ -512,18 +661,17 @@ fn all_entries_rejected_by_whitelist_reports_error() {
     let destination = temp.path().join("all-rejected-dest");
 
     let transaction = fixture.transactions.begin();
-    let result = view.extract(
-        &gma,
-        ExtractDestination::Directory(destination.clone()),
-        &transaction,
-        ExtractOptions {
-            open_after: false,
-            whitelist: Whitelist::Enforce,
-        },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    );
+    let context = fixture
+        .extraction_context(
+            &gma,
+            ExtractDestination::Directory(destination.clone()),
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Enforce,
+            },
+        )
+        .expect("resolve extraction");
+    let result = view.extract(&gma, &transaction, context);
 
     match result {
         Err(GmaError::ExtractionFailed {
@@ -558,18 +706,17 @@ fn refuses_to_extract_through_a_pre_existing_symlinked_directory() {
     std::os::unix::fs::symlink(&outside, destination.join("evil")).expect("plant symlink");
 
     let transaction = fixture.transactions.begin();
-    let result = view.extract(
-        &gma,
-        ExtractDestination::Directory(destination.clone()),
-        &transaction,
-        ExtractOptions {
-            open_after: false,
-            whitelist: Whitelist::Ignore,
-        },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    );
+    let context = fixture
+        .extraction_context(
+            &gma,
+            ExtractDestination::Directory(destination.clone()),
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Ignore,
+            },
+        )
+        .expect("resolve extraction");
+    let result = view.extract(&gma, &transaction, context);
 
     match result {
         Err(GmaError::ExtractionFailed {
@@ -619,19 +766,20 @@ fn addon_json_exists_before_finished_event_fires() {
 
     let (handle, view) = &gma;
     let transaction = transactions.begin();
+    let context = ExtractionContext::resolve(
+        handle,
+        ExtractDestination::NamedDirectory(extract_root),
+        ExtractOptions {
+            open_after: false,
+            whitelist: Whitelist::Ignore,
+        },
+        &whitelist,
+        &app_data,
+        &steam,
+    )
+    .expect("resolve extraction fixture");
     let extracted = view
-        .extract(
-            handle,
-            ExtractDestination::NamedDirectory(extract_root),
-            &transaction,
-            ExtractOptions {
-                open_after: false,
-                whitelist: Whitelist::Ignore,
-            },
-            &whitelist,
-            &app_data,
-            &steam,
-        )
+        .extract(handle, &transaction, context)
         .expect("extract fixture");
 
     assert_eq!(extracted, expected_dest);

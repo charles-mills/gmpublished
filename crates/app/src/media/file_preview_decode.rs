@@ -7,41 +7,29 @@
 
 use gmpublished_backend::math::Vec3;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     panic::{self, AssertUnwindSafe},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
-use crate::media::preview_model::{MeshData, ModelData, ModelVertex};
+use crate::media::preview_model::{MeshData, ModelData};
 use cosmic_text::{
     Align, Attrs, Buffer, Color as TextColor, FontSystem, Metrics, PlatformFallback, Shaping,
     SwashCache, fontdb,
 };
 #[cfg(test)]
 use gmpublished_backend::scene::map::MapVisibilityBucket;
-use gmpublished_backend::scene::map::{
-    AmbientCube, ConvexHull, MapAmbientLighting, MapDetailSprite, MapDoor, MapDoorGeometry,
-    MapEnvironmentLighting, MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapOverlay,
-    MapPropVisibility, MapVisibility, MapWalkCollision, MapWalkPropModel,
-    MapWalkPropModelPlacement, StaticPropPlacement,
-};
+use gmpublished_backend::scene::map::{MapDetailSprite, MapOverlay};
 use iced::widget::image as iced_image;
 use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
-use vformats::phy::{ConvexLedge, ReadStats, SkipReason};
 
-use crate::bridge::materials::{
-    ContentSourceTier, DecodedTextureBudget, MaterialResolver, RenderMode,
-    ResolvedMaterialTextures, ResolvedPrimaryMaterial, ResolvedSoundReference, srgb_byte_to_linear,
-};
+use crate::bridge::materials::{MaterialResolver, RenderMode, ResolvedMaterialTextures};
 use crate::media::preview_model::{
-    DetailSprite, DoorInstance, DoorSound, DoorSoundSourceTier, DoorSoundWave, DoorSounds,
-    InfoReason, LightmapSlot, MAX_PREVIEW_LINES, MapFog, MapSkyCamera, MapSpawn, MapStats,
-    MaterialSlot, ModelPreview, ModelStats, OverlayPrimitive, OverlayVertex,
-    PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot, ParticlePreview, ParticleSystemInfo,
-    PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest, Skybox,
-    SkyboxFace, normalize_particle_material,
+    DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot, ModelPreview, ModelStats,
+    OverlayPrimitive, OverlayVertex, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot,
+    ParticlePreview, ParticleSystemInfo, PreviewContent, PreviewData, PreviewLoadError,
+    PreviewLoadStage, PreviewRequest, RenderScene, Skybox, SkyboxFace, normalize_particle_material,
 };
 use crate::theme::Tokens;
 
@@ -610,33 +598,24 @@ fn model_preview_data(
     PreviewData::from_request(
         request,
         PreviewContent::Model(std::sync::Arc::new(ModelPreview {
-            stats: ModelStats {
-                bone_count: model.bone_count,
-                sequence_count: model.sequence_count,
-                vertex_count: model.vertex_count,
-                triangle_count: model.triangle_count,
-                mesh_count: u32::try_from(model.meshes.len()).unwrap_or(u32::MAX),
-                material_count: u32::try_from(model.material_names.len()).unwrap_or(u32::MAX),
-                resolved_material_count,
-            },
-            meshes: model.meshes,
-            mesh_visibility: Vec::new(),
-            map_skybox_meshes: Vec::new(),
-            materials,
-            lightmap: None,
-            skybox: None,
-            detail_sprites: Vec::new(),
-            map_skybox_detail_sprites: Vec::new(),
-            overlays: Vec::new(),
-            map_skybox_overlays: Vec::new(),
-            doors: Vec::new(),
-            phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
+            scene: std::sync::Arc::new(RenderScene {
+                stats: ModelStats {
+                    bone_count: model.bone_count,
+                    sequence_count: model.sequence_count,
+                    vertex_count: model.vertex_count,
+                    triangle_count: model.triangle_count,
+                    mesh_count: u32::try_from(model.meshes.len()).unwrap_or(u32::MAX),
+                    material_count: u32::try_from(model.material_names.len()).unwrap_or(u32::MAX),
+                    resolved_material_count,
+                },
+                meshes: model.meshes,
+                materials,
+                phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
+                bounds_min: model.bounds_min,
+                bounds_max: model.bounds_max,
+            }),
             skin_tables: model.skin_tables,
             bodygroups: model.bodygroups,
-            bounds_min: model.bounds_min,
-            bounds_max: model.bounds_max,
-            visibility: None,
-            walk_collision: None,
         })),
     )
 }

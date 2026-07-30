@@ -24,7 +24,7 @@ use iced::{
 };
 
 use crate::bridge::{
-    DownloadCountFormat, Settings, SystemColorScheme, ThemePreset,
+    AppPaths, DownloadCountFormat, Settings, SystemColorScheme, ThemePreset,
     domain::{
         PublishedFileId, SearchFullRequest, SearchMode, SearchQuickRequest, WORKSHOP_LEGAL_URL,
         WorkshopDownloadResult, WorkshopDownloadSuccess, workshop_url,
@@ -112,6 +112,12 @@ pub struct App {
     /// One warm pass per session; set when the first library snapshot kicks it.
     library_warm_kicked: bool,
     audio_playback: Option<AudioPlayback>,
+    /// App-data snapshots arrive in backend order but are sanitized on a
+    /// parallel worker pool. Keep exactly one such job in flight so an older
+    /// snapshot can never finish after, and overwrite, a newer one. While it
+    /// runs, only the newest queued snapshot matters.
+    appdata_snapshot_in_flight: bool,
+    pending_appdata_snapshot: Option<Box<gmpublished_backend::appdata::AppDataSnapshot>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,6 +252,70 @@ impl State {
         self.preview_gma.set_window_focused(focused);
     }
 
+    fn apply_thumbnail_delivery(&mut self, delivery: &thumbnail_demand::Delivery) {
+        let _updated = self.installed_addons.apply_thumbnail_delivery(delivery);
+        let _updated = self.my_workshop.apply_thumbnail_delivery(delivery);
+        let well = self.tokens.colors.surface_sunken;
+        let _updated = self
+            .prepare_publish
+            .apply_thumbnail_delivery(delivery, [well.r, well.g, well.b]);
+        let _updated = self.preview_gma.apply_thumbnail_delivery(delivery);
+        let _updated = self.search.apply_thumbnail_delivery(delivery);
+        let _invalidation = self.size_analyzer.apply_thumbnail_delivery(delivery);
+    }
+
+    fn invalidate_ready_thumbnails(&mut self) {
+        let _changed = self.my_workshop.invalidate_ready_thumbnails();
+        let _changed = self.installed_addons.invalidate_ready_thumbnails();
+        let _changed = self.search.invalidate_ready_thumbnails();
+        let _changed = self.preview_gma.invalidate_ready_thumbnail();
+        let _invalidation = self.size_analyzer.invalidate_ready_thumbnails();
+    }
+
+    fn thumbnail_demand_sets(
+        &self,
+        search_viewport_height: f32,
+    ) -> Vec<thumbnail_demand::DemandSet> {
+        vec![
+            self.my_workshop.thumbnail_demands(),
+            self.installed_addons.thumbnail_demands(),
+            self.search.thumbnail_demands(search_viewport_height),
+            self.prepare_publish.thumbnail_demands(),
+            self.preview_gma.thumbnail_demands(),
+            self.size_analyzer.thumbnail_demands(),
+        ]
+    }
+
+    fn set_scale_factor(&mut self, scale_factor: f32) -> bool {
+        self.size_analyzer.set_scale_factor(scale_factor)
+    }
+
+    fn apply_settings_snapshot(
+        &mut self,
+        settings: Settings,
+        paths: AppPaths,
+    ) -> SettingsFanoutResult {
+        let previous_chrome = self.chrome_strategy;
+        let previous_gmod_dir = self
+            .installed_addons
+            .watch_gmod_dir()
+            .map(Path::to_path_buf);
+        let destination_label = destination_select::destination_label(&settings, &paths);
+
+        self.apply_runtime_settings(&settings);
+        self.installed_addons
+            .set_watch_gmod_dir(paths.gmod_dir.clone());
+        let gmod_dir_changed = previous_gmod_dir != paths.gmod_dir;
+        self.destination_select
+            .reset_from_snapshot(destination_select::SettingsSnapshot::new(settings, paths));
+        self.downloader.set_destination_label(destination_label);
+
+        SettingsFanoutResult {
+            previous_chrome,
+            gmod_dir_changed,
+        }
+    }
+
     fn apply_runtime_settings(&mut self, settings: &Settings) {
         self.theme_preset = settings.ui.theme_preset;
         self.accent_inputs = settings::accent_inputs_from_settings(settings);
@@ -310,6 +380,12 @@ impl State {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SettingsFanoutResult {
+    previous_chrome: shell::ChromeStrategy,
+    gmod_dir_changed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum RootMessage {
     Shell(shell::Message),
@@ -336,6 +412,7 @@ pub enum RootMessage {
     DragRegionDoubleClicked,
     TaskEvent(TaskEvent),
     BackendEvent(BackendRuntimeEvent),
+    AppDataSnapshotApplied(Result<Box<settings::SettingsSnapshot>, RunBlockingError>),
     LibraryWatch(library_watch::Message),
     LibraryRefreshRequested(LibraryRefreshReason),
     LibraryRefreshed(
@@ -360,6 +437,7 @@ pub enum RootMessage {
     GlobalShortcut(GlobalShortcut),
     Platform(crate::platform::Message),
     FileDropped(PathBuf),
+    Noop,
     AnimationTick(Instant),
 }
 
@@ -506,20 +584,8 @@ impl App {
             ..thumbnail_demand::Config::default()
         });
         let mut state = State::default();
-        state.set_play_gifs_by_default(ctx.play_gifs_by_default());
         let (settings, paths) = ctx.settings_and_paths_snapshot();
-        state.apply_runtime_settings(&settings);
-        state
-            .installed_addons
-            .set_watch_gmod_dir(paths.gmod_dir.clone());
-        let label = destination_select::destination_label(&settings, &paths);
-        state
-            .destination_select
-            .reset_from_snapshot(destination_select::SettingsSnapshot::new(
-                settings.clone(),
-                paths,
-            ));
-        state.downloader.set_destination_label(label);
+        let _result = state.apply_settings_snapshot(settings, paths);
         let app = Self {
             ctx,
             thumbnails,
@@ -528,6 +594,8 @@ impl App {
             startup_phase,
             library_warm_kicked: false,
             audio_playback: None,
+            appdata_snapshot_in_flight: false,
+            pending_appdata_snapshot: None,
         };
         #[cfg(target_os = "macos")]
         app.install_macos_menu();
@@ -635,7 +703,7 @@ impl App {
                 self.apply_destination_select_message(message)
             }
             RootMessage::FilePreview(message) => self.apply_file_preview_message(message),
-            RootMessage::PreparePublish(message) => self.prepare_publish_message_task(&message),
+            RootMessage::PreparePublish(message) => self.prepare_publish_message_task(message),
             RootMessage::PreviewGma(message) => self.apply_preview_gma_message(message),
             RootMessage::Settings(message) => self.apply_settings_message(message),
             RootMessage::ContextMenu(message) => self.apply_context_menu_message(message),
@@ -662,6 +730,23 @@ impl App {
             }
             RootMessage::TasksOverlay(message) => self.apply_tasks_overlay_message(message),
             RootMessage::BackendEvent(event) => self.backend_event_task(event),
+            RootMessage::AppDataSnapshotApplied(result) => {
+                self.appdata_snapshot_in_flight = false;
+                let applied = match result {
+                    Ok(snapshot) => self.apply_settings_snapshot_runtime(&snapshot),
+                    Err(error) => {
+                        log::warn!("failed to apply backend settings snapshot: {error}");
+                        Task::none()
+                    }
+                };
+                let next = self
+                    .pending_appdata_snapshot
+                    .take()
+                    .map_or_else(Task::none, |snapshot| {
+                        self.start_appdata_snapshot_task(snapshot)
+                    });
+                Task::batch([applied, next])
+            }
             RootMessage::LibraryWatch(message) => match message {
                 library_watch::Message::WatchArmed { degraded } => self
                     .apply_installed_addons_message(installed_addons::Message::WatchArmed {
@@ -696,19 +781,7 @@ impl App {
                 {
                     self.ctx.record_thumbhash(url, hash);
                 }
-                let _updated = self
-                    .state
-                    .installed_addons
-                    .apply_thumbnail_delivery(&delivery);
-                let _updated = self.state.my_workshop.apply_thumbnail_delivery(&delivery);
-                let well = self.state.tokens.colors.surface_sunken;
-                let _updated = self
-                    .state
-                    .prepare_publish
-                    .apply_thumbnail_delivery(&delivery, [well.r, well.g, well.b]);
-                let _updated = self.state.preview_gma.apply_thumbnail_delivery(&delivery);
-                let _updated = self.state.search.apply_thumbnail_delivery(&delivery);
-                let _invalidation = self.state.size_analyzer.apply_thumbnail_delivery(&delivery);
+                self.state.apply_thumbnail_delivery(&delivery);
                 Task::none()
             }
             RootMessage::WarmLibraryResolved(preview_urls) => {
@@ -760,6 +833,7 @@ impl App {
             }
             RootMessage::Platform(message) => self.platform_task(message),
             RootMessage::FileDropped(path) => self.handle_file_drop(path),
+            RootMessage::Noop => Task::none(),
             RootMessage::AnimationTick(now) => {
                 self.state.context_menu.tick(now);
                 self.state.prerequisites.tick(now);
@@ -1138,6 +1212,25 @@ impl App {
                 .destination_select_folder_picker_task(
                     self.state.destination_select.initial_browse_directory(),
                 ),
+            destination_select::Effect::CustomPathValidationRequested(request) => self
+                .ctx
+                .run_blocking("destination-validate-path", move |_app| {
+                    let valid = destination_select::probe_custom_path(&request.path);
+                    (request, valid)
+                })
+                .map(|result| match result {
+                    Ok((request, valid)) => RootMessage::DestinationSelect(
+                        destination_select::Message::CustomPathValidated {
+                            generation: request.generation,
+                            path: request.path,
+                            valid,
+                        },
+                    ),
+                    Err(error) => {
+                        log::warn!("destination path validation failed: {error}");
+                        RootMessage::Noop
+                    }
+                }),
             destination_select::Effect::CreateFolderChanged(enabled) => {
                 self.destination_select_create_folder_task(enabled)
             }
@@ -1400,7 +1493,7 @@ impl App {
         }
 
         if self.state.addon_drag.is_dragging() {
-            layers = layers.push(addon_drag_ghost(&self.state.addon_drag, &tokens));
+            layers = layers.push(addon_drag_ghost(&self.state.addon_drag, ctx));
         }
 
         // The tasks overlay is the topmost layer, above modal scrims, so
@@ -1625,10 +1718,7 @@ impl App {
         if self.startup_phase.started() {
             streams.push(
                 library_watch::subscription(
-                    self.state
-                        .installed_addons
-                        .watch_gmod_dir()
-                        .map(PathBuf::as_path),
+                    self.state.installed_addons.watch_gmod_dir(),
                     self.state.installed_addons.watch_arm_epoch(),
                 )
                 .map(RootMessage::LibraryWatch),

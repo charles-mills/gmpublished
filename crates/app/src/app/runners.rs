@@ -304,7 +304,7 @@ pub(super) fn run_document_open_extraction(ctx: &BackendContext, path: &Path) {
 
     open_preview_gma_extracted_path(
         ctx,
-        result.as_ref().ok(),
+        result.as_deref().ok(),
         "document-open archive",
         &path.display().to_string(),
     );
@@ -328,7 +328,7 @@ pub(super) fn run_preview_gma_entry_extraction(
     if let Err(error) = &result {
         ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
-    open_preview_gma_extracted_path(ctx, result.as_ref().ok(), "PreviewGMA entry", &path);
+    open_preview_gma_extracted_path(ctx, result.as_deref().ok(), "PreviewGMA entry", &path);
     log_preview_gma_extraction_result("PreviewGMA entry", &path, &result);
 }
 
@@ -345,7 +345,7 @@ pub(super) fn run_preview_gma_archive_extraction(
     if let Err(error) = &result {
         ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
-    open_preview_gma_extracted_path(ctx, result.as_ref().ok(), "PreviewGMA archive", &subject);
+    open_preview_gma_extracted_path(ctx, result.as_deref().ok(), "PreviewGMA archive", &subject);
     log_preview_gma_extraction_result("PreviewGMA archive", &subject, &result);
 }
 
@@ -378,7 +378,7 @@ fn create_extract_task(ctx: &BackendContext, kind: TaskKind, total_bytes: u64) -
 
 pub(super) fn open_preview_gma_extracted_path(
     ctx: &BackendContext,
-    extracted: Option<&PathBuf>,
+    extracted: Option<&Path>,
     label: &str,
     subject: &str,
 ) {
@@ -388,7 +388,7 @@ pub(super) fn open_preview_gma_extracted_path(
     schedule_native_open_target(
         ctx,
         "native-open-preview-gma-extraction",
-        NativeOpenTarget::path(path.clone()),
+        NativeOpenTarget::path(path.to_path_buf()),
     );
     log::debug!("scheduled native open for {label} extraction path for `{subject}`");
 }

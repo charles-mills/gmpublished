@@ -137,10 +137,12 @@ impl App {
                 ),
             )),
             BackendRuntimeEvent::AppDataUpdated(snapshot) => {
-                let (settings, paths) = self.ctx.apply_appdata_snapshot(*snapshot);
-                let snapshot =
-                    settings::SettingsSnapshot::new(settings, paths, self.state.system_scheme);
-                self.apply_settings_snapshot_runtime(&snapshot)
+                if self.appdata_snapshot_in_flight {
+                    self.pending_appdata_snapshot = Some(snapshot);
+                    Task::none()
+                } else {
+                    self.start_appdata_snapshot_task(snapshot)
+                }
             }
             BackendRuntimeEvent::InstalledAddonsRefreshed => Task::done(
                 RootMessage::LibraryRefreshRequested(LibraryRefreshReason::SettingsChanged),
@@ -155,6 +157,25 @@ impl App {
                     .map(|action| Task::done(backend_runtime_action_message(action))),
             ),
         }
+    }
+
+    pub(super) fn start_appdata_snapshot_task(
+        &mut self,
+        snapshot: Box<gmpublished_backend::appdata::AppDataSnapshot>,
+    ) -> Task<RootMessage> {
+        debug_assert!(!self.appdata_snapshot_in_flight);
+        self.appdata_snapshot_in_flight = true;
+        let system_scheme = self.state.system_scheme;
+        self.ctx
+            .run_blocking("apply-appdata-snapshot", move |services| {
+                let (settings, paths) = services.apply_appdata_snapshot(*snapshot);
+                Box::new(settings::SettingsSnapshot::new(
+                    settings,
+                    paths,
+                    system_scheme,
+                ))
+            })
+            .map(RootMessage::AppDataSnapshotApplied)
     }
 
     /// Warms the Steam connection once per session after the launch-critical

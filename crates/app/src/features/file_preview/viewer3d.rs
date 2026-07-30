@@ -18,9 +18,9 @@ use vformats::vtf::BcFormat;
 use super::Message;
 use super::state::{FlyPose, MovementMode, OrbitPose};
 use crate::media::preview_model::{
-    DetailSprite, DoorAudioEvent, DoorAudioEventKind, DoorInstance, DoorSound, MapFog,
+    DetailSprite, DoorAudioEvent, DoorAudioEventKind, DoorInstance, DoorSound, MapFog, MapPreview,
     MapSkyCamera, MapSpawn, MapTrace, MapVisibilityBucket, MaterialSlot, MeshData, ModelPreview,
-    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, SKYBOX_FACE_COUNT, Skybox, SkyboxFace,
+    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, RenderScene, SKYBOX_FACE_COUNT, Skybox, SkyboxFace,
     WorldVisibilityPlan,
 };
 

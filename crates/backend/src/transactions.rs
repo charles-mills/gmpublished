@@ -9,98 +9,68 @@ mod payload;
 
 use parking_lot::RwLock;
 use serde::Serialize;
-use std::fmt;
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicU8, AtomicU32, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
+use std::{collections::BTreeMap, fmt};
 
 use crate::error_key::{ErrorKey, HasErrorKey};
 use crate::events::{BackendEvent, BackendEventSink, TransactionEvent};
 
 pub use self::payload::TransactionPayload;
 
-/// What a long-running operation is currently doing, as the UI names it.
-///
-/// A closed set rather than free text: the app renders a status by looking its
-/// [`translation_key`](Self::translation_key) up in the Fluent catalogs, so a
-/// value with no entry reaches the user as raw wire text. Being an enum is
-/// what makes that unrepresentable — an undeclared status is a compile error
-/// rather than something a catalog-coverage test has to notice afterwards.
-///
-/// The keys are frozen. Renaming a variant is free; changing what
-/// `translation_key` returns silently breaks localization in twelve catalogs.
-/// Their inconsistent shape (`locating` beside `PUBLISH_STARTING`) is part of
-/// what is frozen.
-///
-/// Covers both sides of the bridge. The backend raises most of these from
-/// inside a transaction; the app raises [`Self::Downloading`],
-/// [`Self::Extracting`], [`Self::Searching`] and [`Self::Notice`] for work it
-/// runs itself, and both arrive at the same task overlay.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TransactionStatus {
-    Locating,
-    Decompressing,
-    ReadingMetadata,
-    Downloading,
-    Extracting,
-    Searching,
-    PublishStarting,
-    PublishProcessingIcon,
-    PublishPacking,
-    PublishPreparingConfig,
-    PublishPreparingContent,
-    PublishUploadingContent,
-    PublishUploadingPreviewFile,
-    PublishCommittingChanges,
-    /// Raised only by the developer context menu, but still a catalog key, so
-    /// the coverage test enumerates it either way.
-    Notice,
+macro_rules! transaction_statuses {
+    ($($(#[$meta:meta])* $variant:ident => $key:literal),+ $(,)?) => {
+        /// What a long-running operation is currently doing, as the UI names it.
+        ///
+        /// A closed set rather than free text: the app renders a status by looking its
+        /// [`translation_key`](Self::translation_key) up in the Fluent catalogs, so a
+        /// value with no entry reaches the user as raw wire text. The keys are frozen;
+        /// their inconsistent shape is part of the application protocol.
+        ///
+        /// Covers both sides of the bridge. The backend raises most variants inside a
+        /// transaction; the app raises the UI-owned work states, and both arrive at the
+        /// same task overlay.
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        pub enum TransactionStatus {
+            $($(#[$meta])* $variant),+
+        }
+
+        impl TransactionStatus {
+            /// Every status, in declaration order. Generated with the enum so
+            /// a newly declared status cannot be omitted from catalog checks.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The Fluent message id this status renders as. Frozen — see the
+            /// type documentation.
+            #[must_use]
+            pub const fn translation_key(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $key),+
+                }
+            }
+        }
+    };
 }
 
-impl TransactionStatus {
-    /// Every status, for the catalog-coverage test to walk. Kept exhaustive by
-    /// [`Self::translation_key`]'s match rather than by review: a new variant
-    /// fails to compile until it is spelled there.
-    pub const ALL: &'static [Self] = &[
-        Self::Locating,
-        Self::Decompressing,
-        Self::ReadingMetadata,
-        Self::Downloading,
-        Self::Extracting,
-        Self::Searching,
-        Self::PublishStarting,
-        Self::PublishProcessingIcon,
-        Self::PublishPacking,
-        Self::PublishPreparingConfig,
-        Self::PublishPreparingContent,
-        Self::PublishUploadingContent,
-        Self::PublishUploadingPreviewFile,
-        Self::PublishCommittingChanges,
-        Self::Notice,
-    ];
-
-    /// The Fluent message id this status renders as. Frozen — see the type doc.
-    #[must_use]
-    pub const fn translation_key(self) -> &'static str {
-        match self {
-            Self::Locating => "locating",
-            Self::Decompressing => "decompressing",
-            Self::ReadingMetadata => "reading_metadata",
-            Self::Downloading => "downloading",
-            Self::Extracting => "extracting_progress",
-            Self::Searching => "searching",
-            Self::PublishStarting => "PUBLISH_STARTING",
-            Self::PublishProcessingIcon => "PUBLISH_PROCESSING_ICON",
-            Self::PublishPacking => "PUBLISH_PACKING",
-            Self::PublishPreparingConfig => "PUBLISH_PREPARING_CONFIG",
-            Self::PublishPreparingContent => "PUBLISH_PREPARING_CONTENT",
-            Self::PublishUploadingContent => "PUBLISH_UPLOADING_CONTENT",
-            Self::PublishUploadingPreviewFile => "PUBLISH_UPLOADING_PREVIEW_FILE",
-            Self::PublishCommittingChanges => "PUBLISH_COMMITTING_CHANGES",
-            Self::Notice => "context-menu-debug-toast-notice",
-        }
-    }
+transaction_statuses! {
+    Locating => "locating",
+    Decompressing => "decompressing",
+    ReadingMetadata => "reading_metadata",
+    Downloading => "downloading",
+    Extracting => "extracting_progress",
+    Searching => "searching",
+    PublishStarting => "PUBLISH_STARTING",
+    PublishProcessingIcon => "PUBLISH_PROCESSING_ICON",
+    PublishPacking => "PUBLISH_PACKING",
+    PublishPreparingConfig => "PUBLISH_PREPARING_CONFIG",
+    PublishPreparingContent => "PUBLISH_PREPARING_CONTENT",
+    PublishUploadingContent => "PUBLISH_UPLOADING_CONTENT",
+    PublishUploadingPreviewFile => "PUBLISH_UPLOADING_PREVIEW_FILE",
+    PublishCommittingChanges => "PUBLISH_COMMITTING_CHANGES",
+    /// Raised only by the developer context menu, but still a catalog key.
+    Notice => "context-menu-debug-toast-notice",
 }
 
 impl fmt::Display for TransactionStatus {
@@ -150,9 +120,34 @@ impl<E: HasErrorKey> From<&E> for TransactionError {
 /// (rather than requiring `Arc<Transactions>`) so `Transactions::begin` only
 /// needs `&self`.
 struct TransactionsShared {
-    registry: RwLock<Vec<TransactionRef>>,
-    id: AtomicU32,
+    registry: RwLock<TransactionRegistry>,
     sink: Arc<dyn BackendEventSink>,
+}
+
+#[derive(Default)]
+struct TransactionRegistry {
+    live: BTreeMap<TransactionId, Weak<TransactionInner>>,
+    next_id: u32,
+}
+
+impl TransactionRegistry {
+    fn allocate_id(&mut self) -> TransactionId {
+        let first_candidate = self.next_id;
+
+        loop {
+            let id = TransactionId(self.next_id);
+            self.next_id = self.next_id.wrapping_add(1);
+
+            if !self.live.contains_key(&id) {
+                return id;
+            }
+
+            assert_ne!(
+                self.next_id, first_candidate,
+                "transaction ID space exhausted"
+            );
+        }
+    }
 }
 
 /// Owns transaction bookkeeping (id allocation, the live-transaction
@@ -175,8 +170,7 @@ impl Transactions {
     pub fn new(sink: Arc<dyn BackendEventSink>) -> Self {
         Self {
             shared: Arc::new(TransactionsShared {
-                registry: RwLock::new(Vec::new()),
-                id: AtomicU32::new(0),
+                registry: RwLock::new(TransactionRegistry::default()),
                 sink,
             }),
         }
@@ -190,20 +184,16 @@ impl Transactions {
 
     #[must_use]
     pub fn begin(&self) -> Transaction {
-        let id = TransactionId(self.shared.id.fetch_add(1, Ordering::SeqCst));
+        let mut registry = self.shared.registry.write();
+        let id = registry.allocate_id();
         let transaction = Arc::new(TransactionInner {
             id,
             state: AtomicU8::new(State::Running as u8),
             shared: Arc::clone(&self.shared),
         });
 
-        {
-            let mut registry = self.shared.registry.write();
-            registry.push(TransactionRef {
-                id: transaction.id,
-                ptr: Arc::downgrade(&transaction),
-            });
-        }
+        registry.live.insert(id, Arc::downgrade(&transaction));
+        drop(registry);
 
         Transaction(transaction)
     }
@@ -211,20 +201,16 @@ impl Transactions {
     #[must_use]
     pub fn find(&self, transaction_id: TransactionId) -> Option<Transaction> {
         let registry = self.shared.registry.read();
-        if let Ok(pos) =
-            registry.binary_search_by_key(&transaction_id, |transaction| transaction.id)
-        {
-            let transaction = registry.get(pos).unwrap().upgrade();
-            drop(registry);
-            // A failed upgrade is not a leak: the entry is removed by
-            // `try_finalize`, which `Drop` reaches only after the last strong
-            // reference is already gone. A concurrent lookup in that window
-            // sees a live entry it cannot upgrade, and "already finished" is
-            // the right answer for it.
-            return transaction;
-        }
-
-        None
+        // A failed upgrade is not a leak: the entry is removed by
+        // `try_finalize`, which `Drop` reaches only after the last strong
+        // reference is already gone. A concurrent lookup in that window sees
+        // a live entry it cannot upgrade, and "already finished" is the right
+        // answer for it.
+        registry
+            .live
+            .get(&transaction_id)
+            .and_then(Weak::upgrade)
+            .map(Transaction)
     }
 
     /// Cancels every transaction still running, and reports how many were.
@@ -241,8 +227,9 @@ impl Transactions {
         let live: Vec<Transaction> = {
             let registry = self.shared.registry.read();
             registry
-                .iter()
-                .filter_map(TransactionRef::upgrade)
+                .live
+                .values()
+                .filter_map(|transaction| transaction.upgrade().map(Transaction))
                 .collect()
         };
 
@@ -258,32 +245,6 @@ impl Transactions {
         transaction.cancel()
     }
 }
-
-pub struct TransactionRef {
-    pub id: TransactionId,
-    ptr: Weak<TransactionInner>,
-}
-impl TransactionRef {
-    fn upgrade(&self) -> Option<Transaction> {
-        self.ptr.upgrade().map(Transaction)
-    }
-}
-impl PartialOrd for TransactionRef {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for TransactionRef {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
-    }
-}
-impl PartialEq for TransactionRef {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-impl Eq for TransactionRef {}
 
 #[inline(always)]
 fn progress_as_int(progress: f64) -> u16 {
@@ -380,11 +341,7 @@ impl TransactionInner {
             .map_err(State::from_raw)
             .map(|_| {
                 let mut registry = self.shared.registry.write();
-                if let Ok(pos) =
-                    registry.binary_search_by_key(&self.id, |transaction| transaction.id)
-                {
-                    registry.remove(pos);
-                }
+                registry.live.remove(&self.id);
             })
     }
 
@@ -560,23 +517,19 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicU8};
 
     use super::{
-        State, TransactionId, TransactionInner, TransactionRef, TransactionStatus, Transactions,
-        TransactionsShared, progress_as_int,
+        State, TransactionId, TransactionInner, TransactionRegistry, TransactionStatus,
+        Transactions, TransactionsShared, progress_as_int,
     };
 
     use crate::events::{BackendEvent, BackendEventCollector, TransactionEvent};
 
     fn shared_for_test(sink: BackendEventCollector) -> Arc<TransactionsShared> {
         Arc::new(TransactionsShared {
-            registry: parking_lot::RwLock::new(Vec::new()),
-            id: std::sync::atomic::AtomicU32::new(0),
+            registry: parking_lot::RwLock::new(TransactionRegistry::default()),
             sink: Arc::new(sink),
         })
     }
 
-    /// `find` must not treat a registry entry it cannot upgrade as a bug:
-    /// `Drop` removes the entry strictly after the strong count reaches zero,
-    /// so a concurrent lookup can legitimately observe one.
     /// Shutdown's cooperative half: every live transaction is cancelled, so a
     /// job polling `aborted()` stops at its own checkpoint rather than being
     /// abandoned mid-write when the pools are joined.
@@ -605,16 +558,35 @@ mod tests {
         assert!(running.aborted());
     }
 
+    /// `find` must not treat a registry entry it cannot upgrade as a bug:
+    /// `Drop` removes the entry strictly after the strong count reaches zero,
+    /// so a concurrent lookup can legitimately observe one.
     #[test]
     fn find_returns_none_for_an_entry_that_cannot_upgrade() {
         let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));
         let id = TransactionId::from_raw(9);
-        transactions.shared.registry.write().push(TransactionRef {
-            id,
-            ptr: std::sync::Weak::new(),
-        });
+        transactions
+            .shared
+            .registry
+            .write()
+            .live
+            .insert(id, std::sync::Weak::new());
 
         assert!(transactions.find(id).is_none());
+    }
+
+    #[test]
+    fn id_allocation_skips_registered_ids_after_wraparound() {
+        let mut registry = TransactionRegistry {
+            next_id: u32::MAX,
+            ..TransactionRegistry::default()
+        };
+        registry
+            .live
+            .insert(TransactionId(0), std::sync::Weak::new());
+
+        assert_eq!(registry.allocate_id(), TransactionId(u32::MAX));
+        assert_eq!(registry.allocate_id(), TransactionId(1));
     }
 
     #[test]

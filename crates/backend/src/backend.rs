@@ -31,7 +31,9 @@ use std::{
 use crate::{
     appdata::{AppData, AppDataPaths},
     events::{BackendEventSink, NullEventSink},
-    gma::whitelist::AddonWhitelist,
+    gma::{
+        ExtractDestination, ExtractOptions, ExtractionContext, GmaFile, whitelist::AddonWhitelist,
+    },
     search::Search,
     steam::{Steam, downloads::Downloads},
     transactions::Transactions,
@@ -219,6 +221,24 @@ impl Backend {
         });
 
         Ok(backend)
+    }
+
+    /// Resolves one extraction against a coherent snapshot of paths,
+    /// overwrite mode and whitelist policy before the archive reader starts.
+    pub fn resolve_extraction(
+        &self,
+        handle: &GmaFile,
+        destination: ExtractDestination,
+        options: ExtractOptions,
+    ) -> Result<ExtractionContext, crate::GmaError> {
+        ExtractionContext::resolve(
+            handle,
+            destination,
+            options,
+            &self.whitelist,
+            &self.app_data,
+            &self.steam,
+        )
     }
 
     /// Starts process-lifetime services at most once. Returns whether this

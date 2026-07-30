@@ -217,7 +217,7 @@ impl App {
         }
 
         self.window_id = Some(id);
-        let analyzer_task = if self.state.size_analyzer.set_scale_factor(scale_factor) {
+        let analyzer_task = if self.state.set_scale_factor(scale_factor) {
             self.apply_size_analyzer_message(size_analyzer::Message::ScaleFactorChanged)
         } else {
             Task::none()

@@ -21,11 +21,12 @@ use crate::util::thread_pool;
 use crate::{
     GMOD_APP_ID, GmaError, GmaFile,
     appdata::AppData,
-    events::{BackendEvent, DownloadStartedEvent, ExtractionStartedEvent},
+    events::{BackendEvent, DownloadStartedEvent, ExtractionStartedEvent, WorkshopSnapshotId},
     gma::{
-        ExtractDestination, ExtractOptions, Whitelist, read::GmaView, whitelist::AddonWhitelist,
+        ExtractDestination, ExtractOptions, ExtractionContext, Whitelist, read::GmaView,
+        whitelist::AddonWhitelist,
     },
-    steam::{CALLBACK_RESULT_TIMEOUT, Steam},
+    steam::{CALLBACK_RESULT_TIMEOUT, ConnectedSteam, Steam, runtime::SteamRuntimeError},
     transactions::Transactions,
 };
 
@@ -48,7 +49,7 @@ struct DownloadInner {
     transaction: crate::transactions::Transaction,
     sent_total: AtomicBool,
     extract_destination: ExtractDestination,
-    request_id: Option<u64>,
+    request_id: Option<WorkshopSnapshotId>,
 }
 impl std::hash::Hash for DownloadInner {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -183,9 +184,12 @@ impl WatchdogQueue {
 /// covered by `cancel_all`. An explicitly requested single download is exempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BatchToken {
-    epoch: u64,
-    request_id: Option<u64>,
+    epoch: CancellationEpoch,
+    request_id: Option<WorkshopSnapshotId>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CancellationEpoch(u64);
 
 impl BatchToken {
     const fn is_exempt_from_cancel_all(self) -> bool {
@@ -195,17 +199,17 @@ impl BatchToken {
 
 #[cfg(test)]
 mod batch_token_tests {
-    use super::BatchToken;
+    use super::{BatchToken, CancellationEpoch, WorkshopSnapshotId};
 
     #[test]
     fn only_bulk_batches_are_covered_by_cancel_all() {
         let bulk = BatchToken {
-            epoch: 7,
+            epoch: CancellationEpoch(7),
             request_id: None,
         };
         let targeted = BatchToken {
-            epoch: 7,
-            request_id: Some(42),
+            epoch: CancellationEpoch(7),
+            request_id: Some(WorkshopSnapshotId::new(42)),
         };
 
         assert!(!bulk.is_exempt_from_cancel_all());
@@ -257,8 +261,8 @@ impl Downloads {
         self.cancel_epoch.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn cancelled_since(&self, epoch: u64) -> bool {
-        self.cancel_epoch.load(Ordering::SeqCst) != epoch
+    fn cancelled_since(&self, epoch: CancellationEpoch) -> bool {
+        CancellationEpoch(self.cancel_epoch.load(Ordering::SeqCst)) != epoch
     }
 
     /// Whether `cancel_all` has fired since `token`'s batch began *and*
@@ -272,7 +276,7 @@ impl Downloads {
         folder: PathBuf,
         item: WorkshopId,
         extract_destination: ExtractDestination,
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
     ) {
         self.extract_with_cleanup(folder, item, extract_destination, request_id, None);
     }
@@ -282,7 +286,7 @@ impl Downloads {
         folder: PathBuf,
         item: WorkshopId,
         extract_destination: ExtractDestination,
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
         temp_guard: Option<tempfile::TempPath>,
     ) {
         let downloads = Arc::clone(self);
@@ -358,10 +362,9 @@ impl Downloads {
                 bytes: gma.size,
             });
 
-            if let Err(err) = view.extract(
+            let extraction = match ExtractionContext::resolve(
                 &gma,
                 extract_destination,
-                &transaction,
                 ExtractOptions {
                     open_after: false,
                     whitelist: Whitelist::Ignore,
@@ -370,8 +373,14 @@ impl Downloads {
                 &downloads.app_data,
                 &downloads.steam,
             ) {
-                transaction.error(&err);
-            }
+                Ok(extraction) => extraction,
+                Err(error) => return transaction.error(&error),
+            };
+
+            // `GmaView::extract` owns the terminal transaction event; the
+            // returned error is only for synchronous callers that need the
+            // cause as a value as well.
+            let _ = view.extract(&gma, &transaction, extraction);
         });
     }
 
@@ -444,31 +453,35 @@ impl Downloads {
         transaction.error(crate::error_key::keys::ITEM_NOT_FOUND);
     }
 
-    pub fn download(self: &Arc<Self>, ids: impl IntoIterator<Item = WorkshopId>) {
-        self.download_many(ids, self.app_data.extract_destination_snapshot(), None);
+    pub fn download(
+        self: &Arc<Self>,
+        ids: impl IntoIterator<Item = WorkshopId>,
+    ) -> Result<(), SteamRuntimeError> {
+        self.download_many(ids, self.app_data.extract_destination_snapshot(), None)
     }
 
     pub fn download_one_to(
         self: &Arc<Self>,
         item: WorkshopId,
         extract_destination: ExtractDestination,
-        request_id: u64,
-    ) {
-        self.download_many([item], extract_destination, Some(request_id));
+        request_id: WorkshopSnapshotId,
+    ) -> Result<(), SteamRuntimeError> {
+        self.download_many([item], extract_destination, Some(request_id))
     }
 
     fn download_many(
         self: &Arc<Self>,
         ids: impl IntoIterator<Item = WorkshopId>,
         extract_destination: ExtractDestination,
-        request_id: Option<u64>,
-    ) {
+        request_id: Option<WorkshopSnapshotId>,
+    ) -> Result<(), SteamRuntimeError> {
         let ids: Vec<WorkshopId> = ids.into_iter().collect();
         if ids.is_empty() {
-            return;
+            return Ok(());
         }
+        let steam = self.steam.require_client()?;
         let token = BatchToken {
-            epoch: self.cancel_epoch.load(Ordering::SeqCst),
+            epoch: CancellationEpoch(self.cancel_epoch.load(Ordering::SeqCst)),
             request_id,
         };
         let extract_destination = Arc::new(extract_destination);
@@ -485,15 +498,16 @@ impl Downloads {
         });
         match webapi::resolve_downloads(known_items, possible_collections) {
             Ok(details) => {
-                self.dispatch_preflighted(details, &extract_destination, token);
-                return;
+                self.dispatch_preflighted(details, &extract_destination, token, steam);
+                return Ok(());
             }
             Err(error) => log::warn!(
                 "Workshop Web API preflight failed, falling back to Steamworks queries: {error}"
             ),
         }
 
-        self.download_via_steamworks(ids, &extract_destination, token);
+        self.download_via_steamworks(ids, &extract_destination, token, steam);
+        Ok(())
     }
 
     /// Routes preflighted items to the cheapest lane: already-installed
@@ -504,6 +518,7 @@ impl Downloads {
         details: Vec<webapi::PublishedFileDetail>,
         extract_destination: &Arc<ExtractDestination>,
         token: BatchToken,
+        steam: ConnectedSteam<'_>,
     ) {
         self.steam.fetch_workshop_items(
             details
@@ -513,12 +528,7 @@ impl Downloads {
                 .collect(),
         );
 
-        let ugc = self
-            .steam
-            .client()
-            .expect("download() is only reached once the app-layer connected check has passed")
-            .client()
-            .ugc();
+        let ugc = steam.interface.client().ugc();
         let mut queued_steam_downloads = false;
         // The keyless Web API cannot see private/friends-only items (e.g.
         // the user's own unlisted addons); let the authenticated Steamworks
@@ -558,7 +568,7 @@ impl Downloads {
         }
 
         if !unresolved.is_empty() {
-            self.download_via_steamworks(unresolved, extract_destination, token);
+            self.download_via_steamworks(unresolved, extract_destination, token, steam);
         }
     }
 
@@ -710,6 +720,7 @@ impl Downloads {
         mut ids: Vec<WorkshopId>,
         extract_destination: &Arc<ExtractDestination>,
         token: BatchToken,
+        steam: ConnectedSteam<'_>,
     ) {
         let possible_collections: Arc<Mutex<PossibleCollectionsState>> =
             Arc::new(Mutex::new(self.steam.with_known_workshop_items(|cache| {
@@ -719,10 +730,7 @@ impl Downloads {
         loop {
             let possible_collections_query;
             {
-                let Some(query) = possible_collections
-                    .lock()
-                    .next_query(self.steam.connected())
-                else {
+                let Some(query) = possible_collections.lock().next_query(true) else {
                     break;
                 };
                 possible_collections_query = query;
@@ -731,19 +739,13 @@ impl Downloads {
             let extract_destination = extract_destination.clone();
             let possible_collections = possible_collections.clone();
 
-            let query = match self
-                .steam
-                .client()
-                .expect("this loop only reaches here when next_query() saw connected() true")
-                .client()
-                .ugc()
-                .query_items(
-                    possible_collections_query
-                        .iter()
-                        .copied()
-                        .map(Into::into)
-                        .collect(),
-                ) {
+            let query = match steam.interface.client().ugc().query_items(
+                possible_collections_query
+                    .iter()
+                    .copied()
+                    .map(Into::into)
+                    .collect(),
+            ) {
                 Ok(query) => query,
                 Err(error) => {
                     // Steam refused to create the query; surface it as a failed
@@ -764,6 +766,7 @@ impl Downloads {
 
             let (done_tx, done_rx) = mpsc::channel();
             let downloads = Arc::clone(self);
+            let callback_client = steam.interface.client().clone();
             query
                 .include_children(true)
                 .fetch(
@@ -822,11 +825,7 @@ impl Downloads {
                             let actions = possible_collections
                                 .lock()
                                 .apply_query_results(&possible_collections_query, query_results);
-                            let ugc = downloads
-                                .steam
-                                .client()
-                                .expect("Steam UGC callbacks only fire from the connected callback pump")
-                                .client().ugc();
+                            let ugc = callback_client.ugc();
                             for action in actions {
                                 match action {
                                     WorkshopDownloadAction::FetchWorkshopItems(items) => {
@@ -858,12 +857,7 @@ impl Downloads {
         let mut pending = self.pending.lock();
         pending.reserve(ids.len());
 
-        let ugc = self
-            .steam
-            .client()
-            .expect("download_via_steamworks is only reached once Steam has connected")
-            .client()
-            .ugc();
+        let ugc = steam.interface.client().ugc();
         for item in ids {
             self.push_download(&ugc, &mut pending, extract_destination, item, token);
         }
@@ -893,12 +887,7 @@ impl Downloads {
     // Condvar pairings in the drain loop: the guards are handed to
     // `wait_while` (the idle park) and `wait_for` (the in-flight poll).
     #[expect(clippy::significant_drop_tightening)]
-    pub(super) fn watchdog(downloads: &Arc<Self>, steam: &Arc<Steam>) {
-        // Spawned from `Steam::on_initialized`, which runs after the interface
-        // is set, so it is up for this thread's whole life.
-        let interface = steam
-            .client()
-            .expect("Downloads::watchdog only runs after Steam has connected");
+    pub(super) fn watchdog(downloads: &Arc<Self>, steam: &Arc<Steam>, client: steamworks::Client) {
         // `Option`, not a map: the Steam client downloads workshop items
         // serially, so exactly one can be in flight. The loop below only ever
         // started a download when the map was empty — which made "at most one"
@@ -907,8 +896,8 @@ impl Downloads {
             Arc::new((Mutex::new(None), Condvar::new()));
         let in_progress_ref = in_progress_state.clone();
         let downloads_for_callback = Arc::clone(downloads);
-        let steam_for_callback = Arc::clone(steam);
-        let _cb = interface.register_callback(move |result: steamworks::DownloadItemResult| {
+        let callback_client = client.clone();
+        let _cb = client.register_callback(move |result: steamworks::DownloadItemResult| {
             if result.app_id == GMOD_APP_ID {
                 let mut in_progress = in_progress_ref.0.lock();
                 let matched = in_progress.as_ref().is_some_and(|download| {
@@ -923,10 +912,7 @@ impl Downloads {
                                 crate::transactions::detail_from_serialize(error),
                             ),
                         );
-                    } else if let Some(info) = steam_for_callback
-                        .client()
-                        .expect("Steam UGC callbacks only fire from the connected callback pump")
-                        .client()
+                    } else if let Some(info) = callback_client
                         .ugc()
                         .item_install_info(result.published_file_id)
                     {
@@ -988,10 +974,7 @@ impl Downloads {
                     continue;
                 }
 
-                let download_started = interface
-                    .client()
-                    .ugc()
-                    .download_item(download.item.into(), true);
+                let download_started = client.ugc().download_item(download.item.into(), true);
                 if !download_started {
                     download
                         .transaction
@@ -1003,7 +986,7 @@ impl Downloads {
                 *in_progress = Some(download);
             }
 
-            let ugc = interface.client().ugc();
+            let ugc = client.ugc();
             let keep = in_progress.as_ref().is_some_and(|download| {
                 // ISteamUGC has no per-item cancel: dropping our tracking is
                 // all a cancel can do here — the Steam client finishes the
@@ -1048,17 +1031,17 @@ impl Downloads {
 pub fn queue_workshop_downloads(
     downloads: &Arc<Downloads>,
     ids: impl IntoIterator<Item = WorkshopId>,
-) {
-    downloads.download(ids);
+) -> Result<(), SteamRuntimeError> {
+    downloads.download(ids)
 }
 
 pub fn queue_workshop_download_to(
     downloads: &Arc<Downloads>,
     item: WorkshopId,
     destination: ExtractDestination,
-    request_id: u64,
-) {
-    downloads.download_one_to(item, destination, request_id);
+    request_id: WorkshopSnapshotId,
+) -> Result<(), SteamRuntimeError> {
+    downloads.download_one_to(item, destination, request_id)
 }
 
 /// The folder's single `.gma` payload; `None` when absent or ambiguous

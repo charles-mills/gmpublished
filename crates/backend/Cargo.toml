@@ -31,8 +31,6 @@ test-support = []
 
 [dependencies]
 vformats.workspace = true
-# Read-only maps of GMA archives (never fully loaded; addons reach GBs).
-memmap2 = "0.9"
 arc-swap.workspace = true
 # `math::Vec3` is `repr(transparent)` + `Pod` so it crosses the wgpu and
 # steamworks boundaries as the bare `[f32; 3]` it wraps.

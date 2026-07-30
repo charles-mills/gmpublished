@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::{Demand, DemandId, Owner, Priority};
+use super::{Demand, DemandCapabilities, DemandId, Owner, Priority};
 
 #[derive(Default)]
 pub(super) struct DemandIndex {
@@ -27,7 +27,7 @@ pub(super) struct DemandIndex {
     /// that owner's entries.
     ///
     /// Without it, tearing down a grid's ~72-entry window scanned every entry
-    /// in the index — including the whole-library warm set, which on a cold
+    /// in the index — including the whole-library cache-only set, which on a cold
     /// disk cache is one entry per addon.
     by_owner: HashMap<Owner, HashSet<InterestKey>>,
     /// Queued interactive candidates, ordered by `(priority, sequence)`.
@@ -37,15 +37,15 @@ pub(super) struct DemandIndex {
     /// is what an index of heap positions would buy, and the bookkeeping costs
     /// more than the stale pops it avoids.
     ready: BinaryHeap<Candidate>,
-    /// Queued whole-library warm candidates, kept in their own heap.
+    /// Queued cache-only candidates, kept in their own heap.
     ///
-    /// Warm work is blocked outright whenever the interactive tiers hold more
-    /// than `WARM_MAX_IN_FLIGHT` slots. Sharing one heap meant every call in
-    /// that state popped the entire warm backlog just to discover none of it
+    /// Cache-only work is blocked outright whenever the interactive tiers hold
+    /// more than `CACHE_ONLY_MAX_IN_FLIGHT` slots. Sharing one heap meant every
+    /// call in that state popped the entire background backlog just to discover none of it
     /// was startable, then pushed it all back — reintroducing the O(library)
     /// scan the heap exists to remove. Partitioning lets that case skip the
     /// backlog entirely.
-    ready_warm: BinaryHeap<Candidate>,
+    ready_cache_only: BinaryHeap<Candidate>,
 }
 
 /// Heap entry ordering candidates by scheduling preference.
@@ -87,19 +87,30 @@ impl DemandIndex {
             .or_default()
             .insert(interest.clone());
         if entry.state == DemandState::Queued {
-            self.enqueue(&interest, entry.priority, entry.sequence);
+            self.enqueue(
+                &interest,
+                entry.priority,
+                entry.sequence,
+                entry.capabilities,
+            );
         }
         self.entries.insert(interest, entry);
     }
 
-    fn enqueue(&mut self, interest: &InterestKey, priority: Priority, sequence: u64) {
+    fn enqueue(
+        &mut self,
+        interest: &InterestKey,
+        priority: Priority,
+        sequence: u64,
+        capabilities: DemandCapabilities,
+    ) {
         let candidate = Candidate {
             priority: std::cmp::Reverse(priority),
             sequence: std::cmp::Reverse(sequence),
             interest: interest.clone(),
         };
-        if priority == Priority::WarmLibrary {
-            self.ready_warm.push(candidate);
+        if capabilities.is_cache_only() {
+            self.ready_cache_only.push(candidate);
         } else {
             self.ready.push(candidate);
         }
@@ -132,6 +143,7 @@ impl DemandIndex {
         generation: Generation,
         id: &DemandId,
         key: &ThumbnailKey,
+        capabilities: DemandCapabilities,
         priority: Priority,
         promoted_sequence: u64,
     ) -> bool {
@@ -140,6 +152,7 @@ impl DemandIndex {
             generation,
             id: id.clone(),
             key: key.clone(),
+            capabilities,
         };
         let Some(entry) = self.entries.get_mut(&interest) else {
             return false;
@@ -148,19 +161,21 @@ impl DemandIndex {
         if entry.priority != priority {
             entry.priority = priority;
             entry.sequence = promoted_sequence;
-            let (state, sequence) = (entry.state, entry.sequence);
+            let (state, sequence, capabilities) = (entry.state, entry.sequence, entry.capabilities);
             if state == DemandState::Queued {
                 // The old heap candidate still carries the old priority and
                 // sequence; it is skipped on pop by the sequence check.
-                self.enqueue(&interest, priority, sequence);
+                self.enqueue(&interest, priority, sequence, capabilities);
             }
         }
         true
     }
 
-    pub(super) fn remove_queued_warm(&mut self, ids: &HashSet<DemandId>) {
+    pub(super) fn remove_queued_cache_only(&mut self, ids: &HashSet<DemandId>) {
         self.remove_where(|entry| {
-            entry.owner.is_warm() && entry.state != DemandState::InFlight && ids.contains(&entry.id)
+            entry.capabilities.is_cache_only()
+                && entry.state != DemandState::InFlight
+                && ids.contains(&entry.id)
         });
     }
 
@@ -238,16 +253,18 @@ impl DemandIndex {
     pub(super) fn next_candidate(
         &mut self,
         job_id: JobId,
-        allow_warm: bool,
+        allow_cache_only: bool,
     ) -> Option<StartCandidate> {
         // Pops in scheduling order, discarding candidates that are stale
         // (their entry is gone, or no longer queued) and setting aside the ones
         // that are merely blocked right now so they are not lost.
-        let selected = self
-            .take_startable(false)
-            .or_else(|| allow_warm.then(|| self.take_startable(true)).flatten());
+        let selected = self.take_startable(false).or_else(|| {
+            allow_cache_only
+                .then(|| self.take_startable(true))
+                .flatten()
+        });
 
-        let (key, input, physical_max_edge, priority) = selected?;
+        let (key, input, physical_max_edge, _priority, capabilities) = selected?;
         if let Some(interests) = self.key_to_interests.get(&key) {
             for interest in interests {
                 if let Some(entry) = self.entries.get_mut(interest) {
@@ -267,7 +284,9 @@ impl DemandIndex {
 
         Some(StartCandidate {
             request: ThumbnailRequest::new(input, physical_max_edge, key.mode()),
-            priority,
+            #[cfg(test)]
+            priority: _priority,
+            capabilities,
             job_id,
             attempt,
             cancellation,
@@ -283,12 +302,18 @@ impl DemandIndex {
     /// returned to the heap, because they are still wanted.
     fn take_startable(
         &mut self,
-        warm: bool,
-    ) -> Option<(ThumbnailKey, ThumbnailInput, u32, Priority)> {
+        cache_only: bool,
+    ) -> Option<(
+        ThumbnailKey,
+        ThumbnailInput,
+        u32,
+        Priority,
+        DemandCapabilities,
+    )> {
         let mut deferred = Vec::new();
         let selected = loop {
-            let heap = if warm {
-                &mut self.ready_warm
+            let heap = if cache_only {
+                &mut self.ready_cache_only
             } else {
                 &mut self.ready
             };
@@ -319,28 +344,29 @@ impl DemandIndex {
                 entry.input.clone(),
                 entry.physical_max_edge,
                 entry.priority,
+                entry.capabilities,
             ));
         };
 
-        if warm {
-            self.ready_warm.extend(deferred);
+        if cache_only {
+            self.ready_cache_only.extend(deferred);
         } else {
             self.ready.extend(deferred);
         }
         selected
     }
 
-    /// True when `key` has at least one interest and every one is warm-tier —
+    /// True when `key` has at least one interest and every one is cache-only —
     /// the completion should fill the disk cache without churning the memory
-    /// cache's recency window. No interests at all is NOT warm-only: a
+    /// cache's recency window. No interests at all is NOT cache-only: a
     /// scrolled-past completion is exactly what the memory cache wants.
-    pub(super) fn interests_warm_only(&self, key: &ThumbnailKey) -> bool {
+    pub(super) fn interests_cache_only(&self, key: &ThumbnailKey) -> bool {
         self.key_to_interests.get(key).is_some_and(|interests| {
             !interests.is_empty()
                 && interests.iter().all(|interest| {
                     self.entries
                         .get(interest)
-                        .is_some_and(|entry| entry.priority == Priority::WarmLibrary)
+                        .is_some_and(|entry| entry.capabilities.is_cache_only())
                 })
         })
     }
@@ -358,33 +384,34 @@ impl DemandIndex {
         self.mark_interests_queued(key);
     }
 
-    /// Retires the warm interests in `key` and re-queues everything else.
+    /// Retires the cache-only interests in `key` and re-queues everything else.
     ///
-    /// A warm job hands back no pixels, so the two halves have to be handled
-    /// differently. Warm interests are *satisfied* — the bytes they wanted are
+    /// A cache-only job hands back no pixels, so the two halves have to be
+    /// handled differently. Cache-only interests are *satisfied* — the bytes they wanted are
     /// on disk — and must not be re-queued, or the pump would restart a job
     /// that banks-and-completes immediately, forever. An interactive interest
-    /// that attached while the warm job was in flight is *not* satisfied, and
+    /// that attached while the cache-only job was in flight is *not* satisfied, and
     /// would otherwise sit `InFlight` waiting for a delivery that is never
     /// coming; re-queuing it restarts it at its own priority, and that restart
     /// is local, since the source it needs was just banked.
-    pub(super) fn retire_warm_interests(&mut self, key: &ThumbnailKey) {
+    pub(super) fn retire_cache_only_interests(&mut self, key: &ThumbnailKey) {
         let Some(interests) = self.key_to_interests.get(key).cloned() else {
             return;
         };
-        // The warm fetch succeeded, so any backoff it accumulated is spent.
+        // The cache-only fetch succeeded, so any backoff it accumulated is spent.
         self.retry_attempts.remove(key);
         for interest in interests {
             let Some(entry) = self.entries.get_mut(&interest) else {
                 continue;
             };
-            if entry.priority == Priority::WarmLibrary {
+            if entry.capabilities.is_cache_only() {
                 let _ = self.remove_interest(&interest);
                 continue;
             }
             entry.state = DemandState::Queued;
-            let (priority, sequence) = (entry.priority, entry.sequence);
-            self.enqueue(&interest, priority, sequence);
+            let (priority, sequence, capabilities) =
+                (entry.priority, entry.sequence, entry.capabilities);
+            self.enqueue(&interest, priority, sequence, capabilities);
         }
     }
 
@@ -397,10 +424,11 @@ impl DemandIndex {
                 continue;
             };
             entry.state = DemandState::Queued;
-            let (priority, sequence) = (entry.priority, entry.sequence);
+            let (priority, sequence, capabilities) =
+                (entry.priority, entry.sequence, entry.capabilities);
             // Re-offer: the entry's previous heap candidate was consumed when
             // it left the queue, so becoming queued again needs a fresh one.
-            self.enqueue(&interest, priority, sequence);
+            self.enqueue(&interest, priority, sequence, capabilities);
         }
     }
 
@@ -460,8 +488,8 @@ impl DemandIndex {
     /// step. Dropping straight out of `entries` left the interest behind in
     /// `by_owner` — harmless today, because `retain_owner` is that map's only
     /// reader and it tolerates entries that no longer exist, but the ghosts
-    /// accumulated for a whole session under `Owner::WarmLibrary` (which
-    /// applies exactly one demand set and so never prunes again), and any
+    /// accumulated for a whole session under an owner that applies exactly one
+    /// demand set and so never prunes again, and any
     /// future reader of `by_owner` would have inherited a lie.
     pub(super) fn complete_key(&mut self, key: &ThumbnailKey) -> Vec<DemandEntry> {
         self.cancel_key(key);
@@ -502,6 +530,7 @@ pub(super) struct InterestKey {
     pub(super) generation: Generation,
     pub(super) id: DemandId,
     pub(super) key: ThumbnailKey,
+    pub(super) capabilities: DemandCapabilities,
 }
 
 pub(super) struct DemandEntry {
@@ -512,6 +541,7 @@ pub(super) struct DemandEntry {
     key: ThumbnailKey,
     physical_max_edge: u32,
     priority: Priority,
+    pub(super) capabilities: DemandCapabilities,
     state: DemandState,
     sequence: u64,
 }
@@ -534,6 +564,7 @@ impl DemandEntry {
             key,
             physical_max_edge,
             priority: demand.priority,
+            capabilities: demand.capabilities,
             state,
             sequence,
         }
@@ -545,6 +576,7 @@ impl DemandEntry {
             generation: self.generation,
             id: self.id.clone(),
             key: self.key.clone(),
+            capabilities: self.capabilities,
         }
     }
 }
@@ -561,7 +593,9 @@ pub(super) struct StartCandidate {
     /// caches under is derived here and cannot disagree with the input and
     /// edge the job actually fetches.
     pub(super) request: ThumbnailRequest,
+    #[cfg(test)]
     pub(super) priority: Priority,
+    pub(super) capabilities: DemandCapabilities,
     pub(super) job_id: JobId,
     pub(super) attempt: RetryAttempt,
     pub(super) cancellation: ThumbnailCancellation,

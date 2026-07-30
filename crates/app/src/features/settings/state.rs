@@ -33,90 +33,44 @@ impl SettingsSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Tab {
-    #[default]
-    General,
-    Paths,
-    Accessibility,
-    Resets,
-}
-
-impl Tab {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::General,
-        Self::Paths,
-        Self::Accessibility,
-        Self::Resets,
-    ];
-
-    pub(crate) const fn label_key(self) -> &'static str {
-        match self {
-            Self::General => "settings-tab-general",
-            Self::Paths => "settings-tab-paths",
-            Self::Accessibility => "settings-tab-accessibility",
-            Self::Resets => "settings-tab-resets",
-        }
+mapped_enum_with_all! {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum Tab {
+        #[default]
+        General => "settings-tab-general",
+        Paths => "settings-tab-paths",
+        Accessibility => "settings-tab-accessibility",
+        Resets => "settings-tab-resets",
     }
+    label_key -> &'static str
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PathSetting {
-    Gmod,
-    Downloads,
-    UserData,
-    Temp,
-}
-
-impl PathSetting {
-    pub(crate) const ALL: [Self; 4] = [Self::Gmod, Self::Downloads, Self::UserData, Self::Temp];
-
-    pub(crate) const fn label_key(self) -> &'static str {
-        match self {
-            Self::Gmod => "settings-paths-gmod",
-            Self::Downloads => "settings-paths-downloads",
-            Self::UserData => "settings-paths-user-data",
-            Self::Temp => "settings-paths-temp",
-        }
+mapped_enum_with_all! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PathSetting {
+        Gmod => "settings-paths-gmod",
+        Downloads => "settings-paths-downloads",
+        UserData => "settings-paths-user-data",
+        Temp => "settings-paths-temp",
     }
-
-    /// Slot in the `PathSetting::ALL`-ordered per-setting storage arrays.
-    const fn index(self) -> usize {
-        match self {
-            Self::Gmod => 0,
-            Self::Downloads => 1,
-            Self::UserData => 2,
-            Self::Temp => 3,
-        }
-    }
+    label_key -> &'static str
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ColorSetting {
-    Neutral,
-    Success,
-    Error,
+mapped_enum_with_all! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(usize)]
+    pub enum ColorSetting {
+        Neutral => "settings-accessibility-color-neutral",
+        Success => "settings-accessibility-color-success",
+        Error => "settings-accessibility-color-error",
+    }
+    label_key -> &'static str
 }
 
 impl ColorSetting {
-    pub(crate) const ALL: [Self; 3] = [Self::Neutral, Self::Success, Self::Error];
-
-    pub(crate) const fn label_key(self) -> &'static str {
-        match self {
-            Self::Neutral => "settings-accessibility-color-neutral",
-            Self::Success => "settings-accessibility-color-success",
-            Self::Error => "settings-accessibility-color-error",
-        }
-    }
-
-    /// Slot in the `ColorSetting::ALL`-ordered per-setting storage arrays,
-    /// also used to position the color-picker popover in `view.rs`.
+    /// Declaration-order position used only to place the picker popover.
     pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::Neutral => 0,
-            Self::Success => 1,
-            Self::Error => 2,
-        }
+        self as usize
     }
 }
 
@@ -339,9 +293,8 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let mut settings = Settings::default();
+        let settings = Settings::default();
         let paths = fallback_paths(&settings);
-        settings.sanitize(&paths);
         Self {
             open: false,
             active_tab: Tab::default(),
@@ -429,7 +382,7 @@ impl State {
     }
 
     pub(crate) fn path_placeholder(&self, kind: PathSetting) -> String {
-        option_path_to_display(path_setting_runtime_path(&self.paths, kind).as_ref())
+        option_path_to_display(path_setting_runtime_path(&self.paths, kind).as_deref())
     }
 
     pub(crate) fn path_error_key(&self, kind: PathSetting) -> Option<&'static str> {
@@ -759,11 +712,10 @@ impl State {
 
     fn apply_snapshot(&mut self, snapshot: SettingsSnapshot) {
         let SettingsSnapshot {
-            mut settings,
+            settings,
             paths,
             system_scheme,
         } = snapshot;
-        settings.sanitize(&paths);
         self.path_fields = PathFields::from_settings(&settings);
         self.color_fields = ColorFields::from_settings(&settings);
         self.close_color_picker();
@@ -825,39 +777,63 @@ struct PathField {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct PathFields([PathField; PathSetting::ALL.len()]);
+struct PathFields {
+    gmod: PathField,
+    downloads: PathField,
+    user_data: PathField,
+    temp: PathField,
+}
 
 impl PathFields {
     fn from_settings(settings: &Settings) -> Self {
-        Self(PathSetting::ALL.map(|kind| PathField {
-            text: option_path_to_display(match kind {
-                PathSetting::Gmod => settings.backend.gmod.as_ref(),
-                PathSetting::Downloads => settings.backend.downloads.as_ref(),
-                PathSetting::UserData => settings.backend.user_data.as_ref(),
-                PathSetting::Temp => settings.backend.temp.as_ref(),
-            }),
+        let field = |path| PathField {
+            text: option_path_to_display(path),
             error: None,
-        }))
+        };
+        Self {
+            gmod: field(settings.backend.gmod.as_deref()),
+            downloads: field(settings.backend.downloads.as_deref()),
+            user_data: field(settings.backend.user_data.as_deref()),
+            temp: field(settings.backend.temp.as_deref()),
+        }
+    }
+
+    fn get(&self, kind: PathSetting) -> &PathField {
+        match kind {
+            PathSetting::Gmod => &self.gmod,
+            PathSetting::Downloads => &self.downloads,
+            PathSetting::UserData => &self.user_data,
+            PathSetting::Temp => &self.temp,
+        }
+    }
+
+    fn get_mut(&mut self, kind: PathSetting) -> &mut PathField {
+        match kind {
+            PathSetting::Gmod => &mut self.gmod,
+            PathSetting::Downloads => &mut self.downloads,
+            PathSetting::UserData => &mut self.user_data,
+            PathSetting::Temp => &mut self.temp,
+        }
     }
 
     fn text(&self, kind: PathSetting) -> &str {
-        &self.0[kind.index()].text
+        &self.get(kind).text
     }
 
     fn error(&self, kind: PathSetting) -> Option<PathValidationError> {
-        self.0[kind.index()].error
+        self.get(kind).error
     }
 
     /// Clears the error: it described the text being replaced.
     fn set_text(&mut self, kind: PathSetting, value: String) {
-        self.0[kind.index()] = PathField {
+        *self.get_mut(kind) = PathField {
             text: value,
             error: None,
         };
     }
 
     fn set_error(&mut self, kind: PathSetting, error: PathValidationError) {
-        self.0[kind.index()].error = Some(error);
+        self.get_mut(kind).error = Some(error);
     }
 }
 
@@ -869,26 +845,51 @@ struct ColorField {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ColorFields([ColorField; ColorSetting::ALL.len()]);
+struct ColorFields {
+    neutral: ColorField,
+    success: ColorField,
+    error: ColorField,
+}
 
 impl ColorFields {
     fn from_settings(settings: &Settings) -> Self {
-        Self(ColorSetting::ALL.map(|kind| ColorField {
+        let field = |kind| ColorField {
             text: format_hex_color(get_color_setting(settings, kind)),
             invalid: false,
-        }))
+        };
+        Self {
+            neutral: field(ColorSetting::Neutral),
+            success: field(ColorSetting::Success),
+            error: field(ColorSetting::Error),
+        }
+    }
+
+    fn get(&self, kind: ColorSetting) -> &ColorField {
+        match kind {
+            ColorSetting::Neutral => &self.neutral,
+            ColorSetting::Success => &self.success,
+            ColorSetting::Error => &self.error,
+        }
+    }
+
+    fn get_mut(&mut self, kind: ColorSetting) -> &mut ColorField {
+        match kind {
+            ColorSetting::Neutral => &mut self.neutral,
+            ColorSetting::Success => &mut self.success,
+            ColorSetting::Error => &mut self.error,
+        }
     }
 
     fn text(&self, kind: ColorSetting) -> &str {
-        &self.0[kind.index()].text
+        &self.get(kind).text
     }
 
     fn invalid(&self, kind: ColorSetting) -> bool {
-        self.0[kind.index()].invalid
+        self.get(kind).invalid
     }
 
     fn set_invalid_text(&mut self, kind: ColorSetting, value: String) {
-        self.0[kind.index()] = ColorField {
+        *self.get_mut(kind) = ColorField {
             text: value,
             invalid: true,
         };
@@ -1036,7 +1037,7 @@ fn path_option_from_input(input: &str) -> Option<PathBuf> {
     }
 }
 
-fn option_path_to_display(path: Option<&PathBuf>) -> String {
+fn option_path_to_display(path: Option<&Path>) -> String {
     path.map(path_to_display).unwrap_or_default()
 }
 
@@ -1147,14 +1148,8 @@ mod tests {
         );
     }
 
-    /// `index()` returns literals that address the per-setting arrays, which
-    /// are built by mapping over `ALL`. A literal that disagrees with `ALL`'s
-    /// order silently swaps two settings' values.
     #[test]
-    fn setting_indices_match_their_all_order() {
-        for (position, kind) in PathSetting::ALL.into_iter().enumerate() {
-            assert_eq!(kind.index(), position, "{kind:?}");
-        }
+    fn color_setting_indices_follow_their_declaration_order() {
         for (position, kind) in ColorSetting::ALL.into_iter().enumerate() {
             assert_eq!(kind.index(), position, "{kind:?}");
         }

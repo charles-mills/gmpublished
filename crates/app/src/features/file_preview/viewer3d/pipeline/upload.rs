@@ -13,9 +13,10 @@ use super::visibility::{
     upload_visible_detail_sprites, upload_visible_indices,
 };
 use super::{
-    DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance, DoorRenderPose, MapVisibilityBucket,
-    MeshData, ModelPreview, ModelVertex, OverlayPrimitive, RenderMode, ResolvedTexture,
-    SKYBOX_FACE_COUNT, WorldVisibilityPlan, initial_door_swing, transform_door_vertices, wgpu,
+    DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance, DoorRenderPose, MapPreview,
+    MapVisibilityBucket, MeshData, ModelVertex, OverlayPrimitive, RenderMode, RenderScene,
+    ResolvedTexture, SKYBOX_FACE_COUNT, WorldVisibilityPlan, initial_door_swing,
+    transform_door_vertices, wgpu,
 };
 
 /// Uploads keyed by preview content id, kept only while their preview still
@@ -55,23 +56,22 @@ impl UploadCache {
         queue: &wgpu::Queue,
         resources: &RenderResources,
         content_id: u64,
-        model: &ModelPreview,
+        scene: &RenderScene,
+        map: Option<&MapPreview>,
     ) {
         if self.uploads.contains_key(&content_id) {
             return;
         }
 
-        let (lightmap_rgba, lightmap_width, lightmap_height) =
-            model
-                .lightmap
-                .as_ref()
-                .map_or((WHITE_RGBA.as_slice(), 1, 1), |lightmap| {
-                    (
-                        lightmap.rgba.as_slice(),
-                        lightmap.width.max(1),
-                        lightmap.height.max(1),
-                    )
-                });
+        let (lightmap_rgba, lightmap_width, lightmap_height) = map
+            .and_then(|map| map.lightmap.as_ref())
+            .map_or((WHITE_RGBA.as_slice(), 1, 1), |lightmap| {
+                (
+                    lightmap.rgba.as_slice(),
+                    lightmap.width.max(1),
+                    lightmap.height.max(1),
+                )
+            });
         let lightmap_view = resources.create_texture_view(
             device,
             queue,
@@ -81,7 +81,7 @@ impl UploadCache {
             lightmap_height,
         );
 
-        let material_uploads = model
+        let material_uploads = scene
             .materials
             .iter()
             .map(|slot| {
@@ -114,19 +114,19 @@ impl UploadCache {
                 )
             })
             .collect::<Vec<_>>();
-        let material_render_modes = if model.materials.is_empty() {
+        let material_render_modes = if scene.materials.is_empty() {
             vec![RenderMode::Opaque]
         } else {
-            model
+            scene
                 .materials
                 .iter()
                 .map(|slot| slot.render_mode)
                 .collect::<Vec<_>>()
         };
-        let material_water_fallbacks = if model.materials.is_empty() {
+        let material_water_fallbacks = if scene.materials.is_empty() {
             vec![false]
         } else {
-            model
+            scene
                 .materials
                 .iter()
                 .map(|slot| {
@@ -162,26 +162,32 @@ impl UploadCache {
                 material_uploads.into_iter().unzip()
             };
 
-        let mut meshes = upload_meshes(device, queue, model.meshes.as_slice(), false);
-        meshes.extend(upload_meshes(
-            device,
-            queue,
-            model.map_skybox_meshes.as_slice(),
-            true,
-        ));
-        meshes.extend(upload_door_meshes(device, queue, model.doors.as_slice()));
-        let detail_sprites = upload_detail_sprites(device, queue, model.detail_sprites.as_slice());
-        let map_skybox_detail_sprites =
-            upload_detail_sprites(device, queue, model.map_skybox_detail_sprites.as_slice());
-        let mut overlays = upload_overlays(device, queue, model.overlays.as_slice(), false);
-        overlays.extend(upload_overlays(
-            device,
-            queue,
-            model.map_skybox_overlays.as_slice(),
-            true,
-        ));
-        let sky_tint = scene_sky_tint(model.skybox.as_ref());
-        let skybox = model.skybox.as_ref().map(|skybox| {
+        let mut meshes = upload_meshes(device, queue, scene.meshes.as_slice(), false);
+        let detail_sprites = map.and_then(|map| {
+            meshes.extend(upload_meshes(
+                device,
+                queue,
+                map.map_skybox_meshes.as_slice(),
+                true,
+            ));
+            meshes.extend(upload_door_meshes(device, queue, map.doors.as_slice()));
+            upload_detail_sprites(device, queue, map.detail_sprites.as_slice())
+        });
+        let map_skybox_detail_sprites = map.and_then(|map| {
+            upload_detail_sprites(device, queue, map.map_skybox_detail_sprites.as_slice())
+        });
+        let overlays = map.map_or_else(Vec::new, |map| {
+            let mut overlays = upload_overlays(device, queue, map.overlays.as_slice(), false);
+            overlays.extend(upload_overlays(
+                device,
+                queue,
+                map.map_skybox_overlays.as_slice(),
+                true,
+            ));
+            overlays
+        });
+        let sky_tint = scene_sky_tint(map.and_then(|map| map.skybox.as_ref()));
+        let skybox = map.and_then(|map| map.skybox.as_ref()).map(|skybox| {
             let face_bind_groups = std::array::from_fn(|index| {
                 skybox.faces[index].as_ref().map(|texture| {
                     let view = resources.create_texture_view(
@@ -245,7 +251,7 @@ impl UploadedModel {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        scene: &ModelPreview,
+        scene: &RenderScene,
     ) {
         if self.phy_debug_meshes.is_some() {
             return;
@@ -262,7 +268,7 @@ impl UploadedModel {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         enabled: bool,
         camera_position: Vec3,
     ) {
@@ -337,7 +343,7 @@ impl UploadedModel {
     pub fn update_door_vertices(
         &mut self,
         queue: &wgpu::Queue,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         poses: &[DoorRenderPose],
     ) {
         for mesh in self.meshes.iter_mut() {

@@ -151,7 +151,10 @@ impl State {
             return false;
         }
 
-        let Some(index) = self.pane.index_of_str(delivery.id.as_str()) else {
+        let Some(row_key) = delivery.id.row_key() else {
+            return false;
+        };
+        let Some(index) = self.pane.index_of_str(row_key) else {
             return false;
         };
         let Some(row) = self.rows.get_mut(index) else {
@@ -637,7 +640,7 @@ mod tests {
         thumbnail_demand::Delivery {
             owner: super::super::model::thumbnail_owner(),
             generation,
-            id: thumbnail_demand::DemandId::new(row_id.to_string()),
+            id: thumbnail_demand::DemandId::row(row_id.to_string()),
             key: key.clone(),
             result: thumbnail_demand::DeliveryResult::Ready(
                 thumbnail_demand::ReadyThumbnail::for_test(key, metadata, vec![9_u8; 8 * 8 * 4]),

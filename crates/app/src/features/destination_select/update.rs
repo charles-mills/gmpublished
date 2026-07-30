@@ -25,12 +25,22 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.edit_path_input(value);
             Vec::new()
         }
-        Message::PathAccepted => {
-            state.accept_path_input();
+        Message::PathAccepted => state.path_input_candidate().map_or_else(Vec::new, |path| {
+            vec![Effect::CustomPathValidationRequested(
+                state.begin_custom_path_validation(path),
+            )]
+        }),
+        Message::CustomPathValidated {
+            generation,
+            path,
+            valid,
+        } => {
+            let _applied = state.apply_custom_path_validation(generation, path, valid);
             Vec::new()
         }
         Message::BrowseCompleted(Some(path)) => {
-            state.select_custom(path);
+            // The native folder picker only returns selected directories.
+            state.select_trusted_custom(path);
             Vec::new()
         }
         Message::BrowseCompleted(None) => Vec::new(),
@@ -46,10 +56,9 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             }
             Vec::new()
         }
-        Message::HistorySelected(path) => {
-            state.select_custom(path);
-            Vec::new()
-        }
+        Message::HistorySelected(path) => vec![Effect::CustomPathValidationRequested(
+            state.begin_custom_path_validation(path),
+        )],
         Message::ConfirmRequested => state.persist_request().map_or_else(Vec::new, |request| {
             state.begin_save();
             vec![Effect::DestinationPersistRequested(request)]
@@ -151,6 +160,65 @@ mod tests {
         assert!(effects.is_empty());
         assert!(!state.kind_active(DestinationKind::Downloads));
         assert!(!state.can_confirm());
+    }
+
+    #[test]
+    fn stale_custom_path_validation_cannot_replace_newer_input() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let mut state = opened_state(&temp);
+
+        let _effects = update(
+            &mut state,
+            Message::PathInputEdited(first.to_string_lossy().into_owned()),
+        );
+        let effects = update(&mut state, Message::PathAccepted);
+        let [Effect::CustomPathValidationRequested(request)] = effects.as_slice() else {
+            panic!("path acceptance should request validation");
+        };
+        let request = request.clone();
+
+        let _effects = update(
+            &mut state,
+            Message::PathInputEdited(second.to_string_lossy().into_owned()),
+        );
+        let _effects = update(
+            &mut state,
+            Message::CustomPathValidated {
+                generation: request.generation,
+                path: request.path,
+                valid: true,
+            },
+        );
+
+        assert_eq!(state.path_input(), second.to_string_lossy());
+        assert!(!state.kind_active(DestinationKind::Browse));
+    }
+
+    #[test]
+    fn pending_custom_path_validation_blocks_confirming_the_previous_selection() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let previous = temp.path().join("previous");
+        let next = temp.path().join("next");
+        fs::create_dir(&previous).expect("previous destination should exist");
+        fs::create_dir(&next).expect("next destination should exist");
+        let mut state = opened_state(&temp);
+        state.select_custom(previous);
+        assert!(state.can_confirm());
+
+        let _effects = update(
+            &mut state,
+            Message::PathInputEdited(next.to_string_lossy().into_owned()),
+        );
+        let effects = update(&mut state, Message::PathAccepted);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::CustomPathValidationRequested(_)]
+        ));
+
+        assert!(!state.can_confirm());
+        assert!(update(&mut state, Message::ConfirmRequested).is_empty());
     }
 
     #[test]

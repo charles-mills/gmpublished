@@ -1,10 +1,10 @@
 //! The GMA container: reading an addon archive, writing one, extracting
 //! entries, and the whitelist that decides what may go in.
 //!
-//! The wire format itself lives in [`vformats::gma`]; this module is the
-//! addon-shaped layer over it — identity (workshop id, extracted name),
-//! the safe-path rules an untrusted archive is held to, and the streaming
-//! read/write paths that keep multi-gigabyte addons off the heap.
+//! [`vformats::gma`] is the canonical whole-buffer format implementation and
+//! writer. This module adds the addon-shaped layer — identity (workshop id,
+//! extracted name), safe-path rules, and a narrow owned-index reader that can
+//! stream multi-gigabyte on-disk payloads without mapping or allocating them.
 
 use std::{
     path::{Path, PathBuf},
@@ -64,7 +64,11 @@ pub enum GmaError {
     #[error("no such entry in the GMA")]
     EntryNotFound,
     #[error("LZMA decompression failed")]
-    LZMA,
+    Lzma(#[source] crate::IoFailure),
+    #[error("reading the compressed payload failed")]
+    DecompressionInput(#[source] crate::IoFailure),
+    #[error("writing the decompressed payload failed")]
+    DecompressionOutput(#[source] crate::IoFailure),
     #[error("cancelled")]
     Cancelled,
     /// Extraction finished without writing everything it should have: at
@@ -83,6 +87,8 @@ pub enum GmaError {
     /// destination was already taken.
     #[error("the extraction destination is unavailable")]
     DestinationUnavailable,
+    #[error("the Garry's Mod directory is required for Addons extraction")]
+    GmodPathMissing,
     /// A filesystem operation failed while packing, and the path it failed on
     /// is the reportable part.
     ///
@@ -106,17 +112,22 @@ impl crate::error_key::HasErrorKey for GmaError {
             Self::FormatError => keys::GMA_FORMAT_ERROR,
             Self::InvalidHeader => keys::GMA_INVALID_HEADER,
             Self::EntryNotFound => keys::GMA_ENTRY_NOT_FOUND,
-            Self::LZMA => keys::LZMA,
+            Self::Lzma(_) => keys::LZMA,
+            Self::DecompressionInput(_) | Self::DecompressionOutput(_) => keys::IO_ERROR,
             Self::Cancelled => keys::CANCELLED,
             Self::ExtractionFailed { .. } => keys::GMA_EXTRACTION_FAILED,
             Self::DestinationUnavailable => keys::GMA_DESTINATION_UNAVAILABLE,
+            Self::GmodPathMissing => keys::GMOD_PATH_MISSING,
             Self::PathIo { .. } => keys::PATH_IO_ERROR,
         }
     }
 
     fn error_detail(&self) -> Option<String> {
         match self {
-            Self::IOError(source) => Some(source.to_string()),
+            Self::IOError(source)
+            | Self::Lzma(source)
+            | Self::DecompressionInput(source)
+            | Self::DecompressionOutput(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::ExtractionFailed {
                 extracted,
@@ -288,10 +299,8 @@ impl std::fmt::Debug for GmaFile {
     }
 }
 impl GmaFile {
-    /// Carries [`read::GmaView::mmap`]'s accepted risk for the duration of the
-    /// call.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GmaError> {
-        read::GmaView::mmap(path.as_ref())?.handle(path)
+        read::GmaView::open_file(path.as_ref())?.handle(path)
     }
 
     pub fn set_ws_id(&mut self, id: WorkshopId) {
@@ -368,7 +377,9 @@ fn id_from_path(path: &Path) -> Option<WorkshopId> {
 pub mod whitelist;
 
 pub mod extract;
-pub use extract::{ExtractDestination, ExtractOptions, ExtractionOverwriteMode, Whitelist};
+pub use extract::{
+    ExtractDestination, ExtractOptions, ExtractionContext, ExtractionOverwriteMode, Whitelist,
+};
 
 pub mod read;
 

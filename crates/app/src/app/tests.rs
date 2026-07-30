@@ -1384,7 +1384,7 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
         Box::new(Ok(data)),
     )));
     let _task = app.update(RootMessage::FilePreview(
-        file_preview::Message::AudioPlaybackStarted,
+        file_preview::Message::AudioPlaybackStarted(request.request_id),
     ));
 
     assert!(app.state.file_preview.is_open());
@@ -2113,9 +2113,18 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
     };
     let snapshot = backend_appdata_snapshot_for_test(settings, root.path());
 
-    let _task = app.update(RootMessage::BackendEvent(
-        BackendRuntimeEvent::AppDataUpdated(Box::new(snapshot)),
+    let task = app.update(RootMessage::BackendEvent(
+        BackendRuntimeEvent::AppDataUpdated(Box::new(snapshot.clone())),
     ));
+    assert_task_scheduled(&task);
+
+    // The event handler deliberately performs sanitization and path
+    // resolution on the blocking pool. Apply the worker result explicitly in
+    // this reducer-level test.
+    let (settings, paths) = app.ctx.apply_appdata_snapshot_for_test(snapshot);
+    let _task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
+        settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
+    ))));
     let (settings, paths) = app.ctx.settings_and_paths_snapshot();
 
     assert!(!settings.backend.sounds);
@@ -2128,6 +2137,60 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
     );
     assert_eq!(settings.ui.theme_preset, ThemePreset::ClassicSource);
     assert_eq!(app.state.steam_session.status(), initial_steam_status);
+}
+
+#[test]
+fn backend_appdata_events_are_serialized_and_coalesce_to_the_latest_snapshot() {
+    let mut app = App::new_for_test();
+    let root = tempfile::tempdir().expect("tempdir");
+    let snapshot = |language: &str| {
+        backend_appdata_snapshot_for_test(
+            BackendSettings {
+                language: Some(language.to_owned()),
+                ..BackendSettings::default()
+            },
+            root.path(),
+        )
+    };
+
+    let first = snapshot("first");
+    let second = snapshot("second");
+    let latest = snapshot("latest");
+    let task = app.update(RootMessage::BackendEvent(
+        BackendRuntimeEvent::AppDataUpdated(Box::new(first.clone())),
+    ));
+    assert_task_scheduled(&task);
+
+    let task = app.update(RootMessage::BackendEvent(
+        BackendRuntimeEvent::AppDataUpdated(Box::new(second)),
+    ));
+    assert_no_task(&task);
+    let task = app.update(RootMessage::BackendEvent(
+        BackendRuntimeEvent::AppDataUpdated(Box::new(latest.clone())),
+    ));
+    assert_no_task(&task);
+    assert_eq!(
+        app.pending_appdata_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.settings.language.as_deref()),
+        Some("latest")
+    );
+
+    let (settings, paths) = app.ctx.apply_appdata_snapshot_for_test(first);
+    let task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
+        settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
+    ))));
+    assert_task_scheduled(&task);
+    assert!(app.appdata_snapshot_in_flight);
+    assert!(app.pending_appdata_snapshot.is_none());
+
+    let (settings, paths) = app.ctx.apply_appdata_snapshot_for_test(latest);
+    let _task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
+        settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
+    ))));
+    let (settings, _) = app.ctx.settings_and_paths_snapshot();
+    assert_eq!(settings.backend.language.as_deref(), Some("latest"));
+    assert!(!app.appdata_snapshot_in_flight);
 }
 
 #[test]
@@ -2158,7 +2221,7 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
             )]
             .into_boxed_slice(),
         ),
-        epoch: 1,
+        epoch: Generation::from_raw(1),
     };
     let refresh = LibraryRefresh {
         reason: LibraryRefreshReason::DiskChanged,
@@ -2224,7 +2287,7 @@ fn backend_runtime_actions_translate_to_downloader_events() {
     ));
 
     let snapshot = backend_runtime_action_message(BackendRuntimeAction::DownloadFinished {
-        request_id: Some(77),
+        request_id: Some(crate::bridge::tasks::WorkshopSnapshotId::new(77)),
         item_id: PublishedFileId::fixture(456),
         installed_path: None,
         extracted_path: PathBuf::from("/tmp/snapshot/456"),
@@ -2232,9 +2295,10 @@ fn backend_runtime_actions_translate_to_downloader_events() {
     assert!(matches!(
         snapshot,
         RootMessage::PreparePublish(prepare_publish::Message::WorkshopContentDownloaded(
-            77,
+            request_id,
             WorkshopDownloadSuccess { item_id, .. }
-        )) if item_id == PublishedFileId::fixture(456)
+        )) if request_id == crate::bridge::tasks::WorkshopSnapshotId::new(77)
+            && item_id == PublishedFileId::fixture(456)
     ));
 }
 
@@ -2250,7 +2314,7 @@ fn workshop_download_completion_starts_baseline_inspection() {
                 title: "Workshop Addon".to_owned(),
                 tags: Vec::new(),
                 preview_url: None,
-                snapshot_request_id: 1,
+                snapshot_request_id: crate::bridge::tasks::WorkshopSnapshotId::new(1),
                 snapshot_destination: extracted_path.clone(),
             }),
             ignored_patterns: Vec::new(),
@@ -2260,7 +2324,7 @@ fn workshop_download_completion_starts_baseline_inspection() {
 
     let _task = app.update(RootMessage::PreparePublish(
         prepare_publish::Message::WorkshopContentDownloaded(
-            1,
+            crate::bridge::tasks::WorkshopSnapshotId::new(1),
             WorkshopDownloadSuccess {
                 item_id: workshop_id,
                 installed_path: None,
@@ -2502,7 +2566,7 @@ fn shell_executor_navigated_runs_size_analyzer_enter_and_exit_effects() {
             )]
             .into_boxed_slice(),
         ),
-        epoch: 1,
+        epoch: Generation::from_raw(1),
     };
     let refresh = LibraryRefresh {
         reason: LibraryRefreshReason::DiskChanged,
@@ -2555,7 +2619,7 @@ fn shell_navigation_to_current_route_does_not_reenter_route() {
             )]
             .into_boxed_slice(),
         ),
-        epoch: 1,
+        epoch: Generation::from_raw(1),
     };
     let refresh = LibraryRefresh {
         reason: LibraryRefreshReason::DiskChanged,
@@ -2840,7 +2904,7 @@ fn size_analyzer_snapshot(epoch: u64) -> LibrarySnapshot {
             ]
             .into_boxed_slice(),
         ),
-        epoch,
+        epoch: Generation::from_raw(epoch),
     }
 }
 

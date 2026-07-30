@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use super::model::{DestinationKind, SettingsSnapshot};
 use super::state::OpenContext;
 use crate::bridge::ui_error::UiError;
+use crate::generation::Generation;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
@@ -16,6 +17,11 @@ pub enum Message {
     KindToggled(DestinationKind),
     PathInputEdited(String),
     PathAccepted,
+    CustomPathValidated {
+        generation: Generation,
+        path: PathBuf,
+        valid: bool,
+    },
     BrowseCompleted(Option<PathBuf>),
     /// The create-folder checkbox toggled; persists immediately.
     CreateFolderToggled(bool),

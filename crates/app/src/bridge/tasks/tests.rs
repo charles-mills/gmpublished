@@ -11,7 +11,10 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 static BACKEND_EVENT_SINK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -856,7 +859,7 @@ fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
         source_path: None,
         file_name: None,
         workshop_id: Some(workshop_id),
-        request_id: Some(77),
+        request_id: Some(WorkshopSnapshotId::new(77)),
     });
     assert!(effects.handled_event());
     assert!(effects.into_actions().is_empty());
@@ -870,7 +873,7 @@ fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
     assert_eq!(
         effects.into_actions(),
         vec![BackendRuntimeAction::DownloadFinished {
-            request_id: Some(77),
+            request_id: Some(WorkshopSnapshotId::new(77)),
             item_id: workshop_id,
             installed_path: None,
             extracted_path: PathBuf::from("/tmp/extracted/458"),
@@ -883,7 +886,7 @@ fn workshop_snapshot_error_is_request_scoped() {
     let ctx = BackendContext::new().expect("test backend context");
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
         transaction_id: TransactionId::from_raw(623),
-        request_id: Some(78),
+        request_id: Some(WorkshopSnapshotId::new(78)),
     });
     assert!(effects.handled_event());
 
@@ -898,7 +901,8 @@ fn workshop_snapshot_error_is_request_scoped() {
     ));
     assert!(matches!(
         effects.into_actions().as_slice(),
-        [BackendRuntimeAction::SnapshotFailed { request_id: 78, .. }]
+        [BackendRuntimeAction::SnapshotFailed { request_id, .. }]
+            if *request_id == WorkshopSnapshotId::new(78)
     ));
 }
 
@@ -1660,19 +1664,18 @@ fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events(
 
     let extract_dir = temp.path().join("extract");
     let backend = ctx.backend();
-    view.extract(
-        &gma,
-        ExtractDestination::Directory(extract_dir.clone()),
-        &transaction,
-        ExtractOptions {
-            open_after: false,
-            whitelist: Whitelist::Ignore,
-        },
-        &backend.whitelist,
-        &backend.app_data,
-        &backend.steam,
-    )
-    .expect("extract fixture");
+    let extraction = backend
+        .resolve_extraction(
+            &gma,
+            ExtractDestination::Directory(extract_dir.clone()),
+            ExtractOptions {
+                open_after: false,
+                whitelist: Whitelist::Ignore,
+            },
+        )
+        .expect("resolve extraction fixture");
+    view.extract(&gma, &transaction, extraction)
+        .expect("extract fixture");
 
     for event in backend_receiver.try_iter() {
         ctx.handle_backend_runtime_event(&event);
@@ -1695,7 +1698,7 @@ fn write_nt_string(bytes: &mut Vec<u8>, value: &str) {
     bytes.push(0);
 }
 
-fn write_raw_gma(path: &PathBuf, entries: &[(&str, &[u8])]) {
+fn write_raw_gma(path: &Path, entries: &[(&str, &[u8])]) {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"GMAD");
     bytes.push(3);

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::PathBuf;
 
 use crate::WorkshopId;
@@ -6,6 +7,30 @@ use crate::appdata::AppDataSnapshot;
 pub use crate::transactions::{
     TransactionError, TransactionId, TransactionPayload, TransactionStatus,
 };
+
+/// Correlates the download/extraction pair used to stage one Workshop item
+/// for publishing. It is deliberately distinct from transaction ids and
+/// Workshop ids even though all three happen to fit in `u64`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkshopSnapshotId(u64);
+
+impl WorkshopSnapshotId {
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for WorkshopSnapshotId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BackendEvent {
@@ -28,7 +53,7 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadStartedEvent {
     pub transaction_id: TransactionId,
-    pub request_id: Option<u64>,
+    pub request_id: Option<WorkshopSnapshotId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,7 +62,7 @@ pub struct ExtractionStartedEvent {
     pub source_path: Option<PathBuf>,
     pub file_name: Option<String>,
     pub workshop_id: Option<WorkshopId>,
-    pub request_id: Option<u64>,
+    pub request_id: Option<WorkshopSnapshotId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

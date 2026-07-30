@@ -9,7 +9,6 @@ use super::{
     TransactionStatus, UiError, WorkerPoolSpawner, install_backend_event_sink_by_default,
     show_native_open_error_dialog,
 };
-use gmpublished_backend::appdata::AppDataSnapshot as BackendAppDataSnapshot;
 use gmpublished_backend::transactions::TransactionId;
 use iced::Subscription;
 use iced::Task;
@@ -33,6 +32,14 @@ pub struct BackendContext {
 impl BackendContext {
     pub(crate) fn new() -> Result<Self, gmpublished_backend::BackendInitError> {
         Self::with_backend_event_sink(install_backend_event_sink_by_default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_appdata_snapshot_for_test(
+        &self,
+        snapshot: gmpublished_backend::appdata::AppDataSnapshot,
+    ) -> (Settings, AppPaths) {
+        self.services.apply_appdata_snapshot(snapshot)
     }
 
     fn with_backend_event_sink(
@@ -153,12 +160,8 @@ impl BackendContext {
         })
     }
 
-    pub(crate) fn play_gifs_by_default(&self) -> bool {
-        self.services.settings_snapshot().ui.play_gifs_by_default
-    }
-
     pub(crate) fn sounds_enabled(&self) -> bool {
-        self.services.settings_snapshot().backend.sounds
+        self.services.sounds_enabled()
     }
 
     pub(crate) fn settings_and_paths_snapshot(&self) -> (Settings, AppPaths) {
@@ -383,13 +386,6 @@ impl BackendContext {
                 BackendRuntimeEventEffects::ignored()
             }
         }
-    }
-
-    pub(crate) fn apply_appdata_snapshot(
-        &self,
-        snapshot: BackendAppDataSnapshot,
-    ) -> (Settings, AppPaths) {
-        self.services.apply_appdata_snapshot(snapshot)
     }
 
     pub(crate) fn error_backend_transaction_task(

@@ -34,4 +34,5 @@ pub enum Effect {
     PublishSubmitRequested(PublishSubmitRequestEnvelope),
     PublishIconSubmitRequested(PublishIconSubmitRequestEnvelope),
     PublishSuccessUrlsRequested(PublishSubmitResult),
+    SoundRequested(crate::media::sounds::Sound),
 }

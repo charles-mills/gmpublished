@@ -11,8 +11,8 @@ use super::{
     NativeOpenTarget, PublishSubmitOutcome, PublishSubmitRequest, PublishedFileId, SearchFullBatch,
     SearchFullRequest, SearchMode, SearchQuickBatch, SearchQuickRequest, Settings,
     SettingsPersistError, SteamUser, UiError, UiSettings, WorkshopItem, WorkshopMetadata,
-    WorkshopPage, appdata_snapshot_from_backend, clear_directory_contents, fallback_paths, library,
-    metadata_snapshot, native, publish_submission_from_app_request,
+    WorkshopPage, WorkshopSnapshotId, appdata_snapshot_from_backend, clear_directory_contents,
+    fallback_paths, library, metadata_snapshot, native, publish_submission_from_app_request,
     search_full_batch_from_transaction_payload, search_quick_batch_from_backend,
     steam_user_from_backend, steam_user_from_workshop_backend, subscription_counts_from_items,
     ui_settings_file_for, workshop_item_from_backend,
@@ -316,6 +316,10 @@ impl BackendServices {
 
     pub(crate) fn settings_snapshot(&self) -> Settings {
         self.configuration.lock().settings.clone()
+    }
+
+    pub(crate) fn sounds_enabled(&self) -> bool {
+        self.configuration.lock().settings.backend.sounds
     }
 
     pub(crate) fn paths(&self) -> AppPaths {
@@ -651,34 +655,26 @@ impl BackendServices {
         &self,
         item_ids: Vec<PublishedFileId>,
     ) -> Result<(), UiError> {
-        if !self.steam_connected() {
-            return Err(steam_not_connected());
-        }
-
         downloads::queue_workshop_downloads(
             &self.backend.downloads,
             item_ids.into_iter().map(Into::into),
-        );
-        Ok(())
+        )
+        .ui_err()
     }
 
     pub(crate) fn submit_workshop_snapshot(
         &self,
         item_id: PublishedFileId,
         destination: crate::bridge::gma::ExtractDestination,
-        request_id: u64,
+        request_id: WorkshopSnapshotId,
     ) -> Result<(), UiError> {
-        if !self.steam_connected() {
-            return Err(steam_not_connected());
-        }
-
         downloads::queue_workshop_download_to(
             &self.backend.downloads,
             item_id.into(),
             destination,
             request_id,
-        );
-        Ok(())
+        )
+        .ui_err()
     }
 
     pub(crate) fn submit_publish_request(

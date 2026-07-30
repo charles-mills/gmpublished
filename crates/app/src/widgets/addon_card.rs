@@ -19,7 +19,7 @@ use iced::{
 };
 
 use crate::assets;
-use crate::theme::{self, Tokens, motion};
+use crate::theme::{self, InvariantTokens, Tokens, motion};
 use crate::widgets::context_area::context_area;
 use crate::widgets::download_count_icon::download_count_icon;
 use crate::widgets::grid_rows::CardId;
@@ -283,17 +283,21 @@ pub enum Message {
 }
 
 #[cfg(test)]
-pub fn preferred_height(data: &Data, width: f32, tokens: &Tokens) -> f32 {
+pub fn preferred_height(data: &Data, width: f32, tokens: &InvariantTokens) -> f32 {
     let measured_title_height = measure_title_height(data.display_title(), width, tokens);
 
     preferred_height_for_title_height(width, measured_title_height, tokens)
 }
 
-pub fn preferred_height_for_title_height(width: f32, title_height: f32, tokens: &Tokens) -> f32 {
+pub fn preferred_height_for_title_height(
+    width: f32,
+    title_height: f32,
+    tokens: &InvariantTokens,
+) -> f32 {
     fixed_content_height(width, tokens) + clamp_title_height(title_height, tokens)
 }
 
-fn fixed_content_height(width: f32, tokens: &Tokens) -> f32 {
+fn fixed_content_height(width: f32, tokens: &InvariantTokens) -> f32 {
     let preview_size = preview_size(width, tokens);
 
     tokens.dims.card_padding * 2.0
@@ -312,9 +316,10 @@ pub fn view<'a>(
     now: Instant,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let content_width = content_width(width, &tokens);
-    let preview_size = preview_size(width, &tokens);
-    let title_height = title_height_from_content_height(content_height, width, &tokens);
+    let layout = theme::invariant();
+    let content_width = content_width(width, layout);
+    let preview_size = preview_size(width, layout);
+    let title_height = title_height_from_content_height(content_height, width, layout);
     let hover_progress = data.hover_progress(now);
 
     let stats = stats_row(data, content_width, &tokens);
@@ -322,7 +327,7 @@ pub fn view<'a>(
     let title = title(data, title_height, &tokens);
 
     let body = column![stats, preview, title]
-        .spacing(tokens.dims.card_inner_gap)
+        .spacing(layout.dims.card_inner_gap)
         .width(Length::Fixed(content_width))
         .height(Length::Shrink);
 
@@ -334,7 +339,7 @@ pub fn view<'a>(
     let content = container(body)
         .width(Length::Fixed(width))
         .height(Length::Fixed(content_height))
-        .padding(tokens.dims.card_padding)
+        .padding(layout.dims.card_padding)
         .align_y(alignment::Vertical::Top)
         .clip(true)
         .style(move |_| card_style(&tokens, hover_progress, hovered, enabled));
@@ -674,22 +679,22 @@ fn title<'a>(data: &Data, height: f32, tokens: &Tokens) -> Element<'a, Message> 
         .into()
 }
 
-fn content_width(width: f32, tokens: &Tokens) -> f32 {
+fn content_width(width: f32, tokens: &InvariantTokens) -> f32 {
     (width - tokens.dims.card_padding * 2.0).max(1.0)
 }
 
-fn preview_size(width: f32, tokens: &Tokens) -> f32 {
+fn preview_size(width: f32, tokens: &InvariantTokens) -> f32 {
     content_width(width, tokens).max(1.0)
 }
 
 /// The exact measured height of any title that lays out as a single line,
 /// at any card width. Exposed so the grid's measurement cache can resolve
 /// known single-line titles without shaping them again.
-pub fn single_line_title_height(tokens: &Tokens) -> f32 {
+pub fn single_line_title_height(tokens: &InvariantTokens) -> f32 {
     title_line_height(tokens)
 }
 
-pub fn measure_title_height(title: &str, width: f32, tokens: &Tokens) -> f32 {
+pub fn measure_title_height(title: &str, width: f32, tokens: &InvariantTokens) -> f32 {
     let line_height = title_line_height(tokens);
     let measured = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let paragraph = IcedParagraph::with_text(iced::advanced::Text {
@@ -772,11 +777,15 @@ fn measure_stats_text_width_uncached(content: &str, size: f32, line_height: f32)
     })
 }
 
-fn title_height_from_content_height(content_height: f32, width: f32, tokens: &Tokens) -> f32 {
+fn title_height_from_content_height(
+    content_height: f32,
+    width: f32,
+    tokens: &InvariantTokens,
+) -> f32 {
     clamp_title_height(content_height - fixed_content_height(width, tokens), tokens)
 }
 
-fn clamp_title_height(height: f32, tokens: &Tokens) -> f32 {
+fn clamp_title_height(height: f32, tokens: &InvariantTokens) -> f32 {
     let height = if height.is_finite() && height > 0.0 {
         height
     } else {
@@ -786,11 +795,11 @@ fn clamp_title_height(height: f32, tokens: &Tokens) -> f32 {
     height.clamp(title_line_height(tokens), max_title_height(tokens))
 }
 
-fn title_line_height(tokens: &Tokens) -> f32 {
+fn title_line_height(tokens: &InvariantTokens) -> f32 {
     tokens.typography.body * TITLE_LINE_HEIGHT
 }
 
-fn max_title_height(tokens: &Tokens) -> f32 {
+fn max_title_height(tokens: &InvariantTokens) -> f32 {
     (title_line_height(tokens) * MAX_TITLE_LINES as f32).min(tokens.dims.card_title_height)
 }
 
@@ -908,7 +917,7 @@ mod tests {
         Data, Kind, Thumbnail, measure_title_height, preferred_height,
         preferred_height_for_title_height,
     };
-    use crate::theme::Tokens;
+    use crate::theme;
 
     #[test]
     fn publish_new_uses_fallback_title_when_empty() {
@@ -1051,7 +1060,7 @@ mod tests {
 
     #[test]
     fn preferred_height_composes_square_preview_and_clamped_title() {
-        let tokens = Tokens::dark();
+        let tokens = theme::invariant();
         let width = 200.0;
         let preview = width - tokens.dims.card_padding * 2.0;
         let base = tokens.dims.card_padding * 2.0
@@ -1059,33 +1068,33 @@ mod tests {
             + tokens.dims.card_inner_gap
             + preview
             + tokens.dims.card_inner_gap;
-        let one_line = super::title_line_height(&tokens);
+        let one_line = super::title_line_height(tokens);
 
         assert_eq!(
-            preferred_height_for_title_height(width, one_line, &tokens),
+            preferred_height_for_title_height(width, one_line, tokens),
             base + one_line
         );
 
         assert_eq!(
-            preferred_height_for_title_height(width, tokens.dims.card_title_height * 2.0, &tokens),
-            base + super::max_title_height(&tokens)
+            preferred_height_for_title_height(width, tokens.dims.card_title_height * 2.0, tokens),
+            base + super::max_title_height(tokens)
         );
     }
 
     #[test]
     fn measured_title_height_is_total_and_clamped() {
-        let tokens = Tokens::dark();
-        let line = super::title_line_height(&tokens);
+        let tokens = theme::invariant();
+        let line = super::title_line_height(tokens);
         let measured = measure_title_height(
             "A very long addon name that may wrap when the font system is populated",
             120.0,
-            &tokens,
+            tokens,
         );
 
         assert!(measured >= line);
         assert!(measured <= tokens.dims.card_title_height);
 
-        let preferred = preferred_height(&Data::addon(CardId::from("1"), "Short"), 200.0, &tokens);
+        let preferred = preferred_height(&Data::addon(CardId::from("1"), "Short"), 200.0, tokens);
         assert!(preferred.is_finite());
     }
 }

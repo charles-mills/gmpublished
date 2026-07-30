@@ -25,6 +25,7 @@ use super::state::OrbitPose;
 use super::viewer3d::SOURCE_UP;
 use super::viewer3d::{look_at, mat_mul, perspective};
 use crate::bridge::materials::ResolvedTexture;
+use crate::generation::Generation;
 use crate::media::preview_model::ParticlePreview;
 
 const SHADER_SOURCE: &str = include_str!("particles.wgsl");
@@ -50,7 +51,7 @@ pub(super) struct ParticleViewer {
     pub(super) playing: bool,
     pub(super) speed: f32,
     /// Bumped by the restart button; the widget replays from t=0.
-    pub(super) restart_epoch: u64,
+    pub(super) restart_epoch: Generation,
     pub(super) pose: Option<OrbitPose>,
     pub(super) control_points: [Vec3; MAX_CONTROL_POINTS],
 }
@@ -71,7 +72,7 @@ pub(super) struct SimState {
     drag: Option<Drag>,
     engine: Option<ParticleEngine>,
     last_frame: Option<Instant>,
-    restart_epoch: u64,
+    restart_epoch: Generation,
 }
 
 impl Default for SimState {
@@ -82,7 +83,7 @@ impl Default for SimState {
             drag: None,
             engine: None,
             last_frame: None,
-            restart_epoch: 0,
+            restart_epoch: Generation::INITIAL,
         }
     }
 }
@@ -158,39 +159,6 @@ struct CameraFrame {
     aspect: f32,
 }
 
-fn v_sub(a: Vec3, b: Vec3) -> Vec3 {
-    Vec3::new(a[0] - b[0], a[1] - b[1], a[2] - b[2])
-}
-
-fn v_add(a: Vec3, b: Vec3) -> Vec3 {
-    Vec3::new(a[0] + b[0], a[1] + b[1], a[2] + b[2])
-}
-
-fn v_scale(a: Vec3, s: f32) -> Vec3 {
-    Vec3::new(a[0] * s, a[1] * s, a[2] * s)
-}
-
-fn v_dot(a: Vec3, b: Vec3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn v_cross(a: Vec3, b: Vec3) -> Vec3 {
-    Vec3::new(
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    )
-}
-
-fn v_length(a: Vec3) -> f32 {
-    v_dot(a, a).sqrt()
-}
-
-fn v_normalize(a: Vec3) -> Vec3 {
-    let len = v_length(a).max(1e-6);
-    v_scale(a, 1.0 / len)
-}
-
 fn srgb_to_linear(value: f32) -> f32 {
     if value <= 0.04045 {
         value / 12.92
@@ -212,9 +180,9 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
         center[2] + distance * state.orbit.pitch().sin(),
     ];
     // Source is Z-up.
-    let forward = v_normalize(v_sub(center, Vec3::from(eye)));
-    let right = v_normalize(v_cross(forward, SOURCE_UP));
-    let up = v_cross(right, forward);
+    let forward = (center - Vec3::from(eye)).normalize_or_zero();
+    let right = forward.cross(SOURCE_UP).normalize_or_zero();
+    let up = right.cross(forward);
     let view = look_at(Vec3::from(eye), center, SOURCE_UP);
     let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
     let proj = perspective(FOV_Y, aspect, radius * 0.01, radius * 20.0 + distance);
@@ -233,27 +201,24 @@ fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> Vec3 {
     let ndc_x = ((cursor.x - bounds.x) / bounds.width.max(1.0)) * 2.0 - 1.0;
     let ndc_y = 1.0 - ((cursor.y - bounds.y) / bounds.height.max(1.0)) * 2.0;
     let tan_half = (FOV_Y * 0.5).tan();
-    v_normalize(v_add(
-        frame.forward,
-        v_add(
-            v_scale(frame.right, ndc_x * tan_half * frame.aspect),
-            v_scale(frame.up, ndc_y * tan_half),
-        ),
-    ))
+    (frame.forward
+        + frame.right * (ndc_x * tan_half * frame.aspect)
+        + frame.up * (ndc_y * tan_half))
+        .normalize_or_zero()
 }
 
 /// Intersects a cursor ray with the camera-facing plane through `anchor`.
 fn drag_plane_position(frame: &CameraFrame, ray: Vec3, anchor: Vec3) -> Option<Vec3> {
-    let denominator = v_dot(ray, frame.forward);
+    let denominator = ray.dot(frame.forward);
     if denominator.abs() < 1e-4 {
         return None;
     }
-    let t = v_dot(v_sub(anchor, frame.eye), frame.forward) / denominator;
-    (t > 0.0).then(|| v_add(frame.eye, v_scale(ray, t)))
+    let t = (anchor - frame.eye).dot(frame.forward) / denominator;
+    (t > 0.0).then(|| frame.eye + ray * t)
 }
 
 fn gizmo_pick_radius(frame: &CameraFrame, position: Vec3) -> f32 {
-    v_length(v_sub(position, frame.eye)) * 0.035
+    position.distance(frame.eye) * 0.035
 }
 
 impl ParticleViewer {
@@ -279,13 +244,13 @@ impl ParticleViewer {
         let mut best: Option<(ControlPointIndex, f32)> = None;
         for index in self.gizmo_indices(state) {
             let position = engine.control_point(index);
-            let to_point = v_sub(position, frame.eye);
-            let along = v_dot(to_point, ray);
+            let to_point = position - frame.eye;
+            let along = to_point.dot(ray);
             if along <= 0.0 {
                 continue;
             }
-            let closest = v_add(frame.eye, v_scale(ray, along));
-            let miss = v_length(v_sub(position, closest));
+            let closest = frame.eye + ray * along;
+            let miss = position.distance(closest);
             if miss <= gizmo_pick_radius(frame, position)
                 && best.is_none_or(|(_, distance)| along < distance)
             {
@@ -404,8 +369,8 @@ impl shader::Program<Message> for ParticleViewer {
                     // Painter's order: no depth buffer, so translucents sort
                     // back-to-front along the view direction.
                     list.sort_by(|a, b| {
-                        let da = v_dot(v_sub(a.position(), frame.eye), frame.forward);
-                        let db = v_dot(v_sub(b.position(), frame.eye), frame.forward);
+                        let da = (a.position() - frame.eye).dot(frame.forward);
+                        let db = (b.position() - frame.eye).dot(frame.forward);
                         db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     translucent.push((slot, list));
@@ -492,17 +457,17 @@ fn build_instances(
         }
         RendererKind::SpriteTrail => {
             for particle in particles {
-                let speed = v_length(particle.velocity);
+                let speed = particle.velocity.length();
                 let length = (speed * particle.trail_length)
                     .clamp(renderer.trail_min_length, renderer.trail_max_length)
                     .max(particle.radius);
                 let axis = if speed > 1e-3 {
-                    v_normalize(particle.velocity)
+                    particle.velocity.normalize_or_zero()
                 } else {
                     frame.up
                 };
                 let half_length = length * 0.5;
-                let center = v_sub(particle.position, v_scale(axis, half_length));
+                let center = particle.position - axis * half_length;
                 list.push(GpuInstance {
                     position_rotation: [center[0], center[1], center[2], 0.0],
                     axis_mode: [axis[0], axis[1], axis[2], 1.0],
@@ -517,13 +482,13 @@ fn build_instances(
             ordered.sort_by_key(|particle| particle.spawn_index);
             for pair in ordered.windows(2) {
                 let (a, b) = (&pair[0], &pair[1]);
-                let span = v_sub(b.position, a.position);
-                let length = v_length(span);
+                let span = b.position - a.position;
+                let length = span.length();
                 if length < 1e-3 {
                     continue;
                 }
-                let center = v_scale(v_add(a.position, b.position), 0.5);
-                let axis = v_scale(span, 1.0 / length);
+                let center = (a.position + b.position) * 0.5;
+                let axis = span * (1.0 / length);
                 let mut color = GpuInstance::linear_color(a);
                 let color_b = GpuInstance::linear_color(b);
                 for (target, other) in color.iter_mut().zip(color_b) {

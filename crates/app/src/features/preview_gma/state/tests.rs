@@ -176,7 +176,7 @@ fn ready_delivery(generation: Generation) -> thumbnail_demand::Delivery {
     thumbnail_demand::Delivery {
         owner: thumbnail_demand::Owner::PreviewGma,
         generation,
-        id: thumbnail_demand::DemandId::new(PREVIEW_THUMBNAIL_DEMAND_ID),
+        id: thumbnail_demand::DemandId::Singleton,
         key: key.clone(),
         result: thumbnail_demand::DeliveryResult::Ready(
             thumbnail_demand::ReadyThumbnail::for_test(key, metadata, vec![7_u8; 8 * 8 * 4]),

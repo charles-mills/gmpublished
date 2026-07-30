@@ -201,7 +201,7 @@ impl GmaMeta {
 
     pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        // One mmap + one parse; the previous open/header/entries chain
+        // One file open + one parse; the previous open/header/entries chain
         // re-parsed the whole entry table three times.
         let bundle = GmaFile::open_index(path)?;
         let mut entries: Vec<GmaMetaEntry> = bundle
@@ -231,9 +231,8 @@ pub struct PreviewEntry {
 }
 
 /// Bytes provider and parsed identity for one open preview archive. `view`
-/// is wrapped in `Arc` purely so the struct stays `Clone` (a memory map
-/// cannot be); it plays no part in the archive's identity, so `Debug` and
-/// `PartialEq` are hand-written to skip it.
+/// is wrapped in `Arc` purely so the struct stays `Clone`; it plays no part
+/// in the archive's identity, so `Debug` and `PartialEq` skip it.
 #[derive(Clone)]
 pub struct PreviewArchive {
     gma: GmaFile,
@@ -271,7 +270,7 @@ impl PreviewArchive {
         workshop_id: Option<u64>,
     ) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        // One mmap + one parse for handle, header and entries together;
+        // One file open + one parse for handle, header and entries together;
         // the view is kept for entry fetches during the preview session.
         let view = GmaView::open(path)?;
         let bundle = view.meta(path)?;
@@ -362,10 +361,9 @@ impl PreviewArchive {
         transaction: &Transaction,
         backend: &gmpublished_backend::Backend,
     ) -> Result<PathBuf, GmaError> {
-        self.view.extract(
+        let context = backend.resolve_extraction(
             &self.gma,
             destination,
-            transaction,
             ExtractOptions {
                 open_after: false,
                 whitelist: if options.ignore_whitelist {
@@ -374,10 +372,8 @@ impl PreviewArchive {
                     Whitelist::Enforce
                 },
             },
-            &backend.whitelist,
-            &backend.app_data,
-            &backend.steam,
-        )
+        )?;
+        self.view.extract(&self.gma, transaction, context)
     }
 }
 

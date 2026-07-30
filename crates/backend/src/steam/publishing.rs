@@ -21,12 +21,18 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use steamworks::SteamError;
 
 use crate::WorkshopId;
 use walkdir::WalkDir;
+
+/// Item updates can legitimately spend a long time preparing or committing
+/// without changing the byte counters exposed by Steam. Keep an absolute
+/// safety bound for a callback Steam may abandon, but do not treat ordinary
+/// progress inactivity as proof that the upload stopped.
+const PUBLISH_RESULT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[cfg(not(target_os = "windows"))]
 use std::collections::HashSet;
@@ -61,6 +67,10 @@ pub enum PublishError {
     PathIo { path: PathBuf },
     #[error("Steam returned an error: {0}")]
     SteamError(SteamError),
+    #[error("Steam reported success without a Workshop item ID")]
+    MissingPublishedFileId,
+    #[error("Steam abandoned the publishing callback")]
+    CallbackAbandoned,
     #[error("image processing failed: {0}")]
     ImageError(#[source] ImageError),
     #[error("cancelled")]
@@ -85,6 +95,7 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::IOError(_) => keys::IO_ERROR,
             Self::PathIo { .. } => keys::PATH_IO_ERROR,
             Self::SteamError(_) => keys::STEAM_ERROR,
+            Self::MissingPublishedFileId | Self::CallbackAbandoned => keys::STEAM_ERROR,
             Self::ImageError(_) => keys::IMAGE_ERROR,
             Self::Cancelled => keys::CANCELLED,
             Self::Gma(error) => error.error_key(),
@@ -99,11 +110,22 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::IOError(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::SteamError(error) => Some(error.to_string()),
+            Self::MissingPublishedFileId | Self::CallbackAbandoned => Some(self.to_string()),
             Self::ImageError(error) => Some(error.to_string()),
             Self::Gma(error) => error.error_detail(),
             Self::Runtime(error) => error.error_detail(),
             _ => None,
         }
+    }
+}
+
+impl PublishError {
+    /// Steam offers no cancellation API once an item update is submitted.
+    /// When either error comes from the post-submit progress pump, it means
+    /// only that this process stopped waiting; the client may still be reading
+    /// the upload inputs and committing the revision.
+    fn submitted_upload_may_be_active(&self) -> bool {
+        matches!(self, Self::CallbackAbandoned | Self::Cancelled)
     }
 }
 impl serde::Serialize for PublishError {
@@ -218,14 +240,30 @@ fn ensure_temp_dir(app_data: &AppData) -> PathBuf {
 }
 
 /// Deletes the whole per-publish temp directory (the packed GMA, and any
-/// debris from an interrupted pack) once the flow ends, success or failure.
-struct PublishDirGuard(PathBuf);
+/// debris from an interrupted pack) once the flow reaches a known terminal
+/// outcome. Indeterminate submitted uploads explicitly disarm it.
+struct PublishDirGuard(Option<PathBuf>);
+impl PublishDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    /// Leaves the directory for Steam when an already-submitted update has an
+    /// indeterminate outcome. The app's ordinary temp cleanup can reclaim it
+    /// on a later run, after Steam can no longer be using it.
+    fn preserve(mut self) {
+        self.0.take();
+    }
+}
 impl Drop for PublishDirGuard {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+        let Some(path) = self.0.take() else {
+            return;
+        };
+        if let Err(error) = std::fs::remove_dir_all(&path) {
             log::debug!(
                 "Failed to remove temporary publish directory {}: {error}",
-                self.0.display()
+                path.display()
             );
         }
     }
@@ -268,11 +306,15 @@ fn pump_publish_progress(
     result_rx: &mpsc::Receiver<Result<(steamworks::PublishedFileId, bool), SteamError>>,
 ) -> Result<Result<(steamworks::PublishedFileId, bool), SteamError>, PublishError> {
     let mut last_processed = None;
+    let callback_deadline = Instant::now() + PUBLISH_RESULT_TIMEOUT;
     loop {
         if transaction.aborted() {
             return Err(PublishError::Cancelled);
         }
         let (processed, progress, total) = update_handle.progress();
+        if Instant::now() >= callback_deadline {
+            return Err(PublishError::CallbackAbandoned);
+        }
         if let Some(status) = publish_update_status(processed) {
             transaction.status(status);
         }
@@ -284,11 +326,15 @@ fn pump_publish_progress(
         }
         last_processed = Some(processed);
 
-        match result_rx.recv_timeout(Duration::from_millis(50)) {
+        match result_rx.recv_timeout(
+            callback_deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50)),
+        ) {
             Ok(result) => return Ok(result),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(fail_publish_callback_channel(transaction));
+                return Err(PublishError::CallbackAbandoned);
             }
         }
     }
@@ -317,8 +363,8 @@ struct PreviewIconWriteFailed(PathBuf);
 
 /// The preview file path handed to Steam for an upload. A temp file this
 /// resolved (an upscaled copy or the bundled default icon) is deleted once
-/// Steam is done reading it, on drop; a user-supplied icon path is left
-/// untouched.
+/// Steam is known to be done reading it, on drop; an indeterminate upload can
+/// disarm cleanup, and a user-supplied icon path is always left untouched.
 struct PreviewPath {
     path: PathBuf,
     owned_temp: Option<PathBuf>,
@@ -336,6 +382,12 @@ impl PreviewPath {
             owned_temp: Some(path.clone()),
             path,
         }
+    }
+
+    /// Keeps an owned preview available to an update whose callback outcome
+    /// is unknown. Borrowed user paths are never managed by this type.
+    fn preserve(mut self) {
+        self.owned_temp.take();
     }
 }
 impl AsRef<Path> for PreviewPath {
@@ -451,21 +503,30 @@ impl WorkshopIcon {
     }
 }
 
-pub enum WorkshopUpdateType {
-    Creation {
-        title: String,
-        path: ContentPath,
-        tags: Vec<String>,
-        addon_type: String,
-        preview: WorkshopIcon,
-    },
-    Update {
-        path: ContentPath,
-        tags: Vec<String>,
-        addon_type: String,
-        preview: Option<WorkshopIcon>,
-        changes: Option<String>,
-    },
+/// The first revision of a newly-created Workshop item. Creation-only fields
+/// are mandatory here and cannot be passed to [`ConnectedSteam::update`].
+pub struct WorkshopCreation {
+    pub title: String,
+    pub path: ContentPath,
+    pub tags: Vec<String>,
+    pub addon_type: String,
+    pub preview: WorkshopIcon,
+}
+
+/// A revision of an existing Workshop item. Its identity is supplied
+/// separately to [`ConnectedSteam::update`]; title/default-description fields
+/// cannot accidentally be applied through this path.
+pub struct WorkshopUpdate {
+    pub path: ContentPath,
+    pub tags: Vec<String>,
+    pub addon_type: String,
+    pub preview: Option<WorkshopIcon>,
+    pub changes: Option<String>,
+}
+
+enum WorkshopRevision {
+    Creation(WorkshopCreation),
+    Update(WorkshopUpdate),
 }
 
 #[derive(Clone, Debug)]
@@ -507,7 +568,7 @@ pub struct PublishSubmissionOutcome {
     pub legal_agreement_required: bool,
 }
 
-/// Outcome of creating a new Workshop item (see [`Steam::publish`]): the
+/// Outcome of creating a new Workshop item (see [`ConnectedSteam::publish`]): the
 /// freshly created id alongside whether Steam requires the legal agreement
 /// to be accepted before the item is visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -517,28 +578,26 @@ pub struct PublishOutcome {
 }
 
 impl ConnectedSteam<'_> {
-    pub fn update(
+    fn submit_revision(
         &self,
         id: WorkshopId,
-        details: WorkshopUpdateType,
+        details: WorkshopRevision,
         transaction: &Transaction,
         app_data: &AppData,
     ) -> Result<bool, PublishError> {
-        use WorkshopUpdateType::{Creation, Update};
-
         let (result_tx, result_rx) = mpsc::channel();
         // The preview file must outlive the upload itself, not just the
         // builder call that hands Steam its path, so it's threaded out of
         // the match and only dropped (deleting an owned temp) after the
         // upload has finished below.
-        let (update_handle, _preview) = match details {
-            Creation {
+        let (update_handle, preview) = match details {
+            WorkshopRevision::Creation(WorkshopCreation {
                 title,
                 path,
                 tags,
                 addon_type,
                 preview,
-            } => {
+            }) => {
                 let tags = publish_tags(tags, addon_type);
 
                 let preview_path = preview.resolve_preview_path(app_data)?;
@@ -559,13 +618,13 @@ impl ConnectedSteam<'_> {
                 (handle, Some(preview_path))
             }
 
-            Update {
+            WorkshopRevision::Update(WorkshopUpdate {
                 path,
                 tags,
                 addon_type,
                 preview,
                 changes,
-            } => {
+            }) => {
                 let tags = publish_tags(tags, addon_type);
 
                 let preview_path = preview
@@ -590,7 +649,17 @@ impl ConnectedSteam<'_> {
             }
         };
 
-        let result = pump_publish_progress(&update_handle, transaction, &result_rx)?;
+        let result = match pump_publish_progress(&update_handle, transaction, &result_rx) {
+            Ok(result) => result,
+            Err(error) => {
+                if error.submitted_upload_may_be_active()
+                    && let Some(preview) = preview
+                {
+                    preview.preserve();
+                }
+                return Err(error);
+            }
+        };
 
         match result {
             Ok((_, legal_agreement)) => {
@@ -601,17 +670,26 @@ impl ConnectedSteam<'_> {
         }
     }
 
+    pub fn update(
+        &self,
+        id: WorkshopId,
+        details: WorkshopUpdate,
+        transaction: &Transaction,
+        app_data: &AppData,
+    ) -> Result<bool, PublishError> {
+        self.submit_revision(id, WorkshopRevision::Update(details), transaction, app_data)
+    }
+
     /// Creates a new Workshop item and uploads `details` as its first
-    /// revision. On failure after the item has been created, the item is
-    /// deleted so a failed publish never leaves an empty orphan behind.
+    /// revision. A definitively failed revision deletes the empty item; when
+    /// completion is unknown, the item and its inputs remain intact because
+    /// Steam may still be committing them.
     pub fn publish(
         &self,
-        details: WorkshopUpdateType,
+        details: WorkshopCreation,
         transaction: &Transaction,
         app_data: &AppData,
     ) -> Result<PublishOutcome, PublishError> {
-        debug_assert!(matches!(details, WorkshopUpdateType::Creation { .. }));
-
         let (published_tx, published_rx) = mpsc::channel();
         self.interface.client().ugc().create_item(
             GMOD_APP_ID,
@@ -627,19 +705,27 @@ impl ConnectedSteam<'_> {
         let id = match published_rx.recv_timeout(super::CALLBACK_RESULT_TIMEOUT) {
             // Steam just created this item, so a zero here means Steam
             // reported success without publishing anything.
-            Ok(Ok((id, _))) => WorkshopId::try_from(id)
-                .map_err(|_| PublishError::SteamError(SteamError::IOFailure))?,
+            Ok(Ok((id, _))) => {
+                WorkshopId::try_from(id).map_err(|_| PublishError::MissingPublishedFileId)?
+            }
             Ok(Err(error)) => return Err(PublishError::SteamError(error)),
-            Err(_) => return Err(fail_publish_callback_channel(transaction)),
+            Err(_) => return Err(PublishError::CallbackAbandoned),
         };
 
-        match self.update(id, details, transaction, app_data) {
+        match self.submit_revision(
+            id,
+            WorkshopRevision::Creation(details),
+            transaction,
+            app_data,
+        ) {
             Ok(legal_agreement_required) => Ok(PublishOutcome {
                 id,
                 legal_agreement_required,
             }),
             Err(error) => {
-                self.interface.client().ugc().delete_item(id.into(), |_| {});
+                if !error.submitted_upload_may_be_active() {
+                    self.interface.client().ugc().delete_item(id.into(), |_| {});
+                }
                 Err(error)
             }
         }
@@ -665,7 +751,15 @@ impl ConnectedSteam<'_> {
                 let _ = result_tx.send(result);
             });
 
-        let result = pump_publish_progress(&update_handle, transaction, &result_rx)?;
+        let result = match pump_publish_progress(&update_handle, transaction, &result_rx) {
+            Ok(result) => result,
+            Err(error) => {
+                if error.submitted_upload_may_be_active() {
+                    preview_path.preserve();
+                }
+                return Err(error);
+            }
+        };
 
         match result {
             Ok((_, legal_agreement)) => {
@@ -710,7 +804,7 @@ pub fn submit_with_transaction(
 
     // `Some` only for a custom icon; `None` means "keep the existing preview"
     // when updating, or "use the default icon" when creating (resolved at the
-    // `WorkshopUpdateType` construction below, where each branch knows which).
+    // mode-specific request construction below, where each branch knows which).
     let custom_icon = match icon_path {
         Some(icon_path) => {
             transaction.status(crate::transactions::TransactionStatus::PublishProcessingIcon);
@@ -729,7 +823,7 @@ pub fn submit_with_transaction(
     if let Err(error) = std::fs::create_dir_all(&publish_dir) {
         return emit_publish_error(transaction, error.into());
     }
-    let _publish_dir_guard = PublishDirGuard(publish_dir.clone());
+    let publish_dir_guard = PublishDirGuard::new(publish_dir.clone());
 
     {
         let gma = GmaFile {
@@ -777,7 +871,7 @@ pub fn submit_with_transaction(
         steam
             .update(
                 id,
-                WorkshopUpdateType::Update {
+                WorkshopUpdate {
                     path: content_path,
                     tags,
                     addon_type,
@@ -793,7 +887,7 @@ pub fn submit_with_transaction(
             })
     } else {
         steam.publish(
-            WorkshopUpdateType::Creation {
+            WorkshopCreation {
                 title,
                 path: content_path,
                 tags,
@@ -817,6 +911,9 @@ pub fn submit_with_transaction(
             })
         }
         Err(error) => {
+            if error.submitted_upload_may_be_active() {
+                publish_dir_guard.preserve();
+            }
             transaction.error(&error);
             Err(error)
         }
@@ -837,17 +934,6 @@ fn emit_publish_error(
 ) -> Result<PublishSubmissionOutcome, PublishError> {
     transaction.error(&error);
     Err(error)
-}
-
-/// A Steam callback channel that disconnects, or goes quiet past its
-/// deadline, means the publish will never get its answer; fail the transaction
-/// and yield the error the publish flow returns early with.
-fn fail_publish_callback_channel(transaction: &Transaction) -> PublishError {
-    transaction.error(crate::transactions::TransactionError::detailed(
-        crate::error_key::keys::STEAM_ERROR,
-        Some("callback channel disconnected".to_owned()),
-    ));
-    PublishError::SteamError(SteamError::IOFailure)
 }
 
 #[expect(
@@ -1099,6 +1185,44 @@ mod tests {
             "ERR_PATH_IO_ERROR",
             Some("/addons/icon.png"),
         );
+        assert_wire(
+            PublishError::MissingPublishedFileId,
+            "ERR_STEAM_ERROR",
+            Some("Steam reported success without a Workshop item ID"),
+        );
+        assert_wire(
+            PublishError::CallbackAbandoned,
+            "ERR_STEAM_ERROR",
+            Some("Steam abandoned the publishing callback"),
+        );
+    }
+
+    #[test]
+    fn indeterminate_uploads_preserve_inputs_while_terminal_paths_clean_up() {
+        assert!(PublishError::CallbackAbandoned.submitted_upload_may_be_active());
+        assert!(PublishError::Cancelled.submitted_upload_may_be_active());
+        assert!(!PublishError::NoEntries.submitted_upload_may_be_active());
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let preserved_dir = root.path().join("preserved-publish");
+        fs::create_dir(&preserved_dir).expect("preserved publish dir");
+        PublishDirGuard::new(preserved_dir.clone()).preserve();
+        assert!(preserved_dir.is_dir());
+
+        let cleaned_dir = root.path().join("cleaned-publish");
+        fs::create_dir(&cleaned_dir).expect("cleaned publish dir");
+        drop(PublishDirGuard::new(cleaned_dir.clone()));
+        assert!(!cleaned_dir.exists());
+
+        let preserved_preview = root.path().join("preserved-preview.png");
+        fs::write(&preserved_preview, b"preview").expect("preserved preview");
+        PreviewPath::owned(preserved_preview.clone()).preserve();
+        assert!(preserved_preview.is_file());
+
+        let cleaned_preview = root.path().join("cleaned-preview.png");
+        fs::write(&cleaned_preview, b"preview").expect("cleaned preview");
+        drop(PreviewPath::owned(cleaned_preview.clone()));
+        assert!(!cleaned_preview.exists());
     }
 
     #[test]

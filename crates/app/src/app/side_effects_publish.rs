@@ -1,10 +1,11 @@
 use super::ports::Ports;
 use super::{
-    App, BackendServices, Path, PathBuf, PublishedFileId, RootMessage, Task, TaskKind, UiError,
+    App, BackendServices, PathBuf, PublishedFileId, RootMessage, Task, TaskKind, UiError,
     WORKSHOP_LEGAL_URL, flatten_blocking_ui_result, modal_stack, prepare_publish, sounds,
     steam_session, workshop_url,
 };
 use crate::bridge::tasks::TransactionStatus;
+use crate::bridge::tasks::WorkshopSnapshotId;
 use crate::bridge::ui_error::ResultExt as _;
 use crate::features::file_preview;
 use gmpublished_backend::error_key::keys;
@@ -26,18 +27,12 @@ impl App {
     /// to `finish_modal_close_task`, which runs once that animation settles.
     pub(super) fn prepare_publish_message_task(
         &mut self,
-        message: &prepare_publish::Message,
+        message: prepare_publish::Message,
     ) -> Task<RootMessage> {
         if matches!(message, prepare_publish::Message::CloseRequested) {
             return self.close_modal_stack_task();
         }
-
-        let was_valid = self.state.prepare_publish.can_submit();
-        let was_pending = self.state.prepare_publish.submit_pending();
-        let announce_path_success = self.state.prepare_publish.announce_path_success();
-        let task = self.apply_prepare_publish_message(message.clone());
-        self.prepare_publish_sounds(message, was_valid, was_pending, announce_path_success);
-        task
+        self.apply_prepare_publish_message(message)
     }
 
     pub(super) fn run_prepare_publish_effect(
@@ -108,84 +103,10 @@ impl App {
             prepare_publish::Effect::PublishSuccessUrlsRequested(result) => {
                 self.prepare_publish_success_urls_task(result)
             }
-        }
-    }
-
-    /// Plays the modal's UI sounds in response to a `prepare_publish::Message`.
-    ///
-    /// `was_valid`/`was_pending` are sampled before the message is applied and
-    /// compared against the post-update state; the valid-transition blip is
-    /// suppressed for programmatic open/close resets.
-    pub(super) fn prepare_publish_sounds(
-        &self,
-        message: &prepare_publish::Message,
-        was_valid: bool,
-        was_pending: bool,
-        announce_path_success: bool,
-    ) {
-        let enabled = self.ctx.sounds_enabled();
-        if !enabled {
-            return;
-        }
-
-        if let prepare_publish::Message::PathVerificationCompleted(generation, result) = message
-            && self
-                .state
-                .prepare_publish
-                .is_current_path_generation(*generation)
-        {
-            match result {
-                Ok(_) if announce_path_success => sounds::play(sounds::Sound::Success, enabled),
-                Err(_) => sounds::play(sounds::Sound::Error, enabled),
-                Ok(_) => {}
+            prepare_publish::Effect::SoundRequested(sound) => {
+                sounds::play(sound, self.ctx.sounds_enabled());
+                Task::none()
             }
-        }
-
-        // Publish outcomes blip on completion, mirroring the toast the
-        // overlay shows; stale-generation completions change nothing and
-        // stay silent.
-        if was_pending && !self.state.prepare_publish.submit_pending() {
-            let completion = match message {
-                prepare_publish::Message::PublishSubmitCompleted(_, result) => Some(result.is_ok()),
-                prepare_publish::Message::PublishIconSubmitCompleted(_, result) => {
-                    Some(result.is_ok())
-                }
-                _ => None,
-            };
-            if let Some(succeeded) = completion {
-                let blip = if succeeded {
-                    sounds::Sound::Success
-                } else {
-                    sounds::Sound::Error
-                };
-                sounds::play(blip, enabled);
-                return;
-            }
-        }
-
-        // Only form-field edits and path checks blip; icon verification
-        // doesn't.
-        if matches!(
-            message,
-            prepare_publish::Message::OpenRequested { .. }
-                | prepare_publish::Message::CloseRequested
-                | prepare_publish::Message::IconBrowseRequested
-                | prepare_publish::Message::IconBrowseCompleted { .. }
-                | prepare_publish::Message::IconVerificationCompleted(_, _)
-                | prepare_publish::Message::IconRemoveRequested
-                | prepare_publish::Message::PublishSubmitCompleted(_, _)
-                | prepare_publish::Message::PublishIconSubmitCompleted(_, _)
-        ) {
-            return;
-        }
-        let is_valid = self.state.prepare_publish.can_submit();
-        if is_valid != was_valid {
-            let blip = if is_valid {
-                sounds::Sound::BtnOn
-            } else {
-                sounds::Sound::BtnOff
-            };
-            sounds::play(blip, enabled);
         }
     }
 
@@ -228,30 +149,23 @@ pub(super) fn prepare_publish_connect_steam(app: &BackendServices) -> Result<(),
 }
 
 pub(super) fn prepare_publish_initial_content_directory(input: &str) -> PathBuf {
-    initial_content_directory(input).unwrap_or_else(fallback_current_dir)
+    normalized_picker_path(input).unwrap_or_else(fallback_current_dir)
 }
 
 pub(super) fn prepare_publish_initial_icon_directory(input: Option<&str>) -> PathBuf {
     input
-        .and_then(initial_content_directory)
+        .and_then(normalized_picker_path)
+        .and_then(|path| path.parent().map(ToOwned::to_owned))
         .unwrap_or_else(fallback_current_dir)
 }
 
-pub(super) fn initial_content_directory(input: &str) -> Option<PathBuf> {
+fn normalized_picker_path(input: &str) -> Option<PathBuf> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return None;
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
     }
-
-    let path = PathBuf::from(trimmed);
-    if path.is_dir() {
-        return Some(path);
-    }
-
-    path.parent()
-        .filter(|parent| parent.is_dir())
-        .map(Path::to_path_buf)
-        .or(Some(path))
 }
 
 pub(super) fn fallback_current_dir() -> PathBuf {
@@ -282,14 +196,18 @@ impl<'a> PublishRunner<'a> {
         settings.backend.upscale_addon_icon
     }
 
-    pub(super) fn workshop_snapshot(&self, workshop_id: PublishedFileId) -> (u64, PathBuf) {
+    pub(super) fn workshop_snapshot(
+        &self,
+        workshop_id: PublishedFileId,
+    ) -> (WorkshopSnapshotId, PathBuf) {
         let (_settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
-        let sequence = WORKSHOP_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let request_id =
+            WorkshopSnapshotId::new(WORKSHOP_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
         let path = paths
             .temp_dir
             .join("prepare-publish-workshop")
-            .join(format!("{}-{sequence}", workshop_id.get()));
-        (sequence, path)
+            .join(format!("{}-{request_id}", workshop_id.get()));
+        (request_id, path)
     }
 
     pub(super) fn workshop_content_task(

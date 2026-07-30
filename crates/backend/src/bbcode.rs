@@ -7,8 +7,8 @@
 /// emits further opening tags as literal text.
 ///
 /// Descriptions are attacker-controlled — a Workshop description, or a
-/// `.gma`'s own embedded metadata, which no length limit applies to (see
-/// `GmaView::parse`, which lifts `vformats`' input caps). The tree this
+/// `.gma`'s own embedded metadata. Even a bounded source string can contain
+/// far more nesting than recursive consumers can safely walk. The tree this
 /// produces is walked recursively by every consumer: the Iced renderer's
 /// `render_nodes`/`render_block`/`collect_inline`, [`Document::plain_text`],
 /// [`Document::is_empty`], and `Vec<Node>`'s own `Drop`. Measured against a
@@ -304,10 +304,10 @@ impl<'a> Parser<'a> {
         let name = name.to_ascii_lowercase();
 
         if name == "img" {
-            return self.consume_image(raw);
+            return self.consume_image();
         }
         if name == "noparse" || name == "code" {
-            return self.consume_raw_block(raw, &name);
+            return self.consume_raw_block(&name);
         }
         if name == "hr" {
             self.current_nodes().push(Node::Element(Element {
@@ -357,7 +357,7 @@ impl<'a> Parser<'a> {
         self.open_frame(raw, kind)
     }
 
-    fn consume_raw_block(&mut self, opener: &str, name: &str) -> bool {
+    fn consume_raw_block(&mut self, name: &str) -> bool {
         let closing = format!("[/{name}]");
         let Some(relative_end) = find_ascii_case_insensitive(&self.source[self.cursor..], &closing)
         else {
@@ -374,11 +374,10 @@ impl<'a> Parser<'a> {
         } else {
             self.push_text(raw_content);
         }
-        let _ = opener;
         true
     }
 
-    fn consume_image(&mut self, opener: &str) -> bool {
+    fn consume_image(&mut self) -> bool {
         let closing = "[/img]";
         let Some(relative_end) = find_ascii_case_insensitive(&self.source[self.cursor..], closing)
         else {
@@ -396,7 +395,6 @@ impl<'a> Parser<'a> {
             },
             children: Vec::new(),
         }));
-        let _ = opener;
         true
     }
 

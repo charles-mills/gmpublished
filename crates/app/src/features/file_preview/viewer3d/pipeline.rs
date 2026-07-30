@@ -10,14 +10,14 @@ use super::{
     CHECKERBOARD_SIZE, CHECKERBOARD_SIZE_USIZE, Camera, DETAIL_SHADER_SOURCE,
     DETAIL_VERTEX_ATTRIBUTES, DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance,
     DoorRenderPose, DrawItem, DrawPlan, DrawPlans, FOV_Y, FlyCamera, MATERIAL_ANISOTROPY_CLAMP,
-    MODEL_VERTEX_ATTRIBUTES, MSAA_SAMPLE_COUNT, MapFog, MapSkyCamera, MapVisibilityBucket,
-    MaterialSlot, MeshData, ModelPreview, ModelVertex, OverlayDrawItem, OverlayPrimitive,
-    PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA, Rectangle, RenderMode, ResolvedBcMip, ResolvedTexture,
-    SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SOURCE_UP, Skybox, SkyboxFace,
-    TextureUploadLevel, Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan, bc_mip_is_valid,
-    bc_texture_format, decode_bc_texture, half_extent, initial_door_swing, look_at, mat_mul, mid,
-    perspective, prepare_draw_plans, shader, skybox_eye, transform_door_vertices, wgpu,
-    write_bc_texture_level, write_texture_level,
+    MODEL_VERTEX_ATTRIBUTES, MSAA_SAMPLE_COUNT, MapFog, MapPreview, MapSkyCamera,
+    MapVisibilityBucket, MaterialSlot, MeshData, ModelPreview, ModelVertex, OverlayDrawItem,
+    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA, Rectangle, RenderMode, RenderScene,
+    ResolvedBcMip, ResolvedTexture, SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SOURCE_UP,
+    Skybox, SkyboxFace, TextureUploadLevel, Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan,
+    bc_mip_is_valid, bc_texture_format, decode_bc_texture, half_extent, initial_door_swing,
+    look_at, mat_mul, mid, perspective, prepare_draw_plans, shader, skybox_eye,
+    transform_door_vertices, wgpu, write_bc_texture_level, write_texture_level,
 };
 use gmpublished_backend::math::Vec3;
 
@@ -41,6 +41,31 @@ use targets::RenderTargets;
 use uniforms::DEFAULT_SKY_TINT;
 use upload::UploadCache;
 
+/// The authoritative decoded preview behind a frame. Keeping the model/map
+/// distinction here makes it impossible to pair one scene's geometry with a
+/// different map's lightmaps, doors, or visibility data.
+#[derive(Debug)]
+pub(super) enum PreviewScene {
+    Model(Arc<ModelPreview>),
+    Map(Arc<MapPreview>),
+}
+
+impl PreviewScene {
+    fn render_scene(&self) -> &RenderScene {
+        match self {
+            Self::Model(model) => &model.scene,
+            Self::Map(map) => &map.scene,
+        }
+    }
+
+    fn map(&self) -> Option<&MapPreview> {
+        match self {
+            Self::Model(_) => None,
+            Self::Map(map) => Some(map),
+        }
+    }
+}
+
 /// One frame's draw of a loaded model; heavy data is uploaded once per
 /// `content_id` and cached in the shared [`ModelPipeline`].
 #[derive(Debug)]
@@ -49,7 +74,7 @@ use upload::UploadCache;
     reason = "three independent render toggles plus the camera's water state"
 )]
 pub struct ModelPrimitive {
-    pub(super) model: Arc<ModelPreview>,
+    pub(super) preview: PreviewScene,
     pub(super) content_id: u64,
     pub(super) skin_remap: Vec<u16>,
     pub(super) bodygroup_choices: Vec<usize>,
@@ -97,30 +122,35 @@ impl shader::Primitive for ModelPrimitive {
         viewport: &Viewport,
     ) {
         let size = viewport.physical_size();
+        let scene = self.preview.render_scene();
+        let map = self.preview.map();
         pipeline.uploads.ensure_upload(
             device,
             queue,
             &pipeline.resources,
             self.content_id,
-            &self.model,
+            scene,
+            map,
         );
         pipeline.uploads.touch(self.content_id);
         if let Some(upload) = pipeline.uploads.get_mut(self.content_id) {
             if self.phy_debug_visible {
-                upload.ensure_phy_debug_meshes(device, queue, &self.model);
+                upload.ensure_phy_debug_meshes(device, queue, scene);
             }
-            upload.update_door_vertices(queue, &self.model, self.door_poses.as_slice());
-            upload.ensure_world_visibility(
-                device,
-                queue,
-                &self.model,
-                self.visibility_culling,
-                Vec3::new(
-                    self.uniforms.camera_position[0],
-                    self.uniforms.camera_position[1],
-                    self.uniforms.camera_position[2],
-                ),
-            );
+            if let Some(map) = map {
+                upload.update_door_vertices(queue, map, self.door_poses.as_slice());
+                upload.ensure_world_visibility(
+                    device,
+                    queue,
+                    map,
+                    self.visibility_culling,
+                    Vec3::new(
+                        self.uniforms.camera_position[0],
+                        self.uniforms.camera_position[1],
+                        self.uniforms.camera_position[2],
+                    ),
+                );
+            }
             let draw_plans = prepare_draw_plans(
                 self.content_id,
                 upload,
@@ -471,11 +501,11 @@ impl shader::Pipeline for ModelPipeline {
 mod tests {
     use iced::Point;
 
-    use super::super::test_support::empty_preview;
+    use super::super::test_support::empty_model_preview;
     use super::{
         Arc, Camera, DrawItem, DrawPlan, FrameLayout, MaterialSlot, MeshData, ModelPipeline,
-        ModelPrimitive, ModelVertex, Rectangle, RenderMode, Uniforms, Vec3, Viewport, frame_layout,
-        shader, wgpu,
+        ModelPrimitive, ModelVertex, PreviewScene, Rectangle, RenderMode, Uniforms, Vec3, Viewport,
+        frame_layout, shader, wgpu,
     };
 
     #[test]
@@ -560,9 +590,11 @@ mod tests {
             bodygroup: 0,
             bodygroup_choice: 0,
         };
-        let mut preview = empty_preview(Vec3::new(-48.0, -24.0, 0.0), Vec3::new(48.0, 24.0, 38.0));
-        preview.meshes = vec![mesh];
-        preview.materials = vec![MaterialSlot {
+        let mut preview =
+            empty_model_preview(Vec3::new(-48.0, -24.0, 0.0), Vec3::new(48.0, 24.0, 38.0));
+        let scene = Arc::make_mut(&mut preview.scene);
+        scene.meshes = vec![mesh];
+        scene.materials = vec![MaterialSlot {
             name: "test".to_owned(),
             texture: None,
             texture2: None,
@@ -593,7 +625,7 @@ mod tests {
             map_skybox_uniforms: None,
             sky_uniforms: None,
             door_poses: Vec::new(),
-            model: preview,
+            preview: PreviewScene::Model(Arc::clone(&preview)),
             content_id: 1,
         };
         let mut pipeline_state = <ModelPipeline as shader::Pipeline>::new(&device, &queue, format);

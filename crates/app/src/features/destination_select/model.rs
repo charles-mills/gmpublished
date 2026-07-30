@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{AppPaths, ExtractDestination, Settings};
+use crate::generation::Generation;
 use crate::util::paths::path_to_display;
 
 const HISTORY_LIMIT: usize = 20;
@@ -18,26 +19,16 @@ impl SettingsSnapshot {
     }
 }
 
-/// Declaration order is the tile rendering order.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DestinationKind {
-    Browse,
-    Temp,
-    Addons,
-    Downloads,
-}
-
-impl DestinationKind {
-    pub(crate) const ALL: [Self; 4] = [Self::Browse, Self::Temp, Self::Addons, Self::Downloads];
-
-    pub(crate) const fn label_key(self) -> &'static str {
-        match self {
-            Self::Browse => "destination-browse",
-            Self::Temp => "destination-open",
-            Self::Addons => "destination-addons",
-            Self::Downloads => "destination-downloads",
-        }
+mapped_enum_with_all! {
+    /// Declaration order is the tile rendering order.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum DestinationKind {
+        Browse => "destination-browse",
+        Temp => "destination-open",
+        Addons => "destination-addons",
+        Downloads => "destination-downloads",
     }
+    label_key -> &'static str
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,6 +36,12 @@ pub struct DestinationPersistRequest {
     pub(crate) destination: ExtractDestination,
     pub(crate) create_folder: bool,
     pub(crate) history_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomPathValidationRequest {
+    pub(crate) generation: Generation,
+    pub(crate) path: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,10 +75,13 @@ impl ResolvedDestinations {
     pub(super) fn from_paths(paths: &AppPaths) -> Self {
         Self {
             temp: Some(paths.temp_dir.clone()),
-            addons: paths.gmod_dir.as_ref().and_then(|gmod| {
-                let addons = gmod.join("GarrysMod").join("addons");
-                addons.is_dir().then_some(addons)
-            }),
+            // AppPaths snapshots are resolved and sanitized by the backend.
+            // UI projection must not turn that trusted snapshot back into a
+            // synchronous filesystem probe.
+            addons: paths
+                .gmod_dir
+                .as_ref()
+                .map(|gmod| gmod.join("GarrysMod").join("addons")),
             downloads: paths.downloads_dir.clone(),
         }
     }
@@ -110,9 +110,8 @@ pub fn apply_persist_request(settings: &mut Settings, request: DestinationPersis
 /// `Settings` (its history list and per-workshop overrides are irrelevant
 /// here).
 pub fn destination_label(settings: &Settings, paths: &AppPaths) -> String {
-    let destination = settings.sanitized_extract_destination(paths);
     let roots = ResolvedDestinations::from_paths(paths);
-    match selection_from_extract_destination(&destination, &roots) {
+    match selection_from_extract_destination(&settings.backend.extract_destination, &roots) {
         DestinationSelection::Root(DestinationRoot::Temp) => "Temporary".to_owned(),
         DestinationSelection::Root(DestinationRoot::Downloads) => "Downloads".to_owned(),
         DestinationSelection::Root(DestinationRoot::Addons) => "Garry's Mod addons".to_owned(),
@@ -143,7 +142,7 @@ fn selection_from_extract_destination(
             DestinationSelection::Root(DestinationRoot::Addons)
         }
         ExtractDestination::Directory(path) | ExtractDestination::NamedDirectory(path)
-            if valid_custom_path(path) =>
+            if path.is_absolute() =>
         {
             DestinationSelection::Custom(path.clone())
         }
@@ -183,7 +182,7 @@ pub(super) fn selected_base_path<'a>(
     }
 }
 
-pub(super) fn valid_custom_path(path: &Path) -> bool {
+pub(crate) fn probe_custom_path(path: &Path) -> bool {
     path.is_absolute() && path.is_dir()
 }
 

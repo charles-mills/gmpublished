@@ -27,7 +27,7 @@ use iced::{animation::Easing, widget::image};
 
 use crate::generation::Generation;
 use crate::media::{thumbnail_demand, thumbnail_worker::ThumbnailInput};
-use crate::theme::{Tokens, motion};
+use crate::theme::{self, motion};
 
 pub const QUICK_SEARCH_DEBOUNCE: Duration = Duration::from_millis(100);
 pub const RESULT_ROW_HEIGHT: f32 = 70.0;
@@ -74,7 +74,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let tokens = Tokens::dark();
+        let tokens = theme::invariant();
         Self {
             input: String::new(),
             mode: SearchMode::Addons,
@@ -100,24 +100,50 @@ impl Default for State {
 
 impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.rows == other.rows
-            && self.mode == other.mode
-            && self.expanded == other.expanded
-            && self.visible == other.visible
-            && self.presence == other.presence
-            && self.pending_quick == other.pending_quick
-            && self.thumbnail_generation == other.thumbnail_generation
-            && self.metadata_generation == other.metadata_generation
-            && self.metadata_in_flight == other.metadata_in_flight
-            && self.metadata_finished == other.metadata_finished
-            && self.scroll_offset == other.scroll_offset
-            && self.session.generation() == other.session.generation()
-            && self.session.query() == other.session.query()
-            && self.session.loading() == other.session.loading()
-            && self.session.has_more() == other.session.has_more()
-            && self.session.active_full_task() == other.session.active_full_task()
-            && self.session.full_replace_pending() == other.session.full_replace_pending()
+        let Self {
+            input,
+            mode,
+            session,
+            rows,
+            expanded,
+            visible,
+            presence,
+            pending_quick,
+            thumbnail_generation,
+            metadata_generation,
+            metadata_in_flight,
+            metadata_finished,
+            scroll_offset,
+        } = self;
+        let Self {
+            input: other_input,
+            mode: other_mode,
+            session: other_session,
+            rows: other_rows,
+            expanded: other_expanded,
+            visible: other_visible,
+            presence: other_presence,
+            pending_quick: other_pending_quick,
+            thumbnail_generation: other_thumbnail_generation,
+            metadata_generation: other_metadata_generation,
+            metadata_in_flight: other_metadata_in_flight,
+            metadata_finished: other_metadata_finished,
+            scroll_offset: other_scroll_offset,
+        } = other;
+
+        input == other_input
+            && rows == other_rows
+            && mode == other_mode
+            && expanded == other_expanded
+            && visible == other_visible
+            && presence == other_presence
+            && pending_quick == other_pending_quick
+            && thumbnail_generation == other_thumbnail_generation
+            && metadata_generation == other_metadata_generation
+            && metadata_in_flight == other_metadata_in_flight
+            && metadata_finished == other_metadata_finished
+            && scroll_offset == other_scroll_offset
+            && session == other_session
     }
 }
 
@@ -758,15 +784,16 @@ impl Row {
         }
 
         Some(thumbnail_demand::Demand {
-            id: thumbnail_demand::DemandId::new(self.id.to_string()),
+            id: thumbnail_demand::DemandId::search_row(self.id),
             input: ThumbnailInput::from_url(preview_url),
             logical_max_edge: SEARCH_THUMBNAIL_MAX_EDGE,
             priority,
+            capabilities: thumbnail_demand::DemandCapabilities::SURFACE,
         })
     }
 
     fn apply_thumbnail_delivery(&mut self, delivery: &thumbnail_demand::Delivery) -> bool {
-        if delivery.id.as_str().parse::<usize>() != Ok(self.id) {
+        if delivery.id.search_row_index() != Some(self.id) {
             return false;
         }
 
@@ -1269,10 +1296,22 @@ mod tests {
             demands
                 .demands
                 .iter()
-                .map(|demand| demand.id.as_str())
+                .map(|demand| demand.id.search_row_index())
                 .collect::<Vec<_>>(),
             vec![
-                "10", "11", "12", "6", "7", "8", "9", "13", "14", "15", "16", "17", "18"
+                Some(10),
+                Some(11),
+                Some(12),
+                Some(6),
+                Some(7),
+                Some(8),
+                Some(9),
+                Some(13),
+                Some(14),
+                Some(15),
+                Some(16),
+                Some(17),
+                Some(18)
             ]
         );
         assert!(

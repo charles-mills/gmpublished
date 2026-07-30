@@ -10,7 +10,7 @@ use gmpublished_backend::{
     error_key::HasErrorKey,
     events::{BackendEventCollector, NullEventSink},
     gma::extract::{ExtractOptions, Whitelist},
-    gma::{self, ExtractDestination, read::GmaView, whitelist::AddonWhitelist},
+    gma::{self, ExtractDestination, ExtractionContext, read::GmaView, whitelist::AddonWhitelist},
     steam::Steam,
     transactions::Transactions,
 };
@@ -68,6 +68,23 @@ impl Fixture {
             transactions,
             _temp: temp,
         }
+    }
+
+    fn extraction_context(
+        &self,
+        handle: &GmaFile,
+        destination: ExtractDestination,
+        options: ExtractOptions,
+    ) -> ExtractionContext {
+        ExtractionContext::resolve(
+            handle,
+            destination,
+            options,
+            &self.whitelist,
+            &self.app_data,
+            &self.steam,
+        )
+        .expect("resolve extraction")
     }
 }
 
@@ -186,20 +203,15 @@ fn gma_write_read_extract_round_trip_from_generated_fixture() {
 
     let extract_dir = dir.path().join("extract");
     let transaction = fixture.transactions.begin();
-    let extracted_path = view
-        .extract(
-            &gma,
-            ExtractDestination::Directory(extract_dir.clone()),
-            &transaction,
-            ExtractOptions {
-                open_after: false,
-                whitelist: Whitelist::Enforce,
-            },
-            &fixture.whitelist,
-            &fixture.app_data,
-            &fixture.steam,
-        )
-        .unwrap();
+    let context = fixture.extraction_context(
+        &gma,
+        ExtractDestination::Directory(extract_dir.clone()),
+        ExtractOptions {
+            open_after: false,
+            whitelist: Whitelist::Enforce,
+        },
+    );
+    let extracted_path = view.extract(&gma, &transaction, context).unwrap();
 
     assert_eq!(extracted_path, extract_dir);
     assert_eq!(
@@ -257,19 +269,15 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
 
     let extract_dir = dir.path().join("extract");
     let transaction = fixture.transactions.begin();
-    view.extract(
+    let context = fixture.extraction_context(
         &gma,
         ExtractDestination::Directory(extract_dir.clone()),
-        &transaction,
         ExtractOptions {
             open_after: false,
             whitelist: Whitelist::Enforce,
         },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    )
-    .unwrap();
+    );
+    view.extract(&gma, &transaction, context).unwrap();
     assert_eq!(fs::read(extract_dir.join("lua/big.lua")).unwrap(), big);
     assert_eq!(
         fs::read_to_string(extract_dir.join("lua/a_before.lua")).unwrap(),
@@ -582,19 +590,15 @@ fn gma_unsafe_entry_paths_are_skipped_without_shifting_following_data() {
 
     let extract_dir = dir.path().join("extract");
     let transaction = fixture.transactions.begin();
-    view.extract(
+    let context = fixture.extraction_context(
         &gma,
         ExtractDestination::Directory(extract_dir.clone()),
-        &transaction,
         ExtractOptions {
             open_after: false,
             whitelist: Whitelist::Ignore,
         },
-        &fixture.whitelist,
-        &fixture.app_data,
-        &fixture.steam,
-    )
-    .unwrap();
+    );
+    view.extract(&gma, &transaction, context).unwrap();
 
     assert_eq!(
         fs::read_to_string(extract_dir.join("lua/autorun/safe.lua")).unwrap(),

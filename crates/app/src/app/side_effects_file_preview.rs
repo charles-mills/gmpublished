@@ -24,13 +24,17 @@ impl App {
                 .map_or_else(Task::none, |request| {
                     self.preview_gma_entry_extraction_task(request)
                 }),
-            file_preview::Effect::AudioPlayRequested { bytes, resume_at } => {
-                self.file_preview_audio_play_task(bytes, resume_at)
+            file_preview::Effect::AudioPlayRequested {
+                request_id,
+                bytes,
+                resume_at,
+            } => self.file_preview_audio_play_task(request_id, bytes, resume_at),
+            file_preview::Effect::AudioPauseRequested(request_id) => {
+                self.file_preview_audio_pause_task(request_id)
             }
-            file_preview::Effect::AudioPauseRequested => self.file_preview_audio_pause_task(),
             file_preview::Effect::AudioStopRequested => self.file_preview_audio_stop_task(),
-            file_preview::Effect::AudioPositionPollRequested => {
-                self.file_preview_audio_position_poll_task()
+            file_preview::Effect::AudioPositionPollRequested(request_id) => {
+                self.file_preview_audio_position_poll_task(request_id)
             }
             file_preview::Effect::DoorAudioEvent(event) => {
                 self.file_preview_door_audio_event_task(event)

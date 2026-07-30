@@ -7,7 +7,7 @@ use iced::{Element, Length, Point, Size};
 
 #[cfg(test)]
 use crate::generation::Generation;
-use crate::theme::{self, Tokens};
+use crate::theme::{self, InvariantTokens, Tokens};
 use crate::widgets::addon_card;
 use crate::widgets::grid_rows::CardId;
 
@@ -282,13 +282,13 @@ impl State {
     fn set_viewport_size_at(&mut self, size: Size, now: Instant) -> Vec<Message> {
         self.viewport_height = finite_nonnegative(size.height);
         self.content_width = finite_nonnegative(size.width);
-        let tokens = Tokens::dark();
-        let columns = columns_for_width(scrollable_content_width(self.content_width, &tokens));
+        let tokens = theme::invariant();
+        let columns = columns_for_width(scrollable_content_width(self.content_width, tokens));
         if self.columns != columns.max(1) {
             return self.set_columns_at(columns, now);
         }
 
-        let card_width = self.resolved_card_width(&tokens);
+        let card_width = self.resolved_card_width(tokens);
         if self.card_width != card_width {
             self.recompute_layout_cache();
         }
@@ -318,8 +318,8 @@ impl State {
     }
 
     fn recompute_layout_cache(&mut self) {
-        let tokens = Tokens::dark();
-        let card_width = self.resolved_card_width(&tokens);
+        let tokens = theme::invariant();
+        let card_width = self.resolved_card_width(tokens);
         // Theme switches do not invalidate this cache: addon-card geometry
         // uses theme-invariant spacing, dimensions, and typography tokens.
         // Width changes do not clear it either — entries carry their own
@@ -338,9 +338,9 @@ impl State {
         self.card_heights = self
             .items
             .iter()
-            .map(|item| item.preferred_height_cached(card_width, &tokens, title_measures))
+            .map(|item| item.preferred_height_cached(card_width, tokens, title_measures))
             .collect();
-        self.layout = RowLayout::for_items(&self.items, &self.card_heights, self.columns, &tokens);
+        self.layout = RowLayout::for_items(&self.items, &self.card_heights, self.columns, tokens);
         self.card_width = card_width;
         self.card_gap = tokens.spacing.gap;
         #[cfg(test)]
@@ -349,7 +349,7 @@ impl State {
         }
     }
 
-    fn resolved_card_width(&self, tokens: &Tokens) -> f32 {
+    fn resolved_card_width(&self, tokens: &InvariantTokens) -> f32 {
         card_width_for_columns(
             scrollable_content_width(self.content_width, tokens),
             self.columns,
@@ -680,7 +680,7 @@ impl Item {
     }
 
     #[cfg(test)]
-    fn preferred_height(&self, width: f32, tokens: &Tokens) -> f32 {
+    fn preferred_height(&self, width: f32, tokens: &InvariantTokens) -> f32 {
         self.preferred_height_cached(width, tokens, &mut HashMap::new())
     }
 
@@ -689,7 +689,7 @@ impl Item {
     fn preferred_height_cached(
         &self,
         width: f32,
-        tokens: &Tokens,
+        tokens: &InvariantTokens,
         measures: &mut HashMap<String, TitleMeasure>,
     ) -> f32 {
         #[cfg(test)]
@@ -736,7 +736,7 @@ struct TitleMeasure {
 fn cached_title_height(
     title: &str,
     width: f32,
-    tokens: &Tokens,
+    tokens: &InvariantTokens,
     measures: &mut HashMap<String, TitleMeasure>,
 ) -> f32 {
     let single_line = addon_card::single_line_title_height(tokens);
@@ -824,7 +824,12 @@ struct RowLayout {
 }
 
 impl RowLayout {
-    fn for_items(items: &[Item], item_heights: &[f32], columns: usize, tokens: &Tokens) -> Self {
+    fn for_items(
+        items: &[Item],
+        item_heights: &[f32],
+        columns: usize,
+        tokens: &InvariantTokens,
+    ) -> Self {
         debug_assert_eq!(items.len(), item_heights.len());
         let columns = columns.max(1);
         let rows = item_heights
@@ -980,17 +985,17 @@ pub fn columns_for_width(width: f32) -> usize {
         .max(1)
 }
 
-fn card_width_for_columns(width: f32, columns: usize, tokens: &Tokens) -> f32 {
+fn card_width_for_columns(width: f32, columns: usize, tokens: &InvariantTokens) -> f32 {
     let columns = columns.max(1);
     let content_width = finite_nonnegative(width);
     let gaps = tokens.spacing.gap * columns.saturating_sub(1) as f32;
     ((content_width - gaps) / columns as f32).max(MIN_CARD_WIDTH)
 }
 
-fn scrollable_content_width(width: f32, tokens: &Tokens) -> f32 {
+fn scrollable_content_width(width: f32, tokens: &InvariantTokens) -> f32 {
     sub_clamped(
         finite_nonnegative(width),
-        theme::styles::vertical_scrollbar_reserved_width(tokens),
+        tokens.dims.scrollbar_thumb_width + tokens.dims.scrollbar_track_inset,
     )
 }
 

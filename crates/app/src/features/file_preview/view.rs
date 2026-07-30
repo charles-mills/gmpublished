@@ -12,7 +12,7 @@ use crate::i18n::Arg;
 use gmpublished_backend::math::Vec3;
 use iced::widget::{
     Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
-    sensor, stack, svg, text,
+    sensor, stack, text,
 };
 use iced::{Border, Center, Color, ContentFit, Element, Font, Length, Padding, Shadow, border};
 
@@ -22,6 +22,7 @@ use crate::{
     theme::{self, Tokens, ViewCtx},
     widgets::{
         file_types::{SilkIcon, file_type_info},
+        icon::svg_icon as icon,
         select,
         spinner::spinner,
         split_pane, tooltip as tooltip_widget,
@@ -33,11 +34,25 @@ use super::{Message, State};
 use crate::media::preview_model::{
     CodeLine, InfoReason, PreviewContent, PreviewData, PreviewRequest, RelatedPreviewKind,
 };
-use crate::media::preview_model::{MapStats, ModelPreview, ParticlePreview};
+use crate::media::preview_model::{MapPreview, MapStats, ModelPreview, ParticlePreview};
 use gmpublished_backend::particles::SupportLevel;
 
 fn count_text(count: impl std::fmt::Display) -> String {
     count.to_string()
+}
+
+fn full_width_action<'a>(
+    label: String,
+    message: Message,
+    text_size: f32,
+    tokens: &Tokens,
+) -> iced::widget::Button<'a, Message> {
+    let tokens = *tokens;
+    button(container(text(label).size(text_size).line_height(1.0)).center_x(Length::Fill))
+        .on_press(message)
+        .padding(tokens.spacing.pad_control)
+        .width(Length::Fill)
+        .style(move |_, status| theme::styles::extract_button(&tokens, status))
 }
 
 const SILKICON_SIZE: f32 = 16.0;
@@ -463,18 +478,12 @@ fn audio_preview<'a>(
             image(assets::silkicons::silkicon(SilkIcon::Sound))
                 .width(Length::Fixed(48.0))
                 .height(Length::Fixed(48.0)),
-            button(
-                container(
-                    text(button_label)
-                        .size(tokens.typography.body)
-                        .line_height(1.0),
-                )
-                .center_x(Length::Fill),
-            )
-            .on_press(Message::AudioToggleRequested)
-            .padding(tokens.spacing.pad_control)
-            .width(Length::Fill)
-            .style(move |_, status| theme::styles::extract_button(&tokens, status)),
+            full_width_action(
+                button_label,
+                Message::AudioToggleRequested,
+                tokens.typography.body,
+                &tokens,
+            ),
             container(
                 progress_bar(progress, progress_value)
                     .style(move |_| theme::styles::progress_bar(&tokens)),
@@ -536,35 +545,19 @@ fn info_preview<'a>(
     .spacing(tokens.spacing.gap_sm)
     .width(Length::Fill);
     if reason == InfoReason::TooLarge {
-        rows = rows.push(
-            button(
-                container(
-                    text(i18n.tr("file-preview-load-anyway"))
-                        .size(tokens.typography.body)
-                        .line_height(1.0),
-                )
-                .center_x(Length::Fill),
-            )
-            .on_press(Message::LoadAnywayRequested)
-            .padding(tokens.spacing.pad_control)
-            .width(Length::Fill)
-            .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-        );
+        rows = rows.push(full_width_action(
+            i18n.tr("file-preview-load-anyway"),
+            Message::LoadAnywayRequested,
+            tokens.typography.body,
+            &tokens,
+        ));
     }
-    let rows = rows.push(
-        button(
-            container(
-                text(i18n.tr("file-preview-extract"))
-                    .size(tokens.typography.body)
-                    .line_height(1.0),
-            )
-            .center_x(Length::Fill),
-        )
-        .on_press(Message::ExtractRequested)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-    );
+    let rows = rows.push(full_width_action(
+        i18n.tr("file-preview-extract"),
+        Message::ExtractRequested,
+        tokens.typography.body,
+        &tokens,
+    ));
 
     container(rows)
         .width(Length::Fill)
@@ -760,7 +753,7 @@ fn model_inspector_rows<'a>(
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    let stats = model.stats;
+    let stats = model.scene.stats;
     let material_status = material_status_text(stats.resolved_material_count, stats.material_count);
     let rows = column![
         info_row(
@@ -805,27 +798,21 @@ fn model_inspector_rows<'a>(
         ),
         info_row(
             i18n.tr("file-preview-model-bounds-min"),
-            format_model_bounds(model.bounds_min),
+            format_model_bounds(model.scene.bounds_min),
             &tokens
         ),
         info_row(
             i18n.tr("file-preview-model-bounds-max"),
-            format_model_bounds(model.bounds_max),
+            format_model_bounds(model.scene.bounds_max),
             &tokens
         ),
         Space::new().height(tokens.spacing.gap),
-        button(
-            container(
-                text(i18n.tr("file-preview-extract"))
-                    .size(tokens.typography.body)
-                    .line_height(1.0),
-            )
-            .center_x(Length::Fill),
-        )
-        .on_press(Message::ExtractRequested)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status)),
+        full_width_action(
+            i18n.tr("file-preview-extract"),
+            Message::ExtractRequested,
+            tokens.typography.body,
+            &tokens,
+        ),
     ]
     .spacing(tokens.spacing.gap_sm)
     .width(Length::Fill);
@@ -942,14 +929,7 @@ fn particle_selectors<'a>(
         i18n.tr("file-preview-audio-play")
     };
     let playback_button = |label: String, message: Message| {
-        button(
-            container(text(label).size(tokens.typography.body_sm).line_height(1.0))
-                .center_x(Length::Fill),
-        )
-        .on_press(message)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status))
+        full_width_action(label, message, tokens.typography.body_sm, &tokens)
     };
     selectors = selectors.push(
         row![
@@ -1024,20 +1004,12 @@ fn particle_inspector_rows<'a>(
     }
 
     rows = rows.push(Space::new().height(tokens.spacing.gap));
-    rows = rows.push(
-        button(
-            container(
-                text(i18n.tr("file-preview-extract"))
-                    .size(tokens.typography.body)
-                    .line_height(1.0),
-            )
-            .center_x(Length::Fill),
-        )
-        .on_press(Message::ExtractRequested)
-        .padding(tokens.spacing.pad_control)
-        .width(Length::Fill)
-        .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-    );
+    rows = rows.push(full_width_action(
+        i18n.tr("file-preview-extract"),
+        Message::ExtractRequested,
+        tokens.typography.body,
+        &tokens,
+    ));
 
     rows.into()
 }
@@ -1092,7 +1064,7 @@ fn coverage_row<'a>(
 
 #[derive(Clone, Copy)]
 struct MapPreviewParts<'a> {
-    scene: &'a std::sync::Arc<ModelPreview>,
+    scene: &'a std::sync::Arc<MapPreview>,
     stats: MapStats,
     fog: Option<crate::media::preview_model::MapFog>,
     sky_camera: Option<crate::media::preview_model::MapSkyCamera>,
@@ -1329,7 +1301,7 @@ fn mode_pill_slot<'a>(
     tooltip_widget::below(slot, tooltip, tokens, tokens.dims.tooltip_max_width)
 }
 
-fn scene_supports_walk(scene: &ModelPreview) -> bool {
+fn scene_supports_walk(scene: &MapPreview) -> bool {
     scene
         .walk_collision
         .as_ref()
@@ -1457,20 +1429,12 @@ fn map_inspector_rows<'a>(
             &tokens,
         ))
         .push(Space::new().height(tokens.spacing.gap))
-        .push(
-            button(
-                container(
-                    text(i18n.tr("file-preview-extract"))
-                        .size(tokens.typography.body)
-                        .line_height(1.0),
-                )
-                .center_x(Length::Fill),
-            )
-            .on_press(Message::ExtractRequested)
-            .padding(tokens.spacing.pad_control)
-            .width(Length::Fill)
-            .style(move |_, status| theme::styles::extract_button(&tokens, status)),
-        );
+        .push(full_width_action(
+            i18n.tr("file-preview-extract"),
+            Message::ExtractRequested,
+            tokens.typography.body,
+            &tokens,
+        ));
 
     rows.into()
 }
@@ -1559,12 +1523,4 @@ fn silk_image<'a>(icon: SilkIcon, tooltip: String, tokens: &Tokens) -> Element<'
         tokens,
         tokens.dims.tooltip_max_width,
     )
-}
-
-fn icon<'a>(handle: iced::widget::svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
 }

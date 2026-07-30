@@ -55,7 +55,7 @@ impl log::Log for BackendLogger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if !self.enabled(record.metadata()) && !is_renderer_selection_record(record) {
+        if !self.enabled(record.metadata()) {
             return;
         }
 
@@ -379,17 +379,6 @@ fn more_permissive_level(left: log::LevelFilter, right: log::LevelFilter) -> log
     }
 }
 
-// iced_wgpu reports the adapter it picked ("Selected: AdapterInfo { name,
-// backend, .. }") at Info, below the external-target Warn cap. Surfacing that
-// one record keeps a silent fallback to the GL backend (e.g. libvulkan.so.1
-// missing on Linux) visible in every startup log. The message match formats
-// the record args, so it must stay behind the cheap level/target checks.
-fn is_renderer_selection_record(record: &log::Record<'_>) -> bool {
-    record.level() == log::Level::Info
-        && record.target().starts_with("iced_wgpu")
-        && record.args().to_string().starts_with("Selected:")
-}
-
 fn should_log_target(target: &str, level: log::Level, config: LevelConfig) -> bool {
     let effective_level = if target.starts_with(LOCAL_TARGET_PREFIX) {
         config.local
@@ -597,30 +586,6 @@ mod tests {
         ));
         assert!(should_log_target("iced_wgpu", log::Level::Warn, config));
         assert!(!should_log_target("iced_wgpu", log::Level::Info, config));
-    }
-
-    #[test]
-    fn renderer_selection_record_bypasses_external_warn_cap() {
-        let selected = log::Record::builder()
-            .level(log::Level::Info)
-            .target("iced_wgpu::window::compositor")
-            .args(format_args!("Selected: AdapterInfo {{ backend: Gl }}"))
-            .build();
-        assert!(is_renderer_selection_record(&selected));
-
-        let other_info = log::Record::builder()
-            .level(log::Level::Info)
-            .target("iced_wgpu::window::compositor")
-            .args(format_args!("Available adapters: []"))
-            .build();
-        assert!(!is_renderer_selection_record(&other_info));
-
-        let wrong_target = log::Record::builder()
-            .level(log::Level::Info)
-            .target("wgpu_core::instance")
-            .args(format_args!("Selected: something"))
-            .build();
-        assert!(!is_renderer_selection_record(&wrong_target));
     }
 
     #[test]

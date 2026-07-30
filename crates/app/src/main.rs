@@ -21,6 +21,58 @@ use std::{
 
 use app::App;
 
+/// Declares a fieldless enum and derives its declaration-ordered catalog from
+/// the same variant list. Rust does not expose enum iteration, so keeping an
+/// `ALL` array beside an independently-written enum otherwise leaves an
+/// omission that still compiles.
+macro_rules! enum_with_all {
+    (
+        $(#[$enum_meta:meta])*
+        $vis:vis enum $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        $vis enum $name {
+            $($(#[$variant_meta])* $variant),+
+        }
+
+        impl $name {
+            pub(crate) const ALL: [Self; [$(stringify!($variant)),+].len()] = [
+                $(Self::$variant),+
+            ];
+        }
+    };
+}
+
+/// [`enum_with_all!`] plus one exhaustive value mapping, also sourced from
+/// the declaration. This is deliberately local rather than a derive
+/// dependency: these small UI catalogs are the only capability required.
+macro_rules! mapped_enum_with_all {
+    (
+        $(#[$enum_meta:meta])*
+        $vis:vis enum $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident => $value:expr),+ $(,)?
+        }
+        $method:ident -> $value_type:ty
+    ) => {
+        enum_with_all! {
+            $(#[$enum_meta])*
+            $vis enum $name {
+                $($(#[$variant_meta])* $variant),+
+            }
+        }
+
+        impl $name {
+            pub(crate) const fn $method(self) -> $value_type {
+                match self {
+                    $(Self::$variant => $value),+
+                }
+            }
+        }
+    };
+}
+
 mod app;
 mod assets;
 mod bridge;

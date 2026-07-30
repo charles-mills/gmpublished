@@ -17,37 +17,47 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::AnimationTick(now) => {
             state.tick_animation(now);
-            if state.audio_playing() {
-                return vec![Effect::AudioPositionPollRequested];
+            if state.audio_playing()
+                && let Some(request_id) = state.current_audio_request_id()
+            {
+                return vec![Effect::AudioPositionPollRequested(request_id)];
             }
             Vec::new()
         }
         Message::AudioToggleRequested => {
             if state.audio_playing() {
-                vec![Effect::AudioPauseRequested]
+                state
+                    .current_audio_request_id()
+                    .map_or_else(Vec::new, |request_id| {
+                        vec![Effect::AudioPauseRequested(request_id)]
+                    })
             } else {
                 state.current_audio_bytes().map_or_else(Vec::new, |bytes| {
+                    let request_id = state
+                        .current_audio_request_id()
+                        .expect("loaded audio has a request id");
                     vec![Effect::AudioPlayRequested {
+                        request_id,
                         bytes,
                         resume_at: state.audio_position_secs(),
                     }]
                 })
             }
         }
-        Message::AudioPlaybackStarted => {
-            state.start_audio();
+        Message::AudioPlaybackStarted(request_id) => {
+            state.start_audio(request_id);
             Vec::new()
         }
-        Message::AudioPlaybackPaused => {
-            state.pause_audio();
+        Message::AudioPlaybackPaused(request_id) => {
+            state.pause_audio(request_id);
             Vec::new()
         }
-        Message::AudioPlaybackEnded => {
-            state.finish_audio();
+        Message::AudioPlaybackEnded(request_id) => {
+            state.finish_audio(request_id);
             Vec::new()
         }
-        Message::AudioPositionUpdated(position_secs) => {
-            state.update_audio_position(position_secs);
+        Message::AudioPositionUpdated(request_id, position_secs) => {
+            state.update_audio_position(request_id, position_secs);
             Vec::new()
         }
         Message::SkinSelected(skin) => {

@@ -181,7 +181,7 @@ fn unmeasured_viewport_requests_next_page_on_first_scroll() {
 
 #[test]
 fn rows_use_addon_card_preferred_height() {
-    let tokens = Tokens::dark();
+    let tokens = theme::invariant();
     let card_width = 200.0;
     let items = vec![
         Item::new(addon_card::Data::addon(CardId::from("short"), "Short")),
@@ -192,19 +192,19 @@ fn rows_use_addon_card_preferred_height() {
     ];
     let heights = items
         .iter()
-        .map(|item| item.preferred_height(card_width, &tokens))
+        .map(|item| item.preferred_height(card_width, tokens))
         .collect::<Vec<_>>();
 
-    let layout = RowLayout::for_items(&items, &heights, 2, &tokens);
+    let layout = RowLayout::for_items(&items, &heights, 2, tokens);
 
     assert_eq!(layout.rows().len(), 1);
     assert_eq!(
         layout.rows()[0].content_height(),
-        addon_card::preferred_height(items[1].card(), card_width, &tokens)
+        addon_card::preferred_height(items[1].card(), card_width, tokens)
     );
     assert_eq!(
         layout.rows()[0].height(),
-        addon_card::preferred_height(items[1].card(), card_width, &tokens)
+        addon_card::preferred_height(items[1].card(), card_width, tokens)
             + tokens.dims.card_row_gap
     );
 }

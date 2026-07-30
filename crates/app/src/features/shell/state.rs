@@ -7,34 +7,21 @@ use iced::animation::Easing;
 use iced::widget::{image, svg};
 
 use crate::features::steam_session::{ConnectionStatus, SteamIdentity};
-use crate::theme::{Tokens, motion};
+use crate::theme::{self, Tokens, motion};
 
-/// Route identifiers owned by the shell.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Route {
-    MyWorkshop,
-    InstalledAddons,
-    Downloader,
-    SizeAnalyzer,
+mapped_enum_with_all! {
+    /// Route identifiers owned by the shell.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Route {
+        MyWorkshop => "my-workshop",
+        InstalledAddons => "installed-addons",
+        Downloader => "downloader",
+        SizeAnalyzer => "size-analyzer",
+    }
+    label_key -> &'static str
 }
 
 impl Route {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::MyWorkshop,
-        Self::InstalledAddons,
-        Self::Downloader,
-        Self::SizeAnalyzer,
-    ];
-
-    pub(crate) const fn label_key(self) -> &'static str {
-        match self {
-            Self::MyWorkshop => "my-workshop",
-            Self::InstalledAddons => "installed-addons",
-            Self::Downloader => "downloader",
-            Self::SizeAnalyzer => "size-analyzer",
-        }
-    }
-
     pub(crate) fn icon(self) -> svg::Handle {
         match self {
             Self::MyWorkshop => assets::icons::route_my_workshop(),
@@ -127,7 +114,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let tokens = Tokens::dark();
+        let tokens = theme::invariant();
         Self {
             app_version: app_version_text(),
             route: Route::MyWorkshop,
@@ -321,7 +308,7 @@ impl Default for BadgeMotion {
             visible: false,
             opacity: motion::boolean(
                 false,
-                Tokens::dark().motion.fast_duration(),
+                theme::invariant().motion.fast_duration(),
                 Easing::EaseInOut,
             ),
         }

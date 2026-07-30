@@ -276,58 +276,59 @@ fn taggify(
             .and_then(|index| groups.get_mut(*index))
         {
             group.total_size_bytes = group.total_size_bytes.saturating_add(addon.file_size_bytes);
-            group.sizes.push(addon.file_size_bytes as f64);
             group.addons.push(addon);
         } else {
             group_index.insert(tag.clone(), groups.len());
             groups.push(TagGroup {
                 tag,
                 total_size_bytes: addon.file_size_bytes,
-                sizes: vec![addon.file_size_bytes as f64],
                 addons: vec![addon],
             });
         }
     }
 
-    let group_sizes = groups
-        .iter()
-        .map(|group| group.total_size_bytes as f64)
-        .collect();
-
-    let mut master_treemap = TreeMap::new(bounds.width, bounds.height);
-    master_treemap.data = groups
+    let group_items = groups
         .into_iter()
-        .map(|group| Some(RawTreeMapData::Tag(group)))
-        .collect();
-    master_treemap.process(group_sizes, total_size_bytes as f64);
+        .map(|group| WeightedItem::new(group.total_size_bytes as f64, group))
+        .collect::<Vec<_>>();
 
-    for square in &mut master_treemap.squares {
-        let Some(RawTreeMapData::Tag(group)) = square.data.take() else {
-            log::warn!("skipping malformed size-analyzer tag square");
-            continue;
-        };
-        let padding = (f64::min(square.width, square.height) * 0.05).ceil();
-        let child_width = (square.width.floor() - padding).max(0.0);
-        let child_height = (square.height.floor() - padding).max(0.0);
-        let mut treemap = TreeMap::new(child_width, child_height);
-        treemap.data = group
-            .addons
-            .into_iter()
-            .map(|addon| Some(RawTreeMapData::Addon(addon)))
-            .collect();
-        treemap.process(group.sizes, group.total_size_bytes as f64);
-
-        square.data = Some(RawTreeMapData::TagRegion {
-            tag: group.tag,
-            total_size_bytes: group.total_size_bytes,
-            children: treemap.squares,
-        });
-    }
-
-    master_treemap
-        .squares
+    Squarifier::new(bounds.width, bounds.height)
+        .layout(group_items, total_size_bytes as f64)
         .into_iter()
-        .filter_map(RawSquare::into_public)
+        .map(|square| {
+            let group = square.data;
+            let padding = (f64::min(square.width, square.height) * 0.05).ceil();
+            let child_width = (square.width.floor() - padding).max(0.0);
+            let child_height = (square.height.floor() - padding).max(0.0);
+            let child_items = group
+                .addons
+                .into_iter()
+                .map(|addon| WeightedItem::new(addon.file_size_bytes as f64, addon))
+                .collect::<Vec<_>>();
+            let children = Squarifier::new(child_width, child_height)
+                .layout(child_items, group.total_size_bytes as f64)
+                .into_iter()
+                .map(|child| TreemapSquare {
+                    data: TreemapSquareData::Addon { addon: child.data },
+                    x: child.x,
+                    y: child.y,
+                    width: child.width,
+                    height: child.height,
+                })
+                .collect();
+
+            TreemapSquare {
+                data: TreemapSquareData::Tag {
+                    tag: group.tag,
+                    total_size_bytes: group.total_size_bytes,
+                    children,
+                },
+                x: square.x,
+                y: square.y,
+                width: square.width,
+                height: square.height,
+            }
+        })
         .collect()
 }
 
@@ -426,73 +427,38 @@ fn child_padding(width: f64, height: f64) -> f64 {
 struct TagGroup {
     tag: String,
     total_size_bytes: u64,
-    sizes: Vec<f64>,
     addons: Vec<TreemapAddon>,
 }
 
-#[derive(Clone, Debug)]
-enum RawTreeMapData {
-    Tag(TagGroup),
-    TagRegion {
-        tag: String,
-        total_size_bytes: u64,
-        children: Vec<RawSquare>,
-    },
-    Addon(TreemapAddon),
+struct WeightedItem<T> {
+    area: f64,
+    data: T,
 }
 
-#[derive(Clone, Debug)]
-struct RawSquare {
-    data: Option<RawTreeMapData>,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-impl RawSquare {
-    fn into_public(self) -> Option<TreemapSquare> {
-        let data = match self.data? {
-            RawTreeMapData::Tag(_) => return None,
-            RawTreeMapData::TagRegion {
-                tag,
-                total_size_bytes,
-                children,
-            } => {
-                let children = children.into_iter().filter_map(Self::into_public).collect();
-                TreemapSquareData::Tag {
-                    tag,
-                    total_size_bytes,
-                    children,
-                }
-            }
-            RawTreeMapData::Addon(addon) => TreemapSquareData::Addon { addon },
-        };
-
-        Some(TreemapSquare {
-            data,
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-        })
+impl<T> WeightedItem<T> {
+    const fn new(area: f64, data: T) -> Self {
+        Self { area, data }
     }
 }
 
-struct TreeMap {
-    squares: Vec<RawSquare>,
-    data: Vec<Option<RawTreeMapData>>,
+struct LayoutSquare<T> {
+    data: T,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 }
 
-impl TreeMap {
+struct Squarifier {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl Squarifier {
     fn new(width: f64, height: f64) -> Self {
         Self {
-            data: Vec::new(),
-            squares: Vec::new(),
             x: 0.0,
             y: 0.0,
             width,
@@ -500,59 +466,70 @@ impl TreeMap {
         }
     }
 
-    fn process(&mut self, data_sizes: Vec<f64>, total_size: f64) {
-        if data_sizes.is_empty()
+    fn layout<T>(mut self, items: Vec<WeightedItem<T>>, total_size: f64) -> Vec<LayoutSquare<T>> {
+        if items.is_empty()
             || total_size <= 0.0
             || self.width <= 0.0
             || self.height <= 0.0
             || !total_size.is_finite()
         {
-            return;
+            return Vec::new();
         }
 
-        let scaled = data_sizes
+        let mut pending = items
             .into_iter()
-            .map(|size| (size * self.height * self.width) / total_size)
-            .collect::<Vec<_>>();
-        let mut next_index = 0;
+            .map(|item| WeightedItem {
+                area: (item.area * self.height * self.width) / total_size,
+                data: item.data,
+            })
+            .collect::<std::collections::VecDeque<_>>();
         let mut row = Vec::new();
+        let mut squares = Vec::new();
         let mut row_worst = None;
         let mut width = self.min_width().0;
-        loop {
-            let Some(next_square) = scaled.get(next_index).copied() else {
-                self.layout_row(&mut row, width, self.min_width().1);
-                break;
-            };
-            if next_index + 1 == scaled.len() {
-                self.layout_last_square(next_square, &mut row, width);
+        while !pending.is_empty() {
+            let next_area = pending.front().expect("pending is not empty").area;
+            if pending.len() == 1 {
+                let last = pending.pop_front().expect("pending has one item");
+                let vertical = self.min_width().1;
+                self.layout_row(&mut row, width, vertical, &mut squares);
+                self.layout_row(&mut vec![last], width, vertical, &mut squares);
                 break;
             }
 
             let previous_worst = row_worst;
-            row.push(next_square);
-            let next_worst = self.worst_ratio(&row, width);
+            let next_worst = self.worst_ratio_with(&row, next_area, width);
             if previous_worst.is_none_or(|worst| worst >= next_worst) {
                 row_worst = Some(next_worst);
-                next_index += 1;
+                row.push(pending.pop_front().expect("pending is not empty"));
                 continue;
             }
 
-            row.pop();
-            self.layout_row(&mut row, width, self.min_width().1);
-            row.clear();
+            self.layout_row(&mut row, width, self.min_width().1, &mut squares);
             row_worst = None;
             width = self.min_width().0;
         }
+        squares
     }
 
-    fn worst_ratio(&self, row: &[f64], width: f64) -> f64 {
+    fn worst_ratio_with<T>(
+        &self,
+        row: &[WeightedItem<T>],
+        additional_area: f64,
+        width: f64,
+    ) -> f64 {
         let mut sum = 0.0;
         let mut max = 0.0;
         let mut min = f64::MAX;
-        for value in row {
-            sum += *value;
-            max = f64::max(max, *value);
-            min = f64::min(min, *value);
+        for item in row {
+            sum += item.area;
+            max = f64::max(max, item.area);
+            min = f64::min(min, item.area);
+        }
+        if additional_area > 0.0 {
+            sum += additional_area;
+            max = f64::max(max, additional_area);
+            min = f64::min(min, additional_area);
         }
 
         let sumsum = sum.powi(2);
@@ -572,36 +549,41 @@ impl TreeMap {
         }
     }
 
-    fn layout_row(&mut self, row: &mut Vec<f64>, width: f64, vertical: bool) {
+    fn layout_row<T>(
+        &mut self,
+        row: &mut Vec<WeightedItem<T>>,
+        width: f64,
+        vertical: bool,
+        squares: &mut Vec<LayoutSquare<T>>,
+    ) {
         if row.is_empty() || width <= 0.0 {
             return;
         }
 
-        let row_height = row.iter().sum::<f64>() / width;
+        let row_height = row.iter().map(|item| item.area).sum::<f64>() / width;
 
-        for value in row {
-            let row_width = *value / row_height;
-            let data = self.data.get_mut(self.squares.len()).and_then(Option::take);
-            self.squares.push(if vertical {
-                let data = RawSquare {
+        for item in row.drain(..) {
+            let row_width = item.area / row_height;
+            squares.push(if vertical {
+                let square = LayoutSquare {
                     x: self.x,
                     y: self.y,
                     width: row_height,
                     height: row_width,
-                    data,
+                    data: item.data,
                 };
                 self.y += row_width;
-                data
+                square
             } else {
-                let data = RawSquare {
+                let square = LayoutSquare {
                     x: self.x,
                     y: self.y,
                     width: row_width,
                     height: row_height,
-                    data,
+                    data: item.data,
                 };
                 self.x += row_width;
-                data
+                square
             });
         }
 
@@ -614,13 +596,6 @@ impl TreeMap {
             self.y += row_height;
             self.height -= row_height;
         }
-    }
-
-    fn layout_last_square(&mut self, square: f64, row: &mut Vec<f64>, width: f64) {
-        let vertical = self.min_width().1;
-        self.layout_row(row, width, vertical);
-        let mut last = vec![square];
-        self.layout_row(&mut last, width, vertical);
     }
 }
 

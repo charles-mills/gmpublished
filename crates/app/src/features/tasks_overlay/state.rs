@@ -4,7 +4,7 @@ use gmpublished_backend::error_key::keys;
 
 use crate::bridge::tasks::{TaskEvent, TaskId, TaskKind, TaskUpdate, TransactionStatus};
 use crate::bridge::ui_error::UiError;
-use crate::theme::{Tokens, motion};
+use crate::theme::{self, motion};
 
 /// How long a settled toast lingers before its exit animation starts.
 const EXPIRE_HOLD: Duration = Duration::from_millis(2500);
@@ -41,7 +41,7 @@ impl Toast {
     fn new(task_id: TaskId, kind: TaskKind, status: TransactionStatus, now: Instant) -> Self {
         let mut presence = motion::boolean(
             false,
-            Tokens::dark().motion.overlay_toast_duration(),
+            theme::invariant().motion.overlay_toast_duration(),
             motion::expo_ease(),
         );
         presence.go(true, now);

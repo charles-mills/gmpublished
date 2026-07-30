@@ -5,5 +5,5 @@ pub mod tokens;
 mod view_ctx;
 
 pub use tokens::invariant;
-pub use tokens::{AccentInputs, Rgba, ThemeVariant, Tokens};
+pub use tokens::{AccentInputs, InvariantTokens, Rgba, ThemeVariant, Tokens};
 pub use view_ctx::ViewCtx;

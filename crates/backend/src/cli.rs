@@ -50,9 +50,6 @@ pub fn run() -> Option<Result<(), CliError>> {
 
     let matches = command().get_matches();
 
-    #[cfg(debug_assertions)]
-    std::eprintln!("{matches:#?}");
-
     // Clap handles `--help`/`--version` by exiting itself, so reaching here
     // with no request means the arguments named no work to do.
     Some(extraction_request(&matches).map_or(Ok(()), run_extraction))
@@ -142,18 +139,15 @@ fn run_extraction(request: ExtractionRequest) -> Result<(), CliError> {
 
     let gma = GmaFile::open(request.path)?;
     gma.view().and_then(|view| {
-        view.extract(
+        let context = backend.resolve_extraction(
             &gma,
             request.destination,
-            &backend.transactions.begin(),
             ExtractOptions {
                 open_after: true,
                 whitelist: Whitelist::Ignore,
             },
-            &backend.whitelist,
-            &backend.app_data,
-            &backend.steam,
-        )
+        )?;
+        view.extract(&gma, &backend.transactions.begin(), context)
     })?;
     Ok(())
 }

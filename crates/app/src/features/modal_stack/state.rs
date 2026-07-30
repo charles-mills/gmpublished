@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use iced::animation::Easing;
 
-use crate::theme::{Tokens, motion};
+use crate::theme::{self, motion};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveModal {
@@ -32,8 +32,8 @@ impl Default for Layer {
             phase: Phase::Closed,
             presence: motion::asymmetric(
                 false,
-                Tokens::dark().motion.modal_enter_duration(),
-                Tokens::dark().motion.modal_exit_duration(),
+                theme::invariant().motion.modal_enter_duration(),
+                theme::invariant().motion.modal_exit_duration(),
                 Easing::EaseOut,
             ),
         }

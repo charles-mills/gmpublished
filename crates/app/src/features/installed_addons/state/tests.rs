@@ -345,23 +345,23 @@ fn quiet_error_keeps_current_rows_on_screen() {
 #[test]
 fn degraded_watch_rearms_once_per_route_entry() {
     let mut state = State::default();
-    assert_eq!(state.watch_arm_epoch(), 0);
+    assert_eq!(state.watch_arm_epoch(), Generation::INITIAL);
 
     state.apply_watch_armed(true);
     state.enter_route();
-    assert_eq!(state.watch_arm_epoch(), 1);
+    assert_eq!(state.watch_arm_epoch(), Generation::from_raw(1));
 
     // Still degraded after the retry: no second bump until re-entry.
     state.apply_watch_armed(true);
     state.exit_route();
     state.enter_route();
-    assert_eq!(state.watch_arm_epoch(), 2);
+    assert_eq!(state.watch_arm_epoch(), Generation::from_raw(2));
 
     // Healthy watch never churns the subscription.
     state.apply_watch_armed(false);
     state.exit_route();
     state.enter_route();
-    assert_eq!(state.watch_arm_epoch(), 2);
+    assert_eq!(state.watch_arm_epoch(), Generation::from_raw(2));
 }
 
 /// A metadata lookup that fails says nothing about the ids it named, so they

@@ -207,7 +207,7 @@ impl Row {
         delivery: &thumbnail_demand::Delivery,
         current_generation: Generation,
     ) -> bool {
-        if generation != current_generation || delivery.id.as_str() != self.id.as_str() {
+        if generation != current_generation || delivery.id.row_key() != Some(self.id.as_str()) {
             return false;
         }
 
@@ -376,10 +376,11 @@ impl GridRow for Row {
         }
 
         Some(thumbnail_demand::Demand {
-            id: thumbnail_demand::DemandId::new(self.id.to_string()),
+            id: thumbnail_demand::DemandId::row(self.id.as_str()),
             input: ThumbnailInput::from_url(preview_url),
             logical_max_edge: ADDON_THUMBNAIL_MAX_EDGE,
             priority,
+            capabilities: thumbnail_demand::DemandCapabilities::SURFACE,
         })
     }
 
@@ -555,7 +556,7 @@ mod tests {
         let delivery = |result| Delivery {
             owner: thumbnail_owner(),
             generation: Generation::INITIAL,
-            id: DemandId::new("/tmp/addon.gma"),
+            id: DemandId::row("/tmp/addon.gma"),
             key: key.clone(),
             result,
         };
@@ -701,7 +702,7 @@ mod tests {
         assert_eq!(set.owner, thumbnail_owner());
         assert_eq!(set.generation, Generation::from_raw(7));
         assert_eq!(set.demands.len(), 1);
-        assert_eq!(set.demands[0].id.as_str(), "/tmp/loading.gma");
+        assert_eq!(set.demands[0].id.row_key(), Some("/tmp/loading.gma"));
     }
 
     #[test]

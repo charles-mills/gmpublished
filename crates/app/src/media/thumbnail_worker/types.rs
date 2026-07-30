@@ -31,6 +31,7 @@ impl ThumbnailInput {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn cache_key(&self, max_edge: u32) -> ThumbnailKey {
         match self {
             Self::Url { url } => {

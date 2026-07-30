@@ -1,7 +1,7 @@
 use crate::i18n::Arg;
 use iced::widget::{
     Space, button, column, container, image, mouse_area, opaque, pane_grid, row, scrollable,
-    sensor, stack, svg, text,
+    sensor, stack, text,
 };
 use iced::{Center, Color, Element, Length, Size};
 
@@ -15,6 +15,7 @@ use crate::{
         bbcode,
         download_count_icon::download_count_icon,
         file_browser::{self, Row as FileBrowserRowData, RowKind as FileBrowserEntryKind},
+        icon::svg_icon as icon,
         spinner::spinner,
         split_pane,
         star_rating::star_rating,
@@ -741,15 +742,7 @@ fn browser_empty_state(ctx: ViewCtx<'_>) -> Element<'_, Message> {
 }
 
 fn dead_icon<'a>(color: Color, size: f32) -> Element<'a, Message> {
-    icon(assets::icons::dead(), color, size)
-}
-
-fn icon<'a>(handle: iced::widget::svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
+    icon(assets::icons::dead(), color, size).into()
 }
 
 #[cfg(test)]

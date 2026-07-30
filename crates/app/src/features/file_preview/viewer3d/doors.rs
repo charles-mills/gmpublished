@@ -2,7 +2,7 @@ use super::super::state::MovementMode;
 use super::camera::FlyCamera;
 use super::{
     DoorAudioEvent, DoorAudioEventKind, DoorInstance, DoorSound, MapDoorClass, MapDoorMotion,
-    MapDoorOpenDirection, MapTrace, MapVisibilityBucket, ModelPreview, ModelVertex, mid,
+    MapDoorOpenDirection, MapPreview, MapTrace, MapVisibilityBucket, ModelVertex, mid,
     normalize_or_up,
 };
 use gmpublished_backend::math::Vec3;
@@ -402,7 +402,7 @@ pub(super) fn expand_bounds(bounds: (Vec3, Vec3), half_extents: Vec3) -> (Vec3, 
 impl FlyCamera {
     pub(super) fn integrate_doors(
         &mut self,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         content_id: u64,
         dt: f32,
     ) -> Vec<DoorAudioEvent> {
@@ -510,7 +510,7 @@ impl FlyCamera {
 
     pub(super) fn resume_blocked_doors_if_clear(
         &mut self,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         content_id: u64,
     ) -> Vec<DoorAudioEvent> {
         let player_hull = self.player_hull_bounds();
@@ -546,7 +546,7 @@ impl FlyCamera {
 
     pub(super) fn toggle_nearest_door(
         &mut self,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         content_id: u64,
     ) -> Option<DoorAudioEvent> {
         if self.mode != MovementMode::Walk {
@@ -593,7 +593,7 @@ impl FlyCamera {
 
     pub(super) fn door_visible_from_current_cluster(
         &self,
-        scene: &ModelPreview,
+        scene: &MapPreview,
         door: &DoorInstance,
     ) -> bool {
         let Some(visibility) = scene.visibility.as_ref() else {
@@ -620,12 +620,12 @@ impl FlyCamera {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::empty_preview;
-    use super::super::{FlyCamera, FlyPose, MapVisibilityBucket, ModelPreview, MovementMode};
+    use super::super::{FlyCamera, FlyPose, MapPreview, MapVisibilityBucket, MovementMode};
     use super::*;
     use crate::media::preview_model::DoorSounds;
     use gmpublished_backend::scene::map::MapWalkCollision;
 
-    fn door_scene(doors: Vec<DoorInstance>) -> ModelPreview {
+    fn door_scene(doors: Vec<DoorInstance>) -> MapPreview {
         let mut scene = empty_preview(
             Vec3::new(-128.0, -128.0, -128.0),
             Vec3::new(256.0, 128.0, 128.0),
@@ -668,7 +668,7 @@ mod tests {
         }
     }
 
-    fn walk_camera_for_scene(scene: &ModelPreview, position: Vec3, yaw: f32) -> FlyCamera {
+    fn walk_camera_for_scene(scene: &MapPreview, position: Vec3, yaw: f32) -> FlyCamera {
         let mut camera = FlyCamera::default();
         camera.ensure_spawn(
             scene,

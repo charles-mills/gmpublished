@@ -1,7 +1,7 @@
 use super::window;
 use super::{
-    App, LibraryRefreshReason, RootMessage, Task, destination_select, flatten_blocking_ui_result,
-    resolve_tokens, settings, shell, theme,
+    App, LibraryRefreshReason, RootMessage, Task, flatten_blocking_ui_result, resolve_tokens,
+    settings, shell, theme,
 };
 #[cfg(target_os = "macos")]
 use crate::bridge::ui_error::ResultExt as _;
@@ -11,22 +11,11 @@ impl App {
         &mut self,
         snapshot: &settings::SettingsSnapshot,
     ) -> Task<RootMessage> {
-        let previous = self.state.chrome_strategy;
-        let previous_gmod_dir = self.state.installed_addons.watch_gmod_dir().cloned();
-        self.state.apply_runtime_settings(&snapshot.settings);
-        self.state
-            .installed_addons
-            .set_watch_gmod_dir(snapshot.paths.gmod_dir.clone());
-        self.state.destination_select.reset_from_snapshot(
-            destination_select::SettingsSnapshot::new(
-                snapshot.settings.clone(),
-                snapshot.paths.clone(),
-            ),
-        );
-        let label = destination_select::destination_label(&snapshot.settings, &snapshot.paths);
-        self.state.downloader.set_destination_label(label);
+        let result = self
+            .state
+            .apply_settings_snapshot(snapshot.settings.clone(), snapshot.paths.clone());
         self.sync_game_prerequisite();
-        let library_refresh = if previous_gmod_dir != snapshot.paths.gmod_dir {
+        let library_refresh = if result.gmod_dir_changed {
             Task::done(RootMessage::LibraryRefreshRequested(
                 LibraryRefreshReason::SettingsChanged,
             ))
@@ -35,7 +24,10 @@ impl App {
         };
         #[cfg(target_os = "macos")]
         self.install_macos_menu();
-        Task::batch([self.chrome_strategy_apply_task(previous), library_refresh])
+        Task::batch([
+            self.chrome_strategy_apply_task(result.previous_chrome),
+            library_refresh,
+        ])
     }
 
     pub(super) fn apply_settings_mutation_runtime(

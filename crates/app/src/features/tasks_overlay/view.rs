@@ -8,6 +8,7 @@ use crate::bridge::tasks::{TaskKind, TransactionStatus};
 use crate::format::format_bytes;
 use crate::i18n::{Arg, I18n, translated_error};
 use crate::theme::{Rgba, Tokens, ViewCtx};
+use crate::widgets::icon::svg_icon;
 use crate::{assets, widgets};
 
 use super::Message;
@@ -164,17 +165,9 @@ fn status_icon<'a>(
         Outcome::Pending => {
             widgets::spinner::spinner(&tokens, toast.spinner_elapsed(now), ICON_SIZE)
         }
-        Outcome::Finished { .. } => icon(assets::icons::check(), color),
-        Outcome::Error { .. } => icon(assets::icons::circle_alert(), color),
+        Outcome::Finished { .. } => svg_icon(assets::icons::check(), color, ICON_SIZE).into(),
+        Outcome::Error { .. } => svg_icon(assets::icons::circle_alert(), color, ICON_SIZE).into(),
     }
-}
-
-fn icon<'a>(handle: svg::Handle, color: Color) -> Element<'a, Message> {
-    svg(handle)
-        .width(Length::Fixed(ICON_SIZE))
-        .height(Length::Fixed(ICON_SIZE))
-        .style(move |_, _| svg::Style { color: Some(color) })
-        .into()
 }
 
 fn toast_label(toast: &Toast, i18n: &I18n) -> String {

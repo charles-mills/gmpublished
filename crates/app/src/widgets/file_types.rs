@@ -2,101 +2,58 @@
 
 use std::borrow::Cow;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SilkIcon {
-    Bricks,
-    Comments,
-    Folder,
-    Font,
-    Map,
-    PageWhite,
-    PageWhiteText,
-    PageWhiteWrench,
-    Photo,
-    PictureLink,
-    ScriptCode,
-    Sound,
-    Wand,
-}
-
-impl SilkIcon {
-    /// Every icon, in declaration order.
-    ///
-    /// A new variant is caught by [`Self::bytes`]'s exhaustive match, not by
-    /// this array — its length is a literal, so a missing entry here compiles.
-    /// Getting the *order* wrong compiles too, which is what
-    /// `all_matches_declaration_order` exists for.
-    pub const ALL: [Self; 13] = [
-        Self::Bricks,
-        Self::Comments,
-        Self::Folder,
-        Self::Font,
-        Self::Map,
-        Self::PageWhite,
-        Self::PageWhiteText,
-        Self::PageWhiteWrench,
-        Self::Photo,
-        Self::PictureLink,
-        Self::ScriptCode,
-        Self::Sound,
-        Self::Wand,
-    ];
-
-    /// The bundled PNG for this icon, and the file name to blame if it fails
-    /// to decode.
-    ///
-    /// An exhaustive match rather than a position in a parallel array: the
-    /// icon and its bytes are one fact, and a positional pairing is two
-    /// orderings kept in step by hand.
-    #[must_use]
-    pub const fn bytes(self) -> (&'static str, &'static [u8]) {
-        match self {
-            Self::Bricks => (
+mapped_enum_with_all! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(usize)]
+    pub enum SilkIcon {
+        Bricks => (
                 "bricks",
                 include_bytes!("../../ui/images/silkicons/bricks.png"),
             ),
-            Self::Comments => (
+        Comments => (
                 "comments",
                 include_bytes!("../../ui/images/silkicons/comments.png"),
             ),
-            Self::Folder => (
+        Folder => (
                 "folder",
                 include_bytes!("../../ui/images/silkicons/folder.png"),
             ),
-            Self::Font => ("font", include_bytes!("../../ui/images/silkicons/font.png")),
-            Self::Map => ("map", include_bytes!("../../ui/images/silkicons/map.png")),
-            Self::PageWhite => (
+        Font => ("font", include_bytes!("../../ui/images/silkicons/font.png")),
+        Map => ("map", include_bytes!("../../ui/images/silkicons/map.png")),
+        PageWhite => (
                 "page_white",
                 include_bytes!("../../ui/images/silkicons/page_white.png"),
             ),
-            Self::PageWhiteText => (
+        PageWhiteText => (
                 "page_white_text",
                 include_bytes!("../../ui/images/silkicons/page_white_text.png"),
             ),
-            Self::PageWhiteWrench => (
+        PageWhiteWrench => (
                 "page_white_wrench",
                 include_bytes!("../../ui/images/silkicons/page_white_wrench.png"),
             ),
-            Self::Photo => (
+        Photo => (
                 "photo",
                 include_bytes!("../../ui/images/silkicons/photo.png"),
             ),
-            Self::PictureLink => (
+        PictureLink => (
                 "picture_link",
                 include_bytes!("../../ui/images/silkicons/picture_link.png"),
             ),
-            Self::ScriptCode => (
+        ScriptCode => (
                 "script_code",
                 include_bytes!("../../ui/images/silkicons/script_code.png"),
             ),
-            Self::Sound => (
+        Sound => (
                 "sound",
                 include_bytes!("../../ui/images/silkicons/sound.png"),
             ),
-            Self::Wand => ("wand", include_bytes!("../../ui/images/silkicons/wand.png")),
-        }
+        Wand => ("wand", include_bytes!("../../ui/images/silkicons/wand.png")),
     }
+    bytes -> (&'static str, &'static [u8])
+}
 
+impl SilkIcon {
     /// This icon's position in [`Self::ALL`], which is declaration order.
     #[must_use]
     pub const fn index(self) -> usize {

@@ -8,20 +8,9 @@ const WARM_THUMBNAIL_MAX_EDGE: u32 = 256;
 
 impl App {
     pub(super) fn thumbnail_scale_changed_task(&mut self) -> Task<RootMessage> {
-        let _changed = self.state.my_workshop.invalidate_ready_thumbnails();
-        let _changed = self.state.installed_addons.invalidate_ready_thumbnails();
-        let _changed = self.state.search.invalidate_ready_thumbnails();
-        let _changed = self.state.preview_gma.invalidate_ready_thumbnail();
-        let _invalidation = self.state.size_analyzer.invalidate_ready_thumbnails();
-
-        let demand_sets = vec![
-            self.state.my_workshop.thumbnail_demands(),
-            self.state.installed_addons.thumbnail_demands(),
-            self.search_thumbnail_demand_set(),
-            self.state.prepare_publish.thumbnail_demands(),
-            self.state.preview_gma.thumbnail_demands(),
-            self.state.size_analyzer.thumbnail_demands(),
-        ];
+        self.state.invalidate_ready_thumbnails();
+        let viewport_height = self.search_dropdown_list_viewport_height();
+        let demand_sets = self.state.thumbnail_demand_sets(viewport_height);
 
         self.thumbnails
             .set_demand_sets(&self.ctx, demand_sets)
@@ -57,12 +46,6 @@ impl App {
         self.thumbnails
             .set_demands(&self.ctx, self.state.preview_gma.thumbnail_demands())
             .map(RootMessage::ThumbnailDemand)
-    }
-
-    pub(super) fn search_thumbnail_demand_set(&self) -> thumbnail_demand::DemandSet {
-        self.state
-            .search
-            .thumbnail_demands(self.search_dropdown_list_viewport_height())
     }
 
     fn search_thumbnail_metadata_task(&mut self, viewport_height: f32) -> Task<RootMessage> {
@@ -174,10 +157,11 @@ impl App {
             .into_iter()
             .filter(|(_, url)| !url.is_empty())
             .map(|(id, url)| thumbnail_demand::Demand {
-                id: thumbnail_demand::DemandId::new(id.to_string()),
+                id: thumbnail_demand::DemandId::workshop(id),
                 input: crate::media::thumbnail_worker::ThumbnailInput::from_url(url),
                 logical_max_edge: WARM_THUMBNAIL_MAX_EDGE,
-                priority: thumbnail_demand::Priority::WarmLibrary,
+                priority: thumbnail_demand::Priority::Prefetch,
+                capabilities: thumbnail_demand::DemandCapabilities::CACHE_ONLY,
             })
             .collect();
         let set = thumbnail_demand::DemandSet {
@@ -207,7 +191,7 @@ pub(super) fn log_thumbnail_delivery(delivery: &thumbnail_demand::Delivery) {
                 "thumbnail ready for {:?} generation {} id {} key {:?} (ready key {:?}, {}x{})",
                 delivery.owner,
                 delivery.generation,
-                delivery.id.as_str(),
+                delivery.id,
                 delivery.key,
                 ready.key(),
                 metadata.width,
@@ -220,7 +204,7 @@ pub(super) fn log_thumbnail_delivery(delivery: &thumbnail_demand::Delivery) {
                 "thumbnail failed for {:?} generation {} id {} key {:?}: {error}",
                 delivery.owner,
                 delivery.generation,
-                delivery.id.as_str(),
+                delivery.id,
                 delivery.key
             );
         }

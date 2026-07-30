@@ -34,7 +34,6 @@ use crate::bridge::domain::SteamId;
 use crate::generation::Generation;
 
 const PREVIEW_THUMBNAIL_MAX_EDGE: u32 = 256;
-const PREVIEW_THUMBNAIL_DEMAND_ID: &str = "preview-gma";
 const DEFAULT_SIDEBAR_RATIO: f32 = 272.0 / 1008.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -301,10 +300,11 @@ impl State {
             generation: self.request_id,
             replace: thumbnail_demand::ReplaceMode::Owner,
             demands: vec![thumbnail_demand::Demand {
-                id: thumbnail_demand::DemandId::new(PREVIEW_THUMBNAIL_DEMAND_ID),
+                id: thumbnail_demand::DemandId::Singleton,
                 input: ThumbnailInput::from_url(url),
                 logical_max_edge: PREVIEW_THUMBNAIL_MAX_EDGE,
                 priority: thumbnail_demand::Priority::ActiveDetail,
+                capabilities: thumbnail_demand::DemandCapabilities::SURFACE,
             }],
         }
     }
@@ -555,7 +555,7 @@ impl State {
     ) -> bool {
         if delivery.owner != thumbnail_owner()
             || delivery.generation != self.request_id
-            || delivery.id.as_str() != PREVIEW_THUMBNAIL_DEMAND_ID
+            || !delivery.id.is_singleton()
         {
             return false;
         }

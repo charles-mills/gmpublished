@@ -80,6 +80,7 @@ const TASK_EVENTS_ID: u64 = 1;
 const BACKEND_EVENTS_ID: u64 = 2;
 const BACKEND_EVENT_QUEUE_CAPACITY: usize = 256;
 
+pub use gmpublished_backend::events::WorkshopSnapshotId;
 /// Every status a task can report, whichever crate raised it.
 ///
 /// Re-exported rather than redeclared: the statuses this crate produces for

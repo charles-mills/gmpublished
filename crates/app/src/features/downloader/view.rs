@@ -14,6 +14,7 @@ use crate::{
     format::format_bytes,
     i18n::I18n,
     theme::{self, Tokens, ViewCtx},
+    widgets::icon::{svg_icon as icon, svg_icon_with_opacity as icon_with_opacity},
     widgets::tooltip as tooltip_widget,
 };
 
@@ -255,7 +256,7 @@ fn section_view<'a>(
     let panel_content = if jobs.is_empty() {
         column![body].height(Length::Fill)
     } else {
-        column![table_header(&tokens), body].height(Length::Fill)
+        column![table_header(ctx.i18n, &tokens), body].height(Length::Fill)
     };
 
     let panel = container(panel_content)
@@ -277,15 +278,35 @@ fn section_view<'a>(
     container(content).width(Length::Fill).height(Length::Fill)
 }
 
-fn table_header<'a>(tokens: &Tokens) -> Element<'a, Message> {
+fn table_header<'a>(i18n: &I18n, tokens: &Tokens) -> Element<'a, Message> {
     let tokens = *tokens;
     container(
         row![
             text("").width(48.0),
-            header_text("Addon", &tokens, alignment::Horizontal::Left).width(Length::Fill),
-            header_text("Speed", &tokens, alignment::Horizontal::Right).width(84.0),
-            header_text("Total", &tokens, alignment::Horizontal::Right).width(84.0),
-            header_text("Progress", &tokens, alignment::Horizontal::Center).width(180.0),
+            header_text(
+                i18n.tr("downloader-column-addon"),
+                &tokens,
+                alignment::Horizontal::Left
+            )
+            .width(Length::Fill),
+            header_text(
+                i18n.tr("downloader-column-speed"),
+                &tokens,
+                alignment::Horizontal::Right
+            )
+            .width(84.0),
+            header_text(
+                i18n.tr("downloader-column-total"),
+                &tokens,
+                alignment::Horizontal::Right
+            )
+            .width(84.0),
+            header_text(
+                i18n.tr("downloader-column-progress"),
+                &tokens,
+                alignment::Horizontal::Center,
+            )
+            .width(180.0),
         ]
         .align_y(Center)
         .spacing(tokens.spacing.gap_sm)
@@ -301,7 +322,7 @@ fn table_header<'a>(tokens: &Tokens) -> Element<'a, Message> {
 }
 
 fn header_text(
-    label: &'static str,
+    label: String,
     tokens: &Tokens,
     align_x: alignment::Horizontal,
 ) -> iced::widget::Text<'static> {
@@ -553,27 +574,7 @@ fn section_icon<'a>(section: Section, tokens: &Tokens) -> Element<'a, Message> {
         Section::Downloading => assets::icons::cloud_download(),
         Section::Extracting => assets::icons::folder_add(),
     };
-    icon(handle, tokens.colors.text.into(), 32.0)
-}
-
-fn icon<'a>(handle: svg::Handle, color: Color, size: f32) -> Element<'a, Message> {
-    icon_with_opacity(handle, color, size, 1.0)
-}
-
-fn icon_with_opacity<'a>(
-    handle: svg::Handle,
-    color: Color,
-    size: f32,
-    opacity: f32,
-) -> Element<'a, Message> {
-    container(
-        svg(handle)
-            .width(size)
-            .height(size)
-            .style(move |_, _| svg::Style { color: Some(color) })
-            .opacity(opacity),
-    )
-    .into()
+    icon(handle, tokens.colors.text.into(), 32.0).into()
 }
 
 fn centered_text<'a>(

@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gmpublished_backend::error_key::keys;
 
 use super::{
     BackendRuntimeAction, BackendRuntimeEventEffects, MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION,
     MAX_PENDING_PRE_START_TRANSACTIONS, PublishedFileId, TRANSACTION_PROGRESS_SCALE, TaskHandle,
-    TaskId, TransactionRuntimeEvent, UiError, WorkshopDownloadTaskKind,
+    TaskId, TransactionRuntimeEvent, UiError, WorkshopDownloadTaskKind, WorkshopSnapshotId,
 };
 use gmpublished_backend::events::TransactionPayload;
 use gmpublished_backend::transactions;
@@ -151,7 +151,7 @@ pub(super) enum BackendTaskSource {
     WorkshopDownload {
         item_id: Option<PublishedFileId>,
         start_emitted: bool,
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
     },
     WorkshopExtraction {
         item_id: Option<PublishedFileId>,
@@ -159,7 +159,7 @@ pub(super) enum BackendTaskSource {
         /// The on-disk `.gma` the extraction reads from, when it outlives
         /// the extraction (installed workshop content, not temp payloads).
         source_gma: Option<PathBuf>,
-        request_id: Option<u64>,
+        request_id: Option<WorkshopSnapshotId>,
     },
 }
 
@@ -254,7 +254,7 @@ impl CorrelatedBackendTask {
         vec![BackendRuntimeAction::DownloadFinished {
             request_id: self.source.request_id(),
             item_id,
-            installed_path: self.source.source_gma().cloned(),
+            installed_path: self.source.source_gma().map(Path::to_path_buf),
             extracted_path: extracted_path.clone(),
         }]
     }
@@ -278,14 +278,14 @@ impl BackendTaskSource {
         }
     }
 
-    const fn source_gma(&self) -> Option<&PathBuf> {
+    fn source_gma(&self) -> Option<&Path> {
         match self {
             Self::Generic | Self::WorkshopDownload { .. } => None,
-            Self::WorkshopExtraction { source_gma, .. } => source_gma.as_ref(),
+            Self::WorkshopExtraction { source_gma, .. } => source_gma.as_deref(),
         }
     }
 
-    const fn request_id(&self) -> Option<u64> {
+    const fn request_id(&self) -> Option<WorkshopSnapshotId> {
         match self {
             Self::Generic => None,
             Self::WorkshopDownload { request_id, .. }
@@ -308,7 +308,7 @@ pub(super) fn take_workshop_start_action(
     item_id: Option<PublishedFileId>,
     start_emitted: &mut bool,
     task_id: TaskId,
-    request_id: Option<u64>,
+    request_id: Option<WorkshopSnapshotId>,
 ) -> Vec<BackendRuntimeAction> {
     if request_id.is_some() {
         return Vec::new();

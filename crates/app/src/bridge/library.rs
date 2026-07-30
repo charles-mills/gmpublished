@@ -11,6 +11,7 @@ use std::{
     time::SystemTime,
 };
 
+use crate::generation::Generation;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -40,7 +41,7 @@ impl LibraryRefreshReason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibrarySnapshot {
     pub(crate) addons: Arc<[InstalledAddon]>,
-    pub(crate) epoch: u64,
+    pub(crate) epoch: Generation,
 }
 
 #[derive(Clone, Debug)]
@@ -59,7 +60,7 @@ pub struct LibraryStore {
 #[derive(Debug, Default)]
 struct LibraryState {
     snapshot: Option<LibrarySnapshot>,
-    epoch: u64,
+    epoch: Generation,
     running: bool,
     pending_reason: Option<LibraryRefreshReason>,
 }
@@ -229,7 +230,7 @@ impl LibraryStore {
 
     fn commit_snapshot(&self, addons: Vec<InstalledAddon>) -> LibrarySnapshot {
         let mut state = self.state.lock();
-        state.epoch = state.epoch.wrapping_add(1).max(1);
+        state.epoch.bump();
         let snapshot = LibrarySnapshot {
             addons: Arc::from(addons.into_boxed_slice()),
             epoch: state.epoch,
@@ -1325,7 +1326,7 @@ mod tests {
         let first = store.commit_snapshot(Vec::new());
         let second = store.commit_snapshot(Vec::new());
 
-        assert_eq!(first.epoch, 1);
-        assert_eq!(second.epoch, 2);
+        assert_eq!(first.epoch, Generation::from_raw(1));
+        assert_eq!(second.epoch, Generation::from_raw(2));
     }
 }

@@ -1,25 +1,15 @@
 //! Fixtures shared by the viewer's test modules.
 
-use super::ModelPreview;
+use super::{MapPreview, ModelPreview, RenderScene};
 use crate::media::preview_model::ModelStats;
 use gmpublished_backend::math::Vec3;
+use std::sync::Arc;
 
-pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPreview {
-    ModelPreview {
+fn empty_render_scene(bounds_min: Vec3, bounds_max: Vec3) -> Arc<RenderScene> {
+    Arc::new(RenderScene {
         meshes: Vec::new(),
-        mesh_visibility: Vec::new(),
-        map_skybox_meshes: Vec::new(),
         materials: Vec::new(),
-        lightmap: None,
-        skybox: None,
-        detail_sprites: Vec::new(),
-        map_skybox_detail_sprites: Vec::new(),
-        overlays: Vec::new(),
-        map_skybox_overlays: Vec::new(),
-        doors: Vec::new(),
         phy_debug_meshes: Vec::new(),
-        skin_tables: vec![Vec::new()],
-        bodygroups: Vec::new(),
         stats: ModelStats {
             bone_count: 0,
             sequence_count: 0,
@@ -31,6 +21,29 @@ pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPreview 
         },
         bounds_min,
         bounds_max,
+    })
+}
+
+pub(super) fn empty_model_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPreview {
+    ModelPreview {
+        scene: empty_render_scene(bounds_min, bounds_max),
+        skin_tables: vec![Vec::new()],
+        bodygroups: Vec::new(),
+    }
+}
+
+pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> MapPreview {
+    MapPreview {
+        scene: empty_render_scene(bounds_min, bounds_max),
+        mesh_visibility: Vec::new(),
+        map_skybox_meshes: Vec::new(),
+        lightmap: None,
+        skybox: None,
+        detail_sprites: Vec::new(),
+        map_skybox_detail_sprites: Vec::new(),
+        overlays: Vec::new(),
+        map_skybox_overlays: Vec::new(),
+        doors: Vec::new(),
         visibility: None,
         walk_collision: None,
     }
@@ -40,7 +53,7 @@ use super::super::state::MovementMode;
 use super::camera::FlyCamera;
 use gmpublished_backend::scene::map::MapWalkCollision;
 
-pub(super) fn floor_scene() -> ModelPreview {
+pub(super) fn floor_scene() -> MapPreview {
     let mut scene = empty_preview(Vec3::splat(0.0), Vec3::splat(1024.0));
     scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
         Vec3::new(-4096.0, -4096.0, -64.0),
@@ -49,7 +62,7 @@ pub(super) fn floor_scene() -> ModelPreview {
     scene
 }
 
-pub(super) fn deep_water_scene() -> ModelPreview {
+pub(super) fn deep_water_scene() -> MapPreview {
     let mut scene = empty_preview(
         Vec3::new(-512.0, -512.0, -320.0),
         Vec3::new(512.0, 512.0, 256.0),

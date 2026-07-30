@@ -18,6 +18,7 @@ pub enum ThemeVariant {
 }
 
 impl ThemeVariant {
+    #[cfg(test)]
     const fn preset(self) -> ThemePreset {
         match self {
             Self::Dark => ThemePreset::Dark,
@@ -422,10 +423,12 @@ pub fn invariant() -> &'static InvariantTokens {
 }
 
 impl Tokens {
+    #[cfg(test)]
     pub fn dark() -> Self {
         Self::for_variant(ThemeVariant::Dark)
     }
 
+    #[cfg(test)]
     pub fn for_variant(variant: ThemeVariant) -> Self {
         Self::with_accent_inputs(variant, AccentInputs::for_preset(variant.preset()))
     }

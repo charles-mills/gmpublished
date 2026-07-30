@@ -150,7 +150,7 @@ impl crate::error_key::HasErrorKey for WorkshopQueryError {
 }
 
 impl Steam {
-    pub fn workshop_fetcher(steam: &Arc<Self>, search: &Arc<Search>) {
+    pub fn workshop_fetcher(steam: &Arc<Self>, search: &Arc<Search>, client: steamworks::Client) {
         loop {
             let rx = steam.workshop_queue_rx.lock();
             let Ok(mut queue) = rx.recv() else {
@@ -179,11 +179,7 @@ impl Steam {
 
                 search.reserve(chunk.len());
 
-                let client = steam
-                    .client()
-                    .expect("workshop_fetcher only runs after Steam has connected");
                 if let Ok(query) = client
-                    .client()
                     .ugc()
                     .query_items(chunk.into_iter().map(Into::into).collect())
                 {

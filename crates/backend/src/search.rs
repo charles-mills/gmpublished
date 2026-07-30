@@ -1,15 +1,16 @@
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     collections::BTreeMap,
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU32},
+        atomic::{AtomicBool, AtomicU32},
     },
 };
 
 use crate::WorkshopId;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use rayon::prelude::*;
 use serde::{Serialize, ser::SerializeTuple};
 
@@ -21,7 +22,7 @@ use nucleo_matcher::{
 use crate::transactions::TransactionId;
 use crate::{GmaFile, Transaction, WorkshopItem, transactions::TransactionPayload};
 
-const MAX_QUICK_RESULTS: u8 = 10;
+const MAX_QUICK_RESULTS: usize = 10;
 
 /// Hard cap on full-search hits delivered to the UI. Broad file-scope queries
 /// can match most of the index; only the best-scored slice is worth showing.
@@ -91,7 +92,45 @@ pub struct QuickSearchResult {
     pub has_more: bool,
 }
 
-type QuickSearchSlot = Option<(u32, Arc<SearchItem>)>;
+fn quick_hit_order(left: &QuickSearchHit, right: &QuickSearchHit) -> Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| left.item.cmp(&right.item))
+}
+
+#[derive(Default)]
+struct QuickSearchAccumulator {
+    hits: Vec<QuickSearchHit>,
+    matches: usize,
+}
+
+impl QuickSearchAccumulator {
+    fn push(&mut self, hit: QuickSearchHit) {
+        self.matches += 1;
+        self.retain_if_best(hit);
+    }
+
+    fn merge(mut self, other: Self) -> Self {
+        self.matches += other.matches;
+        for hit in other.hits {
+            self.retain_if_best(hit);
+        }
+        self
+    }
+
+    fn retain_if_best(&mut self, hit: QuickSearchHit) {
+        let position = self
+            .hits
+            .binary_search_by(|existing| quick_hit_order(existing, &hit))
+            .unwrap_or_else(|position| position);
+
+        if position < MAX_QUICK_RESULTS {
+            self.hits.insert(position, hit);
+            self.hits.truncate(MAX_QUICK_RESULTS);
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SearchScope {
@@ -384,7 +423,7 @@ pub struct Search {
     dirty: AtomicBool,
     items: RwLock<Vec<Arc<SearchItem>>>,
 
-    pub installed_addons: RwLock<BTreeMap<WorkshopId, Arc<SearchItem>>>,
+    installed_addons: RwLock<BTreeMap<WorkshopId, Arc<SearchItem>>>,
 }
 impl Default for Search {
     fn default() -> Self {
@@ -403,7 +442,7 @@ impl Search {
         }
     }
 
-    pub fn dirty(&self) {
+    pub fn ensure_sorted(&self) {
         // Cheap check before contending for the write lock; the swap below
         // is the one that actually matters.
         if !self.dirty.load(std::sync::atomic::Ordering::Acquire) {
@@ -480,7 +519,7 @@ impl Search {
             self.installed_addons.write().extend(new_installed_addons);
         }
 
-        // Flag AFTER the items are appended: a dirty() racing the extend may
+        // Flag AFTER the items are appended: an ensure_sorted() racing the extend may
         // sort without them, but this store re-flags so the next query sorts.
         self.dirty.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -527,84 +566,45 @@ impl Search {
         reason = "app-layer callers across the crate boundary already own this string"
     )]
     pub fn quick_search_with_scope(&self, query: String, scope: SearchScope) -> QuickSearchResult {
-        self.dirty();
+        self.ensure_sorted();
         self.quick_scored(&query, scope)
     }
 
     fn quick_scored(&self, query: &str, scope: SearchScope) -> QuickSearchResult {
-        let i = AtomicU8::new(0);
-        let has_more = AtomicBool::new(false);
-        let results: Mutex<Vec<QuickSearchSlot>> =
-            Mutex::new(vec![None; MAX_QUICK_RESULTS as usize]);
-
         // Queries use fzf-style atom syntax: whitespace-separated AND terms,
         // with `!` negation, `^`/`$` anchors and `'` exact matching.
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
-        self.items
+        let result = self
+            .items
             .read()
             .par_iter()
-            .try_for_each(|search_item| {
+            .filter_map(|search_item| {
                 if !search_scope_matches(&search_item.source, scope) {
-                    return Ok(());
-                }
-
-                if i.load(std::sync::atomic::Ordering::Acquire) >= MAX_QUICK_RESULTS {
-                    has_more.store(true, std::sync::atomic::Ordering::Release);
-                    return Err(());
+                    return None;
                 }
 
                 if search_item.len < query.len() {
-                    return Ok(());
+                    return None;
                 }
 
-                if let Some(score) = best_search_item_score(&pattern, query, search_item) {
-                    let i = i.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if i >= MAX_QUICK_RESULTS {
-                        has_more.store(true, std::sync::atomic::Ordering::Release);
-                        return Err(());
-                    }
-                    results.lock()[i as usize] = Some((score, search_item.clone()));
-                }
-
-                Ok(())
+                best_search_item_score(&pattern, query, search_item).map(|score| QuickSearchHit {
+                    score,
+                    item: search_item.clone(),
+                })
             })
-            .ok();
+            .fold(QuickSearchAccumulator::default, |mut result, hit| {
+                result.push(hit);
+                result
+            })
+            .reduce(
+                QuickSearchAccumulator::default,
+                QuickSearchAccumulator::merge,
+            );
 
-        let i = i.into_inner();
-        let mut results = results.into_inner();
-
-        if i <= 1 {
-            QuickSearchResult {
-                hits: results
-                    .into_iter()
-                    .flatten()
-                    .map(|(score, item)| QuickSearchHit { score, item })
-                    .collect(),
-                has_more: false,
-            }
-        } else {
-            let has_more = has_more.load(std::sync::atomic::Ordering::Acquire);
-
-            results.sort_by(|a, b| {
-                if let Some(a) = a {
-                    if let Some(b) = b {
-                        return a.0.cmp(&b.0).reverse();
-                    }
-                    return std::cmp::Ordering::Less;
-                } else if b.is_some() {
-                    return std::cmp::Ordering::Greater;
-                }
-                std::cmp::Ordering::Equal
-            });
-
-            QuickSearchResult {
-                hits: results
-                    .into_iter()
-                    .filter_map(|x| x.map(|(score, item)| QuickSearchHit { score, item }))
-                    .collect(),
-                has_more,
-            }
+        QuickSearchResult {
+            hits: result.hits,
+            has_more: result.matches > MAX_QUICK_RESULTS,
         }
     }
 
@@ -622,7 +622,7 @@ impl Search {
         scope: SearchScope,
         transaction: Transaction,
     ) -> TransactionId {
-        self.dirty();
+        self.ensure_sorted();
 
         let id = transaction.id();
         let search = Arc::clone(self);
@@ -712,7 +712,7 @@ impl Search {
     /// replacement item rather than editing the existing one in place, and
     /// swaps it into both `items` and `installed_addons`.
     pub fn refresh_installed_addon_labels(&self, items: &[WorkshopItem]) {
-        self.dirty();
+        self.ensure_sorted();
         for item in items {
             let Some(existing) = self.installed_addons.read().get(&item.id).cloned() else {
                 continue;

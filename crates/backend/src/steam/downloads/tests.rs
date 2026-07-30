@@ -31,6 +31,17 @@ fn downloads_for_test(temp_root: &Path) -> (Arc<Downloads>, BackendEventCollecto
     )
 }
 
+#[test]
+fn download_requires_a_connected_steam_capability() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (downloads, _events) = downloads_for_test(temp.path());
+
+    assert!(matches!(
+        downloads.download([id(1)]),
+        Err(SteamRuntimeError::NotConnected)
+    ));
+}
+
 fn with_installed_extract_events<T>(
     build: impl FnOnce(&Path) -> InstalledExtractFixture,
     test: impl FnOnce(Arc<Downloads>, BackendEventCollector, InstalledExtractFixture) -> T,

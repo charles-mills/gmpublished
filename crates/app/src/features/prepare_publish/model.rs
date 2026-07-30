@@ -17,6 +17,7 @@ use crate::bridge::{
     },
     tasks::{
         BackendContext, BackendRuntimeEvent, BackendServices, TaskHandle, TransactionRuntimeEvent,
+        WorkshopSnapshotId,
     },
 };
 use ::image::GenericImageView;
@@ -44,7 +45,7 @@ pub struct ContentPathVerificationRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkshopContentRequest {
-    pub(crate) request_id: u64,
+    pub(crate) request_id: WorkshopSnapshotId,
     pub(crate) workshop_id: PublishedFileId,
     pub(crate) destination: PathBuf,
 }

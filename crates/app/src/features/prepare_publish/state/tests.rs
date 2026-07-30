@@ -14,6 +14,7 @@ use super::ChangelogContent;
 use super::{
     AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget, Verification,
 };
+use crate::bridge::tasks::WorkshopSnapshotId;
 use crate::features::prepare_publish::model::{
     ContentPathVerificationRequest, IgnorePatternMutationResult, IgnoredPattern,
     PublishSubmitContext, PublishSubmitResult, VerifiedContentPathState, VerifiedIcon,
@@ -36,7 +37,7 @@ fn open_new_resets_to_blank_new_mode() {
             title: "Old".to_owned(),
             tags: vec!["map".to_owned()],
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-42".into(),
         },
     );
@@ -60,7 +61,7 @@ fn open_update_prefills_workshop_metadata() {
             title: "Workshop Addon".to_owned(),
             tags: vec!["Addon".to_owned(), "map".to_owned(), "scenic".to_owned()],
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
@@ -101,14 +102,14 @@ fn workshop_download_hydrates_the_current_update_path() {
             title: "Workshop Addon".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: destination.clone(),
         },
     );
 
     let verification = state
         .apply_workshop_download(
-            1,
+            WorkshopSnapshotId::new(1),
             WorkshopDownloadSuccess {
                 item_id: workshop_id,
                 installed_path: None,
@@ -135,13 +136,13 @@ fn inspected_workshop_baseline_is_visible_but_not_a_publish_source() {
             title: "Workshop Addon".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: destination.clone(),
         },
     );
     let inspection = state
         .apply_workshop_download(
-            1,
+            WorkshopSnapshotId::new(1),
             WorkshopDownloadSuccess {
                 item_id: workshop_id,
                 installed_path: None,
@@ -169,7 +170,7 @@ fn late_workshop_download_is_cleaned_after_close() {
             title: "Workshop Addon".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: destination.clone(),
         },
     );
@@ -178,7 +179,7 @@ fn late_workshop_download_is_cleaned_after_close() {
     assert!(
         state
             .apply_workshop_download(
-                1,
+                WorkshopSnapshotId::new(1),
                 WorkshopDownloadSuccess {
                     item_id: workshop_id,
                     installed_path: None,
@@ -202,11 +203,14 @@ fn workshop_snapshot_error_leaves_manual_selection_available() {
             title: "Workshop Addon".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: destination.clone(),
         },
     );
-    state.apply_workshop_submission_result(1, Err(UiError::new(ErrorKey::new("DOWNLOAD_FAILED"))));
+    state.apply_workshop_submission_result(
+        WorkshopSnapshotId::new(1),
+        Err(UiError::new(ErrorKey::new("DOWNLOAD_FAILED"))),
+    );
 
     assert!(!state.path_pending());
     assert!(state.path_error().is_some());
@@ -228,7 +232,7 @@ fn update_mode_title_is_read_only() {
             title: "Original".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
@@ -351,7 +355,7 @@ fn begin_update_submit_uses_workshop_id_changelog_and_no_default_preview() {
             title: "Existing Addon".to_owned(),
             tags: vec!["Addon".to_owned(), "map".to_owned(), "scenic".to_owned()],
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
@@ -519,7 +523,7 @@ fn publish_icon_submit_requires_update_mode_and_selected_icon() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
@@ -618,7 +622,7 @@ fn changelog_content_round_trips_through_editor_actions() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: None,
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-7".into(),
         },
     );
@@ -656,14 +660,17 @@ fn open_update_seeds_workshop_preview_display_only() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
 
     let set = state.thumbnail_demands();
     assert_eq!(set.demands.len(), 1);
-    assert_eq!(set.demands[0].id.as_str(), "99");
+    assert_eq!(
+        set.demands[0].id.workshop_id(),
+        Some(PublishedFileId::fixture(99))
+    );
     assert!(state.icon_handle().is_none());
 
     // Stale generation and failures never seed.
@@ -704,7 +711,7 @@ fn browsed_icon_replaces_the_seeded_preview() {
             title: "Existing".to_owned(),
             tags: Vec::new(),
             preview_url: Some("https://example.invalid/preview.png".to_owned()),
-            snapshot_request_id: 1,
+            snapshot_request_id: WorkshopSnapshotId::new(1),
             snapshot_destination: "/tmp/workshop-99".into(),
         },
     );
@@ -742,7 +749,7 @@ fn seed_delivery(generation: Generation, workshop_id: u64) -> thumbnail_demand::
     thumbnail_demand::Delivery {
         owner: thumbnail_demand::Owner::PreparePublish,
         generation,
-        id: thumbnail_demand::DemandId::new(workshop_id.to_string()),
+        id: thumbnail_demand::DemandId::workshop(PublishedFileId::fixture(workshop_id)),
         key: key.clone(),
         result: thumbnail_demand::DeliveryResult::Ready(
             thumbnail_demand::ReadyThumbnail::for_test(key, metadata, vec![200_u8; 8 * 8 * 4]),
@@ -755,7 +762,7 @@ fn failed_seed_delivery(generation: Generation, workshop_id: u64) -> thumbnail_d
     thumbnail_demand::Delivery {
         owner: thumbnail_demand::Owner::PreparePublish,
         generation,
-        id: thumbnail_demand::DemandId::new(workshop_id.to_string()),
+        id: thumbnail_demand::DemandId::workshop(PublishedFileId::fixture(workshop_id)),
         key: input.cache_key(super::SEED_THUMBNAIL_MAX_EDGE),
         result: thumbnail_demand::DeliveryResult::Failed {
             error: thumbnail_demand::ThumbnailDeliveryError::Thumbnail(Arc::new(
@@ -860,7 +867,7 @@ fn workshop_update_target() -> UpdateTarget {
         title: "Workshop Addon".to_owned(),
         tags: Vec::new(),
         preview_url: None,
-        snapshot_request_id: 1,
+        snapshot_request_id: WorkshopSnapshotId::new(1),
         snapshot_destination: PathBuf::from("/tmp/workshop-77"),
     }
 }

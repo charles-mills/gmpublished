@@ -1,3 +1,4 @@
+use crate::generation::Generation;
 use crate::media::preview_model::DoorAudioEvent;
 use crate::media::preview_model::PreviewRequest;
 use std::sync::Arc;
@@ -8,11 +9,17 @@ use std::sync::Arc;
 pub enum Effect {
     ModalCloseRequested,
     LoadRequested(PreviewRequest),
-    ExtractRequested { entry_path: String },
-    AudioPlayRequested { bytes: Arc<Vec<u8>>, resume_at: f32 },
-    AudioPauseRequested,
+    ExtractRequested {
+        entry_path: String,
+    },
+    AudioPlayRequested {
+        request_id: Generation,
+        bytes: Arc<Vec<u8>>,
+        resume_at: f32,
+    },
+    AudioPauseRequested(Generation),
     AudioStopRequested,
-    AudioPositionPollRequested,
+    AudioPositionPollRequested(Generation),
     DoorAudioEvent(DoorAudioEvent),
     DoorAudioStopRequested,
 }

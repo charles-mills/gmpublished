@@ -1,11 +1,17 @@
 use gmpublished_backend::math::Vec3;
+use gmpublished_backend::scene::map::{
+    AmbientCube, MapAmbientLighting, MapDoorGeometry, MapPropVisibility, StaticPropPlacement,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use vformats::vtf::VtfFormat;
 
 use super::*;
+use crate::bridge::materials::DecodedTextureBudget;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::generation::Generation;
+use crate::media::preview_model::{MapStats, ModelVertex};
 use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
 use crate::theme::ThemeVariant;
 

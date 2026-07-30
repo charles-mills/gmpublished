@@ -73,10 +73,6 @@ impl TaskId {
     pub(crate) const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
 }
 
 /// Coarse task classification used by the UI for labels and icons, and to

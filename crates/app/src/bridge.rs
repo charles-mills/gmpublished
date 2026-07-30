@@ -280,14 +280,14 @@ impl AppPaths {
     }
 
     pub(crate) fn resolve_with_defaults(settings: &Settings, mut defaults: Self) -> Self {
-        defaults.temp_dir = valid_dir(settings.backend.temp.as_ref())
+        defaults.temp_dir = valid_dir(settings.backend.temp.as_deref())
             .unwrap_or_else(|| defaults.default_temp_dir.clone());
-        defaults.user_data_dir = valid_dir(settings.backend.user_data.as_ref())
+        defaults.user_data_dir = valid_dir(settings.backend.user_data.as_deref())
             .unwrap_or_else(|| defaults.default_user_data_dir.clone());
-        defaults.downloads_dir = valid_dir(settings.backend.downloads.as_ref())
+        defaults.downloads_dir = valid_dir(settings.backend.downloads.as_deref())
             .or_else(|| defaults.default_downloads_dir.clone());
         let default_gmod_dir = defaults.gmod_dir.take();
-        defaults.gmod_dir = valid_dir(settings.backend.gmod.as_ref())
+        defaults.gmod_dir = valid_dir(settings.backend.gmod.as_deref())
             .or_else(|| default_gmod_dir.and_then(|path| path.is_dir().then_some(path)));
         defaults
     }
@@ -303,8 +303,8 @@ pub fn appdata_snapshot_from_backend(
     (settings, paths)
 }
 
-fn valid_dir(path: Option<&PathBuf>) -> Option<PathBuf> {
-    path.filter(|path| path.is_dir()).cloned()
+fn valid_dir(path: Option<&Path>) -> Option<PathBuf> {
+    path.filter(|path| path.is_dir()).map(Path::to_path_buf)
 }
 
 pub fn validate_gmod(path: impl AsRef<Path>) -> bool {

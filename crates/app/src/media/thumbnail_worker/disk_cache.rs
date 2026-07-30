@@ -644,7 +644,6 @@ fn should_try_png_cache_payload(pixels: &[u8]) -> bool {
     transparent || sampled == 0 || same_as_previous.saturating_mul(8) >= sampled
 }
 
-/// Why a cached thumbnail payload was rejected.
 /// Why a cached payload could not be decoded.
 ///
 /// Deliberately not an enum: the sole consumer logs the reason and deletes the

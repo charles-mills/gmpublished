@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::bridge::domain::WORKSHOP_LEGAL_URL;
+use crate::media::sounds::Sound;
 
 use super::{Effect, Message, State};
 
@@ -9,7 +10,9 @@ pub fn browser_rows_scrollable_id() -> iced::widget::Id {
 }
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    let sounds = SoundObservation::before(state, &message);
     let mut effects = apply(state, message);
+    sounds.append_effects(state, &mut effects);
     // Every snapshot refresh resets the model's scroll offset; the widget
     // keeps its own offset, so it has to be snapped in the same update or the
     // virtualized rows and the viewport drift apart.
@@ -17,6 +20,81 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         effects.push(Effect::BrowserScrollResetRequested);
     }
     effects
+}
+
+struct SoundObservation {
+    was_valid: bool,
+    was_pending: bool,
+    path_sound: Option<Sound>,
+    completion_succeeded: Option<bool>,
+    suppress_validity_sound: bool,
+}
+
+impl SoundObservation {
+    fn before(state: &State, message: &Message) -> Self {
+        let path_sound = match message {
+            Message::PathVerificationCompleted(generation, result)
+                if state.is_current_path_generation(*generation) =>
+            {
+                match result {
+                    Ok(_) if state.announce_path_success() => Some(Sound::Success),
+                    Err(_) => Some(Sound::Error),
+                    Ok(_) => None,
+                }
+            }
+            _ => None,
+        };
+        let completion_succeeded = match message {
+            Message::PublishSubmitCompleted(_, result) => Some(result.is_ok()),
+            Message::PublishIconSubmitCompleted(_, result) => Some(result.is_ok()),
+            _ => None,
+        };
+        let suppress_validity_sound = matches!(
+            message,
+            Message::OpenRequested { .. }
+                | Message::CloseRequested
+                | Message::IconBrowseRequested
+                | Message::IconBrowseCompleted { .. }
+                | Message::IconVerificationCompleted(_, _)
+                | Message::IconRemoveRequested
+                | Message::PublishSubmitCompleted(_, _)
+                | Message::PublishIconSubmitCompleted(_, _)
+        );
+
+        Self {
+            was_valid: state.can_submit(),
+            was_pending: state.submit_pending(),
+            path_sound,
+            completion_succeeded,
+            suppress_validity_sound,
+        }
+    }
+
+    fn append_effects(self, state: &State, effects: &mut Vec<Effect>) {
+        if let Some(sound) = self.path_sound {
+            effects.push(Effect::SoundRequested(sound));
+        }
+
+        if self.was_pending
+            && !state.submit_pending()
+            && let Some(succeeded) = self.completion_succeeded
+        {
+            effects.push(Effect::SoundRequested(if succeeded {
+                Sound::Success
+            } else {
+                Sound::Error
+            }));
+            return;
+        }
+
+        if !self.suppress_validity_sound && state.can_submit() != self.was_valid {
+            effects.push(Effect::SoundRequested(if state.can_submit() {
+                Sound::BtnOn
+            } else {
+                Sound::BtnOff
+            }));
+        }
+    }
 }
 
 fn apply(state: &mut State, message: Message) -> Vec<Effect> {
@@ -232,8 +310,10 @@ fn append_cleanup_effects(state: &mut State, effects: &mut Vec<Effect>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, State, update};
+    use super::{Effect, Message, State, update};
+    use crate::bridge::ui_error::UiError;
     use crate::features::prepare_publish::OpenTarget;
+    use crate::media::sounds::Sound;
 
     #[test]
     fn close_resets_modal_state() {
@@ -250,5 +330,40 @@ mod tests {
         let _effects = update(&mut state, Message::CloseRequested);
 
         assert!(!state.open());
+    }
+
+    #[test]
+    fn path_verification_failure_is_an_explicit_sound_effect() {
+        let mut state = State::default();
+        let _effects = update(
+            &mut state,
+            Message::OpenRequested {
+                target: OpenTarget::New,
+                ignored_patterns: Vec::new(),
+                upscale_icon_default: true,
+            },
+        );
+        let _effects = update(
+            &mut state,
+            Message::AddonPathEdited("/not/a/content/directory".to_owned()),
+        );
+        let effects = update(&mut state, Message::AddonPathAccepted);
+        let generation = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PathVerificationRequested(request) => Some(request.generation),
+                _ => None,
+            })
+            .expect("accepted path should request verification");
+
+        let effects = update(
+            &mut state,
+            Message::PathVerificationCompleted(
+                generation,
+                Err(UiError::new(gmpublished_backend::error_key::keys::IO_ERROR)),
+            ),
+        );
+
+        assert!(effects.contains(&Effect::SoundRequested(Sound::Error)));
     }
 }

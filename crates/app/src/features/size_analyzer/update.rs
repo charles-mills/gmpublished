@@ -89,6 +89,7 @@ mod tests {
         gma::{GmaHeader, GmaMeta, GmaMetadata},
         library::{LibraryRefreshReason, LibrarySnapshot},
     };
+    use crate::generation::Generation;
     use iced::{Point, Size};
 
     use super::{Effect, Message, State, update};
@@ -332,7 +333,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             ),
-            epoch,
+            epoch: Generation::from_raw(epoch),
         }
     }
 
@@ -347,7 +348,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             ),
-            epoch,
+            epoch: Generation::from_raw(epoch),
         }
     }
 
@@ -362,7 +363,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
             ),
-            epoch,
+            epoch: Generation::from_raw(epoch),
         }
     }
 

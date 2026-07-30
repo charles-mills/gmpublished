@@ -22,7 +22,6 @@ use crate::theme::motion;
 use gmpublished_backend::error_key::keys;
 use iced::animation::Easing;
 
-const SYNTHETIC_ROW_START: i32 = -1;
 const PROGRESS_SMOOTH_DURATION: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn smoothed_ratio(initial: f32) -> motion::Presence<f32> {
@@ -30,17 +29,13 @@ fn smoothed_ratio(initial: f32) -> motion::Presence<f32> {
 }
 const MAX_PENDING_TASK_UPDATES: usize = 128;
 
-/// A downloader row's identity: positive for rows keyed off a real
-/// [`TaskId`], negative for synthetic rows (already-finished or errored
-/// entries with no running task) minted from a private countdown.
+/// A downloader row's identity. The variants keep task-backed and synthetic
+/// rows in disjoint namespaces without narrowing a 64-bit [`TaskId`] into a
+/// signed integer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RowId(i32);
-
-impl RowId {
-    #[cfg(test)]
-    pub(crate) const fn new(value: i32) -> Self {
-        Self(value)
-    }
+pub enum RowId {
+    Task(TaskId),
+    Synthetic(u64),
 }
 
 /// A finished download the archive previewer can open in-app.
@@ -322,7 +317,7 @@ pub struct Jobs {
     /// Tasks that started for already-cancelled (hidden) items; drained by
     /// the update layer into a cancellation effect so they abort at birth.
     pending_cancellations: Vec<TaskId>,
-    next_synthetic_row_id: i32,
+    next_synthetic_row_sequence: u64,
 }
 
 impl Default for Jobs {
@@ -339,7 +334,7 @@ impl Default for Jobs {
             ignored_task_ids: HashSet::new(),
             workshop_title_requests: HashSet::new(),
             pending_cancellations: Vec::new(),
-            next_synthetic_row_id: SYNTHETIC_ROW_START,
+            next_synthetic_row_sequence: 0,
         }
     }
 }
@@ -512,7 +507,7 @@ impl Jobs {
                 };
                 *ratio = progress.clamp(0.0, 1.0);
                 let target = *ratio as f32;
-                job.smoothed.go(target, Instant::now());
+                job.smoothed.go(target, now);
                 true
             }
             TaskUpdate::ProgressIncr(delta) => {
@@ -524,7 +519,7 @@ impl Jobs {
                 };
                 *ratio = (*ratio + delta).clamp(0.0, 1.0);
                 let target = *ratio as f32;
-                job.smoothed.go(target, Instant::now());
+                job.smoothed.go(target, now);
                 true
             }
             TaskUpdate::ProgressReset => {
@@ -682,7 +677,7 @@ impl Jobs {
             return;
         }
 
-        let row_id = RowId(self.next_synthetic_row_id());
+        let row_id = self.allocate_synthetic_row_id();
         let title = title_for_path_or(&success.extracted_path, &item_id.to_string());
         self.extracting.push(DownloaderJob::finished_extract(
             row_id,
@@ -824,7 +819,7 @@ impl Jobs {
             return;
         }
 
-        let row_id = RowId(self.next_synthetic_row_id());
+        let row_id = self.allocate_synthetic_row_id();
         self.downloading.push(DownloaderJob::errored(
             row_id,
             Some(item_id),
@@ -1144,14 +1139,17 @@ impl Jobs {
         self.rebuild_row_indexes();
     }
 
-    fn row_id_for_task(&mut self, task_id: TaskId) -> RowId {
-        RowId(i32::try_from(task_id.get()).unwrap_or_else(|_| self.next_synthetic_row_id()))
+    const fn row_id_for_task(&self, task_id: TaskId) -> RowId {
+        RowId::Task(task_id)
     }
 
-    fn next_synthetic_row_id(&mut self) -> i32 {
-        let id = self.next_synthetic_row_id;
-        self.next_synthetic_row_id = self.next_synthetic_row_id.saturating_sub(1);
-        id
+    fn allocate_synthetic_row_id(&mut self) -> RowId {
+        let sequence = self.next_synthetic_row_sequence;
+        self.next_synthetic_row_sequence = self
+            .next_synthetic_row_sequence
+            .checked_add(1)
+            .expect("synthetic downloader row ID space exhausted");
+        RowId::Synthetic(sequence)
     }
 
     fn section_jobs(&self, section: Section) -> &[DownloaderJob] {

@@ -51,7 +51,7 @@ pub struct State {
     layout_workshop_ids: HashSet<PublishedFileId>,
     /// Snapshot epoch whose missing preview URLs were already handed to a
     /// resolve worker.
-    preview_resolve_epoch: Option<u64>,
+    preview_resolve_epoch: Option<Generation>,
     preview_urls: HashMap<PublishedFileId, String>,
     thumbnail_plan: Vec<(PublishedFileId, u32)>,
     thumbnails: HashMap<PublishedFileId, ThumbnailTile>,
@@ -133,7 +133,7 @@ impl State {
         }
         let snapshot = LibrarySnapshot {
             addons: Arc::from(addons),
-            epoch: snapshot.epoch.wrapping_add(1),
+            epoch: snapshot.epoch.next(),
         };
         self.apply_snapshot(Ok(Some(snapshot)));
         true
@@ -365,10 +365,11 @@ impl State {
             .filter(|(workshop_id, _)| !self.failed_thumbnails.contains(workshop_id))
             .filter_map(|(workshop_id, max_edge)| {
                 Some(thumbnail_demand::Demand {
-                    id: workshop_demand_id(*workshop_id),
+                    id: thumbnail_demand::DemandId::workshop(*workshop_id),
                     input: ThumbnailInput::from_url(self.preview_urls.get(workshop_id)?.clone()),
                     logical_max_edge: *max_edge,
                     priority: thumbnail_demand::Priority::SizeAnalyzer,
+                    capabilities: thumbnail_demand::DemandCapabilities::STATIC_ANALYSIS,
                 })
             })
             .collect();
@@ -392,7 +393,7 @@ impl State {
             return LayerInvalidation::NONE;
         }
 
-        let Some(workshop_id) = parse_workshop_demand_id(&delivery.id) else {
+        let Some(workshop_id) = delivery.id.workshop_id() else {
             return LayerInvalidation::NONE;
         };
         if !self.preview_urls.contains_key(&workshop_id) {
@@ -1049,7 +1050,7 @@ impl ContextMenuRequest {
 /// Identity of the synchronous treemap projection currently installed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayoutProjectionKey {
-    snapshot_epoch: u64,
+    snapshot_epoch: Generation,
     dimensions: RenderDimensions,
 }
 
@@ -1134,17 +1135,6 @@ fn rounded_dimension(value: f32) -> u32 {
 
 fn thumbnail_owner() -> thumbnail_demand::Owner {
     thumbnail_demand::Owner::SizeAnalyzer
-}
-
-fn workshop_demand_id(workshop_id: PublishedFileId) -> thumbnail_demand::DemandId {
-    thumbnail_demand::DemandId::new(workshop_id.to_string())
-}
-
-fn parse_workshop_demand_id(id: &thumbnail_demand::DemandId) -> Option<PublishedFileId> {
-    id.as_str()
-        .parse::<u64>()
-        .ok()
-        .and_then(PublishedFileId::new)
 }
 
 #[cfg(test)]

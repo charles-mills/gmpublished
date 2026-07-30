@@ -190,12 +190,8 @@ impl App {
             return Task::none();
         };
 
-        let mut settings = self.state.destination_select.settings().clone();
+        let settings = self.state.destination_select.settings().clone();
         let paths = self.state.destination_select.paths().clone();
-        settings.sanitize(&paths);
-        let plan = gma::build_preview_extract_request(settings, &paths);
-        let destination = plan.destination;
-        let options = plan.options;
 
         let ctx = self.ctx.clone();
         Task::future(async move {
@@ -206,11 +202,12 @@ impl App {
                 "Preview GMA archive extraction",
                 move |app| {
                     let _app = app;
+                    let plan = gma::build_preview_extract_request(settings, &paths);
                     run_preview_gma_archive_extraction(
                         &worker_ctx,
                         &request,
-                        destination,
-                        &options,
+                        plan.destination,
+                        &plan.options,
                     );
                 },
             );

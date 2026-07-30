@@ -239,11 +239,13 @@ impl Steam {
     ) {
         let watchdog_handle = {
             let steam = Arc::clone(steam);
-            std::thread::spawn(move || Self::watchdog(&steam, &pump))
+            let watchdog_client = pump.clone();
+            std::thread::spawn(move || Self::watchdog(&steam, &watchdog_client))
         };
         let workshop_fetcher_handle = {
             let steam = Arc::clone(steam);
-            std::thread::spawn(move || Self::workshop_fetcher(&steam, &search))
+            let workshop_client = pump.clone();
+            std::thread::spawn(move || Self::workshop_fetcher(&steam, &search, workshop_client))
         };
         // The downloads watchdog parks on its own condvar with no timeout
         // while nothing is downloading — the idle case — so the shutdown
@@ -254,7 +256,8 @@ impl Steam {
         });
         let downloads_watchdog_handle = {
             let steam = Arc::clone(steam);
-            std::thread::spawn(move || Downloads::watchdog(&downloads, &steam))
+            let downloads_client = pump;
+            std::thread::spawn(move || Downloads::watchdog(&downloads, &steam, downloads_client))
         };
         steam.threads.lock().extend([
             watchdog_handle,
