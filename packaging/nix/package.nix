@@ -32,7 +32,7 @@ let
     name = pname;
     desktopName = pname;
     comment = "Native Workshop Publishing Utility for Garry's Mod";
-    exec = "${pname} -e %f";
+    exec = "${pname} %f";
     icon = pname;
     terminal = false;
     mimeTypes = [ "application/gma" ];
