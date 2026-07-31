@@ -64,7 +64,8 @@ pub mod bbcode;
 mod appdata;
 pub use appdata::{
     AppDataPathsSnapshot, AppDataSnapshot, Settings, SettingsEnvironment, SettingsError,
-    TitlebarPreference, cache_dir, steam_client_installed, validate_gmod,
+    TitlebarPreference, cache_dir, steam_client_installed, steam_library_common_dirs,
+    validate_gmod,
 };
 
 mod gma;

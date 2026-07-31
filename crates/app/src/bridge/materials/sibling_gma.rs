@@ -44,11 +44,14 @@ impl SiblingGmaIndex {
             return Ok(None);
         };
         match (&archive.kind, &entry.location) {
+            // Opened per read: a retained view would hold a file descriptor
+            // for every sibling archive, and a workshop folder routinely has
+            // more archives than a GUI process's descriptor budget.
             (
-                SiblingGmaArchiveKind::Plain { view, .. },
-                SiblingGmaEntryLocation::Plain { entry_path },
-            ) => view
-                .read_entry_bytes(entry_path)
+                SiblingGmaArchiveKind::Plain { path },
+                SiblingGmaEntryLocation::Plain { offset, len },
+            ) => GmaView::open(path)
+                .and_then(|view| view.read_payload_bytes(*offset, *len))
                 .map(Some)
                 .map_err(|error| SourceError::SiblingGma(error.to_string())),
             (
@@ -126,32 +129,10 @@ pub(super) struct SiblingGmaArchive {
     kind: SiblingGmaArchiveKind,
 }
 
-/// `view` has no `Debug` of its own; the derive on this enum only needs `gma`.
+#[derive(Debug)]
 pub(super) enum SiblingGmaArchiveKind {
-    Plain {
-        gma: Box<gmpublished_backend::GmaFile>,
-        view: Box<gmpublished_backend::GmaView>,
-    },
-    LegacyBin {
-        path: PathBuf,
-        data_end: u64,
-    },
-}
-
-impl std::fmt::Debug for SiblingGmaArchiveKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Plain { gma, .. } => f
-                .debug_struct("Plain")
-                .field("gma", gma)
-                .finish_non_exhaustive(),
-            Self::LegacyBin { path, data_end } => f
-                .debug_struct("LegacyBin")
-                .field("path", path)
-                .field("data_end", data_end)
-                .finish(),
-        }
-    }
+    Plain { path: PathBuf },
+    LegacyBin { path: PathBuf, data_end: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -168,7 +149,7 @@ pub(super) struct SiblingGmaEntryRef {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum SiblingGmaEntryLocation {
-    Plain { entry_path: String },
+    Plain { offset: u64, len: u64 },
     LegacyBin { offset: u64, len: u64 },
 }
 
@@ -230,8 +211,9 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
         .par_iter()
         .map(|path| match path.kind {
             SiblingGmaPathKind::Plain => {
-                // One file open + one parse for the entry table; the view is
-                // retained for entry fetches.
+                // One file open + one parse for the entry table; the file is
+                // closed again once the offsets are recorded, so an indexed
+                // archive costs no descriptor while it sits idle.
                 let view = match GmaView::open(&path.path) {
                     Ok(view) => view,
                     Err(error) => {
@@ -252,6 +234,7 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
                         return None;
                     }
                 };
+                drop(view);
                 let entries = bundle
                     .entries
                     .into_iter()
@@ -260,7 +243,8 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
                         Some((
                             normalized,
                             SiblingGmaEntryLocation::Plain {
-                                entry_path: entry.path,
+                                offset: entry.data_offset,
+                                len: entry.size,
                             },
                         ))
                     })
@@ -268,8 +252,7 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
                 Some((
                     SiblingGmaArchive {
                         kind: SiblingGmaArchiveKind::Plain {
-                            gma: Box::new(bundle.handle),
-                            view: Box::new(view),
+                            path: path.path.clone(),
                         },
                     },
                     entries,

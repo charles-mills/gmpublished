@@ -222,8 +222,23 @@ impl VpkFile {
 /// Finds supported game-content directory VPKs in deterministic order.
 #[must_use]
 pub fn discover_game_vpks(gmod_dir: &Path) -> Vec<PathBuf> {
+    discover_game_vpks_with_mounts(gmod_dir, &[])
+}
+
+/// [`discover_game_vpks`] plus additional mounted content roots (other Source
+/// games), sorted together so GMod's own content keeps priority and its
+/// `fallbacks_dir.vpk` stays behind every real game's textures.
+#[must_use]
+pub fn discover_game_vpks_with_mounts(gmod_dir: &Path, mount_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut vpks = Vec::new();
     discover_game_vpks_inner(gmod_dir, 0, &mut vpks);
+    for mount_dir in mount_dirs {
+        discover_game_vpks_inner(mount_dir, 0, &mut vpks);
+    }
+    // A mount dir inside the GMod tree (a self-referential mount.cfg entry)
+    // would rediscover the same archives.
+    vpks.sort_unstable();
+    vpks.dedup();
     vpks.sort_by_cached_key(|path| vpk_mount_sort_key(gmod_dir, path));
     vpks
 }
