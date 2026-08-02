@@ -21,8 +21,8 @@ nix run github:charles-mills/gmpublished
 Arch Linux users can install through the PKGBUILD:
 
 ```
-git clone --depth 1 https://github.com/charles-mills/gmpublished/
-cd gmpublished/packaging/arch
+mkdir gmpublished && cd gmpublished
+curl -O https://raw.githubusercontent.com/charles-mills/gmpublished/main/packaging/arch/PKGBUILD
 makepkg -si
 ```
 
