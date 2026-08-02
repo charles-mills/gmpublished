@@ -11,11 +11,11 @@ struct Uniforms {
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var refraction_texture: texture_2d<f32>;
+@group(0) @binding(2) var refraction_sampler: sampler;
+@group(0) @binding(3) var scene_depth: texture_depth_multisampled_2d;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
-@group(2) @binding(0) var refraction_texture: texture_2d<f32>;
-@group(2) @binding(1) var refraction_sampler: sampler;
-@group(2) @binding(2) var scene_depth: texture_depth_multisampled_2d;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,

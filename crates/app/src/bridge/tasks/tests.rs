@@ -97,7 +97,7 @@ fn task_event_forwarder_delivers_on_its_own_thread() {
     use iced::futures::StreamExt;
 
     let (tasks, receiver) = Tasks::channel();
-    let factory = TaskEventStreamFactory::new(Some(receiver));
+    let factory = TaskEventStreamFactory::new(receiver);
     let handle = tasks.create(TaskKind::Search, TransactionStatus::Searching);
     let id = handle.id();
 
@@ -116,6 +116,36 @@ fn task_event_forwarder_delivers_on_its_own_thread() {
             status: TransactionStatus::Searching,
         }
     );
+}
+
+#[test]
+fn task_event_stream_restart_reattaches_to_live_forwarder() {
+    use iced::futures::StreamExt;
+
+    let (tasks, receiver) = Tasks::channel();
+    let factory = TaskEventStreamFactory::new(receiver);
+    let handle = tasks.create(TaskKind::Search, TransactionStatus::Searching);
+    let id = handle.id();
+
+    // Dropping the stream at the end of this scope models iced tearing the
+    // subscription down; the forwarder thread must outlive it.
+    {
+        let mut stream = std::pin::pin!(task_event_stream(&factory));
+        let (event_id, _started) =
+            futures::executor::block_on(stream.next()).expect("forwarded task event");
+        assert_eq!(event_id, id);
+    }
+
+    // Emitted with no live stream: it either waits in the std channel or
+    // parks mid-delivery in the forwarder until the next run attaches.
+    handle.progress(0.5);
+
+    let mut stream = std::pin::pin!(task_event_stream(&factory));
+    let (event_id, update) =
+        futures::executor::block_on(stream.next()).expect("event after stream restart");
+
+    assert_eq!(event_id, id);
+    assert_eq!(update.into_update(), TaskUpdate::Progress(0.5));
 }
 
 #[test]

@@ -62,8 +62,8 @@ impl BackendContext {
         let services = Arc::new(services(backend_event_sink)?);
         let runtime = Arc::new(AppWorkerRuntime::new(services.execution_resources()));
         let (tasks, receiver) = Tasks::channel();
-        let task_events = TaskEventStreamFactory::new(Some(receiver));
-        let backend_events = BackendEventStreamFactory::new(Some(backend_event_receiver));
+        let task_events = TaskEventStreamFactory::new(receiver);
+        let backend_events = BackendEventStreamFactory::new(backend_event_receiver);
 
         Ok(Self {
             services,

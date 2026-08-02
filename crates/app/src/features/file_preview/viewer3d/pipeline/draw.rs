@@ -61,7 +61,7 @@ pub fn draw_scene_plan<'a>(
         uniform_bind_group,
         detail_sprites,
     );
-    draw_scene_plan_transparent(pass, resources, upload, plan, None);
+    draw_scene_plan_transparent(pass, resources, upload, plan, uniform_bind_group, None);
 }
 
 pub fn draw_scene_plan_opaque<'a>(
@@ -92,19 +92,26 @@ pub fn draw_scene_plan_transparent<'a>(
     resources: &'a RenderResources,
     upload: &'a UploadedModel,
     plan: &'a DrawPlan,
-    refraction_bind_group: Option<&'a wgpu::BindGroup>,
+    uniform_bind_group: &'a wgpu::BindGroup,
+    water_frame_bind_group: Option<&'a wgpu::BindGroup>,
 ) {
-    if let (Some(refraction_bind_group), Some(refractive_water_pipeline)) = (
-        refraction_bind_group,
+    if let (Some(water_frame_bind_group), Some(refractive_water_pipeline)) = (
+        water_frame_bind_group,
         resources.refractive_water_pipeline.as_ref(),
     ) {
         pass.set_pipeline(refractive_water_pipeline);
-        pass.set_bind_group(2, refraction_bind_group, &[]);
+        pass.set_bind_group(0, water_frame_bind_group, &[]);
+        for item in &plan.water {
+            draw_model_item(pass, upload, *item);
+        }
+        // The remaining pipelines declare group 0 as the uniforms-only
+        // layout, which the water frame group does not satisfy.
+        pass.set_bind_group(0, uniform_bind_group, &[]);
     } else {
         pass.set_pipeline(&resources.water_pipeline);
-    }
-    for item in &plan.water {
-        draw_model_item(pass, upload, *item);
+        for item in &plan.water {
+            draw_model_item(pass, upload, *item);
+        }
     }
     pass.set_pipeline(&resources.overlay_translucent_pipeline);
     for item in &plan.overlay_translucent {

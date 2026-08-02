@@ -943,11 +943,8 @@ impl renderer::Headless for Renderer {
                 // elsewhere). See GMPUBLISHED-PATCH.md.
                 required_features: wgpu::Features::TEXTURE_COMPRESSION_BC
                     .intersection(adapter.features()),
-                // GMPUBLISHED PATCH: the file-preview water shader binds
-                // group 2, so request 4 bind groups (the wgpu default) instead
-                // of upstream's 2. See GMPUBLISHED-PATCH.md.
                 required_limits: wgpu::Limits {
-                    max_bind_groups: 4,
+                    max_bind_groups: 2,
                     ..wgpu::Limits::default()
                 },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
