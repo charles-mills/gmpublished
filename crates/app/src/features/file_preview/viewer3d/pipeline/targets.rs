@@ -42,11 +42,7 @@ impl RenderTargets {
         }) {
             if let Some(targets) = slot.as_mut() {
                 if needs_refraction {
-                    targets.ensure_refraction(
-                        device,
-                        &resources.water_refraction_layout,
-                        &resources.water_refraction_sampler,
-                    );
+                    targets.ensure_refraction(device, resources);
                 } else {
                     // Shed it when the scene stops needing it. Keyed on size and
                     // format, this target otherwise survives a switch to a
@@ -122,21 +118,12 @@ impl RenderTargets {
             format: resources.target_format,
         };
         if needs_refraction {
-            targets.ensure_refraction(
-                device,
-                &resources.water_refraction_layout,
-                &resources.water_refraction_sampler,
-            );
+            targets.ensure_refraction(device, resources);
         }
         *slot = Some(targets);
     }
 
-    fn ensure_refraction(
-        &mut self,
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-    ) {
+    fn ensure_refraction(&mut self, device: &wgpu::Device, resources: &RenderResources) {
         if self.refraction.is_some() {
             return;
         }
@@ -155,20 +142,27 @@ impl RenderTargets {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // The frame group carries the shared uniforms alongside the
+        // refraction inputs; see the `water_frame_layout` rationale in
+        // `RenderResources::new`.
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("file_preview.model_viewer.water_refraction_bind_group"),
-            layout,
+            label: Some("file_preview.model_viewer.water_frame_bind_group"),
+            layout: &resources.water_frame_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: resources.uniform_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::TextureView(&view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&resources.water_refraction_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
                     resource: wgpu::BindingResource::TextureView(&self.depth),
                 },
             ],

@@ -429,6 +429,7 @@ impl shader::Primitive for ModelPrimitive {
                     &pipeline.resources,
                     upload,
                     plan,
+                    &pipeline.resources.uniform_bind_group,
                     Some(&refraction.bind_group),
                 );
             }
@@ -562,6 +563,13 @@ mod tests {
         let (device, queue) =
             futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("test.uniform_shading"),
+                // Match the limits iced_wgpu requests for the shared device,
+                // so building the real pipelines here fails if any shader
+                // outgrows them.
+                required_limits: wgpu::Limits {
+                    max_bind_groups: 2,
+                    ..wgpu::Limits::default()
+                },
                 ..wgpu::DeviceDescriptor::default()
             }))
             .expect("device");

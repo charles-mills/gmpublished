@@ -152,11 +152,8 @@ impl Compositor {
         let limits =
             [wgpu::Limits::default(), wgpu::Limits::downlevel_defaults()];
 
-        // GMPUBLISHED PATCH: the file-preview water shader binds group 2, so
-        // request 4 bind groups (the wgpu default and downlevel baseline)
-        // instead of upstream's 2. See GMPUBLISHED-PATCH.md.
         let limits = limits.into_iter().map(|limits| wgpu::Limits {
-            max_bind_groups: 4,
+            max_bind_groups: 2,
             max_non_sampler_bindings: 2048,
             ..limits
         });

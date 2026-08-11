@@ -40,8 +40,8 @@ use sibling_gma::{SiblingGmaIndex, SiblingGmaPath, build_sibling_gma_index};
 #[cfg(test)]
 use discovery::normalize_source_path;
 use discovery::{
-    discover_loose_source_dirs, discover_sibling_gma_paths, material_paths, normalize_texture_name,
-    strip_prefix_ascii_case, texture_path,
+    discover_loose_source_dirs, discover_mounted_game_dirs, discover_sibling_gma_paths,
+    material_paths, normalize_texture_name, strip_prefix_ascii_case, texture_path,
 };
 
 use parking_lot::Mutex;
@@ -63,6 +63,10 @@ const MAX_LEGACY_BIN_FETCH_BYTES: u64 = 1024 * 1024 * 1024;
 /// to agree, or water changes colour when a map omits the keyvalue.
 pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
 const GMA_MAGIC: &[u8; 4] = b"GMAD";
+/// Stand-in albedo for chrome-style materials: `$envmap` with no
+/// `$basetexture`. The engine renders these as reflective metal, so a flat
+/// mid-gray reads far closer than the missing-material checkerboard.
+const ENVMAP_FALLBACK_RGBA: [u8; 4] = [128, 128, 128, 255];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedTexture {
@@ -469,14 +473,31 @@ impl MaterialResolver {
         reason = "gmod_dir is threaded by value through many preview-pipeline call sites upstream of this leaf consumer"
     )]
     pub(crate) fn new(addon: impl IntoPreviewArchiveSource, gmod_dir: Option<PathBuf>) -> Self {
+        let mounted_game_dirs = gmod_dir
+            .as_deref()
+            .map(discover_mounted_game_dirs)
+            .unwrap_or_default();
         let game_vpk_paths = gmod_dir
             .as_deref()
-            .map(gmpublished_backend::vpk::discover_game_vpks)
+            .map(|dir| {
+                gmpublished_backend::vpk::discover_game_vpks_with_mounts(dir, &mounted_game_dirs)
+            })
             .unwrap_or_default();
-        let loose_source_dirs = gmod_dir
+        let mut loose_source_dirs = gmod_dir
             .as_deref()
             .map(discover_loose_source_dirs)
             .unwrap_or_default();
+        // Only explicit mount.cfg targets join the loose tier: sibling Steam
+        // games ship their content entirely in the VPKs discovered above, and
+        // a mount.cfg target is routinely a loose models/materials tree.
+        loose_source_dirs.extend(
+            gmod_dir
+                .as_deref()
+                .map(discovery::existing_mount_cfg_dirs)
+                .unwrap_or_default()
+                .into_iter()
+                .map(LooseSourceDir::new),
+        );
         let sibling_gma_paths = gmod_dir
             .as_deref()
             .map(discover_sibling_gma_paths)
@@ -646,7 +667,8 @@ impl MaterialResolver {
             .and_then(|base_texture| {
                 self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
             })
-            .or_else(|| self.water_fallback_texture(&material));
+            .or_else(|| self.water_fallback_texture(&material))
+            .or_else(|| self.envmap_fallback_texture(&material));
         let texture2 = material.base_texture2.as_deref().and_then(|base_texture| {
             self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
         });
@@ -674,7 +696,8 @@ impl MaterialResolver {
             .and_then(|base_texture| {
                 self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
             })
-            .or_else(|| self.water_fallback_texture(&material))?;
+            .or_else(|| self.water_fallback_texture(&material))
+            .or_else(|| self.envmap_fallback_texture(&material))?;
         Some(ResolvedPrimaryMaterial {
             texture,
             force_opaque: render_mode.force_opaque(),
@@ -830,6 +853,34 @@ impl MaterialResolver {
         cache.insert(key, Arc::clone(&texture));
         drop(cache);
         Some(texture)
+    }
+
+    /// Chrome-style materials name an `$envmap` and no `$basetexture` at all;
+    /// the engine renders them as reflective metal, not as an error. Uses the
+    /// envmap itself when it names a decodable texture, else flat gray. Only
+    /// for a missing `$basetexture` *key* — a named-but-unresolvable base
+    /// texture stays a miss, matching the engine's error checkerboard.
+    fn envmap_fallback_texture(
+        &self,
+        material: &EffectiveMaterial,
+    ) -> Option<Arc<ResolvedTexture>> {
+        if material.base_texture.is_some() {
+            return None;
+        }
+        let env_map = material.env_map.as_deref()?;
+        if env_map != "env_cubemap"
+            && let Some(texture) = self.resolve_texture(env_map, false)
+        {
+            return Some(texture);
+        }
+        Some(Arc::new(ResolvedTexture::rgba(
+            ENVMAP_FALLBACK_RGBA.to_vec(),
+            1,
+            1,
+            1,
+            1,
+            false,
+        )))
     }
 
     fn water_fallback_texture(&self, material: &EffectiveMaterial) -> Option<Arc<ResolvedTexture>> {
@@ -1157,6 +1208,7 @@ struct EffectiveMaterial {
     shader: String,
     base_texture: Option<String>,
     base_texture2: Option<String>,
+    env_map: Option<String>,
     fog_color: Option<String>,
     alpha_test: bool,
     translucent: bool,
@@ -1173,6 +1225,7 @@ impl EffectiveMaterial {
             base_texture2: document
                 .value("$basetexture2")
                 .and_then(normalize_texture_name),
+            env_map: document.value("$envmap").and_then(normalize_texture_name),
             fog_color: document.value("$fogcolor").map(str::to_owned),
             alpha_test: vmt_bool(document.value("$alphatest")),
             translucent: vmt_bool(document.value("$translucent")),
@@ -1223,6 +1276,12 @@ impl EffectiveMaterial {
             .and_then(normalize_texture_name)
         {
             self.base_texture2 = Some(value);
+        }
+        if let Some(value) = document.value("$envmap").and_then(normalize_texture_name) {
+            self.env_map = Some(value);
+        }
+        if let Some(value) = patch.value("$envmap").and_then(normalize_texture_name) {
+            self.env_map = Some(value);
         }
         if let Some(value) = document.value("$fogcolor") {
             self.fog_color = Some(value.to_owned());

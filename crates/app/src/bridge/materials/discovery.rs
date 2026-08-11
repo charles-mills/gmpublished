@@ -32,6 +32,102 @@ fn push_loose_source_dir(dirs: &mut Vec<LooseSourceDir>, path: PathBuf) {
     }
 }
 
+const MOUNTED_GAME_DIR_CAP: usize = 32;
+
+/// Content directories of other Source games this GMod install can mount:
+/// installs in this and every other Steam library whose subdirectories carry
+/// a `gameinfo.txt` (the games GMod's own Games menu offers), plus explicit
+/// `cfg/mount.cfg` paths. These are `*_dir.vpk` scan roots; only the
+/// mount.cfg subset also becomes a loose content root, via
+/// [`existing_mount_cfg_dirs`].
+pub(super) fn discover_mounted_game_dirs(gmod_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let own_common = gmod_dir.parent();
+    if let Some(common) = own_common {
+        push_mountable_game_dirs(common, gmod_dir, &mut dirs);
+    }
+    // Other Steam libraries hold mountable games too, but the machine's
+    // Steam state is only consulted for a gmod_dir that is itself a Steam
+    // install — an arbitrary directory (a test fixture, a hand-rolled
+    // server tree) stays self-contained.
+    if own_common.is_some_and(is_steam_common_dir) {
+        let own_common_canonical = own_common.and_then(|dir| fs::canonicalize(dir).ok());
+        for common in gmpublished_backend::steam_library_common_dirs() {
+            if fs::canonicalize(&common).ok() == own_common_canonical {
+                continue;
+            }
+            push_mountable_game_dirs(&common, gmod_dir, &mut dirs);
+        }
+    }
+
+    for path in mount_cfg_dirs(gmod_dir) {
+        if dirs.len() >= MOUNTED_GAME_DIR_CAP {
+            break;
+        }
+        if path.is_dir() && !dirs.contains(&path) {
+            dirs.push(path);
+        }
+    }
+    dirs
+}
+
+fn push_mountable_game_dirs(common: &Path, gmod_dir: &Path, dirs: &mut Vec<PathBuf>) {
+    'installs: for install in sorted_children(common) {
+        if !install.is_dir() || install.path.file_name() == gmod_dir.file_name() {
+            continue;
+        }
+        for child in sorted_children(&install.path) {
+            if dirs.len() >= MOUNTED_GAME_DIR_CAP {
+                break 'installs;
+            }
+            if child.is_dir()
+                && child.path.join("gameinfo.txt").is_file()
+                && !dirs.contains(&child.path)
+            {
+                dirs.push(child.path);
+            }
+        }
+    }
+}
+
+/// Whether `dir` is a Steam library's `steamapps/common` directory by layout.
+pub(super) fn is_steam_common_dir(dir: &Path) -> bool {
+    fn is_named(dir: &Path, name: &str) -> bool {
+        dir.file_name()
+            .and_then(|file_name| file_name.to_str())
+            .is_some_and(|file_name| file_name.eq_ignore_ascii_case(name))
+    }
+    is_named(dir, "common")
+        && dir
+            .parent()
+            .is_some_and(|parent| is_named(parent, "steamapps"))
+}
+
+/// Existing `cfg/mount.cfg` targets. These also join
+/// [`discover_mounted_game_dirs`], but unlike sibling Steam installs — whose
+/// content ships entirely in VPKs — a mount.cfg target is routinely a loose
+/// `models/materials/...` tree, so callers add these as loose roots too.
+pub(super) fn existing_mount_cfg_dirs(gmod_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = mount_cfg_dirs(gmod_dir);
+    dirs.retain(|dir| dir.is_dir());
+    dirs
+}
+
+fn mount_cfg_dirs(gmod_dir: &Path) -> Vec<PathBuf> {
+    let Ok(text) = fs::read_to_string(gmod_dir.join("garrysmod/cfg/mount.cfg")) else {
+        return Vec::new();
+    };
+    let Ok(document) = vformats::keyvalues::parse(&text, &vformats::Limits::default()) else {
+        return Vec::new();
+    };
+    document
+        .blocks("mountcfg")
+        .flat_map(|block| &block.pairs)
+        .filter_map(|pair| pair.value.as_str())
+        .map(PathBuf::from)
+        .collect()
+}
+
 pub(super) fn discover_sibling_gma_paths(gmod_dir: &Path) -> Vec<SiblingGmaPath> {
     let mut paths = Vec::new();
     if let Ok(workshop_dir) = fs::canonicalize(gmod_dir.join("../../workshop/content/4000")) {

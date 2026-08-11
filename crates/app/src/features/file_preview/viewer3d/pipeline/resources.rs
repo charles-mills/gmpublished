@@ -35,7 +35,7 @@ pub struct RenderResources {
     pub map_skybox_uniform_buffer: wgpu::Buffer,
     pub map_skybox_uniform_bind_group: wgpu::BindGroup,
     pub material_layout: wgpu::BindGroupLayout,
-    pub water_refraction_layout: wgpu::BindGroupLayout,
+    pub water_frame_layout: wgpu::BindGroupLayout,
     pub sky_layout: wgpu::BindGroupLayout,
     pub blit_layout: wgpu::BindGroupLayout,
     pub material_sampler: wgpu::Sampler,
@@ -49,7 +49,7 @@ pub struct RenderResources {
 impl RenderResources {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         // These shaders run on iced_wgpu's own device, so they must fit the
-        // limits it requests (max_bind_groups: 4, max_non_sampler_bindings:
+        // limits it requests (max_bind_groups: 2, max_non_sampler_bindings:
         // 2048). Exceeding them panics here at preview time, not at build time.
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("file_preview.model_viewer.shader"),
@@ -150,12 +150,27 @@ impl RenderResources {
                 },
             ],
         });
-        let water_refraction_layout =
+        // Uniforms and refraction inputs share one group so the refractive
+        // water pipeline fits iced_wgpu's max_bind_groups = 2 alongside the
+        // per-material group.
+        let water_frame_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("file_preview.model_viewer.water_refraction"),
+                label: Some("file_preview.model_viewer.water_frame"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<Uniforms>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -165,13 +180,13 @@ impl RenderResources {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Depth,
@@ -233,7 +248,7 @@ impl RenderResources {
         let refractive_water_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("file_preview.model_viewer.refractive_water_layout"),
-                bind_group_layouts: &[&uniform_layout, &material_layout, &water_refraction_layout],
+                bind_group_layouts: &[&water_frame_layout, &material_layout],
                 push_constant_ranges: &[],
             });
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -538,7 +553,7 @@ impl RenderResources {
             map_skybox_uniform_buffer,
             map_skybox_uniform_bind_group,
             material_layout,
-            water_refraction_layout,
+            water_frame_layout,
             sky_layout,
             blit_layout,
             material_sampler,

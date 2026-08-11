@@ -856,6 +856,82 @@ fn patch_include_water_shader_returns_tinted_slot() {
 }
 
 #[test]
+fn envmap_only_chrome_material_resolves_to_flat_gray() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Chrome Fixture")
+            .entry(
+                "materials/models/test/chrome.vmt",
+                br#"
+                VertexLitGeneric
+                {
+                    "$envmap" "env_cubemap"
+                    "$envmapmask" "models/test/chrome_mask"
+                }
+                "#
+                .to_vec(),
+            )
+            .build(),
+    )
+    .expect("fixture archive should load");
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+
+    let texture = resolver
+        .resolve(&["models/test".to_owned()], "chrome")
+        .expect("chrome fallback should resolve");
+
+    assert_eq!((texture.width, texture.height), (1, 1));
+    assert!(!texture.is_water_fallback());
+    assert_eq!(texture_rgba(&texture), ENVMAP_FALLBACK_RGBA);
+}
+
+#[test]
+fn envmap_naming_a_resolvable_texture_uses_it_over_flat_gray() {
+    let rgba = vec![
+        10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
+    ];
+    let archive = archive_with_texture(
+        "materials/models/test/shiny.vmt",
+        r#""VertexLitGeneric" { "$envmap" "models/test/shine" }"#,
+        "materials/models/test/shine.vtf",
+        &rgba,
+    );
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+
+    let texture = resolver
+        .resolve(&["models/test".to_owned()], "shiny")
+        .expect("envmap texture should resolve");
+
+    assert_eq!(texture_rgba(&texture), rgba);
+}
+
+#[test]
+fn named_but_unresolvable_basetexture_stays_a_miss_despite_envmap() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Broken Base Fixture")
+            .entry(
+                "materials/models/test/broken.vmt",
+                br#"
+                VertexLitGeneric
+                {
+                    "$basetexture" "models/test/not_shipped"
+                    "$envmap" "env_cubemap"
+                }
+                "#
+                .to_vec(),
+            )
+            .build(),
+    )
+    .expect("fixture archive should load");
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+
+    assert!(
+        resolver
+            .resolve(&["models/test".to_owned()], "broken")
+            .is_none()
+    );
+}
+
+#[test]
 fn patch_include_cycles_do_not_recurse_forever() {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Patch Cycle Fixture")
@@ -938,6 +1014,131 @@ fn resolves_loose_game_material_dirs() {
     let texture = resolver
         .resolve(&["models/test".to_owned()], "thing")
         .expect("loose material should resolve");
+
+    assert_eq!(texture_rgba(&texture), rgba);
+}
+
+#[test]
+fn steam_common_dir_gate_matches_layout_not_location() {
+    use super::discovery::is_steam_common_dir;
+    assert!(is_steam_common_dir(Path::new(
+        "/Volumes/Games/SteamLibrary/steamapps/common"
+    )));
+    assert!(is_steam_common_dir(Path::new(
+        "/games/steam/SteamApps/Common"
+    )));
+    assert!(!is_steam_common_dir(Path::new("/tmp/fixtures/common")));
+    assert!(!is_steam_common_dir(Path::new(
+        "/Volumes/Games/SteamLibrary/steamapps"
+    )));
+}
+
+#[test]
+fn resolves_material_from_mounted_sibling_game_vpk() {
+    let rgba = vec![
+        30, 60, 90, 255, 30, 60, 90, 255, 30, 60, 90, 255, 30, 60, 90, 255,
+    ];
+    let common = tempfile::TempDir::new().expect("temp steam common dir");
+    let gmod_dir = common.path().join("GarrysMod");
+    fs::create_dir_all(gmod_dir.join("garrysmod")).expect("gmod tree");
+    let cstrike = common.path().join("Counter-Strike Source/cstrike");
+    fs::create_dir_all(&cstrike).expect("cstrike tree");
+    fs::write(cstrike.join("gameinfo.txt"), b"\"GameInfo\" {}").expect("gameinfo");
+    write_vpk_fixture(
+        &cstrike.join("cstrike_pak_dir.vpk"),
+        vec![
+            (
+                "materials/de_test/wall.vmt",
+                r#""LightmappedGeneric" { "$basetexture" "de_test/wall_color" }"#
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            ("materials/de_test/wall_color.vtf", create_vtf_bytes(&rgba)),
+        ],
+    );
+    let resolver = MaterialResolver::new(Arc::new(empty_archive()), Some(gmod_dir));
+
+    let texture = resolver
+        .resolve(&[], "de_test/wall")
+        .expect("mounted game material should resolve");
+
+    assert_eq!(texture_rgba(&texture), rgba);
+}
+
+#[test]
+fn mounted_game_texture_beats_gmod_fallbacks_vpk() {
+    let mounted_rgba = vec![
+        0, 200, 0, 255, 0, 200, 0, 255, 0, 200, 0, 255, 0, 200, 0, 255,
+    ];
+    let fallback_rgba = vec![
+        200, 0, 0, 255, 200, 0, 0, 255, 200, 0, 0, 255, 200, 0, 0, 255,
+    ];
+    let entries = |rgba: &[u8]| {
+        vec![
+            (
+                "materials/de_test/wall.vmt",
+                r#""LightmappedGeneric" { "$basetexture" "de_test/wall_color" }"#
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            ("materials/de_test/wall_color.vtf", create_vtf_bytes(rgba)),
+        ]
+    };
+    let common = tempfile::TempDir::new().expect("temp steam common dir");
+    let gmod_dir = common.path().join("GarrysMod");
+    fs::create_dir_all(gmod_dir.join("garrysmod")).expect("gmod tree");
+    write_vpk_fixture(
+        &gmod_dir.join("garrysmod/fallbacks_dir.vpk"),
+        entries(&fallback_rgba),
+    );
+    let cstrike = common.path().join("Counter-Strike Source/cstrike");
+    fs::create_dir_all(&cstrike).expect("cstrike tree");
+    fs::write(cstrike.join("gameinfo.txt"), b"\"GameInfo\" {}").expect("gameinfo");
+    write_vpk_fixture(&cstrike.join("cstrike_pak_dir.vpk"), entries(&mounted_rgba));
+    let resolver = MaterialResolver::new(Arc::new(empty_archive()), Some(gmod_dir));
+
+    let texture = resolver
+        .resolve(&[], "de_test/wall")
+        .expect("material should resolve");
+
+    assert_eq!(texture_rgba(&texture), mounted_rgba);
+}
+
+#[test]
+fn resolves_loose_material_from_mount_cfg_target() {
+    let rgba = vec![
+        120, 30, 200, 255, 120, 30, 200, 255, 120, 30, 200, 255, 120, 30, 200, 255,
+    ];
+    let root = tempfile::TempDir::new().expect("temp root dir");
+    let gmod_dir = root.path().join("GarrysMod");
+    let cfg_dir = gmod_dir.join("garrysmod/cfg");
+    fs::create_dir_all(&cfg_dir).expect("cfg tree");
+    let mounted = root.path().join("server-content/cstrike");
+    let material_dir = mounted.join("materials/mounted/test");
+    fs::create_dir_all(&material_dir).expect("mounted tree");
+    fs::write(
+        material_dir.join("thing.vmt"),
+        br#""VertexlitGeneric" { "$basetexture" "mounted/test/thing_color" }"#,
+    )
+    .expect("mounted vmt");
+    fs::write(
+        material_dir.join("thing_color.vtf"),
+        create_vtf_bytes(&rgba),
+    )
+    .expect("mounted vtf");
+    fs::write(
+        cfg_dir.join("mount.cfg"),
+        format!(
+            "\"mountcfg\"\n{{\n\t\"cstrike\"\t\"{}\"\n}}\n",
+            mounted.display()
+        ),
+    )
+    .expect("mount.cfg");
+    let resolver = MaterialResolver::new(Arc::new(empty_archive()), Some(gmod_dir));
+
+    let texture = resolver
+        .resolve(&["mounted/test".to_owned()], "thing")
+        .expect("mount.cfg material should resolve");
 
     assert_eq!(texture_rgba(&texture), rgba);
 }

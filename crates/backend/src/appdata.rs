@@ -98,6 +98,24 @@ pub fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("gmpublished"))
 }
 
+/// The `steamapps/common` directory of every Steam library on this machine,
+/// from Steam's own library-folders manifest. Empty when Steam cannot be
+/// located. Stateless and environment-derived, like [`cache_dir`].
+#[must_use]
+pub fn steam_library_common_dirs() -> Vec<PathBuf> {
+    let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
+        return Vec::new();
+    };
+    let Ok(libraries) = steam_dir.libraries() else {
+        return Vec::new();
+    };
+    libraries
+        .filter_map(Result::ok)
+        .map(|library| library.path().join("steamapps").join("common"))
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TitlebarPreference {
     #[default]

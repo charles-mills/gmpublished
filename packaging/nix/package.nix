@@ -35,7 +35,7 @@ let
     exec = "${pname} %f";
     icon = pname;
     terminal = false;
-    mimeTypes = [ "application/gma" ];
+    mimeTypes = [ "application/x-garrys-mod-addon" ];
     categories = [
       "Utility"
       "Game"
