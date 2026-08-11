@@ -32,10 +32,10 @@ makepkg -si
 <img alt="the addon update modal" src="https://github.com/user-attachments/assets/50b7af77-b324-4edb-8dd4-5d64900b7a14" />
 <img alt="the search modal" src="https://github.com/user-attachments/assets/25236541-45f8-4b8f-b9e2-52a1edc69679" />
 <img alt="the addon size analyzer" src="https://github.com/user-attachments/assets/75716efa-4e85-4a8b-8e34-d61b774a7d37" />
-<img alt="the model previewer" src="https://github.com/user-attachments/assets/c882fb02-c5ab-40ea-a583-68e3d4d8af3d" />
+<img alt="the code previewer" src="https://github.com/user-attachments/assets/e6fb6f8b-7ecf-4d54-a9a4-fb21498f6604" />
+<img alt="the model previewer" src="https://github.com/user-attachments/assets/335d1504-5795-47da-8db3-4195f19a89ed" />
 <img alt="the map previewer (1/2)" src="https://github.com/user-attachments/assets/aabbe28f-0fe1-4037-bb1d-eb374dfc1265" />
 <img alt="the map previewer (2/2)" src="https://github.com/user-attachments/assets/716afb57-5315-4fc6-aa07-720b955ae6f8" />
-<img alt="the code previewer" src="https://github.com/user-attachments/assets/f0f09340-7c28-4d85-9ae7-e580b27eb18d" />
 
 ## Compared to gmpublisher
 
