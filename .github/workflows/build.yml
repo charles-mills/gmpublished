@@ -104,7 +104,10 @@ jobs:
                    "$root/share/mime/packages" \
                    "$root/share/icons/hicolor/32x32/apps" \
                    "$root/share/icons/hicolor/128x128/apps" \
-                   "$root/share/icons/hicolor/256x256/apps"
+                   "$root/share/icons/hicolor/256x256/apps" \
+                   "$root/share/icons/hicolor/32x32/mimetypes" \
+                   "$root/share/icons/hicolor/128x128/mimetypes" \
+                   "$root/share/icons/hicolor/256x256/mimetypes"
 
           cp target/release/gmpublished "$root/"
           cp target/release/libsteam_api.so "$root/"
@@ -113,6 +116,10 @@ jobs:
           cp packaging/icons/32x32.png "$root/share/icons/hicolor/32x32/apps/gmpublished.png"
           cp packaging/icons/128x128.png "$root/share/icons/hicolor/128x128/apps/gmpublished.png"
           cp packaging/icons/128x128@2x.png "$root/share/icons/hicolor/256x256/apps/gmpublished.png"
+          gma_icon=application-x-garrys-mod-addon.png
+          cp packaging/icons/32x32.png "$root/share/icons/hicolor/32x32/mimetypes/$gma_icon"
+          cp packaging/icons/128x128.png "$root/share/icons/hicolor/128x128/mimetypes/$gma_icon"
+          cp packaging/icons/128x128@2x.png "$root/share/icons/hicolor/256x256/mimetypes/$gma_icon"
 
           cp packaging/linux/gmpublished.desktop "$root/share/applications/"
           desktop-file-validate "$root/share/applications/gmpublished.desktop"

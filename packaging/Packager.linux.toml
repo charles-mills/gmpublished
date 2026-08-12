@@ -51,6 +51,9 @@ depends = [
 
 [deb.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
+"icons/32x32.png" = "usr/share/icons/hicolor/32x32/mimetypes/application-x-garrys-mod-addon.png"
+"icons/128x128.png" = "usr/share/icons/hicolor/128x128/mimetypes/application-x-garrys-mod-addon.png"
+"icons/128x128@2x.png" = "usr/share/icons/hicolor/256x256/mimetypes/application-x-garrys-mod-addon.png"
 "steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
 "../THIRD-PARTY-NOTICES.md" = "usr/share/doc/gmpublished/THIRD-PARTY-NOTICES.md"
 
@@ -60,5 +63,8 @@ bins = []
 
 [appimage.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
+"icons/32x32.png" = "usr/share/icons/hicolor/32x32/mimetypes/application-x-garrys-mod-addon.png"
+"icons/128x128.png" = "usr/share/icons/hicolor/128x128/mimetypes/application-x-garrys-mod-addon.png"
+"icons/128x128@2x.png" = "usr/share/icons/hicolor/256x256/mimetypes/application-x-garrys-mod-addon.png"
 "steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
 "../THIRD-PARTY-NOTICES.md" = "usr/share/doc/gmpublished/THIRD-PARTY-NOTICES.md"

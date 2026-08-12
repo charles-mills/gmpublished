@@ -158,6 +158,12 @@ rustPlatform.buildRustPackage {
         "$out/share/icons/hicolor/128x128/apps/${pname}.png"
       install -Dm0644 packaging/linux/application-gma.xml \
         "$out/share/mime/packages/application-gma.xml"
+      install -Dm0644 packaging/icons/32x32.png \
+        "$out/share/icons/hicolor/32x32/mimetypes/application-x-garrys-mod-addon.png"
+      install -Dm0644 packaging/icons/128x128.png \
+        "$out/share/icons/hicolor/128x128/mimetypes/application-x-garrys-mod-addon.png"
+      install -Dm0644 packaging/icons/128x128@2x.png \
+        "$out/share/icons/hicolor/256x256/mimetypes/application-x-garrys-mod-addon.png"
     ''
     + lib.optionalString stdenv.hostPlatform.isDarwin ''
       app="$out/Applications/${pname}.app"
