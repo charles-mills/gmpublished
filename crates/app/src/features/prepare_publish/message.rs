@@ -59,6 +59,10 @@ pub enum Message {
     UpRequested,
     TitleEdited(String),
     ChangelogActionPerformed(text_editor::Action),
+    /// Open the description editor for this submission.
+    DescriptionEditRequested,
+    /// A local draft description came back from the editor (creation flow).
+    DescriptionStaged(String),
     SubmitRequested,
     PublishIconRequested,
     PublishIconSubmitCompleted(Generation, Result<PublishIconSubmitResult, UiError>),

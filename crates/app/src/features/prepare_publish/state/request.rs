@@ -40,6 +40,7 @@ impl State {
                     .map_or_else(String::new, |value| value.as_str().to_owned()),
                 tags,
                 changelog,
+                description: self.submit_description(),
                 preview,
                 ignore_globs: context.ignore_globs,
                 total_size: verified.total_size,
@@ -143,6 +144,15 @@ impl State {
                     workshop_id: target.workshop_id,
                 })
             }
+        }
+    }
+
+    /// Only a creation carries a staged description; updates edit theirs
+    /// against the live item directly.
+    fn submit_description(&self) -> Option<String> {
+        match &self.mode {
+            Mode::New => self.staged_description().map(str::to_owned),
+            Mode::Update(_) => None,
         }
     }
 

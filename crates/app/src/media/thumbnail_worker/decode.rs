@@ -177,8 +177,15 @@ fn fetch_source_bytes_with_fetch(
 
 /// Edge requested for the warm path's CDN variant.
 ///
-/// Must be at least `physical_thumbnail_edge`'s ceiling, since the fetched
-/// bytes become the source every later size derives from.
+/// Must be at least the largest physical edge a *grid* can request, since
+/// warm's product is the source every grid tile derives from. It is
+/// deliberately not sized to the app-wide ceiling: demands above it (the
+/// description editor's media, detail surfaces at hi-DPI) run interactively
+/// and fetch the bare original, so sizing the whole-library warm sweep to
+/// those rare demands would multiply its bandwidth and disk weight for
+/// sources that are mostly 512px workshop icons anyway. When warm banked a
+/// URL first, a larger demand derives from the 512 bank instead — the same
+/// quality the old 512 display ceiling produced, never worse.
 const SOURCE_VARIANT_EDGE: u32 = 512;
 
 fn steam_cdn_variant_url(url: &str, max_edge: u32) -> Option<String> {
@@ -487,22 +494,25 @@ mod tests {
         );
     }
 
-    /// `SOURCE_VARIANT_EDGE`'s doc says it "must be at least
-    /// `physical_thumbnail_edge`'s ceiling", and it is — but nothing tied the
-    /// two together. Raising the display ceiling without raising this would
-    /// silently make every warm-banked source too small to derive the largest
-    /// size the app can ask for, and the only symptom would be soft thumbnails
-    /// on hi-DPI displays.
+    /// `SOURCE_VARIANT_EDGE`'s doc says it "must be at least the largest
+    /// physical edge a *grid* can request", and it is — but nothing tied the
+    /// two together. Shrinking this below the grid ceiling would silently make
+    /// every warm-banked source too small for the tiles warming exists to
+    /// serve, and the only symptom would be soft thumbnails on hi-DPI
+    /// displays. (Demands above the bank — description media, hi-DPI detail —
+    /// accept bank-sized quality by contract; see the const's doc.)
     #[test]
-    fn the_warm_variant_is_large_enough_for_every_size_the_app_can_request() {
+    fn the_warm_variant_is_large_enough_for_every_grid_size() {
         use crate::media::thumbnail_demand::physical_thumbnail_edge;
+        use crate::widgets::grid_rows::ADDON_THUMBNAIL_MAX_EDGE;
 
-        // The ceiling is a clamp, so any absurd scale factor lands on it.
-        let ceiling = physical_thumbnail_edge(4_096, f32::MAX);
+        // The scale bucket caps at 2x, so any absurd factor lands on the
+        // grid's true ceiling.
+        let ceiling = physical_thumbnail_edge(ADDON_THUMBNAIL_MAX_EDGE, f32::MAX);
         assert!(
             SOURCE_VARIANT_EDGE >= ceiling,
-            "warm banks at {SOURCE_VARIANT_EDGE}px but the app can request {ceiling}px, \
-             so every derived size above the bank would be an upscale"
+            "warm banks at {SOURCE_VARIANT_EDGE}px but grids can request {ceiling}px, \
+             so every derived tile above the bank would be an upscale"
         );
     }
 

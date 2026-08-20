@@ -253,6 +253,19 @@ fn apply(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
             state.perform_changelog_action(action);
             Vec::new()
         }
+        Message::DescriptionEditRequested => {
+            vec![Effect::DescriptionEditRequested(
+                super::effect::DescriptionEditRequest {
+                    workshop_id: state.description_edit_target(),
+                    title: state.title().trim().to_owned(),
+                    staged: state.staged_description().map(str::to_owned),
+                },
+            )]
+        }
+        Message::DescriptionStaged(description) => {
+            state.set_staged_description(&description);
+            Vec::new()
+        }
         Message::SubmitRequested => vec![Effect::SubmitContextRequested],
         Message::PublishIconRequested => state
             .begin_publish_icon_at(now)

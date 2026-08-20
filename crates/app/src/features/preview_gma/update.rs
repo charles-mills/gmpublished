@@ -11,6 +11,7 @@ pub fn browser_rows_scrollable_id() -> iced::widget::Id {
 }
 
 use super::{Effect, Message, State};
+use crate::widgets::bbcode::normalize_description_url;
 
 pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -> Vec<Effect> {
     match message {
@@ -134,22 +135,6 @@ pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -
 #[cfg(test)]
 fn update(state: &mut State, message: Message) -> Vec<Effect> {
     update_at(state, message, std::time::Instant::now())
-}
-
-fn normalize_description_url(url: &str) -> Option<String> {
-    let url = url.trim();
-    if url.is_empty() || url.chars().any(char::is_whitespace) {
-        return None;
-    }
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        let (_, remainder) = url.split_once("://")?;
-        return (!remainder.is_empty()).then(|| url.to_owned());
-    }
-    if url.contains("://") {
-        return None;
-    }
-    Some(format!("https://{url}"))
 }
 
 #[cfg(test)]

@@ -46,9 +46,9 @@ use crate::bridge::{
     ui_error::UiError,
 };
 use crate::features::{
-    context_menu, destination_select, downloader, file_preview, installed_addons, modal_stack,
-    my_workshop, prepare_publish, prerequisites, preview_gma, search, settings, shell,
-    size_analyzer, steam_session, tasks_overlay,
+    context_menu, description_editor, destination_select, downloader, file_preview,
+    installed_addons, modal_stack, my_workshop, prepare_publish, prerequisites, preview_gma,
+    search, settings, shell, size_analyzer, steam_session, tasks_overlay,
 };
 use crate::format::DownloadCountFormatter;
 use crate::i18n::I18n;
@@ -70,6 +70,7 @@ mod routes;
 pub mod runners;
 mod side_effects_addons;
 mod side_effects_audio;
+mod side_effects_description_editor;
 mod side_effects_downloader;
 mod side_effects_file_preview;
 mod side_effects_prerequisites;
@@ -203,6 +204,7 @@ pub struct State {
 #[derive(Debug, Default)]
 pub struct FeatureStates {
     shell: shell::State,
+    description_editor: description_editor::State,
     my_workshop: my_workshop::State,
     installed_addons: installed_addons::State,
     downloader: downloader::State,
@@ -265,6 +267,7 @@ impl State {
         self.features.installed_addons.set_window_focused(focused);
         self.features.prepare_publish.set_window_focused(focused);
         self.features.preview_gma.set_window_focused(focused);
+        self.features.description_editor.set_window_focused(focused);
     }
 
     fn apply_thumbnail_delivery(&mut self, delivery: &thumbnail_demand::Delivery) {
@@ -279,6 +282,10 @@ impl State {
             .prepare_publish
             .apply_thumbnail_delivery(delivery, [well.r, well.g, well.b]);
         let _updated = self.features.preview_gma.apply_thumbnail_delivery(delivery);
+        let _updated = self
+            .features
+            .description_editor
+            .apply_thumbnail_delivery(delivery);
         let _updated = self.features.search.apply_thumbnail_delivery(delivery);
         let _invalidation = self
             .features
@@ -291,6 +298,10 @@ impl State {
         let _changed = self.features.installed_addons.invalidate_ready_thumbnails();
         let _changed = self.features.search.invalidate_ready_thumbnails();
         let _changed = self.features.preview_gma.invalidate_ready_thumbnail();
+        let _changed = self
+            .features
+            .description_editor
+            .invalidate_ready_thumbnails();
         let _invalidation = self.features.size_analyzer.invalidate_ready_thumbnails();
     }
 
@@ -306,6 +317,7 @@ impl State {
                 .thumbnail_demands(search_viewport_height),
             self.features.prepare_publish.thumbnail_demands(),
             self.features.preview_gma.thumbnail_demands(),
+            self.features.description_editor.thumbnail_demands(),
             self.features.size_analyzer.thumbnail_demands(),
         ]
     }
@@ -524,6 +536,7 @@ pub enum RootMessage {
     FilePreview(file_preview::Message),
     PreparePublish(prepare_publish::Message),
     PreviewGma(preview_gma::Message),
+    DescriptionEditor(description_editor::Message),
     Settings(settings::Message),
     ContextMenu(context_menu::Message),
     SteamSession(steam_session::Message),
@@ -847,6 +860,9 @@ impl App {
                 self.prepare_publish_message_task(message, update)
             }
             RootMessage::PreviewGma(message) => self.apply_preview_gma_message(message, update),
+            RootMessage::DescriptionEditor(message) => {
+                self.apply_description_editor_message(message, update)
+            }
             RootMessage::Settings(message) => self.apply_settings_message(message),
             RootMessage::ContextMenu(message) => self.apply_context_menu_message(message, update),
             RootMessage::SteamSession(message) => self.apply_steam_session_message(message),
@@ -1598,6 +1614,12 @@ impl App {
             layers = layers.push(account_menu.map(RootMessage::Shell));
         }
 
+        let chrome_clearance = if self.state.chrome_strategy.mac_native_inset() {
+            tokens.dims.sidebar_band_height
+        } else {
+            0.0
+        };
+
         if let Some(active) = self.state.features.modal_stack.active() {
             let modal_scale = self.state.features.modal_stack.scale(now);
             let modal_interactive = self.state.features.modal_stack.interactive();
@@ -1605,12 +1627,6 @@ impl App {
                 modal_stack::scrim(&self.state.features.modal_stack, &tokens, now)
                     .map(RootMessage::ModalStack),
             );
-
-            let chrome_clearance = if self.state.chrome_strategy.mac_native_inset() {
-                tokens.dims.sidebar_band_height
-            } else {
-                0.0
-            };
 
             // Only these two host a file preview. An expanded preview leaves
             // just a thin ring of app visible; black it out so it reads as
@@ -1653,7 +1669,8 @@ impl App {
                         .map(RootMessage::Settings),
                 ),
                 // Overlay-only; drawn in the overlay block below.
-                modal_stack::ActiveModal::DestinationSelect => None,
+                modal_stack::ActiveModal::DestinationSelect
+                | modal_stack::ActiveModal::DescriptionEditor => None,
             };
             if let Some(content) = content {
                 layers = layers.push(modal_stack::frame(content, modal_scale, modal_interactive));
@@ -1678,6 +1695,15 @@ impl App {
                         self.state.viewport_size,
                     )
                     .map(RootMessage::DestinationSelect),
+                ),
+                modal_stack::ActiveModal::DescriptionEditor => Some(
+                    description_editor::view(
+                        &self.state.features.description_editor,
+                        ctx,
+                        self.state.viewport_size,
+                        chrome_clearance,
+                    )
+                    .map(RootMessage::DescriptionEditor),
                 ),
                 // Base modals; the stack never raises these to the overlay layer.
                 modal_stack::ActiveModal::PreparePublish
@@ -1975,6 +2001,10 @@ impl App {
         streams.push(
             prepare_publish::subscription(&self.state.features.prepare_publish)
                 .map(RootMessage::PreparePublish),
+        );
+        streams.push(
+            description_editor::subscription(&self.state.features.description_editor)
+                .map(RootMessage::DescriptionEditor),
         );
         streams.push(
             preview_gma::subscription(&self.state.features.preview_gma)

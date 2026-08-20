@@ -26,6 +26,7 @@ vformats.workspace = true
 clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 # pinned to match iced 0.14's internal version — do not bump independently
 cosmic-text = { version = "0.15.0", default-features = false, features = ["std", "swash"] }
+unicode-segmentation = "1.13"
 fast_image_resize.workspace = true
 fluent-bundle.workspace = true
 fluent-langneg.workspace = true
@@ -36,8 +37,6 @@ iced.workspace = true
 image.workspace = true
 jiff.workspace = true
 log.workspace = true
-# Decoder for the build-time-compressed font and Fluent-catalog blobs
-# (already linked via the backend crate, so this adds no code to the binary).
 lzma-rust2.workspace = true
 notify.workspace = true
 quick_cache.workspace = true
@@ -49,7 +48,6 @@ serde_json.workspace = true
 sys-locale.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-# pinned to match iced 0.14's internal version — do not bump independently
 tokio = { version = "1.52.3", default-features = false, features = ["sync", "time"] }
 parking_lot.workspace = true
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
@@ -62,8 +60,6 @@ crc32fast.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# macOS .gma document-open bridge (src/platform_open): Apple Event fallback,
-# NSApplicationDelegate patch, and main-queue scheduling for the patch.
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
 muda = { version = "0.19.3", default-features = false }
@@ -73,15 +69,12 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 raw-window-handle = "0.6.2"
 
 [build-dependencies]
-# Encoder only runs at build time to pack the bundled fonts and .ftl
-# catalogs; never ships.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [dev-dependencies]
 crc32fast.workspace = true
 gmpublished-backend = { path = "../backend", features = ["test-support"] }
 gmpublished-domain = { path = "../domain", features = ["test-support"] }
-# Headless widget-tree simulator for click-through view tests.
 iced_test = "0.14.0"
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 

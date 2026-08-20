@@ -283,6 +283,7 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'
                 &details.description,
                 state.revealed_description_spoilers(),
                 &tokens,
+                ctx.i18n,
             )
             .map(|event| match event {
                 bbcode::Event::OpenLink(url) => Message::DescriptionLinkRequested(url),

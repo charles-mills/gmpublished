@@ -1,4 +1,5 @@
 pub mod context_menu;
+pub mod description_editor;
 pub mod destination_select;
 pub mod downloader;
 pub mod file_preview;

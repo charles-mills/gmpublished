@@ -46,6 +46,7 @@ pub(super) fn publish_submission_from_app_request(
         tags: request.tags,
         addon_type: request.addon_type,
         upscale,
+        description: request.description,
         mode,
         settings: Some(steam_publishing::PublishSettingsSnapshot {
             temp: Some(request.temp_dir),

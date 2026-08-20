@@ -2,9 +2,10 @@
 use super::shell;
 use super::{
     App, NativeOpenTarget, PathBuf, Point, PublishedFileId, RootMessage, Task, UpdateContext,
-    context_menu, destination_select, downloader, file_preview, flatten_blocking_ui_result,
-    installed_addons, modal_stack, my_workshop, open_modal_message, prepare_publish, preview_gma,
-    schedule_native_open_target, settings, size_analyzer, window, workshop_url,
+    context_menu, description_editor, destination_select, downloader, file_preview,
+    flatten_blocking_ui_result, installed_addons, modal_stack, my_workshop, open_modal_message,
+    prepare_publish, preview_gma, schedule_native_open_target, settings, size_analyzer, window,
+    workshop_url,
 };
 #[cfg(feature = "debug")]
 use crate::bridge::tasks::TransactionStatus;
@@ -31,6 +32,10 @@ impl App {
             modal_stack::ActiveModal::Settings => {
                 self.apply_settings_message(settings::Message::CloseFinished)
             }
+            modal_stack::ActiveModal::DescriptionEditor => self.apply_description_editor_message(
+                description_editor::Message::CloseFinished,
+                self.update_context,
+            ),
         }
     }
 
@@ -47,6 +52,16 @@ impl App {
     }
 
     fn modal_stack_close_requested_task(&mut self, update: UpdateContext) -> Task<RootMessage> {
+        // The description editor owns its close: unsaved changes get a
+        // confirmation instead of silently discarding on Escape or scrim.
+        if self.state.features.modal_stack.overlay_modal()
+            == Some(modal_stack::ActiveModal::DescriptionEditor)
+        {
+            return self.apply_description_editor_message(
+                description_editor::Message::CloseRequested,
+                self.update_context,
+            );
+        }
         if self.state.features.modal_stack.overlay_active() {
             return self.modal_stack_task(&modal_stack::Message::CloseRequested, update);
         }
@@ -464,6 +479,16 @@ impl App {
                 context_menu::ContextMenuAction::AdjustSubscribers(_),
                 ContextMenuTarget::Local(_),
             ) => Task::none(),
+            (
+                context_menu::ContextMenuAction::EditDescription,
+                ContextMenuTarget::MyWorkshop { workshop_id, .. },
+            ) => self.apply_description_editor_message(
+                description_editor::Message::OpenRequested {
+                    workshop_id,
+                    title: None,
+                },
+                self.update_context,
+            ),
             (action, ContextMenuTarget::Local(local)) => {
                 self.route_local_context_menu_action(action, local)
             }
@@ -603,6 +628,8 @@ impl App {
                 workshop_url,
                 preview_url,
             ),
+            // Only offered on My Workshop items, which route before this.
+            ContextMenuAction::EditDescription => Task::none(),
             #[cfg(feature = "debug")]
             ContextMenuAction::HideAddon
             | ContextMenuAction::AdjustSubscribers(_)
@@ -639,7 +666,8 @@ impl App {
             }
             ContextMenuAction::Extract
             | ContextMenuAction::OpenAddonLocation
-            | ContextMenuAction::CopyPath => Task::none(),
+            | ContextMenuAction::CopyPath
+            | ContextMenuAction::EditDescription => Task::none(),
             #[cfg(feature = "debug")]
             ContextMenuAction::HideAddon
             | ContextMenuAction::AdjustSubscribers(_)

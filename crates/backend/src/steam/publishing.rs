@@ -66,6 +66,8 @@ pub enum PublishError {
     IconTooSmall,
     #[error("the icon is not a format the Workshop accepts")]
     IconInvalidFormat,
+    #[error("the description exceeds the Workshop length limit")]
+    DescriptionTooLong,
     #[error("publish I/O failed")]
     IoError(#[source] crate::IoFailure),
     /// A filesystem operation failed while publishing, and the path it failed
@@ -103,6 +105,7 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::IconTooLarge => keys::ICON_TOO_LARGE,
             Self::IconTooSmall => keys::ICON_TOO_SMALL,
             Self::IconInvalidFormat => keys::ICON_INVALID_FORMAT,
+            Self::DescriptionTooLong => keys::DESCRIPTION_TOO_LONG,
             Self::IoError(_) => keys::IO_ERROR,
             Self::PathIo { .. } => keys::PATH_IO_ERROR,
             Self::SteamError(_) => keys::STEAM_ERROR,
@@ -202,8 +205,43 @@ impl ContentPath {
 const WORKSHOP_ICON_MAX_SIZE: u64 = 1048576;
 const WORKSHOP_ICON_MIN_SIZE: u64 = 16;
 const WORKSHOP_DEFAULT_ICON: &[u8] = include_bytes!("../../assets/gmpublisher_default_icon.png");
-const WORKSHOP_DEFAULT_DESCRIPTION: &str =
+/// The description a Workshop item is created with when the user never wrote
+/// one. Public so the description editor can recognize it and present an
+/// empty editor instead of literal text to overwrite.
+pub const WORKSHOP_DEFAULT_DESCRIPTION: &str = "No description provided";
+
+/// The default description earlier builds wrote. Never written anymore, but
+/// items created by those builds still carry it, so placeholder detection
+/// must keep recognizing it.
+pub const WORKSHOP_LEGACY_DEFAULT_DESCRIPTION: &str =
     "Uploaded with [url=https://github.com/charles-mills/gmpublished]gmpublished[/url]";
+
+/// Steam refuses `SetItemDescription` input past this byte length
+/// (`k_cchPublishedDocumentDescriptionMax`).
+pub const WORKSHOP_DESCRIPTION_MAX_BYTES: usize = 8000;
+
+/// The description a newly created item ships with: the user's staged text
+/// when present, the placeholder otherwise — sanitized either way.
+fn creation_description(custom: Option<&str>) -> Result<String, PublishError> {
+    let custom = custom.map(str::trim).filter(|text| !text.is_empty());
+    Ok(sanitize_description(custom.unwrap_or(WORKSHOP_DEFAULT_DESCRIPTION))?.into_owned())
+}
+
+/// Prepares a description for the Steam API: interior NUL bytes are dropped
+/// (steamworks builds a `CString` from the value and would panic on them),
+/// and oversize input is refused rather than truncated so no part of a
+/// description is ever silently discarded.
+pub fn sanitize_description(description: &str) -> Result<std::borrow::Cow<'_, str>, PublishError> {
+    let description = if description.contains('\0') {
+        std::borrow::Cow::Owned(description.replace('\0', ""))
+    } else {
+        std::borrow::Cow::Borrowed(description)
+    };
+    if description.len() > WORKSHOP_DESCRIPTION_MAX_BYTES {
+        return Err(PublishError::DescriptionTooLong);
+    }
+    Ok(description)
+}
 
 /// A suffix that's unique across concurrent publishes in this process and
 /// across restarts (a crashed run's temp names never repeat), so per-run
@@ -551,6 +589,8 @@ struct WorkshopCreation {
     tags: Vec<String>,
     addon_type: String,
     preview: WorkshopIcon,
+    /// Already sanitized; see [`sanitize_description`].
+    description: String,
 }
 
 /// A revision of an existing Workshop item. Its identity is supplied
@@ -594,6 +634,10 @@ pub struct PublishSubmission {
     pub addon_type: String,
     /// Whether a small custom icon may be enlarged.
     pub upscale: bool,
+    /// Initial Workshop description. Creation only — updates never touch the
+    /// description through this path (see [`WorkshopUpdate`]); `None` falls
+    /// back to the default placeholder text.
+    pub description: Option<String>,
     /// Create/update-specific fields.
     pub mode: PublishSubmissionMode,
     /// Optional pre-captured settings; live settings are used when absent.
@@ -655,6 +699,7 @@ impl ConnectedSteam<'_> {
                 tags,
                 addon_type,
                 preview,
+                description,
             }) => {
                 let tags = publish_tags(tags, addon_type);
 
@@ -669,7 +714,7 @@ impl ConnectedSteam<'_> {
                     .title(&title)
                     .preview_path(preview_path.as_ref())
                     .tags(tags, false)
-                    .description(WORKSHOP_DEFAULT_DESCRIPTION)
+                    .description(&description)
                     .submit(None, move |result| {
                         let _ = result_tx.send(result);
                     });
@@ -789,6 +834,37 @@ impl ConnectedSteam<'_> {
         }
     }
 
+    /// Replaces the item's Workshop description without touching its content,
+    /// preview, or tags — the same metadata-only revision shape as
+    /// [`Self::update_icon`].
+    pub(crate) fn update_description(
+        &self,
+        addon_id: WorkshopId,
+        description: &str,
+        transaction: &Transaction,
+    ) -> Result<bool, PublishError> {
+        let description = sanitize_description(description)?;
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let update_handle = self
+            .interface
+            .client()
+            .ugc()
+            .start_item_update(STEAM_GMOD_APP_ID, addon_id.into())
+            .description(&description)
+            .submit(None, move |result| {
+                let _ = result_tx.send(result);
+            });
+
+        match pump_publish_progress(&update_handle, transaction, &result_rx)? {
+            Ok((_, legal_agreement)) => {
+                transaction.progress(1.);
+                Ok(legal_agreement)
+            }
+            Err(error) => Err(PublishError::SteamError(error)),
+        }
+    }
+
     pub(crate) fn update_icon(
         &self,
         addon_id: WorkshopId,
@@ -849,9 +925,14 @@ pub(crate) fn submit_with_transaction(
                 tags,
                 addon_type,
                 upscale,
+                description,
                 mode,
                 settings,
             } = submission;
+
+            // Fails before any packing work when the description cannot be
+            // submitted, and stays reachable offline.
+            let description = creation_description(description.as_deref())?;
 
             // The submission carries the globs this publish should honour; falling
             // back to the stored ones keeps a submission without a snapshot working.
@@ -940,6 +1021,7 @@ pub(crate) fn submit_with_transaction(
                         tags,
                         addon_type,
                         preview: custom_icon.unwrap_or_default(),
+                        description,
                     },
                     transaction,
                     app_data,
@@ -1505,6 +1587,25 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_description_strips_nuls_and_refuses_oversize_input() {
+        assert_eq!(
+            sanitize_description("safe [b]markup[/b]").expect("within limits"),
+            "safe [b]markup[/b]"
+        );
+        assert_eq!(
+            sanitize_description("interior\0nul").expect("nuls are dropped"),
+            "interiornul"
+        );
+        let oversize = "a".repeat(WORKSHOP_DESCRIPTION_MAX_BYTES + 1);
+        assert!(matches!(
+            sanitize_description(&oversize),
+            Err(PublishError::DescriptionTooLong)
+        ));
+        let exactly_at_limit = "a".repeat(WORKSHOP_DESCRIPTION_MAX_BYTES);
+        assert!(sanitize_description(&exactly_at_limit).is_ok());
+    }
+
+    #[test]
     fn publishing_config_helpers_preserve_tags_status_keys_and_urls() {
         assert_eq!(
             publish_tags(
@@ -1518,10 +1619,7 @@ mod tests {
                 "map".to_string()
             ]
         );
-        assert_eq!(
-            WORKSHOP_DEFAULT_DESCRIPTION,
-            "Uploaded with [url=https://github.com/charles-mills/gmpublished]gmpublished[/url]"
-        );
+        assert_eq!(WORKSHOP_DEFAULT_DESCRIPTION, "No description provided");
         assert_eq!(
             publish_update_status(steamworks::UpdateStatus::Invalid),
             None
@@ -1615,6 +1713,7 @@ mod tests {
                 tags: vec!["fun".to_string()],
                 addon_type: "tool".to_string(),
                 upscale: false,
+                description: None,
                 mode: PublishSubmissionMode::Update {
                     id: workshop_id(123),
                     changes: Some("icon check".to_string()),

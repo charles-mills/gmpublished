@@ -66,6 +66,19 @@ impl App {
             }
             prepare_publish::Effect::IconPickerRequested => self.prepare_publish_icon_picker_task(),
             prepare_publish::Effect::OpenUrlRequested(url) => self.open_url_task(url),
+            prepare_publish::Effect::DescriptionEditRequested(request) => {
+                let message = match request.workshop_id {
+                    Some(workshop_id) => super::description_editor::Message::OpenRequested {
+                        workshop_id,
+                        title: Some(request.title),
+                    },
+                    None => super::description_editor::Message::OpenDraftRequested {
+                        title: request.title,
+                        initial: request.staged.unwrap_or_default(),
+                    },
+                };
+                self.apply_description_editor_message(message, self.update_context)
+            }
             prepare_publish::Effect::WorkshopContentRequested(request) => {
                 self.publish().workshop_content_task(request)
             }

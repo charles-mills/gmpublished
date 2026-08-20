@@ -106,7 +106,9 @@ pub use steam::{
 pub mod publishing {
     pub use crate::steam::publishing::{
         PublishError, PublishSettingsSnapshot, PublishSubmission, PublishSubmissionMode,
-        PublishSubmissionOutcome, WorkshopIcon, workshop_icon_can_upscale,
+        PublishSubmissionOutcome, WORKSHOP_DEFAULT_DESCRIPTION, WORKSHOP_DESCRIPTION_MAX_BYTES,
+        WORKSHOP_LEGACY_DEFAULT_DESCRIPTION, WorkshopIcon, sanitize_description,
+        workshop_icon_can_upscale,
     };
 }
 

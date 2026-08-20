@@ -60,6 +60,16 @@ impl App {
         Task::batch([metadata_task, thumbnail_task])
     }
 
+    pub(super) fn description_editor_thumbnail_demands(&mut self) -> Task<RootMessage> {
+        self.environment
+            .thumbnails
+            .set_demands(
+                &self.environment.ctx,
+                self.state.features.description_editor.thumbnail_demands(),
+            )
+            .map(RootMessage::ThumbnailDemand)
+    }
+
     pub(super) fn preview_gma_thumbnail_demands(&mut self) -> Task<RootMessage> {
         self.environment
             .thumbnails

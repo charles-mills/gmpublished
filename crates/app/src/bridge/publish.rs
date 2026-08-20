@@ -60,6 +60,8 @@ pub struct PublishSubmitRequest {
     pub(crate) addon_type: String,
     pub(crate) tags: Vec<String>,
     pub(crate) changelog: Option<String>,
+    /// Staged initial description; creation only.
+    pub(crate) description: Option<String>,
     pub(crate) preview: Option<PublishSubmitPreview>,
     pub(crate) ignore_globs: Vec<String>,
     pub(crate) total_size: u64,

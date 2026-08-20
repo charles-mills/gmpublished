@@ -32,8 +32,21 @@ pub enum Effect {
     IconVerificationRequested(IconVerificationRequest),
     IgnorePatternMutationRequested(IgnorePatternMutation),
     SubmitContextRequested,
+    /// Hand off to the description editor: against the live item when its
+    /// id is known, as a local draft otherwise.
+    DescriptionEditRequested(DescriptionEditRequest),
     PublishSubmitRequested(PublishSubmitRequestEnvelope),
     PublishIconSubmitRequested(PublishIconSubmitRequestEnvelope),
     PublishSuccessUrlsRequested(PublishSubmitResult),
     SoundRequested(crate::media::sounds::Sound),
+}
+
+/// What the description editor should open against.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DescriptionEditRequest {
+    /// `Some` targets the live Workshop item; `None` edits a local draft
+    /// staged into the pending creation.
+    pub workshop_id: Option<crate::bridge::domain::PublishedFileId>,
+    pub title: String,
+    pub staged: Option<String>,
 }

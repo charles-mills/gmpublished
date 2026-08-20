@@ -240,6 +240,7 @@ fn icon_handle(icon: Icon) -> svg::Handle {
         Icon::OpenLocation => assets::icons::context_folder(),
         Icon::Copy => assets::icons::context_copy(),
         Icon::OpenExternal => assets::icons::context_link_out(),
+        Icon::Edit => assets::icons::context_edit(),
         Icon::CopyLink => assets::icons::context_link_chain(),
         Icon::Download => assets::icons::context_cloud_download(),
         Icon::Image => assets::icons::context_image(),

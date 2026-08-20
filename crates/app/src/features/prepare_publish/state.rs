@@ -98,6 +98,9 @@ pub struct State {
     addon_type: Option<AddonType>,
     tags: [Option<AddonTag>; 3],
     changelog: ChangelogContent,
+    /// Description staged in the editor for a new item; existing items save
+    /// their description straight to Steam instead of staging it here.
+    staged_description: Option<String>,
     ignored_patterns: Vec<IgnoredPattern>,
     ignore_pattern_input: String,
     submit: SpinnerClock,
@@ -146,6 +149,7 @@ impl Default for State {
             addon_type: None,
             tags: [None, None, None],
             changelog: ChangelogContent::default(),
+            staged_description: None,
             ignored_patterns: Vec::new(),
             ignore_pattern_input: String::new(),
             submit: SpinnerClock::Idle,
@@ -637,6 +641,24 @@ impl State {
                 self.mode = Mode::Update(target);
                 Some(request)
             }
+        }
+    }
+
+    pub(crate) fn staged_description(&self) -> Option<&str> {
+        self.staged_description.as_deref()
+    }
+
+    pub(super) fn set_staged_description(&mut self, description: &str) {
+        let trimmed = description.trim();
+        self.staged_description = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+    }
+
+    /// The identity an "edit description" request should target: the live
+    /// Workshop item when updating, none (a local draft) when creating.
+    pub(super) fn description_edit_target(&self) -> Option<PublishedFileId> {
+        match &self.mode {
+            Mode::New => None,
+            Mode::Update(target) => Some(target.workshop_id),
         }
     }
 

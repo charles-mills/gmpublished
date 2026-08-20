@@ -309,6 +309,17 @@ impl Backend {
         )
     }
 
+    pub fn update_publish_description(
+        &self,
+        workshop_id: crate::WorkshopId,
+        description: &str,
+        transaction: &crate::Transaction,
+    ) -> Result<bool, crate::steam::publishing::PublishError> {
+        self.steam
+            .require_client()?
+            .update_description(workshop_id, description, transaction)
+    }
+
     pub fn update_publish_icon(
         &self,
         workshop_id: crate::WorkshopId,

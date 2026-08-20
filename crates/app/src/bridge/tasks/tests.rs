@@ -1312,6 +1312,7 @@ fn publish_submit_request_maps_default_preview_to_backend_submission() {
         addon_type: "tool".to_owned(),
         tags: vec!["fun".to_owned()],
         changelog: None,
+        description: None,
         preview: Some(PublishSubmitPreview::Default(PathBuf::from(
             "/tmp/request-default-icon.png",
         ))),
@@ -1354,6 +1355,7 @@ fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
         addon_type: "map".to_owned(),
         tags: vec!["scenic".to_owned()],
         changelog: Some("Updated icon".to_owned()),
+        description: None,
         preview: Some(PublishSubmitPreview::Selected(PublishSelectedPreview {
             path: PathBuf::from("/tmp/icon.png"),
             upscale: true,
@@ -1392,6 +1394,7 @@ fn publish_submit_requires_connected_steam_runtime_and_errors_transaction() {
             addon_type: "tool".to_owned(),
             tags: vec!["fun".to_owned()],
             changelog: None,
+            description: None,
             preview: None,
             ignore_globs: Vec::new(),
             total_size: 0,

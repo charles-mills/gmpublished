@@ -49,6 +49,26 @@ impl<'a> PublishService<'a> {
         }
         Ok(outcome)
     }
+
+    pub(crate) fn update_description(
+        self,
+        description: &str,
+        workshop_id: PublishedFileId,
+        transaction: &Transaction,
+    ) -> Result<bool, UiError> {
+        self.inner
+            .backend
+            .connected_steam()
+            .inspect_err(|_| {
+                transaction.error(&SteamRuntimeError::NotConnected);
+            })
+            .ui_err()?;
+        self.inner
+            .backend
+            .update_publish_description(workshop_id.into(), description, transaction)
+            .ui_err()
+    }
+
     pub(crate) fn update_icon(
         self,
         icon_source_path: &Path,

@@ -5,6 +5,7 @@ use super::{
 
 pub(super) fn open_modal_message(modal: modal_stack::ActiveModal) -> modal_stack::Message {
     match modal {
+        modal_stack::ActiveModal::DescriptionEditor => modal_stack::Message::OpenDescriptionEditor,
         modal_stack::ActiveModal::DestinationSelect => modal_stack::Message::OpenDestinationSelect,
         modal_stack::ActiveModal::PreparePublish => modal_stack::Message::OpenPreparePublish,
         modal_stack::ActiveModal::PreviewGma => modal_stack::Message::OpenPreviewGma,
