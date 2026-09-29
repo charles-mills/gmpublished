@@ -15,7 +15,7 @@ category = "DeveloperTool"
 out-dir = "../target/packager"
 binaries-dir = "../target/release"
 before-packaging-command = "sh scripts/prepare_packager_inputs.sh"
-formats = ["deb", "appimage"]
+formats = ["deb"]
 
 binaries = [{ path = "gmpublished", main = true }]
 
@@ -50,18 +50,6 @@ depends = [
 ]
 
 [deb.files]
-"linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
-"icons/32x32.png" = "usr/share/icons/hicolor/32x32/mimetypes/application-x-garrys-mod-addon.png"
-"icons/128x128.png" = "usr/share/icons/hicolor/128x128/mimetypes/application-x-garrys-mod-addon.png"
-"icons/128x128@2x.png" = "usr/share/icons/hicolor/256x256/mimetypes/application-x-garrys-mod-addon.png"
-"steam/redistributable/linux/libsteam_api.so" = "usr/bin/libsteam_api.so"
-"../THIRD-PARTY-NOTICES.md" = "usr/share/doc/gmpublished/THIRD-PARTY-NOTICES.md"
-
-[appimage]
-libs = []
-bins = []
-
-[appimage.files]
 "linux/application-gma.xml" = "usr/share/mime/packages/application-gma.xml"
 "icons/32x32.png" = "usr/share/icons/hicolor/32x32/mimetypes/application-x-garrys-mod-addon.png"
 "icons/128x128.png" = "usr/share/icons/hicolor/128x128/mimetypes/application-x-garrys-mod-addon.png"

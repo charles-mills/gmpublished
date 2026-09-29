@@ -53,6 +53,11 @@ jobs:
             desktop-file-utils \
             file \
             pkg-config \
+            libgl1-mesa-dri \
+            mesa-vulkan-drivers \
+            xauth \
+            x11-utils \
+            xvfb \
             zip
 
       - name: Restore Cargo sources
@@ -86,8 +91,64 @@ jobs:
       - name: Verify lockfile matches manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
 
-      - name: Package
+      - name: Package Debian archive
         run: cargo packager --release --config packaging/Packager.linux.toml
+
+      - name: Install linuxdeploy
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
+            --output "$RUNNER_TEMP/linuxdeploy.AppImage"
+          echo "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  $RUNNER_TEMP/linuxdeploy.AppImage" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/linuxdeploy.AppImage"
+
+      - name: Package AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          ARCH: x86_64
+        run: |
+          deb="$(find target/packager -type f -name '*.deb' -print -quit)"
+          test -n "$deb"
+          appdir="$RUNNER_TEMP/gmpublished.AppDir"
+          dpkg-deb --extract "$deb" "$appdir"
+          export VERSION="$(dpkg-deb --field "$deb" Version)"
+          export OUTPUT="$PWD/target/packager/gmpublished-$VERSION-x86_64.AppImage"
+          "$RUNNER_TEMP/linuxdeploy.AppImage" --appdir "$appdir" --output appimage
+
+      - name: Verify AppImage permissions and startup
+        shell: bash
+        run: |
+          appimage="$(find target/packager -type f -iname '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          appimage="$(realpath "$appimage")"
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          cd "$extracted"
+          "$appimage" --appimage-extract > /dev/null
+          for executable in squashfs-root/AppRun squashfs-root/usr/bin/gmpublished; do
+            mode="$(stat -Lc '%a' "$executable")"
+            if (( (8#$mode & 8#555) != 8#555 )); then
+              echo "$executable has mode $mode; all users need read and execute permissions" >&2
+              exit 1
+            fi
+          done
+          xvfb-run -a bash -euo pipefail <<'EOF'
+          ./squashfs-root/AppRun > startup.log 2>&1 &
+          app_pid=$!
+          trap 'cat startup.log; kill "$app_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            kill -0 "$app_pid"
+            xwininfo -root -tree > windows.txt
+            if grep -qi gmpublished windows.txt; then
+              sleep 10
+              kill -0 "$app_pid"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "AppImage did not show a window within 30 seconds" >&2
+          exit 1
+          EOF
 
       - name: Collect artifacts
         run: |
@@ -130,7 +191,7 @@ jobs:
           (cd "$root" && zip -r "../gmpublished-${artifact_version}-x86_64-linux.zip" \
             gmpublished libsteam_api.so LICENSE THIRD-PARTY-NOTICES.md share)
 
-          cp "$appimage" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.AppImage"
+          cp "$appimage" "artifacts/linux/gmpublished-${artifact_version}-x86_64.AppImage"
           cp "$deb" "artifacts/linux/gmpublished-${artifact_version}-x86_64-linux.deb"
 
       - name: Attest release artifacts
