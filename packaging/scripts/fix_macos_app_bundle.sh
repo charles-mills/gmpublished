@@ -50,8 +50,6 @@ icon_output="$icon_tmp_dir/output"
 icon_partial_plist="$icon_tmp_dir/partial.plist"
 mkdir -p "$icon_output" "$resources_dir"
 
-# Compile the layered Icon Composer source for current macOS appearances and
-# produce the flattened .icns fallback used by older supported releases.
 xcrun actool \
     "$icon_source" \
     "$asset_catalog" \

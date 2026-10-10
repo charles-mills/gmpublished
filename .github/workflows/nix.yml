@@ -1,7 +1,5 @@
 name: nix
 
-# `nix flake check` builds the package, so every Rust input counts, plus the
-# extra trees package.nix pulls into its source fileset.
 on:
   pull_request:
     paths:

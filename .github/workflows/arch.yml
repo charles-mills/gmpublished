@@ -44,7 +44,6 @@ jobs:
 
       - name: Lint PKGBUILD
         working-directory: packaging/arch
-        # Without pipefail, `namcap | tee` returns tee's status.
         shell: bash -euo pipefail {0}
         run: |
           namcap PKGBUILD | tee /tmp/namcap.txt
