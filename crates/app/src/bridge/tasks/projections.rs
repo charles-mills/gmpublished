@@ -40,12 +40,14 @@ pub(super) fn publish_submission_from_app_request(
     };
 
     steam_publishing::PublishSubmission {
+        language: request.language,
         content_path_src: request.content_source_path,
         icon_path,
         title: request.title,
         tags: request.tags,
         addon_type: request.addon_type,
         upscale,
+        description: request.description,
         mode,
         settings: Some(steam_publishing::PublishSettingsSnapshot {
             temp: Some(request.temp_dir),

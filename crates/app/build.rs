@@ -81,6 +81,8 @@ const FONT_SOURCES: &[(&str, &str)] = &[
     ("INTER_REGULAR", "ui/fonts/Inter-Regular.ttf"),
     ("INTER_SEMI_BOLD", "ui/fonts/Inter-SemiBold.ttf"),
     ("INTER_BOLD", "ui/fonts/Inter-Bold.ttf"),
+    ("INTER_ITALIC", "ui/fonts/Inter-Italic.ttf"),
+    ("INTER_BOLD_ITALIC", "ui/fonts/Inter-BoldItalic.ttf"),
     ("CJK_SC_REGULAR", "ui/fonts/GMPCJKSCUI-Regular.otf"),
     ("CJK_KR_REGULAR", "ui/fonts/GMPCJKKRUI-Regular.otf"),
 ];

@@ -11,6 +11,7 @@ pub fn browser_rows_scrollable_id() -> iced::widget::Id {
 }
 
 use super::{Effect, Message, State};
+use crate::widgets::bbcode::normalize_description_url;
 
 pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -> Vec<Effect> {
     match message {
@@ -37,6 +38,20 @@ pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -
             }
             effects
         }
+        Message::WorkshopLanguageChanged(language) => {
+            state.workshop_language_changed(language);
+            if let Some(request_id) = state.take_localized_text_request()
+                && let Some(workshop_id) = state.workshop_id()
+            {
+                vec![Effect::LocalizedTextRequested {
+                    request_id,
+                    workshop_id,
+                    language,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
         Message::WorkshopMetadataCompleted(request_id, workshop_id, result) => {
             if !state.apply_workshop_metadata(request_id, workshop_id, *result) {
                 return Vec::new();
@@ -51,6 +66,24 @@ pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -
         Message::AuthorFetchCompleted(request_id, steamid64, result) => {
             let _changed = state.apply_author_result(request_id, steamid64, result);
             Vec::new()
+        }
+        Message::EditMetadataRequested => {
+            if state.can_edit_metadata() {
+                state
+                    .workshop_id()
+                    .map(|workshop_id| Effect::EditMetadataRequested {
+                        workshop_id,
+                        language: state.language(),
+                    })
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Message::LocalizedTextFetched(request_id, result) => {
+            state.apply_localized_text(request_id, result);
+            vec![Effect::ThumbnailDemandsChanged]
         }
         Message::AuthorLinkRequested => state
             .author_profile_url()
@@ -134,22 +167,6 @@ pub fn update_at(state: &mut State, message: Message, now: std::time::Instant) -
 #[cfg(test)]
 fn update(state: &mut State, message: Message) -> Vec<Effect> {
     update_at(state, message, std::time::Instant::now())
-}
-
-fn normalize_description_url(url: &str) -> Option<String> {
-    let url = url.trim();
-    if url.is_empty() || url.chars().any(char::is_whitespace) {
-        return None;
-    }
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        let (_, remainder) = url.split_once("://")?;
-        return (!remainder.is_empty()).then(|| url.to_owned());
-    }
-    if url.contains("://") {
-        return None;
-    }
-    Some(format!("https://{url}"))
 }
 
 #[cfg(test)]

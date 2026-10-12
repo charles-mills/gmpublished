@@ -54,12 +54,16 @@ pub enum PublishSubmitPreview {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishSubmitRequest {
+    pub(crate) language: super::workshop_text::WorkshopLanguage,
+    pub(crate) localized_drafts: super::workshop_text::LocalizedDrafts,
     pub(crate) mode: PublishSubmitMode,
     pub(crate) content_source_path: PathBuf,
     pub(crate) title: String,
     pub(crate) addon_type: String,
     pub(crate) tags: Vec<String>,
     pub(crate) changelog: Option<String>,
+    /// Staged initial description; creation only.
+    pub(crate) description: Option<String>,
     pub(crate) preview: Option<PublishSubmitPreview>,
     pub(crate) ignore_globs: Vec<String>,
     pub(crate) total_size: u64,
@@ -75,8 +79,9 @@ impl PublishSubmitRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishSubmitOutcome {
+    pub(crate) pending_translations: super::workshop_text::LocalizedDrafts,
     pub(crate) published_file_id: PublishedFileId,
     pub(crate) legal_agreement_required: bool,
 }

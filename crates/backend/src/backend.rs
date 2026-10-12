@@ -275,11 +275,23 @@ impl Backend {
     }
 
     #[must_use]
+    pub fn workshop_language(&self) -> crate::WorkshopLanguage {
+        self.steam.workshop_language()
+    }
+    pub fn set_workshop_language(&self, language: crate::WorkshopLanguage) -> bool {
+        if !self.steam.set_workshop_language(language) {
+            return false;
+        }
+        self.search.invalidate_workshop_titles();
+        true
+    }
+    #[must_use]
     pub fn browse_my_workshop_page(
         &self,
         page: u32,
+        language: crate::WorkshopLanguage,
     ) -> Option<crate::steam::workshop::WorkshopPage> {
-        crate::steam::workshop::browse_my_workshop_page(&self.steam, &self.search, page)
+        crate::steam::workshop::browse_my_workshop_page(&self.steam, &self.search, page, language)
     }
 
     #[must_use]
@@ -306,6 +318,38 @@ impl Backend {
             &self.steam,
             &self.whitelist,
             self.execution.cpu(),
+        )
+    }
+
+    pub fn update_publish_description(
+        &self,
+        workshop_id: crate::WorkshopId,
+        description: &str,
+        transaction: &crate::Transaction,
+    ) -> Result<bool, crate::steam::publishing::PublishError> {
+        self.update_publish_metadata(
+            workshop_id,
+            crate::WorkshopLanguage::English,
+            None,
+            Some(description),
+            transaction,
+        )
+    }
+
+    pub fn update_publish_metadata(
+        &self,
+        workshop_id: crate::WorkshopId,
+        language: crate::WorkshopLanguage,
+        title: Option<&str>,
+        description: Option<&str>,
+        transaction: &crate::Transaction,
+    ) -> Result<bool, crate::publishing::PublishError> {
+        self.steam.require_client()?.update_metadata(
+            workshop_id,
+            language,
+            title,
+            description,
+            transaction,
         )
     }
 

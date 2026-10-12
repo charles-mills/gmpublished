@@ -149,6 +149,7 @@ impl Row {
         }
 
         let mut entries = vec![
+            context_menu::Entry::edit_description(),
             context_menu::Entry::steam_workshop(),
             context_menu::Entry::copy_link(),
             context_menu::Entry::download(),

@@ -45,6 +45,7 @@ pub struct BackendServices {
     library: LibraryStore,
     workshop_metadata: Mutex<HashMap<PublishedFileId, CachedWorkshopMetadata>>,
     metadata_snapshot_file: Option<PathBuf>,
+    text_journal: Mutex<crate::bridge::workshop_text::TextJournal>,
     _backend_event_sink: Option<BackendEventSinkRegistration>,
     #[cfg(test)]
     _test_data_root: Option<tempfile::TempDir>,
@@ -168,7 +169,18 @@ impl BackendServices {
             library.set_header_snapshot_file(path);
         }
 
+        let journal_path = config.persist_settings.then(|| {
+            configuration
+                .snapshot()
+                .paths
+                .default_user_data_dir
+                .join("workshop-text-edits.json")
+        });
+        let text_journal = Mutex::new(crate::bridge::workshop_text::TextJournal::load(
+            journal_path,
+        ));
         Self {
+            text_journal,
             backend,
             configuration,
             steam_runtime,
@@ -373,6 +385,7 @@ mod performance_tests {
                 (
                     id,
                     CachedWorkshopMetadata {
+                        language: Default::default(),
                         metadata: WorkshopMetadata {
                             id,
                             title: String::new(),

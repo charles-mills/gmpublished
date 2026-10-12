@@ -179,6 +179,7 @@ fn left_column<'a>(state: &'a State, ctx: ViewCtx<'a>) -> iced::widget::Column<'
         .push(title_input(state, ctx))
         .push(addon_type_select(state, ctx))
         .push(tag_selects(state, ctx))
+        .push(description_row(state, ctx))
         .push(submit_button(state, ctx))
 }
 
@@ -396,16 +397,33 @@ fn title_input<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         field = field.on_input(Message::TitleEdited);
     }
 
-    if state.update_mode() {
+    let globe = button(
+        row![
+            icon(
+                assets::icons::globe(),
+                tokens.colors.text.into(),
+                tokens.dims.icon_size
+            ),
+            text(state.language().name()).size(tokens.typography.caption),
+        ]
+        .spacing(tokens.spacing.gap_xs)
+        .align_y(Center),
+    )
+    .on_press(Message::DescriptionEditRequested)
+    .padding(tokens.spacing.pad_control)
+    .style(move |_, status| theme::styles::button(&tokens, status));
+    row![
+        field,
         tooltip_widget::below(
-            field,
-            i18n.tr("prepare-publish-title-locked"),
+            globe,
+            i18n.tr("workshop-text-language"),
             &tokens,
-            tokens.dims.tooltip_max_width,
+            tokens.dims.tooltip_max_width
         )
-    } else {
-        field.into()
-    }
+    ]
+    .spacing(tokens.spacing.gap_sm)
+    .align_y(Center)
+    .into()
 }
 
 fn select_metrics(tokens: &Tokens) -> select::Metrics {
@@ -467,6 +485,42 @@ fn tag_selects<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         ));
     }
     tag_row.into()
+}
+
+/// Opens the full description editor: staged locally for a new item, against
+/// the live Workshop item when updating. A check marks a staged draft.
+fn description_row<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+    let tokens = *ctx.tokens;
+    let i18n = ctx.i18n;
+
+    let mut label = row![
+        icon(
+            assets::icons::context_edit(),
+            tokens.colors.text.into(),
+            tokens.dims.icon_size,
+        ),
+        text(i18n.tr("prepare-publish-edit-description")).size(tokens.typography.body),
+    ]
+    .spacing(tokens.spacing.gap_sm)
+    .align_y(Center);
+    if !state.update_mode() && state.staged_description().is_some() {
+        label = label.push(
+            container(icon(
+                assets::icons::check(),
+                tokens.colors.text.into(),
+                tokens.dims.icon_size,
+            ))
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right),
+        );
+    }
+
+    button(container(label).width(Length::Fill))
+        .on_press(Message::DescriptionEditRequested)
+        .padding(tokens.spacing.pad_control)
+        .width(Length::Fill)
+        .style(move |_, status| theme::styles::button(&tokens, status))
+        .into()
 }
 
 fn submit_button<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {

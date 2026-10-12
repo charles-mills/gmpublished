@@ -18,6 +18,7 @@ pub mod snapshot;
 pub mod tasks;
 pub mod ui_error;
 pub mod vpk;
+pub mod workshop_text;
 
 pub use self::gma::{ExtractDestination, ExtractionOverwriteMode};
 pub use gmpublished_backend::{

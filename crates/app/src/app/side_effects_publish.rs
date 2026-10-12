@@ -19,12 +19,42 @@ impl App {
         message: prepare_publish::Message,
         update: UpdateContext,
     ) -> Task<RootMessage> {
+        let opening = matches!(message, prepare_publish::Message::OpenRequested { .. });
         let effects = prepare_publish::update_at(
             &mut self.state.features.prepare_publish,
             message,
             update.now,
         );
-        self.batch_effects(effects, Self::run_prepare_publish_effect)
+        if opening {
+            self.state.features.prepare_publish.set_initial_language(
+                gmpublished_backend::WorkshopLanguage::from_locale(self.ports().i18n.locale_id()),
+            );
+        }
+        let localized = if opening && self.state.features.prepare_publish.update_mode() {
+            let state = &self.state.features.prepare_publish;
+            let id = state.description_edit_target();
+            let generation = state.text_generation();
+            let language = state.language();
+            id.map_or_else(Task::none, |id| {
+                self.environment
+                    .ctx
+                    .run_blocking("publish-localized-text", move |app| {
+                        app.workshop().localized_text(id, language)
+                    })
+                    .map(move |result| {
+                        RootMessage::PreparePublish(prepare_publish::Message::LocalizedTextFetched(
+                            generation,
+                            flatten_blocking_ui_result(result),
+                        ))
+                    })
+            })
+        } else {
+            Task::none()
+        };
+        Task::batch([
+            self.batch_effects(effects, Self::run_prepare_publish_effect),
+            localized,
+        ])
     }
 
     /// Direct close requests (e.g. the modal's Cancel button) only start the
@@ -66,6 +96,22 @@ impl App {
             }
             prepare_publish::Effect::IconPickerRequested => self.prepare_publish_icon_picker_task(),
             prepare_publish::Effect::OpenUrlRequested(url) => self.open_url_task(url),
+            prepare_publish::Effect::DescriptionEditRequested(request) => {
+                let message = match request.workshop_id {
+                    Some(workshop_id) => {
+                        super::description_editor::Message::OpenLocalizedRequested {
+                            language: request.language,
+                            workshop_id,
+                            title: Some(request.title),
+                        }
+                    }
+                    None => super::description_editor::Message::OpenLocalizedDraftRequested {
+                        language: request.language,
+                        drafts: request.drafts,
+                    },
+                };
+                self.apply_description_editor_message(message, self.update_context)
+            }
             prepare_publish::Effect::WorkshopContentRequested(request) => {
                 self.publish().workshop_content_task(request)
             }
@@ -108,7 +154,18 @@ impl App {
                 self.publish().publish_icon_task(request)
             }
             prepare_publish::Effect::PublishSuccessUrlsRequested(result) => {
-                self.prepare_publish_success_urls_task(result)
+                let recovery = if result.pending_translations.is_empty() {
+                    Task::none()
+                } else {
+                    self.apply_description_editor_message(
+                        super::description_editor::Message::OpenPendingTranslationsRequested {
+                            workshop_id: result.published_file_id,
+                            drafts: result.pending_translations.clone(),
+                        },
+                        self.update_context,
+                    )
+                };
+                Task::batch([self.prepare_publish_success_urls_task(&result), recovery])
             }
             prepare_publish::Effect::SoundRequested(sound) => {
                 sounds::play(sound, self.environment.ctx.sounds_enabled());
@@ -133,7 +190,7 @@ impl App {
 
     pub(super) fn prepare_publish_success_urls_task(
         &self,
-        result: prepare_publish::PublishSubmitResult,
+        result: &prepare_publish::PublishSubmitResult,
     ) -> Task<RootMessage> {
         let workshop_url = workshop_url::workshop_item_url(result.published_file_id.get());
         let mut tasks = Vec::with_capacity(2);

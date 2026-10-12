@@ -263,7 +263,29 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'
 
     if !details.title.trim().is_empty() {
         content = content.push(Space::new().height(tokens.spacing.gap_md));
-        content = content.push(addon_title(state, details, &tokens));
+        let mut title_row = row![addon_title(state, details, &tokens)]
+            .spacing(tokens.spacing.gap_sm)
+            .align_y(Center);
+        if state.can_edit_metadata() {
+            title_row = title_row.push(
+                button(
+                    row![
+                        icon(
+                            assets::icons::globe(),
+                            tokens.colors.text.into(),
+                            tokens.dims.icon_size
+                        ),
+                        text(state.language().name()).size(tokens.typography.caption)
+                    ]
+                    .spacing(tokens.spacing.gap_xs)
+                    .align_y(Center),
+                )
+                .on_press(Message::EditMetadataRequested)
+                .padding(tokens.spacing.pad_xs)
+                .style(move |_, status| theme::styles::ghost_button(&tokens, status)),
+            );
+        }
+        content = content.push(title_row);
     }
 
     if !details.tag_rows.is_empty() {
@@ -283,6 +305,7 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'
                 &details.description,
                 state.revealed_description_spoilers(),
                 &tokens,
+                ctx.i18n,
             )
             .map(|event| match event {
                 bbcode::Event::OpenLink(url) => Message::DescriptionLinkRequested(url),

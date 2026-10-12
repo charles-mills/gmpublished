@@ -17,6 +17,10 @@ pub mod fonts {
     // fontdb registers a variable font as a single weight-400 face, so
     // `Font::with_name("Inter")` with Semibold/Bold silently rendered
     // Regular; static 400/600/700 faces make those weights real.
+    //
+    // Italic and Bold Italic are instanced from `InterVariable-Italic`
+    // (wght pinned at 400/700, opsz at 14, family "Inter"). cosmic-text
+    // requires registered italic faces because it does not synthesize slant.
     include!(concat!(env!("OUT_DIR"), "/font_segments.rs"));
 
     const COMPRESSED_FONTS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bundled_fonts.lzma"));
@@ -60,6 +64,8 @@ pub mod fonts {
             font_bytes(INTER_REGULAR),
             font_bytes(INTER_SEMI_BOLD),
             font_bytes(INTER_BOLD),
+            font_bytes(INTER_ITALIC),
+            font_bytes(INTER_BOLD_ITALIC),
             font_bytes(CJK_SC_REGULAR),
             font_bytes(CJK_KR_REGULAR),
         ]
@@ -79,6 +85,8 @@ pub mod fonts {
                 INTER_REGULAR,
                 INTER_SEMI_BOLD,
                 INTER_BOLD,
+                INTER_ITALIC,
+                INTER_BOLD_ITALIC,
                 CJK_SC_REGULAR,
                 CJK_KR_REGULAR,
             ];
@@ -116,6 +124,7 @@ pub mod icons {
         };
     }
 
+    svg_icon!(globe, "../ui/images/globe.svg");
     svg_icon!(akar_arrow_left, "../ui/images/akar-arrow-left.svg");
     svg_icon!(akar_download, "../ui/images/akar-download.svg");
     svg_icon!(akar_enlarge, "../ui/images/akar-enlarge.svg");
@@ -136,6 +145,7 @@ pub mod icons {
         "../ui/images/context-menu/cloud-download.svg"
     );
     svg_icon!(context_copy, "../ui/images/context-menu/copy.svg");
+    svg_icon!(context_edit, "../ui/images/context-menu/edit.svg");
     svg_icon!(context_folder, "../ui/images/context-menu/folder.svg");
     svg_icon!(
         context_folder_add,
@@ -150,7 +160,10 @@ pub mod icons {
     svg_icon!(cross, "../ui/images/cross.svg");
     svg_icon!(dead, "../ui/icons/dead.svg");
     svg_icon!(download_count, "../ui/images/download-count.svg");
+    // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
+    svg_icon!(eye_off, "../ui/images/eye-off.svg");
     svg_icon!(folder, "../ui/images/folder.svg");
+    svg_icon!(play, "../ui/images/play.svg");
     svg_icon!(folder_add, "../ui/images/folder-add.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
     svg_icon!(folder_x, "../ui/images/folder-x.svg");
@@ -162,6 +175,8 @@ pub mod icons {
         svg::Handle::from_memory(include_bytes!("../ui/images/gmod-logo.svg"))
     }
 
+    // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
+    svg_icon!(image, "../ui/images/image.svg");
     svg_icon!(link_chain, "../ui/images/link-chain.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
     svg_icon!(package_open, "../ui/images/package-open.svg");
@@ -178,6 +193,8 @@ pub mod icons {
     svg_icon!(route_size_analyzer, "../ui/images/route-size-analyzer.svg");
     svg_icon!(search, "../ui/images/search.svg");
     svg_icon!(star_filled, "../ui/images/star-filled.svg");
+    // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
+    svg_icon!(table, "../ui/images/table.svg");
     svg_icon!(tag_point, "../ui/images/tag-point.svg");
 
     /// Solid downward triangle (16x8) tinted to the tooltip background for
@@ -295,17 +312,19 @@ mod tests {
     fn bundled_font_registry_contains_primary_and_cjk_fonts() {
         let fonts = fonts::bundled_fonts();
 
-        assert_eq!(fonts.len(), 5);
+        assert_eq!(fonts.len(), 7);
         assert!(fonts.iter().all(|bytes| bytes.len() > 1_024));
         assert_eq!(fonts[0], include_bytes!("../ui/fonts/Inter-Regular.ttf"));
         assert_eq!(fonts[1], include_bytes!("../ui/fonts/Inter-SemiBold.ttf"));
         assert_eq!(fonts[2], include_bytes!("../ui/fonts/Inter-Bold.ttf"));
+        assert_eq!(fonts[3], include_bytes!("../ui/fonts/Inter-Italic.ttf"));
+        assert_eq!(fonts[4], include_bytes!("../ui/fonts/Inter-BoldItalic.ttf"));
         assert_eq!(
-            fonts[3],
+            fonts[5],
             include_bytes!("../ui/fonts/GMPCJKSCUI-Regular.otf")
         );
         assert_eq!(
-            fonts[4],
+            fonts[6],
             include_bytes!("../ui/fonts/GMPCJKKRUI-Regular.otf")
         );
         assert_eq!(fonts::default_font(), iced::Font::with_name("Inter"));

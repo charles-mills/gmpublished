@@ -67,7 +67,9 @@ impl Node {
             Self::Element(element) => {
                 !matches!(
                     element.kind,
-                    ElementKind::HorizontalRule | ElementKind::Image { .. }
+                    ElementKind::HorizontalRule
+                        | ElementKind::Image { .. }
+                        | ElementKind::YoutubeVideo { .. }
                 ) && element.children.iter().all(Self::is_empty)
             }
         }
@@ -79,6 +81,7 @@ impl Node {
             Self::Text(text) => text.clone(),
             Self::Element(element) => match &element.kind {
                 ElementKind::Image { source } => source.clone(),
+                ElementKind::YoutubeVideo { id } => youtube_watch_url(id),
                 _ => element
                     .children
                     .iter()
@@ -116,13 +119,30 @@ pub enum ElementKind {
     Strikethrough,
     Spoiler(SpoilerId),
     HorizontalRule,
-    Link { target: String },
-    Image { source: String },
-    List { ordered: bool },
+    Link {
+        target: String,
+    },
+    Image {
+        source: String,
+    },
+    /// An embedded YouTube video (`[previewyoutube=<id>;full]`). The id is
+    /// restricted to URL-safe characters at parse time, so consumers can
+    /// splice it into youtube.com URLs without further escaping.
+    YoutubeVideo {
+        id: String,
+    },
+    List {
+        ordered: bool,
+    },
     ListItem,
-    Quote { author: Option<String> },
+    Quote {
+        author: Option<String>,
+    },
     Code,
-    Table { bordered: bool, equal_cells: bool },
+    Table {
+        bordered: bool,
+        equal_cells: bool,
+    },
     TableRow,
     TableHeader,
     TableCell,
@@ -306,6 +326,9 @@ impl<'a> Parser<'a> {
         if name == "img" {
             return self.consume_image();
         }
+        if name == "previewyoutube" {
+            return self.consume_youtube(value);
+        }
         if name == "noparse" || name == "code" {
             return self.consume_raw_block(&name);
         }
@@ -393,6 +416,38 @@ impl<'a> Parser<'a> {
             kind: ElementKind::Image {
                 source: source.to_owned(),
             },
+            children: Vec::new(),
+        }));
+        true
+    }
+
+    /// Consumes `[previewyoutube=<id>;full]…[/previewyoutube]`. Steam ignores
+    /// anything between the tags, so any inner content is skipped. The id is
+    /// everything before the first `;` (the rest are display options), and is
+    /// only accepted when it looks like a YouTube video id — descriptions are
+    /// attacker-controlled, and consumers splice the id into URLs.
+    fn consume_youtube(&mut self, value: Option<&str>) -> bool {
+        let id = value
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return false;
+        }
+        let closing = "[/previewyoutube]";
+        let Some(relative_end) = find_ascii_case_insensitive(&self.source[self.cursor..], closing)
+        else {
+            return false;
+        };
+        self.cursor += relative_end + closing.len();
+        self.current_nodes().push(Node::Element(Element {
+            kind: ElementKind::YoutubeVideo { id: id.to_owned() },
             children: Vec::new(),
         }));
         true
@@ -585,6 +640,18 @@ impl<'a> Parser<'a> {
             self.finish_top();
         }
     }
+}
+
+/// The canonical watch URL for a parsed [`ElementKind::YoutubeVideo`] id.
+#[must_use]
+pub fn youtube_watch_url(id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={id}")
+}
+
+/// The thumbnail YouTube serves for every public video id.
+#[must_use]
+pub fn youtube_thumbnail_url(id: &str) -> String {
+    format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")
 }
 
 fn paragraph_boundary(text: &str) -> Option<usize> {
@@ -912,6 +979,46 @@ mod tests {
         ));
         assert_eq!(document.plain_text(), "https://i.imgur.com/example.png");
         assert!(!document.is_empty());
+    }
+
+    #[test]
+    fn parses_previewyoutube_ids_and_skips_ignored_inner_content() {
+        let document = Document::parse("[previewyoutube=dQw4w9WgXcQ;full]ignored[/previewyoutube]");
+
+        assert!(matches!(
+            document.nodes(),
+            [Node::Element(Element {
+                kind: ElementKind::YoutubeVideo { id },
+                children,
+            })] if id == "dQw4w9WgXcQ" && children.is_empty()
+        ));
+        assert_eq!(
+            document.plain_text(),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+        assert!(!document.is_empty());
+    }
+
+    #[test]
+    fn rejects_previewyoutube_without_a_safe_id_or_closing_tag() {
+        for source in [
+            "[previewyoutube][/previewyoutube]",
+            "[previewyoutube=][/previewyoutube]",
+            "[previewyoutube=https://evil.example][/previewyoutube]",
+            "[previewyoutube=dQw4w9WgXcQ]unterminated",
+        ] {
+            let document = Document::parse(source);
+            assert!(
+                !document.nodes().iter().any(|node| matches!(
+                    node,
+                    Node::Element(Element {
+                        kind: ElementKind::YoutubeVideo { .. },
+                        ..
+                    })
+                )),
+                "{source} must not produce a video node"
+            );
+        }
     }
 
     #[test]

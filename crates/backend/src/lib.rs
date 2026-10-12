@@ -42,6 +42,9 @@ pub use transactions::{
 mod rgba_image;
 pub use rgba_image::RgbaImage;
 
+mod workshop_language;
+pub use workshop_language::WorkshopLanguage;
+
 mod workshop_id;
 pub use workshop_id::WorkshopId;
 
@@ -106,7 +109,9 @@ pub use steam::{
 pub mod publishing {
     pub use crate::steam::publishing::{
         PublishError, PublishSettingsSnapshot, PublishSubmission, PublishSubmissionMode,
-        PublishSubmissionOutcome, WorkshopIcon, workshop_icon_can_upscale,
+        PublishSubmissionOutcome, WORKSHOP_DEFAULT_DESCRIPTION, WORKSHOP_DESCRIPTION_MAX_BYTES,
+        WORKSHOP_LEGACY_DEFAULT_DESCRIPTION, WorkshopIcon, sanitize_description,
+        workshop_icon_can_upscale,
     };
 }
 

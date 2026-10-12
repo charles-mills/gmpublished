@@ -475,3 +475,117 @@ fn copy_and_workshop_targets_are_derived_from_loaded_archive() {
         Some("/tmp/local.gma/lua/autorun".replace('/', std::path::MAIN_SEPARATOR_STR))
     );
 }
+
+#[test]
+fn localized_preview_survives_metadata_refresh_and_late_reads_after_save() {
+    use crate::bridge::workshop_text::{WorkshopLanguage, WorkshopText};
+    let mut state = State::default();
+    let owner = SteamId::new(7);
+    state.set_viewer(Some(owner), WorkshopLanguage::French);
+    let request = state.begin_open(target());
+    let metadata = WorkshopMetadata {
+        id: PublishedFileId::fixture(42),
+        title: "English".into(),
+        description: "English description".into(),
+        steamid64: Some(owner),
+        author: None,
+        avatar: None,
+        time_created: 0,
+        time_updated: 0,
+        tags: Vec::new(),
+        preview_url: None,
+        subscriptions: 0,
+        score_bucket: 0,
+        score_label: String::new(),
+    };
+    state.apply_workshop_metadata(request.request_id, metadata.id, Ok(Some(metadata.clone())));
+    let text_generation = state.take_localized_text_request().unwrap();
+    assert!(state.take_localized_text_request().is_none());
+    state.apply_saved_metadata(
+        metadata.id,
+        WorkshopLanguage::French,
+        WorkshopText {
+            title: "Nouveau titre".into(),
+            description: "Nouvelle description".into(),
+        },
+    );
+    state.apply_localized_text(
+        text_generation,
+        Ok(WorkshopText {
+            title: "Ancien titre".into(),
+            description: "Ancienne description".into(),
+        }),
+    );
+    state.apply_workshop_metadata(request.request_id, metadata.id, Ok(Some(metadata.clone())));
+    assert!(state.take_localized_text_request().is_none());
+    assert_eq!(state.title(), "Nouveau titre");
+    assert_eq!(
+        state.workshop_metadata.as_ref().unwrap().description,
+        "Nouvelle description"
+    );
+    state.close();
+    state.set_viewer(Some(owner), WorkshopLanguage::French);
+    let request = state.begin_open(target());
+    state.apply_workshop_metadata(request.request_id, metadata.id, Ok(Some(metadata)));
+    assert_ne!(state.take_localized_text_request(), Some(text_generation));
+    state.apply_localized_text(
+        text_generation,
+        Ok(WorkshopText {
+            title: "Stale".into(),
+            description: "Stale".into(),
+        }),
+    );
+    assert_eq!(state.title(), "English");
+}
+
+#[test]
+fn new_language_text_arriving_before_metadata_is_retained_for_unowned_previews() {
+    use crate::bridge::workshop_text::{WorkshopLanguage, WorkshopText};
+    let mut state = State::default();
+    let request = state.begin_open(target());
+    state.workshop_language_changed(WorkshopLanguage::Turkish);
+    let generation = state.take_localized_text_request().unwrap();
+    state.apply_localized_text(
+        generation,
+        Ok(WorkshopText {
+            title: "Türkçe başlık".into(),
+            description: "Türkçe açıklama".into(),
+        }),
+    );
+    assert_eq!(state.title(), "Türkçe başlık");
+    state.apply_workshop_metadata(
+        request.request_id,
+        PublishedFileId::fixture(42),
+        Ok(Some(WorkshopMetadata {
+            id: PublishedFileId::fixture(42),
+            title: "Old English title".into(),
+            description: "Old description".into(),
+            steamid64: Some(SteamId::new(99)),
+            author: None,
+            avatar: None,
+            time_created: 0,
+            time_updated: 0,
+            tags: Vec::new(),
+            preview_url: None,
+            subscriptions: 0,
+            score_bucket: 0,
+            score_label: String::new(),
+        })),
+    );
+    assert_eq!(state.title(), "Türkçe başlık");
+    assert_eq!(
+        state.workshop_metadata.as_ref().unwrap().description,
+        "Türkçe açıklama"
+    );
+    assert!(!state.can_edit_metadata());
+    state.workshop_language_changed(WorkshopLanguage::French);
+    state.apply_localized_text(
+        generation,
+        Ok(WorkshopText {
+            title: "Late Turkish".into(),
+            description: String::new(),
+        }),
+    );
+    assert_eq!(state.title(), "Türkçe başlık");
+    assert!(state.take_localized_text_request().is_some());
+}

@@ -48,6 +48,11 @@ pub(super) enum Pane {
 )]
 #[derive(Debug)]
 pub struct State {
+    viewer: Option<SteamId>,
+    language: crate::bridge::workshop_text::WorkshopLanguage,
+    text_generation: Generation,
+    localized_requested: bool,
+    localized_text: Option<crate::bridge::workshop_text::WorkshopText>,
     open: bool,
     loading: bool,
     error: Option<UiError>,
@@ -81,6 +86,11 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            viewer: None,
+            language: Default::default(),
+            text_generation: Generation::INITIAL,
+            localized_requested: false,
+            localized_text: None,
             open: false,
             loading: false,
             error: None,
@@ -127,6 +137,74 @@ impl State {
         self.error.as_ref()
     }
 
+    pub(crate) fn set_viewer(
+        &mut self,
+        viewer: Option<SteamId>,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+    ) {
+        self.viewer = viewer;
+        if !self.open {
+            self.language = language;
+        }
+    }
+    pub(crate) const fn language(&self) -> crate::bridge::workshop_text::WorkshopLanguage {
+        self.language
+    }
+    pub(crate) fn can_edit_metadata(&self) -> bool {
+        self.open
+            && self.viewer.is_some()
+            && self
+                .workshop_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.steamid64 == self.viewer)
+    }
+    pub(crate) fn apply_saved_metadata(
+        &mut self,
+        id: PublishedFileId,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+        text: crate::bridge::workshop_text::WorkshopText,
+    ) {
+        if self.open && self.workshop_id == Some(id) && self.language == language {
+            self.text_generation.bump();
+            self.localized_text = Some(text.clone());
+            text.title.trim().clone_into(&mut self.title);
+            if let Some(metadata) = self.workshop_metadata.as_mut() {
+                metadata.title = text.title;
+                metadata.description = text.description;
+            }
+            self.refresh_details();
+        }
+    }
+
+    pub(super) fn workshop_language_changed(
+        &mut self,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+    ) {
+        self.language = language;
+        self.text_generation.bump();
+        self.localized_requested = false;
+        self.localized_text = None;
+    }
+    pub(super) fn take_localized_text_request(&mut self) -> Option<Generation> {
+        if !self.open || self.workshop_id.is_none() || self.localized_requested {
+            return None;
+        }
+        self.localized_requested = true;
+        Some(self.text_generation.bump())
+    }
+    pub(super) fn apply_localized_text(
+        &mut self,
+        request_id: Generation,
+        result: Result<crate::bridge::workshop_text::WorkshopText, UiError>,
+    ) {
+        if request_id == self.text_generation
+            && self.open
+            && let Ok(text) = result
+            && let Some(id) = self.workshop_id
+        {
+            self.apply_saved_metadata(id, self.language, text);
+        }
+    }
     #[cfg(test)]
     pub(crate) fn title(&self) -> &str {
         &self.title
@@ -137,7 +215,6 @@ impl State {
         self.archive_path.as_deref()
     }
 
-    #[cfg(test)]
     pub(crate) const fn workshop_id(&self) -> Option<PublishedFileId> {
         self.workshop_id
     }
@@ -311,6 +388,9 @@ impl State {
 
     pub(super) fn begin_open_at(&mut self, target: OpenTarget, now: Instant) -> OpenRequest {
         self.request_id.bump();
+        self.text_generation.bump();
+        self.localized_requested = false;
+        self.localized_text = None;
         self.open = true;
         self.loading = true;
         self.error = None;
@@ -523,6 +603,10 @@ impl State {
                     self.author_requested = false;
                     self.author_fetch_failed = false;
                 }
+                if let Some(text) = self.localized_text.as_ref() {
+                    metadata.title.clone_from(&text.title);
+                    metadata.description.clone_from(&text.description);
+                }
                 metadata.title.trim().clone_into(&mut self.title);
                 if metadata.preview_url != self.thumbnail_url {
                     self.thumbnail_url.clone_from(&metadata.preview_url);
@@ -629,6 +713,9 @@ impl State {
             return;
         }
         self.request_id.bump();
+        self.text_generation.bump();
+        self.localized_requested = false;
+        self.localized_text = None;
         self.open = false;
         self.loading = false;
         self.error = None;

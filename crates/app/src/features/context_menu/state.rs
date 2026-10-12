@@ -31,6 +31,7 @@ pub enum ContextMenuAction {
     OpenAddonLocation,
     CopyPath,
     SteamWorkshop,
+    EditDescription,
     CopyLink,
     Download,
     OpenImage,
@@ -59,6 +60,7 @@ pub enum Icon {
     OpenLocation,
     Copy,
     OpenExternal,
+    Edit,
     CopyLink,
     Download,
     Image,
@@ -111,6 +113,14 @@ impl Entry {
             "context-menu-copy-path",
             ContextMenuAction::CopyPath,
             Icon::Copy,
+        )
+    }
+
+    pub(crate) const fn edit_description() -> Self {
+        Self::actionable(
+            "context-menu-edit-description",
+            ContextMenuAction::EditDescription,
+            Icon::Edit,
         )
     }
 

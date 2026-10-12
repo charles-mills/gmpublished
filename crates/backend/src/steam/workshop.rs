@@ -182,6 +182,7 @@ impl Steam {
                 let chunk_len = super::RESULTS_PER_PAGE.min(queue.len());
                 let chunk = queue.drain(..chunk_len).collect::<Vec<_>>();
                 let chunk_for_callback = chunk.clone();
+                let language = steam.workshop_language();
                 let (done_tx, done_rx) = mpsc::channel();
 
                 search.reserve(chunk.len());
@@ -192,8 +193,12 @@ impl Steam {
                 {
                     let steam_for_callback = Arc::clone(steam);
                     let search_for_callback = Arc::clone(search);
-                    query.allow_cached_response(600).fetch(
+                    query.language(language.api_code()).allow_cached_response(600).fetch(
                         move |results: Result<QueryResults<'_>, SteamError>| {
+                            if steam_for_callback.workshop_language() != language {
+                                let _ = done_tx.send(());
+                                return;
+                            }
                             if let Ok(results) = results {
                                 let items = results
                                     .iter()
@@ -265,12 +270,18 @@ impl Steam {
         }
     }
 
-    pub fn browse_my_workshop_page(&self, page: u32, search: &Arc<Search>) -> Option<WorkshopPage> {
+    pub fn browse_my_workshop_page(
+        &self,
+        page: u32,
+        search: &Arc<Search>,
+        language: crate::WorkshopLanguage,
+    ) -> Option<WorkshopPage> {
         self.browse_user_workshop_page(
             steamworks::UserList::Published,
             steamworks::UserListOrder::LastUpdatedDesc,
             page,
             Some(Arc::clone(search)),
+            language,
         )
     }
 
@@ -283,6 +294,7 @@ impl Steam {
         user_list_order: steamworks::UserListOrder,
         page: u32,
         index_into: Option<Arc<Search>>,
+        language: crate::WorkshopLanguage,
     ) -> Option<WorkshopPage> {
         let (tx, rx) = mpsc::sync_channel(1);
 
@@ -299,6 +311,7 @@ impl Steam {
                 page,
             )
             .ok()?
+            .language(language.api_code())
             .require_tag("addon")
             .fetch(move |result: Result<QueryResults<'_>, SteamError>| {
                 let page = result.ok().map(|data| WorkshopPage {
@@ -314,9 +327,6 @@ impl Steam {
                                 return None;
                             };
                             let item = enrich_workshop_item(x, i as u32, &data)?;
-                            if let Some(search) = &index_into {
-                                search.add(&item);
-                            }
                             Some(item)
                         })
                         .collect(),
@@ -324,7 +334,18 @@ impl Steam {
                 let _ = tx.send(page);
             });
 
-        rx.recv_timeout(CALLBACK_RESULT_TIMEOUT).ok().flatten()
+        let page = rx.recv_timeout(CALLBACK_RESULT_TIMEOUT).ok().flatten();
+        let current_language = self.workshop_language.read();
+        if *current_language == language
+            && let Some(page) = page.as_ref()
+            && let Some(search) = index_into
+        {
+            for item in &page.items {
+                search.add(item);
+            }
+        }
+        drop(current_language);
+        page
     }
 }
 
@@ -480,6 +501,35 @@ impl ConnectedSteam<'_> {
             .map(|mut items| items.pop().unwrap_or_else(|| WorkshopItem::from(id)))
     }
 
+    pub fn query_localized_item_details(
+        &self,
+        id: WorkshopId,
+        language: crate::WorkshopLanguage,
+    ) -> Result<WorkshopItem, WorkshopQueryError> {
+        main_thread_forbidden!();
+        let (tx, rx) = mpsc::channel();
+        let query = self
+            .interface
+            .client()
+            .ugc()
+            .query_items(vec![id.into()])
+            .map_err(|_| WorkshopQueryError::QueryCreateFailed)?;
+        query
+            .language(language.api_code())
+            .set_return_long_description(true)
+            .allow_cached_response(0)
+            .fetch(move |result| {
+                let _sent = tx.send(query_results_to_workshop_items(&[id], result));
+            });
+        let items = rx
+            .recv_timeout(CALLBACK_RESULT_TIMEOUT)
+            .map_err(|_| WorkshopQueryError::Abandoned)??;
+        items
+            .into_iter()
+            .find(|item| !item.dead)
+            .ok_or(WorkshopQueryError::QueryCreateFailed)
+    }
+
     fn query_workshop_items_with_description(
         &self,
         ids: &[WorkshopId],
@@ -579,12 +629,17 @@ impl ConnectedSteam<'_> {
                 } else {
                     query
                 };
-                query.allow_cached_response(600).fetch(
-                    move |results: Result<QueryResults<'_>, SteamError>| {
+                query
+                    .language(self.workshop_language.api_code())
+                    .allow_cached_response(if description_length.returns_full_description() {
+                        0
+                    } else {
+                        600
+                    })
+                    .fetch(move |results: Result<QueryResults<'_>, SteamError>| {
                         let _ = result_tx
                             .send((chunk_index, query_results_to_workshop_items(&ids, results)));
-                    },
-                );
+                    });
             }
             Err(_) => {
                 let _ = result_tx.send((chunk_index, Err(WorkshopQueryError::QueryCreateFailed)));
@@ -619,9 +674,10 @@ pub(crate) fn browse_my_workshop_page(
     steam: &Steam,
     search: &Arc<Search>,
     page: u32,
+    language: crate::WorkshopLanguage,
 ) -> Option<WorkshopPage> {
     steam.client_wait(super::CLIENT_WAIT_DEFAULT_TIMEOUT).ok()?;
-    steam.browse_my_workshop_page(page, search)
+    steam.browse_my_workshop_page(page, search, language)
 }
 
 #[cfg(test)]

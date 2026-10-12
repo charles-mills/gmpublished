@@ -16,6 +16,15 @@ pub enum Effect {
     ArchiveOpenRequested(OpenRequest),
     WorkshopMetadataRequested(MetadataRequest),
     AuthorFetchRequested(AuthorRequest),
+    EditMetadataRequested {
+        workshop_id: crate::bridge::domain::PublishedFileId,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+    },
+    LocalizedTextRequested {
+        request_id: crate::generation::Generation,
+        workshop_id: crate::bridge::domain::PublishedFileId,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+    },
     DestinationSelectRequested,
     EntryPreviewRequested(PreviewRequest),
     OpenUrlRequested(String),

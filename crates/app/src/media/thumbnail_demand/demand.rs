@@ -9,8 +9,9 @@ use crate::generation::Generation;
 use crate::media::thumbnail_worker::{ThumbnailInput, ThumbnailMode};
 
 const THUMBNAIL_SCALE_BUCKET: f32 = 0.5;
-const WORKSHOP_ICON_SOURCE_MAX_EDGE: u32 = 512;
-const WORKSHOP_ICON_SOURCE_MAX_SCALE: f32 = 2.0;
+const THUMBNAIL_MAX_SCALE: f32 = 2.0;
+/// Limits an RGBA entry to 9 MiB while allowing the 647px description column at 2x.
+const PHYSICAL_EDGE_BACKSTOP: u32 = 1536;
 
 pub fn bucketed_thumbnail_scale(scale_factor: f32) -> f32 {
     if !scale_factor.is_finite() || scale_factor <= 1.0 {
@@ -18,7 +19,7 @@ pub fn bucketed_thumbnail_scale(scale_factor: f32) -> f32 {
     }
 
     ((scale_factor / THUMBNAIL_SCALE_BUCKET).ceil() * THUMBNAIL_SCALE_BUCKET)
-        .min(WORKSHOP_ICON_SOURCE_MAX_SCALE)
+        .min(THUMBNAIL_MAX_SCALE)
 }
 
 pub fn physical_thumbnail_edge(logical_edge: u32, scale_factor: f32) -> u32 {
@@ -26,7 +27,7 @@ pub fn physical_thumbnail_edge(logical_edge: u32, scale_factor: f32) -> u32 {
     scaled
         .round()
         .max(f64::from(logical_edge))
-        .min(f64::from(WORKSHOP_ICON_SOURCE_MAX_EDGE)) as u32
+        .min(f64::from(PHYSICAL_EDGE_BACKSTOP)) as u32
 }
 
 pub fn prefetch_ranges(visible: Range<usize>, total: usize) -> (Range<usize>, Range<usize>) {
@@ -64,6 +65,7 @@ pub fn retained_rows(visible: Range<usize>, total: usize) -> Option<Range<usize>
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Owner {
+    DescriptionEditor,
     InstalledAddons,
     MyWorkshop,
     PreparePublish,
@@ -281,10 +283,24 @@ mod tests {
     }
 
     #[test]
-    fn physical_thumbnail_edge_rounds_up_to_hidpi_bucket_and_source_cap() {
+    fn physical_thumbnail_edge_rounds_up_to_hidpi_bucket_and_scale_cap() {
         assert_eq!(physical_thumbnail_edge(256, 1.25), 384);
         assert_eq!(physical_thumbnail_edge(256, 2.0), 512);
         assert_eq!(physical_thumbnail_edge(256, 9.0), 512);
+    }
+
+    #[test]
+    fn the_backstop_admits_the_largest_real_demand() {
+        let media_edge = crate::widgets::bbcode::STEAM_DESCRIPTION_WIDTH as u32;
+        assert_eq!(physical_thumbnail_edge(media_edge, 1.0), media_edge);
+        assert_eq!(physical_thumbnail_edge(media_edge, 2.0), media_edge * 2);
+        assert_eq!(physical_thumbnail_edge(media_edge, 9.0), media_edge * 2);
+    }
+
+    #[test]
+    fn physical_thumbnail_edge_backstop_bounds_oversized_demands() {
+        assert_eq!(physical_thumbnail_edge(4_096, 1.0), PHYSICAL_EDGE_BACKSTOP);
+        assert_eq!(physical_thumbnail_edge(4_096, 9.0), PHYSICAL_EDGE_BACKSTOP);
     }
 
     #[test]

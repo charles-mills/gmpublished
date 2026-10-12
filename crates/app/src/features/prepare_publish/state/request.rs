@@ -32,6 +32,12 @@ impl State {
         Some(PublishSubmitRequestEnvelope {
             generation,
             request: PublishSubmitRequest {
+                language: self.language,
+                localized_drafts: if self.update_mode() {
+                    Default::default()
+                } else {
+                    self.localized_drafts()
+                },
                 mode,
                 content_source_path: verified.path,
                 title: self.title.trim().to_owned(),
@@ -40,6 +46,7 @@ impl State {
                     .map_or_else(String::new, |value| value.as_str().to_owned()),
                 tags,
                 changelog,
+                description: self.submit_description(),
                 preview,
                 ignore_globs: context.ignore_globs,
                 total_size: verified.total_size,
@@ -53,7 +60,16 @@ impl State {
         generation: Generation,
         result: Result<PublishSubmitResult, UiError>,
     ) -> bool {
-        self.apply_submit_outcome(generation, result.map(|_result| ()))
+        let created = if matches!(self.mode, Mode::New) {
+            result.as_ref().ok().map(|result| result.published_file_id)
+        } else {
+            None
+        };
+        let applied = self.apply_submit_outcome(generation, result.map(|_result| ()));
+        if applied && let Some(id) = created {
+            self.created_item = Some(id);
+        }
+        applied
     }
 
     pub(in super::super) fn begin_publish_icon_at(
@@ -143,6 +159,15 @@ impl State {
                     workshop_id: target.workshop_id,
                 })
             }
+        }
+    }
+
+    /// Only a creation carries a staged description; updates edit theirs
+    /// against the live item directly.
+    fn submit_description(&self) -> Option<String> {
+        match &self.mode {
+            Mode::New => self.staged_description().map(str::to_owned),
+            Mode::Update(_) => None,
         }
     }
 

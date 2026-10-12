@@ -396,6 +396,7 @@ fn stale_submit_completion_is_ignored() {
     assert!(state.apply_submit_completion(
         envelope.generation,
         Ok(PublishSubmitResult {
+            pending_translations: Default::default(),
             published_file_id: PublishedFileId::fixture(123),
             legal_agreement_required: false,
         }),
@@ -968,4 +969,31 @@ fn an_unchosen_tag_slot_does_not_repeat_its_own_label() {
             .iter()
             .any(|(_, label)| *label == face)
     );
+}
+
+#[test]
+fn closing_and_reopening_rejects_previous_items_localized_title() {
+    use crate::bridge::workshop_text::WorkshopText;
+    let mut state = State::default();
+    let target = |id, title: &str| UpdateTarget {
+        workshop_id: PublishedFileId::fixture(id),
+        title: title.into(),
+        tags: vec![],
+        preview_url: None,
+        snapshot_request_id: WorkshopSnapshotId::new(id),
+        snapshot_destination: format!("/tmp/workshop-{id}").into(),
+    };
+    open_update(&mut state, target(42, "First"));
+    let stale = state.text_generation();
+    state.close();
+    open_update(&mut state, target(43, "Second"));
+    assert_ne!(stale, state.text_generation());
+    state.apply_localized_text(
+        stale,
+        Ok(WorkshopText {
+            title: "Late first title".into(),
+            description: String::new(),
+        }),
+    );
+    assert_eq!(state.title(), "Second");
 }

@@ -23,8 +23,9 @@ impl PublishSubmitRequestEnvelope {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishSubmitResult {
+    pub(crate) pending_translations: crate::bridge::workshop_text::LocalizedDrafts,
     pub(crate) published_file_id: PublishedFileId,
     pub(crate) legal_agreement_required: bool,
 }
@@ -56,6 +57,7 @@ pub fn publish_selected_preview(icon: &VerifiedIcon, upscale_icon: bool) -> Publ
 impl From<PublishSubmitOutcome> for PublishSubmitResult {
     fn from(outcome: PublishSubmitOutcome) -> Self {
         Self {
+            pending_translations: outcome.pending_translations,
             published_file_id: outcome.published_file_id,
             legal_agreement_required: outcome.legal_agreement_required,
         }

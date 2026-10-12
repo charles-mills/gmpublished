@@ -432,6 +432,15 @@ impl State {
         self.sync_grid_items();
     }
 
+    pub(super) fn workshop_language_changed(&mut self) {
+        self.generation.bump();
+        self.metadata_in_flight.clear();
+        self.metadata_finished.clear();
+        self.metadata_failed.clear();
+        self.pending_preview = None;
+        self.pending_context_menu = None;
+    }
+
     /// Returns metadata IDs for visible rows, then the thumbnail prefetch
     /// window.
     ///

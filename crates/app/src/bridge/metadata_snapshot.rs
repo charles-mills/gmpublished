@@ -30,6 +30,7 @@ const SNAPSHOT_FILE_NAME: &str = "metadata.snap";
 /// Steam (or persisted by a previous run).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CachedWorkshopMetadata {
+    pub(crate) language: gmpublished_backend::WorkshopLanguage,
     pub(crate) metadata: WorkshopMetadata,
     pub(crate) fetched_at: u64,
 }
@@ -64,6 +65,8 @@ struct SnapshotFile {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SnapshotEntry {
+    #[serde(default)]
+    language: gmpublished_backend::WorkshopLanguage,
     id: u64,
     title: String,
     time_created: u32,
@@ -110,6 +113,7 @@ fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, Cache
             // than fail the whole load.
             let id = PublishedFileId::new(entry.id)?;
             let cached = CachedWorkshopMetadata {
+                language: entry.language,
                 metadata: WorkshopMetadata {
                     id,
                     title: entry.title,
@@ -142,6 +146,7 @@ pub fn prepare(
     let mut snapshot_entries = entries
         .values()
         .map(|cached| SnapshotEntry {
+            language: cached.language,
             id: cached.metadata.id.get(),
             title: cached.metadata.title.clone(),
             time_created: cached.metadata.time_created,
@@ -204,6 +209,7 @@ mod tests {
 
     fn sample_cached(id: u64, fetched_at: u64) -> CachedWorkshopMetadata {
         CachedWorkshopMetadata {
+            language: Default::default(),
             metadata: WorkshopMetadata {
                 id: PublishedFileId::fixture(id),
                 title: format!("Addon {id}"),
@@ -349,5 +355,34 @@ mod tests {
         assert!(!sample_cached(123, NOW - ttl - 1).is_fresh_at(NOW));
         // Future timestamps (clock skew) count as fresh now.
         assert!(sample_cached(123, NOW + 10_000).is_fresh_at(NOW));
+    }
+    #[test]
+    fn snapshot_retains_content_language_and_legacy_entries_default_to_english() {
+        use gmpublished_backend::WorkshopLanguage;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.snap");
+        let mut entries = sample_map(100);
+        for entry in entries.values_mut() {
+            entry.language = WorkshopLanguage::French;
+        }
+        write(&path, &entries).unwrap();
+        assert!(
+            load_at(&path, 100)
+                .values()
+                .all(|entry| entry.language == WorkshopLanguage::French)
+        );
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for entry in legacy["entries"].as_array_mut().unwrap() {
+            entry.as_object_mut().unwrap().remove("language");
+        }
+        std::fs::write(&path, serde_json::to_string(&legacy).unwrap()).unwrap();
+        let legacy = load_at(&path, 100);
+        assert_eq!(legacy.len(), 2);
+        assert!(
+            legacy
+                .values()
+                .all(|entry| entry.language == WorkshopLanguage::English)
+        );
     }
 }

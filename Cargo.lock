@@ -1549,6 +1549,7 @@ dependencies = [
  "thumbhash",
  "tokio",
  "unic-langid",
+ "unicode-segmentation",
  "ureq",
  "vformats",
 ]

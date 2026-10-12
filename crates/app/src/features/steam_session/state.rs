@@ -199,6 +199,7 @@ fn merge_retry_item_ids(
 /// Persona information fetched after a Steam connection is established.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteamIdentity {
+    steamid: crate::bridge::domain::SteamId,
     name: String,
     avatar: Option<AvatarRgba>,
 }
@@ -206,9 +207,14 @@ pub struct SteamIdentity {
 impl SteamIdentity {
     pub(crate) fn from_user(user: SteamUser) -> Self {
         Self {
+            steamid: user.steamid,
             name: user.name,
             avatar: user.avatar,
         }
+    }
+
+    pub(crate) const fn steamid(&self) -> crate::bridge::domain::SteamId {
+        self.steamid
     }
 
     pub(crate) fn name(&self) -> &str {

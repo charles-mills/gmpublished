@@ -6,6 +6,7 @@ use super::{ActiveModal, Effect, Message, State};
 
 pub fn update_at(state: &mut State, message: &Message, now: Instant) -> Vec<Effect> {
     let displaced = match message {
+        Message::OpenDescriptionEditor => state.open(ActiveModal::DescriptionEditor, now),
         Message::OpenDestinationSelect => state.open(ActiveModal::DestinationSelect, now),
         Message::OpenPreparePublish => state.open(ActiveModal::PreparePublish, now),
         Message::OpenPreviewGma => state.open(ActiveModal::PreviewGma, now),

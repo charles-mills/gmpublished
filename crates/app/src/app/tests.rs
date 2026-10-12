@@ -3269,3 +3269,31 @@ fn root_message_stays_small_enough_for_the_hot_path() {
          box the payload of whichever variant grew rather than raising this bound"
     );
 }
+
+#[test]
+fn selected_interface_language_updates_workshop_query_language_at_runtime() {
+    use gmpublished_backend::WorkshopLanguage;
+    let mut app = App::new_for_test();
+    let _task = app
+        .apply_settings_mutation_runtime(&settings::SettingsMutation::Language(Some("fr".into())));
+    assert_eq!(app.state.i18n.locale_id(), "fr");
+    assert!(
+        !app.environment
+            .ctx
+            .set_workshop_language(WorkshopLanguage::French)
+    );
+    let _task = app
+        .apply_settings_mutation_runtime(&settings::SettingsMutation::Language(Some("kr".into())));
+    assert!(
+        !app.environment
+            .ctx
+            .set_workshop_language(WorkshopLanguage::Korean)
+    );
+    let _task = app
+        .apply_settings_mutation_runtime(&settings::SettingsMutation::Language(Some("en".into())));
+    assert!(
+        !app.environment
+            .ctx
+            .set_workshop_language(WorkshopLanguage::English)
+    );
+}

@@ -30,6 +30,13 @@ pub struct BackendContext {
 }
 
 impl BackendContext {
+    pub(crate) fn set_workshop_language(
+        &self,
+        language: gmpublished_backend::WorkshopLanguage,
+    ) -> bool {
+        self.services.workshop().set_language(language)
+    }
+
     pub(crate) fn new() -> Result<Self, gmpublished_backend::BackendInitError> {
         Self::with_backend_event_sink(install_backend_event_sink_by_default())
     }

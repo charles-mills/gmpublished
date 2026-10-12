@@ -240,6 +240,24 @@ impl State {
         self.pane.grid_mut()
     }
 
+    pub(super) fn workshop_language_changed(&mut self) -> Option<(Generation, u32)> {
+        self.generation.bump();
+        self.rows.clear();
+        self.next_page = FIRST_WORKSHOP_PAGE;
+        self.loaded_pages = 0;
+        self.total_count = 0;
+        self.loading_page = false;
+        self.complete = false;
+        self.stats_in_flight = false;
+        self.page_status = PageStatus::Idle;
+        self.pending_prepare_publish = None;
+        self.pending_context_menu = None;
+        self.pane.clear_animation_clock();
+        self.last_roll_tick = None;
+        self.sync_grid_items();
+        self.begin_next_page()
+    }
+
     pub(super) fn enter_route(&mut self) -> Option<(Generation, u32)> {
         self.route_visible = true;
         if matches!(self.page_status, PageStatus::Idle | PageStatus::Failed(_))

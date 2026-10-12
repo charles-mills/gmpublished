@@ -12,6 +12,7 @@ use crate::generation::Generation;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     RouteEntered,
+    WorkshopLanguageChanged,
     RouteExited,
     /// The root library store started an event-driven refresh.
     LibraryRefreshStarted(LibraryRefreshReason),

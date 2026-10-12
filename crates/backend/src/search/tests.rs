@@ -490,3 +490,27 @@ fn refresh_installed_addon_labels_replaces_stale_label_everywhere() {
     assert_eq!(search.quick_search("New Title".to_owned()).hits.len(), 1);
     assert_eq!(search.quick_search("Old Title".to_owned()).hits.len(), 1);
 }
+
+#[test]
+fn language_invalidation_removes_workshop_labels_and_retains_installed_search() {
+    let search = Search::new(test_cpu());
+    search.add(&search_fixture(11, "Old language", ["old"], 1));
+    search.sync_installed_addons(vec![SearchItem::new_installed_addon(
+        PathBuf::from("/tmp/local.gma"),
+        Some(22),
+        "Local addon".into(),
+        vec![],
+        2_u64,
+    )]);
+    search.invalidate_workshop_titles();
+    let items = search.items.read();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].label(), "Local addon");
+    drop(items);
+    assert!(
+        search
+            .installed_addons
+            .read()
+            .contains_key(&workshop_id(22))
+    );
+}

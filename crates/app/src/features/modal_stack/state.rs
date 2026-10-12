@@ -8,6 +8,7 @@ use crate::theme::{self, motion};
 pub enum ActiveModal {
     /// Extraction destination picker (always the overlay layer).
     DestinationSelect,
+    DescriptionEditor,
     PreparePublish,
     PreviewGma,
     Settings,
@@ -191,7 +192,9 @@ impl State {
 }
 
 impl ActiveModal {
+    /// Overlays stack above an open base modal instead of replacing it: the
+    /// description editor must not displace the publish modal that opened it.
     const fn is_overlay(self) -> bool {
-        matches!(self, Self::DestinationSelect)
+        matches!(self, Self::DestinationSelect | Self::DescriptionEditor)
     }
 }
