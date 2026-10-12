@@ -15,7 +15,6 @@ use crate::generation::Generation;
 use crate::widgets::file_browser::{Entry as FileBrowserEntry, State as FileBrowserState};
 use gmpublished_backend::error_keys as keys;
 
-/// Data the click source already rendered, seeded for the first frame.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OpenSeed {
     pub(crate) preview_url: Option<String>,
@@ -74,7 +73,6 @@ pub struct MetadataRequest {
     pub(crate) workshop_id: PublishedFileId,
 }
 
-/// Author lookup request emitted when metadata carries only a steamid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorRequest {
     pub(crate) request_id: Generation,
@@ -87,8 +85,6 @@ pub struct AuthorInfo {
     pub(crate) avatar: Option<AvatarRgba>,
 }
 
-/// Renders a steamid64 in the classic Steam2 form, shown as a placeholder
-/// while the author lookup is in flight.
 pub fn steam2_rendered_id(steamid64: SteamId) -> String {
     const ACCOUNT_OFFSET: u64 = 76_561_197_960_265_728;
     let account = steamid64.get().saturating_sub(ACCOUNT_OFFSET);

@@ -1,5 +1,3 @@
-//! Blocking thumbnail payload decode, fetch, resize, and disk-cache facade.
-
 use std::sync::{
     Arc, LazyLock,
     atomic::{AtomicBool, Ordering},
@@ -13,8 +11,6 @@ mod thumbnail_key;
 mod types;
 
 pub use decode::ThumbnailDecoder;
-#[cfg(test)]
-pub use disk_cache::disk_cache_path;
 pub use disk_cache::{
     WorkerDiskCache, read_disk_cache, read_source_bytes, remove_source_bytes, write_disk_cache,
     write_source_bytes,
@@ -47,9 +43,6 @@ impl ThumbnailCancellation {
 #[derive(Clone, Debug)]
 pub enum ThumbnailWorkerOutcome<T> {
     Completed(T),
-    /// A cache-only job that put the source bytes on disk and stopped there.
-    /// It carries no thumbnail because it decoded nothing: this policy
-    /// exists to make the *next* request local, and nothing paints for it.
     SourceBanked,
     Cancelled,
 }
@@ -64,31 +57,15 @@ impl<T> ThumbnailWorkerOutcome<T> {
     }
 }
 
-/// What a byte fetch can end as. Narrower than [`ThumbnailWorkerOutcome`]:
-/// fetching cannot bank a source, that is what the caller does with the bytes.
 #[derive(Debug)]
 pub enum FetchOutcome<T> {
     Fetched(T),
     Cancelled,
 }
 
-/// How a thumbnail job sources bytes for a URL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FetchProfile {
-    /// Latency-first: the bare URL, exactly as the author uploaded it.
-    /// The CDN computes resized renditions on FIRST request (~1s each,
-    /// measured), and the local disk cache absorbs repeats — so every
-    /// interactive fetch is a first fetch and a variant would put that
-    /// rendition latency on screen.
     Interactive,
-    /// Bandwidth-first cache-only fetch: request a tile-sized CDN
-    /// rendition (10-100x fewer bytes), falling back to the bare URL for
-    /// GIF re-encodes (byte-unpredictable, 0.6x-2.1x measured) and on any
-    /// variant failure.
-    ///
-    /// Stops at bytes. It banks the source and returns
-    /// [`ThumbnailWorkerOutcome::SourceBanked`] without decoding — see
-    /// [`run_cache_only_source_request`].
     CacheOnly,
 }
 
@@ -98,10 +75,7 @@ pub fn run_thumbnail_request(
     profile: FetchProfile,
     cancellation: &ThumbnailCancellation,
 ) -> ThumbnailResult<ThumbnailWorkerOutcome<Thumbnail>> {
-    // Cancellation may only fire before I/O is paid for: here (nothing
-    // spent yet) and just before the network request. Bytes in hand always
-    // decode and reach the caches — during a fast scroll the passed-by
-    // fetches bank into the disk cache instead of being thrown away.
+    // Cancel only before I/O. Once fetched, decode and cache the bytes for later scrolls.
     if cancellation.is_cancelled() {
         return Ok(ThumbnailWorkerOutcome::Cancelled);
     }
@@ -150,14 +124,6 @@ pub fn run_thumbnail_request(
                 return Ok(ThumbnailWorkerOutcome::Completed(thumbnail));
             }
             Err(error) => {
-                // A source that will not decode is worse than no source: it
-                // would fail identically on every future request. Drop it and
-                // fall through to a real fetch.
-                //
-                // Through `remove_source_bytes`, never a bare `remove_file`:
-                // the index is what `contains_source` answers from, so an
-                // unindexed delete would leave the cache-only filter believing this
-                // URL is banked and never repairing it.
                 log::debug!("cached thumbnail source for {url} failed to decode: {error}");
                 remove_source_bytes(cache, url.as_ref());
             }
@@ -178,9 +144,6 @@ pub fn run_thumbnail_request(
         )));
     }
 
-    // Still thumbnails persist their single resized frame. Animations do not
-    // persist here at all — their payload would be the source stream verbatim,
-    // which the fetch already banked; see `write_disk_cache`.
     if let (Some(cache), Ok(ThumbnailWorkerOutcome::Completed(thumbnail))) = (disk_cache, &result) {
         write_disk_cache(cache, key, thumbnail);
     }
@@ -188,21 +151,6 @@ pub fn run_thumbnail_request(
     result
 }
 
-/// The whole of a cache-only job: get this URL's bytes into the source
-/// tier, and stop.
-///
-/// Warm deliberately stops short of the full interactive pipeline (decode,
-/// resize, write a derived entry, hand back a `Thumbnail`) because it is
-/// processing a tile nothing is going to paint. A decode and resize here would
-/// be spent on a size chosen by the background pass rather than by whatever eventually
-/// asks — a DPI change, or a different card size, invalidates every one of
-/// them — and the derived entry would sit in the same disk budget as the
-/// source it came from, evicting real sources to store a guess.
-///
-/// What that costs: the first interactive request for a banked URL pays a
-/// local decode (measured at 2.7 ms for a 512x512 JPEG, 11.5 ms for
-/// 1920x1080) instead of a disk read. What it buys: no network, which is the
-/// term that actually dominates.
 fn run_cache_only_source_request(
     disk_cache: Option<&WorkerDiskCache>,
     input: ThumbnailInput,
@@ -210,14 +158,10 @@ fn run_cache_only_source_request(
 ) -> ThumbnailResult<ThumbnailWorkerOutcome<Thumbnail>> {
     let ThumbnailInput::Url { url } = input;
 
-    // Without a disk cache there is nothing to bank into, so a fetch would be
-    // pure network cost for bytes that go straight in the bin.
     let Some(cache) = disk_cache else {
         return Ok(ThumbnailWorkerOutcome::SourceBanked);
     };
 
-    // The scheduler already skipped keys whose source is on disk; this catches
-    // the ones banked between that check and now.
     if cache.contains_source(&url) {
         return Ok(ThumbnailWorkerOutcome::SourceBanked);
     }
@@ -243,11 +187,6 @@ pub fn run_prepared_thumbnail_request(
     )
 }
 
-/// Post-processing every freshly decoded thumbnail needs, regardless of whether
-/// the bytes came off the network or out of the source tier.
-///
-/// A fresh decode computes the ThumbHash once so it is persisted with the pixels
-/// and travels back to the placeholder cache; derived-tier hits already carry it.
 fn finish_fresh_decode(mut thumbnail: Thumbnail, key: &ThumbnailKey) -> Thumbnail {
     if key.mode() == ThumbnailMode::Static {
         thumbnail.make_static();
@@ -277,7 +216,6 @@ mod tests {
         let cache = WorkerDiskCache::new(root.path().to_path_buf(), 8 * 1024 * 1024);
         let url = "https://example.invalid/preview.png";
 
-        // Encode a real image and store it as the fetched source.
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
             64,
@@ -291,8 +229,6 @@ mod tests {
         let input = ThumbnailInput::from_url(url);
         let key = input.cache_key(32);
 
-        // No network is reachable from a test, so completing at all proves the
-        // bytes came from disk.
         let outcome = run_thumbnail_request(
             Some(&cache),
             &ThumbnailRequest::new(input, 32, key.mode()),
@@ -305,14 +241,9 @@ mod tests {
             panic!("expected a completed thumbnail, got {outcome:?}");
         };
         assert!(thumbnail.metadata().width <= 32 && thumbnail.metadata().height <= 32);
-        // Derived output is persisted too, so the next request at this size
-        // skips the decode entirely.
         assert!(read_disk_cache(&cache, &key, 32).is_some());
     }
 
-    /// Warming's product is the source tier, so a URL already banked is
-    /// finished work — no fetch, no decode, and above all no derived entry
-    /// competing with real sources for the same disk budget.
     #[test]
     fn a_warm_request_for_a_banked_source_does_no_work_at_all() {
         let root = crate::test_support::TestDir::new("warm-source-present");
@@ -350,9 +281,6 @@ mod tests {
         );
     }
 
-    /// The interactive path still derives *and* persists, unlike the warm path.
-    /// Asserted next to the warm case so the asymmetry is deliberate rather
-    /// than something a later edit can quietly flatten.
     #[test]
     fn an_interactive_request_still_writes_the_derived_entry_a_warm_one_skips() {
         let root = crate::test_support::TestDir::new("warm-vs-interactive-derive");
@@ -383,10 +311,6 @@ mod tests {
         assert!(read_disk_cache(&cache, &key, 32).is_some());
     }
 
-    /// Animations get no derived entry, so the source tier is the only thing
-    /// keeping them off the network. This is the test that says storing no
-    /// duplicate costs nothing: the animation replays, carries a ThumbHash,
-    /// and needs no fetch.
     #[test]
     fn an_animation_replays_from_the_source_tier_with_no_derived_entry() {
         let root = crate::test_support::TestDir::new("animation-source-only");
@@ -397,8 +321,6 @@ mod tests {
         let input = ThumbnailInput::from_url(url);
         let key = input.cache_key(256);
 
-        // No network is reachable from a test, so completing at all proves the
-        // bytes came from the source tier.
         for attempt in 1..=2 {
             let outcome = run_thumbnail_request(
                 Some(&cache),
@@ -430,8 +352,6 @@ mod tests {
         );
     }
 
-    /// A source that cannot decode would fail identically forever, so it is
-    /// discarded rather than retried on every request.
     #[test]
     fn an_undecodable_source_is_dropped_rather_than_poisoning_every_request() {
         let root = crate::test_support::TestDir::new("thumbnail-source-poison");
@@ -452,10 +372,7 @@ mod tests {
             read_source_bytes(&cache, url).is_none(),
             "a source that will not decode must not survive to be retried"
         );
-        // The index is what `contains_source` answers from. An unindexed delete
-        // leaves a phantom: the whole-library warm filter keeps reporting this
-        // URL as banked, so warm never re-fetches it and the card stays broken
-        // for the rest of the session.
+        // Delete through the cache API or the index keeps reporting the poisoned URL as banked.
         assert!(
             !cache.contains_source(url),
             "deleting a poisoned source must unindex it, not just unlink it"
@@ -501,7 +418,6 @@ mod tests {
         assert!(read_disk_cache(&cache, &static_key, 64).is_some());
     }
 
-    /// Smallest thing that decodes as a multi-frame animation.
     fn multi_frame_gif_bytes() -> Vec<u8> {
         use gif::{DisposalMethod, Encoder, Frame, Repeat};
 

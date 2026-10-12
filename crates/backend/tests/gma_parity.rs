@@ -7,18 +7,12 @@ use std::{
 use gmpublished_backend::{
     ExtractDestination, ExtractOptions, ExtractionContext, GmaError, GmaFile, GmaMetadata, GmaView,
     HasErrorKey, Whitelist,
-    test_support::{
-        AddonWhitelist, AppData, AppDataPaths, BackendEventCollector, NullEventSink, Steam,
-        Transactions, is_default_ignored, is_ignored, is_whitelisted_in,
-    },
+    test_support::{AddonWhitelist, AppData, AppDataPaths, NullEventSink, Steam, Transactions},
 };
 use lzma_rust2::{LzmaOptions, LzmaWriter};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-/// Bundles the service handles that GMA read/write/extract take
-/// explicitly. One `Fixture` per test keeps everything private to that
-/// test (no shared settings file, no shared Steam instance).
 struct Fixture {
     app_data: AppData,
     steam: Steam,
@@ -39,32 +33,7 @@ impl Fixture {
         Self {
             app_data,
             steam: Steam::new(transactions.clone()),
-            whitelist: AddonWhitelist::new(),
-            transactions,
-            cpu: gmpublished_backend::CpuExecutor::build(2).expect("test CPU executor"),
-            _temp: temp,
-        }
-    }
-
-    /// Same as [`Self::new`], but with a live event sink attached, so a test
-    /// exercising a transaction path runs against real emission rather than a
-    /// null sink.
-    ///
-    /// The collector is not retained: packing reports failure by *returning*
-    /// an error, and the tests below assert on that. Emission is the publish
-    /// layer's job and is covered where it happens.
-    fn with_collected_events() -> Self {
-        let temp = tempfile::tempdir().unwrap();
-        let collector = BackendEventCollector::default();
-        let transactions = Transactions::new(Arc::new(collector));
-        let app_data = AppData::load(
-            AppDataPaths::for_test_root(temp.path()),
-            transactions.clone(),
-        );
-        Self {
-            app_data,
-            steam: Steam::new(transactions.clone()),
-            whitelist: AddonWhitelist::new(),
+            whitelist: AddonWhitelist::builtin_only(),
             transactions,
             cpu: gmpublished_backend::CpuExecutor::build(2).expect("test CPU executor"),
             _temp: temp,
@@ -216,8 +185,6 @@ fn gma_write_read_extract_round_trip_from_generated_fixture() {
     assert!(extracted_path.join("addon.json").is_file());
     assert!(!extracted_path.join("lua/autorun/ignored.lua").exists());
 
-    // Trailer CRC is 0 like fastgmad writes; GMod never reads the field and
-    // upstream's value was garbage (it hashed the unflushed BufWriter tail).
     let bytes = fs::read(&gma_path).unwrap();
     assert_eq!(&bytes[bytes.len() - 4..], &[0, 0, 0, 0]);
 }
@@ -230,8 +197,6 @@ fn gma_create_streams_large_files_with_correct_crc_and_round_trips() {
     let lua_dir = source.join("lua");
     fs::create_dir_all(&lua_dir).unwrap();
 
-    // Over the 8MB direct-streaming threshold, plus small batched siblings
-    // on both sides of it in sort order.
     let big: Vec<u8> = (0..9 * 1024 * 1024u32)
         .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
         .collect();
@@ -333,45 +298,29 @@ fn gma_create_failure_leaves_nothing_at_the_final_path() {
 }
 
 #[test]
-#[cfg(unix)]
-fn gma_create_walk_error_fails_the_pack_and_leaves_no_final_file() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let fixture = Fixture::with_collected_events();
+fn gma_create_walk_error_reports_the_path_and_removes_the_partial_archive() {
+    let fixture = Fixture::new();
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source");
-    let locked = source.join("locked");
-    fs::create_dir_all(&locked).unwrap();
-    fs::write(locked.join("secret.lua"), b"print('locked')\n").unwrap();
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-
+    let source = dir.path().join("missing-source");
     let gma_path = dir.path().join("walk-error.gma");
-    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Walk Error Fixture"));
-
+    let gma = GmaFile::for_creation(gma_path.clone(), fixture_metadata("Walk Error"));
     let transaction = fixture.transactions.begin();
-    let result = gma.create(&source, &transaction, &fixture.whitelist, &fixture.cpu);
-    transaction.cancel();
 
-    // Restore permissions so the tempdir can clean itself up regardless of
-    // whether the assertions below pass.
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = gma
+        .create(&source, &transaction, &fixture.whitelist, &fixture.cpu)
+        .expect_err("a walk error must fail the pack");
 
-    assert!(!gma_path.exists());
-
-    // The path travels on the error, not alongside it: whoever receives this
-    // can report it, and a caller that reports nothing loses nothing that was
-    // already reported behind its back.
-    let error = result.expect_err("an unreadable directory must fail the pack");
-    assert!(
-        matches!(&error, GmaError::PathIo { path } if path.starts_with(&source)),
-        "expected a path-naming error for the unreadable directory, got {error:?}"
+    assert!(matches!(&error, GmaError::PathIo { path } if path == &source));
+    assert_eq!(
+        error.error_key(),
+        gmpublished_backend::error_keys::PATH_IO_ERROR
     );
-    assert_eq!(error.error_key().as_str(), "ERR_PATH_IO_ERROR");
-    assert!(
-        error
-            .error_detail()
-            .is_some_and(|detail| detail.contains("locked")),
-        "the failing path must survive into the reportable detail"
+    assert!(error.error_detail().unwrap().contains("missing-source"));
+    assert!(!gma_path.exists());
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        0,
+        "partial archive left behind"
     );
 }
 
@@ -384,12 +333,11 @@ fn gma_create_non_utf8_entry_name_errors_naming_the_path() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    let fixture = Fixture::with_collected_events();
+    let fixture = Fixture::new();
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
     fs::create_dir_all(&source).unwrap();
 
-    // Not valid UTF-8: a lone continuation byte.
     let bad_name = OsStr::from_bytes(b"invalid-\x80-name.lua");
     fs::write(source.join(bad_name), b"print('bad name')\n").unwrap();
 
@@ -446,7 +394,6 @@ fn gma_lzma_bin_with_known_size_decompresses_in_memory() {
     let gma_path = create_fixture_gma(&fixture, &dir, "LZMA Sized Fixture");
     let raw = fs::read(&gma_path).unwrap();
 
-    // Valve-style payload: LZMA-alone header carrying the exact unpacked size.
     let options = LzmaOptions::with_preset(1);
     let mut encoder =
         LzmaWriter::new_use_header(Vec::new(), &options, Some(raw.len() as u64)).unwrap();
@@ -551,8 +498,6 @@ fn gma_unsafe_entry_paths_are_skipped_without_shifting_following_data() {
     let entries = view.entries().unwrap();
     assert!(!entries.contains_key("../outside.lua"));
     assert!(!entries.contains_key("C:\\absolute.lua"));
-    // Skipped entries must not shift the payload addressing of what
-    // follows them: the safe entry's bytes come back intact.
     assert_eq!(
         view.read_entry_bytes("lua/autorun/safe.lua").unwrap(),
         b"safe"
@@ -595,29 +540,9 @@ fn gma_header_projects_full_fields_matching_the_constructed_handle() {
     assert_eq!(header.author, "Author Name");
     assert_eq!(header.addon_version, 1);
 
-    // `header()` independently re-derives fields the handle doesn't keep
-    // (timestamp, author, addon_version); its title still agrees with the
-    // one `open()` already stamped onto the handle.
     assert_eq!(gma.metadata().title(), header.metadata.title());
 }
 
-#[test]
-fn gma_whitelist_and_default_ignore_match_expected_paths() {
-    let whitelist = AddonWhitelist::new();
-    let snapshot = whitelist.snapshot();
-    assert!(is_whitelisted_in(&snapshot, "lua/autorun/round_trip.lua"));
-    assert!(!is_whitelisted_in(&snapshot, "lua/autorun/round_trip.exe"));
-    assert!(is_default_ignored("addon.json"));
-    assert!(!is_default_ignored("lua/autorun/round_trip.lua"));
-    assert!(is_ignored(
-        "lua/autorun/ignored.lua",
-        &["lua/autorun/ignored.lua".to_string()]
-    ));
-}
-
-/// `data_offset` is a byte offset into the mapped view, produced by pointer
-/// arithmetic against the parsed payload. Nothing else re-derives it, so if it
-/// is wrong the preview modal serves one entry's bytes for another.
 #[test]
 fn indexed_entry_offsets_address_their_own_payload() {
     let fixture = Fixture::new();

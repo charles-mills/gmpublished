@@ -37,14 +37,11 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, viewport_size: Size) -> Elem
 
     let mut content = column![].align_x(Center).width(Length::Fill);
     content = content.push(title);
-    // h4 margins: .8rem above, 1.5rem below.
     content = content.push(Space::new().height(tokens.spacing.gap_md));
     content = content.push(warning);
     content = content.push(Space::new().height(tokens.spacing.gap_lg));
     content = content.push(path_input(state, &tokens));
     if let Some(error) = state.error() {
-        // Deviation from upstream (which fails silently): a small caption
-        // keeps invalid typed paths explainable.
         let error_text = match error {
             DestinationError::InvalidPath => i18n.tr("destination-invalid-path"),
             DestinationError::SaveFailed(error) => error.to_string(),
@@ -181,10 +178,6 @@ fn tile_icon(
         DestinationKind::Temp => assets::icons::akar_folder_add(),
         DestinationKind::Downloads => assets::icons::akar_download(),
         DestinationKind::Addons => {
-            // Multicolor Garry's Mod logo: rendered untinted. Upstream dims
-            // disabled tiles with brightness(.5); the logo cannot be
-            // recolored, so a 50%-alpha film of the disabled tile bg covers
-            // it instead (the one sanctioned alpha use in this modal).
             let logo = svg(assets::icons::gmod_logo()).width(size).height(size);
             if enabled {
                 return logo.into();
@@ -246,7 +239,6 @@ fn history<'a>(state: &'a State, tokens: &Tokens) -> Element<'a, Message> {
         );
     }
 
-    // Natural height up to the cap, then scrolls without visible chrome.
     container(
         scrollable(rows)
             .width(Length::Fill)

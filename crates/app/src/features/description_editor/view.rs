@@ -157,15 +157,13 @@ fn length_counter<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message
         .into()
 }
 
-/// One formatting control: its glyph, styled after the effect it applies.
 struct Tool {
     glyph: ToolGlyph,
     tooltip_key: &'static str,
     action: ToolbarAction,
 }
 
-/// Typography where a bundled glyph exists (B, H1, …); an SVG asset where
-/// none does — the bundled fonts carry no emoji coverage.
+/// Use SVGs where the bundled fonts have no glyph, including emoji.
 enum ToolGlyph {
     Text {
         label: &'static str,
@@ -433,7 +431,6 @@ fn source_pane<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .height(Length::Fill)
         .padding(tokens.spacing.pad_control)
         .size(tokens.typography.caption)
-        // Share the preview's Unicode font fallback for translated source.
         .font(assets::fonts::default_font())
         .style(move |_, status| theme::styles::text_editor(&tokens, status));
 
@@ -455,8 +452,6 @@ fn source_pane<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .into()
 }
 
-/// Ctrl/Cmd shortcuts route to the toolbar, Enter goes through the
-/// list-aware handler, everything else keeps iced's default behavior.
 fn editor_key_binding(key_press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     use iced::keyboard::{Key, key::Named};
 
@@ -496,8 +491,6 @@ fn editor_key_binding(key_press: text_editor::KeyPress) -> Option<text_editor::B
     text_editor::Binding::from_key_press(key_press)
 }
 
-/// The rendered half: the document exactly as the Workshop page shows it —
-/// Steam's canvas color, Steam's column width, Steam's type ramp.
 fn preview_pane<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let (Some(document), Some(revealed)) = (state.document(), state.revealed_spoilers()) else {
@@ -692,14 +685,6 @@ mod tests {
                 "source bounds: {:?}",
                 source.bounds()
             );
-            if let Ok(directory) = std::env::var("GMPUBLISHED_EDITOR_SCREENSHOT_DIR") {
-                ui.snapshot(&iced::Theme::Dark)
-                    .unwrap()
-                    .matches_image(
-                        std::path::Path::new(&directory).join(format!("editor-{}.png", size.width)),
-                    )
-                    .unwrap();
-            }
             ui.click(selector::id("workshop-language")).unwrap();
             assert!(
                 ui.find("Turkish").is_ok(),

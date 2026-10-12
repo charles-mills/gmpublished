@@ -14,7 +14,6 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 
-/// Event sent from worker code to the UI-facing task drain.
 pub type TaskEvent = (TaskId, SharedTaskUpdate);
 
 #[derive(Clone, Debug)]
@@ -75,19 +74,12 @@ impl TaskId {
     }
 }
 
-/// Coarse task classification used by the UI for labels and icons, and to
-/// route each task to the surface that displays it: `Download`/`Extract` own
-/// Downloader-page rows, while `Publish`/`OverlayExtract`/`Notice` feed the
-/// bottom tasks overlay.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskKind {
     Publish,
     Extract,
-    /// An extraction invoked outside the Downloader page (GMA preview,
-    /// document open), toasted instead of getting a Downloader row.
     OverlayExtract,
-    /// A one-shot overlay message: created already finished, its status key
-    /// is the message. Only the debug toast simulator constructs one today.
+    /// Already finished when created; status_key holds the notice text.
     #[cfg_attr(not(any(feature = "debug", test)), expect(dead_code))]
     Notice,
     Download,
@@ -117,7 +109,6 @@ pub enum TaskUpdate {
     Abandoned,
 }
 
-/// Terminal update retained after coalescing a task event batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoalescedTaskTerminal {
     Finished,
@@ -160,7 +151,6 @@ pub struct CoalescedTaskStart {
     pub(crate) status: TransactionStatus,
 }
 
-/// Coalesced update state for one task in one drained event batch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CoalescedTaskUpdate {
     pub(crate) started: Option<CoalescedTaskStart>,
@@ -283,7 +273,6 @@ impl Drop for TaskHandle {
     }
 }
 
-/// Registry for creating task handles.
 #[derive(Debug)]
 pub struct Tasks {
     next_id: AtomicU64,
@@ -340,9 +329,7 @@ impl TaskEventStreamFactory {
         Subscription::run_with(self.clone(), task_event_stream)
     }
 
-    /// Production code never takes the receiver by hand — the first stream
-    /// run claims it inside `attach_stream_run`; tests take it to observe
-    /// emitted events directly.
+    /// Only tests take the receiver directly; production claims it in attach_stream_run.
     #[cfg(test)]
     pub(super) fn take_receiver(&self) -> Option<mpsc::Receiver<TaskEvent>> {
         self.receiver.lock().take()
@@ -378,19 +365,10 @@ pub(super) fn task_event_stream(
     })
 }
 
-/// The iced-facing half of a forwarder thread, held in a slot the thread
-/// re-reads on every delivery. iced tears down and rebuilds a subscription's
-/// stream whenever its identity leaves and re-enters the subscription set,
-/// but the std receiver feeding the forwarder can be taken only once — so
-/// the long-lived thread must be the stable end of the pipe, and each stream
-/// run merely attaches its sender here. Without this indirection a rebuilt
-/// stream would find the receiver gone and end immediately, which iced's
-/// tracker records as a still-registered subscription: event delivery would
-/// die silently for the rest of the process.
-///
-/// Events already buffered inside a torn-down stream's channel are dropped
-/// with it by iced; this slot only guarantees the pipeline itself survives
-/// and the one event mid-delivery is redelivered to the replacement.
+/// Replaceable Iced sender for a process-lifetime forwarder. Iced may rebuild
+/// subscription streams, but the std receiver can only be taken once.
+/// The forwarder reattaches and retries its pending event on the new sender.
+/// Events buffered in the old Iced channel are lost when that stream drops.
 struct ForwarderOutput<T> {
     state: Mutex<ForwarderOutputState<T>>,
     attached: Condvar,
@@ -415,8 +393,6 @@ impl<T> ForwarderOutput<T> {
         }
     }
 
-    /// Installs the sender of the current subscription stream run, waking a
-    /// forwarder blocked on a dead predecessor.
     fn attach(&self, sender: iced_mpsc::Sender<T>) {
         let mut state = self.state.lock();
         state.sender = Some(sender);
@@ -425,10 +401,8 @@ impl<T> ForwarderOutput<T> {
         self.attached.notify_all();
     }
 
-    /// Delivers one event to the currently attached sender, blocking through
-    /// subscription restarts until some attached channel accepts it. Only
-    /// process teardown ends a delivery early, by never attaching again —
-    /// the thread then parks here until the process exits.
+    /// Wait through subscription restarts until a sender accepts the event. Teardown may
+    /// leave the thread parked.
     fn deliver(&self, mut event: T) {
         loop {
             let (mut sender, epoch) = {
@@ -456,10 +430,6 @@ impl<T> ForwarderOutput<T> {
     }
 }
 
-/// Wires one subscription stream run into the forwarding pipeline: attach
-/// the run's sender, then spawn the forwarder thread if this run is the
-/// first to claim the receiver. Later runs find the receiver taken and only
-/// reattach — the running thread picks the new sender up from the slot.
 fn attach_stream_run<T: Send + 'static>(
     name: &'static str,
     receiver: &Mutex<Option<mpsc::Receiver<T>>>,
@@ -471,19 +441,11 @@ fn attach_stream_run<T: Send + 'static>(
     if let Some(receiver) = receiver.lock().take() {
         spawn_forwarder_thread(name, receiver, Arc::clone(output));
     } else {
-        // Reachable only when iced rebuilds the subscription stream, which
-        // no current app state does: the subscriptions are unconditional in
-        // `App::subscription` and their identities are constant. Worth a
-        // visible trace because before reattachment existed, this exact
-        // path silently killed event delivery for the rest of the process.
         log::warn!("{name}: subscription stream restarted; reattached to live forwarder");
     }
 }
 
-/// Spawns a process-lifetime forwarding loop on its own thread rather than
-/// submitting it to the bounded blocking worker pool: it never returns, so
-/// on a pool this small it would permanently pin one of only a handful of
-/// worker threads.
+/// This loop never returns. Give it its own thread so it cannot occupy a worker indefinitely.
 fn spawn_forwarder_thread<T: Send + 'static>(
     name: &'static str,
     receiver: mpsc::Receiver<T>,
@@ -493,8 +455,6 @@ fn spawn_forwarder_thread<T: Send + 'static>(
         .name(name.to_owned())
         .spawn(move || forward_to_subscription(&receiver, &output))
     {
-        // The receiver died with the failed spawn, so event delivery is
-        // gone for good: say so at error severity.
         log::error!("failed to start {name} thread, event delivery is disabled: {error}");
     }
 }
@@ -525,9 +485,7 @@ impl BackendEventStreamFactory {
         Subscription::run_with(self.clone(), backend_event_stream)
     }
 
-    /// Production code never takes the receiver by hand — the first stream
-    /// run claims it inside `attach_stream_run`; tests take it to observe
-    /// emitted events directly.
+    /// Only tests take the receiver directly; production claims it in attach_stream_run.
     #[cfg(test)]
     pub(super) fn take_receiver(&self) -> Option<mpsc::Receiver<BackendRuntimeEvent>> {
         self.receiver.lock().take()

@@ -6,12 +6,6 @@ use super::{gma::GmaMeta, tasks::TaskId};
 
 pub const WORKSHOP_LEGAL_URL: &str = "https://steamcommunity.com/workshop/workshoplegalagreement";
 
-/// Zero is never a valid Steam Workshop id (the backend already treats it
-/// as "no id"); the inner `NonZeroU64` makes that invariant unrepresentable.
-///
-/// The UI-side spelling of [`gmpublished_backend::WorkshopId`], which carries
-/// the same invariant — so crossing the bridge is a total conversion in both
-/// directions and neither side has to assert anything about the other.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PublishedFileId(NonZeroU64);
 
@@ -36,9 +30,6 @@ impl PublishedFileId {
         self.0.get()
     }
 
-    /// A literal workshop id in a test. Panics on zero, which is a broken
-    /// fixture rather than a runtime condition — stated once so the fixtures
-    /// do not each carry their own wording for it.
     #[cfg(test)]
     pub(crate) fn fixture(id: u64) -> Self {
         Self::new(id).expect("a fixture workshop id must be nonzero")
@@ -51,8 +42,6 @@ impl fmt::Display for PublishedFileId {
     }
 }
 
-/// A Steam account id. Mirrors `steamworks::SteamId` on this side of the
-/// bridge so the app does not depend on the steamworks crate.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct SteamId(u64);
@@ -166,9 +155,7 @@ pub struct WorkshopMetadata {
     /// Workshop description. `Some("")` is a known-empty description.
     pub(crate) full_description: Option<String>,
     pub(crate) owner_steamid: Option<SteamId>,
-    /// ThumbHash of the preview image, computed locally the first time it is
-    /// decoded (Steam never supplies it). Persisted so placeholders paint on
-    /// the next launch.
+    /// Steam supplies no ThumbHash. Compute it on decode and persist it for the next launch.
     pub(crate) thumbhash: Option<Arc<[u8]>>,
 }
 
@@ -202,11 +189,7 @@ impl WorkshopMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledAddon {
     pub(crate) path: PathBuf,
-    /// `path` resolved once at discovery time (background thread). Search
-    /// indexing needs the canonical form to cross-reference reliably, but
-    /// re-resolving it per addon on every index rebuild put a filesystem
-    /// syscall storm on the UI thread on every hide/library refresh; reusing
-    /// this cached copy keeps that resolution off the hot path entirely.
+    /// Canonicalized during discovery so search rebuilds need no filesystem calls.
     pub(crate) canonical_path: PathBuf,
     pub(crate) workshop_id: Option<PublishedFileId>,
     pub(crate) file_size_bytes: u64,
@@ -215,10 +198,7 @@ pub struct InstalledAddon {
 }
 
 impl InstalledAddon {
-    /// User-visible title with the same fallback everywhere the addon is
-    /// shown or indexed (list rows, search corpus): GMA title → file stem
-    /// → full path. Keeping search on this exact string means an addon is
-    /// always findable by the name the user sees.
+    /// Use the same title for display and search: GMA title, then file stem, then full path.
     pub(crate) fn display_title(&self) -> String {
         let title = self.meta.title().trim();
         if !title.is_empty() {

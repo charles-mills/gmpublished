@@ -237,11 +237,7 @@ fn push_quoted_string_spans(
     }
 }
 
-/// Byte index just past the closing `quote`, and whether one was found.
-///
-/// Walks characters rather than bytes: an escape must skip a whole character,
-/// and a multi-byte one skipped a byte at a time would land the scanner
-/// mid-character and treat a continuation byte as content.
+/// An escape skips a whole character, including multibyte characters.
 fn quoted_string_end(line: &str, start: usize, quote: u8) -> (usize, bool) {
     let mut escaped = false;
     for (offset, character) in line[start.saturating_add(1)..].char_indices() {
@@ -587,9 +583,7 @@ fn vmt_token_text<'a>(line: &'a str, token: &VmtLineToken) -> Option<&'a str> {
     }
 }
 
-/// Mirrors the byte-level pieces of the backend VMT tokenizer in
-/// `crates/backend/src/scene/vmt.rs`. The backend parser is kept
-/// semantic and span-less, so preview highlighting owns its local ranges.
+/// Highlighting needs byte ranges that the semantic VMT parser does not retain.
 fn vmt_line_tokens(line: &str) -> Vec<VmtLineToken> {
     let bytes = line.as_bytes();
     let mut tokens = Vec::new();
@@ -753,9 +747,6 @@ fn color_channel(value: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    /// A multi-byte character inside a string must not split the scan: byte
-    /// stepping would land mid-character and read a continuation byte as
-    /// content, so the closing quote after one would be missed.
     #[test]
     fn a_quoted_string_containing_multibyte_characters_closes() {
         for line in [

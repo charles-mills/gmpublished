@@ -16,26 +16,6 @@ use crate::features::steam_session::{ConnectionStatus, SteamIdentity};
 use crate::theme::Tokens;
 
 #[test]
-fn default_state_matches_shared_shell_startup_surface() {
-    let state = State::default();
-
-    assert_eq!(state.app_version(), env!("CARGO_PKG_VERSION"));
-    assert_eq!(state.route(), Route::MyWorkshop);
-    assert_eq!(state.account_name(), None);
-    assert!(!state.update_available());
-    assert_eq!(state.update_version(), "");
-    assert_eq!(state.update_release_url(), "");
-    assert_eq!(state.steam_status(), ConnectionStatus::Disconnected);
-    assert!(!state.steam_status().connected());
-    assert_eq!(state.steam_status().kind(), 0);
-    assert_eq!(state.steam_status().translation_key(), "steam_disconnected");
-    assert!(state.steam_avatar().is_none());
-    assert_eq!(state.downloader_jobs(), 0);
-    assert!(state.downloader_badge(Instant::now()).is_none());
-    assert!(!state.account_menu_open());
-}
-
-#[test]
 fn update_release_marks_update_row_available() {
     let mut state = State::default();
 

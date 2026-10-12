@@ -1,15 +1,5 @@
-//! Vector maths shared by backend decoding and application rendering.
-//!
-//! [`Vec3`] is `repr(transparent)` over `[f32; 3]` and `Pod`, so it is the
-//! same bytes as the array it wraps and crosses the wgpu and steamworks
-//! boundaries unchanged. Being a distinct type is what lets the arithmetic be
-//! written as arithmetic — `start + (end - start) * t` rather than
-//! `add(start, scale(sub(end, start), t))` — and stops a position being passed
-//! where a normal belongs.
-
 use std::ops::{Add, AddAssign, Div, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
-/// A 3-component vector: a position, direction, normal or extent.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vec3([f32; 3]);
@@ -52,14 +42,11 @@ impl Vec3 {
         self.0[2]
     }
 
-    /// Applies `f` to each component, mirroring `[f32; 3]::map`.
     #[must_use]
     pub fn map(self, f: impl FnMut(f32) -> f32) -> Self {
         Self(self.0.map(f))
     }
 
-    /// Whether every component is finite. Parsed and decoded vectors reach
-    /// this crate from map files, so a NaN is data, not a bug.
     #[must_use]
     pub fn is_finite(self) -> bool {
         self.0.iter().all(|component| component.is_finite())
@@ -70,9 +57,8 @@ impl Vec3 {
         self.0[0] * other.0[0] + self.0[1] * other.0[1] + self.0[2] * other.0[2]
     }
 
-    /// [`Self::dot`] with this vector's components taken as magnitudes —
-    /// Source's plane/AABB overlap test, where the box extent projects onto
-    /// the plane normal regardless of which way the normal points.
+    /// Project box extents onto a plane normal using absolute components,
+    /// as in Source's plane/AABB overlap test.
     #[must_use]
     pub fn dot_abs(self, other: Self) -> f32 {
         self.0[0].abs() * other.0[0] + self.0[1].abs() * other.0[1] + self.0[2].abs() * other.0[2]
@@ -107,18 +93,12 @@ impl Vec3 {
         self.distance_squared(other).sqrt()
     }
 
-    /// `None` for a vector too short to have a direction.
-    ///
-    /// Fallible because callers disagree on the degenerate case: a camera
-    /// basis wants a usable axis, a surface normal wants zero.
     #[must_use]
     pub fn normalize(self) -> Option<Self> {
         let length = self.length();
         (length > f32::EPSILON).then(|| self / length)
     }
 
-    /// A direction, or the zero vector when there is none. Prefer
-    /// [`Self::normalize`] where the caller can say something better than zero.
     #[must_use]
     pub fn normalize_or_zero(self) -> Self {
         self.normalize().unwrap_or(Self::ZERO)
@@ -159,9 +139,7 @@ impl Vec3 {
         ])
     }
 
-    /// Applies a Source entity's `angles` to this vector, in Source's
-    /// roll-pitch-yaw order. Applying the three rotations in any other order
-    /// gives a different result for anything but a single-axis angle.
+    /// Apply Source angles in roll-pitch-yaw order; rotations do not commute.
     #[must_use]
     pub fn rotate_source(self, angles: Self) -> Self {
         let QAngle { pitch, yaw, roll } = QAngle::from_source_degrees(angles);
@@ -270,8 +248,6 @@ impl MulAssign<f32> for Vec3 {
     }
 }
 
-/// A Source engine QAngle: the `[pitch, yaw, roll]` degree triple that map
-/// entities and static props store their orientation as.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct QAngle {
     pub pitch: f32,
@@ -303,7 +279,6 @@ pub fn simple_spline(t: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// The degenerate case is the whole reason this returns `Option`.
     #[test]
     fn normalize_reports_a_vector_with_no_direction_rather_than_choosing_one() {
         assert_eq!(Vec3::ZERO.normalize(), None);
@@ -314,9 +289,6 @@ mod tests {
         );
     }
 
-    /// `repr(transparent)` is what lets a `Vec3` reach wgpu and steamworks as
-    /// the array they expect. A layout change would be silent at every call
-    /// site and wrong on the GPU.
     #[test]
     fn a_vector_is_the_bytes_of_the_array_it_wraps() {
         use std::mem::{align_of, size_of};
@@ -329,8 +301,6 @@ mod tests {
         assert_eq!(Vec3::from(source).to_array(), source);
     }
 
-    /// Outside 0..=1 the raw polynomial reverses direction, so an unclamped
-    /// spline eases backwards rather than saturating.
     #[test]
     fn simple_spline_saturates_outside_the_unit_interval() {
         assert_eq!(simple_spline(-1.0), 0.0);
@@ -340,31 +310,21 @@ mod tests {
         assert!((simple_spline(0.5) - 0.5).abs() < f32::EPSILON);
     }
 
-    /// Source applies roll, then pitch, then yaw. Any other order agrees when
-    /// at most one angle is non-zero, so a swap is invisible on the
-    /// single-axis cases and wrong on every real prop. Values are hand-derived
-    /// rather than composed from the same helpers.
     #[test]
     fn source_rotation_order_is_roll_pitch_yaw() {
-        // 90° yaw alone takes +X to +Y.
         assert_close(
             Vec3::new(1.0, 0.0, 0.0).rotate_source(Vec3::new(0.0, 90.0, 0.0)),
             Vec3::new(0.0, 1.0, 0.0),
         );
-        // 90° pitch alone takes +X to -Z (Source pitches nose-down).
         assert_close(
             Vec3::new(1.0, 0.0, 0.0).rotate_source(Vec3::new(90.0, 0.0, 0.0)),
             Vec3::new(0.0, 0.0, -1.0),
         );
-        // 90° roll alone leaves +X fixed and takes +Y to +Z.
         assert_close(
             Vec3::new(0.0, 1.0, 0.0).rotate_source(Vec3::new(0.0, 0.0, 90.0)),
             Vec3::new(0.0, 0.0, 1.0),
         );
 
-        // Roll-then-pitch-then-yaw: +X rolls to +X, pitches to -Z, and yaw
-        // leaves -Z alone. Applying the same angles in the reverse order lands
-        // somewhere else entirely, which is the whole point.
         let combined = Vec3::splat(90.0);
         let x_axis = Vec3::new(1.0, 0.0, 0.0);
         assert_close(x_axis.rotate_source(combined), Vec3::new(0.0, 0.0, -1.0));

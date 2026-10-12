@@ -33,29 +33,18 @@ const HOVER_BORDER_WIDTH: f32 = 4.0;
 /// Height of the tooltip arrow triangle; also the gap the panel keeps from
 /// the hovered square's edge so the arrow tip touches it.
 const TOOLTIP_ARROW_H: f32 = 8.0;
-/// Full width of the arrow triangle svg (16x8).
 const TOOLTIP_ARROW_W: f32 = 16.0;
-/// Inset the panel keeps from the surface edges when clamped.
 const TOOLTIP_MARGIN: f32 = 8.0;
-/// Hard cap on panel width, matching tippy's default max-width.
-///
-/// Its own constant rather than `dims.tooltip_max_width`: this panel is drawn
-/// here rather than by the tooltip widget, and the number is a fidelity pin to
-/// the web original it reproduces, not the app's tooltip metric.
 const TOOLTIP_MAX_WIDTH: f32 = 350.0;
-/// Grid gap between the label and value columns / between rows (.5rem).
 const TOOLTIP_GRID_GAP: f32 = 8.0;
-/// Panel inner padding, matching `theme::styles::tooltip` usage.
 const TOOLTIP_PAD_Y: f32 = 7.0;
 const TOOLTIP_PAD_X: f32 = 10.0;
 const TOOLTIP_TEXT_SIZE: f32 = 13.0;
-/// Line-height multiple used for wrapped-row height estimates.
 const TOOLTIP_LINE_HEIGHT: f32 = 1.3;
 /// Bold labels are measured with the Regular face; nudge up to cover the
 /// heavier weight (labels are three short words).
 const TOOLTIP_BOLD_FUDGE: f32 = 1.05;
 
-/// Renders the Size Analyzer route surface.
 pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let viewport = sensor(treemap_surface(state, ctx)).on_resize(Message::ViewportResized);
@@ -87,9 +76,6 @@ fn treemap_surface<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
         layers = layers.push(loading_overlay(ctx));
     }
 
-    // Empty and Error stopped sharing a surface: "there is nothing to chart"
-    // is not a failure, and reporting it with the same dead-face overlay was
-    // how this route ended up speaking a different dialect from the others.
     if matches!(state.load_status(), LoadStatus::Empty) {
         layers = layers.push(empty_overlay(ctx));
     } else if matches!(state.load_status(), LoadStatus::Error(_)) {
@@ -139,9 +125,6 @@ fn base_surface<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
     .into()
 }
 
-/// Purely visual treemap canvas: three cached layers replayed until state
-/// invalidates them. Interaction stays on the wrapping `mouse_area`, so the
-/// program handles no events and returns no messages.
 struct TreemapProgram<'a> {
     state: &'a State,
 }
@@ -163,8 +146,6 @@ impl canvas::Program<Message> for TreemapProgram<'_> {
 
         let size = bounds.size();
         let scale = SurfaceScale::new(layout.bounds, size);
-        // Drain any coalesced thumbnail arrivals so a burst of deliveries
-        // clears the cache once, right before it re-records below.
         let _invalidation = self.state.flush_thumbnail_invalidation();
         let layers = self.state.layers();
 
@@ -257,8 +238,6 @@ fn draw_thumbnail_layer(
                 clipped.draw_image(cover, &tile.handle);
             });
         } else if !state.thumbnail_pending(workshop_id) {
-            // Failed or never-deliverable (local addon, no preview URL):
-            // draw the dead-file glyph.
             draw_dead_placeholder(frame, cell);
         }
     }
@@ -320,8 +299,6 @@ fn snap_to_physical(value: f32, scale: f32) -> f32 {
     (value * scale).round() / scale
 }
 
-/// Cover-fit: uniform scale `max(cell.w/src.w, cell.h/src.h)`, centered on
-/// the cell; the caller clips the overflow to the cell.
 fn cover_fit_bounds(cell: Rectangle, source_width: u32, source_height: u32) -> Option<Rectangle> {
     if cell.width <= 0.0 || cell.height <= 0.0 || source_width == 0 || source_height == 0 {
         return None;
@@ -378,11 +355,6 @@ fn draw_dead_placeholder(frame: &mut canvas::Frame, cell: Rectangle) {
 
 fn hover_outline<'a>(hover: &HoverProbe) -> Element<'a, Message> {
     let color = analyzer_color(hover.color());
-    // The container is sized to exactly the hovered square and iced strokes
-    // borders inward from the bounds, so this 4px ring reads *inside* the
-    // square edges.
-    // Kept instant (no grow/shrink animation) to preserve the idle-0% rule;
-    // upstream's .1s transition is a sanctioned deviation.
     let outline = container(Space::new().width(Length::Fill).height(Length::Fill))
         .width(Length::Fixed(hover.rect_width().max(1.0)))
         .height(Length::Fixed(hover.rect_height().max(1.0)))
@@ -407,8 +379,6 @@ fn hover_outline<'a>(hover: &HoverProbe) -> Element<'a, Message> {
     .into()
 }
 
-/// Placement of the anchored tooltip within the treemap surface: the panel's
-/// top-left corner, its size, and whether it was flipped below the square.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TooltipPlacement {
     x: f32,
@@ -418,10 +388,6 @@ struct TooltipPlacement {
     below: bool,
 }
 
-/// Positions the tooltip panel over the treemap surface: horizontally
-/// centered on the hovered square and clamped inside the surface margins,
-/// sitting above the square with the arrow tip touching its top edge — and
-/// flipping below when there is no room above.
 fn place_tooltip(square: Rectangle, panel: Size, surface: Size) -> TooltipPlacement {
     let max_x = (surface.width - panel.width - TOOLTIP_MARGIN).max(TOOLTIP_MARGIN);
     let x = (square.center_x() - panel.width / 2.0).clamp(TOOLTIP_MARGIN, max_x);
@@ -442,9 +408,6 @@ fn place_tooltip(square: Rectangle, panel: Size, surface: Size) -> TooltipPlacem
     }
 }
 
-/// Arrow's left offset within the surface: centered on the square, clamped so
-/// it stays inside the panel's horizontal span (minus its own half-width) and
-/// never detaches when the panel is edge-clamped.
 fn tooltip_arrow_x(square: Rectangle, placement: TooltipPlacement) -> f32 {
     let min = placement.x;
     let max = (placement.x + placement.width - TOOLTIP_ARROW_W).max(min);
@@ -508,8 +471,6 @@ fn hover_tooltip<'a>(
             color: Some(arrow_color),
         });
 
-    // The arrow sits against the square edge: below the panel when the
-    // tooltip is above, above the panel when it flips below.
     let stack_column = if placement.below {
         column![
             positioned_row(arrow_x, arrow),
@@ -534,8 +495,6 @@ fn hover_tooltip<'a>(
         .into()
 }
 
-/// Wraps a child in a leading horizontal spacer so it sits at `x` within the
-/// full-width surface (the `hover_outline` positioning technique).
 fn positioned_row<'a>(x: f32, child: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     row![Space::new().width(Length::Fixed(x.max(0.0))), child.into()]
         .width(Length::Fill)
@@ -581,8 +540,6 @@ fn bold_font() -> Font {
     }
 }
 
-/// Bold label-column width: the widest of the three labels measured with the
-/// Regular face and fudged up for the heavier Bold weight.
 fn label_column_width(name_label: &str, type_label: &str, size_label: &str) -> f32 {
     [name_label, type_label, size_label]
         .into_iter()
@@ -590,9 +547,6 @@ fn label_column_width(name_label: &str, type_label: &str, size_label: &str) -> f
         .fold(0.0, f32::max)
 }
 
-/// Rendered width of the flag chip value: lowercased label at the chip's font
-/// size + the chip body's horizontal padding + the trailing point svg
-/// (reusing the chip's own constants).
 fn chip_value_width(tag: &str, tokens: &Tokens) -> f32 {
     let label = tag.to_ascii_lowercase();
     text_measure::measure_width(&label, TAG_TEXT_SIZE)
@@ -600,15 +554,10 @@ fn chip_value_width(tag: &str, tokens: &Tokens) -> f32 {
         + TAG_POINT_WIDTH
 }
 
-/// Value-column width once the panel width is fixed: the panel's inner width
-/// minus the label column and the grid gap. At least 1.
 fn value_column_width(panel_width: f32, label_w: f32) -> f32 {
     (panel_width - TOOLTIP_PAD_X * 2.0 - label_w - TOOLTIP_GRID_GAP).max(1.0)
 }
 
-/// Computes the panel size before layout: width capped at `TOOLTIP_MAX_WIDTH`,
-/// height = padding + three rows (the title row wraps at the clamped value
-/// column width) + two inter-row gaps.
 fn tooltip_panel_size(
     title: &str,
     tag: &str,
@@ -624,8 +573,6 @@ fn tooltip_panel_size(
     let content_w = label_w + TOOLTIP_GRID_GAP + widest_value;
     let width = (content_w + TOOLTIP_PAD_X * 2.0).min(TOOLTIP_MAX_WIDTH);
 
-    // The title wraps at whatever the value column collapses to once width is
-    // capped; the other two rows are single-line.
     let value_col_w = value_column_width(width, label_w);
     let title_lines =
         text_measure::wrapped_line_count(title, TOOLTIP_TEXT_SIZE, value_col_w).max(1);
@@ -771,8 +718,6 @@ mod tests {
         let square = rect(400.0, 200.0, 40.0, 40.0);
         let placement = place_tooltip(square, Size::new(100.0, 60.0), Size::new(1000.0, 600.0));
 
-        // Centered on center_x (420) → x = 420 - 50; above the square with the
-        // arrow gap → y = 200 - ARROW_H - panel.height.
         assert!((placement.x - 370.0).abs() < 1e-4);
         assert!((placement.y - 132.0).abs() < 1e-4);
         assert!(!placement.below);
@@ -791,7 +736,6 @@ mod tests {
         let square = rect(990.0, 200.0, 10.0, 40.0);
         let placement = place_tooltip(square, Size::new(100.0, 60.0), Size::new(1000.0, 600.0));
 
-        // max_x = surface.width - panel.width - MARGIN = 892.
         assert!((placement.x - 892.0).abs() < 1e-4);
     }
 
@@ -801,7 +745,6 @@ mod tests {
         let placement = place_tooltip(square, Size::new(100.0, 60.0), Size::new(1000.0, 600.0));
 
         assert!(placement.below);
-        // Below: y = square.bottom + ARROW_H = 4 + 40 + 8.
         assert!((placement.y - 52.0).abs() < 1e-4);
     }
 
@@ -811,8 +754,6 @@ mod tests {
         let placement = place_tooltip(square, Size::new(100.0, 60.0), Size::new(1000.0, 600.0));
         let arrow_x = tooltip_arrow_x(square, placement);
 
-        // Centered on center_x (420) minus half the arrow width (8) = 412,
-        // comfortably inside the panel span [370, 454].
         assert!((arrow_x - 412.0).abs() < 1e-4);
     }
 
@@ -824,18 +765,15 @@ mod tests {
 
         assert!(arrow_x >= placement.x - 1e-4);
         assert!(arrow_x <= placement.x + placement.width - TOOLTIP_ARROW_W + 1e-4);
-        // Panel clamped to x=892; arrow must stay within [892, 892+100-16=976].
         assert!((arrow_x - 976.0).abs() < 1e-4);
     }
 
     #[test]
     fn cover_fit_scales_uniformly_to_the_dominant_axis_and_centers() {
-        // Wide source into a square cell: height dominates, width overflows.
         let cover = cover_fit_bounds(rect(10.0, 20.0, 100.0, 100.0), 200, 100).unwrap();
 
         assert!((cover.height - 100.0).abs() < 1e-4);
         assert!((cover.width - 200.0).abs() < 1e-4);
-        // Centered: overflow splits evenly on both sides.
         assert!((cover.x - (10.0 - 50.0)).abs() < 1e-4);
         assert!((cover.y - 20.0).abs() < 1e-4);
     }
@@ -900,8 +838,6 @@ mod tests {
 
         let bounds = label_sprite_bounds(&sprite, scale).unwrap();
 
-        // 64x32 physical at 2.0 → 32x16 logical, centered in the 100x50 rect
-        // at (10, 10) and snapped to the half-pixel physical grid.
         assert!((bounds.width - 32.0).abs() < 1e-4);
         assert!((bounds.height - 16.0).abs() < 1e-4);
         assert!((bounds.x - 44.0).abs() <= 0.25);
@@ -915,8 +851,6 @@ mod tests {
 
         let bounds = label_sprite_bounds(&sprite, scale).unwrap();
 
-        // Bounds keep the bitmap's horizontal orientation; the canvas image
-        // rotates it around the center at draw time.
         assert!((bounds.width - 64.0).abs() < 1e-4);
         assert!((bounds.height - 32.0).abs() < 1e-4);
         let center_x = bounds.x + bounds.width / 2.0;

@@ -1,11 +1,3 @@
-//! The on-disk half of the thumbnail cache: decoded thumbnails keyed by source
-//! URL and size, so a restart does not re-download and re-decode the library.
-//!
-//! Bounded by total bytes and evicted least-recently-used. The index is
-//! rewritten atomically and tolerates entries whose file has vanished, because
-//! the cache directory is in user-writable space and may be cleared behind the
-//! app at any point.
-
 use image::{
     ColorType, ImageEncoder, ImageFormat, ImageReader,
     codecs::png::{CompressionType as PngCompressionType, FilterType as PngFilterType, PngEncoder},
@@ -32,15 +24,10 @@ const CACHE_PAYLOAD_MAGIC: &[u8; 8] = b"GMPTB001";
 const CACHE_PAYLOAD_VERSION: u32 = 1;
 const CACHE_FORMAT_RAW_RGBA: u8 = 0;
 const CACHE_FORMAT_PNG_RGBA: u8 = 1;
-// Animated GIF: the payload is the raw encoded GIF stream, replayed on read.
 const CACHE_FORMAT_GIF: u8 = 2;
 
-/// The on-disk thumbnail cache, with an in-memory index of what it holds.
-///
-/// Single-writer: clones share one index, but a second process sharing the
-/// directory keeps its own. `max_bytes` is therefore a soft target, not a
-/// ceiling, and [`Self::contains_source`] answers from this process's index
-/// rather than the filesystem.
+/// Clones share an index; separate processes do not. The byte limit is a
+/// soft target, and `contains_source` can be stale until a read checks it.
 #[derive(Clone, Debug)]
 pub struct WorkerDiskCache {
     dir: PathBuf,
@@ -62,24 +49,12 @@ impl WorkerDiskCache {
         self.state.max_bytes.load(Ordering::Relaxed)
     }
 
-    /// Resizes the eviction budget; clones share it. A shrink takes effect
-    /// on the next write's eviction pass rather than immediately.
     pub(crate) fn set_max_bytes(&self, max_bytes: u64) {
         self.state.max_bytes.store(max_bytes, Ordering::Relaxed);
     }
 
-    /// Builds the on-disk index now, if it is not built already.
-    ///
-    /// Exists so the build can be *placed*. It is a `read_dir` plus one `stat`
-    /// per cached file, and it happens lazily inside whichever call touches the
-    /// index first. Left to itself that call is the whole-library warm skip,
-    /// which runs on the main thread inside a single `update` — so a warm start
-    /// with a full cache paid a directory scan mid-frame. Calling this from a
-    /// blocking task beforehand moves the syscalls off the main thread without
-    /// changing what any caller sees.
-    ///
-    /// Idempotent and racy-safe: a worker that got there first leaves this a
-    /// mutex acquire.
+    /// Primes the lazy index off-thread before UI demand processing.
+    /// The first access runs `read_dir` and a `stat` per file; later calls only lock.
     pub(crate) fn prime_index(&self) {
         let mut slot = self.state.index.lock();
         if let Err(error) = ensure_disk_cache_index(self, &mut slot) {
@@ -90,14 +65,6 @@ impl WorkerDiskCache {
         }
     }
 
-    /// Whether a URL's fetched bytes are in the source tier, by index lookup —
-    /// no stat.
-    ///
-    /// Deliberately asks about the source rather than a derived entry. The
-    /// derived tier is size-keyed, so it answers "can this exact request be
-    /// served without decoding?"; the source tier is URL-keyed and answers "is
-    /// this URL local at all?". Background warming wants the second, because
-    /// the source is what it produces.
     pub(crate) fn contains_source(&self, url: &str) -> bool {
         let path = source_cache_path(&self.dir, url);
         let mut slot = self.state.index.lock();
@@ -110,7 +77,6 @@ impl WorkerDiskCache {
 
 #[derive(Debug)]
 struct DiskCacheState {
-    /// Shared across clones so a capacity change reaches the workers.
     max_bytes: AtomicU64,
     /// `None` until the first operation that needs it builds it from disk.
     index: Mutex<Option<DiskCacheIndex>>,
@@ -149,19 +115,14 @@ struct CacheFileMetadata {
     tier: CacheTier,
 }
 
-/// Which of the two caches a file belongs to. Both live in one directory and
-/// share one budget, so eviction has to tell them apart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CacheTier {
-    /// Fetched bytes keyed by URL — what warming produces, and what makes a
-    /// later interactive request local. Evicted last.
+    /// URL-keyed source bytes. Evict after derived entries, which can be rebuilt from them.
     Source,
-    /// One decoded thumbnail at one size, re-derivable from a source.
     Derived,
 }
 
 impl CacheTier {
-    /// `None` for a file that belongs to neither cache.
     fn from_path(path: &Path) -> Option<Self> {
         match path.extension().and_then(|value| value.to_str()) {
             Some(crate::media::thumbnail_worker::THUMBNAIL_SOURCE_FILE_EXTENSION) => {
@@ -224,14 +185,12 @@ pub fn read_disk_cache(
     }
 }
 
-/// Path for a URL's fetched bytes in the source tier.
 pub fn source_cache_path(cache_dir: impl AsRef<Path>, url: &str) -> PathBuf {
     cache_dir
         .as_ref()
         .join(super::thumbnail_key::source_file_name(url))
 }
 
-/// Reads a URL's fetched bytes, if they are still on disk.
 pub fn read_source_bytes(cache: &WorkerDiskCache, url: &str) -> Option<Vec<u8>> {
     let path = source_cache_path(&cache.dir, url);
     match fs::read(&path) {
@@ -240,18 +199,12 @@ pub fn read_source_bytes(cache: &WorkerDiskCache, url: &str) -> Option<Vec<u8>> 
             Some(bytes)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // The read path is the only place that learns the index is wrong.
-            // A second instance sharing this directory evicts against its own
-            // private index and unlinks files this one still has recorded;
-            // without this, `contains_source` reports the URL as banked
-            // forever and the warm filter never re-fetches it.
+            // Repair the index when another process has removed the source file.
             remove_indexed_cache_file(cache, &path);
             None
         }
         Err(error) => {
-            // Deliberately not a repair: an unreadable file is still a file,
-            // and dropping its index entry would leak its bytes from the
-            // budget while eviction still has to unlink it.
+            // Unreadable files still count toward the byte budget until eviction removes them.
             log::debug!(
                 "failed to read thumbnail source {}: {error}",
                 path.display()
@@ -261,34 +214,14 @@ pub fn read_source_bytes(cache: &WorkerDiskCache, url: &str) -> Option<Vec<u8>> 
     }
 }
 
-/// How stale an entry's recorded age must be before a read refreshes it.
-///
-/// Without a floor this is one `set_times` syscall per thumbnail load. An hour
-/// is far below the interval eviction ordering actually turns on — sessions and
-/// days — and far above the rate at which one thumbnail is re-read.
 const SOURCE_AGE_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// Marks a source as recently used, so eviction orders the tier by use rather
-/// than by when it happened to be banked.
-///
-/// Sources are write-once and read-forever, so without this the whole tier is
-/// FIFO: a library warm banks 20k sources in ID order, the budget forces
-/// eviction, and the ones dropped are simply the ones banked first — not the
-/// ones nobody opens. A user who browses the same 200 addons would re-fetch
-/// them from the network every session while sources they have never viewed
-/// survive.
-///
-/// The mtime is written, not just the in-memory index, because the index is
-/// rebuilt from mtimes on every start. An in-memory-only bump would be
-/// forgotten exactly when it matters — the next session's warm sweep.
 fn refresh_source_age(cache: &WorkerDiskCache, path: &Path) -> Option<()> {
     let now = SystemTime::now();
     // Read out and drop the guard before the `set_times` syscall: holding the
     // index lock across I/O would stall every other worker's cache write.
     let existing = {
         let slot = cache.state.index.lock();
-        // Before the first build there is nothing to reorder, and the build
-        // itself will read this file's real mtime anyway.
         let existing = *slot.as_ref()?.by_path.get(path)?;
         drop(slot);
         existing
@@ -306,8 +239,6 @@ fn refresh_source_age(cache: &WorkerDiskCache, path: &Path) -> Option<()> {
         .open(path)
         .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(now)));
     if let Err(error) = touched {
-        // Not worth failing a read over: the entry keeps its old age and is
-        // simply evicted sooner than ideal.
         log::debug!(
             "failed to refresh thumbnail source age {}: {error}",
             path.display()
@@ -316,11 +247,8 @@ fn refresh_source_age(cache: &WorkerDiskCache, path: &Path) -> Option<()> {
     }
 
     let mut slot = cache.state.index.lock();
-    // The lock was dropped across the syscall, so another worker's write may
-    // have run eviction and unlinked this very path in the meantime. Inserting
-    // blindly would resurrect an index entry for a file that no longer exists —
-    // `contains_source` would then report it as banked and the warm filter
-    // would never re-fetch it.
+    // Eviction may unlink this path while the lock is released; only refresh
+    // an entry that still exists in the index.
     let index = slot.as_mut()?;
     if !index.by_path.contains_key(path) {
         return None;
@@ -338,12 +266,6 @@ fn refresh_source_age(cache: &WorkerDiskCache, path: &Path) -> Option<()> {
     Some(())
 }
 
-/// Deletes a URL's banked source, keeping the index in step.
-///
-/// The index is authoritative for `contains_source` and for the eviction
-/// budget, so a bare `remove_file` leaves a phantom: the warm filter keeps
-/// reporting the URL as banked and never repairs it, and `total_bytes`
-/// overcounts until eviction happens to trip over the missing file.
 pub fn remove_source_bytes(cache: &WorkerDiskCache, url: &str) {
     let path = source_cache_path(&cache.dir, url);
     if let Err(error) = fs::remove_file(&path)
@@ -357,16 +279,6 @@ pub fn remove_source_bytes(cache: &WorkerDiskCache, url: &str) {
     remove_indexed_cache_file(cache, &path);
 }
 
-/// Stores a URL's fetched bytes.
-///
-/// Shares the derived tier's directory, index, and budget, so the two compete
-/// under one ceiling rather than needing a second one to tune.
-///
-/// They compete by **use**, not write age: sources are write-once and
-/// read-forever, so ranking them by mtime alone would let a hot source banked
-/// during the first warm age toward the front of the eviction queue.
-/// [`read_source_bytes`] calls [`refresh_source_age`] on every hit, which
-/// rewrites the mtime and re-inserts into `by_age`.
 pub fn write_source_bytes(cache: &WorkerDiskCache, url: &str, bytes: &[u8]) {
     let path = source_cache_path(&cache.dir, url);
     match crate::util::fs::atomic_write(&path, bytes) {
@@ -380,30 +292,7 @@ pub fn write_source_bytes(cache: &WorkerDiskCache, url: &str, bytes: &[u8]) {
     }
 }
 
-/// Persists a derived entry — **except for animations, which are not stored
-/// here at all**.
-///
-/// An animated entry's payload is `LazyGifPreview::encoded_bytes`, which is the
-/// `Arc<[u8]>` the preview was decoded from: byte-for-byte the stream already
-/// sitting in the source tier. Writing it here would store the same GIF twice
-/// under one disk budget, so an animated addon would cost double and evict
-/// twice as much of everything else.
-///
-/// Almost nothing is lost by skipping it. A derived GIF entry is not a
-/// *derivation* — unlike a resized still it is size-independent, so its read
-/// path would do exactly the work the source path already does:
-/// `decode_lazy_gif_preview` over the same bytes.
-///
-/// The one real cost is the ThumbHash, which a derived entry would persist and
-/// which `finish_fresh_decode` instead recomputes per cold load. Measured at
-/// **327 µs** for a 256² first frame (`probe_thumbhash_encode_cost`) — an order
-/// of magnitude more than it looks like it should be, so it is worth naming
-/// rather than waving at. It is paid on a media-pool thread, never the main
-/// one, next to a GIF decode already costing milliseconds. Halving the disk
-/// footprint of every animated addon is worth 0.3 ms of background work.
-///
-/// The reader still understands `CACHE_FORMAT_GIF`, so a cache that does hold
-/// animated derived entries keeps loading rather than being discarded.
+/// Persist stills only. GIF source bytes are already cached; retain reads of old GIF entries.
 pub fn write_disk_cache(cache: &WorkerDiskCache, key: &ThumbnailKey, thumbnail: &Thumbnail) {
     if thumbnail.animation().is_some() {
         return;
@@ -467,8 +356,6 @@ fn maybe_evict_disk_cache(
     drop(slot);
 }
 
-/// Builds the index on first use. `Err` only when the cache directory cannot
-/// be listed; what an unavailable index means is the caller's decision.
 fn ensure_disk_cache_index<'a>(
     cache: &WorkerDiskCache,
     slot: &'a mut Option<DiskCacheIndex>,
@@ -502,8 +389,6 @@ fn insert_indexed_cache_file(index: &mut DiskCacheIndex, file: CacheFile) {
     index.total_bytes = index.total_bytes.saturating_add(file.len);
 }
 
-/// Only touches an index that already exists: with none built, there is
-/// nothing to keep consistent and the eventual build reads the real directory.
 fn remove_indexed_cache_file(cache: &WorkerDiskCache, path: &Path) {
     let mut slot = cache.state.index.lock();
     let Some(index) = slot.as_mut() else {
@@ -516,23 +401,9 @@ fn remove_indexed_cache_file(cache: &WorkerDiskCache, path: &Path) {
     drop(slot);
 }
 
-/// How far into the age order to look for a derived entry before giving up and
-/// evicting whatever is oldest.
-///
-/// Bounds the cost of the preference below: without a cap this would be a full
-/// scan per eviction once only sources remain.
+/// Bound the search so eviction cannot scan every entry when only sources remain.
 const EVICTION_PREFERENCE_SCAN: usize = 64;
 
-/// Evicts oldest-first, but prefers derived entries over sources.
-///
-/// The two tiers share one budget, and a source is necessarily written just
-/// *before* the derived entry decoded from it — so plain age order evicts every
-/// source first, which is exactly backwards: losing a derived entry costs a
-/// local decode, losing a source costs a network fetch. Keeping a source is
-/// also usually the cheaper of the two in bytes — measured at 31x smaller for a
-/// warm-banked 512px variant, but only 2.3x for a bare 1920x1080 original, so
-/// "cheap" holds strongly for warm-banked sources and weakly for
-/// interactively-banked ones.
 fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex) {
     while index.total_bytes > cache.max_bytes() {
         let victim = index
@@ -570,8 +441,7 @@ fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex)
 fn serialize_cached_thumbnail(thumbnail: &Thumbnail) -> image::ImageResult<Vec<u8>> {
     let metadata = thumbnail.metadata();
     let pixels = thumbnail.rgba_bytes();
-    // Animated GIFs persist as their raw encoded stream so they replay after a
-    // restart; only still thumbnails are worth PNG-compressing a frame.
+    // Old GIF cache entries contain the raw stream; still entries contain PNG frames.
     let compressed = if thumbnail.animation().is_none() && should_try_png_cache_payload(pixels) {
         let mut png = Vec::new();
         PngEncoder::new_with_quality(&mut png, PngCompressionType::Fast, PngFilterType::Adaptive)
@@ -601,8 +471,7 @@ fn serialize_cached_thumbnail(thumbnail: &Thumbnail) -> image::ImageResult<Vec<u
         |animation| (CACHE_FORMAT_GIF, animation.encoded_bytes()),
     );
 
-    // ThumbHashes are tens of bytes; anything longer is a bug, so drop it
-    // rather than widen the length field.
+    // Drop unexpectedly long ThumbHashes rather than widening the length field.
     let thumbhash = thumbnail
         .thumbhash()
         .filter(|hash| u8::try_from(hash.len()).is_ok());
@@ -644,12 +513,6 @@ fn should_try_png_cache_payload(pixels: &[u8]) -> bool {
     transparent || sampled == 0 || same_as_previous.saturating_mul(8) >= sampled
 }
 
-/// Why a cached payload could not be decoded.
-///
-/// Deliberately not an enum: the sole consumer logs the reason and deletes the
-/// file, so per-cause variants bought 21 names and no dispatch. Three of them
-/// were also unconstructible — the length checks that would have made them
-/// reachable had already returned.
 #[derive(Debug, Error)]
 #[error("corrupt thumbnail cache entry: {0}")]
 struct CacheDecodeError(&'static str);
@@ -760,8 +623,6 @@ fn deserialize_cached_thumbnail(
     Ok(thumbnail)
 }
 
-/// Reads one byte, advancing `offset`. Bounds-checked here rather than
-/// slicing and then re-checking the slice.
 fn take_byte(bytes: &[u8], offset: &mut usize) -> Result<u8, CacheDecodeError> {
     let byte = bytes
         .get(*offset)
@@ -811,8 +672,7 @@ fn thumbnail_cache_files(cache_dir: &Path) -> std::io::Result<Vec<CacheFile>> {
     for entry_result in entries {
         let entry = entry_result?;
         let path = entry.path();
-        // Both tiers live here and share one budget, so both must be indexed
-        // or the source files would be invisible to eviction and grow forever.
+        // Index both tiers so source files count toward eviction.
         let Some(tier) = CacheTier::from_path(&path) else {
             continue;
         };
@@ -835,12 +695,9 @@ fn thumbnail_cache_files(cache_dir: &Path) -> std::io::Result<Vec<CacheFile>> {
 
 #[cfg(test)]
 mod tests {
-    /// Under pressure the cheap-to-rebuild tier must go first. A source costs a
-    /// network fetch to replace; a derived entry costs a local decode.
     #[test]
     fn eviction_sacrifices_derived_entries_before_sources() {
         let root = crate::test_support::TestDir::new("disk-cache-eviction-order");
-        // Room for roughly one derived entry, forcing eviction on the second.
         let cache = WorkerDiskCache::new(root.path().to_path_buf(), 4_096);
         let url = "https://example.invalid/preview.jpg";
 
@@ -881,18 +738,13 @@ mod tests {
         assert_eq!(file_key.disk_file_name(), "c9249628c039637d-128.rgba");
     }
 
-    /// Reading a source must move it out of the firing line. Without this the
-    /// source tier is FIFO on bank order, so the addons a user actually opens
-    /// are evicted in favour of ones they have never looked at.
     #[test]
     fn reading_a_source_saves_it_from_eviction_ahead_of_an_unread_one() {
         let root = TestDir::new("disk-cache-source-lru");
         let read_often = "https://example.invalid/browsed.jpg";
         let never_read = "https://example.invalid/ignored.jpg";
 
-        // Banked through a handle that is then dropped, and backdated — this is
-        // a *previous session's* cache. The index has to come from the files'
-        // own mtimes, which is the state the refresh has to work against.
+        // Reopen a backdated cache from a previous session so eviction must use the files' mtimes.
         {
             let previous_session = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
             write_source_bytes(&previous_session, read_often, &[1_u8; 512]);
@@ -912,8 +764,6 @@ mod tests {
 
         assert!(read_source_bytes(&cache, read_often).is_some());
 
-        // Shrink the budget so exactly one of the two must go, then force an
-        // eviction pass by writing something.
         cache.set_max_bytes(1_200);
         write_source_bytes(&cache, "https://example.invalid/newcomer.jpg", &[3_u8; 512]);
 
@@ -936,19 +786,12 @@ mod tests {
             .expect("fixture mtime is settable");
     }
 
-    /// The preference scan is bounded, so once the window is entirely sources
-    /// it gives up and evicts the oldest thing it found. That fallback is the
-    /// normal state for a warmed large library — every derived entry already
-    /// gone — and an unbounded or non-terminating preference there would mean
-    /// the budget silently stops converging.
     #[test]
     fn eviction_still_converges_when_only_sources_remain() {
         let root = TestDir::new("disk-cache-eviction-all-sources");
         let budget = 4_096_u64;
         let cache = WorkerDiskCache::new(root.path().to_path_buf(), budget);
 
-        // Well past `EVICTION_PREFERENCE_SCAN`, so the window can never contain
-        // a derived entry to prefer.
         for index in 0..(EVICTION_PREFERENCE_SCAN * 2) {
             write_source_bytes(
                 &cache,
@@ -963,19 +806,12 @@ mod tests {
         );
     }
 
-    /// Priming only moves *when* the index is built, never what it answers.
-    /// A cache primed up front and one left to build lazily must agree, or the
-    /// warm filter would drop work the scheduler still needs — or keep work it
-    /// does not.
     #[test]
     fn priming_the_index_answers_the_same_as_building_it_lazily() {
         let root = TestDir::new("disk-cache-prime-index");
         let present = "https://example.invalid/primed-present.png";
         let absent = "https://example.invalid/primed-absent.png";
 
-        // Written through a handle that is then dropped, so the priming cache
-        // below has to discover the file from disk rather than from its own
-        // in-memory bookkeeping.
         {
             let writer = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
             write_source_bytes(&writer, present, &[1, 2, 3, 4]);
@@ -983,8 +819,6 @@ mod tests {
 
         let primed = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
         primed.prime_index();
-        // Twice, because priming must be idempotent — the app races a worker
-        // that may have built it already.
         primed.prime_index();
 
         let lazy = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
@@ -1011,11 +845,6 @@ mod tests {
         assert!(!cache.contains_source(absent));
     }
 
-    /// A second instance sharing this directory evicts against its own private
-    /// index, so a file can vanish under a path this one still has recorded.
-    /// The read is the only operation that finds out, and `contains_source`
-    /// answers from the index alone — so without the repair the URL reads as
-    /// banked forever and warming never re-fetches it.
     #[test]
     fn a_source_deleted_out_of_band_stops_reading_as_banked() {
         let root = TestDir::new("disk-cache-external-eviction");
@@ -1035,10 +864,6 @@ mod tests {
         );
     }
 
-    /// A derived entry is not a source. Warming skips URLs whose *source* is
-    /// banked; if a derived write satisfied that check, warming would never
-    /// bank the source for anything the user had already scrolled past, and
-    /// the next DPI change would re-fetch all of it.
     #[test]
     fn a_derived_entry_does_not_make_a_source_look_present() {
         let root = TestDir::new("disk-cache-derived-is-not-source");
@@ -1102,8 +927,6 @@ mod tests {
         assert_eq!(decoded.rgba_bytes(), thumbnail.rgba_bytes());
     }
 
-    /// The derived payload for an animation is the source stream verbatim, so
-    /// storing it charged one disk budget twice for the same bytes.
     #[test]
     fn an_animation_is_not_written_to_the_derived_tier() {
         let root = TestDir::new("disk-cache-animation-not-derived");
@@ -1128,14 +951,10 @@ mod tests {
         );
     }
 
-    /// The counterpart: a still thumbnail *is* a derivation — resized to this
-    /// key's edge — so it keeps its derived entry.
     #[test]
     fn a_still_thumbnail_is_still_written_to_the_derived_tier() {
         let root = TestDir::new("disk-cache-still-derived");
         let cache = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
-        // The fixture's `max_edge` is its longest side, and `read_disk_cache`
-        // rejects an entry whose edge does not match what is being asked for.
         let key = ThumbnailKey::for_url("https://example.invalid/still.png", 4);
 
         write_disk_cache(&cache, &key, &solid_thumbnail(4, 4, 7));
@@ -1143,11 +962,6 @@ mod tests {
         assert!(read_disk_cache(&cache, &key, 4).is_some());
     }
 
-    /// On-disk compatibility: caches on users' machines still hold
-    /// `CACHE_FORMAT_GIF` payloads, so the reader must keep understanding them.
-    /// Current builds do not produce this payload — `write_disk_cache` writes
-    /// animations to the derived tier — so this exercises the format directly
-    /// rather than a round-trip the app performs.
     #[test]
     fn thumbnails_cached_round_trips_animated_gif() {
         let gif = multi_frame_gif_bytes();
@@ -1186,8 +1000,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Eviction walks the cache directory, so it must consider only the files
-    /// it owns. Anything else living there is not its to delete.
     #[test]
     fn eviction_stays_under_budget_and_leaves_foreign_files_alone() {
         const MAX_BYTES: u64 = 4_096;

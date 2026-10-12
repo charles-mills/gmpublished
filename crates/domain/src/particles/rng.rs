@@ -1,13 +1,8 @@
-//! Deterministic random sampling and coherent noise.
-
 use super::*;
 
-/// Scalar linear interpolation, for the noise field's per-component blend.
 fn scalar_lerp(start: f32, end: f32, fraction: f32) -> f32 {
     fraction.mul_add(end - start, start)
 }
-
-// --- Deterministic RNG ---------------------------------------------------
 
 /// PCG32; deterministic so a restarted preview replays identically.
 #[derive(Clone, Debug)]
@@ -77,14 +72,11 @@ impl Rng {
         loop {
             let sample = u64::from(self.next_u32());
             if sample < unbiased_zone {
-                // `sample % width` is at most `max - min`, so the sum is
-                // proven to remain in the requested i32 interval.
                 return (i64::from(min) + (sample % width) as i64) as i32;
             }
         }
     }
 
-    /// Uniform direction, componentwise-scaled by `bias` then renormalized.
     pub(super) fn biased_unit_vector(&mut self, bias: Vec3) -> Vec3 {
         for _ in 0..16 {
             let v = Vec3::new(
@@ -101,8 +93,7 @@ impl Rng {
     }
 }
 
-/// Cheap value noise in [-1, 1]; smooth in its argument. Stands in for
-/// Source's Perlin-style curl noise where only "coherent wobble" matters.
+/// Value noise in [-1, 1], approximating Source's Perlin-style curl noise.
 pub(super) fn value_noise(x: f32, y: f32, z: f32, w: f32) -> f32 {
     fn hash(mut n: u32) -> f32 {
         n = (n ^ 61) ^ (n >> 16);
@@ -132,8 +123,7 @@ pub(super) fn value_noise(x: f32, y: f32, z: f32, w: f32) -> f32 {
         smooth(z - fz),
         smooth(w - fw),
     );
-    // Bilinear over (x, w) at the two (y, z) corners kept nearest; a full
-    // 4D lattice is overkill for a visual wobble source.
+    // Approximate 4D noise with bilinear samples over x and w at the nearest y and z corners.
     let corner = |dx: i32, dw: i32| {
         let a = cell(ix + dx, iy, iz, iw + dw);
         let b = cell(ix + dx, iy + 1, iz + 1, iw + dw);
@@ -146,8 +136,7 @@ pub(super) fn value_noise(x: f32, y: f32, z: f32, w: f32) -> f32 {
     )
 }
 
-/// Stable per-particle random in [min, max]: operators like fade-out draw a
-/// random duration per particle that must not change between frames.
+/// Keep each particle's random duration stable between frames.
 pub(super) fn deterministic_range(spawn_index: u32, salt: u32, min: f32, max: f32) -> f32 {
     let mut n = spawn_index
         .wrapping_mul(0x9E37_79B9)

@@ -17,10 +17,7 @@ use crate::bridge::gma::is_gma_path;
 use crate::generation::Generation;
 
 const QUIET_WINDOW: Duration = Duration::from_secs(1);
-/// Sustained disk churn (e.g. Steam mass-updating workshop items) never
-/// produces a quiet window, so cap how long a burst can defer the refresh:
-/// the library catches up live during the storm instead of freezing on
-/// whatever the launch scan saw.
+/// Cap debounce latency so continuous Steam updates cannot defer refreshes forever.
 const STORM_MAX_LATENCY: Duration = Duration::from_secs(5);
 const WATCH_EVENT_QUEUE: usize = 100;
 

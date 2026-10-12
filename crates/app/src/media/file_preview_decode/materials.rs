@@ -15,14 +15,6 @@ pub(super) fn resolve_map_material_slots_parallel(
     map_material_resolution_from_results(material_names, resolved)
 }
 
-/// The differential oracle for [`resolve_map_material_slots_parallel`].
-///
-/// Not a duplicate of it: both build their results through
-/// [`map_material_resolution_from_results`], and the only difference is the
-/// iteration strategy — which is precisely what
-/// `parallel_material_resolution_matches_serial_slots_in_order` exists to
-/// compare. Deleting this would delete the check that the parallel path keeps
-/// slot order.
 #[cfg(test)]
 pub(super) fn resolve_map_material_slots_serial(
     material_names: &[String],
@@ -160,9 +152,6 @@ pub(super) fn resolve_map_overlays(
     }
 }
 
-/// Resolve unique overlay materials across worker threads before the serial
-/// index-assignment pass — the same shape as the prop pre-resolve; slot order
-/// stays first-encounter and counters only move in the serial pass.
 pub(super) fn pre_resolve_overlay_materials(
     overlays: &[MapOverlay],
     table: &MaterialTable,
@@ -243,7 +232,6 @@ pub(super) fn push_map_material_slot(
 ) -> usize {
     let texture = resolved.and_then(|material| material.texture.as_ref().map(Arc::clone));
     let texture2 = resolved.and_then(|material| material.texture2.as_ref().map(Arc::clone));
-    // Unindexed: the caller decides whether this slot is reachable by name.
     table.push_unindexed(MaterialSlot {
         name: name.to_owned(),
         texture,

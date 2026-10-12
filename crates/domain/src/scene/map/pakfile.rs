@@ -1,12 +1,7 @@
-//! BSP pakfile data and extraction limits.
-
 use super::{BspError, Limits, ZipReader, fmt, normalize_source_path};
 
 pub const MAX_PAKFILE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 
-/// The embedded pakfile lump's raw bytes. Parsed on demand via
-/// [`ZipReader`] (its reader borrows, so it cannot be cached across
-/// calls the way vbsp's `Packfile` cached an owned `zip::ZipArchive`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapPakFile {
     bytes: Vec<u8>,
@@ -24,9 +19,6 @@ impl MapPakFile {
         Self { bytes }
     }
 
-    /// A malformed central directory, if the lump is not a readable ZIP
-    /// archive (tolerated: an absent/corrupt pakfile just means no
-    /// bundled content, not a `load_map` failure).
     pub fn read_error(&self) -> Option<String> {
         ZipReader::parse(&self.bytes)
             .err()
@@ -106,8 +98,6 @@ pub(super) fn is_pakfile_entry_oversized(size_bytes: u64) -> bool {
     size_bytes > MAX_PAKFILE_ENTRY_BYTES
 }
 
-/// The pakfile reader has its own error type; it carries no structure worth
-/// preserving beyond its message.
 pub(super) fn pakfile_error(error: impl fmt::Display) -> BspError {
     BspError::Pakfile {
         message: error.to_string(),

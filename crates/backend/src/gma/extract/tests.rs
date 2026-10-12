@@ -217,9 +217,6 @@ fn existing_destination(root: &Path) -> PathBuf {
     path
 }
 
-/// The settings UI offers Overwrite as an alternative to Delete, so it must
-/// not delete: files the GMA does not contain survive, files it does are
-/// replaced.
 #[test]
 fn overwrite_mode_replaces_gma_files_and_keeps_the_rest() {
     let fixture = with_overwrite_mode(&ExtractionOverwriteMode::Overwrite);
@@ -245,9 +242,6 @@ fn overwrite_mode_replaces_gma_files_and_keeps_the_rest() {
     assert_transaction_finished_with_full_progress(&fixture.collector, &existing);
 }
 
-/// Overwrite writes into the existing tree instead of clearing it, so a stale
-/// *file* where the GMA needs a *directory* is a collision the delete-first
-/// modes never see. It must fail the extraction rather than half-write it.
 #[test]
 fn overwrite_mode_fails_when_a_stale_file_blocks_a_gma_directory() {
     let fixture = with_overwrite_mode(&ExtractionOverwriteMode::Overwrite);
@@ -257,7 +251,6 @@ fn overwrite_mode_fails_when_a_stale_file_blocks_a_gma_directory() {
     let extract_root = temp.path().join("extract");
     let existing = extract_root.join(FIXTURE_EXTRACTED_NAME);
     std::fs::create_dir_all(&existing).expect("existing destination");
-    // The GMA needs `lua/autorun/` to be a directory.
     std::fs::write(existing.join("lua"), "not a directory").expect("blocking file");
 
     let result = fixture.extract(&gma, ExtractDestination::NamedDirectory(extract_root));
@@ -423,8 +416,6 @@ fn suffix_exhaustion_errors_instead_of_falling_back_to_parent() {
     });
 
     assert!(matches!(result, Err(GmaError::DestinationUnavailable)));
-    // The pre-existing destination is untouched: cleanup failed, so nothing
-    // was ever removed, and no fallback path was written into either.
     assert!(existing.join("stale.txt").exists());
 }
 
@@ -615,9 +606,6 @@ fn partial_entry_failure_reports_error_with_counts() {
     let view = gma.view().expect("fixture view");
 
     let destination = temp.path().join("partial-failure-dest");
-    // "blocked" is a plain file, not a directory: the "blocked/bad.lua"
-    // entry can never create its parent directory and fails to write,
-    // while the unrelated "good.lua" entry still succeeds.
     std::fs::create_dir_all(&destination).expect("destination");
     std::fs::write(destination.join("blocked"), b"not a directory").expect("blocking file");
 
@@ -736,7 +724,6 @@ fn refuses_to_extract_through_a_pre_existing_symlinked_directory() {
         other => panic!("expected ExtractionFailed, got {other:?}"),
     }
     assert!(!outside.join("payload.lua").exists());
-    // The symlink itself is left alone; only writing through it is refused.
     assert!(destination.join("evil").is_symlink());
 }
 

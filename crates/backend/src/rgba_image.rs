@@ -1,8 +1,3 @@
-//! Raw RGBA image buffer for Steam avatars.
-//!
-//! Holds raw RGBA pixel bytes directly, with no built-in encoding; see
-//! `steam::runtime::SteamAvatarRgba` for how they're consumed.
-
 use std::fmt;
 
 #[derive(Clone)]
@@ -15,13 +10,6 @@ pub struct RgbaImage {
 impl RgbaImage {
     const BYTES_PER_PIXEL: usize = 4;
 
-    /// Builds an image from raw RGBA bytes, or `None` when `img` is not
-    /// exactly `width * height * 4` bytes.
-    ///
-    /// The dimensions are how every consumer reads the buffer, so one that
-    /// disagrees with them is not a smaller image — it is an image that reads
-    /// past its own end or renders garbage. Checking here is what makes the
-    /// type's name true, rather than a hope about its constructor's callers.
     #[must_use]
     pub fn try_new(img: Vec<u8>, width: u32, height: u32) -> Option<Self> {
         let expected = (width as usize)
@@ -72,8 +60,6 @@ mod tests {
         );
     }
 
-    /// A zero dimension is only valid alongside an empty buffer, and the
-    /// dimension product must not wrap on the way to that check.
     #[test]
     fn degenerate_dimensions_do_not_wrap_into_a_passing_size() {
         assert!(RgbaImage::try_new(Vec::new(), 0, 0).is_some());

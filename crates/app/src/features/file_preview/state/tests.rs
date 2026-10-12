@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::bridge::materials::RenderMode;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::generation::Generation;
-use crate::media::preview_model::ModelVertex;
 use crate::media::preview_model::{InfoReason, PreviewContent};
 use crate::media::preview_model::{
     MapFog, MapPreview, MapStats, MaterialSlot, MeshData, ModelPreview, ModelStats, RenderScene,
@@ -349,98 +347,10 @@ fn truncated_code_loaded_state_is_preserved() {
 }
 
 #[test]
-fn model_loaded_state_round_trips_through_apply_loaded() {
-    let mut state = State::default();
-    let request = state.begin_open(request("models/test/thing.mdl"));
-    let data = PreviewData::from_request(
-        &request,
-        PreviewContent::Model(Arc::new(ModelPreview {
-            scene: render_scene(
-                vec![MeshData {
-                    vertices: vec![ModelVertex {
-                        position: Vec3::new(0.0, 1.0, 2.0),
-                        normal: Vec3::new(0.0, 0.0, 1.0),
-                        uv: [0.5, 0.75],
-                        lightmap_uv: [0.0; 2],
-                        color: Vec3::splat(1.0),
-                        blend_alpha: 0.0,
-                    }],
-                    indices: vec![0],
-                    material_index: 0,
-                    bodygroup: 0,
-                    bodygroup_choice: 0,
-                }],
-                vec![MaterialSlot {
-                    name: "models/test/thing".to_owned(),
-                    texture: None,
-                    texture2: None,
-                    force_opaque: true,
-                    render_mode: RenderMode::Opaque,
-                }],
-                Vec::new(),
-                ModelStats {
-                    bone_count: 1,
-                    sequence_count: 2,
-                    vertex_count: 1,
-                    triangle_count: 0,
-                    mesh_count: 1,
-                    material_count: 1,
-                    resolved_material_count: 0,
-                },
-                Vec3::new(0.0, 1.0, 2.0),
-                Vec3::new(0.0, 1.0, 2.0),
-            ),
-            skin_tables: vec![vec![0], vec![0]],
-            bodygroups: vec![2],
-        })),
-    );
-
-    assert!(state.apply_loaded(request.request_id, Ok(data.clone())));
-
-    assert_eq!(state.current(), Some(&data));
-    assert_eq!(state.bodygroup_choices(), &[0]);
-    assert_eq!(state.selected_skin(), 0);
-}
-
-#[test]
-fn map_loaded_state_round_trips_through_apply_loaded() {
+fn loading_a_map_with_fog_exposes_only_the_available_controls() {
     let mut state = State::default();
     let request = state.begin_open(request("maps/test.bsp"));
-    let scene = Arc::new(empty_map(render_scene(
-        vec![MeshData {
-            vertices: vec![ModelVertex {
-                position: Vec3::new(0.0, 1.0, 2.0),
-                normal: Vec3::new(0.0, 0.0, 1.0),
-                uv: [0.5, 0.75],
-                lightmap_uv: [0.0; 2],
-                color: Vec3::splat(1.0),
-                blend_alpha: 0.0,
-            }],
-            indices: vec![0],
-            material_index: 0,
-            bodygroup: 0,
-            bodygroup_choice: 0,
-        }],
-        vec![MaterialSlot {
-            name: "brick/wall".to_owned(),
-            texture: None,
-            texture2: None,
-            force_opaque: true,
-            render_mode: RenderMode::Opaque,
-        }],
-        Vec::new(),
-        ModelStats {
-            bone_count: 0,
-            sequence_count: 0,
-            vertex_count: 1,
-            triangle_count: 0,
-            mesh_count: 1,
-            material_count: 1,
-            resolved_material_count: 0,
-        },
-        Vec3::new(0.0, 1.0, 2.0),
-        Vec3::new(0.0, 1.0, 2.0),
-    )));
+    let scene = Arc::new(empty_map(blank_scene()));
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Map {
@@ -606,7 +516,9 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
             bodygroups: vec![3],
         })),
     );
-    state.apply_loaded(request.request_id, Ok(data));
+    assert!(state.apply_loaded(request.request_id, Ok(data)));
+    assert_eq!(state.selected_skin(), 0);
+    assert_eq!(state.bodygroup_choices(), &[0]);
 
     state.select_skin(1);
     state.select_bodygroup_choice(0, 2);

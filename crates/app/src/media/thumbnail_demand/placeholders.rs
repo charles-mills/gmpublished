@@ -1,7 +1,3 @@
-//! ThumbHash placeholders: the per-URL hashes the manager remembers, and the
-//! blurred stand-in images decoded from them that paint before real pixels
-//! arrive.
-
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use iced::widget::image;
@@ -9,28 +5,13 @@ use quick_cache::unsync::Cache;
 
 use crate::media::thumbnail_worker::normalized_url;
 
-/// Placeholder images held at once.
-///
-/// A retained row window is four times the visible count (see
-/// [`super::prefetch_ranges`]), so this covers several windows across every
-/// owner at roughly 4 KB each.
 const PLACEHOLDER_CACHE_ITEMS: usize = 512;
 
 type PlaceholderCache = Cache<Arc<str>, PlaceholderImage>;
 
-/// Preview-URL ThumbHashes and the placeholder images decoded from them.
 pub(super) struct PlaceholderStore {
-    /// ThumbHashes seeded from the metadata snapshot and topped up by
-    /// completions.
-    ///
-    /// Unbounded on purpose: ~25 bytes per addon, and nothing re-reads the
-    /// snapshot, so an evicted hash costs that row its placeholder for good.
+    /// Keep all hashes; the snapshot is only read once, and each is about 25 bytes.
     thumbhashes: HashMap<Arc<str>, Arc<[u8]>>,
-    /// Placeholders decoded from [`Self::thumbhashes`], kept so a scrolled row
-    /// reuses a stable handle instead of re-uploading.
-    ///
-    /// Bounded, unlike the hashes: each entry holds a GPU-uploadable handle,
-    /// and a miss costs one small decode.
     decoded: PlaceholderCache,
 }
 
@@ -54,8 +35,6 @@ impl PlaceholderStore {
         }
     }
 
-    /// Returns (decoding and caching once per URL) the placeholder image for a
-    /// URL whose ThumbHash we know, or `None` if we don't or it won't decode.
     pub(super) fn get(&mut self, url: &str) -> Option<PlaceholderImage> {
         let url = normalized_url(url);
         if let Some(placeholder) = self.decoded.get(url) {
@@ -69,7 +48,6 @@ impl PlaceholderStore {
     }
 }
 
-/// Tiny ThumbHash-decoded image the GPU upscales into a blurred placeholder.
 #[derive(Clone)]
 pub struct PlaceholderImage {
     handle: image::Handle,
@@ -127,9 +105,6 @@ fn decode_placeholder(hash: &[u8]) -> Option<PlaceholderImage> {
 mod tests {
     use super::*;
 
-    /// Placeholders hold GPU-uploadable handles, so the map that keeps them is
-    /// bounded while the ~25-byte hashes they derive from are not. A URL whose
-    /// placeholder has been evicted still paints — it just decodes again.
     #[test]
     fn placeholders_are_capped_while_the_hashes_they_derive_from_are_kept() {
         let mut store = PlaceholderStore::default();
@@ -155,13 +130,9 @@ mod tests {
             "placeholder cache held {} entries",
             store.decoded.len()
         );
-        // The evicted end still resolves, because the hash behind it survived.
         assert!(store.get(&url(0)).is_some());
     }
 
-    /// Seeds come straight off Steam metadata, where a stray-whitespace URL is
-    /// possible; lookups come through a `ThumbnailKey`, which already
-    /// normalized. Both have to land on the same key.
     #[test]
     fn a_seeded_url_is_found_however_it_was_padded() {
         let mut store = PlaceholderStore::default();

@@ -4,7 +4,6 @@ use crate::theme::Tokens;
 
 use super::{ChromeStrategy, Effect, Message, State, UPSTREAM_REPO_URL};
 
-/// Applies a shell message and returns outward effects as plain data.
 pub fn update_at(
     state: &mut State,
     message: Message,

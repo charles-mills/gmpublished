@@ -66,9 +66,7 @@ impl App {
             return self.modal_stack_task(&modal_stack::Message::CloseRequested, update);
         }
 
-        // Settings only shields itself while it is the TOPMOST layer; with
-        // the Destination Select overlay above it, close requests target the
-        // overlay.
+        // Settings blocks close requests only while it is the top layer.
         if self.state.features.modal_stack.active() == Some(modal_stack::ActiveModal::Settings)
             && self.state.features.settings.blocks_scrim_close()
         {
@@ -142,19 +140,14 @@ impl App {
             }
             window::Event::Focused => {
                 self.state.set_window_focused(true);
-                // Idempotent insurance: AppKit can rebuild the titlebar while
-                // the window is in the background (e.g. appearance change),
-                // resetting the custom traffic-light frames.
+                // AppKit can reset the traffic-light frames while the window is in the background.
                 self.traffic_light_position_task(id)
             }
             window::Event::Unfocused => {
                 self.state.set_window_focused(false);
                 Task::none()
             }
-            // Resizes are handled natively: the keepalive observer re-asserts
-            // the traffic-light treatment synchronously inside each resize
-            // layout pass, which an async round-trip through this message
-            // loop is always at least a frame too late for.
+            // Resize layout runs natively; an async reposition would arrive a frame late.
             window::Event::Closed
             | window::Event::Resized(_)
             | window::Event::Moved(_)
@@ -188,10 +181,7 @@ impl App {
         Task::none()
     }
 
-    /// Installs the native observer that keeps the traffic-light treatment
-    /// applied through live resizes. Installed unconditionally (once, at
-    /// window open) because the titlebar mode can be switched at runtime;
-    /// the observer itself no-ops while the system titlebar is active.
+    /// Install once even with the system titlebar active; the user can switch modes later.
     #[cfg(target_os = "macos")]
     fn traffic_light_keepalive_task(&self, id: window::Id) -> Task<RootMessage> {
         let tokens = self.state.tokens;
@@ -262,8 +252,6 @@ impl App {
         iced::clipboard::write(text)
     }
 
-    /// Loads a fresh settings snapshot and opens the chooser with the
-    /// caller's context (confirm label, extracted name, forced folder).
     pub(super) fn destination_select_open_task(
         &mut self,
         context: destination_select::OpenContext,
@@ -275,8 +263,6 @@ impl App {
         })
     }
 
-    /// Persists the create-folder checkbox immediately without closing the
-    /// chooser or touching the pending destination choice.
     pub(super) fn destination_select_create_folder_task(&self, enabled: bool) -> Task<RootMessage> {
         self.environment
             .ctx
@@ -508,9 +494,6 @@ impl App {
         }
     }
 
-    /// Drives a fake correlated transaction from a background thread so the
-    /// simulated toast exercises the same event path as real work,
-    /// cancellation included.
     #[cfg(feature = "debug")]
     fn simulate_toast_task(&self, kind: context_menu::SimulatedToast) -> Task<RootMessage> {
         use gmpublished_backend::TransactionPayload;
@@ -703,9 +686,6 @@ impl App {
         self.destination_select_open_task(context)
     }
 
-    /// Context-menu extraction rides the Destination Select overlay:
-    /// dismissing it drops the queued paths, a successful save extracts
-    /// them, and a failed save leaves the overlay open showing the error.
     pub(super) fn context_menu_destination_dismissed_task(&mut self) -> Task<RootMessage> {
         self.state.context_menu_extraction.clear();
         Task::none()

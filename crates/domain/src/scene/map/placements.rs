@@ -1,5 +1,3 @@
-//! Render-facing BSP prop, sprite, and overlay placements.
-
 use super::{
     BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropSolid, MapPropVisibility,
     MapVisibilityBucket, Overlay, SkyboxPartition, StaticProp, StaticPropPlacement,
@@ -97,10 +95,6 @@ fn static_prop_leaf_visibility(
             return MapPropVisibility::Always;
         };
         if cluster_in_range(leaf.cluster, cluster_count) {
-            // `cluster_in_range` above has already established the cluster is
-            // non-negative and within count, so this cannot fail. Landing on
-            // cluster 0 instead would attribute the prop to the wrong cell and
-            // look like a visibility bug rather than a conversion one.
             let Ok(cluster) = u32::try_from(leaf.cluster) else {
                 debug_assert!(false, "cluster_in_range admitted a negative cluster");
                 continue;
@@ -250,8 +244,7 @@ pub(super) fn partitioned_detail_sprite_placements(
     let mut skybox = Vec::new();
     let cluster_count = bsp.cluster_count();
     for prop in bsp.detail_props_iter() {
-        // vformats names the kind byte `prop_type` and the dict index
-        // `model_index` — the reverse of vbsp's `detail_type`/`prop_type`.
+        // vformats prop_type is vbsp detail_type; model_index is vbsp prop_type.
         if prop.prop_type != DETAIL_PROP_TYPE_SPRITE {
             continue;
         }
@@ -315,10 +308,6 @@ pub(super) fn partitioned_map_overlays(
     (visible, skybox)
 }
 
-/// The overlay projection basis: just the fields
-/// [`overlay_quad_positions`] needs, decoupled from
-/// [`vformats::bsp::Overlay`] (whose packed face-table fields are
-/// private) so tests can build fixtures with a plain struct literal.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct OverlayBasis {
     pub(super) id: i32,
@@ -344,12 +333,9 @@ pub(super) fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[Vec3; 4]>
         log::debug!("bsp overlay {} skipped: invalid basis normal", overlay.id);
         return None;
     }
-    // vbsp packs the overlay's real U basis into the z components of the
-    // first three UV points and flags a flipped V basis via
-    // uv_points[3].z == 1.0 (source-sdk-2013 utils/vbsp/overlay.cpp:
-    // vecUVPoints[i].z = vecBasis[0][i]; [3].z = 1.0 when
-    // normal.cross(basisU) . basisV < 0). The xy pairs are corner
-    // coordinates in that basis — z is NOT a normal offset.
+    // vbsp packs BasisU in uv_points[0..3].z and the V-flip flag in [3].z.
+    // The xy pairs are corners in that basis; z is not a normal offset.
+    // See source-sdk-2013 utils/vbsp/overlay.cpp.
     let uv_points = overlay.uv_points;
     let u_axis = Vec3::new(uv_points[0][2], uv_points[1][2], uv_points[2][2]).normalize_or_zero();
     if !vector_is_finite_nonzero(u_axis) {

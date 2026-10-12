@@ -21,9 +21,6 @@ pub use view::view;
 
 const SUBMIT_SPINNER_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 
-/// Both clocks are strictly gated: the icon clock runs only while an animated
-/// GIF icon is selected and the spinner clock only while a publish is running,
-/// keeping the idle app at 0% CPU.
 pub fn subscription(state: &State) -> Subscription<Message> {
     let mut clocks = Vec::with_capacity(2);
     if state.has_active_icon_animation() {

@@ -8,7 +8,6 @@ use crate::bridge::{
 use gmpublished_backend::{SteamRuntimeError, Transaction, publishing as steam_publishing};
 use std::path::Path;
 
-/// Workshop publishing capability exposed to app features.
 #[derive(Clone, Copy)]
 pub struct PublishService<'a> {
     inner: &'a BackendServices,

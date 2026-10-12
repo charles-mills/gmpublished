@@ -67,8 +67,6 @@ impl Row {
         match &self.thumbnail {
             RowThumbnail::Loading => addon_card::Thumbnail::Loading,
             RowThumbnail::Dead => addon_card::Thumbnail::Dead,
-            // The GPU upscales the tiny placeholder into a blur; the sharp
-            // image fades in over it when it decodes.
             RowThumbnail::Placeholder(handle) => addon_card::Thumbnail::Placeholder(handle.clone()),
             RowThumbnail::Ready { still, animation } => {
                 let handle = match animation {
@@ -232,15 +230,11 @@ impl Row {
         true
     }
 
-    /// Whether this row would animate right now, given the user's default.
-    /// The pane reaches the same decision inside `advance_animation`; this
-    /// exposes it for the policy tests below.
     #[cfg(test)]
     pub(super) fn has_active_animation(&self, play_gifs_by_default: bool) -> bool {
         self.holds_animation() && self.thumbnail_should_play(play_gifs_by_default)
     }
 
-    /// Whether a playable animation exists at all, regardless of policy.
     pub(super) fn holds_animation(&self) -> bool {
         matches!(
             self.thumbnail,
@@ -361,7 +355,6 @@ impl GridRow for Row {
         &self,
         priority: thumbnail_demand::Priority,
     ) -> Option<thumbnail_demand::Demand> {
-        // A placeholder still wants its real pixels; both states demand.
         if !matches!(
             self.thumbnail,
             RowThumbnail::Loading | RowThumbnail::Placeholder(_)
@@ -503,9 +496,6 @@ pub fn resolve_metadata(
     }
 }
 
-/// Projects Workshop metadata into the patches understood by installed rows.
-/// Streaming and chunk scheduling belong to the caller; this function only
-/// performs the per-batch conversion.
 pub fn metadata_patches(metadata: &[WorkshopMetadata]) -> Vec<MetadataPatch> {
     metadata
         .iter()
@@ -560,7 +550,6 @@ mod tests {
             Generation::INITIAL,
         ));
         assert!(matches!(row.thumbnail, RowThumbnail::Placeholder(_)));
-        // Still demanding the sharp image while the placeholder paints.
         assert!(
             row.thumbnail_demand(thumbnail_demand::Priority::VisibleRow)
                 .is_some()

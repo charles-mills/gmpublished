@@ -1,5 +1,3 @@
-//! Search-palette visibility and animated presence.
-
 use iced::animation::Easing;
 
 use crate::theme::{self, motion};

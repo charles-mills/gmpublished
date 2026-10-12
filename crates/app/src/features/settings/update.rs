@@ -217,9 +217,6 @@ mod tests {
         )
     }
 
-    /// Saves run on the multi-worker runtime, so a slow earlier save can
-    /// complete after a later one. Adopting its snapshot would silently revert
-    /// the newer edit in the UI while the newer value is what is on disk.
     #[test]
     fn a_save_completing_after_a_later_edit_is_discarded() {
         let mut state = State::default();

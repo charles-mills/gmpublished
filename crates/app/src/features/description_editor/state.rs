@@ -15,8 +15,7 @@ use crate::media::thumbnail_worker::ThumbnailInput;
 use crate::media::{thumbnail_animation, thumbnail_demand};
 use crate::widgets::bbcode::{self, MediaLookup, MediaView};
 
-/// Steam's description length ceiling, shared with the backend validator so
-/// the header counter and the submit guard can never disagree.
+/// Keep the counter and submit guard on the same Steam byte limit.
 pub(super) const DESCRIPTION_MAX_BYTES: usize =
     gmpublished_backend::publishing::WORKSHOP_DESCRIPTION_MAX_BYTES;
 
@@ -30,10 +29,8 @@ const fn thumbnail_owner() -> thumbnail_demand::Owner {
     thumbnail_demand::Owner::DescriptionEditor
 }
 
-/// Fetch images at the Workshop column's display width.
 const MEDIA_MAX_EDGE: u32 = bbcode::STEAM_DESCRIPTION_WIDTH as u32;
 
-/// Source editor content with value semantics for state snapshots.
 #[derive(Debug, Default)]
 pub struct SourceContent(text_editor::Content);
 
@@ -98,8 +95,7 @@ impl SourceContent {
         self.0.selection()
     }
 
-    /// The caret's line and its byte offset within that line (the editor
-    /// reports the cursor column as a byte index).
+    /// The editor reports cursor columns as byte offsets, not character counts.
     pub(super) fn cursor_line(&self) -> Option<(String, usize)> {
         let position = self.0.cursor().position;
         let line = self.0.line(position.line)?;
@@ -123,7 +119,6 @@ impl PartialEq for SourceContent {
     }
 }
 
-/// One fetched media source for the live preview.
 #[derive(Debug)]
 enum MediaEntry {
     Ready {
@@ -145,8 +140,6 @@ enum LoadPhase {
     Ready,
 }
 
-/// What a session edits: a live Workshop item, or a local draft staged into
-/// a pending creation by the publish flow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionTarget {
     Existing(PublishedFileId),
@@ -164,7 +157,6 @@ struct Session {
     phase: LoadPhase,
     saving: bool,
     source: SourceContent,
-    /// The text as fetched (or last saved); dirtiness is divergence from it.
     initial: String,
     document: BbCodeDocument,
     revealed_spoilers: HashSet<SpoilerId>,
@@ -289,8 +281,6 @@ impl State {
         self.generation.bump()
     }
 
-    /// Opens over a local draft: no fetch, and saving stages the text back to
-    /// the caller instead of submitting to Steam.
     pub(super) fn open_draft(&mut self, title: String, initial: &str) -> Generation {
         self.inactive.clear();
         self.saving_language = None;
@@ -311,7 +301,6 @@ impl State {
         self.saving_language = None;
         self.save_failed = None;
         self.last_animation_tick = None;
-        // Invalidates any in-flight fetch, save, and thumbnail deliveries.
         self.generation.bump();
     }
 
@@ -585,7 +574,6 @@ impl State {
         }
     }
 
-    /// Records a successful save: the current text becomes the new baseline.
     pub(super) fn mark_saved(&mut self) -> Option<(WorkshopLanguage, WorkshopText)> {
         let language = self.saving_language.take().unwrap_or(self.language);
         let session = if language == self.language {
@@ -674,8 +662,6 @@ impl State {
         self.session.as_ref()?.source.cursor_line()
     }
 
-    /// Re-derives the parsed document after an edit and drops media entries
-    /// for sources the description no longer references.
     pub(super) fn reparse(&mut self) {
         let Some(session) = self.session.as_mut() else {
             return;
@@ -744,10 +730,8 @@ impl State {
         let Some(url) = delivery.id.row_key() else {
             return false;
         };
-        // A delivery can land after the edit that removed its tag; storing it
-        // anyway would park an invisible entry in the map — and a Ready GIF
-        // there keeps the animation subscription ticking until the next edit
-        // prunes it.
+        // Ignore deliveries for removed tags or an invisible GIF can keep the animation
+        // clock running.
         if !bbcode::media_urls(&session.document)
             .iter()
             .any(|referenced| referenced == url)
@@ -769,8 +753,6 @@ impl State {
                 );
                 true
             }
-            // The preview shows its own loading box; ThumbHash placeholders
-            // stay unused until delivered images replace them anyway.
             thumbnail_demand::DeliveryResult::Placeholder(_) => false,
             thumbnail_demand::DeliveryResult::Failed { .. } => {
                 session.media.insert(url.to_owned(), MediaEntry::Failed);
@@ -788,8 +770,6 @@ impl State {
         had_media
     }
 
-    /// GIFs in the preview play while the editor is open and the window is
-    /// focused — the same always-on behavior as the live Workshop page.
     pub(crate) fn has_active_animation(&self) -> bool {
         (self.window_focused || !self.focus_initialized)
             && self.session.as_ref().is_some_and(|session| {
@@ -805,7 +785,6 @@ impl State {
             })
     }
 
-    /// Advances every playing animation; reports whether a frame changed.
     pub(super) fn advance_animations(&mut self, now: Instant) -> bool {
         let Some(last_tick) = self.last_animation_tick.replace(now) else {
             return false;
@@ -856,8 +835,7 @@ impl MediaLookup for State {
     }
 }
 
-/// The text a save would submit: surrounding whitespace never survives the
-/// round trip through Steam, so it does not count as a difference either.
+/// Ignore surrounding whitespace when checking for edits; Steam strips it on save.
 fn trimmed_source(source: &SourceContent) -> String {
     normalize(&source.text())
 }

@@ -1,10 +1,3 @@
-//! Decoding for the file previewer: fonts, images, VTF/model/particle assets,
-//! BSP prop baking, and source highlighting.
-//!
-//! The `impl App` methods that schedule this live in `app/`, and so does the
-//! translation of what comes back into application messages — nothing here
-//! touches the message loop.
-
 use gmpublished_domain::math::Vec3;
 use std::{
     collections::{HashMap, HashSet},
@@ -83,11 +76,6 @@ const MAP_DETAIL_SPRITE_PLACEMENT_CAP: usize = 65_536;
 const SKYBOX_FACE_DIMENSION_CAP: u32 = 2048;
 const PHY_DEBUG_VERTEX_COLOR: Vec3 = Vec3::new(0.5, 0.5, 0.5);
 
-/// Decodes one preview, reporting progress through `on_stage`.
-///
-/// Takes a callback rather than a message sender so this module owes nothing
-/// to the UI framework: what a stage *means* to the app — which message it
-/// becomes, which route it reaches — is the caller's to decide.
 pub fn load_preview(
     request: &PreviewRequest,
     tokens: &Tokens,
@@ -132,9 +120,7 @@ fn load_preview_data(
     };
     on_stage(initial_load_stage(entry_class));
     let bytes = request.archive.entry_bytes(&request.entry_path)?;
-    // Loose-folder entries carry crc32 = 0, which would collide the
-    // size-derived content_id for same-size files; derive the real one now
-    // that the bytes are in hand.
+    // Loose-folder CRCs are zero; hash the bytes to distinguish same-size files.
     if request.crc32 == 0 {
         request.crc32 = crc32fast::hash(&bytes);
     }
@@ -651,9 +637,6 @@ fn model_preview_data(
     )
 }
 
-/// VVD + VTX companion bytes for a `.mdl` stem, trying VTX variants in
-/// order (`.dx90.vtx`, then `.dx80.vtx`, then plain `.vtx`). `log_context`
-/// names the caller for the "missing companion" debug logs.
 fn load_model_companions(
     stem: &str,
     log_context: &str,

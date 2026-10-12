@@ -10,13 +10,9 @@ use crate::widgets::route_state::{self, Glyph, RouteState, Tone};
 use super::state::Library;
 use super::{Message, State};
 
-/// Identifies this route's grid across route switches; see `addon_grid::view`.
 pub const GRID_KEY: &str = "installed-addons-grid";
 
 pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
-    // A found-but-empty library is the same shape of surface as a missing
-    // prerequisite, so it uses the same panel — the difference is the glyph
-    // (no strike) and the tone (nothing is wrong, there is just nothing here).
     if matches!(state.library(), Library::Scanned(rows) if rows.is_empty()) {
         return route_state::view(
             RouteState::new(
@@ -61,8 +57,6 @@ fn header_line<'a>(state: &State, ctx: ViewCtx<'a>) -> Option<Element<'a, Messag
 
 fn status_line(state: &State, i18n: &I18n) -> Option<String> {
     match state.library() {
-        // A completed scan says everything it needs to through the grid, or —
-        // when it found nothing — through the panel in `view`.
         Library::Unscanned | Library::Scanned(_) => None,
         Library::Scanning => Some(i18n.tr("installed-addons-loading")),
         Library::Failed(error) => Some(i18n.trn(

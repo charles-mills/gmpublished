@@ -10,7 +10,6 @@ use crate::bridge::{
 };
 use gmpublished_backend::{Transaction, TransactionId, TransactionPayload};
 
-/// Installed-content search capability exposed to app features.
 #[derive(Clone, Copy)]
 pub struct SearchService<'a> {
     inner: &'a BackendServices,

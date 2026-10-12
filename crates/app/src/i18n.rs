@@ -1,5 +1,3 @@
-//! Fluent-backed runtime localization for the Iced UI.
-
 use std::io::Read as _;
 use std::rc::Rc;
 use std::{fmt, sync::OnceLock};
@@ -17,18 +15,9 @@ struct LocaleCatalog {
 
 include!(concat!(env!("OUT_DIR"), "/catalog_segments.rs"));
 
-/// The Fluent catalogs, LZMA-packed at build time into one blob.
-///
-/// ~232 KiB of repetitive UTF-8 compresses by about 80%. The decoder is
-/// already linked for the bundled fonts, so this costs no extra code.
 const COMPRESSED_CATALOGS: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/bundled_catalogs.lzma"));
 
-/// Decompresses every catalog once, on first use.
-///
-/// One blob rather than one per locale: they share almost all of their
-/// structure, so packing them together is what earns the ratio, and the
-/// fallback locale is built alongside the selected one anyway.
 fn unpacked_catalogs() -> &'static str {
     static CATALOGS_TEXT: OnceLock<Box<str>> = OnceLock::new();
     CATALOGS_TEXT.get_or_init(|| {
@@ -114,8 +103,6 @@ pub struct I18n {
     bundles: Rc<Bundles>,
 }
 
-/// The built Fluent state for one locale, behind an `Rc` so cloning an
-/// `I18n` is a refcount bump instead of re-decompressing and rebuilding it.
 struct Bundles {
     bundle: FluentBundle<FluentResource>,
     fallback: FluentBundle<FluentResource>,
@@ -163,11 +150,6 @@ impl I18n {
         self.format(key, Some(&fluent_args(args)))
     }
 
-    /// `None` when neither the active catalog nor the fallback has `key`.
-    ///
-    /// Callers that need to distinguish a miss from a translation should use
-    /// this; [`Self::tr`] and [`Self::trn`] echo the key back, which is only
-    /// safe when the key is known to exist.
     fn try_format(&self, key: &str, args: Option<&FluentArgs<'_>>) -> Option<String> {
         format_from_bundle(&self.bundles.bundle, key, args)
             .or_else(|| format_from_bundle(&self.bundles.fallback, key, args))
@@ -186,12 +168,8 @@ impl I18n {
     }
 }
 
-/// A `trn` argument.
-///
-/// The distinction is load-bearing: Fluent parses a numeric argument, so text
-/// that merely looks like a number is rewritten — an addon titled `007`
-/// renders as `7`, `1e3` as `1000`, `+5` as `5`. Only [`Self::Number`] is
-/// parsed, and only it can drive a plural selector.
+/// Keep text separate from numbers. Fluent rewrites numeric-looking text
+/// such as addon titles `007` and `1e3`. Only `Number` drives plural selectors.
 #[derive(Clone, Copy, Debug)]
 pub enum Arg<'a> {
     Text(&'a str),
@@ -253,13 +231,6 @@ impl PartialEq for I18n {
 
 impl Eq for I18n {}
 
-/// Translates a backend [`UiError`](crate::bridge::ui_error::UiError)
-/// through the Fluent catalogs: `ERR_FOO_BAR` looks up `err-foo-bar` (and
-/// `err-foo-bar-detail` when the error carries detail text).
-///
-/// An unmapped key falls back to `err-unknown`, never to the raw wire string —
-/// `UiError`'s `Display` is the `KEY:detail` composite, so returning it here
-/// put text like `ERR_GMOD_PATH_MISSING` in front of users.
 pub fn translated_error(i18n: &I18n, error: &crate::bridge::ui_error::UiError) -> String {
     let key = format!(
         "err-{}",
@@ -397,18 +368,8 @@ mod tests {
 
     use super::{Arg, CATALOGS, I18n, catalog_source, resolve_locale_id};
 
-    /// `(locale, message id)` pairs where the target language genuinely renders
-    /// the message as the English string, so an identical value is a correct
-    /// translation rather than a missing one: loanwords ("Addons", "Skin",
-    /// "Roleplay"), cognates ("Name", "Audio", "Water"), Valve/Source format
-    /// names, acronyms ("CRC", "NPC"), and byte units in the languages that do
-    /// not localize them.
-    ///
-    /// This records facts about languages, not decisions about this codebase.
-    /// Anything that is untranslatable *by construction* does not belong here:
-    /// brand names live in [`crate::APP_NAME`], and pure format templates are
-    /// skipped by [`has_translatable_text`]. Adding an entry asserts that a
-    /// speaker of that language would write the English word in this place.
+    /// Translations allowed to match English, including loanwords and units.
+    /// Keep brand names in `crate::APP_NAME`.
     const LOCALE_KEEPS_ENGLISH: &[(&str, &str)] = &[
         ("de", "byte-rate-per-second"),
         ("de", "byte-unit-b"),
@@ -642,10 +603,6 @@ mod tests {
         );
     }
 
-    /// Every `ErrorKey` the UI can surface must derive a Fluent key that
-    /// exists, or `translated_error` silently degrades to `err-unknown` —
-    /// which is what a prose key value like `ErrorKey("Garry's Mod path is
-    /// not configured")` would do.
     #[test]
     fn error_keys_resolve_to_their_own_message_not_the_fallback() {
         use gmpublished_backend::error_keys as keys;
@@ -674,9 +631,6 @@ mod tests {
         }
     }
 
-    /// `translated_error` supplies `detail` only to the `-detail` variant, so a
-    /// base `err-*` message that references it renders the placeholder itself
-    /// to the user whenever the error carries no detail.
     #[test]
     fn detail_free_error_messages_reference_no_arguments() {
         for catalog in CATALOGS {
@@ -704,9 +658,6 @@ mod tests {
         }
     }
 
-    /// Key parity alone is not coverage: pasting the English block into every
-    /// catalog satisfies [`fluent_catalogs_have_matching_key_sets`] while leaving
-    /// the UI in English. This asserts the values actually got translated.
     #[test]
     fn translated_catalogs_do_not_leak_english_values() {
         let english = catalog_messages(catalog_source("en"));
@@ -734,10 +685,6 @@ mod tests {
         }
     }
 
-    /// A translation that names a placeholder the caller does not supply
-    /// renders as the literal `{$name}`; one that drops a placeholder silently
-    /// loses the value. Both pass key parity, so the placeholder sets are
-    /// checked separately.
     #[test]
     fn fluent_catalogs_have_matching_placeholder_sets() {
         let english = catalog_messages(catalog_source("en"));
@@ -760,11 +707,7 @@ mod tests {
         }
     }
 
-    /// The `$name` of every `{$name}` reference in a message value, including
-    /// the ones inside selector arms.
-    ///
-    /// Only `$` inside a Fluent placeable counts, so a literal `$5` in prose
-    /// is not mistaken for an argument the caller must supply.
+    /// Count `$name` only inside Fluent placeables, so literal `$5` is not an argument.
     fn message_placeholders(value: &str) -> BTreeSet<&str> {
         let mut names = BTreeSet::new();
         let mut rest = value;
@@ -827,8 +770,6 @@ mod tests {
         );
     }
 
-    /// Fluent rewrites anything it parses as a number, which would render a
-    /// title like `007` as `7`. Text arguments must survive verbatim.
     #[test]
     fn text_arguments_are_not_rewritten_as_numbers() {
         let i18n = I18n::for_locale(Some("en"));
@@ -844,13 +785,6 @@ mod tests {
         }
     }
 
-    /// Message id -> value, with Fluent block values (a bare `=` followed by
-    /// indented lines) folded into a single newline-joined string so they are
-    /// compared as a whole rather than skipped.
-    /// A key that reaches `tr`/`trn` but has no catalog entry renders as the
-    /// literal key in the UI, and every catalog-parity test still passes
-    /// because the key is absent from all of them equally. This is the only
-    /// check that ties a call site to the catalogs.
     #[test]
     fn every_literal_translation_key_exists_in_the_catalog() {
         let english = catalog_source("en");
@@ -873,10 +807,6 @@ mod tests {
         );
     }
 
-    /// Fluent silently renders `{$name}` as itself when the caller supplies no
-    /// `name`, so a call site whose argument names drift from its message's
-    /// placeholders puts `{$total}` in front of users. Nothing else ties the
-    /// two together — the names are strings on both sides.
     #[test]
     fn literal_trn_call_sites_supply_exactly_their_messages_placeholders() {
         let english = catalog_messages(catalog_source("en"));
@@ -902,14 +832,8 @@ mod tests {
         );
     }
 
-    /// `("key", ["arg name", ..])` for every `trn("key", &[("name", ..), ..])`
-    /// whose key *and* argument names are literals. Call sites keyed on a
-    /// runtime value are invisible here by construction.
-    ///
-    /// The argument list is the first `&[..]` after the key, so a `trn` whose
-    /// arguments are not a literal slice would take the next unrelated one.
-    /// No call site is written that way; one that was would show up as a
-    /// mismatch here rather than passing silently.
+    /// Only finds literal keys and argument names. Assumes arguments are a
+    /// literal `&[..]` slice; otherwise it finds the next unrelated slice.
     fn literal_trn_arguments(source: &str) -> Vec<(String, Vec<String>)> {
         let mut calls = Vec::new();
         let mut rest = source;
@@ -941,7 +865,6 @@ mod tests {
         calls
     }
 
-    /// Every `.rs` file in this crate, as `(display path, contents)`.
     fn rust_sources() -> Vec<(String, String)> {
         fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -973,8 +896,6 @@ mod tests {
         out
     }
 
-    /// Keys passed to `tr`/`trn` as string literals. Computed keys (error
-    /// codes, `label_key()` returns) are invisible here by construction.
     fn literal_translation_keys(source: &str) -> Vec<String> {
         let mut keys = Vec::new();
         for call in [".tr(\"", ".trn(\""] {

@@ -24,9 +24,6 @@ resources = [
     { src = "../THIRD-PARTY-NOTICES.md", target = "THIRD-PARTY-NOTICES.md" },
 ]
 
-# cargo-packager copies external binaries to Contents/MacOS for macOS .app
-# bundles. The prepare script creates the target-triple-suffixed input from the
-# selected Steam SDK redistributable.
 external-binaries = ["steam/generated/libsteam_api.dylib"]
 
 [macos]

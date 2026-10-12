@@ -15,23 +15,10 @@ use crate::{CpuExecutor, GmaFile, transactions::Transaction, write_nt_string};
 use super::{GmaError, GmaMetadata, whitelist, whitelist::AddonWhitelist};
 
 use super::GMA_HEADER;
-/// Small files are read in parallel batches of at most this many bytes, so
-/// peak memory stays bounded no matter how large the addon is.
 const BATCH_MAX_BYTES: u64 = 32 * 1024 * 1024;
-/// Files larger than this never enter a batch; they stream straight through
-/// a fixed-size chunk buffer.
 const BATCH_FILE_MAX: u64 = 8 * 1024 * 1024;
 const STREAM_CHUNK: usize = 1024 * 1024;
 
-/// Creates the file a pack is written into: a uniquely named sibling of
-/// `final_path`, so the destination only ever appears once the pack has
-/// finished and a rename onto it stays within one filesystem.
-///
-/// Exclusive creation and deletion-on-drop both come from [`NamedTempFile`],
-/// which covers every early return in [`GmaFile::create`] — an error, a panic
-/// unwind, a cancelled transaction — without a cleanup call at each exit.
-/// The name is prefixed with the destination's so a leftover from a killed
-/// process still says what it was.
 fn create_temp_file(final_path: &Path) -> Result<NamedTempFile, GmaError> {
     let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = final_path
@@ -45,10 +32,6 @@ fn create_temp_file(final_path: &Path) -> Result<NamedTempFile, GmaError> {
         .tempfile_in(parent)?)
 }
 
-/// Converts a path already relative to the source root into the
-/// forward-slash entry name a GMA stores. `None` for a non-UTF8 relative
-/// path: a GMA entry name must be a valid string, so this is treated as an
-/// error by the caller, never silently mangled.
 fn relative_entry_name(relative: &Path) -> Option<String> {
     relative
         .to_str()
@@ -128,7 +111,6 @@ impl GmaFile {
         // addon version [unused]
         f.write_all(&1i32.to_le_bytes())?;
 
-        // Contents are streamed later in bounded batches, never held all at once.
         struct Pending {
             path: PathBuf,
             size: u64,
@@ -197,8 +179,6 @@ impl GmaFile {
             }
         }
 
-        // Write every file-list record up front (sizes come from the walk);
-        // per-entry CRCs are patched in after their contents have streamed.
         let mut file_list: Vec<(String, Pending)> = file_list.into_iter().collect();
         let mut cursor = f.stream_position()?;
         for (i, (relative_path, pending)) in file_list.iter_mut().enumerate() {
@@ -213,10 +193,6 @@ impl GmaFile {
         }
         f.write_all(&0u32.to_le_bytes())?;
 
-        // Payload: entries stream in list order. Small files are read in
-        // parallel batches capped at BATCH_MAX_BYTES; large files go through
-        // a reused chunk buffer. A size that no longer matches the walk means
-        // the source changed mid-create — fail rather than corrupt offsets.
         let total = file_list.len() as f64;
         let mut written_files: f64 = 0.;
         let mut crcs: Vec<u32> = Vec::with_capacity(file_list.len());
@@ -320,8 +296,6 @@ impl GmaFile {
         f.get_ref().sync_all()?;
         drop(f);
 
-        // Renames onto the destination, and gives up its deletion-on-drop only
-        // once that has succeeded.
         temp.persist(&self.path).map_err(|error| error.error)?;
 
         Ok(())
@@ -332,10 +306,6 @@ impl GmaFile {
 mod tests {
     use super::*;
 
-    /// Packing is the long phase of a publish — minutes on a large addon — so
-    /// a cancel has to reach it. Without an `aborted()` check the pack runs to
-    /// completion regardless, and `transaction.progress` logs a warning per
-    /// file on the way, so the only symptom is noise in the log.
     #[test]
     fn cancelling_stops_the_pack_instead_of_warning_once_per_file() {
         use crate::events::BackendEventCollector;
@@ -402,9 +372,6 @@ mod tests {
         assert_eq!(relative_entry_name(Path::new(bad)), None);
     }
 
-    /// Two packs aimed at one destination must not share a file, and the
-    /// temp file must be a sibling of the destination so the rename that
-    /// commits it cannot cross a filesystem.
     #[test]
     fn temp_files_are_distinct_siblings_of_the_destination() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -419,8 +386,6 @@ mod tests {
         assert!(!final_path.exists(), "the destination must not appear yet");
     }
 
-    /// The temp file is deleted on drop, so a pack that fails or is cancelled
-    /// leaves nothing behind next to the addon it was writing.
     #[test]
     fn an_uncommitted_temp_file_is_removed_when_dropped() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,5 +1,3 @@
-//! Steam session lifecycle state for the Iced application.
-
 mod effect;
 mod message;
 mod state;

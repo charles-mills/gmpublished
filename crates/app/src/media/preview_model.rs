@@ -1,11 +1,3 @@
-//! What a decoded file preview *is*: the geometry, materials, lighting, audio
-//! and text a preview entry turns into.
-//!
-//! Sits below both sides that touch it. `media::file_preview_decode` produces
-//! these values and `features::file_preview` renders them, so the shape
-//! belongs to neither — a decoder that imported the feature, or a feature that
-//! owned the decoder's output type, would point the dependency the wrong way.
-
 use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
 
@@ -19,23 +11,14 @@ pub use gmpublished_domain::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
     MapVisibilityBucket, MapWalkCollision,
 };
-/// Why loading a preview entry failed. Variants carry the actual producer
-/// error so its `Display` reaches the user verbatim; only the wire boundary
-/// (this type's `Display`) is rendered.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreviewLoadError {
-    /// The blocking worker pool rejected the load job before it could run.
     #[error(transparent)]
     Schedule(#[from] ScheduleError),
-    /// Reading the entry's bytes out of the archive failed.
     #[error(transparent)]
     Archive(#[from] PreviewArchiveSourceError),
 }
 
-/// GPU-ready preview vertex: models and map geometry share one
-/// 14-float layout. `vformats` loads lean position/normal/uv vertices;
-/// the extra lanes are the app's (prop lighting bakes into `color`,
-/// debug meshes tint it, maps use `lightmap_uv`/`blend_alpha`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelVertex {
@@ -60,7 +43,6 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
     }
 }
 
-/// One renderable preview mesh (see [`ModelVertex`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
     pub vertices: Vec<ModelVertex>,
@@ -82,7 +64,6 @@ impl From<&vformats::mdl::MeshData> for MeshData {
     }
 }
 
-/// Loaded model geometry in the app's preview shape.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelData {
     pub meshes: Vec<MeshData>,
@@ -126,8 +107,6 @@ pub struct PreviewRequest {
     pub(crate) display_name: String,
     pub(crate) size_bytes: u64,
     pub(crate) crc32: u32,
-    /// The user pressed "Load anyway" on the very-large-file warning:
-    /// skip the per-kind size gates and decode the entry regardless.
     pub(crate) bypass_size_limits: bool,
 }
 
@@ -142,9 +121,6 @@ pub struct PreviewData {
 }
 
 impl PreviewData {
-    /// Content-addressed identity shared by GPU upload reuse, camera-pose
-    /// keying, and door audio event routing — one derivation so those
-    /// consumers can never drift apart.
     pub(crate) fn content_id(&self) -> u64 {
         u64::from(self.crc32) | (self.size_bytes << 32)
     }
@@ -195,8 +171,6 @@ pub enum PreviewContent {
     },
 }
 
-/// A parsed .pcf plus everything resolved up front for its systems: per-
-/// system coverage/metadata and the de-duplicated sprite materials.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParticlePreview {
     pub(crate) file: gmpublished_domain::scene::pcf::PcfFile,
@@ -207,19 +181,15 @@ pub struct ParticlePreview {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParticleSystemInfo {
     pub(crate) name: String,
-    /// Deduplicated operator coverage across the system and its children.
     pub(crate) coverage: Vec<gmpublished_domain::particles::CoverageEntry>,
-    /// Highest control point index the compiled effect reads.
     pub(crate) highest_control_point: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParticleMaterialSlot {
-    /// Normalized via [`normalize_particle_material`].
     pub(crate) name: String,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) additive: bool,
-    /// Sprite sheet from the texture's VTF resource block, when present.
     pub(crate) sheet: Option<Arc<vformats::vtf::SpriteSheet>>,
 }
 
@@ -260,7 +230,6 @@ pub struct RenderScene {
 pub struct ModelPreview {
     pub(crate) scene: Arc<RenderScene>,
     pub(crate) skin_tables: Vec<Vec<u16>>,
-    /// Choice count per bodygroup, in bodypart order.
     pub(crate) bodygroups: Vec<usize>,
 }
 
@@ -638,7 +607,6 @@ impl PreviewLoadStage {
     }
 }
 
-/// Line cap for code previews; larger files render truncated with a banner.
 pub const MAX_PREVIEW_LINES: usize = 2_000;
 
 pub type CodeLine = Vec<CodeSpan>;

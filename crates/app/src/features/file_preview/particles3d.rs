@@ -1,10 +1,3 @@
-//! Custom wgpu pipeline rendering a Source particle system inside the
-//! preview modal. The simulation clock rides the redraw chain: each playing
-//! frame requests the next, so pausing or closing stops the loop dead (0%
-//! idle). Camera state and the sim engine live in the widget tree; the orbit
-//! pose and control point positions round-trip through feature state so they
-//! survive expand/collapse rebuilds.
-
 use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,12 +38,10 @@ const GIZMO_COLORS: [Vec3; 7] = [
 
 pub(super) struct ParticleViewer {
     pub(super) preview: Arc<ParticlePreview>,
-    /// Identifies uploads in the shared pipeline cache; bump per load.
     pub(super) content_id: u64,
     pub(super) system_index: usize,
     pub(super) playing: bool,
     pub(super) speed: f32,
-    /// Bumped by the restart button; the widget replays from t=0.
     pub(super) restart_epoch: Generation,
     pub(super) pose: Option<OrbitPose>,
     pub(super) control_points: [Vec3; MAX_CONTROL_POINTS],
@@ -59,11 +50,7 @@ pub(super) struct ParticleViewer {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
     Orbit(Point),
-    /// Dragging a control point gizmo in the camera-facing plane through
-    /// its position at grab time.
-    Gizmo {
-        index: ControlPointIndex,
-    },
+    Gizmo { index: ControlPointIndex },
 }
 
 pub(super) struct SimState {
@@ -118,9 +105,7 @@ impl SimState {
             }
             self.last_frame = None;
         }
-        // Feature state owns control points; sync any that moved (e.g. the
-        // widget tree was rebuilt, or a future reset control), except the
-        // one currently being dragged, which the drag handler feeds.
+        // Sync control points from feature state, except the point currently being dragged.
         let dragging = match self.drag {
             Some(Drag::Gizmo { index }) => Some(index),
             _ => None,
@@ -147,8 +132,6 @@ impl SimState {
         self.orbit.pose()
     }
 }
-
-// --- Camera --------------------------------------------------------------
 
 struct CameraFrame {
     eye: Vec3,
@@ -196,7 +179,6 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
     }
 }
 
-/// World-space ray through a cursor position inside `bounds`.
 fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> Vec3 {
     let ndc_x = ((cursor.x - bounds.x) / bounds.width.max(1.0)) * 2.0 - 1.0;
     let ndc_y = 1.0 - ((cursor.y - bounds.y) / bounds.height.max(1.0)) * 2.0;
@@ -207,7 +189,6 @@ fn cursor_ray(frame: &CameraFrame, bounds: Rectangle, cursor: Point) -> Vec3 {
         .normalize_or_zero()
 }
 
-/// Intersects a cursor ray with the camera-facing plane through `anchor`.
 fn drag_plane_position(frame: &CameraFrame, ray: Vec3, anchor: Vec3) -> Option<Vec3> {
     let denominator = ray.dot(frame.forward);
     if denominator.abs() < 1e-4 {
@@ -222,8 +203,7 @@ fn gizmo_pick_radius(frame: &CameraFrame, position: Vec3) -> f32 {
 }
 
 impl ParticleViewer {
-    /// Draggable control points: 1..=highest referenced. CP0 stays pinned at
-    /// the viewport centre so the effect cannot be dragged off-origin.
+    /// CP0 stays pinned at the origin. Show gizmos for the other referenced control points.
     fn gizmo_indices(&self, state: &SimState) -> impl Iterator<Item = ControlPointIndex> {
         let highest = state
             .engine
@@ -332,8 +312,7 @@ impl shader::Program<Message> for ParticleViewer {
                     }
                 }
                 state.last_frame = Some(*now);
-                // Each playing frame requests the next; pausing breaks the
-                // chain and the widget goes fully idle.
+                // Playing requests the next redraw. Pausing stops the chain.
                 Some(Action::request_redraw())
             }
             _ => None,
@@ -385,7 +364,6 @@ impl shader::Program<Message> for ParticleViewer {
                 push_batch(&mut instances, &mut batches, slot, true, list);
             }
 
-            // Gizmos last, on top of the effect.
             let mut gizmos = Vec::new();
             for index in self.gizmo_indices(state) {
                 let position = engine.control_point(index);
@@ -526,8 +504,6 @@ fn push_batch(
     });
 }
 
-// --- Primitive & pipeline --------------------------------------------------
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -537,7 +513,6 @@ struct Uniforms {
     camera_eye: [f32; 4],
 }
 
-/// Full-texture UV rect as offset + scale.
 const FULL_UV_RECT: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 #[repr(C)]
@@ -593,7 +568,6 @@ impl GpuInstance {
     }
 }
 
-/// Atlas rect (as offset+scale) for a particle's current animation frame.
 fn sheet_uv_rect(
     sheet: Option<&vformats::vtf::SpriteSheet>,
     renderer: &gmpublished_domain::particles::RendererInfo,
@@ -701,7 +675,6 @@ pub(super) struct ParticlePipeline {
     instance_buffer: Option<wgpu::Buffer>,
     instance_capacity: usize,
     textures: HashMap<(u64, usize), TextureEntry>,
-    /// Content ids drawn since the last trim; others are evicted.
     live: Vec<u64>,
     draw_batches: Vec<DrawBatch>,
     draw_content_id: u64,
@@ -978,7 +951,6 @@ impl shader::Pipeline for ParticlePipeline {
             ..wgpu::SamplerDescriptor::default()
         });
 
-        // 1x1 white: gizmos and unresolved materials.
         let white_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("particle preview white"),
             size: wgpu::Extent3d {
@@ -1047,7 +1019,6 @@ impl shader::Pipeline for ParticlePipeline {
 
     fn trim(&mut self) {
         if self.live.is_empty() {
-            // Nothing drawn this frame: the preview closed; free everything.
             self.textures.clear();
             self.instance_buffer = None;
             self.instance_capacity = 0;

@@ -129,23 +129,13 @@ fn builtin_whitelist() -> Vec<String> {
         .collect()
 }
 
-/// Where [`AddonWhitelist::refresh_from_remote`] is allowed to look.
-///
-/// Carried on the instance rather than read from the environment so that
-/// keeping the network out of a test is a constructor choice, not a process-
-/// wide `set_var` — which is a data race against any concurrent `getenv` under
-/// the stock test harness, where all tests in a binary share one process.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WhitelistSource {
-    /// Refresh from the upstream gmad source when asked.
     #[default]
     Remote,
-    /// Never touch the network; the built-in list is authoritative.
     BuiltinOnly,
 }
 
-/// The addon whitelist: the built-in list, optionally refreshed from the
-/// upstream gmad source. Cheap to clone (`Arc` internally).
 #[derive(Clone, Debug)]
 pub struct AddonWhitelist {
     list: Arc<parking_lot::RwLock<Arc<[String]>>>,
@@ -158,8 +148,6 @@ impl AddonWhitelist {
         Self::with_source(WhitelistSource::Remote)
     }
 
-    /// A whitelist that will never fetch. Use from tests and offline runs
-    /// instead of gating the network on an environment variable.
     #[must_use]
     pub fn builtin_only() -> Self {
         Self::with_source(WhitelistSource::BuiltinOnly)
@@ -180,10 +168,7 @@ impl AddonWhitelist {
         Arc::clone(&self.list.read())
     }
 
-    /// Fetches the up-to-date whitelist from the upstream gmad source and
-    /// stores it, keeping the built-in list on any failure. Performs
-    /// blocking HTTPS I/O: call from a background thread, never from
-    /// construction.
+    /// Blocking HTTPS refresh. Keep the built-in whitelist if it fails.
     pub fn refresh_from_remote(&self) {
         if self.source == WhitelistSource::BuiltinOnly {
             return;
@@ -249,7 +234,6 @@ fn download_addon_whitelist() -> Result<Vec<String>, std::io::Error> {
     }
 
     if !wildcard.iter().any(|glob| glob == "lua/*.lua") {
-        // This should definitely be in there, so if it isn't, something has gone wrong. Probably.
         return Err(std::io::Error::other(
             "Failed to parse addon whitelist (missing lua/*.lua)",
         ));
@@ -295,8 +279,6 @@ fn globber(wild: &str, str: &str) -> bool {
     w == wild.len()
 }
 
-/// Check if a path is allowed in a GMA file, against the backend's current
-/// whitelist snapshot.
 pub fn is_whitelisted_in(whitelist: &[String], str: &str) -> bool {
     let mut valid = false;
 
@@ -313,20 +295,15 @@ pub fn is_whitelisted_in(whitelist: &[String], str: &str) -> bool {
     valid
 }
 
-/// Check if a path is allowed in a GMA file, against the built-in whitelist.
-/// Test-only convenience: production code always goes through an
-/// [`AddonWhitelist`] snapshot instead.
 #[cfg(test)]
 fn is_whitelisted(str: &str) -> bool {
     is_whitelisted_in(&builtin_whitelist(), str)
 }
 
-/// Check if a path matches the built-in default-ignore list
 pub fn is_default_ignored(str: &str) -> bool {
     DEFAULT_IGNORE.iter().any(|glob| globber(glob, str))
 }
 
-/// Check if a path is ignored by a list of custom globs
 pub fn is_ignored(str: &str, ignore: &[String]) -> bool {
     if ignore.is_empty() {
         return false;

@@ -12,15 +12,8 @@ pub mod fonts {
 
     use super::Font;
 
-    // Primary UI family, bundled as STATIC weight instances (fontTools
-    // varLib.instancer over the source variable font, slnt pinned at 0).
-    // fontdb registers a variable font as a single weight-400 face, so
-    // `Font::with_name("Inter")` with Semibold/Bold silently rendered
-    // Regular; static 400/600/700 faces make those weights real.
-    //
-    // Italic and Bold Italic are instanced from `InterVariable-Italic`
-    // (wght pinned at 400/700, opsz at 14, family "Inter"). cosmic-text
-    // requires registered italic faces because it does not synthesize slant.
+    // Static Inter weights let fontdb select Regular, Semibold, and Bold.
+    // Explicit italic faces are required because cosmic-text does not synthesize slant.
     include!(concat!(env!("OUT_DIR"), "/font_segments.rs"));
 
     const COMPRESSED_FONTS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bundled_fonts.lzma"));
@@ -54,11 +47,6 @@ pub mod fonts {
         Font::with_name("Inter")
     }
 
-    /// Every bundled face, in builder registration order.
-    ///
-    /// Named rather than `from_fn(font_bytes)`: the array length is
-    /// `FONT_COUNT`, which the build script derives from `FONT_SOURCES`, so
-    /// adding a face there fails to compile until it is registered here too.
     pub fn bundled_fonts() -> [&'static [u8]; FONT_COUNT] {
         [
             font_bytes(INTER_REGULAR),
@@ -75,10 +63,6 @@ pub mod fonts {
     mod tests {
         use super::*;
 
-        /// Each generated constant must name the face it indexes. The build
-        /// script derives both from one list, so this fails only if that list
-        /// and these expectations disagree — which is what a reader checking
-        /// "is `INTER_REGULAR` really Inter Regular?" needs pinned.
         #[test]
         fn the_generated_indices_name_distinct_faces() {
             let indices = [
@@ -96,7 +80,6 @@ pub mod fonts {
                 assert_eq!(index, position, "the constants are out of order");
             }
 
-            // Distinct faces, so a duplicated path in FONT_SOURCES shows up.
             for (left, right) in (0..FONT_COUNT)
                 .flat_map(|left| ((left + 1)..FONT_COUNT).map(move |right| (left, right)))
             {
@@ -113,9 +96,6 @@ pub mod fonts {
 pub mod icons {
     use super::svg;
 
-    /// Declares a `pub(crate) fn $name() -> svg::Handle` that wraps the SVG
-    /// bytes at `$path` (relative to this file), for the many icons that are
-    /// otherwise a plain "load these bytes" one-liner.
     macro_rules! svg_icon {
         ($name:ident, $path:literal) => {
             pub fn $name() -> svg::Handle {
@@ -197,15 +177,11 @@ pub mod icons {
     svg_icon!(table, "../ui/images/table.svg");
     svg_icon!(tag_point, "../ui/images/tag-point.svg");
 
-    /// Solid downward triangle (16x8) tinted to the tooltip background for
-    /// the size-analyzer anchored tooltip arrow. Flip vertically for the
-    /// upward variant when the tooltip is placed below its square.
     pub fn tooltip_arrow() -> svg::Handle {
         svg::Handle::from_memory(include_bytes!("../ui/images/tooltip-arrow.svg"))
     }
 }
 
-/// Bundled 16px silkicon rasters for file-browser rows.
 pub mod silkicons {
     use super::{OnceLock, ThumbnailDecoder, image};
     use crate::widgets::file_types::SilkIcon;
@@ -236,7 +212,6 @@ pub mod silkicons {
     }
 }
 
-/// Static raster assets decoded once into codec-free Iced RGBA handles.
 pub mod images {
     use super::{OnceLock, ThumbnailDecoder, image};
 
@@ -255,8 +230,7 @@ pub mod images {
             .clone()
     }
 
-    /// Cached per icon-well color so a theme switch re-flattens transparency
-    /// onto the new well; in practice this bakes once per session.
+    /// Cache by icon-well color so a theme change flattens transparency onto the new well.
     pub fn default_icon_backdrop(well_rgb: [u8; 3]) -> image::Handle {
         let mut cached = DEFAULT_ICON_BACKDROP.lock();
         if let Some((well, handle)) = cached.as_ref()
@@ -306,7 +280,7 @@ pub mod images {
 mod tests {
     use iced::widget::image;
 
-    use super::{fonts, icons, images};
+    use super::{fonts, images};
 
     #[test]
     fn bundled_font_registry_contains_primary_and_cjk_fonts() {
@@ -328,49 +302,6 @@ mod tests {
             include_bytes!("../ui/fonts/GMPCJKKRUI-Regular.otf")
         );
         assert_eq!(fonts::default_font(), iced::Font::with_name("Inter"));
-    }
-
-    #[test]
-    fn svg_registry_uses_bundled_memory_handles() {
-        for (first, second) in [
-            (icons::akar_download(), icons::akar_download()),
-            (icons::akar_folder(), icons::akar_folder()),
-            (icons::akar_folder_add(), icons::akar_folder_add()),
-            (icons::circle_plus(), icons::circle_plus()),
-            (icons::cloud_download(), icons::cloud_download()),
-            (icons::cloud_upload(), icons::cloud_upload()),
-            (
-                icons::context_cloud_download(),
-                icons::context_cloud_download(),
-            ),
-            (icons::context_copy(), icons::context_copy()),
-            (icons::context_folder(), icons::context_folder()),
-            (icons::context_folder_add(), icons::context_folder_add()),
-            (icons::context_image(), icons::context_image()),
-            (icons::context_link_chain(), icons::context_link_chain()),
-            (icons::context_link_out(), icons::context_link_out()),
-            (icons::cross(), icons::cross()),
-            (icons::dead(), icons::dead()),
-            (icons::download_count(), icons::download_count()),
-            (icons::folder(), icons::folder()),
-            (icons::folder_add(), icons::folder_add()),
-            (icons::gear(), icons::gear()),
-            (icons::gmod_logo(), icons::gmod_logo()),
-            (icons::link_chain(), icons::link_chain()),
-            (icons::mode_fly(), icons::mode_fly()),
-            (icons::mode_walk(), icons::mode_walk()),
-            (icons::route_downloader(), icons::route_downloader()),
-            (
-                icons::route_installed_addons(),
-                icons::route_installed_addons(),
-            ),
-            (icons::route_my_workshop(), icons::route_my_workshop()),
-            (icons::route_size_analyzer(), icons::route_size_analyzer()),
-            (icons::search(), icons::search()),
-            (icons::star_filled(), icons::star_filled()),
-        ] {
-            assert_eq!(first.id(), second.id());
-        }
     }
 
     #[test]

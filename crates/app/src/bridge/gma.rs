@@ -13,7 +13,6 @@ pub use gmpublished_backend::{
 #[cfg(test)]
 pub use gmpublished_backend::GMA_VERSION;
 
-/// Safe, already-validated path for one file entry inside a GMA archive.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ArchiveEntryPath(Arc<String>);
 
@@ -60,7 +59,6 @@ impl From<ArchiveEntryPath> for String {
     }
 }
 
-/// Safe archive directory path used by the archive-browser presentation model.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ArchiveDirectoryPath(String);
 
@@ -134,13 +132,6 @@ impl From<ArchiveDirectoryPath> for String {
     }
 }
 
-/// The backend's own types.
-///
-/// Not mirrored: both were duplicated field-for-field *and* accessor-for-
-/// accessor, with identity `From` impls in each direction. A newtype earns its
-/// conversions by refining something — see
-/// [`PublishedFileId`](crate::bridge::domain::PublishedFileId), which enforces
-/// non-zero where the backend's does not. These refined nothing.
 pub use gmpublished_backend::{GmaHeader, GmaMetadata};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,9 +145,6 @@ pub struct GmaMetaEntry {
 pub struct GmaMeta {
     pub(crate) path: PathBuf,
     pub(crate) header: GmaHeader,
-    /// Immutable archive tables are shared between the persistent header
-    /// cache and each published library snapshot. Refreshes clone the `Arc`,
-    /// not every path string in the archive.
     pub(crate) entries: Arc<[GmaMetaEntry]>,
 }
 
@@ -184,8 +172,6 @@ impl GmaMeta {
         })
     }
 
-    /// Opens only the archive header for library discovery. `PreviewArchive`
-    /// deliberately remains the full-entry path for the preview modal.
     #[cfg(test)]
     pub(crate) fn open_header_only(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
@@ -198,8 +184,6 @@ impl GmaMeta {
 
     pub(crate) fn open_index(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        // One file open + one parse; the previous open/header/entries chain
-        // re-parsed the whole entry table three times.
         let bundle = GmaFile::open_index(path)?;
         let mut entries: Vec<GmaMetaEntry> = bundle
             .entries
@@ -227,9 +211,7 @@ pub struct PreviewEntry {
     data_offset: u64,
 }
 
-/// Bytes provider and parsed identity for one open preview archive. `view`
-/// is wrapped in `Arc` purely so the struct stays `Clone`; it plays no part
-/// in the archive's identity, so `Debug` and `PartialEq` skip it.
+/// The view is shared for cloning, but does not participate in archive identity or equality.
 #[derive(Clone)]
 pub struct PreviewArchive {
     gma: GmaFile,
@@ -267,8 +249,6 @@ impl PreviewArchive {
         workshop_id: Option<u64>,
     ) -> Result<Self, GmaError> {
         let path = path.as_ref();
-        // One file open + one parse for handle, header and entries together;
-        // the view is kept for entry fetches during the preview session.
         let view = GmaView::open(path)?;
         let bundle = view.meta(path)?;
         let mut gma = bundle.handle;
@@ -276,7 +256,6 @@ impl PreviewArchive {
             .or_else(|| workshop_id_from_path(path))
             .and_then(gmpublished_backend::WorkshopId::new)
         {
-            // Recomputes extracted_name so it includes both title and id.
             gma.set_workshop_id(id);
         }
         let header = bundle.header;
@@ -309,9 +288,6 @@ impl PreviewArchive {
         &self.entries
     }
 
-    /// Owned snapshot of the entry list, for callers that need `self` to
-    /// keep living alongside a moved-from copy of its entries (e.g.
-    /// building another owner of `self` from the same entries).
     pub(crate) fn entries_owned(&self) -> Vec<PreviewEntry> {
         self.entries.clone()
     }
@@ -487,10 +463,7 @@ pub struct FixtureGmaFile {
 
 #[cfg(test)]
 fn preview_archive_from_fixture(gma: FixtureGmaFile) -> Result<PreviewArchive, GmaError> {
-    // Serialize the fixture into a real GMA byte stream so the backend
-    // parses it exactly like production content (including skipping
-    // entries with unsafe paths, which the fixture places on purpose —
-    // the reason this cannot go through the safety-enforcing writer).
+    // Use real archive bytes so this fixture also exercises unsafe-path filtering.
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"GMAD");
     bytes.push(gma.header.version);
@@ -555,7 +528,6 @@ mod workshop_id_tests {
             workshop_id_from_path(Path::new("/tmp/ds_123456.gma")),
             Some(123456)
         );
-        // Installed workshop layout: the numeric content folder carries the id.
         assert_eq!(
             workshop_id_from_path(Path::new(
                 "/Steam/steamapps/workshop/content/4000/2575621404/temp.gma"

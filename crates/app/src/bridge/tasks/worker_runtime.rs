@@ -37,12 +37,6 @@ pub(super) type RuntimeJob = Box<dyn FnOnce() + Send + 'static>;
 pub(super) type WorkerPoolSpawner =
     fn(&AppWorkerRuntime, Arc<str>, RuntimeJob) -> Result<(), ScheduleError>;
 
-/// App-facing scheduler over the process-owned backend execution resources.
-///
-/// There is deliberately no second set of app pools here: filesystem/Steam
-/// work shares the bounded blocking executor, media/CDN work shares the
-/// bounded network executor, and CPU-parallel work enters through
-/// `BackendServices::cpu_executor`.
 #[derive(Debug)]
 pub(super) struct AppWorkerRuntime {
     execution: ExecutionResources,

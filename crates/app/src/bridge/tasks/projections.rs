@@ -28,7 +28,6 @@ pub(super) fn publish_submission_from_app_request(
     request: PublishSubmitRequest,
 ) -> steam_publishing::PublishSubmission {
     let (icon_path, upscale) = publish_preview_from_app_request(request.preview);
-    // The changelog belongs to the update case, so it travels inside it.
     let mode = match request.mode {
         PublishSubmitMode::New => steam_publishing::PublishSubmissionMode::Create,
         PublishSubmitMode::Update { workshop_id } => {
@@ -113,9 +112,6 @@ pub(super) fn search_item_source_from_backend(
     source: &gmpublished_backend::SearchItemSource,
 ) -> SearchItemSource {
     match source {
-        // The backend's own `PublishedFileId` already excludes zero (see
-        // its `nonzero_workshop_id` helper), so every id it hands us
-        // converts cleanly.
         gmpublished_backend::SearchItemSource::InstalledAddons(path, id) => {
             SearchItemSource::InstalledAddons(path.clone(), id.map(PublishedFileId::from))
         }

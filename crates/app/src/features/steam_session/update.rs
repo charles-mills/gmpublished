@@ -1,6 +1,5 @@
 use super::{Effect, Message, State, state::ConnectionChange};
 
-/// Applies a Steam session message and returns any follow-up effects.
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::ConnectionEvent(event) => {

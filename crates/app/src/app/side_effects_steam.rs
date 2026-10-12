@@ -19,9 +19,7 @@ impl App {
         let identity_completed = matches!(message, steam_session::Message::IdentityFetched(_, _));
 
         let effects = steam_session::update(&mut self.state.features.steam_session, message);
-        // Prerequisite panels need the edge, not just the level: a Connecting
-        // that follows a failure is a retry, and must not read as a first
-        // attempt.
+        // After a failure, Connecting means retrying. Keep that distinction in the panel.
         let steam_status = self.state.features.steam_session.status();
         let reconnected = self
             .state
@@ -33,10 +31,8 @@ impl App {
         let (reload_task, installed_retry_task) = if reconnected {
             (
                 self.reload_steam_route_after_reconnect(),
-                // Installed Addons is not a Steam-gated route, so the reload
-                // above skips it — but its metadata lookups are the ones most
-                // likely to have failed against a Steam that was still coming
-                // up, and nothing else re-asks on their behalf.
+                // Installed Addons is not re-entered on reconnect. Retry its
+                // failed metadata lookups here.
                 self.apply_installed_addons_message(installed_addons::Message::SteamReconnected),
             )
         } else {
@@ -65,22 +61,12 @@ impl App {
         ])
     }
 
-    /// Steam came up after a route had already given up on it. The prerequisite
-    /// panel hides that route's stale failure while the connection is down, so
-    /// the moment it clears, the error underneath would be the first thing the
-    /// user sees — reporting an outage that is already over.
-    ///
-    /// Re-entering is exactly what leaving the route and coming back does —
-    /// the manual workaround a user would otherwise have to find.
     fn reload_steam_route_after_reconnect(&mut self) -> Task<RootMessage> {
         let route = self.state.features.shell.route();
         if !prerequisites::requires_steam(route) {
             return Task::none();
         }
 
-        // The features' own enter guards decide whether this actually refetches:
-        // a route holding rows keeps them, and only an idle or failed one asks
-        // again.
         self.route_lifecycle_task(route, RouteLifecycle::Entered)
     }
 
@@ -183,11 +169,6 @@ impl App {
             .map(RootMessage::AppDataSnapshotApplied)
     }
 
-    /// Warms the Steam connection once per session after the launch-critical
-    /// path (first frame + library snapshot) is done, so the first
-    /// Steam-backed click skips SteamAPI init + connect. Rides the same
-    /// machinery as a deferred operation's lazy connect — a failed attempt
-    /// is silent and measurement modes ignore it — just without a retry.
     pub(super) fn warm_steam_connect_task(&mut self) -> Task<RootMessage> {
         if !self.state.features.steam_session.take_warm_connect_cue()
             || self.environment.ctx.steam_connected()
@@ -277,12 +258,7 @@ impl App {
     }
 }
 
-/// Dispatch for a deferred Steam-backed operation, kept next to
-/// `defer_steam_operation`'s call sites rather than in `steam_session` itself:
-/// both outcomes route through `RootMessage`, which is an app-level type the
-/// `steam_session` feature module does not otherwise depend on.
 impl steam_session::PendingRetry {
-    /// Resumes the operation now that Steam has connected.
     fn retry_message(self, app: &mut App) -> Task<RootMessage> {
         match self {
             Self::MyWorkshopPage { generation, page } => {
@@ -317,9 +293,6 @@ impl steam_session::PendingRetry {
         }
     }
 
-    /// The message this deferred operation resolves to when the connection
-    /// attempt itself failed, so the caller sees the same terminal shape it
-    /// would have gotten had Steam simply refused the request outright.
     fn fail_message(self, error: UiError) -> RootMessage {
         match self {
             Self::MyWorkshopPage { generation, page } => RootMessage::MyWorkshop(

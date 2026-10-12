@@ -5,9 +5,8 @@ use crate::generation::Generation;
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     let mut effects = update_message(state, message);
-    // Asked after every message rather than delivered as one: the grid latches
-    // the request when it decides, and a state sync that discarded the message
-    // would leave the latch suppressing every later page.
+    // Check after every update. Losing a latched page request would suppress
+    // all later requests.
     if state.grid_mut().take_next_page_request() {
         append_page_request_effect(state.begin_next_page(), &mut effects);
         effects.push(Effect::ThumbnailDemandsChanged);
@@ -348,10 +347,6 @@ mod tests {
         );
     }
 
-    /// A page that does not overflow the viewport never scrolls, so nothing
-    /// but this request advances it. The grid must not latch the request
-    /// inside `sync_grid_items`, whose messages are discarded — a latch set
-    /// there suppresses every later request and pagination stops for good.
     #[test]
     fn a_page_that_fits_the_viewport_requests_the_next_one() {
         let mut state = State::default();
@@ -371,8 +366,6 @@ mod tests {
             "the next page must be requested without waiting for a scroll: {effects:?}"
         );
 
-        // Claimed once: a second message must not re-request while the fetch
-        // is still in flight.
         let again = update(&mut state, Message::StatsRefreshTick);
         assert!(
             !again

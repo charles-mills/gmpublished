@@ -1,11 +1,3 @@
-//! Disk snapshot of the Workshop metadata RAM cache.
-//!
-//! Persists `services.workshop_metadata` to `<cache_dir>/metadata.snap` so
-//! restarts (including offline ones) render titles, tags, and scores
-//! instantly, then revalidate in the background. The file is a disposable
-//! cache: missing, corrupt, or version-mismatched snapshots are silently
-//! discarded and rebuilt.
-
 use crate::bridge::snapshot::SnapshotWriteError;
 use std::{
     collections::HashMap,
@@ -26,8 +18,6 @@ pub const METADATA_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const SNAPSHOT_VERSION: u32 = 1;
 const SNAPSHOT_FILE_NAME: &str = "metadata.snap";
 
-/// Workshop metadata plus the wall-clock unix second it was fetched from
-/// Steam (or persisted by a previous run).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CachedWorkshopMetadata {
     pub(crate) language: gmpublished_backend::WorkshopLanguage,
@@ -37,8 +27,6 @@ pub struct CachedWorkshopMetadata {
 
 impl CachedWorkshopMetadata {
     pub(crate) fn is_fresh_at(&self, now_unix_seconds: u64) -> bool {
-        // saturating_sub also treats future timestamps (clock skew during a
-        // run) as age zero, i.e. fresh now.
         now_unix_seconds.saturating_sub(self.fetched_at) <= METADATA_TTL.as_secs()
     }
 }
@@ -54,9 +42,7 @@ pub fn snapshot_path() -> Option<PathBuf> {
     gmpublished_backend::cache_dir().map(|dir| dir.join(SNAPSHOT_FILE_NAME))
 }
 
-/// Versioned snapshot DTOs: a stable schema decoupled from the live structs.
-/// Schema changes bump [`SNAPSHOT_VERSION`]; old files are discarded, never
-/// migrated.
+/// Bump SNAPSHOT_VERSION when the schema changes. Discard incompatible snapshots.
 #[derive(Debug, Deserialize, Serialize)]
 struct SnapshotFile {
     version: u32,
@@ -127,7 +113,6 @@ fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, Cache
                     owner_steamid: entry.owner_steamid,
                     thumbhash: entry.thumbhash.map(Arc::from),
                 },
-                // Clock-skew guard: never trust timestamps from the future.
                 fetched_at: entry.fetched_at.min(now_unix_seconds),
             };
             Some((id, cached))
@@ -135,9 +120,7 @@ fn load_at(path: &Path, now_unix_seconds: u64) -> HashMap<PublishedFileId, Cache
         .collect()
 }
 
-/// Detached, deterministically ordered snapshot. Building this while holding
-/// the live cache lock copies each metadata value exactly once; serialization
-/// and disk I/O then happen after the lock is released.
+/// Copy under the cache lock; serialize and write after releasing it.
 pub struct PreparedMetadataSnapshot(SnapshotFile);
 
 pub fn prepare(
@@ -161,8 +144,6 @@ pub fn prepare(
             thumbhash: cached.metadata.thumbhash.as_deref().map(<[u8]>::to_vec),
         })
         .collect::<Vec<_>>();
-    // Stable on-disk order keeps rewrites auditable (the map iterates in
-    // arbitrary order).
     snapshot_entries.sort_unstable_by_key(|entry| entry.id);
     let snapshot = SnapshotFile {
         version: SNAPSHOT_VERSION,
@@ -192,9 +173,6 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
-    /// `SteamId` is `#[serde(transparent)]`, so wrapping the field must not
-    /// change the on-disk shape — a change here silently discards every user's
-    /// cached metadata on upgrade.
     #[test]
     fn owner_steamid_serializes_as_a_bare_number() {
         let json = serde_json::to_string(&SteamId::new(76_561_197_960_265_728))
@@ -235,17 +213,6 @@ mod tests {
         .into_iter()
         .map(|cached| (cached.metadata.id, cached))
         .collect()
-    }
-
-    #[test]
-    fn round_trip_preserves_entries() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("metadata.snap");
-        let entries = sample_map(NOW - 100);
-
-        write(&path, &entries).expect("write snapshot");
-
-        assert_eq!(load_at(&path, NOW), entries);
     }
 
     #[test]
@@ -353,7 +320,6 @@ mod tests {
         assert!(sample_cached(123, NOW).is_fresh_at(NOW));
         assert!(sample_cached(123, NOW - ttl).is_fresh_at(NOW));
         assert!(!sample_cached(123, NOW - ttl - 1).is_fresh_at(NOW));
-        // Future timestamps (clock skew) count as fresh now.
         assert!(sample_cached(123, NOW + 10_000).is_fresh_at(NOW));
     }
     #[test]

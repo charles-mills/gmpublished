@@ -75,9 +75,7 @@ impl ResolvedDestinations {
     pub(super) fn from_paths(paths: &AppPaths) -> Self {
         Self {
             temp: Some(paths.temp_dir.clone()),
-            // AppPaths snapshots are resolved and sanitized by the backend.
-            // UI projection must not turn that trusted snapshot back into a
-            // synchronous filesystem probe.
+            // Use the resolved paths. Do not probe the filesystem while building the UI.
             addons: paths
                 .gmod_dir
                 .as_ref()
@@ -104,11 +102,6 @@ pub fn apply_persist_request(settings: &mut Settings, request: DestinationPersis
     }
 }
 
-/// Formats the current extract destination for display (e.g. the downloader's
-/// "set destination" row). Reads `settings.backend.extract_destination` through the
-/// same sanitization `sanitize` applies, without cloning the whole
-/// `Settings` (its history list and per-workshop overrides are irrelevant
-/// here).
 pub fn destination_label(settings: &Settings, paths: &AppPaths) -> String {
     let roots = ResolvedDestinations::from_paths(paths);
     match selection_from_extract_destination(&settings.backend.extract_destination, &roots) {

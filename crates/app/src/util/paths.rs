@@ -1,14 +1,9 @@
-//! Path-to-display-string helpers shared by the pickers and settings views.
-
 use std::path::{Path, PathBuf};
 
-/// Renders `path` for display, lossily substituting any non-UTF-8 bytes.
 pub fn path_to_display(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().into_owned()
 }
 
-/// Falls back to the temp directory when the current directory can't be read
-/// (e.g. it was deleted out from under the process).
 pub fn fallback_current_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|error| {
         log::debug!("current_dir failed while resolving a fallback path: {error}");

@@ -76,8 +76,6 @@ pub struct SteamRuntime {
 struct SteamRuntimeInner {
     started: AtomicBool,
     unavailable: AtomicBool,
-    /// `None` means this runtime was built disabled (tests): it never
-    /// touches a real `Steam` connection.
     steam: Option<Arc<Steam>>,
     connect_timeout: Duration,
 }
@@ -196,9 +194,6 @@ mod tests {
     #[test]
     fn fresh_runtime_reads_underlying_steam_connected_flag_without_connecting() {
         let steam = test_steam();
-        // Same-crate access: `runtime` is a descendant module of `steam`, so
-        // this private setter (normally flipped only by the connect
-        // callbacks) is visible here for the test double.
         steam.set_connected(true);
         let runtime = SteamRuntime::new(steam);
 

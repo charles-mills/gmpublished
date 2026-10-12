@@ -35,7 +35,6 @@ thread_local! {
         RefCell::new((Matcher::new(Config::DEFAULT), Vec::new()));
 }
 
-/// Scores `haystack` against `pattern`, reusing this thread's matcher state.
 fn score(pattern: &Pattern, haystack: &str) -> Option<u32> {
     MATCHER.with(|state| {
         let (matcher, buf) = &mut *state.borrow_mut();
@@ -43,9 +42,6 @@ fn score(pattern: &Pattern, haystack: &str) -> Option<u32> {
     })
 }
 
-/// Best fuzzy-match score for `search_item` against `pattern`: its label if
-/// long enough to match `query`, and its best-scoring qualifying term,
-/// whichever is higher.
 fn best_search_item_score(pattern: &Pattern, query: &str, search_item: &SearchItem) -> Option<u32> {
     let label_score = {
         let label = search_item.label();
@@ -54,8 +50,7 @@ fn best_search_item_score(pattern: &Pattern, query: &str, search_item: &SearchIt
             .flatten()
     };
 
-    // File items don't carry a `terms` vec — their haystacks live on the
-    // shared source (entry path subsumes file name and extension).
+    // File haystacks use the shared source; the entry path includes name and extension.
     let term_score = match &search_item.source {
         SearchItemSource::InstalledAddonFile {
             addon, entry_path, ..
@@ -154,27 +149,15 @@ pub enum SearchItemSource {
     WorkshopItem(WorkshopId),
 }
 
-/// Shared per-addon identity for file search items: a library has ~10³
-/// addons but ~10⁵ file entries, so per-file copies of the addon path,
-/// title and id string dominated the file index's memory. One `Arc` per
-/// addon, shared by all of its files; the file items themselves carry only
-/// their entry path (label and extension are substrings of it).
 #[derive(Debug, Serialize)]
 pub struct FileSearchAddon {
-    /// Canonicalized addon path (see [`SearchItem::new_installed_addon`]).
     pub path: PathBuf,
     pub title: String,
     pub workshop_id: Option<WorkshopId>,
-    /// The workshop id formatted once, so id queries can match file items
-    /// without a per-file copy.
     pub id_str: Option<Box<str>>,
 }
 
 impl FileSearchAddon {
-    /// Takes the id already refined, so the searchable text and the typed id
-    /// cannot describe different addons — a raw `Some(0)` would otherwise
-    /// leave `workshop_id: None` beside an `id_str` of `"0"` that file search
-    /// happily matches on.
     pub fn new(path: PathBuf, title: String, workshop_id: Option<WorkshopId>) -> Arc<Self> {
         Arc::new(Self {
             path,
@@ -185,8 +168,6 @@ impl FileSearchAddon {
     }
 }
 
-// serde's blanket `Arc<T>` impl is feature-gated (`rc`); serialize the
-// shared struct directly — this only feeds transaction detail logging.
 fn serialize_shared_addon<S>(addon: &Arc<FileSearchAddon>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -204,8 +185,6 @@ pub struct SearchItem {
 }
 impl SearchItem {
     pub fn label(&self) -> &str {
-        // File items derive their label (the file name) from the entry
-        // path instead of storing a per-file copy.
         if let SearchItemSource::InstalledAddonFile { entry_path, .. } = &self.source {
             entry_path
                 .rsplit_once('/')
@@ -226,10 +205,6 @@ impl PartialOrd for SearchItem {
 }
 impl Ord for SearchItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Tie-break by source identity so distinct addons never compare
-        // Equal (upstream compared the two Orderings to each other, which is
-        // not transitive and let binary-search replacement hit the wrong
-        // item when timestamp and length collided).
         self.timestamp
             .cmp(&other.timestamp)
             .reverse()
@@ -268,9 +243,6 @@ fn search_scope_matches(source: &SearchItemSource, scope: SearchScope) -> bool {
 
 impl PartialEq for SearchItem {
     fn eq(&self, other: &Self) -> bool {
-        // Delegate to the full sort key so Eq and Ord agree: a partial
-        // comparison here (e.g. source identity alone) would violate the
-        // Ord contract and break dedup()'s adjacency assumption after sorting.
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
@@ -299,9 +271,7 @@ impl SearchItem {
         }
     }
 
-    /// `path` must already be canonicalized by the caller — resolving it here
-    /// would mean a filesystem syscall per addon on every index rebuild,
-    /// which is exactly the cost this split was made to avoid.
+    /// The caller must canonicalize path; index rebuilds must not make filesystem calls per addon.
     pub fn new_installed_addon<D: Into<u64>>(
         path: PathBuf,
         workshop_id: Option<u64>,
@@ -317,11 +287,6 @@ impl SearchItem {
         )
     }
 
-    /// One file entry of an installed addon. `addon` is the shared
-    /// per-addon identity ([`FileSearchAddon::new`], one per addon, its
-    /// `path` already canonicalized); the item itself owns only its entry
-    /// path. Label, extension and search terms all derive from the source,
-    /// so `label`/`terms` stay empty.
     pub fn new_installed_addon_file<D: Into<u64>>(
         addon: Arc<FileSearchAddon>,
         entry_path: String,
@@ -329,8 +294,6 @@ impl SearchItem {
         crc32: u32,
         timestamp: D,
     ) -> Self {
-        // Mirrors `new`'s len: the longest haystack this item can match
-        // (see `best_search_item_score`'s file-item arm).
         let len = entry_path
             .len()
             .max(addon.title.len())
@@ -443,22 +406,13 @@ impl Search {
     }
 
     fn ensure_sorted_on_cpu(&self) {
-        // Cheap check before contending for the write lock; the swap below
-        // is the one that actually matters.
         if !self.dirty.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
 
         let mut items = self.items.write();
-        // Clear the flag only once we hold the write lock: `add()`'s
-        // binary-search path only runs when it sees a clean flag, and it
-        // needs the same lock to do so, so it can never observe "clean"
-        // while this sort is still in flight. Clearing the flag first (the
-        // old order) left a window where a concurrent `add()` could read
-        // "clean", grab the lock before this sort ran, and binary-search
-        // into a still-unsorted vec. A bulk add racing us re-flags after it
-        // releases its own write lock, so we never clear a flag out from
-        // under a pending write.
+        // Clear the dirty flag under the write lock so `add()` cannot binary-search
+        // before sorting finishes. Concurrent bulk writes re-flag after releasing it.
         if !self.dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
@@ -480,10 +434,6 @@ impl Search {
                 self.items.write().push(search_item);
             } else {
                 let mut items = self.items.write();
-                // Replace by identity (source), not by Ord position or full
-                // equality: a re-added addon usually carries a new
-                // timestamp, so its old entry sits elsewhere in the sort
-                // order and no longer compares equal to the new one.
                 if let Some(existing) = items.iter().position(|cmp| {
                     source_order_key(&cmp.source) == source_order_key(&search_item.source)
                 }) {
@@ -573,8 +523,6 @@ impl Search {
     }
 
     fn quick_scored(&self, query: &str, scope: SearchScope) -> QuickSearchResult {
-        // Queries use fzf-style atom syntax: whitespace-separated AND terms,
-        // with `!` negation, `^`/`$` anchors and `'` exact matching.
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
         let result = self
@@ -711,13 +659,6 @@ impl Search {
             .store(false, std::sync::atomic::Ordering::Release);
     }
 
-    /// Refreshes installed-addon labels from freshly fetched workshop data,
-    /// moving any stale label into `terms` so it stays searchable.
-    ///
-    /// `SearchItem` is immutable (`len` is a cached sort key derived from
-    /// `label`/`terms` at construction), so a change in label builds a whole
-    /// replacement item rather than editing the existing one in place, and
-    /// swaps it into both `items` and `installed_addons`.
     pub fn refresh_installed_addon_labels(&self, items: &[WorkshopItem]) {
         self.ensure_sorted();
         for item in items {

@@ -1,16 +1,8 @@
-//! Centred panel for a route that cannot show its content yet: a tinted
-//! glyph, a title, one sentence, and the buttons that fix it.
-//!
-//! Every blank route surface goes through here — unmet prerequisites and
-//! genuinely-empty libraries alike — so "no Garry's Mod" and "no addons"
-//! stop being reported in two different visual dialects.
-
 use iced::widget::{Space, button, column, container, row, svg, text};
 use iced::{Alignment, Center, Color, ContentFit, Element, Length};
 
 use crate::theme::{self, Tokens, ViewCtx};
 
-/// Panel width. The body wraps inside it at roughly 34 characters.
 const PANEL_WIDTH: f32 = 380.0;
 const GLYPH_DISC: f32 = 52.0;
 const GLYPH_SIZE: f32 = 26.0;
@@ -19,14 +11,10 @@ const GLYPH_SIZE: f32 = 26.0;
 const OPTICAL_TOP_SHARE: u16 = 46;
 const OPTICAL_BOTTOM_SHARE: u16 = 54;
 
-/// How loudly the glyph reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tone {
-    /// An unmet prerequisite the user can act on.
     Warn,
-    /// Work in flight — connecting, searching.
     Busy,
-    /// Nothing is wrong; there is simply nothing here.
     Quiet,
 }
 
@@ -49,18 +37,16 @@ impl Tone {
     }
 }
 
-/// Weight of a panel button. Exactly one action per panel is `Primary`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Emphasis {
     Primary,
     Secondary,
 }
 
-/// One button under the sentence.
 pub struct Action<M> {
     label: String,
     emphasis: Emphasis,
-    /// `None` renders the button disabled — used while a retry is in flight.
+    /// None disables the button while a retry is in flight.
     message: Option<M>,
 }
 
@@ -81,8 +67,6 @@ impl<M> Action<M> {
         }
     }
 
-    /// Greys the button out without removing it, so the row keeps its shape
-    /// while the action it offers is momentarily unavailable.
     #[must_use]
     pub fn disabled(mut self) -> Self {
         self.message = None;
@@ -90,20 +74,16 @@ impl<M> Action<M> {
     }
 }
 
-/// What sits inside the tinted disc.
 pub enum Glyph {
     Icon(svg::Handle),
-    /// The shared equalizer spinner, driven by the caller's animation clock.
     Spinner(f32),
 }
 
-/// A route surface with no content to show.
 pub struct RouteState<M> {
     glyph: Glyph,
     tone: Tone,
     title: String,
     body: String,
-    /// Monospaced supporting line, e.g. the saved path that stopped resolving.
     detail: Option<String>,
     actions: Vec<Action<M>>,
 }
@@ -133,7 +113,6 @@ impl<M> RouteState<M> {
     }
 }
 
-/// Renders the panel filling the route's content area.
 pub fn view<'a, M: Clone + 'a>(state: RouteState<M>, ctx: ViewCtx<'a>) -> Element<'a, M> {
     let tokens = *ctx.tokens;
     let RouteState {

@@ -1,5 +1,3 @@
-//! Icon thumbnail ownership and backdrop projection.
-
 use super::thumbnail_demand;
 
 pub(super) fn thumbnail_owner() -> thumbnail_demand::Owner {

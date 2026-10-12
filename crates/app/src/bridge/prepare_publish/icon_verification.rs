@@ -1,5 +1,3 @@
-//! Workshop icon validation and display-preview preparation.
-
 use super::{
     Arc, Duration, IconFormat, IconVerificationRequest, PathOperation, PreparePublishPathError,
     PreparedAnimation, UiError, VerifiedIcon, VerifiedIconPreview, WORKSHOP_ICON_MAX_SIZE,
@@ -149,8 +147,6 @@ fn display_preview_rgba(image: &::image::DynamicImage) -> (Vec<u8>, u32, u32) {
         return (image.to_rgba8().into_raw(), width, height);
     }
 
-    // Triangle is plenty for a display-only downscale and much cheaper than
-    // CatmullRom at 4K-source sizes; the submitted file is never resampled here.
     let resized = image.resize(
         WORKSHOP_ICON_PREVIEW_MAX_EDGE,
         WORKSHOP_ICON_PREVIEW_MAX_EDGE,

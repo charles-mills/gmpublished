@@ -14,9 +14,6 @@ pub fn scrim(state: &State, tokens: &Tokens, now: Instant) -> Element<'static, M
     dim_layer(tokens, state.opacity(now), state.interactive())
 }
 
-/// Renders the second scrim between the base modal and the Destination
-/// Select overlay, keyed to the overlay's own presence. Clicking it closes
-/// only the topmost layer.
 pub fn overlay_scrim(state: &State, tokens: &Tokens, now: Instant) -> Element<'static, Message> {
     dim_layer(
         tokens,
@@ -25,10 +22,6 @@ pub fn overlay_scrim(state: &State, tokens: &Tokens, now: Instant) -> Element<'s
     )
 }
 
-/// Renders the heavy scrim behind an expanded (near-fullscreen) preview,
-/// on top of the base scrim; together they black out the ring of app that
-/// stays visible around the sheet. Clicking it routes through the same
-/// close chain as Esc (collapse first).
 pub fn expanded_scrim(state: &State, tokens: &Tokens, now: Instant) -> Element<'static, Message> {
     dim_layer_colored(
         tokens.colors.scrim_expanded,
@@ -62,7 +55,6 @@ fn dim_layer_colored(
     }
 }
 
-/// Hosts a modal body layer; bodies are content-sized and center themselves.
 pub fn frame<'a, M>(content: Element<'a, M>, scale: f32, interactive: bool) -> Element<'a, M>
 where
     M: 'a,

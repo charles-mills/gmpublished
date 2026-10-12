@@ -7,7 +7,6 @@ use crate::bridge::{
 use gmpublished_backend::AppDataSnapshot as BackendAppDataSnapshot;
 use std::path::PathBuf;
 
-/// Configuration capability exposed to app features.
 #[derive(Clone, Copy)]
 pub struct ConfigService<'a> {
     inner: &'a BackendServices,

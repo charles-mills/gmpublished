@@ -1,7 +1,6 @@
 use super::BackendServices;
 use crate::bridge::library::{LibraryRefresh, LibraryRefreshReason, LibrarySnapshot};
 
-/// Installed-addon library capability exposed to app features.
 #[derive(Clone, Copy)]
 pub struct LibraryService<'a> {
     inner: &'a BackendServices,

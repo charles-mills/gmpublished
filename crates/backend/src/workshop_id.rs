@@ -1,18 +1,7 @@
-//! The identity of a Steam Workshop item.
-
 use std::{fmt, num::NonZeroU64};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// A Steam Workshop item id.
-///
-/// Zero is never a valid id — Steam spells "no item" that way, and every parse
-/// path in this crate already treats it so — which the inner `NonZeroU64`
-/// makes unrepresentable rather than a convention each caller has to remember.
-///
-/// Distinct from [`steamworks::PublishedFileId`], which is a plain `u64`
-/// wrapper: this crate's own vocabulary carries the invariant, and the
-/// conversion to steamworks' spelling happens at the calls into steamworks.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkshopId(NonZeroU64);
 
@@ -31,9 +20,6 @@ impl WorkshopId {
         self.0.get()
     }
 
-    /// The id with its invariant still attached, so a caller mirroring this
-    /// type on the other side of a boundary converts totally rather than
-    /// re-checking something already proven.
     #[must_use]
     pub const fn get_nonzero(self) -> NonZeroU64 {
         self.0
@@ -66,13 +52,11 @@ impl TryFrom<steamworks::PublishedFileId> for WorkshopId {
     }
 }
 
-/// Steam answered with id zero, which names no item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("a workshop id of zero names no item")]
 pub struct ZeroWorkshopId;
 
-/// Serialized as the bare integer, which is the shape settings files hold.
-/// Changing it would orphan every id already on disk.
+/// Settings files store IDs as bare integers. Keep this format compatible.
 impl Serialize for WorkshopId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.get().serialize(serializer)
@@ -86,9 +70,6 @@ impl<'de> Deserialize<'de> for WorkshopId {
     }
 }
 
-/// A literal workshop id in a fixture. Panics on zero, which is a broken
-/// fixture rather than a runtime condition — stated once here so the fixtures
-/// do not each carry their own wording for it.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn workshop_id(id: u64) -> WorkshopId {
@@ -115,8 +96,6 @@ mod tests {
         assert!(WorkshopId::try_from(steamworks::PublishedFileId(0)).is_err());
     }
 
-    /// The stored shape is the bare integer. Changing it would silently orphan
-    /// every id in an existing settings file.
     #[test]
     fn it_serializes_as_a_bare_integer() {
         let id = WorkshopId::new(12345).expect("nonzero");

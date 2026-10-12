@@ -10,8 +10,6 @@ const GITHUB_LATEST_RELEASE_API_URL: &str =
 const GITHUB_RELEASE_TAG_URL_PREFIX: &str =
     "https://github.com/charles-mills/gmpublished/releases/tag/";
 const UPDATE_CHECK_USER_AGENT: &str = concat!("gmpublished/", env!("CARGO_PKG_VERSION"));
-// Fail fast and silent: a slow GitHub round-trip should never hold the
-// update badge hostage.
 const UPDATE_CHECK_TIMEOUTS: crate::net::HttpTimeouts = crate::net::HttpTimeouts::new()
     .global_timeout(Duration::from_secs(3))
     .connect_timeout(Duration::from_secs(2));
@@ -24,7 +22,6 @@ pub enum UpdateCheckError {
     ResponseRead(#[source] ureq::Error),
 }
 
-/// Fetches the latest GitHub release, returning it only when newer than current.
 pub fn fetch_latest_update(
     current_version: &str,
 ) -> Result<Option<UpdateRelease>, UpdateCheckError> {

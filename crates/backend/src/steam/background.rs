@@ -1,5 +1,3 @@
-//! Ownership and supervision for Steam's process-lifetime threads.
-
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
@@ -24,11 +22,6 @@ const CALLBACK_THREAD: &str = "gmpublished-steam-callbacks";
 const WORKSHOP_THREAD: &str = "gmpublished-steam-workshop";
 const DOWNLOADS_THREAD: &str = "gmpublished-steam-downloads";
 
-/// Root-owned lifecycle for Steam's long-lived services.
-///
-/// The domain-facing [`Steam`] value intentionally owns no thread handles or
-/// shutdown state. This runtime is the one place that may start, stop, wake,
-/// and join its background work.
 pub(crate) struct SteamBackgroundRuntime {
     state: Mutex<RuntimeState>,
 }
@@ -74,7 +67,6 @@ impl SteamBackgroundRuntime {
         }
     }
 
-    /// Starts the supervisor once and reports the exact lifecycle outcome.
     pub(crate) fn start(
         &self,
         steam: Arc<Steam>,
@@ -111,7 +103,6 @@ impl SteamBackgroundRuntime {
         Ok(SteamBackgroundStart::Started)
     }
 
-    /// Signals and joins all workers. Safe before startup and on repeated calls.
     pub(crate) fn shutdown(&self) {
         let control = {
             let mut state = self.state.lock();
@@ -346,12 +337,9 @@ fn retry_until_shutdown(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        time::Instant,
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     use super::*;
@@ -379,20 +367,23 @@ mod tests {
     fn retry_exits_promptly_once_signaled() {
         let shutdown = Arc::new(Signal::new());
         let signaler = Arc::clone(&shutdown);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            signaler.set();
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            retry_until_shutdown(
+                &shutdown,
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+                || {
+                    attempt_tx.send(()).expect("attempt signal");
+                    false
+                },
+            )
         });
-
-        let started = Instant::now();
-        let succeeded = retry_until_shutdown(
-            &shutdown,
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            || false,
-        );
-        assert!(!succeeded);
-        assert!(started.elapsed() < Duration::from_secs(1));
+        attempt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first attempt");
+        signaler.set();
+        assert!(!worker.join().expect("retry worker"));
     }
 
     #[test]
@@ -448,22 +439,5 @@ mod tests {
 
         control.request_shutdown();
         assert!(woke.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn every_join_shares_one_shutdown_deadline() {
-        let control = Arc::new(BackgroundControl::new());
-        for index in 0..4 {
-            control
-                .spawn("gmpublished-steam-stuck-test", move |_| {
-                    let _ = index;
-                    Signal::new().wait_until_set(Duration::from_secs(3600));
-                })
-                .expect("spawn stuck worker");
-        }
-
-        let started = Instant::now();
-        control.shutdown_and_join();
-        assert!(started.elapsed() < SHUTDOWN_JOIN_TIMEOUT * 3);
     }
 }

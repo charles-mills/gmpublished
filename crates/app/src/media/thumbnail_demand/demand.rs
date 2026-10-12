@@ -1,7 +1,3 @@
-//! How views describe what they want: the demand vocabulary, and the
-//! viewport geometry that turns a visible range into demanded rows and
-//! physical pixel sizes.
-
 use std::{fmt, ops::Range, sync::Arc};
 
 use crate::bridge::domain::PublishedFileId;
@@ -50,10 +46,8 @@ pub fn prefetch_ranges(visible: Range<usize>, total: usize) -> (Range<usize>, Ra
     )
 }
 
-/// Rows inside this window keep their thumbnails when a grid releases
-/// off-screen handles; everything else downgrades to Loading. `None` means
-/// "release nothing" (transient empty viewport, e.g. before the first
-/// visible-range event — releasing everything then would flash the grid).
+/// Keep thumbnails inside this window; release the rest. None means release
+/// nothing while waiting for a viewport measurement, avoiding a grid flash.
 pub fn retained_rows(visible: Range<usize>, total: usize) -> Option<Range<usize>> {
     let visible = visible.start.min(total)..visible.end.min(total);
     if visible.is_empty() {
@@ -75,18 +69,11 @@ pub enum Owner {
     WarmLibrary,
 }
 
-/// Identity of the UI entity asking for a thumbnail.
-///
-/// The manager treats identities opaquely, but owners do not: search rows are
-/// numeric, Workshop surfaces use refined Workshop ids, and grid cards use
-/// arbitrary stable row keys. Keeping those spaces distinct removes the
-/// format/parse round trips that used to sit on every delivery boundary.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum DemandId {
     Row(Arc<str>),
     SearchRow(usize),
     Workshop(PublishedFileId),
-    /// An owner with exactly one thumbnail interest, such as GMA preview.
     Singleton,
 }
 
@@ -148,12 +135,6 @@ pub enum Priority {
     Prefetch = 3,
 }
 
-/// What a thumbnail interest is capable of consuming.
-///
-/// This is deliberately independent of [`Priority`]: cache warming is a
-/// cache-only product, not merely a very-low-priority visual request. Static
-/// analysis similarly declares the exact decoding and delivery behavior it
-/// needs instead of teaching the scheduler about a concrete feature owner.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DemandCapabilities {
     mode: ThumbnailMode,
@@ -169,7 +150,6 @@ enum DeliveryPolicy {
 }
 
 impl DemandCapabilities {
-    /// Ordinary visual demand: preserve animation and accept placeholders.
     pub const SURFACE: Self = Self {
         mode: ThumbnailMode::Animated,
         delivery: DeliveryPolicy::Surface,

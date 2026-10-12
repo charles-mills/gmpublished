@@ -1,17 +1,10 @@
-//! One-shot blurred-backdrop bakes for icon previews.
-
 use iced::widget::image;
 
 const BACKDROP_MAX_EDGE: u32 = 64;
 const BACKDROP_SIGMA: f32 = 2.0;
 
-/// Bakes a small gaussian-blurred copy of an RGBA buffer.
-///
-/// The source's alpha is flattened onto `well_rgb` (the icon-well color)
-/// before blurring so transparent regions darken toward the well instead of
-/// edge-extending the icon's border colors. The result is intentionally tiny
-/// (≤64px edge): the GPU upscales it with cover fit at render time, which
-/// reads as a strong cheap blur.
+/// Flatten transparency onto the icon-well color before blurring, so the
+/// edges fade into the well. The GPU scales up the small result.
 pub fn bake_blurred_backdrop(
     width: u32,
     height: u32,
@@ -85,8 +78,6 @@ mod tests {
 
     #[test]
     fn transparent_pixels_flatten_to_the_well_color() {
-        // Fully transparent bright-white source: without flattening the blur
-        // would keep the white edge color.
         let rgba = [255, 255, 255, 0].repeat(16 * 16);
 
         let handle = bake_blurred_backdrop(16, 16, &rgba, WELL).expect("backdrop should bake");

@@ -1,5 +1,3 @@
-//! File-type mapping: extension → silkicon + type label.
-
 use std::borrow::Cow;
 
 mapped_enum_with_all! {
@@ -54,14 +52,12 @@ mapped_enum_with_all! {
 }
 
 impl SilkIcon {
-    /// This icon's position in [`Self::ALL`], which is declaration order.
     #[must_use]
     pub const fn index(self) -> usize {
         self as usize
     }
 }
 
-/// Matches steam.js `getFileTypeInfo`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileTypeInfo<'a> {
     pub(crate) icon: SilkIcon,
@@ -84,8 +80,6 @@ pub fn file_type_info(name: &str) -> FileTypeInfo<'_> {
     }
 }
 
-/// One table so an extension cannot gain a label without an icon, or the
-/// reverse. Extensions sharing a label share this arm.
 fn icon_and_type_key(extension: &str) -> (SilkIcon, &'static str) {
     match extension {
         "lua" => (SilkIcon::ScriptCode, "file-type-lua"),
@@ -115,9 +109,6 @@ fn icon_and_type_key(extension: &str) -> (SilkIcon, &'static str) {
 mod tests {
     use super::{SilkIcon, file_type_info};
 
-    /// `.map` and `.bsp` share a label, so they must share an icon. Two
-    /// separate tables let `.map` keep the label while falling through to the
-    /// generic page icon.
     #[test]
     fn extensions_sharing_a_label_share_an_icon() {
         let bsp = file_type_info("de_dust2.bsp");
@@ -159,9 +150,6 @@ mod tests {
         assert_eq!(bare.extension, "");
     }
 
-    /// `ALL` is indexed by `index()`, which is the discriminant. If the two
-    /// disagree, every icon past the divergence renders as another icon —
-    /// which nothing else in the app would notice.
     #[test]
     fn all_matches_declaration_order() {
         for (index, icon) in SilkIcon::ALL.into_iter().enumerate() {
@@ -169,9 +157,6 @@ mod tests {
         }
     }
 
-    /// Two icons sharing a PNG is always a copy-paste slip, and the slip
-    /// pairs a *correct* name with the wrong bytes — so comparing names alone
-    /// would miss it.
     #[test]
     fn every_icon_has_its_own_bundled_image() {
         for (position, icon) in SilkIcon::ALL.into_iter().enumerate() {

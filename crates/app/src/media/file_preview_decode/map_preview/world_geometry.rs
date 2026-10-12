@@ -1,5 +1,3 @@
-//! World geometry and BSP-to-preview projections.
-
 use super::{
     MapFog, MapSkyCamera, MapSpawn, MaterialSlot, MeshData, ModelVertex, Vec3, material_dimensions,
     normalize_map_uv, srgb_byte_to_linear,

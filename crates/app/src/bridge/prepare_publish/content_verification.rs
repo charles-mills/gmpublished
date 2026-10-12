@@ -1,5 +1,3 @@
-//! Content-tree collection and publish/snapshot verification.
-
 use super::{
     Arc, ArchiveEntryPath, ArchiveService, ConfigService, ContentPathVerificationRequest,
     GmaMetaEntry, HashSet, MAX_WHITELIST_FAILURES, Path, PathBuf, PathOperation,
@@ -136,12 +134,6 @@ impl From<CollectedContentTree> for WorkshopSnapshotInventory {
     }
 }
 
-/// Accumulator state threaded through the recursive directory walk in
-/// [`collect_content_entries`]. Bundled into one struct because these fields
-/// are mutated together at every recursion depth, and each is written from
-/// multiple call sites rather than just one — passing them individually
-/// would mean a long, unwieldy parameter list threaded through every
-/// recursive call for no benefit.
 #[derive(Default)]
 struct ContentCollectionState {
     entries: Vec<(GmaMetaEntry, PathBuf)>,
@@ -218,12 +210,8 @@ fn collect_content_entries(
     Ok(())
 }
 
-/// A path under `root` in the archive's canonical form.
-///
-/// ASCII lowercasing specifically, matching
-/// [`crate::bridge::content_path::normalize_archive_path`]: a Unicode
-/// lowercase would fold characters it does not, so `CAFÉ.vmt` would index one
-/// way here and be looked up another, and nothing would ever find it.
+/// Match normalize_archive_path's ASCII lowercasing; Unicode lowercasing would change non-ASCII
+/// entry names.
 pub(super) fn relative_slash_path(root: &Path, path: &Path) -> Result<String, UiError> {
     let relative = path.strip_prefix(root).map_err(|_| {
         PreparePublishPathError::OutsideContentRoot {

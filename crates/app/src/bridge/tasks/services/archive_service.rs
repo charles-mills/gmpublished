@@ -2,7 +2,6 @@ use super::BackendServices;
 use gmpublished_backend::Transaction;
 use std::{path::PathBuf, sync::Arc};
 
-/// GMA inspection and extraction capability exposed to app features.
 #[derive(Clone, Copy)]
 pub struct ArchiveService<'a> {
     inner: &'a BackendServices,

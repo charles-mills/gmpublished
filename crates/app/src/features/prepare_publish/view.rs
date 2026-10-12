@@ -124,18 +124,6 @@ fn embedded_preview_body<'a>(
     }
 }
 
-/// The left column in its own scroll viewport.
-///
-/// [`Tokens::publish_modal_height`] sizes the modal to fit this column
-/// exactly, but the modal is also capped at `modal_viewport_ratio` of the
-/// window ([`modal_stack::ResponsiveSize::resolve`]), so on a window shorter
-/// than ~800px the cap wins and the tail of the column — title, type, tags
-/// and the submit button — falls outside the panel's `clip(true)` bounds.
-/// Scrolling keeps every control reachable at any window size, and makes the
-/// fitted height a preference rather than a correctness requirement (the
-/// icon-instruction line estimate in `publish_modal_height` is a fixed three
-/// lines, which some locales exceed). The middle and right columns already
-/// scroll for the same reason.
 fn left_pane<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     // iced draws the scrollbar over the content, so the rail width has to be
@@ -435,7 +423,6 @@ fn select_metrics(tokens: &Tokens) -> select::Metrics {
     }
 }
 
-/// Turns the state's labelled options into menu rows, marking the current one.
 fn select_rows<T: Eq>(
     options: Vec<(T, String)>,
     selected: &T,
@@ -487,8 +474,6 @@ fn tag_selects<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     tag_row.into()
 }
 
-/// Opens the full description editor: staged locally for a new item, against
-/// the live Workshop item when updating. A check marks a staged draft.
 fn description_row<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
@@ -661,8 +646,6 @@ fn browser_empty_state<'a>(
     tokens: &Tokens,
     brightness: f32,
 ) -> Element<'a, Message> {
-    // Rest tone is the pre-composited 25%-over-well dim; hover fades to the
-    // full text color.
     let tone = theme::motion::mix_color(
         tokens.colors.browser_empty_dim.into(),
         tokens.colors.text.into(),

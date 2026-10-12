@@ -114,8 +114,6 @@ impl App {
     }
 }
 
-/// Submits localized title and description edits under a correlated
-/// transaction so failures reach the task overlay.
 fn run_metadata_update(
     backend_ctx: &BackendContext,
     publish: PublishService<'_>,

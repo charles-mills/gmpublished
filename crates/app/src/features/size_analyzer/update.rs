@@ -1,13 +1,9 @@
 use super::{Effect, Message, State};
 use crate::widgets::grid_rows::CardId;
 
-/// Applies a Size Analyzer route message and returns outward effects as plain data.
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     let effects = apply_message(state, message);
-    // Hover mutates on many paths (moves, exits, resize reflow, route
-    // exit), so the hidden tag label re-derives once per message instead of
-    // per call site; it only invalidates the labels layer when the hovered
-    // tag changed.
+    // Recalculate the hidden tag once per message; hover can also change on resize or route exit.
     let _invalidation = state.sync_hidden_tag();
     effects
 }
@@ -174,7 +170,6 @@ mod tests {
                 .any(|effect| matches!(effect, Effect::PreviewUrlsResolveRequested(_)))
         );
 
-        // A content-identical refresh under a bumped epoch must not re-arm.
         let effects = update(
             &mut state,
             Message::SnapshotPushed(
@@ -188,7 +183,6 @@ mod tests {
                 .any(|effect| matches!(effect, Effect::PreviewUrlsResolveRequested(_)))
         );
 
-        // A genuinely changed library re-arms the resolve.
         let effects = update(
             &mut state,
             Message::SnapshotPushed(
@@ -200,8 +194,6 @@ mod tests {
             PublishedFileId::fixture(123)
         ])));
 
-        // A metadata-only change (rename, same sizes) is still a content
-        // change — the projection consumes titles for labels.
         let effects = update(
             &mut state,
             Message::SnapshotPushed(
@@ -337,8 +329,6 @@ mod tests {
         }
     }
 
-    /// Same workshop item set as [`workshop_snapshot`] but a changed size, so
-    /// the content differs under a new epoch.
     fn workshop_snapshot_resized(epoch: u64) -> LibrarySnapshot {
         LibrarySnapshot {
             addons: Arc::from(
@@ -352,8 +342,6 @@ mod tests {
         }
     }
 
-    /// Same item set and sizes as [`workshop_snapshot_resized`] but a changed
-    /// title, so the content differs under a new epoch.
     fn workshop_snapshot_renamed(epoch: u64) -> LibrarySnapshot {
         LibrarySnapshot {
             addons: Arc::from(

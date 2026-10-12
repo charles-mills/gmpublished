@@ -219,8 +219,6 @@ impl State {
         self.workshop_id
     }
 
-    /// The loaded archive; the extract flow reads its extracted name when
-    /// opening Destination Select.
     pub(crate) const fn archive(&self) -> Option<&Arc<PreviewArchive>> {
         self.archive.as_ref()
     }
@@ -473,7 +471,6 @@ impl State {
         self.entry_preview_request(&entry_path)
     }
 
-    /// One-shot Steam profile lookup when metadata lacked a live owner.
     pub(super) fn take_author_request(&mut self) -> Option<AuthorRequest> {
         if !self.open || self.author_requested {
             return None;
@@ -693,7 +690,6 @@ impl State {
         let Some(last_tick) = self.last_animation_tick.replace(now) else {
             return spinning;
         };
-        // Spinner ticks keep arriving while unfocused; the GIF stays paused.
         if !self.window_focused {
             return false;
         }
@@ -855,8 +851,6 @@ impl State {
             .flatten()
     }
 
-    /// Without metadata the seeded image (if any) stays; a still-pending
-    /// square settles to dead.
     fn settle_thumbnail_without_metadata(&mut self) {
         if !matches!(self.thumbnail, ThumbnailState::Ready { .. }) {
             self.thumbnail = ThumbnailState::Dead;
@@ -883,7 +877,6 @@ impl State {
             self.revealed_description_spoilers.clear();
         }
         self.details = details;
-        // Click-time stats render on the first frame; hydration replaces them.
         if !self.details.has_stats
             && let Some(subscription_count) = self.seed.subscription_count
         {

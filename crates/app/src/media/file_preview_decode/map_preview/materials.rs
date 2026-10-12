@@ -1,5 +1,3 @@
-//! Map material-slot ownership, resolution bookkeeping, and diagnostics.
-
 use super::{
     Arc, BTreeSet, HashMap, HashSet, MAP_FALLBACK_TEXTURE_DIMENSION, MaterialSlot, RenderMode,
 };
@@ -11,11 +9,6 @@ pub(in super::super) struct PropMaterialResolveJob {
     pub(in super::super) material_dirs: Vec<String>,
 }
 
-/// The map's material slots and the name index into them.
-///
-/// The material slots a baked map references by index, plus the name lookup
-/// used to share a slot between meshes. Telemetry counts are derived from the
-/// slots on demand so they cannot disagree with them.
 #[derive(Debug, Default)]
 pub(in super::super) struct MaterialTable {
     slots: Vec<MaterialSlot>,
@@ -30,9 +23,8 @@ impl MaterialTable {
         index
     }
 
-    /// Appends without indexing it by name. Used where a slot must not be
-    /// reachable by later lookups — the detail material is pushed with a
-    /// hard-coded render mode an overlay of the same name must not inherit.
+    /// Keep the detail slot unindexed so overlays with the same material name
+    /// cannot inherit its hard-coded render mode.
     pub(in super::super) fn push_unindexed(&mut self, slot: MaterialSlot) -> usize {
         let index = self.slots.len();
         self.slots.push(slot);
@@ -72,7 +64,6 @@ impl MaterialTable {
         self.slots
     }
 
-    /// Makes an already-pushed slot reachable by name.
     pub(in super::super) fn index_by_name(&mut self, name: &str, index: usize) {
         self.indexes.insert(name.to_owned(), index);
     }

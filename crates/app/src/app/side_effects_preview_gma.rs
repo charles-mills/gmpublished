@@ -8,10 +8,6 @@ use gmpublished_backend::error_keys as keys;
 use iced::widget::operation;
 
 impl App {
-    /// Preview GMA keeps its base-layer modal open while Destination Select
-    /// runs in the overlay: dismissing the overlay only drops the pending
-    /// extraction, a successful save starts it, and a failed save leaves the
-    /// overlay open showing the error.
     pub(super) fn preview_gma_destination_dismissed_task(&mut self) -> Task<RootMessage> {
         if self.state.features.preview_gma.has_pending_extraction() {
             self.state.features.preview_gma.clear_pending_extraction();

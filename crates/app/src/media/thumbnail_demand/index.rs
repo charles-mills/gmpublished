@@ -1,7 +1,3 @@
-//! The live ledger of demand: every interest that currently exists, the maps
-//! that key it by owner and by thumbnail, and the queued/in-flight/retrying
-//! state that decides which job starts next.
-
 use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     time::Duration,
@@ -23,35 +19,11 @@ pub(super) struct DemandIndex {
     active_jobs: HashMap<ThumbnailKey, ActiveJob>,
     delayed_retries: HashMap<ThumbnailKey, RetryId>,
     retry_attempts: HashMap<ThumbnailKey, RetryAttempt>,
-    /// Interests grouped by owner, so a demand-set replacement touches only
-    /// that owner's entries.
-    ///
-    /// Without it, tearing down a grid's ~72-entry window scanned every entry
-    /// in the index — including the whole-library cache-only set, which on a cold
-    /// disk cache is one entry per addon.
     by_owner: HashMap<Owner, HashSet<InterestKey>>,
-    /// Queued interactive candidates, ordered by `(priority, sequence)`.
-    ///
-    /// Lazily deleted: entries are pushed on queue and simply skipped when
-    /// popped if they are no longer queued. Removing from the middle of a heap
-    /// is what an index of heap positions would buy, and the bookkeeping costs
-    /// more than the stale pops it avoids.
     ready: BinaryHeap<Candidate>,
-    /// Queued cache-only candidates, kept in their own heap.
-    ///
-    /// Cache-only work is blocked outright whenever the interactive tiers hold
-    /// more than `CACHE_ONLY_MAX_IN_FLIGHT` slots. Sharing one heap meant every
-    /// call in that state popped the entire background backlog just to discover none of it
-    /// was startable, then pushed it all back — reintroducing the O(library)
-    /// scan the heap exists to remove. Partitioning lets that case skip the
-    /// backlog entirely.
     ready_cache_only: BinaryHeap<Candidate>,
 }
 
-/// Heap entry ordering candidates by scheduling preference.
-///
-/// `Reverse` on both fields because `BinaryHeap` is a max-heap and the most
-/// preferred candidate is the lowest priority value, then the lowest sequence.
 #[derive(Clone, Eq, PartialEq)]
 struct Candidate {
     priority: std::cmp::Reverse<Priority>,
@@ -116,8 +88,6 @@ impl DemandIndex {
         }
     }
 
-    /// Drops this owner's interests that are absent from `keep`, leaving the
-    /// rest untouched.
     pub(super) fn retain_owner(&mut self, owner: &Owner, keep: &HashSet<InterestKey>) {
         let Some(interests) = self.by_owner.get(owner) else {
             return;
@@ -128,15 +98,9 @@ impl DemandIndex {
         }
     }
 
-    /// Whether this exact interest is already demanded, re-prioritising it if
-    /// the caller now wants it more urgently.
-    ///
-    /// Priority is deliberately *not* part of `InterestKey` — the same row at a
-    /// new priority is the same interest, not a second one. But that means a
-    /// row promoted from `Prefetch` to `VisibleRow` as the user scrolls toward
-    /// it looks unchanged to a plain existence check, and would keep serving at
-    /// prefetch priority for as long as it stayed on screen. Nothing in the
-    /// delivered results would look wrong; it would simply be slow.
+    /// Checks an existing interest and applies priority promotions.
+    /// Priority is excluded from `InterestKey`, so a newly visible row keeps its
+    /// identity while moving out of the prefetch tier.
     pub(super) fn reprioritise_existing(
         &mut self,
         interest: &InterestKey,
@@ -179,11 +143,6 @@ impl DemandIndex {
         }
     }
 
-    /// The only way an interest leaves the index, so every derived map stays
-    /// in step. Callers must not prune `by_owner` themselves — an entry
-    /// removed while its bucket keeps it is a ghost nothing revisits.
-    ///
-    /// Any stale heap candidate is skipped on pop.
     fn remove_interest(&mut self, interest: &InterestKey) -> Option<DemandEntry> {
         let entry = self.entries.remove(interest)?;
         if let Some(interests) = self.key_to_interests.get_mut(&entry.key) {
@@ -201,21 +160,11 @@ impl DemandIndex {
         Some(entry)
     }
 
-    /// Drops work nobody wants any more, releasing its media slot.
-    ///
-    /// Cancelling an in-flight job wastes less than it looks like it should:
-    /// cancellation is cooperative and only checked before I/O, so
-    /// a job already fetching runs to completion, and `complete_job` inserts the
-    /// result into the memory cache *before* it checks whether anyone still
-    /// wants it. The bytes are kept either way. What cancelling actually buys is
-    /// the slot, immediately, for rows the user has now scrolled to.
+    /// Releases media slots for unwanted work. A fetch already in progress may
+    /// still finish and populate the memory cache before delivery is checked.
     pub(super) fn cancel_uninterested_work(&mut self) {
-        // `retry_attempts` is swept alongside the two work maps because a
-        // backpressured job leaves a key in *only* that one: it is out of
-        // `active_jobs` and was never a delayed retry. Left behind, the count
-        // outlives every interest in its key, and the next demand for that key
-        // — an hour and a scroll later — inherits the elevated attempt and
-        // gives up sooner than a first attempt should.
+        // Clear retry counts too: backpressured keys may exist in neither work map
+        // and must not pass elevated attempts to a future demand.
         let keys = self
             .active_jobs
             .keys()
@@ -282,13 +231,6 @@ impl DemandIndex {
         })
     }
 
-    /// Pops the best startable candidate from one tier's heap.
-    ///
-    /// Candidates that are stale (entry gone, no longer queued, or superseded
-    /// by a newer sequence) are dropped. Candidates that are merely blocked
-    /// right now — their source already has a job running, or a static request
-    /// is waiting on the animated decode of the same source — are set aside and
-    /// returned to the heap, because they are still wanted.
     fn take_startable(
         &mut self,
         cache_only: bool,
@@ -345,10 +287,7 @@ impl DemandIndex {
         selected
     }
 
-    /// True when `key` has at least one interest and every one is cache-only —
-    /// the completion should fill the disk cache without churning the memory
-    /// cache's recency window. No interests at all is NOT cache-only: a
-    /// scrolled-past completion is exactly what the memory cache wants.
+    /// True only if at least one interest exists and all interests are cache-only.
     pub(super) fn interests_cache_only(&self, key: &ThumbnailKey) -> bool {
         self.key_to_interests.get(key).is_some_and(|interests| {
             !interests.is_empty()
@@ -373,21 +312,12 @@ impl DemandIndex {
         self.mark_interests_queued(key);
     }
 
-    /// Retires the cache-only interests in `key` and re-queues everything else.
-    ///
-    /// A cache-only job hands back no pixels, so the two halves have to be
-    /// handled differently. Cache-only interests are *satisfied* — the bytes they wanted are
-    /// on disk — and must not be re-queued, or the pump would restart a job
-    /// that banks-and-completes immediately, forever. An interactive interest
-    /// that attached while the cache-only job was in flight is *not* satisfied, and
-    /// would otherwise sit `InFlight` waiting for a delivery that is never
-    /// coming; re-queuing it restarts it at its own priority, and that restart
-    /// is local, since the source it needs was just banked.
+    /// Retires cache-only interests after source banking. Requeues interactive
+    /// interests that attached mid-flight because they still need decoded pixels.
     pub(super) fn retire_cache_only_interests(&mut self, key: &ThumbnailKey) {
         let Some(interests) = self.key_to_interests.get(key).cloned() else {
             return;
         };
-        // The cache-only fetch succeeded, so any backoff it accumulated is spent.
         self.retry_attempts.remove(key);
         for interest in interests {
             let Some(entry) = self.entries.get_mut(&interest) else {
@@ -415,8 +345,6 @@ impl DemandIndex {
             entry.state = DemandState::Queued;
             let (priority, sequence, capabilities) =
                 (entry.priority, entry.sequence, entry.capabilities);
-            // Re-offer: the entry's previous heap candidate was consumed when
-            // it left the queue, so becoming queued again needs a fresh one.
             self.enqueue(&interest, priority, sequence, capabilities);
         }
     }
@@ -462,24 +390,12 @@ impl DemandIndex {
 
     fn cancel_key(&mut self, key: &ThumbnailKey) {
         if let Some(job) = self.active_jobs.remove(key) {
-            // Only an actually-running job needs signalling; a queued entry is
-            // dropped by removing it from `active_jobs` above.
             job.cancellation.cancel();
         }
         self.delayed_retries.remove(key);
         self.retry_attempts.remove(key);
     }
 
-    /// Retires every interest in `key`, returning them so the caller can
-    /// deliver to each.
-    ///
-    /// Removals go through `remove_interest` so the owner bucket is kept in
-    /// step. Dropping straight out of `entries` left the interest behind in
-    /// `by_owner` — harmless today, because `retain_owner` is that map's only
-    /// reader and it tolerates entries that no longer exist, but the ghosts
-    /// accumulated for a whole session under an owner that applies exactly one
-    /// demand set and so never prunes again, and any
-    /// future reader of `by_owner` would have inherited a lie.
     pub(super) fn complete_key(&mut self, key: &ThumbnailKey) -> Vec<DemandEntry> {
         self.cancel_key(key);
         let interests = self.key_to_interests.remove(key).unwrap_or_default();
@@ -578,9 +494,6 @@ pub(super) enum DemandState {
 }
 
 pub(super) struct StartCandidate {
-    /// The whole request, not the parts to rebuild one from: the key it
-    /// caches under is derived here and cannot disagree with the input and
-    /// edge the job actually fetches.
     pub(super) request: ThumbnailRequest,
     #[cfg(test)]
     pub(super) priority: Priority,

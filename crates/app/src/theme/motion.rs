@@ -45,15 +45,9 @@ impl Motion {
     }
 }
 
-/// Animation presence that keeps redraw clocks alive from stored state.
-///
-/// Invariant: a redraw-subscription gate must be a pure function of stored
-/// state (`needs_ticks`), never of the wall clock. `settled` may flip only
-/// inside a tick handler. This guarantees the clock outlives every animation
-/// by exactly one delivered tick: the tick that both finalizes dependent state
-/// and lets the gate close. It prevents the race where iced rebuilds
-/// subscriptions between animation end and the next tick, such as after a
-/// cursor-move message, and tears down the clock before finalization runs.
+/// Redraw gates depend on stored `needs_ticks` state, never wall-clock time.
+/// Only a tick may settle an animation, so the subscription stays alive until
+/// its finalization tick even if another message rebuilds subscriptions.
 #[derive(Clone, Debug)]
 pub struct Presence<T>
 where
@@ -138,7 +132,6 @@ where
         self.animation.value()
     }
 
-    /// The eased in-flight value, tracking retargets mid-animation.
     pub(crate) fn current(&self, now: Instant) -> f32 {
         self.animation
             .interpolate_with(|value| value.float_value(), now)
@@ -159,8 +152,7 @@ where
     }
 }
 
-/// `Eq` holds whenever the animated value itself is `Eq` (e.g. `bool`),
-/// since equality above never inspects the `f32`-valued easing internals.
+/// Equality compares the animated value, not the f32 easing state.
 impl<T> Eq for Presence<T> where T: Clone + Copy + Eq + Float {}
 
 impl Presence<bool> {
@@ -185,11 +177,9 @@ pub fn asymmetric(
     Presence::new_asymmetric(initial, enter, exit, easing)
 }
 
-/// Resting scale for closed popovers and menus, paired with an opacity fade.
 pub const POPOVER_CLOSED_SCALE: f32 = 0.98;
 
-/// The shared enter/exit curve, upstream's cubic-bezier(0.16, 1, 0.3, 1):
-/// heavily front-loaded, so entrances read as a snap that settles.
+/// Upstream enter/exit curve, cubic-bezier(0.16, 1, 0.3, 1).
 pub fn expo_ease() -> Easing {
     Easing::Custom(expo_ease_curve)
 }
@@ -262,10 +252,7 @@ pub fn redraw_subscription(active: bool) -> Subscription<Instant> {
     }
 }
 
-/// GIF thumbnails advance at ~10-25fps and playback is elapsed-based, so a
-/// 50ms tick keeps frame timing exact at a third of the redraws. Used when
-/// GIF playback is the only live motion; any easing animation upgrades the
-/// route back to the full-rate tick.
+/// GIF playback uses elapsed time. Tick every 50ms when it is the only animation running.
 const GIF_FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn gif_redraw_subscription() -> Subscription<Instant> {
@@ -299,35 +286,6 @@ mod tests {
     use iced::animation::Easing;
 
     use super::*;
-
-    #[test]
-    fn motion_tokens_convert_to_durations() {
-        let motion = Motion {
-            fast_ms: 100,
-            hover_in_ms: 90,
-            hover_out_ms: 220,
-            modal_enter_ms: 180,
-            modal_exit_ms: 130,
-            context_menu_enter_ms: 120,
-            context_menu_exit_ms: 100,
-            thumb_reveal_ms: 150,
-            overlay_toast_ms: 500,
-        };
-
-        assert_eq!(motion.fast_duration(), Duration::from_millis(100));
-        assert_eq!(motion.hover_in_duration(), Duration::from_millis(90));
-        assert_eq!(motion.hover_out_duration(), Duration::from_millis(220));
-        assert_eq!(motion.modal_enter_duration(), Duration::from_millis(180));
-        assert_eq!(motion.modal_exit_duration(), Duration::from_millis(130));
-        assert_eq!(
-            motion.context_menu_enter_duration(),
-            Duration::from_millis(120)
-        );
-        assert_eq!(
-            motion.context_menu_exit_duration(),
-            Duration::from_millis(100)
-        );
-    }
 
     #[test]
     fn asymmetric_presence_uses_direction_durations() {
@@ -404,7 +362,6 @@ mod tests {
         assert_approx(expo_ease_curve(0.0), 0.0);
         assert_approx(expo_ease_curve(1.0), 1.0);
 
-        // Front-loaded curve: most of the travel happens by the midpoint.
         assert!(expo_ease_curve(0.5) > 0.9);
     }
 

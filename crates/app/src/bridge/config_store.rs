@@ -25,10 +25,7 @@ pub struct ResolvedConfig {
     backend_revision: u64,
 }
 
-/// The app's sole configuration owner.
-///
-/// Readers load an `Arc` without locking. Writers serialize the complete
-/// mutate -> resolve -> persist -> publish transaction under `writer`.
+/// Readers load snapshots without locking. Writers hold writer through persistence and publication.
 #[derive(Debug)]
 pub struct ConfigStore {
     current: ArcSwap<ResolvedConfig>,
@@ -176,12 +173,8 @@ impl ConfigStore {
     }
 }
 
-/// Imports the pre-unification sibling UI document exactly once.
-///
-/// The backend's ordinary serialized settings transaction supplies the
-/// atomic write and in-memory publication. The old file is retired only
-/// after a fresh snapshot proves that the exact opaque document is present
-/// in the authoritative settings file.
+/// Remove the legacy UI file only after a fresh settings snapshot confirms
+/// that its full contents were saved.
 fn migrate_legacy_ui_settings(backend: &Backend) -> BackendAppDataSnapshot {
     let initial = backend.app_data_snapshot();
     let legacy_file = initial.paths.settings_file.parent().map_or_else(

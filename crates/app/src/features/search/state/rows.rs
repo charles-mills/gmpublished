@@ -1,5 +1,3 @@
-//! Search result projection, selection actions, and thumbnail row state.
-
 use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,7 +96,6 @@ impl Row {
             thumbnail_demand::DeliveryResult::Ready(ready) => {
                 RowThumbnail::Ready(ready.handle().clone())
             }
-            // Search rows keep their spinner rather than a blurred placeholder.
             thumbnail_demand::DeliveryResult::Placeholder(_) => return false,
             thumbnail_demand::DeliveryResult::Failed { .. } => RowThumbnail::Dead,
         };

@@ -1,7 +1,6 @@
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::media::preview_model::{PreviewRequest, RelatedPreviewKind, RelatedPreviewTarget};
 
-/// What an entry path says the entry is, before the archive is consulted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum EntryClass {
     /// A `.mdl` sidecar, which has no preview of its own: the caller either
@@ -10,7 +9,6 @@ pub(super) enum EntryClass {
     Previewable(PreviewClass),
 }
 
-/// An entry the decoder can build a preview from directly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PreviewClass {
     Code { syntax: CodeSyntax },
@@ -154,12 +152,7 @@ fn material_texture_entry_path(texture_name: &str) -> String {
     }
 }
 
-/// The `.vtx` flavours Source ships, most specific first — the bare `.vtx`
-/// must come last or `foo.dx90.vtx` would yield `foo.dx90.mdl`.
-///
-/// `model_companion_parent_path` and `load_model_companions` both read this
-/// list; a flavour in one but not the other redirects to its parent `.mdl` and
-/// then fails to load.
+/// Try plain `.vtx` last, or `foo.dx90.vtx` would resolve to `foo.dx90.mdl`.
 pub(super) const VTX_SUFFIXES: &[&str] = &[
     ".dx90.vtx",
     ".dx80.vtx",
@@ -169,8 +162,6 @@ pub(super) const VTX_SUFFIXES: &[&str] = &[
     ".vtx",
 ];
 
-/// Non-`.vtx` companions. Not alternatives to one another, unlike
-/// [`VTX_SUFFIXES`].
 const OTHER_COMPANION_SUFFIXES: &[&str] = &[".vvd", ".phy", ".ani"];
 
 pub(super) fn model_companion_parent_path(path: &str) -> Option<String> {

@@ -9,8 +9,6 @@ use tempfile::TempDir;
 
 use super::*;
 
-// Wire-format constants for the fixture builder (the parser itself
-// lives in vformats).
 const VPK_SIGNATURE: u32 = 0x55aa1234;
 const VPK_DIR_ARCHIVE_INDEX: u16 = 0x7fff;
 const VPK_ENTRY_TERMINATOR: u16 = 0xffff;
@@ -446,25 +444,16 @@ fn discover_game_vpks_is_depth_limited_and_sorted() {
     );
 }
 
-/// The prefix buffer is sized from an unchecked u32 in the header, so a
-/// 12-byte file can claim a tree of nearly 4GiB. The read that follows fails
-/// either way — the point of the guard is to refuse *before* reserving the
-/// space, which is why this asserts on the sizing decision directly rather
-/// than on `open`'s error code.
 #[test]
 fn prefix_len_is_refused_when_the_file_cannot_hold_it() {
-    // A v1 header claiming the largest possible tree, in a file that is only
-    // the header.
     assert_eq!(
         validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, u32::MAX, 12),
         Err(VpkError::FormatError)
     );
-    // One byte short is still short.
     assert_eq!(
         validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 19),
         Err(VpkError::FormatError)
     );
-    // An honest header is sized as claimed, trailing payload and all.
     assert_eq!(
         validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 20),
         Ok(20)
@@ -475,8 +464,6 @@ fn prefix_len_is_refused_when_the_file_cannot_hold_it() {
     );
 }
 
-/// End to end: a header whose tree overruns the file is a format error, not a
-/// 4GiB allocation.
 #[test]
 fn rejects_tree_size_larger_than_the_file() {
     let dir = TempDir::new().unwrap();

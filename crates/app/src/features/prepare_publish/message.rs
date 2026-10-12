@@ -63,7 +63,6 @@ pub enum Message {
         Result<crate::bridge::workshop_text::WorkshopText, UiError>,
     ),
     ChangelogActionPerformed(text_editor::Action),
-    /// Open the description editor for this submission.
     DescriptionEditRequested,
     LocalizedDraftsStaged {
         language: crate::bridge::workshop_text::WorkshopLanguage,

@@ -1,6 +1,4 @@
-// Particle preview: instanced quads, either camera-facing billboards or
-// axis-stretched (trails, rope segments). No depth buffer — translucents are
-// CPU-sorted back-to-front and additives are order-independent.
+// No depth buffer. Sort translucent particles back-to-front; additives are order-independent.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -51,7 +49,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> Vert
 
     var world_offset: vec3<f32>;
     if instance.axis_mode.w < 0.5 {
-        // Billboard: rotate the corner in the camera plane.
         let cr = cos(rotation);
         let sr = sin(rotation);
         let local = vec2<f32>(
@@ -61,7 +58,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> Vert
         world_offset = uniforms.camera_right.xyz * (local.x * half_width)
             + uniforms.camera_up.xyz * (local.y * half_width);
     } else {
-        // Axis quad: length along the axis, width perpendicular in view.
         let axis = normalize(instance.axis_mode.xyz);
         let to_eye = normalize(uniforms.camera_eye.xyz - center);
         var side = cross(axis, to_eye);

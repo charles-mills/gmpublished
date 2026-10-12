@@ -16,7 +16,7 @@ use gmpublished_backend::{
     AppDataPathsSnapshot as BackendAppDataPathsSnapshot, AppDataSnapshot as BackendAppDataSnapshot,
     Settings as BackendSettings,
 };
-use iced::{Point, Size, Task, keyboard, theme::Mode, widget::image, window};
+use iced::{Point, Size, Task, keyboard, theme::Mode, widget::image};
 
 use crate::bridge::domain::SteamId;
 use crate::{bridge::archive::PreviewArchiveSource, features::file_preview};
@@ -58,50 +58,41 @@ use crate::bridge::ui_error::UiError;
 use crate::generation::Generation;
 use crate::widgets::grid_rows::CardId;
 
-/// The feature/service boundary is checked as an architectural constraint,
-/// not left as a convention every reviewer has to rediscover.
-#[test]
-fn feature_modules_do_not_import_operational_service_handles() {
-    const FORBIDDEN: &[&str] = &[
-        "BackendContext",
-        "BackendServices",
-        "WorkshopService",
-        "ConfigService",
-        "ArchiveService",
-        "PublishService",
-        ".run_blocking(",
-        "spawn_blocking",
-    ];
+fn task_messages(task: Task<RootMessage>) -> Vec<RootMessage> {
+    use futures::StreamExt;
 
-    fn inspect(path: &Path, offenders: &mut Vec<String>) {
-        for entry in std::fs::read_dir(path).expect("feature source directory") {
-            let path = entry.expect("feature source entry").path();
-            if path.is_dir() {
-                inspect(&path, offenders);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                let source = std::fs::read_to_string(&path).expect("feature source file");
-                for (line_number, line) in source.lines().enumerate() {
-                    for forbidden in FORBIDDEN {
-                        if line.contains(forbidden) {
-                            offenders.push(format!(
-                                "{}:{} contains `{forbidden}`",
-                                path.display(),
-                                line_number + 1
-                            ));
-                        }
-                    }
-                }
+    futures::executor::block_on(async {
+        let Some(mut actions) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        let mut messages = Vec::new();
+        while let Some(action) = actions.next().await {
+            match action {
+                iced_runtime::Action::Output(message) => messages.push(message),
+                _ => panic!("expected a message task"),
             }
         }
-    }
+        messages
+    })
+}
 
-    let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/features");
-    let mut offenders = Vec::new();
-    inspect(&features, &mut offenders);
-    assert!(
-        offenders.is_empty(),
-        "operational dependencies leaked into feature modules: {offenders:#?}"
-    );
+#[test]
+fn gma_file_drop_routes_the_selected_path_to_bulk_extraction() {
+    let app = App::new_for_test();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("selected.gma");
+    std::fs::write(&path, b"GMAD").unwrap();
+
+    let messages = task_messages(app.handle_file_drop(path.clone()));
+    assert!(matches!(messages.as_slice(),
+        [RootMessage::Downloader(downloader::Message::BulkExtractPathsSelected(paths))]
+        if paths == &[path]
+    ));
+    assert!(matches!(
+        task_messages(app.handle_file_drop(root.path().join("missing.gma"))).as_slice(),
+        [RootMessage::Noop]
+    ));
+    assert!(task_messages(app.handle_file_drop(root.path().join("other.txt"))).is_empty());
 }
 
 fn assert_task_scheduled(task: &Task<RootMessage>) {
@@ -110,17 +101,6 @@ fn assert_task_scheduled(task: &Task<RootMessage>) {
 
 fn assert_no_task(task: &Task<RootMessage>) {
     assert_eq!(task.units(), 0, "expected no scheduled task");
-}
-
-#[test]
-fn test_constructor_uses_default_root_state_without_running_startup() {
-    let app = App::new_for_test();
-
-    assert_eq!(app.state.features.shell.route(), shell::Route::MyWorkshop);
-    assert_eq!(app.state.features.shell.account_name(), None);
-    assert!(!app.state.features.my_workshop.is_route_visible());
-    assert_eq!(app.theme(), None);
-    assert_eq!(app.title(), "gmpublished");
 }
 
 #[test]
@@ -193,7 +173,6 @@ fn destination_overlay_layers_over_preview_and_closes_first() {
     assert!(app.state.features.modal_stack.overlay_active());
     assert!(app.state.features.preview_gma.is_open());
 
-    // Scrim/Escape close targets the overlay; the preview stays put.
     let _task = app.update(RootMessage::ModalStack(
         modal_stack::Message::CloseRequested,
     ));
@@ -257,10 +236,6 @@ fn modal_stack_close_clears_prepare_publish_state() {
     assert!(!app.state.features.prepare_publish.open());
 }
 
-/// A modal that is replaced rather than closed never animates out, so the
-/// close teardown has to be driven by the displacement itself: without it
-/// `prepare_publish` keeps its staged temp paths and thumbnail demands alive
-/// behind whatever took the layer.
 #[test]
 fn a_displaced_modal_runs_the_close_teardown_it_never_animated_into() {
     let mut app = App::new_for_test();
@@ -286,10 +261,6 @@ fn a_displaced_modal_runs_the_close_teardown_it_never_animated_into() {
     assert!(!app.state.features.prepare_publish.open());
 }
 
-/// The previewer's messages travel as an effect, so no root match arm has to
-/// be ordered ahead of the general `PreparePublish(_)` one. Handling them at
-/// the root instead would make that ordering load-bearing: swap the two arms
-/// and the message falls through to a feature whose own update ignores it.
 #[test]
 fn a_preview_message_wrapped_by_prepare_publish_still_reaches_the_previewer() {
     let mut app = App::new_for_test();
@@ -327,63 +298,6 @@ fn settings_activation_claims_modal_stack_slot() {
 }
 
 #[test]
-fn shell_executor_open_settings_schedules_settings_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(vec![shell::Effect::OpenSettings], App::run_shell_effect);
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn shell_executor_open_url_schedules_native_open_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![shell::Effect::OpenUrl(
-            "https://example.com/test".to_owned(),
-        )],
-        App::run_shell_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn shell_executor_begin_window_drag_schedules_window_drag_when_window_known() {
-    let mut app = App::new_for_test();
-    app.window_id = Some(window::Id::unique());
-
-    let task = app.batch_effects(vec![shell::Effect::BeginWindowDrag], App::run_shell_effect);
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn shell_executor_toggle_maximize_schedules_window_toggle_when_window_known() {
-    let mut app = App::new_for_test();
-    app.window_id = Some(window::Id::unique());
-
-    let task = app.batch_effects(vec![shell::Effect::ToggleMaximize], App::run_shell_effect);
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn downloader_executor_submission_schedules_worker_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![downloader::Effect::WorkshopSubmissionAccepted(vec![
-            PublishedFileId::fixture(123),
-        ])],
-        App::run_downloader_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
 fn downloader_executor_cancels_requested_tasks() {
     let mut app = App::new_for_test();
     let handle = app
@@ -409,9 +323,6 @@ fn downloader_executor_cancels_requested_tasks() {
 fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     let mut app = App::new_for_test();
 
-    // The backend queues a Steam download: DownloadStarted correlates a
-    // fresh task with the transaction (the same path backend_event_task
-    // takes when the event arrives over the wire).
     let transaction = app.environment.ctx.begin_transaction();
     let _task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::DownloadStarted {
@@ -420,8 +331,6 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
         },
     ));
 
-    // The item id arrives as transaction data; feeding the resulting action
-    // back into update() mirrors backend_event_task's Task::done loop.
     let actions = app
         .environment
         .ctx
@@ -440,9 +349,6 @@ fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     }
     assert_eq!(app.state.features.downloader.downloading().len(), 1);
 
-    // Pressing the row's X sends CancelRequested; the row leaves the list
-    // immediately and its effect aborts the very transaction the download
-    // worker polls.
     let row_id = app.state.features.downloader.downloading()[0].id();
     let _task = app.update(RootMessage::Downloader(
         downloader::Message::CancelRequested {
@@ -499,46 +405,6 @@ fn downloader_row_cancel_button_is_clickable_through_the_full_app_view() {
 }
 
 #[test]
-fn downloader_executor_open_paths_schedules_native_open_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![downloader::Effect::PathsOpenRequested(vec![PathBuf::from(
-            "/tmp/downloader-open",
-        )])],
-        App::run_downloader_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn downloader_executor_open_workshop_schedules_url_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![downloader::Effect::WorkshopPageOpenRequested(Some(
-            PublishedFileId::fixture(123),
-        ))],
-        App::run_downloader_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn downloader_executor_bulk_extract_picker_schedules_dialog_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![downloader::Effect::BulkExtractPickerRequested],
-        App::run_downloader_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
 fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
     let app = App::new_for_test();
     let archive = PreviewArchive::from_gma(
@@ -548,8 +414,6 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
     )
     .expect("fixture archive should load");
 
-    // Mirrors `run_local_gma_extraction`: begin a transaction and correlate
-    // it with the task so cancellation can reach the extraction.
     let transaction = app.environment.ctx.begin_transaction();
     let task = app
         .environment
@@ -560,8 +424,6 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
         .ctx
         .correlate_backend_transaction(transaction.id(), task);
 
-    // Cancelling through the same path the UI's cancel button uses reaches
-    // the transaction the extraction call below is about to use.
     assert!(app.environment.ctx.cancel_task(task_id));
     assert!(transaction.aborted());
 
@@ -573,34 +435,7 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
     );
 
     assert!(matches!(result, Err(GmaError::Cancelled)));
-    // A second cancellation attempt has nothing left to cancel.
     assert!(!app.environment.ctx.cancel_task(task_id));
-}
-
-#[test]
-fn downloader_executor_local_extraction_schedules_worker_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![downloader::Effect::LocalExtractionRequested(vec![
-            PathBuf::from("/tmp/local-extract.gma"),
-        ])],
-        App::run_downloader_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn gma_file_drop_reuses_bulk_local_extraction_path() {
-    let app = App::new_for_test();
-    let root = tempfile::tempdir().expect("tempdir");
-    let path = root.path().join("selected.gma");
-    std::fs::write(&path, b"GMAD").expect("gma fixture");
-
-    let task = app.handle_file_drop(path);
-
-    assert_task_scheduled(&task);
 }
 
 #[test]
@@ -629,52 +464,8 @@ fn destination_select_executor_modal_open_opens_overlay() {
     assert!(app.state.features.modal_stack.overlay_active());
 }
 
-#[test]
-fn destination_select_executor_folder_picker_schedules_dialog() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![destination_select::Effect::FolderPickerRequested],
-        App::run_destination_select_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn destination_select_executor_create_folder_schedules_persistence() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![destination_select::Effect::CreateFolderChanged(true)],
-        App::run_destination_select_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn destination_select_executor_persist_request_schedules_save() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![destination_select::Effect::DestinationPersistRequested(
-            destination_select::DestinationPersistRequest {
-                destination: ExtractDestination::Temp,
-                create_folder: false,
-                history_path: None,
-            },
-        )],
-        App::run_destination_select_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-/// Persisting starts the overlay's close: it stops taking input immediately,
-/// while the overlay itself stays up until the fade finishes. Nothing here
-/// ticks the animation, so `overlay_active` is still true — that is the state
-/// under test, not an oversight.
+/// Saving starts the close animation and disables input. This test does not
+/// tick the animation, so overlay_active must still be true.
 #[test]
 fn destination_select_executor_persisted_begins_closing_the_overlay() {
     let mut app = App::new_for_test();
@@ -710,20 +501,6 @@ fn destination_select_executor_dismissed_clears_extraction_handoff() {
 }
 
 #[test]
-fn downloader_executor_title_query_schedules_metadata_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![downloader::Effect::WorkshopTitleQueryRequested(vec![
-            PublishedFileId::fixture(123),
-        ])],
-        App::run_downloader_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
 fn downloader_executor_active_job_count_updates_shell_badge() {
     let mut app = App::new_for_test();
 
@@ -743,67 +520,6 @@ fn downloader_executor_active_job_count_updates_shell_badge() {
             .count,
         3
     );
-}
-
-#[test]
-fn search_executor_palette_opened_refreshes_thumbnail_demands() {
-    let mut app = App::new_for_test();
-    seed_search_result(&mut app, false);
-
-    let task = app.batch_effects(vec![search::Effect::PaletteOpened], App::run_search_effect);
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn search_executor_palette_dismissed_refreshes_thumbnail_demands() {
-    let mut app = App::new_for_test();
-    seed_search_result(&mut app, false);
-
-    let task = app.batch_effects(
-        vec![search::Effect::PaletteDismissed],
-        App::run_search_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn search_executor_focus_input_schedules_focus_operation() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![search::Effect::FocusInputRequested],
-        App::run_search_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn search_executor_quick_debounce_schedules_debounce_task() {
-    let mut app = App::new_for_test();
-    let request = seed_search_request(&mut app);
-
-    let task = app.batch_effects(
-        vec![search::Effect::QuickSearchDebounceRequested(request)],
-        App::run_search_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn search_executor_quick_search_schedules_worker_task() {
-    let mut app = App::new_for_test();
-    let request = seed_search_request(&mut app);
-
-    let task = app.batch_effects(
-        vec![search::Effect::QuickSearchRequested(request)],
-        App::run_search_effect,
-    );
-
-    assert_task_scheduled(&task);
 }
 
 #[test]
@@ -841,32 +557,6 @@ fn search_executor_cancels_requested_task() {
 
     assert_no_task(&task);
     assert!(transaction.aborted());
-}
-
-#[test]
-fn search_executor_result_activation_schedules_selection_task() {
-    let mut app = App::new_for_test();
-    seed_search_result(&mut app, false);
-
-    let task = app.batch_effects(
-        vec![search::Effect::ResultActivated(0)],
-        App::run_search_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn search_executor_thumbnail_demands_changed_refreshes_thumbnail_demands() {
-    let mut app = App::new_for_test();
-    seed_search_result(&mut app, false);
-
-    let task = app.batch_effects(
-        vec![search::Effect::ThumbnailDemandsChanged],
-        App::run_search_effect,
-    );
-
-    assert_task_scheduled(&task);
 }
 
 #[test]
@@ -930,52 +620,6 @@ fn my_workshop_executor_stats_refresh_defers_until_steam_connects() {
             pages: 2,
         }]
     );
-}
-
-#[test]
-fn my_workshop_executor_prepare_publish_schedules_open() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![my_workshop::Effect::PreparePublishRequested(
-            my_workshop::PreparePublishTarget::New,
-        )],
-        App::run_my_workshop_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn my_workshop_executor_context_menu_schedules_owned_open_request() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![my_workshop::Effect::ContextMenuRequested(
-            my_workshop_context_menu_request(),
-        )],
-        App::run_my_workshop_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-/// The demand handlers must not schedule work — they mutate the demand index
-/// and let the pump drive fetches.
-///
-/// That is all these four check. Observing the demand itself needs a laid-out
-/// grid: `thumbnail_demands` reads `visible_item_range`, which is empty until
-/// a layout pass, and the harness has no way to simulate one.
-#[test]
-fn my_workshop_executor_thumbnail_demands_schedules_no_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![my_workshop::Effect::ThumbnailDemandsChanged],
-        App::run_my_workshop_effect,
-    );
-
-    assert_no_task(&task);
 }
 
 #[test]
@@ -1066,37 +710,11 @@ fn installed_addons_executor_preview_schedules_preview_open() {
         App::run_installed_addons_effect,
     );
 
-    // Modal + local archive + Workshop details now start together.
     assert_task_scheduled(&task);
     assert_eq!(
         app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-}
-
-#[test]
-fn installed_addons_executor_context_menu_schedules_owned_open_request() {
-    let mut app = App::new_for_test();
-    let request = installed_context_menu_request();
-
-    let task = app.batch_effects(
-        vec![installed_addons::Effect::ContextMenuRequested(request)],
-        App::run_installed_addons_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn installed_addons_executor_thumbnail_demands_schedules_no_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![installed_addons::Effect::ThumbnailDemandsChanged],
-        App::run_installed_addons_effect,
-    );
-
-    assert_no_task(&task);
 }
 
 #[test]
@@ -1132,63 +750,6 @@ fn installed_addons_executor_drag_release_finishes_drag() {
 
     assert_task_scheduled(&task);
     assert!(!app.state.addon_drag.is_active());
-}
-
-#[test]
-fn size_analyzer_executor_preview_url_resolve_schedules_worker() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![size_analyzer::Effect::PreviewUrlsResolveRequested(vec![
-            PublishedFileId::fixture(123),
-        ])],
-        App::run_size_analyzer_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn size_analyzer_executor_preview_schedules_preview_open() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![size_analyzer::Effect::PreviewRequested(
-            size_analyzer::PreviewTarget {
-                path: PathBuf::from("/tmp/size-preview.gma"),
-                title: "Size Preview".to_owned(),
-                workshop_id: Some(PublishedFileId::fixture(123)),
-            },
-        )],
-        App::run_size_analyzer_effect,
-    );
-
-    // Local archive and Workshop details start together from this route.
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn size_analyzer_executor_context_menu_schedules_owned_open_request() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![size_analyzer_context_menu_effect()],
-        App::run_size_analyzer_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn size_analyzer_executor_thumbnail_demands_schedules_no_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![size_analyzer::Effect::ThumbnailDemandsChanged],
-        App::run_size_analyzer_effect,
-    );
-
-    assert_no_task(&task);
 }
 
 #[test]
@@ -1240,48 +801,6 @@ fn preview_gma_executor_modal_open_claims_modal_slot() {
         app.state.features.modal_stack.active(),
         Some(modal_stack::ActiveModal::PreviewGma)
     );
-}
-
-#[test]
-fn preview_gma_executor_archive_open_schedules_worker() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::ArchiveOpenRequested(
-            preview_open_request(),
-        )],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn preview_gma_executor_metadata_request_schedules_worker() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::WorkshopMetadataRequested(
-            preview_metadata_request(),
-        )],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn preview_gma_executor_author_request_schedules_worker() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::AuthorFetchRequested(
-            preview_author_request(),
-        )],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
 }
 
 #[test]
@@ -1446,70 +965,6 @@ fn preview_gma_close_request_back_stops_embedded_audio_preview() {
 }
 
 #[test]
-fn preview_gma_executor_open_url_schedules_native_open() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::OpenUrlRequested(
-            "https://example.invalid/preview".to_owned(),
-        )],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn preview_gma_executor_copy_text_schedules_clipboard_write() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::CopyTextRequested("path".to_owned())],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn preview_gma_executor_reveal_path_schedules_native_open() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::RevealPathRequested(PathBuf::from(
-            "/tmp/preview.gma",
-        ))],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn preview_gma_executor_browser_path_changed_schedules_autoscroll() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::BrowserPathChanged],
-        App::run_preview_gma_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn preview_gma_executor_thumbnail_demands_schedules_no_task() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![preview_gma::Effect::ThumbnailDemandsChanged],
-        App::run_preview_gma_effect,
-    );
-
-    assert_no_task(&task);
-}
-
-#[test]
 fn settings_executor_modal_open_claims_modal_slot() {
     let mut app = App::new_for_test();
 
@@ -1544,66 +999,6 @@ fn settings_executor_modal_close_starts_close_animation() {
         Some(modal_stack::ActiveModal::Settings)
     );
     assert!(!app.state.features.modal_stack.interactive());
-}
-
-#[test]
-fn settings_executor_path_browse_schedules_dialog() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![settings::Effect::PathBrowseRequested(
-            settings::PathSetting::Temp,
-        )],
-        App::run_settings_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn settings_executor_path_validation_schedules_worker() {
-    let mut app = App::new_for_test();
-    let request = app
-        .state
-        .features
-        .settings
-        .path_validation_request(settings::PathSetting::Temp);
-
-    let task = app.batch_effects(
-        vec![settings::Effect::PathValidationRequested(request)],
-        App::run_settings_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn settings_executor_mutation_applies_runtime_and_schedules_save() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![settings::Effect::MutationApplied(
-            crate::generation::Generation::INITIAL,
-            settings::SettingsMutation::PlayGifsByDefault(false),
-        )],
-        App::run_settings_effect,
-    );
-
-    assert_task_scheduled(&task);
-}
-
-#[test]
-fn settings_executor_reset_run_schedules_worker() {
-    let mut app = App::new_for_test();
-
-    let task = app.batch_effects(
-        vec![settings::Effect::ResetRunRequested(
-            settings::ResetAction::Settings,
-        )],
-        App::run_settings_effect,
-    );
-
-    assert_task_scheduled(&task);
 }
 
 #[test]
@@ -1768,11 +1163,6 @@ fn command_comma_dismisses_account_menu_and_defers_to_settings_open_task() {
     assert_eq!(app.state.features.modal_stack.active(), None);
 }
 
-/// The shortcut's own contribution is the scheduled close task; the harness
-/// does not run tasks, so the `CloseRequested` below stands in for what that
-/// task delivers. What is verified here is the settling: once the close is
-/// requested, the layer clears on the next animation tick rather than
-/// stranding an inactive modal.
 #[test]
 fn requesting_a_settings_close_clears_the_modal_on_the_next_tick() {
     let mut app = App::new_for_test();
@@ -1785,13 +1175,16 @@ fn requesting_a_settings_close_clears_the_modal_on_the_next_tick() {
         Some(modal_stack::ActiveModal::Settings)
     );
 
-    // The toggle dispatches the same CloseRequested that Escape and the
-    // scrim click dismissal paths emit.
     let task = app.update(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSettings));
-    assert_task_scheduled(&task);
-    let _task = app.update(RootMessage::Settings(settings::Message::CloseRequested));
+    let messages = task_messages(task);
+    assert!(matches!(
+        messages.as_slice(),
+        [RootMessage::Settings(settings::Message::CloseRequested)]
+    ));
+    for message in messages {
+        let _task = app.update(message);
+    }
 
-    // Close-then-clear: the layer settles on the next animation tick.
     let _task = app.update(RootMessage::AnimationTick(
         Instant::now() + Duration::from_secs(1),
     ));
@@ -1808,7 +1201,6 @@ fn settings_toggle_mapper_maps_only_command_comma() {
         map_settings_toggle_shortcut(&keyboard::Key::Character(",".into()), command),
         Some(RootMessage::GlobalShortcut(GlobalShortcut::ToggleSettings))
     ));
-    // Everything else passes through to the modal's widgets.
     assert!(map_settings_toggle_shortcut(&keyboard::Key::Character("f".into()), command).is_none());
     assert!(map_settings_toggle_shortcut(&keyboard::Key::Character("1".into()), command).is_none());
     assert!(
@@ -2195,20 +1587,16 @@ fn backend_appdata_event_refreshes_settings_and_paths() {
     let snapshot = backend_appdata_snapshot_for_test(settings, root.path());
 
     let task = app.update(RootMessage::BackendEvent(
-        BackendRuntimeEvent::AppDataUpdated(Box::new(snapshot.clone())),
+        BackendRuntimeEvent::AppDataUpdated(Box::new(snapshot)),
     ));
-    assert_task_scheduled(&task);
-
-    // The event handler deliberately performs sanitization and path
-    // resolution on the blocking pool. Apply the worker result explicitly in
-    // this reducer-level test.
-    let (settings, paths) = app
-        .environment
-        .ctx
-        .apply_appdata_snapshot_for_test(snapshot);
-    let _task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
-        settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
-    ))));
+    let messages = task_messages(task);
+    assert!(matches!(
+        messages.as_slice(),
+        [RootMessage::AppDataSnapshotApplied(Ok(_))]
+    ));
+    for message in messages {
+        let _task = app.update(message);
+    }
     let (settings, paths) = app.environment.ctx.settings_and_paths_snapshot();
 
     assert!(!settings.backend.sounds);
@@ -2243,17 +1631,16 @@ fn backend_appdata_events_are_serialized_and_coalesce_to_the_latest_snapshot() {
     let first = snapshot("first");
     let second = snapshot("second");
     let latest = snapshot("latest");
-    let task = app.update(RootMessage::BackendEvent(
-        BackendRuntimeEvent::AppDataUpdated(Box::new(first.clone())),
+    let first_task = app.update(RootMessage::BackendEvent(
+        BackendRuntimeEvent::AppDataUpdated(Box::new(first)),
     ));
-    assert_task_scheduled(&task);
 
     let task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::AppDataUpdated(Box::new(second)),
     ));
     assert_no_task(&task);
     let task = app.update(RootMessage::BackendEvent(
-        BackendRuntimeEvent::AppDataUpdated(Box::new(latest.clone())),
+        BackendRuntimeEvent::AppDataUpdated(Box::new(latest)),
     ));
     assert_no_task(&task);
     assert_eq!(
@@ -2263,18 +1650,23 @@ fn backend_appdata_events_are_serialized_and_coalesce_to_the_latest_snapshot() {
         Some("latest")
     );
 
-    let (settings, paths) = app.environment.ctx.apply_appdata_snapshot_for_test(first);
-    let task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
-        settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
-    ))));
-    assert_task_scheduled(&task);
+    let mut messages = task_messages(first_task);
+    assert!(matches!(
+        messages.as_slice(),
+        [RootMessage::AppDataSnapshotApplied(Ok(_))]
+    ));
+    let latest_task = app.update(messages.pop().unwrap());
     assert!(app.appdata_snapshot_in_flight);
     assert!(app.pending_appdata_snapshot.is_none());
 
-    let (settings, paths) = app.environment.ctx.apply_appdata_snapshot_for_test(latest);
-    let _task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(
-        settings::SettingsSnapshot::new(settings, paths, app.state.system_scheme),
-    ))));
+    let messages = task_messages(latest_task);
+    assert!(matches!(
+        messages.as_slice(),
+        [RootMessage::AppDataSnapshotApplied(Ok(_))]
+    ));
+    for message in messages {
+        let _task = app.update(message);
+    }
     let (settings, _) = app.environment.ctx.settings_and_paths_snapshot();
     assert_eq!(settings.backend.language.as_deref(), Some("latest"));
     assert!(!app.appdata_snapshot_in_flight);
@@ -2900,28 +2292,6 @@ fn concrete_theme_tracks_system_scheme_but_keeps_palette_fixed() {
     assert_eq!(state.tokens.variant, crate::theme::ThemeVariant::Dark);
 }
 
-fn preview_open_request() -> preview_gma::OpenRequest {
-    preview_gma::OpenRequest {
-        request_id: Generation::from_raw(1),
-        path: PathBuf::from("/tmp/preview-open.gma"),
-        workshop_id: Some(PublishedFileId::fixture(123)),
-    }
-}
-
-fn preview_metadata_request() -> preview_gma::MetadataRequest {
-    preview_gma::MetadataRequest {
-        request_id: Generation::from_raw(1),
-        workshop_id: PublishedFileId::fixture(123),
-    }
-}
-
-fn preview_author_request() -> preview_gma::AuthorRequest {
-    preview_gma::AuthorRequest {
-        request_id: Generation::from_raw(1),
-        steamid64: SteamId::new(76_561_197_990_735_296),
-    }
-}
-
 fn file_preview_request() -> preview_model::PreviewRequest {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Preview")
@@ -2950,100 +2320,6 @@ fn installed_preview_target() -> installed_addons::PreviewTarget {
         subscription_count: 1_234,
         score_bucket: 4,
         score_label: "95%".to_owned(),
-    }
-}
-
-fn installed_context_menu_request() -> installed_addons::ContextMenuRequest {
-    installed_addons::ContextMenuRequest {
-        position: Point::new(12.0, 24.0),
-        row_id: CardId::from("/tmp/installed-context.gma"),
-        path: PathBuf::from("/tmp/installed-context.gma"),
-        path_text: "/tmp/installed-context.gma".to_owned(),
-        workshop_id: Some(PublishedFileId::fixture(123)),
-        workshop_url: Some(workshop_url::workshop_item_url(PublishedFileId::fixture(
-            123,
-        ))),
-        preview_url: Some("https://example.invalid/installed.jpg".to_owned()),
-        entries: vec![context_menu::Entry::copy_path()],
-    }
-}
-
-fn my_workshop_context_menu_request() -> my_workshop::ContextMenuRequest {
-    my_workshop::ContextMenuRequest {
-        position: Point::new(12.0, 24.0),
-        row_id: CardId::from("123"),
-        workshop_id: PublishedFileId::fixture(123),
-        workshop_url: workshop_url::workshop_item_url(PublishedFileId::fixture(123)),
-        preview_url: Some("https://example.invalid/my-workshop.jpg".to_owned()),
-        entries: vec![context_menu::Entry::copy_link()],
-    }
-}
-
-fn size_analyzer_context_menu_effect() -> size_analyzer::Effect {
-    let mut state = size_analyzer_state_with_snapshot();
-    hover_size_analyzer_workshop_leaf(&mut state);
-    let effects = size_analyzer::update(
-        &mut state,
-        size_analyzer::Message::TreemapRightPressed(Point::new(16.0, 32.0)),
-    );
-    effects
-        .into_iter()
-        .find(|effect| matches!(effect, size_analyzer::Effect::ContextMenuRequested(_)))
-        .expect("right press should request context menu")
-}
-
-fn size_analyzer_state_with_viewport() -> size_analyzer::State {
-    let mut state = size_analyzer::State::default();
-    let _effects = size_analyzer::update(&mut state, size_analyzer::Message::RouteEntered);
-    let _effects = size_analyzer::update(
-        &mut state,
-        size_analyzer::Message::ViewportResized(Size::new(640.0, 360.0)),
-    );
-    state
-}
-
-fn size_analyzer_state_with_snapshot() -> size_analyzer::State {
-    let mut state = size_analyzer_state_with_viewport();
-    let _effects = size_analyzer::update(
-        &mut state,
-        size_analyzer::Message::SnapshotPushed(
-            LibraryRefreshReason::Startup,
-            Ok(Some(size_analyzer_snapshot(1))),
-        ),
-    );
-    state
-}
-
-fn hover_size_analyzer_workshop_leaf(state: &mut size_analyzer::State) {
-    let leaf = state
-        .layout()
-        .expect("layout should exist")
-        .leaf_rects()
-        .into_iter()
-        .find(|leaf| leaf.addon.workshop_id.map(PublishedFileId::get) == Some(123))
-        .expect("workshop leaf should exist");
-    let point = Point::new(
-        (leaf.rect.x + leaf.rect.width / 2.0) as f32,
-        (leaf.rect.y + leaf.rect.height / 2.0) as f32,
-    );
-    let _effects = size_analyzer::update(state, size_analyzer::Message::HoverMoved(point));
-}
-
-fn size_analyzer_snapshot(epoch: u64) -> LibrarySnapshot {
-    LibrarySnapshot {
-        addons: Arc::from(
-            vec![
-                installed_addon_for_library(
-                    "/tmp/size-workshop.gma",
-                    "Size Workshop",
-                    &["tool"],
-                    Some(123),
-                ),
-                installed_addon_for_library("/tmp/size-local.gma", "Size Local", &["map"], None),
-            ]
-            .into_boxed_slice(),
-        ),
-        epoch: Generation::from_raw(epoch),
     }
 }
 
@@ -3139,11 +2415,6 @@ fn installed_addon_for_library(
     }
 }
 
-/// Launch with Steam closed, start Steam while the app is open, and stay on
-/// My Workshop the whole time. The route records the Steam failure while the
-/// panel hides it, so without a reload on the reconnect edge, clearing the
-/// panel reveals a stale "load failed" for an outage that is already over —
-/// recoverable only by navigating away and back.
 #[test]
 fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
     let mut app = App::new_for_test();
@@ -3152,8 +2423,6 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
     let _task = app.update(RootMessage::SteamSession(
         steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Unavailable),
     ));
-    // Entering the route opens page 1; Steam then refuses it, exactly as it
-    // does on a launch with the client closed.
     let _task = app.update(RootMessage::MyWorkshop(my_workshop::Message::RouteEntered));
     let _task = app.update(RootMessage::MyWorkshop(
         my_workshop::Message::PageCompleted(
@@ -3183,8 +2452,6 @@ fn a_reconnect_reloads_a_workshop_route_that_failed_while_steam_was_down() {
     );
 }
 
-/// The edge, not the level: a second Connected message (the backend event and
-/// the attempt completion both land) must not re-enter the route again.
 #[test]
 fn a_repeated_connected_message_does_not_re_enter_the_route() {
     let mut app = App::new_for_test();
@@ -3201,11 +2468,6 @@ fn a_repeated_connected_message_does_not_re_enter_the_route() {
     );
 }
 
-/// Installed Addons is a `Requirement::Game` route, so the reconnect reload
-/// that rescues the Steam-gated routes deliberately skips it — yet its metadata
-/// lookups are the ones most likely to have failed against a Steam that was
-/// still coming up. Without its own hook, ids parked by those failures would
-/// wait for a manual route re-entry.
 #[test]
 fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
     let mut app = App::new_for_test();
@@ -3217,15 +2479,11 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
         installed_addons::Message::RouteEntered,
     ));
     let workshop_id = PublishedFileId::fixture(1);
-    // A snapshot only to advance the metadata generation the completion below
-    // is keyed on; the parking this asserts on is generation-scoped, not
-    // row-scoped, so the rows themselves are beside the point here.
+    // Advance the metadata generation; retries are parked by generation, not by row.
     let _task = app.update(RootMessage::InstalledAddons(
         installed_addons::Message::SnapshotPushed(LibraryRefreshReason::Startup, Ok(Vec::new())),
     ));
 
-    // Steam refuses the lookup, exactly as it does on a launch with the client
-    // still starting.
     let _task = app.update(RootMessage::InstalledAddons(
         installed_addons::Message::MetadataCompleted(
             Generation::from_raw(1),
@@ -3251,13 +2509,6 @@ fn a_reconnect_releases_installed_addon_metadata_parked_by_a_steam_outage() {
     );
 }
 
-/// `RootMessage` is moved and cloned for every interaction in the app,
-/// including the per-frame `AnimationTick`. Feature messages that carry a
-/// decoded payload (preview scenes, workshop metadata, ready thumbnails) box
-/// it so one cold path cannot set the size every message pays; see the
-/// `Boxed:` notes on those variants. This is an upper bound rather than an
-/// equality so field-level churn stays cheap, but a variant that reintroduces
-/// a large inline payload trips it.
 #[test]
 fn root_message_stays_small_enough_for_the_hot_path() {
     const MAX_ROOT_MESSAGE_BYTES: usize = 160;

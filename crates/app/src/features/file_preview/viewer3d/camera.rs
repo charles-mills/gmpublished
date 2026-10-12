@@ -9,15 +9,10 @@ use super::{
 use gmpublished_domain::math::QAngle;
 use gmpublished_domain::math::Vec3;
 
-/// Shader-widget program: owns nothing but a handle to the loaded model;
-/// camera state lives in the widget tree so it survives redraws.
 pub struct Viewer3d {
     pub model: Arc<ModelPreview>,
-    /// Identifies the upload in the shared pipeline cache; bump per load.
     pub content_id: u64,
-    /// Material remap for the selected skin family; empty = identity.
     pub skin_remap: Vec<u16>,
-    /// Selected choice per bodygroup; meshes of other choices are skipped.
     pub bodygroup_choices: Vec<usize>,
     pub phy_debug_visible: bool,
     pub pose: Option<OrbitPose>,
@@ -130,9 +125,6 @@ impl shader::Program<Message> for Viewer3d {
     }
 }
 
-/// Fly-through program for map scenes: WASD + drag-to-look. Movement rides
-/// the redraw chain — each held-key frame requests the next — so the loop
-/// stops dead (0% idle) the moment all keys are released.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each flag toggles an independent map render layer, not a mode enum"
@@ -424,7 +416,6 @@ impl FlyCamera {
             center[1] - radius * 0.6,
             center[2] + radius * 0.35,
         ));
-        // Face the map center from the spawn corner.
         self.yaw = std::f32::consts::FRAC_PI_4;
         self.pitch = -0.25;
     }
@@ -548,13 +539,6 @@ impl FlyCamera {
         match self.mode {
             MovementMode::Fly => self.held.any_movement() || door_moving,
             MovementMode::Walk => {
-                // `duck_reconcile_requested` is one-shot and is cleared by
-                // the next walk step after a single hull-fit attempt.
-                // `duck_view_transition_active` is clamped to Source's
-                // 0.2s duck-view spline, so it terminates by construction.
-                // Door transitions clamp to a finite 0..1 progress range;
-                // a blocked close parks without ticking and only resumes on
-                // later input/movement checks, preserving idle-0%.
                 self.held.any_horizontal()
                     || self.jump_requested
                     || (self.water.is_swimming()

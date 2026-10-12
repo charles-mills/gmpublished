@@ -13,9 +13,8 @@ pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effec
     let sounds = SoundObservation::before(state, &message);
     let mut effects = apply(state, message, now);
     sounds.append_effects(state, &mut effects);
-    // Every snapshot refresh resets the model's scroll offset; the widget
-    // keeps its own offset, so it has to be snapped in the same update or the
-    // virtualized rows and the viewport drift apart.
+    // Reset the widget scroll offset with the model or virtualized rows can
+    // land outside the viewport.
     if state.take_browser_scroll_reset() {
         effects.push(Effect::BrowserScrollResetRequested);
     }

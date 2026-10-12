@@ -1,19 +1,6 @@
-//! Native macOS document-open mechanisms.
-//!
-//! Two complementary handlers feed [`super::accept_paths`]:
-//!
-//! 1. **Delegate patch (primary)** — winit 0.30.13 (used by iced 0.14) does
-//!    *not* implement `application:openURLs:` on its `NSApplicationDelegate`,
-//!    so AppKit has nowhere to route document opens. We dynamically add the
-//!    method to winit's delegate class via `class_addMethod`; AppKit routes
-//!    opens to the delegate once the method exists. The delegate only exists
-//!    after winit's event loop is
-//!    created inside `run()`, so the patch is enqueued onto the main dispatch
-//!    queue from `main()` and executes on the first main-run-loop turns.
-//! 2. **Apple Event handler (fallback)** — a `kAEOpenDocuments` handler
-//!    installed synchronously in `main()` before the delegate exists, so
-//!    launch-time opens cannot be lost even if the patch loses the race with
-//!    the initial `odoc` event.
+//! winit lacks application:openURLs:. Patch its delegate on the main queue after the event loop
+//! installs it.
+//! The Carbon handler also accepts Finder document-open events.
 
 #![allow(unsafe_code)]
 
@@ -26,13 +13,10 @@ use objc2::{
 use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 use objc2_foundation::{MainThreadMarker, NSArray, NSURL};
 
-/// Maximum main-queue turns to wait for winit's delegate to appear.
 const DELEGATE_PATCH_ATTEMPTS: u32 = 50;
 
-/// Must run on the main thread (in `main()`, before the Iced event loop
-/// starts): the Apple Event handler is installed immediately, and the
-/// delegate patch is scheduled onto the main dispatch queue so it runs once
-/// the run loop (and therefore winit's `NSApplicationDelegate`) exists.
+/// Install the Apple Event handler on the main thread before Iced starts, then schedule the
+/// delegate patch.
 pub fn install() {
     match apple_event::install_document_open_handler(super::accept_paths) {
         Ok(()) => {
@@ -219,16 +203,8 @@ mod apple_event {
 
     impl std::error::Error for MacDocumentOpenError {}
 
-    /// Installs the `aevt/odoc` handler for the process lifetime.
-    ///
-    /// There is no teardown, and no handle to one. The handler must stay
-    /// installed as long as the process runs, so the state it needs is leaked
-    /// deliberately.
-    ///
-    /// A registration guard with an `AERemoveEventHandler` `Drop` would be
-    /// unsafe code that never executes — the handle would have to be leaked to
-    /// keep the handler alive, so the `Drop` could not run. If removal is ever
-    /// wanted, the teardown belongs with the change that stops leaking.
+    /// Installs the process-lifetime `aevt/odoc` handler. Its state is leaked
+    /// because Carbon may call it until process exit.
     pub(super) fn install_document_open_handler(
         sender: impl Fn(Vec<PathBuf>) + 'static,
     ) -> Result<(), MacDocumentOpenError> {
@@ -477,7 +453,7 @@ mod apple_event {
     type Size = c_long;
     type CFIndex = c_long;
     type CFStringEncoding = c_uint;
-    // `CFURL.h`: `typedef CF_ENUM(CFIndex, CFURLPathStyle)` — 8 bytes, not 4.
+    // CFURLPathStyle is a CF_ENUM(CFIndex): eight bytes, not four.
     type CFURLPathStyle = CFIndex;
     type CFAllocatorRef = *const c_void;
     type CFURLRef = *const c_void;
@@ -500,7 +476,6 @@ mod apple_event {
     type AEDescList = AEDesc;
     type AppleEvent = AEDesc;
 
-    /// An initialized Carbon descriptor with exactly one disposal obligation.
     struct OwnedAeDesc(AEDesc);
 
     impl OwnedAeDesc {
@@ -554,7 +529,6 @@ mod apple_event {
         }
     }
 
-    /// A +1 Core Foundation reference returned by a Create/Copy function.
     struct OwnedCfRef(NonNull<c_void>);
 
     impl OwnedCfRef {

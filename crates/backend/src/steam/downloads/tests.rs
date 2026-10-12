@@ -4,7 +4,7 @@ use crate::transactions::{TransactionId, TransactionStatus};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Barrier, mpsc},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -76,16 +76,17 @@ fn rejected_extraction_schedule_emits_a_correlated_terminal_error() {
         })
         .expect("test execution resources");
 
-    let gate = Arc::new(Barrier::new(2));
-    let worker_gate = Arc::clone(&gate);
+    let (release_tx, release_rx) = mpsc::channel::<()>();
     let (started_tx, started_rx) = mpsc::channel();
     execution
         .spawn_blocking("occupy-worker", move || {
             started_tx.send(()).expect("announce occupied worker");
-            worker_gate.wait();
+            let _ = release_rx.recv();
         })
         .expect("occupy blocking worker");
-    started_rx.recv().expect("blocking worker started");
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("blocking worker started");
     execution
         .spawn_blocking("fill-queue", || {})
         .expect("fill blocking queue");
@@ -101,6 +102,7 @@ fn rejected_extraction_schedule_emits_a_correlated_terminal_error() {
     );
 
     let events = collector.snapshot();
+    drop(release_tx);
     let transaction_id = events
         .iter()
         .find_map(|event| match event {
@@ -119,8 +121,6 @@ fn rejected_extraction_schedule_emits_a_correlated_terminal_error() {
                 && error.key == crate::error_key::keys::UNKNOWN
                 && error.detail.as_deref().is_some_and(|detail| detail.contains("queue is full"))
     )));
-
-    gate.wait();
 }
 
 fn with_installed_extract_events<T>(
@@ -507,19 +507,11 @@ fn pending_batch_append_moves_all_items_in_one_scheduling_batch() {
     assert_eq!(downloading, (1..=31).map(id).collect::<Vec<_>>());
 }
 
-/// The lost-wakeup regression.
-///
-/// The shutdown flag lives under the mutex its condvar is paired with, so the
-/// park predicate observes it whichever side wins the race. Signalling with a
-/// bare `notify_all()` against a flag under a different mutex loses a shutdown
-/// landing between the loop-top check and the `wait`, and the thread sleeps
-/// until `join_all_within` gives up and detaches it.
 #[test]
 fn shutdown_landing_before_the_park_is_not_lost() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (downloads, _events) = downloads_for_test(temp.path());
 
-    // Shutdown wins: the latch is set while no thread is parked.
     downloads.wake_watchdog();
 
     let mut queue = downloads.downloading.lock();
@@ -528,7 +520,6 @@ fn shutdown_landing_before_the_park_is_not_lost() {
         "a latched shutdown must leave the park predicate false"
     );
 
-    // The real park. It must return without waiting out the timeout.
     let result = downloads.watchdog.wait_while_for(
         &mut queue,
         |queue| queue.should_park(),
@@ -542,18 +533,17 @@ fn shutdown_landing_before_the_park_is_not_lost() {
     );
 }
 
-/// The other ordering: the watchdog is already parked when shutdown arrives.
-/// This half worked before the fix and is kept so a future change to the park
-/// cannot regress it while satisfying the test above.
 #[test]
 fn a_parked_watchdog_wakes_on_shutdown() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (downloads, _events) = downloads_for_test(temp.path());
 
     let parked = Arc::clone(&downloads);
+    let (ready_tx, ready_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
         let result = {
             let mut queue = parked.downloading.lock();
+            ready_tx.send(()).expect("waiter holds the queue lock");
             parked.watchdog.wait_while_for(
                 &mut queue,
                 |queue| queue.should_park(),
@@ -563,10 +553,9 @@ fn a_parked_watchdog_wakes_on_shutdown() {
         !result.timed_out()
     });
 
-    // Long enough that the waiter is parked rather than still starting up; the
-    // assertion holds either way, this just keeps the test honest about which
-    // ordering it exercises.
-    std::thread::sleep(Duration::from_millis(50));
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("waiter ready");
     downloads.wake_watchdog();
 
     assert!(
@@ -575,8 +564,6 @@ fn a_parked_watchdog_wakes_on_shutdown() {
     );
 }
 
-/// `start()` must also release the park — the queue-activity path, distinct
-/// from shutdown.
 #[test]
 fn queued_work_releases_the_park() {
     let temp = tempfile::tempdir().expect("tempdir");

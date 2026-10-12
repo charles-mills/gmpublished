@@ -18,7 +18,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-/// Root-owned backend boundary cloned into Iced workers and subscriptions.
 #[derive(Clone)]
 pub struct BackendContext {
     pub(super) services: Arc<BackendServices>,
@@ -39,14 +38,6 @@ impl BackendContext {
 
     pub(crate) fn new() -> Result<Self, gmpublished_backend::BackendInitError> {
         Self::with_backend_event_sink(install_backend_event_sink_by_default())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn apply_appdata_snapshot_for_test(
-        &self,
-        snapshot: gmpublished_backend::AppDataSnapshot,
-    ) -> (Settings, AppPaths) {
-        self.services.config().apply_appdata_snapshot(snapshot)
     }
 
     fn with_backend_event_sink(
@@ -95,13 +86,6 @@ impl BackendContext {
         self.run_worker_pool(name, job, AppWorkerRuntime::spawn_blocking_job)
     }
 
-    /// [`Self::run_blocking`] for a job that is itself fallible.
-    ///
-    /// Flattens at the boundary instead of at each call site. A job that fails
-    /// and a job that never got scheduled both arrive as one `UiError`, which
-    /// is the point: the nested `Result` made "discard the scheduling error"
-    /// the shortest thing to write, and several call sites took it — turning a
-    /// failure to schedule into a result indistinguishable from success.
     pub(crate) fn run_blocking_ui<T: Send + 'static>(
         &self,
         name: impl Into<Arc<str>>,
@@ -175,7 +159,6 @@ impl BackendContext {
         self.services.config().settings_and_paths_snapshot()
     }
 
-    /// The configured Garry's Mod path paired with the one that resolved.
     pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
         self.services.config().game_paths()
     }
@@ -197,7 +180,6 @@ impl BackendContext {
         self.services.quick_addon_search_for_test(query)
     }
 
-    /// Republishes the installed-addon and installed-file search corpora.
     pub(crate) fn sync_installed_addon_search(
         &self,
         addons: Vec<gmpublished_backend::SearchItem>,
@@ -206,7 +188,6 @@ impl BackendContext {
         self.services.search().sync_installed(addons, files);
     }
 
-    /// Extracts every entry of an opened preview archive.
     pub(crate) fn extract_preview_archive(
         &self,
         archive: &super::super::gma::PreviewArchive,
@@ -219,7 +200,6 @@ impl BackendContext {
             .extract_preview_archive(archive, destination, options, transaction)
     }
 
-    /// Extracts one entry of an opened preview archive to the temp directory.
     pub(crate) fn extract_preview_archive_entry(
         &self,
         archive: &super::super::gma::PreviewArchive,
@@ -231,8 +211,6 @@ impl BackendContext {
             .extract_preview_archive_entry(archive, entry_path, transaction)
     }
 
-    /// Stops every background service this process owns, for app exit.
-    /// Returns how many in-flight transactions were cancelled.
     pub(crate) fn shutdown(&self) -> usize {
         self.services.shutdown()
     }
@@ -444,10 +422,7 @@ impl fmt::Debug for BackendContext {
     }
 }
 
-/// Last-resort `AppPaths` for when nothing better has resolved yet — the
-/// backend before it reads settings, and the pickers rendering before a
-/// backend exists. The directories land under one temp subdirectory so a
-/// fallback run's scratch space is removable in one go.
+/// Keep fallback scratch files under one temp subdirectory for later cleanup.
 pub fn fallback_paths(settings: &Settings) -> AppPaths {
     let temp = std::env::temp_dir().join("gmpublished");
     AppPaths::resolve_with_defaults(

@@ -1,12 +1,3 @@
-//! The publish form's state: what the user has chosen, what has been verified
-//! against the archive on disk, and what is still missing before the Workshop
-//! will accept it.
-//!
-//! Verification is asynchronous and supersedable — a field can be edited while
-//! its previous check is still running — so every verified value carries the
-//! generation it was requested at, and a result for a stale generation is
-//! dropped rather than shown.
-
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -280,7 +271,6 @@ impl State {
         )
     }
 
-    /// Brighten progress of the hovered browser empty state (0 dim, 1 full).
     pub(crate) fn browser_select_hover_progress(&self, now: Instant) -> f32 {
         self.browser_select_hover.0.interpolate(0.0, 1.0, now)
     }
@@ -337,9 +327,6 @@ impl State {
         set
     }
 
-    /// Seeds the display-only preview from a thumbnail delivery.
-    ///
-    /// Failures are silent: the default icon simply stays.
     pub(crate) fn apply_thumbnail_delivery(
         &mut self,
         delivery: &thumbnail_demand::Delivery,
@@ -428,13 +415,8 @@ impl State {
         &self.title
     }
 
-    /// `None` is the row that clears the current choice.
     pub(crate) fn addon_type_options(&self, i18n: &I18n) -> Vec<(Option<AddonType>, String)> {
         let mut options = Vec::with_capacity(AddonType::ALL.len() + 1);
-        // The placeholder row is there to clear a choice. With nothing chosen it
-        // clears nothing and merely repeats the label already on the control's
-        // face — and, matching the empty selection, renders as the highlighted
-        // row. It earns its place only once there is something to undo.
         if self.addon_type.is_some() {
             options.push((None, i18n.tr("prepare-publish-addon-type")));
         }
@@ -450,7 +432,6 @@ impl State {
         self.addon_type
     }
 
-    /// What the control's face reads when the menu is closed.
     pub(crate) fn addon_type_label(&self, i18n: &I18n) -> String {
         self.addon_type.map_or_else(
             || i18n.tr("prepare-publish-addon-type"),
@@ -458,15 +439,12 @@ impl State {
         )
     }
 
-    /// `None` is the row that clears the current choice.
     pub(crate) fn tag_options(
         &self,
         current_index: usize,
         i18n: &I18n,
     ) -> Vec<(Option<AddonTag>, String)> {
         let mut options = Vec::with_capacity(AddonTag::ALL.len() + 1);
-        // Same as the type select: nothing chosen means nothing to clear, and
-        // the row would only echo the face.
         if self.tags.get(current_index).copied().flatten().is_some() {
             options.push((None, tag_placeholder(i18n, current_index)));
         }
@@ -482,7 +460,6 @@ impl State {
         options
     }
 
-    /// What the control's face reads when the menu is closed.
     pub(crate) fn tag_label(&self, index: usize, i18n: &I18n) -> String {
         self.tags.get(index).copied().flatten().map_or_else(
             || tag_placeholder(i18n, index),
@@ -519,12 +496,7 @@ impl State {
         self.submit.is_running()
     }
 
-    /// Why `Publish!` is unavailable, if it is.
-    ///
-    /// Verification in flight suppresses the missing list rather than adding to
-    /// it: until the running check reports back we cannot know what is actually
-    /// absent, and naming a field mid-verify would flag the very thing the user
-    /// is in the middle of supplying.
+    /// Wait for verification to finish before reporting missing requirements.
     pub(crate) fn blockers(&self) -> Blockers {
         if !self.open {
             return Blockers::default();
@@ -565,9 +537,6 @@ impl State {
         self.open && self.created_item.is_none() && self.blockers().is_empty()
     }
 
-    /// The `Publish!` tooltip: the update warning, then whatever is still in
-    /// the way. `None` leaves the button bare, which is the ready state of a
-    /// brand-new addon.
     pub(crate) fn submit_tooltip(&self, i18n: &I18n) -> Option<String> {
         let mut blocks = Vec::new();
         if let Some(warning) = self.update_warning(i18n) {
@@ -601,7 +570,6 @@ impl State {
             && matches!(self.icon, Verification::Verified(_))
     }
 
-    /// Elapsed seconds of the running submit, for the spinner.
     pub(crate) fn spinner_elapsed(&self) -> f32 {
         self.submit.elapsed()
     }
@@ -725,8 +693,6 @@ impl State {
         self.staged_description = (!trimmed.is_empty()).then(|| trimmed.to_owned());
     }
 
-    /// The identity an "edit description" request should target: the live
-    /// Workshop item when updating, none (a local draft) when creating.
     pub(crate) fn description_edit_target(&self) -> Option<PublishedFileId> {
         match &self.mode {
             Mode::New => self.created_item,
@@ -872,7 +838,6 @@ impl State {
         self.begin_content_path_verification(&addon_path)
     }
 
-    /// Verifies the typed path; success is announced with a sound.
     pub(super) fn begin_accepted_path_verification(
         &mut self,
     ) -> Option<ContentPathVerificationRequest> {

@@ -1,5 +1,3 @@
-//! Publish request construction and submission lifecycle.
-
 use super::{
     Generation, Instant, Mode, Path, PublishIconSubmitRequestEnvelope, PublishIconSubmitResult,
     PublishSubmitContext, PublishSubmitMode, PublishSubmitPreview, PublishSubmitRequest,

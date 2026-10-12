@@ -1,19 +1,11 @@
-//! The canonical form every content lookup and every content index uses.
-
 use std::fmt;
 
-/// A content path in the canonical form every tier source indexes by:
-/// lowercase, forward slashes, no empty or `.` segments, no `..`.
-///
-/// A lookup fans out across every content tier, so the path is normalized
-/// once here and the sources index by it directly.
+/// Lowercase, forward slashes, no empty or `.` segments, no `..`.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ContentPath(String);
 
 impl ContentPath {
-    /// `None` when `path` has no canonical form: empty, or containing a `..`
-    /// segment. `..` is rejected outright rather than resolved, so a path is
-    /// never silently rewritten into one naming a different entry.
+    /// Rejects empty paths and `..` segments; parent segments are never resolved.
     pub fn new(path: &str) -> Option<Self> {
         normalize_archive_path(path).map(Self)
     }
@@ -29,9 +21,6 @@ impl fmt::Display for ContentPath {
     }
 }
 
-/// Trims separators, drops empty and `.` segments, rejects `..`, and
-/// lowercases. Both sides of a lookup must agree on this or an index built
-/// from one form is unreachable from the other.
 pub fn normalize_archive_path(path: &str) -> Option<String> {
     let path = path
         .trim()

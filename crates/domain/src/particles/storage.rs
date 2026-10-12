@@ -1,18 +1,7 @@
-//! Structure-of-arrays particle storage.
-
 use super::*;
 
-// --- Particle storage ------------------------------------------------------
-
-/// Declares the particle struct-of-arrays once.
-///
-/// The whole-set operations are generated from the same field list, so a field
-/// cannot be added to one and missed in another — every read indexes all
-/// sixteen arrays by the same position.
 macro_rules! particle_set {
     ($($(#[$meta:meta])* $field:ident: $ty:ty),+ $(,)?) => {
-        /// Structure-of-arrays particle storage; swap-remove keeps steps
-        /// O(live).
         #[derive(Clone, Debug, Default)]
         pub(super) struct ParticleSet {
             $($(#[$meta])* pub(super) $field: Vec<$ty>,)+
@@ -27,7 +16,6 @@ macro_rules! particle_set {
                 $(self.$field.clear();)+
             }
 
-            /// Every array holds one entry per live particle.
             #[cfg(test)]
             pub(super) fn arrays_are_parallel(&self) -> bool {
                 let len = self.position.len();
@@ -40,7 +28,6 @@ macro_rules! particle_set {
 particle_set! {
     position: Vec3,
     velocity: Vec3,
-    /// System time at spawn, already shifted by any pre-age.
     creation_time: f32,
     lifetime: f32,
     radius_initial: f32,

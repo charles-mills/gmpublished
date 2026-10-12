@@ -1,12 +1,3 @@
-//! Shared Source engine particle file (.pcf) parser.
-//!
-//! PCF files are binary DMX documents whose root holds an array of
-//! `DmeParticleSystemDefinition` elements. Each definition carries scalar
-//! base properties plus operator lists (emitters, initializers, operators,
-//! renderers, forces, constraints) and child-system references. The DMX
-//! layer here is deliberately generic; the PCF layer extracts only the
-//! particle schema.
-
 use crate::math::Vec3;
 use std::collections::HashMap;
 
@@ -26,9 +17,6 @@ pub enum PcfError {
     Malformed(&'static str),
 }
 
-/// A parsed particle attribute value. DMX arrays that particle definitions
-/// never use in practice are preserved generically so unknown operators can
-/// still be listed by name.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PcfValue {
     Int(i32),
@@ -48,15 +36,13 @@ pub enum PcfValue {
     Array(Vec<Self>),
 }
 
-/// Attribute bag with Source-style case-insensitive lookup.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PcfAttributes {
     entries: Vec<(String, PcfValue)>,
 }
 
 impl PcfAttributes {
-    /// Appends an attribute; later entries never shadow earlier ones because
-    /// lookup is first-match, mirroring Source.
+    /// First occurrence wins, matching Source.
     pub fn push(&mut self, name: impl Into<String>, value: PcfValue) {
         self.entries.push((name.into(), value));
     }
@@ -128,20 +114,15 @@ impl PcfAttributes {
     }
 }
 
-/// One operator instance: the Source function name ("emit_continuously",
-/// "alpha_fade_out_random", ...) plus its parameter attributes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PcfFunction {
     pub name: String,
     pub attributes: PcfAttributes,
 }
 
-/// Reference to a child system spawned alongside a parent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PcfChild {
     pub name: String,
-    /// Index into [`PcfFile::systems`] when the child definition lives in the
-    /// same file (the overwhelmingly common case).
     pub system_index: Option<usize>,
     pub delay: f32,
 }
@@ -149,7 +130,6 @@ pub struct PcfChild {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PcfSystem {
     pub name: String,
-    /// Base properties: max_particles, material, radius, color, ...
     pub attributes: PcfAttributes,
     pub emitters: Vec<PcfFunction>,
     pub initializers: Vec<PcfFunction>,
@@ -183,8 +163,6 @@ pub fn parse_pcf(bytes: &[u8]) -> Result<PcfFile, PcfError> {
     let document = DmxDocument::parse(bytes)?;
     Ok(extract_particle_systems(&document))
 }
-
-// --- DMX binary layer ---------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
 enum DmxValue {
@@ -248,7 +226,6 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
-    /// Null-terminated string; lossy UTF-8 keeps odd editor exports readable.
     fn cstr(&mut self) -> Result<String, PcfError> {
         let start = self.pos;
         let nul = self.bytes[start..]
@@ -260,8 +237,6 @@ impl<'a> Reader<'a> {
         Ok(String::from_utf8_lossy(slice).into_owned())
     }
 
-    /// Upper bound for count-prefixed reads: each item consumes at least
-    /// `min_item_bytes`, so a count beyond that is a corrupt file.
     fn check_count(&self, count: u32, min_item_bytes: usize) -> Result<usize, PcfError> {
         let remaining = self.bytes.len() - self.pos;
         let count = count as usize;
@@ -272,14 +247,9 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Initial capacity for a count-prefixed read.
-///
-/// [`Reader::check_count`] bounds a count by the bytes left to read, but an
-/// item costs far more in memory than the few bytes that encode it — a `String`
-/// header alone is 24 bytes per one-byte entry. Reserving the full claimed
-/// count therefore multiplies a hostile file's size by an order of magnitude
-/// before a single item is parsed. Growing from a cap costs a few reallocations
-/// on genuinely large files and nothing on real ones.
+/// Caps initial allocation for count-prefixed data. Encoded entries can be
+/// much smaller than their in-memory representation; byte-count validation
+/// alone does not bound the reservation.
 fn initial_capacity(count: usize) -> usize {
     const MAX_RESERVED_ITEMS: usize = 4096;
     count.min(MAX_RESERVED_ITEMS)
@@ -386,7 +356,6 @@ impl DmxDocument {
 }
 
 fn parse_header(header: &str) -> Result<(String, u32, u32), PcfError> {
-    // `<!-- dmx encoding binary 2 format pcf 1 -->`
     let tokens: Vec<&str> = header.split_whitespace().collect();
     if tokens.first() != Some(&"<!--") || tokens.get(1) != Some(&"dmx") {
         return Err(PcfError::NotDmx);
@@ -423,9 +392,7 @@ fn element_ref(reader: &mut Reader<'_>) -> Result<Option<u32>, PcfError> {
     }
 }
 
-/// A DMX attribute's scalar type. The wire encodes an array of `T` as
-/// `T + ARRAY_OFFSET`, so a raw id carries both the element type and whether it
-/// is an array — [`DmxType::decode`] is the one place that arithmetic happens.
+/// DMX encodes arrays as scalar type ID + ARRAY_OFFSET.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmxType {
     Element = 1,
@@ -446,7 +413,6 @@ enum DmxType {
 }
 
 impl DmxType {
-    /// Ids above this are the array form of the type `ARRAY_OFFSET` below.
     const ARRAY_OFFSET: u8 = Self::Matrix as u8;
 
     const fn from_scalar_id(id: u8) -> Option<Self> {
@@ -469,7 +435,6 @@ impl DmxType {
         })
     }
 
-    /// `(element type, whether the attribute is an array of it)`.
     const fn decode(type_id: u8) -> Option<(Self, bool)> {
         if type_id > Self::ARRAY_OFFSET {
             match Self::from_scalar_id(type_id - Self::ARRAY_OFFSET) {
@@ -564,18 +529,10 @@ fn read_scalar(
         DmxType::Angle => PcfValue::Angle(Vec3::from(reader.f32s()?)),
         DmxType::Quaternion => PcfValue::Quaternion(reader.f32s()?),
         DmxType::Matrix => PcfValue::Matrix(Box::new(reader.f32s()?)),
-        // Handled by `read_value`: an element is a reference, not a scalar.
         DmxType::Element => return Err(PcfError::Malformed("unknown attribute type")),
     })
 }
 
-// --- PCF layer -----------------------------------------------------------
-
-/// One of a particle system's function lists, named by its DMX attribute.
-///
-/// An enum rather than a position in a name array, so the attribute name and
-/// the field it assigns are one fact: a positional pairing would be two
-/// orderings kept in step by hand.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperatorList {
     Emitters,
@@ -599,7 +556,6 @@ impl OperatorList {
         })
     }
 
-    /// The field this list populates on the system being built.
     const fn field(self, system: &mut PcfSystem) -> &mut Vec<PcfFunction> {
         match self {
             Self::Emitters => &mut system.emitters,
@@ -613,8 +569,6 @@ impl OperatorList {
 }
 
 fn extract_particle_systems(document: &DmxDocument) -> PcfFile {
-    // Prefer the root's authoritative definition list; fall back to a type
-    // scan for files whose root element is missing or oddly named.
     let definition_indices: Vec<u32> = document
         .elements
         .first()
@@ -764,7 +718,6 @@ fn plain_attributes(attributes: &[(String, DmxValue)]) -> PcfAttributes {
 mod tests {
     use super::*;
 
-    /// Minimal binary DMX writer covering the layouts the parser reads.
     struct Writer {
         bytes: Vec<u8>,
         encoding_version: u32,
@@ -856,9 +809,8 @@ mod tests {
 
     fn build(encoding_version: u32, elements: &[TestElement], value_strings: &[&str]) -> Vec<u8> {
         let mut writer = Writer::new(encoding_version, 1);
-        // The dictionary is serialized before the body, so everything the
-        // body references — including string values written by closures —
-        // must be interned first.
+        // Intern everything the body will reference before writing the dictionary,
+        // including string values supplied by closures.
         if encoding_version >= 2 {
             for element in elements {
                 writer.intern(element.type_name);
@@ -1047,7 +999,6 @@ mod tests {
     #[test]
     fn rejects_non_dmx() {
         assert!(matches!(parse_pcf(b"GMAD\x00"), Err(PcfError::NotDmx)));
-        // No terminator at all reads as a truncated header.
         assert!(matches!(parse_pcf(b"GMAD\x03"), Err(PcfError::Truncated)));
         assert!(matches!(parse_pcf(b""), Err(PcfError::Truncated)));
     }
@@ -1056,7 +1007,6 @@ mod tests {
     fn survives_truncation_everywhere() {
         let bytes = particle_fixture(2);
         for len in 0..bytes.len() {
-            // Any prefix must fail cleanly, never panic.
             let _ = parse_pcf(&bytes[..len]);
         }
     }

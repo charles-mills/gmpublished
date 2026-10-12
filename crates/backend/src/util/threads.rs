@@ -1,22 +1,11 @@
-//! Bounded joining for background threads at shutdown.
-
 use std::{
     sync::mpsc,
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
-/// Joins every handle concurrently, giving up once `timeout` has elapsed
-/// overall and logging what was left under `context`.
-///
-/// The bound is shared across every thread rather than applied per-thread:
-/// the joins run concurrently, so one thread that refuses to stop costs
-/// `timeout` in total, not `timeout` each.
-///
-/// Threads still running past the bound are detached, not killed — their joins
-/// still complete, on the helper threads spawned here. Giving up only stops a
-/// thread that ignored its shutdown signal from blocking the caller, which is
-/// process exit often enough that an unbounded join is never the right default.
+/// Joins concurrently under one shared timeout, logging unfinished threads.
+/// Timed-out threads continue running; helper threads finish their joins later.
 pub(crate) fn join_all_within(
     handles: Vec<JoinHandle<()>>,
     timeout: Duration,
@@ -49,7 +38,6 @@ pub(crate) fn join_all_within(
             }
         }
     }
-    // Otherwise the receiver below never sees a disconnect.
     drop(done_tx);
 
     let mut exited = 0;

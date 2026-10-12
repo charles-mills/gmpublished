@@ -20,9 +20,6 @@ impl From<Friend> for SteamUser {
         Self {
             steamid: friend.id(),
             name: friend.name(),
-            // A buffer that is not a 64x64 RGBA avatar reads as no avatar: the
-            // UI already renders a placeholder for that, and it is the only
-            // honest thing to do with bytes whose shape is unknown.
             avatar: friend.medium_avatar().and_then(|buf| {
                 crate::rgba_image::RgbaImage::try_new(buf, AVATAR_EDGE, AVATAR_EDGE)
             }),
@@ -86,13 +83,8 @@ impl ConnectedSteam<'_> {
             .friends()
             .request_user_information(steamid, false)
         {
-            // First event for this user: the persona (name) is loaded. At
-            // this point Steam serves its default avatar bytes,
-            // indistinguishable from a real avatar by presence alone — the
-            // downloaded image lands with a later event, observable only as
-            // the bytes changing. So baseline here and wait for a change,
-            // using further events as wakeups. A user genuinely on the
-            // default avatar never changes and rides out the deadline.
+            // The first event has the name but may still have Steam's default avatar.
+            // Wait for the pixels to change. Users with the default avatar time out.
             let _ = event_rx.recv_timeout(std::time::Duration::from_secs(10));
             let persona = SteamUser::from(client.client().friends().get_friend(steamid));
             self.steam.users.write().insert(steamid, persona.clone());

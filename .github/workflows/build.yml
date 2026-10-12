@@ -406,7 +406,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  # Refreshes AUR checksums against the published assets. Does not push to the AUR.
   aur_metadata:
     needs: publish
     runs-on: ubuntu-latest

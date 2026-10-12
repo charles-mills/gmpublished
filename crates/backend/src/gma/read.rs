@@ -1,10 +1,5 @@
-//! Safe, bounded-memory GMA reads.
-//!
-//! In-memory decompression results are read directly. On-disk addons and
-//! decompression spill files use positional reads, so another process can
-//! replace or truncate a Steam-managed file without invalidating borrowed
-//! memory. Only the owned header and entry index are retained; payloads are
-//! copied or streamed from checked ranges on demand.
+//! Use positional reads for disk archives. Steam can replace or truncate
+//! these files while they are open, which would make a memory map unsafe.
 
 mod format;
 
@@ -23,11 +18,9 @@ use super::{GmaEntry, GmaError, GmaFile, GmaHeader, GmaMetadata, is_unsafe_entry
 use crate::util::main_thread_forbidden;
 use format::ParsedGma;
 
-/// Where a GMA's decompressed bytes live.
 enum GmaSource {
     Mem(ArcBytes),
     File(FileSource),
-    /// `_guard` unlinks the spill once the view no longer needs it.
     TempBacked {
         source: FileSource,
         _guard: TempPath,
@@ -119,7 +112,6 @@ impl GmaSource {
     }
 }
 
-/// A reader confined to one payload extent.
 pub(super) struct GmaRangeReader<'a> {
     source: &'a GmaSource,
     offset: u64,
@@ -149,9 +141,6 @@ impl Read for GmaRangeReader<'_> {
     }
 }
 
-/// The source for one GMA read/extract operation. Opening a disk-backed view
-/// holds a file handle and its initial length, but does not borrow file-backed
-/// memory or load payloads eagerly.
 pub struct GmaView {
     source: GmaSource,
 }
@@ -164,18 +153,12 @@ impl GmaView {
         })
     }
 
-    /// A GMA decompressed into memory (workshop download); `path` names
-    /// the original compressed payload for identity purposes. Also the
-    /// door in-memory test fixtures come through.
     pub fn from_membuffer(bytes: ArcBytes) -> Self {
         Self {
             source: GmaSource::Mem(bytes),
         }
     }
 
-    /// A GMA decompressed to a spill file; `path` keeps naming the
-    /// original payload so the addon's identity (extracted-name
-    /// fallback, dedup by path) is unchanged.
     pub(crate) fn from_temp_backing(temp_path: TempPath) -> Result<Self, GmaError> {
         let source = FileSource::open(&temp_path)?;
         Ok(Self {
@@ -187,18 +170,11 @@ impl GmaView {
     }
 
     #[cfg(feature = "test-support")]
-    /// Whether this view's bytes are a decompressed-to-disk spill file
-    /// rather than an in-memory buffer or a directly opened addon file.
-    /// Exposed for tests asserting `GmaFile::decompress`'s memory-vs-spill
-    /// threshold; production code never branches on it.
     pub fn is_temp_backed(&self) -> bool {
         matches!(self.source, GmaSource::TempBacked { .. })
     }
 
     #[cfg(feature = "test-support")]
-    /// The spill file's path, when [`Self::is_temp_backed`]. Exposed for
-    /// tests asserting the spill file is deleted once nothing holds this
-    /// view anymore.
     pub fn temp_backing_path(&self) -> Option<&Path> {
         match &self.source {
             GmaSource::TempBacked { _guard, .. } => Some(_guard.as_ref()),
@@ -230,9 +206,6 @@ impl GmaView {
         Self::open_file(path.as_ref())
     }
 
-    /// Parses the header + metadata and builds the identity handle for
-    /// this view's content; `path` names the addon for identity purposes
-    /// (see the constructors above).
     pub fn handle(&self, path: impl AsRef<Path>) -> Result<GmaFile, GmaError> {
         let parsed = self.parse_index()?;
         Ok(self.handle_from_parsed(&parsed, path))
@@ -253,10 +226,7 @@ impl GmaView {
         gma
     }
 
-    /// Identity handle, header, and safe-path entry list from a **single**
-    /// parse. [`Self::handle`], [`Self::header`] and [`Self::entries`]
-    /// each re-walk the whole entry table; index and discovery reads use
-    /// this instead.
+    /// Parses handle, header, and entries once. Calling the individual accessors repeats the parse.
     pub fn meta(&self, path: impl AsRef<Path>) -> Result<GmaMetaBundle, GmaError> {
         let parsed = self.parse_index()?;
         let handle = self.handle_from_parsed(&parsed, path);
@@ -275,8 +245,6 @@ impl GmaView {
         })
     }
 
-    /// Header plus safe-path entry extents for library indexing, without
-    /// constructing the extraction handle that preview/extraction needs.
     pub fn index_meta(&self) -> Result<GmaIndexBundle, GmaError> {
         let parsed = self.parse_index()?;
         Ok(GmaIndexBundle {
@@ -290,16 +258,11 @@ impl GmaView {
         Ok(header_from_parsed(&parsed))
     }
 
-    /// Safe-path-filtered entry projection, computed fresh on every call.
-    /// Callers that need it persistently own the result (it is not a
-    /// populated field).
     pub fn entries(&self) -> Result<HashMap<String, GmaEntry>, GmaError> {
         let parsed = self.parse_index()?;
         Ok(entries_from_parsed(&parsed))
     }
 
-    /// Reads one entry's payload by path. Rejects unsafe paths the same
-    /// way [`Self::entries`] filters them out of its projection.
     pub fn read_entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
         if is_unsafe_entry_path(entry_path) {
             return Err(GmaError::EntryNotFound);
@@ -313,8 +276,6 @@ impl GmaView {
         self.read_payload_bytes(entry.data_offset, entry.size)
     }
 
-    /// Copies a payload extent recorded by [`Self::meta`] without reparsing
-    /// the archive. Every access is checked against the backing bytes again.
     pub fn read_payload_bytes(&self, offset: u64, len: u64) -> Result<Vec<u8>, GmaError> {
         let len = usize::try_from(len).map_err(|_| GmaError::FormatError)?;
         let mut bytes = Vec::new();
@@ -352,8 +313,7 @@ impl GmaView {
 fn entries_from_parsed(parsed: &ParsedGma) -> HashMap<String, GmaEntry> {
     let mut entries = HashMap::with_capacity(parsed.entries.len());
     for (index, entry) in parsed.entries.iter().enumerate() {
-        // An entry whose path could escape an extraction root is skipped,
-        // not fatal — real workshop archives contain them.
+        // Skip unsafe entry paths without rejecting the archive; Workshop files can contain them.
         if is_unsafe_entry_path(&entry.path) {
             log::warn!("Illegal GMA entry: {}", entry.path);
             continue;
@@ -399,8 +359,6 @@ fn indexed_entries_from_parsed(parsed: &ParsedGma) -> Vec<GmaIndexedEntry> {
     entries
 }
 
-/// Everything a single [`GmaView::meta`] parse yields: the identity
-/// handle, the header, and the safe-path entry list in table order.
 #[derive(Clone, Debug)]
 pub struct GmaMetaBundle {
     pub handle: GmaFile,
@@ -423,8 +381,6 @@ pub struct GmaIndexedEntry {
 }
 
 impl GmaFile {
-    /// Opens this addon's bytes for one bounded, positional read/extract
-    /// operation. Membuffer/spill flows keep their original view instead.
     pub fn view(&self) -> Result<GmaView, GmaError> {
         GmaView::open_file(&self.path)
     }
@@ -433,17 +389,14 @@ impl GmaFile {
         self.view()?.header()
     }
 
-    /// One-open, one-parse read: handle + header + entry list together.
     pub fn open_meta<P: AsRef<Path>>(path: P) -> Result<GmaMetaBundle, GmaError> {
         GmaView::open_file(path.as_ref())?.meta(path)
     }
 
-    /// One-open, one-parse library index without an extraction handle.
     pub fn open_index<P: AsRef<Path>>(path: P) -> Result<GmaIndexBundle, GmaError> {
         GmaView::open_file(path.as_ref())?.index_meta()
     }
 
-    /// One-open, one-parse header read without projecting the entry table.
     pub fn open_header<P: AsRef<Path>>(path: P) -> Result<GmaHeader, GmaError> {
         GmaView::open_file(path.as_ref())?.header()
     }
@@ -485,9 +438,6 @@ mod metadata_tests {
         assert_eq!(metadata.title(), "Addon");
     }
 
-    /// Free text that happens to parse as JSON is not a manifest. Untagged
-    /// deserialization swallows these into an empty `Standard` and discards
-    /// the description, which is why the manifest keys are checked explicitly.
     #[test]
     fn a_json_shaped_description_without_manifest_keys_stays_legacy() {
         for description in ["{}", r#"{"note":"see the workshop page"}"#] {

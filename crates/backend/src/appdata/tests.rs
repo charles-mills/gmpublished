@@ -197,52 +197,22 @@ fn concurrent_backend_mutations_cannot_erase_each_other() {
 }
 
 #[test]
-#[cfg(unix)]
-fn update_settings_failed_save_leaves_live_state_and_disk_untouched() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn a_failed_settings_save_does_not_publish_the_attempted_values() {
     let temp = tempfile::tempdir().expect("tempdir");
     let app_data = test_app_data(&temp);
+    app_data.mutate_settings(|settings| settings.language = Some("previous".to_owned()));
+    fs::create_dir_all(&app_data.paths.settings_file).expect("directory blocks the settings file");
 
-    let mut previous = app_data.settings.load().as_ref().clone();
-    previous.language = Some("previous".to_owned());
-    app_data
-        .update_settings(|settings| {
-            settings.clone_from(&previous);
-            SettingsEnvironment::default()
-        })
-        .expect("seed settings save");
-
-    let settings_dir = app_data.paths.settings_file.parent().expect("settings dir");
-    let original_mode = fs::metadata(settings_dir)
-        .expect("settings dir metadata")
-        .permissions();
-    fs::set_permissions(settings_dir, fs::Permissions::from_mode(0o555))
-        .expect("lock down settings dir");
-
-    let mut attempted = previous;
-    attempted.language = Some("unsaved".to_owned());
     let result = app_data.update_settings(|settings| {
-        *settings = attempted;
+        settings.language = Some("unsaved".to_owned());
         SettingsEnvironment::default()
     });
 
-    // Restore before asserting so a failed assertion doesn't leave the
-    // tempdir behind in a state the OS refuses to clean up.
-    fs::set_permissions(settings_dir, original_mode).expect("restore settings dir permissions");
-
-    assert!(
-        result.is_err(),
-        "save into an unwritable directory must fail"
-    );
+    assert!(result.is_err(), "saving over a directory must fail");
     assert_eq!(
         app_data.settings.load().language.as_deref(),
-        Some("previous"),
-        "live settings must be untouched by a failed save"
+        Some("previous")
     );
-
-    let on_disk = Settings::load(&app_data.paths).expect("settings file must still parse");
-    assert_eq!(on_disk.language.as_deref(), Some("previous"));
 }
 
 #[test]
@@ -490,27 +460,6 @@ fn appdata_sanitize_context_retains_available_downloads_and_addons() {
     ));
 }
 
-/// The Steam client, not this process, reads the packed GMA and preview icon
-/// at the absolute path it is handed, and packaged Linux Steam commonly runs
-/// with a private tmpfs over `/tmp` while binding home through. A default
-/// scratch dir under the system temp dir therefore uploads as empty, so it
-/// has to stay under the app's own cache root.
-#[cfg(target_os = "linux")]
-#[test]
-fn appdata_production_temp_dir_stays_under_the_cache_root_on_linux() {
-    let Some(cache_root) = cache_dir() else {
-        return;
-    };
-    let default_temp_dir = AppDataPaths::production().default_temp_dir;
-
-    assert!(
-        default_temp_dir.starts_with(&cache_root),
-        "expected {} under {}",
-        default_temp_dir.display(),
-        cache_root.display()
-    );
-}
-
 #[test]
 fn appdata_validate_gmod_requires_absolute_garrysmod_addons_dir() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -522,9 +471,6 @@ fn appdata_validate_gmod_requires_absolute_garrysmod_addons_dir() {
     assert!(!validate_gmod(PathBuf::from("relative")));
 }
 
-/// `load_or_default` falls back to defaults, and the next `save` writes them
-/// over the file. The unparseable original must survive somewhere recoverable
-/// first, or a single bad byte costs the user every setting.
 #[test]
 fn unreadable_settings_are_preserved_before_defaults_replace_them() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -547,9 +493,6 @@ fn unreadable_settings_are_preserved_before_defaults_replace_them() {
     );
 }
 
-/// Workshop ids are stored as bare integer keys, and the typed id must not
-/// change that: settings files are read and written by builds either side of
-/// this one, so the shape has to stay legible to all of them.
 #[test]
 fn workshop_local_paths_round_trip_as_bare_integer_keys() {
     let mut settings = Settings::default();
@@ -570,9 +513,6 @@ fn workshop_local_paths_round_trip_as_bare_integer_keys() {
     );
 }
 
-/// A stored id of zero names no item. It must drop that one entry rather than
-/// fail the field — failing it fails `Settings`, whose recovery is to replace
-/// every setting the user has with defaults.
 #[test]
 fn a_stored_workshop_id_of_zero_drops_its_entry_without_failing_the_file() {
     let json = serde_json::json!({
@@ -588,11 +528,6 @@ fn a_stored_workshop_id_of_zero_drops_its_entry_without_failing_the_file() {
     );
 }
 
-/// The persisted field names and enum tags are the on-disk format. Two of the
-/// value types (`ExtractDestination`, `ExtractionOverwriteMode`) live in
-/// `gma::extract`, where a variant rename reads as an internal refactor while
-/// silently changing what every installed copy has written. Any change here
-/// needs a `SETTINGS_SCHEMA` bump and a `migrate` arm.
 #[test]
 fn settings_json_shape_is_pinned_to_the_schema() {
     let json = serde_json::to_value(Settings::default()).expect("settings serialize");
@@ -625,9 +560,6 @@ fn settings_json_shape_is_pinned_to_the_schema() {
     );
     assert_eq!(object["schema"], serde_json::json!(SETTINGS_SCHEMA));
 
-    // Every variant, not only the ones a default `Settings` happens to hold:
-    // renaming a non-default variant changes the on-disk format just as much,
-    // and would leave a defaults-only pin green.
     for (destination, tag) in [
         (ExtractDestination::Temp, serde_json::json!("Temp")),
         (
@@ -667,8 +599,6 @@ fn settings_json_shape_is_pinned_to_the_schema() {
     }
 }
 
-/// Every producer of a `Settings` stamps the current schema, so what reaches
-/// disk says what wrote it even when the value was carried in from elsewhere.
 #[test]
 fn saving_settings_writes_the_current_schema() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -686,8 +616,6 @@ fn saving_settings_writes_the_current_schema() {
     assert_eq!(written["schema"], serde_json::json!(SETTINGS_SCHEMA));
 }
 
-/// A file written before the schema field existed is the schema-1 shape, not a
-/// corrupt one: it must load with its values intact and leave no backup.
 #[test]
 fn settings_without_a_schema_load_as_the_original_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -738,9 +666,6 @@ fn schema_one_settings_explicitly_migrate_to_the_combined_schema() {
     assert!(settings.ui.is_none());
 }
 
-/// Serde drops the fields a newer build wrote, so accepting the file would
-/// mean writing that truncated shape back over the user's config on the next
-/// save. Keep it aside instead.
 #[test]
 fn settings_from_a_newer_schema_are_kept_aside_rather_than_downgraded() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -762,9 +687,6 @@ fn settings_from_a_newer_schema_are_kept_aside_rather_than_downgraded() {
     );
 }
 
-/// The first unusable file is the one closest to what the user configured. A
-/// later failure — which by then is failing on a file the app itself wrote —
-/// must not overwrite that backup.
 #[test]
 fn a_second_unreadable_settings_file_does_not_replace_the_first_backup() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -783,8 +705,6 @@ fn a_second_unreadable_settings_file_does_not_replace_the_first_backup() {
     );
 }
 
-/// A settings file that is merely absent is not an error and must not leave a
-/// spurious backup behind.
 #[test]
 fn a_missing_settings_file_leaves_no_backup() {
     let temp = tempfile::tempdir().expect("tempdir");

@@ -1,24 +1,6 @@
-//! Tolerant parser for the Steam Community BBCode dialect.
-//!
-//! The document tree is UI-independent so display surfaces and a future
-//! description editor can share exactly the same interpretation of markup.
-
-/// Element nesting the parser will build before it stops opening frames and
-/// emits further opening tags as literal text.
-///
-/// Descriptions are attacker-controlled — a Workshop description, or a
-/// `.gma`'s own embedded metadata. Even a bounded source string can contain
-/// far more nesting than recursive consumers can safely walk. The tree this
-/// produces is walked recursively by every consumer: the Iced renderer's
-/// `render_nodes`/`render_block`/`collect_inline`, [`Document::plain_text`],
-/// [`Document::is_empty`], and `Vec<Node>`'s own `Drop`. Measured against a
-/// release build on an 8 MiB main-thread stack, the renderer overflowed at
-/// roughly 7000 levels — about 50 KB of `[b]…[/b]` — and at roughly 900 in a
-/// debug build. Bounding the tree here fixes all of those at once, since
-/// `nodes` is private and [`Document::parse`] is the only way to build one.
-///
-/// 64 matches `vformats::Limits::max_kv_depth`, and is far past any markup a
-/// person writes; genuine Steam BBCode nests a handful of levels.
+/// Maximum element nesting; deeper opening tags become literal text.
+/// Bounds recursive rendering, traversal, and drop of untrusted descriptions.
+/// Matches `vformats::Limits::max_kv_depth`.
 const MAX_NESTING_DEPTH: usize = 64;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -119,30 +101,14 @@ pub enum ElementKind {
     Strikethrough,
     Spoiler(SpoilerId),
     HorizontalRule,
-    Link {
-        target: String,
-    },
-    Image {
-        source: String,
-    },
-    /// An embedded YouTube video (`[previewyoutube=<id>;full]`). The id is
-    /// restricted to URL-safe characters at parse time, so consumers can
-    /// splice it into youtube.com URLs without further escaping.
-    YoutubeVideo {
-        id: String,
-    },
-    List {
-        ordered: bool,
-    },
+    Link { target: String },
+    Image { source: String },
+    YoutubeVideo { id: String },
+    List { ordered: bool },
     ListItem,
-    Quote {
-        author: Option<String>,
-    },
+    Quote { author: Option<String> },
     Code,
-    Table {
-        bordered: bool,
-        equal_cells: bool,
-    },
+    Table { bordered: bool, equal_cells: bool },
     TableRow,
     TableHeader,
     TableCell,
@@ -421,11 +387,8 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Consumes `[previewyoutube=<id>;full]…[/previewyoutube]`. Steam ignores
-    /// anything between the tags, so any inner content is skipped. The id is
-    /// everything before the first `;` (the rest are display options), and is
-    /// only accepted when it looks like a YouTube video id — descriptions are
-    /// attacker-controlled, and consumers splice the id into URLs.
+    /// Steam ignores content between previewyoutube tags. Only accept URL-safe
+    /// ids before the first `;`, since they are used to build YouTube URLs.
     fn consume_youtube(&mut self, value: Option<&str>) -> bool {
         let id = value
             .unwrap_or_default()
@@ -473,9 +436,8 @@ impl<'a> Parser<'a> {
             .iter()
             .rev()
             .any(|frame| matches!(frame.kind, Some(PendingKind::List { .. })));
-        // An item outside a list opens the implicit wrapper too, so both
-        // frames have to fit or neither is pushed — a lone implicit list
-        // would never be closed.
+        // An implicit list and its item need two frames. Push both or neither so
+        // the wrapper cannot remain unclosed.
         if !self.has_room_for(if in_list { 1 } else { 2 }) {
             return false;
         }
@@ -575,8 +537,6 @@ impl<'a> Parser<'a> {
         self.current_nodes().push(Node::Element(element));
     }
 
-    /// Opens a nested frame, or reports `false` at [`MAX_NESTING_DEPTH`] so
-    /// the caller falls back to emitting the tag as literal text.
     fn open_frame(&mut self, raw: &str, kind: PendingKind) -> bool {
         if !self.has_room_for(1) {
             return false;
@@ -589,9 +549,7 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Whether `frames` more frames fit under [`MAX_NESTING_DEPTH`]. The
-    /// stack always holds the root frame, so it is one deeper than the
-    /// element nesting it represents.
+    /// The stack includes the root frame, so it is one deeper than the element nesting.
     fn has_room_for(&self, frames: usize) -> bool {
         self.stack.len() + frames <= MAX_NESTING_DEPTH + 1
     }
@@ -642,13 +600,11 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// The canonical watch URL for a parsed [`ElementKind::YoutubeVideo`] id.
 #[must_use]
 pub fn youtube_watch_url(id: &str) -> String {
     format!("https://www.youtube.com/watch?v={id}")
 }
 
-/// The thumbnail YouTube serves for every public video id.
 #[must_use]
 pub fn youtube_thumbnail_url(id: &str) -> String {
     format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")
@@ -786,8 +742,6 @@ mod tests {
             max_depth(document.nodes()) <= MAX_NESTING_DEPTH,
             "nesting past the cap must not build more elements"
         );
-        // Overflow tags degrade to literal text, the same way an unknown tag
-        // does, so nothing in the description is silently dropped.
         assert!(document.plain_text().contains("[b]"));
         assert!(document.plain_text().contains("deep"));
     }

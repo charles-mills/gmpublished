@@ -1,9 +1,3 @@
-//! UI-facing names for bridge-produced Prepare Publish data.
-//!
-//! Keeping this re-export seam lets the feature describe its messages and
-//! state in local vocabulary while the implementations that touch files,
-//! images, settings, Steam, or transactions remain bridge/runner owned.
-
 pub use crate::bridge::prepare_publish::{
     ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation,
     IgnorePatternMutationResult, IgnoredPattern, PublishIconSubmitRequestEnvelope,

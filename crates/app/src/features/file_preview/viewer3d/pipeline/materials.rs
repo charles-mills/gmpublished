@@ -1,9 +1,3 @@
-//! Texture and material uploads: mip-chain and block-compressed texture
-//! views, material and sky bind groups, and the fallback content (white,
-//! checkerboard, collision-debug tint) used when a texture is missing.
-//! Everything here is created against the layouts and samplers owned by
-//! [`RenderResources`].
-
 use super::resources::RenderResources;
 use super::uniforms::MaterialUniform;
 use super::{
@@ -241,8 +235,6 @@ impl RenderResources {
             mapped_at_creation: false,
         });
         let material_uniform = MaterialUniform::new(mode.force_opaque, mode.render_mode);
-        // Material uploads are immutable for this content_id; write once while
-        // creating the bind group.
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.material_bind_group"),
@@ -301,7 +293,6 @@ impl RenderResources {
 
 pub static WHITE_RGBA: [u8; 4] = [255, 255, 255, 255];
 
-// 8x8 magenta/black checkerboard for unresolved materials.
 pub static CHECKERBOARD_RGBA: [u8; CHECKERBOARD_BYTES] = checkerboard_rgba();
 pub static CHECKERBOARD_MIP_4X4_RGBA: [u8; CHECKERBOARD_MIP_4X4_BYTES] =
     solid_rgba(CHECKERBOARD_MIP_RGBA);

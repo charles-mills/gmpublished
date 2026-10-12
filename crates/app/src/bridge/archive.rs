@@ -20,10 +20,7 @@ pub enum PreviewArchiveSource {
     Folder(FolderSource),
 }
 
-/// Loose addon folder snapshot. Entry paths are the normalized
-/// lowercase/forward-slash form the rest of the preview stack expects;
-/// `disk_paths` maps each back to the real file so reads still resolve on
-/// case-sensitive filesystems.
+/// Entry paths are lowercase; disk_paths preserves the real paths for case-sensitive filesystems.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FolderSource {
     entries: HashMap<FolderPath, FolderEntry>,
@@ -34,8 +31,6 @@ pub struct FolderSource {
 struct FolderPath(Arc<String>);
 
 impl FolderPath {
-    /// `None` for a path with no canonical form. The index must be keyed the
-    /// same way lookups arrive, or an entry is present but unreachable.
     fn new(path: &str) -> Option<Self> {
         crate::bridge::content_path::normalize_archive_path(path).map(|path| Self(Arc::new(path)))
     }
@@ -192,8 +187,6 @@ impl PreviewArchiveSource {
 mod tests {
     use super::*;
 
-    /// A folder index keyed by the entry path as authored is unreachable from
-    /// the normalized paths every content lookup arrives with.
     #[test]
     fn folder_entries_are_indexed_in_the_form_lookups_use() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -217,8 +210,7 @@ mod tests {
     #[test]
     fn folder_source_reads_entries_through_the_disk_path_map() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Uppercase on disk, normalized lowercase entry path — the map must
-        // bridge the two even on case-sensitive filesystems.
+        // Lookup must find the uppercase disk file through its lowercase entry path.
         let disk_path = dir.path().join("Init.LUA");
         std::fs::write(&disk_path, b"print(1)").expect("write");
 

@@ -1,9 +1,3 @@
-//! App-owned task, scheduler, and Iced worker boundary.
-//!
-//! Backend transactions drive the Steam and GMA operations (download,
-//! extract, publish); this module is the Iced-facing boundary that
-//! schedules app workers and projects typed task events for the UI.
-
 use super::{
     AppPaths, Settings,
     domain::{
@@ -54,9 +48,6 @@ pub use services::{
 #[cfg(test)]
 use task_events::task_event_stream;
 use task_events::{BackendEventStreamFactory, TaskEventStreamFactory};
-/// Surface no production caller needs, but which tests construct or observe
-/// directly. Gated so a reader of this module's API is not shown machinery
-/// that nothing real reaches for.
 #[cfg(test)]
 pub use task_events::{CoalescedTaskStart, SharedTaskUpdate};
 pub use task_events::{
@@ -69,11 +60,6 @@ const TASK_EVENTS_ID: u64 = 1;
 const BACKEND_EVENTS_ID: u64 = 2;
 const BACKEND_EVENT_QUEUE_CAPACITY: usize = 256;
 
-/// Every status a task can report, whichever crate raised it.
-///
-/// Re-exported rather than redeclared: the statuses this crate produces for
-/// its own work and the ones it receives from backend transactions land in the
-/// same overlay, so they are one closed set with one spelling.
 pub use gmpublished_backend::TransactionStatus;
 pub use gmpublished_backend::WorkshopSnapshotId;
 const TRANSACTION_PROGRESS_SCALE: f64 = 10_000.0;

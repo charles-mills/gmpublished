@@ -395,9 +395,6 @@ fn cancellation_removes_the_running_row_and_requests_task_cancel() {
         },
     );
 
-    // The X is a remove button: the row leaves the list immediately and
-    // the backend task is asked to stop, exactly like Remove All scoped to
-    // one row.
     assert_eq!(
         effects,
         vec![
@@ -407,7 +404,6 @@ fn cancellation_removes_the_running_row_and_requests_task_cancel() {
     );
     assert!(state.downloading().is_empty());
 
-    // The backend's terminal confirmation for the removed row is a no-op.
     let effects = update(
         &mut state,
         Message::TaskEventsReceived(vec![(
@@ -573,13 +569,11 @@ fn remove_all_cancels_late_tasks_for_items_still_resolving() {
         vec![Effect::WorkshopSubmissionAccepted(vec![item_id])]
     );
 
-    // No row has materialized yet when the user removes all.
     let _effects = update(
         &mut state,
         Message::RemoveAllRequested(Section::Downloading),
     );
 
-    // The task that eventually starts is cancelled at birth, with no row.
     let task_id = TaskId::from_raw(7);
     let effects = update(
         &mut state,
@@ -620,8 +614,6 @@ fn cancelled_item_can_be_resubmitted() {
         },
     );
 
-    // Removing the row releases the item, so it can be resubmitted right
-    // away — same contract as Remove All.
     let effects = update(&mut state, Message::WorkshopIdsSubmitted(vec![item_id]));
     assert_eq!(
         effects,

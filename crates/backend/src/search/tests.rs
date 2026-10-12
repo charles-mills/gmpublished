@@ -250,19 +250,14 @@ fn ensure_sorted_sorts_once_then_singular_adds_replace_by_identity() {
         search_fixture(2, "Beta", ["tool"], 200),
     ]);
 
-    // The first query sorts; the flag must clear so later queries skip it.
     search.ensure_sorted();
     assert!(!search.dirty.load(std::sync::atomic::Ordering::Acquire));
 
-    // Same source, new timestamp: the old entry is replaced, not
-    // duplicated (Ord-positional replacement would miss it because the
-    // timestamp moved).
     search.add(&search_fixture(1, "Alpha Updated", ["tool"], 300));
     let items = search.items.read();
     assert_eq!(items.len(), 2);
     assert!(items.iter().any(|item| item.label() == "Alpha Updated"));
     assert!(items.iter().all(|item| item.label() != "Alpha"));
-    // Newest-first index order held through the sorted insert.
     assert!(items.windows(2).all(|pair| pair[0] <= pair[1]));
     drop(items);
 }
@@ -365,7 +360,7 @@ fn search_quick_caps_results_reports_has_more_and_orders_by_score() {
     assert_eq!(result.hits, expected);
     assert!(result.has_more);
 
-    // Rayon scheduling is deliberately outside the result contract.
+    // Scheduling order must not affect results.
     for _ in 0..20 {
         assert_eq!(
             search.quick_scored("needle", SearchScope::Addons).hits,
@@ -476,7 +471,6 @@ fn refresh_installed_addon_labels_replaces_stale_label_everywhere() {
     assert_eq!(installed.label(), "New Title");
     assert!(installed.terms().contains(&"Old Title".to_owned()));
 
-    // The replacement lands in `items` too, not just `installed_addons`.
     let items_labels: Vec<String> = search
         .items
         .read()
@@ -485,8 +479,6 @@ fn refresh_installed_addon_labels_replaces_stale_label_everywhere() {
         .collect();
     assert_eq!(items_labels, vec!["New Title".to_owned()]);
 
-    // The stale label stays searchable as a term; the fresh label is
-    // searchable as the new label itself.
     assert_eq!(search.quick_search("New Title".to_owned()).hits.len(), 1);
     assert_eq!(search.quick_search("Old Title".to_owned()).hits.len(), 1);
 }

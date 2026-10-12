@@ -397,14 +397,11 @@ fn patch_items_resolves_by_id_with_the_index_as_a_hint() {
     let _ = state.set_items(items(&[100.0, 100.0, 100.0]));
 
     let messages = state.patch_items(vec![
-        // Fresh hint: applied directly.
         (
             0,
             Item::new(addon_card::Data::addon(CardId::from("id-0"), "Patched"))
                 .with_preferred_height(100.0),
         ),
-        // Stale hint: the id lives at index 2, not 1 — the patch must land
-        // on the item with that id, not the item at the hinted slot.
         (
             1,
             Item::new(addon_card::Data::addon(
@@ -413,7 +410,6 @@ fn patch_items_resolves_by_id_with_the_index_as_a_hint() {
             ))
             .with_preferred_height(100.0),
         ),
-        // Unknown id: the item left the grid; the patch is dropped.
         (
             1,
             Item::new(addon_card::Data::addon(CardId::from("id-9"), "Gone"))
@@ -430,14 +426,12 @@ fn patch_items_resolves_by_id_with_the_index_as_a_hint() {
 #[test]
 fn patch_items_anchors_scroll_when_heights_above_the_viewport_change() {
     let mut state = State::default();
-    // 400pt wide -> a single column; rows are card height + 10 row gap.
     let _ = apply(&mut state, Message::ViewportResized(400, 200));
     let _ = state.set_items(items(&[100.0; 10]));
     let _ = apply(&mut state, Message::Scrolled(300));
     let anchor_row = state.visible_rows.start;
     let anchor_top = state.layout.top_offset(anchor_row);
 
-    // Row 0 grows by 100 (e.g. a hydrated title re-wrapping taller).
     let messages = state.patch_items(vec![(
         0,
         Item::new(addon_card::Data::addon(CardId::from("id-0"), "Addon 0"))
@@ -445,11 +439,7 @@ fn patch_items_anchors_scroll_when_heights_above_the_viewport_change() {
     )]);
 
     assert_eq!(state.scroll_offset, 400.0);
-    // The message carries the *delta*, applied via a relative scroll_by:
-    // the mirror offset is u32-quantized by the Scrolled echo, so an
-    // absolute scroll_to would drift by the rounding error per anchor.
     assert!(messages.contains(&Message::ScrollAnchored(100.0)));
-    // The anchor row sits exactly where it did relative to the viewport.
     assert_eq!(
         state.layout.top_offset(anchor_row) - state.scroll_offset,
         anchor_top - 300.0
@@ -482,7 +472,6 @@ fn title_measure_memo_is_reused_at_the_same_width_and_ignored_at_another() {
     let mut state = State::default();
     let _ = apply(&mut state, Message::ViewportResized(500, 500));
 
-    // Duplicate titles share one entry; the override-free Item path measures.
     let _ = state.set_items(vec![
         Item::new(addon_card::Data::addon(CardId::from("id-0"), "Alpha")),
         Item::new(addon_card::Data::addon(CardId::from("id-1"), "Beta")),
@@ -495,10 +484,8 @@ fn title_measure_memo_is_reused_at_the_same_width_and_ignored_at_another() {
     let alpha_measure = state.title_measures["Alpha"];
     let (width_bits, alpha_title_height) = alpha_measure.measured.expect("measured");
 
-    // Reuse proof by poisoning: seed a wrong memo for the current width,
-    // re-sync the same title, and the poison must flow into the card
-    // height — a re-measure would silently repair it instead. The
-    // watermark is dropped so the memo is the only fast path in play.
+    // Seed an incorrect height and remove the watermark. Reusing the memo must
+    // preserve that height; measuring again would repair it.
     let poisoned = TitleMeasure {
         single_line_at: None,
         measured: Some((width_bits, alpha_title_height + 20.0)),
@@ -510,8 +497,6 @@ fn title_measure_memo_is_reused_at_the_same_width_and_ignored_at_another() {
     ]);
     assert!((state.card_heights[0] - (alpha_card_height + 20.0)).abs() < 0.01);
 
-    // A memo for a *different* width is dead: after a width change the
-    // title is re-measured, repairing the poison.
     let _ = apply(&mut state, Message::ViewportResized(900, 500));
     let repaired = state.title_measures["Alpha"].measured.expect("measured");
     assert_ne!(repaired.0, width_bits, "memo must be for the new width");

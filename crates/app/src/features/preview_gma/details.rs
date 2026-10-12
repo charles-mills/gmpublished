@@ -45,14 +45,12 @@ pub struct MetadataRow {
     pub(crate) avatar: Option<image::Handle>,
 }
 
-/// Author row projection: a resolved profile or the Steam2 placeholder.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorDisplay {
     pub(crate) name: String,
     /// `None` renders the anonymous placeholder avatar.
     pub(crate) avatar: Option<image::Handle>,
     pub(crate) profile_url: Option<String>,
-    /// The async profile lookup failed; a small dead glyph joins the row.
     pub(crate) failed: bool,
 }
 
@@ -102,7 +100,6 @@ pub fn details_for_archive(
         metadata_rows.push(MetadataRow::bytes("preview-gma-size", total_size));
     }
 
-    // Author/timestamp rows come from Workshop data only.
     if let Some(workshop) = workshop {
         push_timestamp_rows(&mut metadata_rows, workshop);
     }
@@ -398,7 +395,6 @@ mod tests {
             DownloadCountFormatter::default(),
         );
 
-        // The click-source title wins over the gma header (no title pop-in).
         assert_eq!(details.title, "Fallback");
         assert_eq!(details.archive_path, "/tmp/local.gma");
         assert!(details.metadata_rows.iter().any(|row| {

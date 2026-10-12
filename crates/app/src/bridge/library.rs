@@ -1,7 +1,3 @@
-//! The store is the single app-side filesystem walker for installed addons.
-//! It keeps an in-memory GMA header cache so event-driven refreshes only parse
-//! changed files, then exposes immutable snapshots for UI/search projections.
-
 use std::{
     collections::{HashMap, HashSet},
     fs::{DirEntry, Metadata},
@@ -192,9 +188,7 @@ impl LibraryStore {
     pub(crate) fn begin_refresh(&self, reason: LibraryRefreshReason) -> bool {
         let mut state = self.state.lock();
         if state.running {
-            // Coalesce, but never let a quiet reason downgrade a pending
-            // loud one (a settings change immediately followed by watcher
-            // events must still produce the loud reset).
+            // A quiet refresh must not replace a pending reset requested by a settings change.
             state.pending_reason = match state.pending_reason {
                 Some(pending) if pending.loud() => Some(pending),
                 _ => Some(reason),
@@ -283,9 +277,6 @@ fn discover(
 
     let candidate_count = candidates.len();
     let (mut addons, seen_cache_keys) = process_candidates(candidates, header_cache);
-    // A partial launch scan is otherwise indistinguishable from a small
-    // library; the per-root split says whether enumeration or per-file
-    // reads lost addons.
     log::info!(
         "library scan: {} addons from {candidate_count} candidates \
          (addons dir {addons_dir_count}, cache {cache_dir_count}, workshop content {workshop_count}; \
@@ -300,9 +291,7 @@ fn discover(
             .then_with(|| left.path.cmp(&right.path))
     });
 
-    // Pruning evicts every cached header this scan did not see. After an
-    // incomplete enumeration that includes addons which still exist, so the
-    // next scan would re-read them from disk for nothing.
+    // Do not prune after an incomplete scan; unseen addons may still exist.
     if complete {
         prune_header_cache(header_cache, &seen_cache_keys);
     } else {
@@ -323,13 +312,8 @@ fn process_candidates(
     (addons, seen_cache_keys)
 }
 
-/// Collects the GMAs directly inside one of Garry's Mod's addon directories.
-///
-/// Both directories hold the same thing under different names — hand-installed
-/// addons in one, Workshop downloads in the other — so the only difference is
-/// which one to walk.
-/// `false` when the directory exists but could not be read through, so the
-/// caller knows its candidate list is short rather than the library small.
+/// Collects GMAs directly inside an addon directory.
+/// Returns `false` if the directory exists but could not be fully read.
 fn collect_gma_dir(
     gmod: &Path,
     relative_dir: &str,
@@ -368,9 +352,7 @@ fn collect_gma_dir(
     true
 }
 
-/// Hand-installed addons.
 const ADDONS_DIR: &str = "GarrysMod/addons";
-/// Workshop downloads the game has already fetched.
 const WORKSHOP_CACHE_DIR: &str = "GarrysMod/cache/workshop";
 
 fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
@@ -424,10 +406,7 @@ fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCand
     }
 }
 
-/// Returns the display path and canonical search identity for a file entry.
-/// A regular child inherits its already-canonical parent without another
-/// filesystem round trip. Symlinks and unknown file types retain the original
-/// follow-and-canonicalize behavior.
+/// Regular files inherit the canonical parent. Symlinks still need canonicalizing.
 fn discovered_file_paths(entry: &DirEntry, canonical_parent: &Path) -> Option<(PathBuf, PathBuf)> {
     let path = entry.path();
     match entry.file_type() {
@@ -567,9 +546,7 @@ fn persist_header_cache_if_dirty(
     let spawn_cache = Arc::clone(header_cache);
     let spawn = |job: Box<dyn FnOnce() + Send + 'static>| {
         if let Err(error) = execution.spawn_blocking("library-header-persist", job) {
-            // Release the slot the claim above took, or `Running` with no
-            // thread to drain it stops persistence for good. `dirty` survives,
-            // so the next mutation retries.
+            // Release Running on scheduling failure so the next dirty update can retry persistence.
             log::warn!("failed to spawn header cache persist: {error}");
             spawn_cache.lock().persist_state = HeaderCachePersistState::Idle;
         }
@@ -823,8 +800,6 @@ impl From<HeaderSnapshotHeader> for GmaHeader {
     }
 }
 
-/// Explicitly tagged so Standard and Legacy metadata never depend on the
-/// live untagged backend representation.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind")]
 enum HeaderSnapshotMetadata {
@@ -945,32 +920,20 @@ struct DiscoveredCandidate {
 
 #[cfg(test)]
 mod tests {
-    /// An unreadable directory is not an empty one. Reporting it as complete
-    /// lets a partial scan replace the snapshot and prune every cached header
-    /// the scan did not reach — for addons that still exist.
     #[test]
-    #[cfg(unix)]
-    fn an_unreadable_addons_dir_reports_an_incomplete_scan() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn a_non_directory_addons_path_reports_an_incomplete_scan() {
         let temp = tempfile::tempdir().expect("tempdir");
         let addons = temp.path().join(ADDONS_DIR);
-        std::fs::create_dir_all(&addons).expect("addons dir");
-        let original = std::fs::metadata(&addons).expect("metadata").permissions();
-        std::fs::set_permissions(&addons, std::fs::Permissions::from_mode(0o000))
-            .expect("lock down");
+        std::fs::create_dir_all(addons.parent().expect("parent")).expect("parent directory");
+        std::fs::write(&addons, b"not a directory").expect("blocked addons path");
 
         let mut candidates = Vec::new();
-        let complete = collect_gma_dir(temp.path(), ADDONS_DIR, &mut candidates);
-
-        std::fs::set_permissions(&addons, original).expect("restore");
-        assert!(!complete, "an unreadable directory must not read as empty");
-
-        let mut candidates = Vec::new();
-        assert!(
-            collect_gma_dir(temp.path(), "GarrysMod/does-not-exist", &mut candidates),
-            "an absent directory is a complete answer: no addons in it"
-        );
+        assert!(!collect_gma_dir(temp.path(), ADDONS_DIR, &mut candidates));
+        assert!(collect_gma_dir(
+            temp.path(),
+            "GarrysMod/does-not-exist",
+            &mut candidates
+        ));
     }
 
     use std::{

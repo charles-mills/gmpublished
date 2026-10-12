@@ -1,6 +1,5 @@
 use super::{Effect, Message, State};
 
-/// Applies a File Preview modal message and returns any outward effects.
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::OpenRequested(request) => {

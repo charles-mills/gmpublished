@@ -63,8 +63,6 @@ impl App {
         Task::stream(stream::channel(100, async move |output| {
             let mut schedule_error_output = output.clone();
             let schedule = ctx.spawn_blocking_detached("file-preview-load", move |app| {
-                // The decoder reports progress as plain stages; turning those
-                // into messages is this layer's job, not its.
                 let mut stage_output = output.clone();
                 let mut output = output;
                 let result = load_preview(

@@ -1,5 +1,3 @@
-//! Per-frame operators and constraints.
-
 use super::*;
 
 impl ParticleEngine {
@@ -442,7 +440,6 @@ impl ParticleEngine {
             }
         }
 
-        // Decay last so freshly-faded values are what the final frame shows.
         if compiled.retires_particles {
             let mut index = 0;
             while index < particles.len() {

@@ -81,18 +81,10 @@ fn forward_menu_events(mut output: iced_mpsc::Sender<Command>) {
     }
 }
 
-/// Every menu item that dispatches a command.
-///
-/// Both the builders and [`command_for_id`] read this, so an id cannot be
-/// spelled in one and missed in the other.
-///
-/// Predefined items (about, quit, minimise, ...) are not here: AppKit
-/// dispatches those itself and they never reach [`command_for_id`].
 struct CommandItem {
     id: &'static str,
     label_key: &'static str,
     command: Command,
-    /// Command-key shortcut, if the item has one.
     shortcut: Option<Code>,
 }
 
@@ -159,7 +151,6 @@ static UPSTREAM: CommandItem = CommandItem {
     shortcut: None,
 };
 
-/// Every item in [`COMMAND_ITEMS`], for the dispatcher to scan.
 static COMMAND_ITEMS: &[&CommandItem] = &[
     &SETTINGS,
     &OPEN_GMA,
@@ -239,9 +230,6 @@ fn go_menu(i18n: &I18n) -> muda::Result<Submenu> {
     )
 }
 
-/// Builds a menu item from its declaration, so its label and shortcut come
-/// from the same place its command does. Takes the item rather than an id: a
-/// lookup could miss, and a builder's only recourse would be to panic.
 #[cfg(not(test))]
 fn command_menu_item(i18n: &I18n, item: &'static CommandItem) -> MenuItem {
     MenuItem::with_id(
@@ -285,11 +273,6 @@ fn accel(modifiers: Modifiers, code: Code) -> Accelerator {
 mod tests {
     use super::*;
 
-    /// `command_for_id` resolves by scanning the table, so this cannot check
-    /// that a row maps to its own command — that holds by construction. What
-    /// it can check is that the table is *usable* as a lookup: an id appearing
-    /// twice makes the second row unreachable, silently, because the scan
-    /// stops at the first match.
     #[test]
     fn no_menu_id_is_claimed_twice() {
         let mut seen = Vec::new();
@@ -303,8 +286,6 @@ mod tests {
         }
     }
 
-    /// An id AppKit sends that no item claims must round-trip as `Unknown`
-    /// rather than being mistaken for one of ours.
     #[test]
     fn an_unclaimed_id_dispatches_unknown() {
         assert!(matches!(
@@ -318,9 +299,6 @@ mod tests {
         );
     }
 
-    /// Menu labels go through Fluent like every other string. A missing key
-    /// renders the raw key in the macOS menu bar, where nothing else would
-    /// catch it.
     #[test]
     fn every_menu_label_key_has_a_catalog_entry() {
         let i18n = crate::i18n::I18n::for_locale(Some("en"));
@@ -334,8 +312,6 @@ mod tests {
         }
     }
 
-    /// Two items sharing a Command-key shortcut means one of them is
-    /// unreachable from the keyboard, and which one is up to AppKit.
     #[test]
     fn no_two_menu_items_claim_the_same_shortcut() {
         let mut seen = Vec::new();

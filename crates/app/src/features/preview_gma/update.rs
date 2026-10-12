@@ -2,10 +2,7 @@ pub fn nav_path_scrollable_id() -> iced::widget::Id {
     iced::widget::Id::new("preview-gma-nav-path")
 }
 
-/// The virtualized rows scrollable. Navigation resets the model's scroll
-/// offset, so the widget must be snapped back to the top through this id at
-/// the same time — the two offsets otherwise drift apart and the viewport
-/// lands on a spacer.
+/// Reset this scrollable with the model on navigation or their offsets drift.
 pub fn browser_rows_scrollable_id() -> iced::widget::Id {
     iced::widget::Id::new("preview-gma-browser-rows")
 }

@@ -1,5 +1,3 @@
-//! Particle emission and spawn-time initialization.
-
 use super::*;
 
 impl ParticleEngine {
@@ -16,7 +14,6 @@ impl ParticleEngine {
         // budget gets a chance to clamp.
         let mut to_spawn: u64 = 0;
 
-        // Initial particles burst once at instance start.
         if self.instances[instance_index].spawn_counter == 0 && compiled.initial_particles > 0 {
             to_spawn += u64::from(compiled.initial_particles);
         }
@@ -96,8 +93,6 @@ impl ParticleEngine {
         let spawn_index = self.instances[instance_index].spawn_counter;
         self.instances[instance_index].spawn_counter = spawn_index.wrapping_add(1);
 
-        // The RNG is tiny; moving it out sidesteps borrowing `instances`
-        // mutably while parent particles are read from the same vec.
         let mut spawn_rng = self.instances[instance_index].rng.clone();
         let compiled = &self.systems[system];
 
@@ -249,7 +244,6 @@ impl ParticleEngine {
                         position = start + (direction * (*start_offset));
                         let speed = rng.range(*speed_min, *speed_max);
                         velocity += direction * speed;
-                        // Cap the lifetime so the particle dies on arrival.
                         if speed > 1e-4 {
                             lifetime = lifetime.min(distance / speed);
                         }

@@ -1,11 +1,5 @@
-//! Supersedable verification state.
-
 use super::UiError;
 
-/// Something the user chose that has to be checked before the app can use it.
-/// Exactly one of "nothing chosen", "check in flight", "usable" and "rejected"
-/// holds at a time, and the checked-out value lives on `Verified` so it cannot
-/// outlive the check that produced it.
 #[derive(Clone, Debug, Default)]
 pub(super) enum Verification<T> {
     #[default]

@@ -1,8 +1,3 @@
-//! Addons the `debug` menu has hidden from the library.
-//!
-//! A ZST off `debug`, with every method an identity, so call sites stay
-//! unconditional and a shipping build carries no filtering at all.
-
 #[cfg(feature = "debug")]
 use std::{
     collections::HashSet,
@@ -22,8 +17,6 @@ pub(super) struct HiddenAddons {
 }
 
 impl HiddenAddons {
-    /// Hides an addon by whichever identities it has: a Workshop item has an
-    /// id, a local one a path, and an installed Workshop addon has both.
     #[cfg(feature = "debug")]
     pub(super) fn hide(&mut self, workshop_id: Option<PublishedFileId>, path: Option<&Path>) {
         if let Some(workshop_id) = workshop_id {
@@ -44,7 +37,6 @@ impl HiddenAddons {
         &self.workshop_ids
     }
 
-    /// The snapshot with hidden addons removed.
     #[cfg(feature = "debug")]
     pub(super) fn visible(&self, snapshot: &LibrarySnapshot) -> LibrarySnapshot {
         LibrarySnapshot {

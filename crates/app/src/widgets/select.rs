@@ -1,16 +1,3 @@
-//! A dropdown whose menu is ordinary app-owned chrome.
-//!
-//! `pick_list` builds its menu's scrollable internally and exposes no hook to
-//! restyle it, so those menus always carry iced's default scrollbar (wide,
-//! full-height rail) instead of the app's inset pill. Its overlay also opens on
-//! whichever side of the control has more room, which drops upward for anything
-//! below the middle of the window.
-//!
-//! This widget owns the placement and hands the menu itself back to the caller
-//! as a plain `Element`, so the panel, its option rows and its scrollbar are
-//! styled with the same helpers as the rest of the app. The menu always hangs
-//! downward, welded to the control's bottom edge.
-
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, overlay, renderer};
 use iced::widget::{button, column, container, row, scrollable, svg, text};
@@ -23,22 +10,16 @@ use crate::theme::{self, Tokens};
 /// with it so the caller can predict the menu's height before layout.
 const LINE_HEIGHT: f32 = 1.3;
 
-/// Options a menu shows before it starts scrolling.
 pub const MAX_ROWS: usize = 8;
 
-/// Chrome sizing for a select and its menu; option rows are padded like the
-/// control so the two read at the same height.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
     pub text_size: f32,
     pub padding: Padding,
     pub radius: f32,
-    /// Options shown before the menu starts scrolling.
     pub max_rows: usize,
 }
 
-/// Which of the two faces [`select`] swaps between is being built. Both are
-/// laid out up front so the control can switch without a relayout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Face {
     Collapsed,
@@ -51,25 +32,19 @@ impl Face {
     }
 }
 
-/// Whether a `field` control carries a chevron on its trailing edge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Chevron {
     Shown,
     Hidden,
 }
 
-/// One option in a select menu.
 pub struct Row<Message> {
     pub label: String,
     pub on_select: Message,
     pub selected: bool,
 }
 
-/// Height of one option row, matching how the row's `text` is laid out.
-///
-/// Exact only because rows never wrap — labels can come from a model file or a
-/// long translation, and a wrapped row would silently break every height the
-/// menu predicts from this.
+/// Option labels must not wrap; menu height assumes a fixed row height.
 pub fn row_height(metrics: Metrics) -> f32 {
     metrics.padding.y() + metrics.text_size * LINE_HEIGHT
 }
@@ -81,15 +56,12 @@ fn list_inset(metrics: Metrics) -> f32 {
     metrics.radius
 }
 
-/// Height the menu will ask for: every option, up to `max_rows`.
 pub fn menu_height(rows: usize, metrics: Metrics) -> f32 {
     rows.min(metrics.max_rows) as f32 * row_height(metrics) + list_inset(metrics) * 2.0
 }
 
-/// How the menu sits against its control.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Geometry {
-    /// Height the panel asks for before it is clamped to the room available.
     pub height: f32,
     /// How far the panel is pulled up over the control. iced borders are one
     /// width on every side, so without this the control's bottom stroke and the
@@ -98,7 +70,6 @@ pub struct Geometry {
     pub seam: f32,
 }
 
-/// Geometry for a menu of `rows` options built with `metrics`.
 pub fn geometry(rows: usize, metrics: Metrics, tokens: &Tokens) -> Geometry {
     Geometry {
         height: menu_height(rows, metrics),
@@ -106,10 +77,6 @@ pub fn geometry(rows: usize, metrics: Metrics, tokens: &Tokens) -> Geometry {
     }
 }
 
-/// Builds the floating panel: one row per option over the app's scrollbar.
-///
-/// The panel hangs flush off the control's bottom edge, so its top corners stay
-/// square and only the free edge is rounded.
 pub fn menu<'a, Message: Clone + 'a>(
     rows: Vec<Row<Message>>,
     metrics: Metrics,
@@ -161,8 +128,6 @@ pub fn menu<'a, Message: Clone + 'a>(
     .into()
 }
 
-/// The standard app dropdown: a control showing the current label, dropping a
-/// menu of every option beneath it.
 pub fn field<'a, Message: Clone + 'a>(
     label: String,
     rows: Vec<Row<Message>>,
@@ -199,7 +164,6 @@ pub fn field_with_icon<'a, Message: Clone + 'a>(
     .into()
 }
 
-/// The control's face: the current label, and a chevron if asked for.
 fn face<'a, Message: 'a>(
     label: String,
     face: Face,
@@ -258,19 +222,13 @@ const OPEN: usize = 1;
 const MENU: usize = 2;
 
 pub struct Select<'a, Message, Theme, Renderer> {
-    /// The control as it looks while shut, and while its menu is down. Both are
-    /// built up front because the open state lives in the widget's own tree.
     closed: Element<'a, Message, Theme, Renderer>,
     open: Element<'a, Message, Theme, Renderer>,
     menu: Element<'a, Message, Theme, Renderer>,
     geometry: Geometry,
 }
 
-/// A control that drops `menu` beneath itself when pressed.
-///
-/// `closed` and `open` are the same control in its two states and must lay out
-/// to the same size: only one is in the tree per frame, but `size`/`size_hint`
-/// always answer from `closed`.
+/// `closed` and `open` must have the same size; layout is measured from `closed`.
 pub fn select<'a, Message, Theme, Renderer>(
     closed: impl Into<Element<'a, Message, Theme, Renderer>>,
     open: impl Into<Element<'a, Message, Theme, Renderer>>,
@@ -459,9 +417,7 @@ where
             ..
         } = tree;
 
-        // Shut, the control keeps its own overlay — that is where its tooltip
-        // lives. Open, the menu replaces it: a hint hanging over the options it
-        // describes is worse than no hint.
+        // Hide the control's tooltip while the menu is open.
         if !tree_state.downcast_ref::<State>().is_open {
             return self.closed.as_widget_mut().overlay(
                 &mut children[CLOSED],
@@ -489,7 +445,6 @@ struct Menu<'a, 'b, Message, Theme, Renderer> {
     content: &'b mut Element<'a, Message, Theme, Renderer>,
     tree: &'b mut Tree,
     state: &'b mut State,
-    /// The control the menu hangs off, in window space.
     anchor: Rectangle,
     /// What the control is clipped into, in window space: a `scrollable` hands
     /// its visible bounds down, so the menu stays inside the panel it belongs
@@ -499,14 +454,8 @@ struct Menu<'a, 'b, Message, Theme, Renderer> {
 }
 
 impl<Message, Theme, Renderer> Menu<'_, '_, Message, Theme, Renderer> {
-    /// The box the panel gets to fill: exactly the control's width, and the room
-    /// under it.
-    ///
-    /// The menu only ever hangs downward — it shares the control's fill, ring
-    /// and squared-off top edge, so flipping it above would leave a detached box
-    /// sitting over the fields it isn't part of. It prefers the panel the
-    /// control is clipped into, and spills past that edge only when the whole
-    /// menu will not fit inside it.
+    /// Available menu bounds below the control, at its width.
+    /// Prefers the containing panel but may spill beyond it to fit the menu.
     fn limits(&self, window: Size) -> layout::Limits {
         let top = self.top();
         let in_panel = (self.limit.y + self.limit.height) - top;
@@ -523,8 +472,6 @@ impl<Message, Theme, Renderer> Menu<'_, '_, Message, Theme, Renderer> {
         )
     }
 
-    /// Where the panel starts: the control's bottom edge, less the overlap that
-    /// merges the two rings into one stroke.
     fn top(&self) -> f32 {
         self.anchor.y + self.anchor.height - self.geometry.seam
     }
@@ -599,9 +546,8 @@ where
             return;
         }
 
-        // Escape is deliberately not handled here: the app's Escape listeners
-        // are `event::listen_with` subscriptions that ignore `event::Status`, so
-        // capturing it would close the menu *and* unwind the modal underneath.
+        // Leave Escape to the app subscription, which ignores event status. Handling it
+        // here would close both menu and modal.
         let dismissed = matches!(
             event,
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
@@ -666,8 +612,6 @@ mod tests {
         assert_eq!(row_height(METRICS), 22.0 + 14.0 * 1.3);
     }
 
-    /// The list is inset top and bottom so the scrollbar's rounded ends clear
-    /// the panel's corners; that inset is part of the height the menu asks for.
     #[test]
     fn menu_height_shows_every_option_up_to_the_cap() {
         let inset = 2.0 * METRICS.radius;

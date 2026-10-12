@@ -25,9 +25,7 @@ const COMPACT_BREAKPOINT: f32 = 900.0;
 const COMPACT_TAB_BAR_HEIGHT: f32 = 48.0;
 const TAB_BUTTON_HEIGHT: f32 = 33.0;
 const FIELD_LABEL_HEIGHT: f32 = 18.0;
-/// Gap between a field's label and its control.
 const FIELD_LABEL_GAP: f32 = 12.0;
-/// Wrap width of the hint tooltip a select can carry.
 const SELECT_HINT_MAX_WIDTH: f32 = 320.0;
 const CONTROL_HEIGHT: f32 = 40.0;
 /// Vertical padding of a select control, per edge; also the padding of every
@@ -317,11 +315,6 @@ fn switch_row<'a>(
     .into()
 }
 
-/// A labelled dropdown over a domain type. `options` pairs each value with its
-/// translated label; falling back to the first entry keeps a control that has
-/// drifted out of range showing something rather than blank. `hint` is
-/// attached to the shut face only: with the menu down, a tooltip would hang
-/// across the options it is meant to explain.
 fn select_field<'a, T: Clone + Eq>(
     label: String,
     hint: Option<String>,
@@ -384,9 +377,6 @@ fn select_field_face<'a>(
     }
 }
 
-/// The control itself: centered label with a chevron parked on the right edge.
-/// [`select::Face::Expanded`] squares off the bottom corners so the menu joins
-/// it flush.
 fn select_face<'a>(label: String, face: select::Face, tokens: &Tokens) -> Element<'a, Message> {
     let tokens = *tokens;
     let label_layer = container(
@@ -673,9 +663,6 @@ fn color_picker_popover<'a>(
     .into()
 }
 
-// Per-slider display state (label/value text/range/step/channel/rail),
-// bundled so the three `hsv_slider` call sites read as named fields instead
-// of a run of positional strings and f32s that are easy to transpose.
 struct HsvSliderSpec {
     label: String,
     value_text: String,
@@ -1047,8 +1034,6 @@ fn switch_style(tokens: &Tokens, status: toggler::Status) -> toggler::Style {
     }
 }
 
-/// Menu chrome for a settings select: option rows padded like the control they
-/// hang off, so a row and the closed control read at the same height.
 fn select_metrics(tokens: &Tokens) -> select::Metrics {
     select::Metrics {
         text_size: tokens.typography.body,
@@ -1266,10 +1251,6 @@ fn rgb_color(rgb: u32) -> Color {
 mod tests {
     use super::*;
 
-    /// The row that clears an explicit language is the one carrying `None`,
-    /// and it has to be first: `select_field` falls back to the first entry
-    /// for a value it cannot find, so any other order would silently rewrite
-    /// an unknown stored language into a real one.
     #[test]
     fn the_language_list_leads_with_the_follow_the_system_row() {
         let i18n = I18n::for_locale(Some("en"));

@@ -20,8 +20,6 @@ pub(super) fn flatten_blocking_ui_result<T>(
     }
 }
 
-/// Runner-owned Steam connection orchestration shared by every operation
-/// that needs a connected Workshop service.
 pub(super) fn connect_steam_for_operation(
     workshop: WorkshopService<'_>,
 ) -> steam_session::ConnectionAttempt {
@@ -137,7 +135,6 @@ pub(super) fn run_installed_metadata_refresh(
                 &mut output,
                 RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
                     generation,
-                    // A landed batch needs no re-queue bookkeeping.
                     Vec::new(),
                     Ok(patches),
                 )),
@@ -273,10 +270,7 @@ pub(super) fn create_downloader_local_extract_task(
     create_extract_task(ctx, TaskKind::Extract, total_bytes)
 }
 
-/// Correlates a fresh backend transaction with `task` (mirroring the
-/// Steam-download path) so terminal delivery and per-task cancellation both
-/// flow through the same mechanism instead of a hidden, uncorrelated
-/// transaction extraction would otherwise create for itself.
+/// Use a correlated transaction so task cancellation reaches the extraction.
 pub(super) fn run_local_gma_extraction(
     ctx: &BackendContext,
     path: &Path,
@@ -304,8 +298,6 @@ pub(super) fn local_extraction_outcome(
     }
 }
 
-/// Extracts one document-opened `.gma` archive with quick-open semantics:
-/// temp destination, task-overlay progress row, open-after-extract.
 #[cfg(target_os = "macos")]
 pub(super) fn run_document_open_extraction(ctx: &BackendContext, path: &Path) {
     let total_bytes = path.metadata().map_or(0, |metadata| metadata.len());
@@ -380,8 +372,6 @@ pub(super) fn create_preview_gma_extract_task(
     ctx: &BackendContext,
     total_bytes: u64,
 ) -> TaskHandle {
-    // Extractions invoked outside the Downloader page surface as overlay
-    // toasts instead of Downloader rows.
     create_extract_task(ctx, TaskKind::OverlayExtract, total_bytes)
 }
 
@@ -420,10 +410,6 @@ pub(super) fn schedule_native_open_target(
     }
 }
 
-/// Schedules `job` on the backend's blocking pool via `spawn_blocking_detached`,
-/// logging a warning naming `what` if scheduling itself failed. Returns
-/// whether scheduling succeeded, for callers that need to react further
-/// (e.g. sending a fallback message) beyond the log line.
 pub(super) fn spawn_blocking_detached_or_warn(
     ctx: &BackendContext,
     name: impl Into<Arc<str>>,

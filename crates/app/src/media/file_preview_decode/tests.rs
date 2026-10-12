@@ -590,8 +590,6 @@ fn text_preview_over_hard_cap_becomes_too_large_info() {
         }
     ));
 
-    // "Load anyway" consent skips the size gate and decodes (still
-    // truncated for display).
     let mut request = request;
     request.bypass_size_limits = true;
     let data = preview_data_from_bytes(&request, &bytes, &test_tokens(), None);
@@ -944,9 +942,8 @@ fn prop_lighting_adds_visible_sun_in_linear_space() {
         }),
     };
 
-    // Up-facing vertex: ambient + full sun. Down-facing: ambient only —
-    // there is deliberately no separate skylight term (the ambient cube
-    // already integrates sky bounce).
+    // Up-facing vertices get ambient and sun; down-facing vertices get ambient
+    // only. The ambient cube already includes sky bounce.
     assert_vec3_close(
         lighting.evaluate(Vec3::new(0.0, 0.0, 1.0)),
         Vec3::new(0.6, 0.35, 0.1),
@@ -1260,12 +1257,8 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
             visibility,
         )
     }));
-    // Two triangles over four shared vertices: vertex count (4) differs
-    // from index count (6), so any merge that mixes up vertex and index
-    // bases in the visibility ranges breaks the equality below.
-    // The first four placements are sprp-owned and the last four are the
-    // appended entity-prop range; visibility remains keyed by final index
-    // ranges across that ownership boundary.
+    // Use unequal vertex and index counts to catch mixed-up visibility offsets.
+    // Include both static and entity props to test the merged ranges.
     let mut asset = test_prop_asset(2, vec![10, 11]);
     {
         let model = Arc::get_mut(&mut asset.model).expect("fresh model arc");

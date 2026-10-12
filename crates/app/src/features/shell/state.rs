@@ -10,7 +10,6 @@ use crate::features::steam_session::{ConnectionStatus, SteamIdentity};
 use crate::theme::{self, Tokens, motion};
 
 mapped_enum_with_all! {
-    /// Route identifiers owned by the shell.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Route {
         MyWorkshop => "my-workshop",
@@ -32,7 +31,6 @@ impl Route {
     }
 }
 
-/// Latest release metadata shown in the account menu.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateRelease {
     version: String,
@@ -45,7 +43,6 @@ impl UpdateRelease {
     }
 }
 
-/// Effective native/window chrome treatment for the current platform/settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChromeStrategy {
     MacNativeInset,
@@ -91,7 +88,6 @@ pub fn traffic_light_center_y(tokens: &Tokens) -> f32 {
     tokens.dims.sidebar_float_margin + tokens.dims.sidebar_band_height / 2.0
 }
 
-/// Root shell state owned by the Iced app.
 #[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,

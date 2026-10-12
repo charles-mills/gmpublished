@@ -1,12 +1,6 @@
-//! Progress reporting for long-running work: a [`Transaction`] is the handle
-//! an operation reports status, progress and completion through, and
-//! [`Transactions`] mints them and routes their events to the app.
-//!
-//! Each transaction has one serialized event stream: zero or more running
-//! events, exactly one terminal event, then nothing. Cancellation is
-//! cooperative and one-way; operations decide where to poll their own
-//! checkpoints, while this module guarantees the cancellation error is the
-//! last event if cancellation wins.
+//! Progress and completion events for long-running work.
+//! Each transaction emits running events followed by exactly one terminal event.
+//! Cancellation is cooperative and irreversible; if it wins, its error is terminal.
 
 mod payload;
 
@@ -25,28 +19,14 @@ pub use self::payload::TransactionPayload;
 
 macro_rules! transaction_statuses {
     ($($(#[$meta:meta])* $variant:ident => $key:literal),+ $(,)?) => {
-        /// What a long-running operation is currently doing, as the UI names it.
-        ///
-        /// A closed set rather than free text: the app renders a status by looking its
-        /// [`translation_key`](Self::translation_key) up in the Fluent catalogs, so a
-        /// value with no entry reaches the user as raw wire text. The keys are frozen;
-        /// their inconsistent shape is part of the application protocol.
-        ///
-        /// Covers both sides of the bridge. The backend raises most variants inside a
-        /// transaction; the app raises the UI-owned work states, and both arrive at the
-        /// same task overlay.
         #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
         pub enum TransactionStatus {
             $($(#[$meta])* $variant),+
         }
 
         impl TransactionStatus {
-            /// Every status, in declaration order. Generated with the enum so
-            /// a newly declared status cannot be omitted from catalog checks.
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
-            /// The Fluent message id this status renders as. Frozen — see the
-            /// type documentation.
             #[must_use]
             pub const fn translation_key(self) -> &'static str {
                 match self {
@@ -72,7 +52,6 @@ transaction_statuses! {
     PublishUploadingContent => "PUBLISH_UPLOADING_CONTENT",
     PublishUploadingPreviewFile => "PUBLISH_UPLOADING_PREVIEW_FILE",
     PublishCommittingChanges => "PUBLISH_COMMITTING_CHANGES",
-    /// Raised only by the developer context menu, but still a catalog key.
     Notice => "context-menu-debug-toast-notice",
 }
 
@@ -82,9 +61,6 @@ impl fmt::Display for TransactionStatus {
     }
 }
 
-/// A failed transaction's identity on the event wire: a stable [`ErrorKey`]
-/// plus optional contextual payload (a path, an entry name, an upstream
-/// error message).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionError {
     pub key: ErrorKey,
@@ -118,10 +94,6 @@ impl<E: HasErrorKey> From<&E> for TransactionError {
     }
 }
 
-/// Internals shared between a [`Transactions`] handle and every
-/// [`TransactionInner`] it creates. Kept separate from `Transactions` itself
-/// (rather than requiring `Arc<Transactions>`) so `Transactions::begin` only
-/// needs `&self`.
 struct TransactionsShared {
     registry: RwLock<TransactionRegistry>,
     sink: Arc<dyn BackendEventSink>,
@@ -153,10 +125,6 @@ impl TransactionRegistry {
     }
 }
 
-/// Owns transaction bookkeeping (id allocation, the live-transaction
-/// registry) and event emission. Cheap to clone: internally an `Arc`, so
-/// every service that needs to create transactions or emit plain backend
-/// events can hold its own `Transactions` handle.
 #[derive(Clone)]
 pub struct Transactions {
     shared: Arc<TransactionsShared>,
@@ -179,8 +147,6 @@ impl Transactions {
         }
     }
 
-    /// Emits a plain (non-transaction) backend event, e.g. `SteamConnected`
-    /// or `AppDataUpdated`.
     pub fn emit(&self, event: BackendEvent) {
         self.shared.sink.emit(event);
     }
@@ -205,10 +171,6 @@ impl Transactions {
     #[must_use]
     pub fn find(&self, transaction_id: TransactionId) -> Option<Transaction> {
         let registry = self.shared.registry.read();
-        // A failed upgrade is not a leak: `Drop` can reach finalization only
-        // after the last strong reference is already gone. A concurrent
-        // lookup in that window sees a live entry it cannot upgrade, and
-        // "already finished" is the right answer for it.
         registry
             .live
             .get(&transaction_id)
@@ -216,14 +178,6 @@ impl Transactions {
             .map(Transaction)
     }
 
-    /// Cancels every transaction still running, and reports how many were.
-    ///
-    /// The cooperative half of shutdown. Long backend operations already poll
-    /// [`Transaction::aborted`] between units of work — per archive entry when
-    /// packing or extracting — so cancelling here lets an in-flight job stop at
-    /// its next checkpoint instead of being abandoned mid-write when the worker
-    /// pools are joined. Extraction writes each entry straight to its
-    /// destination, so "abandoned mid-write" means a truncated file.
     pub fn cancel_all(&self) -> usize {
         // Collect before cancelling: finalization takes the registry write
         // lock to retire each transaction.
@@ -255,9 +209,7 @@ fn progress_as_int(progress: f64) -> u16 {
     u16::min((progress * 10000.) as u16, 10000)
 }
 
-/// The one-way `Running -> terminal` lifecycle, stored in an [`AtomicU8`] for
-/// cheap cooperative cancellation checks. Transitions are serialized by the
-/// transaction's emission mutex.
+/// One-way Running to terminal state. The emission mutex serializes transitions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum State {
@@ -268,8 +220,6 @@ enum State {
 }
 
 impl State {
-    /// Only ever fed a discriminant this module wrote, so the catch-all arm is
-    /// `Running` itself, not a fallback for unknown input.
     const fn from_raw(raw: u8) -> Self {
         debug_assert!(raw <= Self::Cancelled as u8, "state came from elsewhere");
         match raw {
@@ -281,28 +231,19 @@ impl State {
     }
 }
 
-/// Result of attempting to emit a non-terminal transaction event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmitOutcome {
-    /// The transaction was running and the event was emitted.
     Emitted,
-    /// A terminal transition won first, so the event was rejected.
     AlreadyFinalized,
 }
 
-/// Result of attempting a one-way `Running -> terminal` transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FinalizeOutcome {
-    /// This call performed the terminal transition and emitted its event.
     Finalized,
-    /// Cancellation had already performed the terminal transition.
     AlreadyCancelled,
-    /// Successful or failed completion had already performed the transition.
     AlreadyCompleted,
 }
 
-/// Identifies one transaction for its whole lifetime. The correlation key the
-/// app matches backend progress events against its own tasks.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TransactionId(u32);
 
@@ -312,8 +253,6 @@ impl TransactionId {
         self.0
     }
 
-    /// Only [`Transactions::begin`] mints these in production; tests need to
-    /// name one that never existed.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub const fn from_raw(id: u32) -> Self {
@@ -327,8 +266,6 @@ impl fmt::Display for TransactionId {
     }
 }
 
-/// A handle to one in-flight transaction. Cloning shares the same underlying
-/// state machine, so any clone can finalize it.
 #[derive(Clone)]
 pub struct Transaction(Arc<TransactionInner>);
 
@@ -460,48 +397,36 @@ impl Transaction {
         self.0.id
     }
 
-    /// Emits data if this transaction is still running.
     pub fn data(&self, payload: TransactionPayload) -> EmitOutcome {
         self.0.data(payload)
     }
 
-    /// Emits a status if this transaction is still running.
     pub fn status(&self, status: TransactionStatus) -> EmitOutcome {
         self.0.status(status)
     }
 
-    /// Sets progress if this transaction is still running.
     pub fn progress(&self, progress: f64) -> EmitOutcome {
         self.0.progress(progress)
     }
 
-    /// Increments progress if this transaction is still running.
     pub fn progress_incr(&self, progress: f64) -> EmitOutcome {
         self.0.progress_incr(progress)
     }
 
-    /// Resets progress if this transaction is still running.
     pub fn progress_reset(&self) -> EmitOutcome {
         self.0.progress_reset()
     }
 
-    /// Attempts to finish this transaction with an error.
     pub fn error(&self, error: impl Into<TransactionError>) -> FinalizeOutcome {
         self.0.error(error)
     }
 
-    /// Attempts to finish this transaction successfully.
     pub fn finished(&self, payload: TransactionPayload) -> FinalizeOutcome {
         self.0.finished(payload)
     }
 
-    /// Runs fallible transaction work and performs its matching terminal
-    /// transition exactly once on the normal path.
-    ///
-    /// The original result is returned unchanged. If cancellation wins while
-    /// `work` is running, the attempted success or error transition is rejected
-    /// by the transaction state machine, leaving cancellation as the terminal
-    /// event.
+    /// Returns the work's result even if cancellation wins. In that case,
+    /// the cancellation event remains terminal.
     pub fn complete<T, E>(
         &self,
         work: impl FnOnce() -> Result<T, E>,
@@ -522,7 +447,6 @@ impl Transaction {
         result
     }
 
-    /// Attempts to cancel this transaction.
     pub fn cancel(&self) -> FinalizeOutcome {
         self.0.cancel()
     }
@@ -532,11 +456,7 @@ impl Transaction {
         self.0.aborted()
     }
 
-    /// Reports whether cancellation, specifically, won the terminal transition.
-    ///
-    /// Unlike [`Self::aborted`], successful and errored completion return
-    /// `false`. Terminal states never change, so a `false` result after this
-    /// transaction has attempted completion cannot race with a later cancel.
+    /// Only cancellation returns true; `aborted` also includes success and error.
     #[must_use]
     pub fn cancelled(&self) -> bool {
         self.0.cancelled()
@@ -585,9 +505,6 @@ mod tests {
         })
     }
 
-    /// Shutdown's cooperative half: every live transaction is cancelled, so a
-    /// job polling `aborted()` stops at its own checkpoint rather than being
-    /// abandoned mid-write when the pools are joined.
     #[test]
     fn cancel_all_cancels_every_live_transaction() {
         let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));
@@ -599,8 +516,6 @@ mod tests {
         assert!(second.aborted());
     }
 
-    /// Already-finished transactions are not counted, and cancelling twice
-    /// does not double-count — quit can reach this after a user cancel.
     #[test]
     fn cancel_all_ignores_transactions_that_already_finished() {
         let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));
@@ -613,9 +528,6 @@ mod tests {
         assert!(running.aborted());
     }
 
-    /// `find` must not treat a registry entry it cannot upgrade as a bug:
-    /// `Drop` removes the entry strictly after the strong count reaches zero,
-    /// so a concurrent lookup can legitimately observe one.
     #[test]
     fn find_returns_none_for_an_entry_that_cannot_upgrade() {
         let transactions = Transactions::new(Arc::new(crate::events::NullEventSink));
@@ -808,8 +720,6 @@ mod tests {
         };
 
         assert_eq!(transaction.cancel(), FinalizeOutcome::Finalized);
-        // A worker that only notices cancellation after the fact must not
-        // also deliver a contradicting Finished.
         assert_eq!(
             transaction.finished(super::TransactionPayload::None),
             FinalizeOutcome::AlreadyCancelled

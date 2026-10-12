@@ -15,11 +15,7 @@ use crate::generation::Generation;
 pub enum Message {
     OpenRequested(OpenTarget),
     WorkshopLanguageChanged(crate::bridge::workshop_text::WorkshopLanguage),
-    /// Boxed: `LoadedArchive` carries the full file-browser state inline,
-    /// which would otherwise set the size of `RootMessage`.
     ArchiveOpened(Generation, Box<Result<LoadedArchive, UiError>>),
-    /// Boxed: `WorkshopMetadata` is ~216 bytes inline, which would otherwise
-    /// set the size of `RootMessage`.
     WorkshopMetadataCompleted(
         Generation,
         PublishedFileId,

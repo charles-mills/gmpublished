@@ -1,19 +1,10 @@
-//! ThumbHash perceptual placeholders.
-//!
-//! [`encode`] turns a decoded thumbnail into a ~25-byte hash; [`decode`] turns
-//! that hash back into a tiny RGBA image the GPU upscales into a blurred
-//! placeholder. The hash codec is the `thumbhash` crate (algorithm:
-//! <https://evanw.github.io/thumbhash/>); this module only box-downsamples the
-//! encode input to the ≤100px the codec asserts on.
+//! ThumbHash input must fit within 100px. The codec comes from the `thumbhash`
+//! crate; see <https://evanw.github.io/thumbhash/>.
 
-// ThumbHash captures only a ~7x7 luminance basis, so a small box-averaged
-// input is indistinguishable from a full-resolution one while staying under
-// the codec's 100px limit.
+// A small box-averaged input is enough for ThumbHash's roughly 7x7 luminance basis.
 const ENCODE_MAX_EDGE: u32 = 64;
 
-/// Encodes straight-RGBA pixels into a ThumbHash. ThumbHash is presentation
-/// garnish, so a malformed buffer yields `None` (no placeholder) rather than an
-/// error.
+/// Expects straight RGBA. Returns `None` for invalid input.
 pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Option<Box<[u8]>> {
     let (w, h) = (width as usize, height as usize);
     let expected = w.checked_mul(h)?.checked_mul(4)?;
@@ -32,8 +23,6 @@ pub fn decode(hash: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?, rgba))
 }
 
-/// Box-averages an image to fit within `max_edge`, preserving aspect ratio.
-/// Images already within the bound are copied unchanged.
 fn box_downsample(width: u32, height: u32, rgba: &[u8], max_edge: u32) -> (usize, usize, Vec<u8>) {
     let source_max = width.max(height);
     if source_max <= max_edge {

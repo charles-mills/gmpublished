@@ -1,5 +1,3 @@
-//! Publish submission state, envelopes, and request construction.
-
 use super::{
     DEFAULT_WORKSHOP_ICON_FILE_NAME, Generation, Path, PathBuf, PublishSelectedPreview,
     PublishSubmitOutcome, PublishSubmitRequest, PublishedFileId, TransactionStatus, VerifiedIcon,

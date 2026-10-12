@@ -35,8 +35,6 @@ pub use publish_service::PublishService;
 pub use search_service::SearchService;
 pub use workshop_service::WorkshopService;
 
-/// App composition root. Features receive one of its narrow borrowed service
-/// capabilities; scheduler and lifecycle code alone retain this registry.
 #[derive(Debug)]
 pub struct BackendServices {
     backend: Arc<Backend>,
@@ -51,18 +49,11 @@ pub struct BackendServices {
     _test_data_root: Option<tempfile::TempDir>,
 }
 
-/// The error every Steam-facing call returns when it finds no connection.
 fn steam_not_connected() -> UiError {
     UiError::from(&SteamRuntimeError::NotConnected)
 }
 
-/// What a [`BackendServices`] needs to know about its environment.
-///
-/// Production and tests both build one and call the same constructor. Deciding
-/// it with `cfg!(test)` inside would run different code on the two paths,
-/// making a production-only bug invisible to the suite.
 pub(super) struct BackendServicesConfig {
-    /// Whether settings changes are written back to the backend's store.
     persist_settings: bool,
     /// Where the Workshop metadata snapshot lives; `None` keeps it in memory.
     metadata_snapshot_file: Option<PathBuf>,
@@ -71,7 +62,6 @@ pub(super) struct BackendServicesConfig {
 }
 
 impl BackendServicesConfig {
-    /// Reads and writes the real user directories.
     fn production() -> Self {
         Self {
             persist_settings: true,
@@ -80,8 +70,6 @@ impl BackendServicesConfig {
         }
     }
 
-    /// Touches no directory the developer also uses, and persists nothing —
-    /// many isolated roots coexist in one test process.
     #[cfg(test)]
     fn isolated() -> Self {
         Self {
@@ -123,12 +111,6 @@ impl BackendServices {
         ArchiveService::new(self)
     }
 
-    /// The default entry point every `App::new()` (production) or
-    /// `BackendContext::new()` (tests) goes through. Builds one `Backend`
-    /// (with explicitly-started background services in production; a
-    /// private-tempdir, no-background-services one in tests —
-    /// [`build_default_backend`]) and derives the initial settings/paths from
-    /// its `AppData` snapshot.
     pub(super) fn new(
         backend_event_sink: Option<BackendEventSinkRegistration>,
     ) -> Result<Self, gmpublished_backend::BackendInitError> {
@@ -198,10 +180,7 @@ impl BackendServices {
         Self::for_test_with_event_sink(Arc::new(gmpublished_backend::NullEventSink))
     }
 
-    /// Like [`Self::for_test`], but with the real `AppData`-backed settings
-    /// persistence path enabled (disabled by default in tests), so a test
-    /// can exercise `update_settings_snapshot`'s actual disk write and its
-    /// failure propagation.
+    /// Enables real settings persistence under the test's private data root.
     #[cfg(test)]
     pub(crate) fn for_test_with_settings_persist_enabled() -> Self {
         let (backend, test_data_root) =
@@ -220,9 +199,7 @@ impl BackendServices {
         services
     }
 
-    /// Like [`Self::for_test`], but with an explicit event sink (a
-    /// `BackendEventCollector`, typically) so the test can observe events
-    /// the backend emits directly, without going through a `BackendContext`.
+    /// Uses the supplied event sink so tests can observe backend events directly.
     #[cfg(test)]
     pub(crate) fn for_test_with_event_sink(
         event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
@@ -269,11 +246,6 @@ impl BackendServices {
         )
     }
 
-    /// Stops every background service this process owns, for app exit.
-    ///
-    /// Transactions are cancelled before Steam is shut down so a job still
-    /// running gets the chance to stop at its own next checkpoint rather than
-    /// being abandoned mid-write. Returns how many were cancelled.
     pub(crate) fn shutdown(&self) -> usize {
         let cancelled = self.backend.cancel_all_transactions();
         self.backend.shutdown_background_services();
@@ -417,10 +389,6 @@ mod performance_tests {
     }
 }
 
-/// Production: the one real `Backend` (background threads included, OS
-/// paths). Tests: a throwaway `Backend` on a private tempdir root, with no
-/// background threads (no Steam connect attempt, no whitelist network
-/// fetch) — so every test is fully isolated.
 #[cfg(not(test))]
 fn build_default_backend(
     event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
@@ -443,7 +411,6 @@ fn build_default_backend(
     Ok((backend, root))
 }
 
-/// The backend's id types, built at the one place the app hands ids across.
 fn backend_workshop_id(id: PublishedFileId) -> gmpublished_backend::WorkshopId {
     id.into()
 }

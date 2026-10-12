@@ -4,9 +4,6 @@ use super::model::MetadataPatch;
 use super::*;
 use crate::generation::Generation;
 
-/// Builds a `State` pre-populated with `count` rows (the full discovered
-/// addon library), each with a unique workshop id `1..=count`, mirroring
-/// the shape the route reaches after a snapshot lands.
 fn fixture_state(count: usize) -> State {
     let rows: Vec<Row> = (0..count)
         .map(|i| {
@@ -46,9 +43,6 @@ fn visible_fixture_state(count: usize) -> State {
     state
 }
 
-/// Ids match `fixture_state`'s rows, which are numbered `1..=n` (row `i`
-/// carries id `i + 1`): `start` is the 0-based row index the batch begins
-/// at, so the ids generated here are `start + 1 ..= start + count`.
 fn patch_batch(start: u64, count: u64) -> Vec<MetadataPatch> {
     (start..start + count)
         .map(|id| {
@@ -91,7 +85,6 @@ fn visible_metadata_request_includes_after_window_before_beyond_rows() {
         .take_visible_metadata_request()
         .expect("visible and after-window ids should be requested");
 
-    // Row `i` carries id `i + 1` (see `fixture_state`).
     let visible_ids = visible
         .map(|index| PublishedFileId::fixture(index as u64 + 1))
         .collect::<Vec<_>>();
@@ -108,7 +101,6 @@ fn visible_metadata_request_dedups_prefetch_window_against_known_ids() {
     let mut state = visible_fixture_state(80);
     let visible = state.grid().visible_item_range();
     let (_, after) = thumbnail_demand::prefetch_ranges(visible, state.rows().len());
-    // Row `i` carries id `i + 1` (see `fixture_state`).
     let in_flight = PublishedFileId::fixture(after.start as u64 + 1);
     let finished = PublishedFileId::fixture(after.start.saturating_add(1) as u64 + 1);
     let still_new = PublishedFileId::fixture(after.start.saturating_add(2) as u64 + 1);
@@ -124,8 +116,6 @@ fn visible_metadata_request_dedups_prefetch_window_against_known_ids() {
     assert!(ids.contains(&still_new));
 }
 
-/// Exercises metadata patching at large installed-library scale: 3000
-/// rows and repeated UGC batches of 50 patches.
 #[test]
 fn apply_metadata_patches_matches_expected_at_scale() {
     const ROWS: usize = 3000;
@@ -153,10 +143,6 @@ fn apply_metadata_patches_matches_expected_at_scale() {
     }
 }
 
-/// Drives the real snapshot API rather than hand-building a fixture, to
-/// confirm the workshop-id index stays consistent when maintained through
-/// the actual mutation paths, then verifies patches land on the rows and
-/// on the grid's items in place.
 #[test]
 fn workshop_index_stays_consistent_through_snapshot_and_patches() {
     let mut state = State::default();
@@ -171,7 +157,6 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
         .collect();
     state.apply_snapshot(LibraryRefreshReason::Startup, Ok(rows));
     let generation = state.generation;
-    // The entire library lands in the grid at once; nothing is paged.
     assert_eq!(state.row_count(), 120);
     assert_eq!(state.grid().items_len(), 120);
 
@@ -195,18 +180,11 @@ fn workshop_index_stays_consistent_through_snapshot_and_patches() {
         .expect("row 115 should be present");
     assert_eq!(late.title_for_test(), "Patched Late");
 
-    // The patches must reach the grid's own items: patching is the
-    // hydration path, and no other test observes the grid side of it. The
-    // grid resolves patches by id (the index is only a hint), so this pins
-    // the end-to-end row -> grid item delivery. Row `i` carries id `i + 1`.
     assert_eq!(state.grid().item_title_for_test(9), Some("Patched Early"));
     assert_eq!(state.grid().item_title_for_test(114), Some("Patched Late"));
     assert_eq!(state.grid().item_title_for_test(0), Some("Title"));
 }
 
-/// Duplicate workshop ids (e.g. the same Workshop item installed at two
-/// local paths) must both receive the patch -- guards against an index
-/// implementation that only stores a single index per id.
 #[test]
 fn duplicate_workshop_ids_both_receive_patch() {
     let rows = vec![
@@ -238,8 +216,6 @@ fn duplicate_workshop_ids_both_receive_patch() {
     );
 }
 
-/// Builds a visible, settled state the way the route looks when a live
-/// disk change arrives: rows on screen, nothing in flight.
 fn settled_visible_state(count: usize) -> State {
     let mut state = fixture_state(count);
     state.route_visible = true;
@@ -260,9 +236,7 @@ fn disk_change_swaps_quietly_and_carries_unchanged_rows() {
     assert_eq!(state.rows().len(), 2, "grid keeps rows mid-scan");
 
     let fresh = vec![
-        // Same fingerprint (0/0) as the fixture row: carried over.
         Row::for_test("/addons/0.gma", "Title", Some(PublishedFileId::fixture(1))),
-        // Changed fingerprint: replaced by the fresh scan row.
         Row::for_test("/addons/1.gma", "Title", Some(PublishedFileId::fixture(1)))
             .with_file_fingerprint_for_test(9, 9),
     ];
@@ -351,23 +325,17 @@ fn degraded_watch_rearms_once_per_route_entry() {
     state.enter_route();
     assert_eq!(state.watch_arm_epoch(), Generation::from_raw(1));
 
-    // Still degraded after the retry: no second bump until re-entry.
     state.apply_watch_armed(true);
     state.exit_route();
     state.enter_route();
     assert_eq!(state.watch_arm_epoch(), Generation::from_raw(2));
 
-    // Healthy watch never churns the subscription.
     state.apply_watch_armed(false);
     state.exit_route();
     state.enter_route();
     assert_eq!(state.watch_arm_epoch(), Generation::from_raw(2));
 }
 
-/// A metadata lookup that fails says nothing about the ids it named, so they
-/// must stay askable. Marking them finished alongside successful ones stranded
-/// every visible row until the next loud refresh — a cold start against a Steam
-/// that was still coming up left the library permanently unhydrated.
 #[test]
 fn failed_metadata_lookup_is_retried_once_steam_returns() {
     let mut state = visible_fixture_state(40);
@@ -398,11 +366,6 @@ fn failed_metadata_lookup_is_retried_once_steam_returns() {
     );
 }
 
-/// The metadata *refresh* is the leg that actually talks to Steam; the lookup
-/// before it is a local cache read that always succeeds and marks its ids
-/// finished. Dropping a refresh failure therefore stranded exactly the rows
-/// that had no cache entry to fall back on — the common flaky-network case,
-/// and the one a reconnect edge never sees because Steam stayed up.
 #[test]
 fn failed_metadata_refresh_requeues_its_ids() {
     let mut state = visible_fixture_state(40);
@@ -411,8 +374,6 @@ fn failed_metadata_refresh_requeues_its_ids() {
         .take_visible_metadata_request()
         .expect("visible rows must request metadata");
 
-    // The cache lookup succeeds and reports every id as stale, which is what
-    // queues the network refresh.
     let refresh = state.finish_metadata_request(
         generation,
         &requested,
@@ -424,7 +385,6 @@ fn failed_metadata_refresh_requeues_its_ids() {
     let (refresh_generation, refresh_ids) = refresh.expect("stale ids queue a refresh");
     assert_eq!(refresh_ids, requested);
 
-    // Nothing more to ask while the refresh is outstanding.
     assert!(state.take_visible_metadata_request().is_none());
 
     state.apply_metadata_refresh(

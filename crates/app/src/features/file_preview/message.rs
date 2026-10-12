@@ -10,15 +10,10 @@ use crate::media::preview_model::{
 };
 use gmpublished_domain::particles::ControlPointIndex;
 
-/// Facts emitted by the in-archive file preview modal.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     OpenRequested(PreviewRequest),
     LoadStageChanged(Generation, PreviewLoadStage),
-    /// Boxed: the inline `PreviewData` (a `PreviewContent::Map` carries ~170
-    /// bytes of scene metadata) otherwise sets the size of this enum, and
-    /// through it `RootMessage` — which every message pays, including the
-    /// per-frame animation ticks.
     Loaded(Generation, Box<Result<PreviewData, PreviewLoadError>>),
     AnimationTick(Instant),
     AudioToggleRequested,

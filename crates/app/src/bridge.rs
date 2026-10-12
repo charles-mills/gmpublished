@@ -55,16 +55,8 @@ impl UiSettings {
         }
     }
 
-    /// Converts a parsed JSON value into settings, falling back to the
-    /// default for the whole struct if `value` is not an object, and
-    /// independently, per field, if a field is missing or holds a value of
-    /// the wrong shape.
-    /// `None` for a file this build must not adopt.
-    ///
-    /// A newer `version` means fields this build does not know: taking it
-    /// would drop them and the next save would write the truncated shape back
-    /// over the user's file. Older versions load as-is — every field is
-    /// independently optional, so a missing one takes its default.
+    /// Parses UI settings with per-field defaults. Returns `None` for newer
+    /// versions so saving cannot overwrite fields this build does not understand.
     fn from_json_value(value: &serde_json::Value) -> Option<Self> {
         let dto = serde_json::from_value::<UiSettingsDto>(value.clone()).ok()?;
         (dto.version <= UI_SETTINGS_SCHEMA_VERSION).then(|| Self::from_dto(&dto))
@@ -100,10 +92,7 @@ impl UiSettings {
     }
 }
 
-/// On-disk shape of [`UiSettings`]. Every field is independently optional so
-/// a missing key or a value of the wrong type falls back to that field's
-/// default rather than rejecting the whole file (`lenient_field` swallows
-/// per-field type mismatches; `#[serde(default)]` covers absent keys).
+/// Missing or invalid fields use their defaults without rejecting the whole settings file.
 #[derive(Deserialize, Serialize)]
 struct UiSettingsDto {
     #[serde(default)]
@@ -116,8 +105,7 @@ struct UiSettingsDto {
     theme_preset: Option<String>,
 }
 
-/// Deserializes a field as `Option<T>`, treating a present-but-wrong-shape
-/// value the same as an absent one (`None`) instead of failing the parse.
+/// Treat a field with the wrong type as absent.
 fn lenient_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -127,16 +115,6 @@ where
     Ok(serde_json::from_value(value).ok())
 }
 
-/// The settings document the app reads as one value.
-///
-/// Composed rather than flattened. Mirroring [`BackendSettings`] field by
-/// field would mean a new backend setting needs a field here and a line in
-/// each direction of the conversion — and a forgotten line still compiles,
-/// silently dropping the value on the next save. Holding the backend's own
-/// struct leaves nothing to keep in step.
-///
-/// The backend owns the atomic file and preserves `ui` as an opaque versioned
-/// JSON section; this crate owns the typed interpretation of that section.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub(crate) backend: BackendSettings,
@@ -341,10 +319,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Crossing the bridge must lose nothing. Holding the backend's own struct
-    /// is what guarantees it: there is no per-field list to fall out of step
-    /// with, so a setting added to `BackendSettings` needs no change here and
-    /// cannot be dropped on the next save.
     #[test]
     fn backend_settings_survive_a_round_trip_through_the_bridge() {
         let mut backend = BackendSettings {

@@ -57,9 +57,7 @@ impl App {
         ])
     }
 
-    /// Direct close requests (e.g. the modal's Cancel button) only start the
-    /// close animation; the actual state reset and icon cleanup are deferred
-    /// to `finish_modal_close_task`, which runs once that animation settles.
+    /// Reset state and clean up the icon only after the close animation finishes.
     pub(super) fn prepare_publish_message_task(
         &mut self,
         message: prepare_publish::Message,
@@ -320,8 +318,6 @@ pub(super) fn fallback_current_dir() -> PathBuf {
     })
 }
 
-/// Publish effects that need only [`Ports`] — no `State`, and so no way to
-/// reach another feature's.
 pub(super) struct PublishRunner<'a> {
     ports: Ports<'a>,
 }

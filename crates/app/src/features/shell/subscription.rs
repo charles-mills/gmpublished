@@ -2,7 +2,6 @@ use iced::{Event, Subscription, event, keyboard};
 
 use super::{Message, State};
 
-/// Returns shell event streams, gated so idle shell chrome does not poll.
 pub fn subscription(state: &State) -> Subscription<Message> {
     let mut streams = Vec::new();
 

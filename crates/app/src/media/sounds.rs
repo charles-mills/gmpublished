@@ -1,5 +1,3 @@
-//! Embedded UI sound effects.
-
 use std::io::Cursor;
 
 const SUCCESS_BYTES: &[u8] = include_bytes!("../../ui/sound/success.ogg");
@@ -26,11 +24,6 @@ impl Sound {
     }
 }
 
-/// Plays a bundled sound effect if the sounds setting allows it.
-///
-/// Each play opens the audio output on a detached thread and drops it when
-/// playback finishes, so no audio stream or thread outlives the blip and the
-/// idle process stays at 0% CPU. Output failures are silent by design.
 pub fn play(sound: Sound, enabled: bool) {
     if !enabled {
         return;

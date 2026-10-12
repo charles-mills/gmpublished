@@ -1,9 +1,3 @@
-//! The downloader's job state machine: rows, their progress, and the
-//! task-event reducer that drives them.
-//!
-//! Not `model.rs`: there is no domain layer here to separate out, so the file
-//! is named for what it holds. `state::State` delegates to a [`Jobs`].
-
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -29,16 +23,12 @@ fn smoothed_ratio(initial: f32) -> motion::Presence<f32> {
 }
 const MAX_PENDING_TASK_UPDATES: usize = 128;
 
-/// A downloader row's identity. The variants keep task-backed and synthetic
-/// rows in disjoint namespaces without narrowing a 64-bit [`TaskId`] into a
-/// signed integer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RowId {
     Task(TaskId),
     Synthetic(u64),
 }
 
-/// A finished download the archive previewer can open in-app.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadPreviewTarget {
     pub(crate) path: PathBuf,
@@ -94,7 +84,6 @@ pub enum DownloaderEvent {
     WorkshopDownloadFinished(WorkshopDownloadResult),
 }
 
-/// Terminal result for local `.gma` extraction rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalExtractionOutcome {
     Success(PathBuf),
@@ -116,8 +105,6 @@ pub struct DownloaderJob {
     /// download payloads are deleted and never previewable).
     preview_path: Option<PathBuf>,
     workshop_title_resolved: bool,
-    /// Eased display value chasing `progress`, so the bar sweeps between
-    /// chunky updates instead of jumping.
     smoothed: motion::Presence<f32>,
 }
 
@@ -235,7 +222,6 @@ impl DownloaderJob {
         &self.progress
     }
 
-    /// The eased bar position chasing the raw ratio.
     pub(crate) fn smoothed_ratio(&self, now: Instant) -> f32 {
         self.smoothed.current(now).clamp(0.0, 1.0)
     }
@@ -256,8 +242,6 @@ impl DownloaderJob {
         self.open_path.as_deref()
     }
 
-    /// Whether the finished row still has a `.gma` source the archive
-    /// previewer can open.
     pub(crate) fn previewable(&self) -> bool {
         matches!(self.progress, JobProgress::Finished) && self.preview_path.is_some()
     }
@@ -673,7 +657,6 @@ impl Jobs {
         std::mem::take(&mut self.pending_cancellations)
     }
 
-    /// Returns Workshop IDs whose row titles still need metadata lookups.
     pub(crate) fn take_workshop_title_query_ids(&mut self) -> Vec<PublishedFileId> {
         let row_item_ids = self
             .downloading
@@ -810,12 +793,8 @@ impl Jobs {
         self.rebuild_row_indexes();
     }
 
-    /// Removes the row the user X-ed out and returns its task to cancel if
-    /// it was still running. Mirrors [`Self::remove_all`]'s per-row
-    /// semantics: the row leaves the list immediately whatever its state
-    /// (a terminal row is simply dismissed), and a running item is hidden
-    /// so a follow-up task (a download finishing into extraction) is
-    /// cancelled at birth instead of resurrecting it.
+    /// Remove the row immediately. Hide running items too so a follow-up extraction cannot
+    /// resurrect them.
     pub(crate) fn cancel_row(&mut self, section: Section, row_id: RowId) -> Option<TaskId> {
         let Some(index) = self.row_index(section, row_id) else {
             self.unregister_task_row(row_id);

@@ -73,8 +73,6 @@ mod tests {
         })
     }
 
-    /// Requested entries plus the debug-only toast simulators appended to
-    /// every menu (a separator and three actions).
     fn expected_len(requested: usize) -> usize {
         if cfg!(feature = "debug") {
             requested + 4

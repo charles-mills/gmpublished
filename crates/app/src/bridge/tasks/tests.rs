@@ -101,9 +101,6 @@ fn task_event_forwarder_delivers_on_its_own_thread() {
     let handle = tasks.create(TaskKind::Search, TransactionStatus::Searching);
     let id = handle.id();
 
-    // The forwarder is spawned the first time the stream is polled; it
-    // takes the receiver from `factory` and relays events on its own
-    // thread, independent of any worker pool.
     let mut stream = std::pin::pin!(task_event_stream(&factory));
     let (event_id, update) =
         futures::executor::block_on(stream.next()).expect("forwarded task event");
@@ -177,8 +174,6 @@ fn task_handles_emit_started_progress_and_terminal_updates() {
 
 #[test]
 fn coalesced_updates_observe_last_values_and_accumulate_incremental_progress() {
-    // `CoalescedTaskUpdate::observe` is the downloader's coalescing
-    // primitive (features/downloader/model.rs pending_task_updates).
     let mut update = CoalescedTaskUpdate::default();
     update.observe(
         TaskUpdate::Started {
@@ -206,8 +201,6 @@ fn coalesced_updates_observe_last_values_and_accumulate_incremental_progress() {
     assert_eq!(update.total_bytes, Some(2_000));
     assert_eq!(update.terminal, Some(CoalescedTaskTerminal::Finished));
 
-    // An incremental update on a fresh entry accumulates from the
-    // caller-supplied current progress.
     let mut other = CoalescedTaskUpdate::default();
     other.observe(TaskUpdate::ProgressIncr(0.05), 0.40);
     assert!((other.progress.expect("coalesced progress") - 0.45).abs() < f64::EPSILON);
@@ -221,7 +214,6 @@ fn backend_context_exposes_settings_snapshot_and_task_cancellation() {
     assert_eq!(settings, Settings::default());
     assert_eq!(paths.temp_dir, paths.default_temp_dir);
 
-    // Not yet correlated with a backend transaction: nothing can cancel it.
     let handle = ctx.create_task(TaskKind::Search, TransactionStatus::Searching);
     let id = handle.id();
     assert!(!ctx.cancel_task(id));
@@ -355,35 +347,19 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
 }
 
 #[test]
-#[cfg(unix)]
 fn failed_backend_settings_save_leaves_snapshot_and_live_appdata_unchanged() {
-    use std::os::unix::fs::PermissionsExt;
-
     let services = BackendServices::for_test_with_settings_persist_enabled();
     let before = services.config().settings_snapshot();
 
     let settings_file = services.app_data_snapshot_for_test().paths.settings_file;
-    let settings_dir = settings_file.parent().expect("settings dir");
-    fs::create_dir_all(settings_dir).expect("settings dir");
-    let original_mode = fs::metadata(settings_dir)
-        .expect("settings dir metadata")
-        .permissions();
-    fs::set_permissions(settings_dir, fs::Permissions::from_mode(0o555))
-        .expect("lock down settings dir");
+    fs::create_dir_all(&settings_file).expect("directory blocks the settings file");
 
     let result = services.config().update_settings_snapshot(|settings| {
         settings.backend.sounds = !settings.backend.sounds;
         settings.backend.language = Some("unsaved".to_owned());
     });
 
-    fs::set_permissions(settings_dir, original_mode).expect("restore settings dir permissions");
-
-    assert!(
-        result.is_err(),
-        "save into an unwritable directory must fail"
-    );
-    // The mutation happened on a private copy; a failed persist must never
-    // publish it to the settings snapshot BackendServices hands out.
+    assert!(result.is_err(), "saving over a directory must fail");
     assert_eq!(services.config().settings_snapshot(), before);
 }
 
@@ -1198,12 +1174,6 @@ fn completed_transaction_tombstones_are_bounded() {
     );
 }
 
-/// `game_paths` reports the configured Garry's Mod path beside the one that
-/// actually resolved, and callers tell "never set up" from "set up and since
-/// broken" by comparing them. That only works if the pair comes from one
-/// authoritative snapshot — read from two locks, a reader racing a save could
-/// see a new setting beside the old resolution and call a working install
-/// broken.
 #[test]
 fn a_settings_save_publishes_the_configured_and_resolved_game_paths_together() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1227,7 +1197,6 @@ fn a_settings_save_publishes_the_configured_and_resolved_game_paths_together() {
         Some(gmod_dir.as_path()),
         "the resolved path must reflect the settings published in the same write"
     );
-    // The same pairing, whichever accessor a caller reaches for.
     let (settings, paths) = services.config().settings_and_paths_snapshot();
     assert_eq!(settings.backend.gmod, configured);
     assert_eq!(paths.gmod_dir, resolved);
@@ -1897,18 +1866,9 @@ fn write_raw_gma(path: &Path, entries: &[(&str, &[u8])]) {
     std::fs::write(path, bytes).expect("write raw gma");
 }
 
-/// `status_text`'s fallback arm feeds the status's translation key straight to
-/// Fluent, so a status without its own arm doubles as a message id. Missing an
-/// entry puts the raw wire string in front of the user.
-///
-/// Walks [`TransactionStatus::ALL`], which is the whole set by construction —
-/// a status cannot reach a task without being a variant, so unlike a list of
-/// string constants there is nothing this can fail to know about.
 #[test]
 fn statuses_used_as_translation_keys_have_catalog_entries() {
     let i18n = crate::i18n::I18n::for_locale(Some("en"));
-    // These two render through an arm of their own, against a message that
-    // takes byte-progress placeholders rather than their plain label.
     let dedicated_arms = [
         TransactionStatus::PublishPacking,
         TransactionStatus::PublishProcessingIcon,

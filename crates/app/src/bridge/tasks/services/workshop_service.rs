@@ -16,7 +16,6 @@ use gmpublished_backend::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-/// Steam session, Workshop browsing, metadata, and download capability.
 #[derive(Clone, Copy)]
 pub struct WorkshopService<'a> {
     inner: &'a BackendServices,

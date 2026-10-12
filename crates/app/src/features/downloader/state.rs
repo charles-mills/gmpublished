@@ -39,10 +39,7 @@ impl State {
         self.jobs.extracting()
     }
 
-    /// Nothing queued, running or finished in either column. A Steam outage
-    /// only gets to take this route's surface while this holds: local `.gma`
-    /// extractions never touched Steam, and a queue that survived the outage
-    /// is the one thing the user came here to watch.
+    /// Show Steam failures only when the queue is empty; local extractions can still run.
     pub(crate) fn queue_is_empty(&self) -> bool {
         self.downloading().is_empty() && self.extracting().is_empty()
     }

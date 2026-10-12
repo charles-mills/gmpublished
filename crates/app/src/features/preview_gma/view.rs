@@ -254,8 +254,6 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'
     let details = state.details();
     let mut content = column![].padding(tokens.spacing.pad).spacing(0.0);
 
-    // Render the stats row unconditionally (zeroes while pending) so nothing
-    // below shifts when Workshop data hydrates.
     content = content.push(stats_row(details, &tokens));
     content = content.push(Space::new().height(tokens.spacing.gap_md));
 
@@ -387,7 +385,6 @@ fn preview_image<'a>(
     tokens: &Tokens,
     sidebar_width: f32,
 ) -> Element<'a, Message> {
-    // Keep the thumbnail footprint stable while its content loads.
     let inner_width = (sidebar_width - tokens.spacing.pad * 2.0).max(1.0);
     let content: Element<'a, Message> = state.thumbnail_handle().map_or_else(
         || {

@@ -1,8 +1,5 @@
-//! Application HTTP policy layered over the backend's TLS-safe agent factory.
-
 use std::time::Duration;
 
-/// Named timeout budgets applied to an HTTP agent.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HttpTimeouts {
     global: Option<Duration>,
@@ -12,7 +9,6 @@ pub struct HttpTimeouts {
 }
 
 impl HttpTimeouts {
-    /// Starts an HTTP policy without explicit timeout overrides.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -23,14 +19,12 @@ impl HttpTimeouts {
         }
     }
 
-    /// Sets the wall-clock budget for the complete request.
     #[must_use]
     pub const fn global_timeout(mut self, timeout: Duration) -> Self {
         self.global = Some(timeout);
         self
     }
 
-    /// Sets the connection-establishment budget.
     #[must_use]
     pub const fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect = Some(timeout);
@@ -44,7 +38,6 @@ impl HttpTimeouts {
         self
     }
 
-    /// Sets the rolling idle budget while receiving body data.
     #[must_use]
     pub const fn receive_body_timeout(mut self, timeout: Duration) -> Self {
         self.receive_body = Some(timeout);
@@ -69,13 +62,11 @@ impl HttpTimeouts {
     }
 }
 
-/// Builds an agent with the supplied named timeout policy.
 #[must_use]
 pub fn build_agent(timeouts: HttpTimeouts) -> ureq::Agent {
     gmpublished_backend::build_http_agent(timeouts.backend_config())
 }
 
-/// Builds an agent with named timeouts and a bounded per-host idle pool.
 #[must_use]
 pub fn build_agent_with_max_idle_connections_per_host(
     timeouts: HttpTimeouts,

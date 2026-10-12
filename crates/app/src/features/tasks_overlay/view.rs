@@ -14,7 +14,6 @@ use crate::{assets, widgets};
 use super::Message;
 use super::state::{Outcome, State, TOAST_GAP, TOAST_HEIGHT, Toast};
 
-/// Upstream sizes the stack at 45vw, centered at the bottom of the window.
 const WIDTH_RATIO: f32 = 0.45;
 const FALLBACK_WIDTH: f32 = 500.0;
 const CORNER_RADIUS: f32 = 6.4;
@@ -37,9 +36,6 @@ pub fn view<'a>(
         FALLBACK_WIDTH
     };
 
-    // Oldest toasts sit at the top of the stack, newest at the bottom edge;
-    // overflow beyond the viewport-scaled cap stays queued until a slot
-    // frees up.
     let max_visible = State::max_visible(viewport_size.height);
     let visible = state
         .toasts()
@@ -76,8 +72,6 @@ fn card<'a>(toast: &'a Toast, ctx: ViewCtx<'a>, width: f32, now: Instant) -> Ele
 
     let mut layers = stack![].width(Length::Fill).height(Length::Fill);
 
-    // Success-colored progress sweep behind the label; errors drop it, like
-    // upstream hiding the progress fill on error cards.
     if !errored {
         let ratio = match toast.outcome() {
             Outcome::Finished { .. } => 1.0,
@@ -141,10 +135,6 @@ fn card<'a>(toast: &'a Toast, ctx: ViewCtx<'a>, width: f32, now: Instant) -> Ele
         );
     }
 
-    // iced's uniform scale cannot express upstream's scale-in keyframe, so
-    // enter/exit reuse the context menu's clip-grow-plus-fade instead; the
-    // height collapse doubles as the stack-shift animation when a toast
-    // above expires.
     let height = (TOAST_HEIGHT * presence).max(1.0);
     container(layers)
         .width(Length::Fixed(width))

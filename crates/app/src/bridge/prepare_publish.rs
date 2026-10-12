@@ -1,9 +1,3 @@
-//! Bridge-owned Prepare Publish verification and operational DTOs.
-//!
-//! The feature state consumes these values but performs no filesystem, image,
-//! settings, transaction, or backend work itself. Runners invoke this module
-//! on the shared worker runtime and feed the resulting DTOs back to update.
-
 use crate::bridge::tasks::TransactionStatus;
 use std::{
     collections::HashSet,
@@ -73,10 +67,6 @@ impl std::fmt::Display for PathOperation {
     }
 }
 
-/// Rich filesystem failures at the feature boundary. The full operation and
-/// source chain are retained for logs; the UI receives the stable localized
-/// key plus a path/source detail that does not bake English prose into the
-/// translation payload.
 #[derive(Debug, Error)]
 enum PreparePublishPathError {
     #[error("could not {operation} at {}: {source}", path.display())]
@@ -173,12 +163,8 @@ impl VerifiedContentPath {
     }
 }
 
-/// An unfiltered inventory of content already published to the Workshop.
-///
-/// This is intentionally distinct from [`VerifiedContentPath`]: snapshot
-/// entries are suitable for browsing and previewing, but have not passed the
-/// current publish whitelist or ignore policy and therefore cannot be used as
-/// a publish source.
+/// Published content is safe to browse, but has not passed the current
+/// whitelist or ignore rules and cannot be used as a publish source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkshopSnapshotInventory {
     entries: Vec<file_browser::Entry>,
@@ -197,7 +183,6 @@ impl WorkshopSnapshotInventory {
     }
 }
 
-/// Minimal verified path state retained after the browser tree is built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedContentPathState {
     pub(crate) display_path: String,
@@ -269,10 +254,6 @@ mod tests {
     use crate::bridge::tasks::BackendServices;
     use crate::test_support::TestDir;
 
-    /// The verifier indexes an entry by this path; a material referencing the
-    /// same name is looked up through `ContentPath`. Both must reduce that one
-    /// name identically — two lowercasing rules agree on ASCII and diverge on
-    /// everything else, so the entry would exist and never be found.
     #[test]
     fn entry_paths_and_content_paths_reduce_a_name_identically() {
         let root = PathBuf::from("/addon");

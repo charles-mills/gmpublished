@@ -1,6 +1,3 @@
-//! Squarified-treemap layout and hit testing for the Size Analyzer: addon
-//! sizes in, rectangles out, plus which rectangle a point lands in.
-
 use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
 
 use gmpublished_backend::{ErrorKey, HasErrorKey, error_keys as keys};
@@ -10,7 +7,6 @@ use crate::bridge::domain::{InstalledAddon, PublishedFileId};
 
 const DEFAULT_ADDON_TAG: &str = "addon";
 
-/// Pixel bounds used for treemap layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TreemapBounds {
     pub(crate) width: f64,
@@ -162,7 +158,6 @@ pub enum TreemapSquareData {
     },
 }
 
-/// Absolute rectangle used by hit-testing and renderer overlays.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub(crate) x: f64,
@@ -609,7 +604,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn analyze_installed_addons_handles_synthetic_10k_library_under_debug_bound() {
+    fn a_large_library_keeps_every_addon_in_the_layout() {
         let addons = (0..10_000)
             .map(|index| {
                 installed_addon(

@@ -126,8 +126,6 @@ struct ModelUiState {
     phy_debug_enabled: bool,
 }
 
-// Four independent render toggles the map viewport exposes one-for-one; they
-// share no state, so grouping them would only add a layer to read through.
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct MapUiState {
@@ -345,9 +343,7 @@ impl State {
         }
     }
 
-    /// Identifies the loaded audio whose playback callbacks may mutate this
-    /// state. A request that is merely loading (even if its extension is an
-    /// audio type) deliberately has no playback identity yet.
+    /// Only loaded audio has a playback identity; ignore callbacks while a request is loading.
     pub(crate) fn current_audio_request_id(&self) -> Option<Generation> {
         matches!(
             self.current.as_ref().map(|data| &data.content),
@@ -384,8 +380,6 @@ impl State {
         })
     }
 
-    /// The current request re-armed to skip size gates, for the
-    /// "Load anyway" action on the very-large-file warning.
     pub(crate) fn load_anyway_request(&self) -> Option<PreviewRequest> {
         let mut request = self.request.as_ref()?.clone();
         request.bypass_size_limits = true;
@@ -758,8 +752,6 @@ impl State {
             return;
         }
         particle.system = index;
-        // A different system is a different effect; replay from t=0 with a
-        // clean stage.
         particle.playing = true;
         particle.restart_epoch.bump();
     }

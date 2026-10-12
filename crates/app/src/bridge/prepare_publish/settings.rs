@@ -1,5 +1,3 @@
-//! Ignore-pattern settings mutation and UI projection.
-
 use super::{
     ConfigService, IgnorePatternMutation, IgnorePatternMutationResult, IgnoredPattern, Settings,
     whitelist,

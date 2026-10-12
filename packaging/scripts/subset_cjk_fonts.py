@@ -127,13 +127,7 @@ MESSAGE_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*\s*=(.*)$")
 
 
 def collect_message_chars(source: str, chars: set[str]) -> None:
-    """Collect every character a Fluent catalog can render.
-
-    Only message *values* matter for glyph coverage, so this takes the text
-    after `=` on a message line and the whole of each indented continuation
-    line (block values and select-expression variants), skipping comments and
-    the ASCII-only message ids themselves.
-    """
+    """Include message values and indented continuations, not IDs or comments."""
     for line in source.splitlines():
         if line.lstrip().startswith("#"):
             continue

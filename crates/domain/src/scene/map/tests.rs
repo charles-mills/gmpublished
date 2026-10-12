@@ -1,5 +1,3 @@
-//! BSP scene assembly tests.
-
 #[test]
 fn overlay_quad_uses_packed_u_basis_and_v_flip_flag() {
     // Wall overlay: normal +X. vbsp packs BasisU into the UV points'
@@ -18,18 +16,14 @@ fn overlay_quad_uses_packed_u_basis_and_v_flip_flag() {
         basis_normal: Vec3::new(1.0, 0.0, 0.0),
     };
 
-    // Unflipped: V = normal x U = X x Y = +Z.
     let quad = overlay_quad_positions(overlay).expect("valid overlay");
     assert_eq!(quad[0], Vec3::new(100.0, 200.0 - 8.0, 300.0 - 4.0));
     assert_eq!(quad[2], Vec3::new(100.0, 200.0 + 8.0, 300.0 + 4.0));
 
-    // Flip flag set: V becomes -Z; a decode that ignored the flag (or the
-    // packing itself) cannot produce this corner.
     overlay.uv_points[3][2] = 1.0;
     let flipped = overlay_quad_positions(overlay).expect("valid overlay");
     assert_eq!(flipped[0], Vec3::new(100.0, 200.0 - 8.0, 300.0 + 4.0));
 
-    // Degenerate packed basis (all z zero) is skipped, not guessed at.
     overlay.uv_points[1][2] = 0.0;
     overlay.uv_points[3][2] = 0.0;
     assert!(overlay_quad_positions(overlay).is_none());
@@ -94,10 +88,8 @@ fn color_rgb_exp32_decodes_to_srgb_bytes() {
 
 #[test]
 fn ambient_decode_uses_color_rgb_exp32_to_vector_scale() {
-    // ColorRGBExp32ToVector semantics: byte * 2^exp, no /255. A real
-    // outdoor sample from gm_construct — (143,211,254)e-9 — must decode
-    // to a sky-blue ~0.28/0.41/0.50, not the ~0.001 the lightmap formula
-    // (TexLightToLinear) yields.
+    // The gm_construct sample (143,211,254)e-9 decodes to about 0.28/0.41/0.50.
+    // Applying the lightmap formula would divide it by 255 again.
     let sample = ColorRgbExp {
         r: 143,
         g: 211,
@@ -212,11 +204,6 @@ fn shelf_packer_fits_grows_and_overflows() {
 
 #[test]
 fn displacement_tessellation_matches_base_face_fan_winding() {
-    // Column-major grid over a flat quad, matching displacement_grid's
-    // layout: corners c0=(0,0) → c1 along the column axis (+x), c3
-    // along the row axis (+y). The base face fan (c0,c1,c2)(c0,c2,c3)
-    // winds +z, so every displacement triangle must too; reading the
-    // grid transposed flips them all to -z.
     let steps = 2_usize;
     let side = steps + 1;
     let mut grid = Vec::new();
@@ -1151,9 +1138,6 @@ fn parse_entity_prop_model_scale_defaults_invalid_values() {
     );
 }
 
-/// The three ways a door declines to close itself: the Toggle spawnflag, a
-/// negative `wait`, and being a `func_movelinear` at all. Each still carries a
-/// `wait` keyvalue, so none of them may be honoured.
 #[test]
 fn a_door_that_stays_open_ignores_its_wait_keyvalue() {
     let doors = pending_doors_from_fixture(
@@ -2136,9 +2120,6 @@ fn bsp_fixture_with_entities(entities: &str) -> Vec<u8> {
     bsp_fixture(Some(entities))
 }
 
-/// Parses raw entity-lump text through the real BSP pipeline, for
-/// tests that exercise entity-parsing functions directly rather than
-/// through `load_map`.
 fn parse_test_entities(entities: &str) -> Vec<MapEntity> {
     read_fixture_bsp(&bsp_fixture_with_entities(entities)).entities
 }
@@ -2444,12 +2425,6 @@ fn bsp_fixture(entities: Option<&str>) -> Vec<u8> {
     bytes
 }
 
-/// Appends a game lump holding one `sprp` (static prop) directory entry.
-///
-/// The header is 20 bytes and the payload follows it, so the entry's offset
-/// and the directory's own length are the same fact written twice — kept
-/// together here rather than restated in each fixture, where a mismatch
-/// produces a *valid* BSP whose props the parser cannot find.
 fn append_sprp_game_lump(bytes: &mut Vec<u8>, prop_data: &[u8]) {
     const GAME_LUMP_HEADER_LEN: usize = 20;
     const SPRP_VERSION: u16 = 10;
@@ -2608,9 +2583,6 @@ fn push_vec3(bytes: &mut Vec<u8>, values: Vec3) {
     }
 }
 
-// VBSP header layout and the lump indices the fixtures write. Declared once
-// because a wrong index writes a *valid* file describing the wrong lump, and
-// the parser then simply sees no data — a silent fixture failure.
 const HEADER_LEN: usize = 8;
 const LUMP_COUNT: usize = 64;
 const LUMP_ENTRY_LEN: usize = 16;
@@ -2632,8 +2604,6 @@ const SURFACE_EDGES_LUMP_INDEX: usize = 13;
 const TEXTURE_STRING_DATA_LUMP_INDEX: usize = 43;
 const TEXTURE_STRING_TABLE_LUMP_INDEX: usize = 44;
 
-/// Starts a VBSP file: magic, version, and a zeroed lump directory ready for
-/// [`write_lump_entry`] to fill in.
 fn bsp_fixture_header() -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"VBSP");
@@ -2687,11 +2657,6 @@ fn test_ambient_lighting(samples: Vec<MapAmbientSample>) -> MapAmbientLighting {
     }
 }
 
-/// A BSP whose node children point back up the tree used to spin
-/// `walk_to_leaf` forever. The walk is reached per frame from the map
-/// previewer's camera, so this wedged the render thread rather than a
-/// worker. Run on a spawned thread with a receive timeout: on a regression
-/// this test fails on the timeout instead of hanging the suite.
 #[test]
 fn a_cyclic_node_graph_terminates_instead_of_spinning() {
     use std::sync::mpsc;
@@ -2722,8 +2687,6 @@ fn a_cyclic_node_graph_terminates_instead_of_spinning() {
 
 #[test]
 fn an_acyclic_walk_still_reaches_its_leaf_at_full_depth() {
-    /// Nodes in the degenerate tree below — deep enough to reach the walk's
-    /// own iteration bound.
     const DEPTH: usize = 64;
 
     // A degenerate maximally deep tree: every node's front child is the next
@@ -2769,7 +2732,6 @@ fn node_children_decode_by_sign() {
 
     assert_eq!(NodeChild::decode(0), Some(NodeChild::Node(0)));
     assert_eq!(NodeChild::decode(12), Some(NodeChild::Node(12)));
-    // Negative is the bitwise complement of a leaf index, so -1 is leaf 0.
     assert_eq!(NodeChild::decode(-1), Some(NodeChild::Leaf(0)));
     assert_eq!(
         NodeChild::decode(i32::MIN),
@@ -2777,8 +2739,6 @@ fn node_children_decode_by_sign() {
     );
 }
 
-/// The camera reads `MapData::bounds_min`/`bounds_max` directly and derives a
-/// center and radius from them, so a NaN here becomes a NaN camera.
 #[test]
 fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
     let vertex = |position| MapVertex {
@@ -2805,9 +2765,6 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
     assert_eq!(bounds.max, Vec3::splat(0.0));
 }
 
-/// `BuildMeshVisibility::push` trusts `always_visible` alone to decide whether a
-/// face is drawn unconditionally. A face that ends up in no cluster must
-/// therefore come out always-visible, or it is drawn nowhere.
 #[test]
 fn a_face_in_no_cluster_finishes_as_always_visible() {
     use super::MapVisibilityBucket;

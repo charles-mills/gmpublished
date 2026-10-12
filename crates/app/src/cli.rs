@@ -1,10 +1,3 @@
-//! Binary-owned command-line parsing and headless operation dispatch.
-//!
-//! Process arguments are application policy, so this module translates them
-//! into the same backend operations used by the GUI. Blocking work is sent to
-//! the backend's explicitly configured blocking executor; backend code never
-//! needs to inspect `argv` or weaken its main-thread assertion for this mode.
-
 use std::{path::PathBuf, sync::mpsc};
 
 use clap::{Arg, ArgGroup, ArgMatches, Command};
@@ -13,11 +6,7 @@ use gmpublished_backend::{
     Whitelist,
 };
 
-/// What a CLI invocation asked for, and how it ended.
-///
-/// `None` means no CLI-style arguments were supplied and the GUI should
-/// start. A failed request remains a process failure for scripts and file
-/// association handlers.
+/// `None` starts the GUI. A failed CLI request must remain a process failure.
 pub fn run() -> Option<Result<(), CliError>> {
     if std::env::args_os().len() <= 1 {
         return None;
@@ -27,7 +16,6 @@ pub fn run() -> Option<Result<(), CliError>> {
     Some(extraction_request(&matches).map_or(Ok(()), run_extraction))
 }
 
-/// Why a CLI invocation failed, as the shell should see it.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     #[error("{} is not a file", .0.display())]
@@ -93,9 +81,7 @@ fn run_extraction(request: ExtractionRequest) -> Result<(), CliError> {
         return Err(CliError::NotAFile(request.path));
     }
 
-    // No background Steam runtime and no event consumer. The execution
-    // resources remain enabled because they are the explicit policy boundary
-    // that keeps blocking archive and whitelist work off the process thread.
+    // CLI extraction needs execution pools, but no Steam runtime or event consumer.
     let backend = Backend::init(BackendConfig {
         background_services: BackgroundServices::Disabled,
         ..BackendConfig::default()

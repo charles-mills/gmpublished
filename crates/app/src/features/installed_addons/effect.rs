@@ -3,7 +3,6 @@ use crate::bridge::domain::PublishedFileId;
 use crate::generation::Generation;
 use crate::widgets::grid_rows::CardId;
 
-/// Outward consequences of an Installed Addons state transition.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     MetadataRequested {

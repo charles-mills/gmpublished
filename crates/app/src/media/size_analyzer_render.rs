@@ -1,8 +1,3 @@
-//! Worker-safe label planning and rasterization for the Iced Size Analyzer
-//! treemap, plus the shared color/geometry constants its canvas layers draw
-//! with. The treemap itself is drawn on layered `canvas::Cache`s; only the
-//! outlined tag-label bitmaps are produced on the CPU here.
-
 use std::{collections::HashMap, sync::OnceLock};
 
 use parking_lot::Mutex;
@@ -15,7 +10,6 @@ use iced::widget::image;
 
 pub const BACKGROUND: RgbaColor = RgbaColor::rgb(0x1a, 0x1a, 0x1a);
 const FALLBACK_TAG: RgbaColor = RgbaColor::rgb(0x0c, 0x0c, 0x0c);
-/// Byte length of the longest key `tag_color` matches (`servercontent`).
 const LONGEST_TAG_KEY: usize = 13;
 pub const ADDON_PLACEHOLDER: RgbaColor = RgbaColor::rgb(0x0c, 0x0c, 0x0c);
 pub const DEAD_GLYPH: RgbaColor = RgbaColor::rgb(0x34, 0x34, 0x34);
@@ -35,14 +29,9 @@ const VERTICAL_LABEL_ASPECT_RATIO: f64 = 0.33;
 const LABEL_RASTER_CACHE_MAX_ENTRIES: usize = 256;
 const RECORD_TEXT_STATS: bool = cfg!(test);
 
-/// Returns the exact Size Analyzer tag color, or the fallback color. Tags
-/// reach here in whatever case the workshop stored them (`AddonType::as_str`
-/// yields `ServerContent`), so the lookup folds case in a stack buffer rather
-/// than allocating — this runs per tag square per frame.
 #[must_use]
 pub fn tag_color(tag: &str) -> RgbaColor {
     let mut buffer = [0_u8; LONGEST_TAG_KEY];
-    // Anything longer than the longest key below cannot match.
     let Some(bytes) = buffer.get_mut(..tag.len()) else {
         return FALLBACK_TAG;
     };
@@ -77,10 +66,8 @@ pub fn tag_color(tag: &str) -> RgbaColor {
     }
 }
 
-/// Cached tag label input in logical layout space.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SizeAnalyzerTagLabel {
-    /// Tag-region rectangle in logical layout space.
     pub(crate) rect: TreemapRect,
     pub(crate) text: String,
 }
@@ -102,27 +89,18 @@ pub fn tag_labels_for_layout(layout: &TreemapLayout) -> Vec<SizeAnalyzerTagLabel
         .collect()
 }
 
-/// A pre-rasterized tag label ready to draw on the labels canvas layer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SizeAnalyzerLabelSprite {
-    /// Tag text; the hidden-tag filter matches on it.
     pub(crate) text: String,
-    /// Tag-region rectangle in logical layout space.
     pub(crate) rect: TreemapRect,
     /// Outlined label bitmap rasterized at `scale` × the fitted font size.
     pub(crate) handle: image::Handle,
-    /// Bitmap width in physical pixels.
     pub(crate) width: u32,
-    /// Bitmap height in physical pixels.
     pub(crate) height: u32,
-    /// Raster scale bucket the bitmap was produced for.
     pub(crate) scale: f32,
-    /// Draw rotated 90° clockwise (tall, narrow tag regions).
     pub(crate) vertical: bool,
 }
 
-/// Long-lived worker-side context for tag-label rasterization; owns the glyph
-/// cache and label measure/raster caches over the shared Inter font system.
 pub struct SizeAnalyzerLabelContext {
     text: TextRasterizer,
 }
@@ -135,10 +113,6 @@ impl SizeAnalyzerLabelContext {
         }
     }
 
-    /// Plans and rasterizes every tag label that fits its region: font-fit
-    /// runs in logical rect space, bitmaps rasterize at `logical font ×
-    /// scale` so they draw crisply at logical size on a `scale`-factor
-    /// display.
     pub(crate) fn rasterize_layout_labels(
         &mut self,
         layout: &TreemapLayout,
@@ -211,8 +185,6 @@ impl SizeAnalyzerLabelContext {
     }
 }
 
-/// Runs `f` against the process-wide label context so repeated requests reuse
-/// one font database instead of reloading it per request.
 pub fn with_shared_label_context<T>(f: impl FnOnce(&mut SizeAnalyzerLabelContext) -> T) -> T {
     static SHARED: OnceLock<Mutex<SizeAnalyzerLabelContext>> = OnceLock::new();
     let mut context = SHARED
@@ -229,8 +201,6 @@ fn sanitized_scale(scale: f32) -> f32 {
     }
 }
 
-/// Vector geometry of the dead-file placeholder glyph, in the same coordinate
-/// space as the input cell rectangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeadPlaceholder {
     pub(crate) left: f32,
@@ -241,8 +211,6 @@ pub struct DeadPlaceholder {
     pub(crate) stroke_width: f32,
 }
 
-/// Sizes the dead-file placeholder glyph centered in a cell; `None` when the
-/// cell is too small to render it legibly.
 #[must_use]
 pub fn dead_placeholder_geometry(
     x: f32,
@@ -268,7 +236,6 @@ pub fn dead_placeholder_geometry(
     })
 }
 
-/// RGBA color with byte channels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RgbaColor {
     pub(crate) red: u8,
@@ -393,9 +360,6 @@ fn draw_label_outline(
     blit(target, &fill_source, 0, 0);
 }
 
-/// Dilates an alpha mask with a disk-shaped max filter, producing a
-/// continuous outline ring with no detachment or scalloping on thin glyph
-/// strokes.
 fn dilate_disk_max(mask: &[u8], width: u32, height: u32, radius: i32) -> Vec<u8> {
     let mut dilated = vec![0_u8; mask.len()];
     if radius <= 0 {
@@ -542,7 +506,6 @@ impl TextRasterizer {
             width,
             height,
         };
-        // LRU-evicts the coldest entry past capacity instead of a full flush.
         self.raster_cache.insert(key, raster.clone());
         Some(raster)
     }
@@ -820,7 +783,6 @@ mod tests {
         assert_eq!(at_one.len(), at_two.len());
         for (small, large) in at_one.iter().zip(&at_two) {
             assert_eq!(small.text, large.text);
-            // The bitmap roughly doubles; padding constants keep it inexact.
             assert!(large.width > small.width);
             assert!(large.height > small.height);
             assert!((large.scale - 2.0).abs() < f32::EPSILON);
@@ -871,7 +833,6 @@ mod tests {
         assert!(after_second.raster_cache_hits > after_first.raster_cache_hits);
         assert_eq!(after_second.cached_rasters, after_first.cached_rasters);
 
-        // Cached rasters keep the same GPU handle, so nothing re-uploads.
         for (a, b) in first.iter().zip(&second) {
             assert_eq!(a.handle, b.handle);
         }
@@ -915,7 +876,6 @@ mod tests {
 
     #[test]
     fn tag_color_folds_case_and_rejects_oversized_tags() {
-        // `AddonType::as_str` hands back the mixed-case wire value.
         assert_eq!(tag_color("ServerContent"), tag_color("servercontent"));
         assert_eq!(tag_color("MAP"), tag_color("map"));
         assert_eq!(tag_color("Entity"), tag_color("entity"));

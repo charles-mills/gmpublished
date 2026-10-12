@@ -1,5 +1,3 @@
-//! Door geometry and motion data.
-
 use super::{
     BspError, BspModel, BuildMesh, BuildMeshes, FaceAppendContext, FaceAttributions, MapBounds,
     MapBsp, MapEntity, MapFaceVisibility, MapMesh, MapPropSolid, MapVisibilityBucket, ModelIndex,
@@ -239,8 +237,6 @@ fn pending_linear_brush_door(
     let lip = parse_entity_float_default(entity.prop("lip"), 0.0, class, "lip");
     let model_distance = linear_door_distance(model, direction, lip);
     let distance = if class == MapDoorClass::FuncMoveLinear {
-        // Lowercase: `MapEntity` folds every key at construction, and `prop`
-        // is exact-match, so the BSP's own casing never reaches this lookup.
         entity
             .prop("movedistance")
             .and_then(parse_entity_float)
@@ -393,12 +389,8 @@ fn brush_door_sounds(entity: &MapEntity) -> MapDoorSounds {
 }
 
 fn prop_door_sounds(entity: &MapEntity) -> MapDoorSounds {
-    // Source SDK 2013 `CBasePropDoor` fills missing sound overrides from
-    // model `door_options` skin blocks before validating to script names.
-    // The current `vmdl` path does not expose the embedded MDL keyvalues, so
-    // unresolved prop-door overrides fall back to the mounted script defaults
-    // used by GMod content. This keeps the runtime soundful and records the
-    // model-keyvalues gap without touching raw-offset MDL parsing here.
+    // Source fills missing sound overrides from MDL `door_options`.
+    // `vmdl` does not expose those keyvalues, so use mounted script defaults.
     MapDoorSounds {
         move_sound: normalized_sound_keyvalue(entity.prop("soundmoveoverride"))
             .or_else(|| Some(PROP_DOOR_DEFAULT_MOVE_SOUND.to_owned())),
@@ -498,7 +490,6 @@ fn angle_vectors_forward(angles: Vec3) -> Vec3 {
     let QAngle { pitch, yaw, .. } = QAngle::from_source_degrees(angles);
     let (sin_pitch, cos_pitch) = pitch.sin_cos();
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
-    // Unit by construction: cos²p(cos²y + sin²y) + sin²p == 1.
     Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, -sin_pitch)
 }
 
@@ -537,11 +528,7 @@ fn rotation_axis_delta(spawnflags: u32, degrees: f32) -> Vec3 {
     }
 }
 
-/// Seconds an opened brush door waits before closing itself.
-///
-/// `func_movelinear` has no auto-return in Source — it is a mover, not a door
-/// — and the Toggle spawnflag turns auto-return off for the classes that do,
-/// so neither takes the `wait` default.
+/// Toggle doors and `func_movelinear` do not auto-return, regardless of `wait`.
 fn door_auto_close_after(entity: &MapEntity, class: MapDoorClass) -> Option<f32> {
     if class == MapDoorClass::FuncMoveLinear
         || parse_entity_spawnflags(entity) & SF_DOOR_NO_AUTO_RETURN != 0
@@ -557,12 +544,7 @@ fn prop_door_auto_close_after(entity: &MapEntity, class: MapDoorClass) -> Option
     auto_close_after(entity.prop("returndelay"), -1.0, class, "returndelay")
 }
 
-/// A door delay keyvalue as an absence-or-duration.
-///
-/// Source reads a negative delay as "never auto-return" — the usual way a
-/// mapper pins a door open, and far more common than the Toggle spawnflag. Both
-/// keyvalues spell it the same way, so both fold it into `None` here rather
-/// than passing a negative duration on for a consumer to re-interpret.
+/// Negative Source door delays mean no auto-return and map to `None`.
 fn auto_close_after(
     value: Option<&str>,
     default: f32,

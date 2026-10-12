@@ -55,12 +55,6 @@ impl App {
             })
     }
 
-    /// Runs the quick document-open extraction flow for `.gma` paths opened
-    /// via the OS file association (macOS double-click / "Open With").
-    ///
-    /// Paths are filtered (existing, unique, `.gma`) at the bridge, each
-    /// archive extracts to the temp destination on a worker thread with its
-    /// own task overlay row, and the extracted folder opens on success.
     #[cfg(target_os = "macos")]
     pub(super) fn gma_documents_opened_task(&self, paths: Vec<PathBuf>) -> Task<RootMessage> {
         for path in crate::platform_open::filter_open_gma_paths(paths) {

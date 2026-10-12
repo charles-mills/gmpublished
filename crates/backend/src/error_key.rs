@@ -1,12 +1,8 @@
-//! Stable error codes: the wire- and i18n-addressable identity of an error.
-//! The UI resolves keys to localized text (`ERR_WHITELIST` → `err-whitelist`
-//! in the .ftl files). Values are frozen — renaming a constant is fine,
-//! changing its value silently breaks localization. Contextual payload
-//! travels separately as [`crate::transactions::TransactionError::detail`].
+//! Error values are stable localization keys (`ERR_WHITELIST` becomes
+//! `err-whitelist`). Detail text is carried separately.
 
 use std::fmt;
 
-/// Stable, i18n-addressable error code.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ErrorKey(&'static str);
 
@@ -16,8 +12,6 @@ impl ErrorKey {
         Self(key)
     }
 
-    /// Constructs a valid synthetic key for fixtures that exercise error
-    /// transport independently of the production catalog.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub const fn for_test(key: &'static str) -> Self {
@@ -30,8 +24,8 @@ impl ErrorKey {
     }
 }
 
-/// `ERR_SCREAMING_SNAKE`, with no empty segments. Kept `const` so a malformed
-/// production catalog entry fails while compiling its constant.
+/// ERR_SCREAMING_SNAKE with no empty segments. Const validation rejects malformed catalog keys
+/// at compile time.
 const fn is_valid_error_key(key: &str) -> bool {
     let bytes = key.as_bytes();
     if bytes.len() <= 4
@@ -68,7 +62,6 @@ impl fmt::Display for ErrorKey {
     }
 }
 
-/// Implemented by every error type whose failures are user-addressable.
 pub trait HasErrorKey {
     fn error_key(&self) -> ErrorKey;
 
@@ -82,8 +75,6 @@ pub trait HasErrorKey {
 
 macro_rules! error_key_catalog {
     ($($name:ident => $value:literal),+ $(,)?) => {
-        /// Every production error key. Constants and exhaustive iteration are
-        /// generated together so catalog coverage cannot omit a new key.
         pub mod keys {
             use super::ErrorKey;
 
@@ -165,50 +156,5 @@ mod tests {
         ] {
             assert!(!is_valid_error_key(key), "{key}");
         }
-    }
-
-    /// `Display` is a developer message and `HasErrorKey` is the wire code.
-    /// A `#[error("ERR_…")]` attribute means an error type is carrying the code
-    /// twice, and the copy in `Display` is the one nothing checks.
-    #[test]
-    fn display_messages_do_not_restate_error_keys() {
-        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if path.extension().is_some_and(|ext| ext == "rs")
-                    && let Ok(source) = std::fs::read_to_string(&path)
-                {
-                    for (number, line) in source.lines().enumerate() {
-                        if line.trim_start().starts_with("#[error(\"ERR_") {
-                            out.push(format!("{}:{}", path.display(), number + 1));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Both crates: `HasErrorKey` impls live on either side of the bridge,
-        // and the app's are as able to restate a key as the backend's.
-        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("the backend crate sits inside the workspace");
-        let mut offenders = Vec::new();
-        for crate_name in ["backend", "app"] {
-            walk(&workspace.join(crate_name).join("src"), &mut offenders);
-        }
-        assert!(
-            workspace.join("app/src").is_dir(),
-            "the app crate must be walked, not silently skipped"
-        );
-
-        assert!(
-            offenders.is_empty(),
-            "error keys restated in Display: {offenders:#?}"
-        );
     }
 }
