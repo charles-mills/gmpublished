@@ -101,9 +101,6 @@ pub(super) fn search_hit_from_backend(hit: &gmpublished_backend::QuickSearchHit)
 pub(super) fn search_item_from_backend(item: &gmpublished_backend::SearchItem) -> SearchItem {
     SearchItem {
         label: item.label().to_owned(),
-        terms: item.terms().to_vec(),
-        timestamp: item.timestamp,
-        len: item.len,
         source: search_item_source_from_backend(&item.source),
     }
 }
@@ -128,8 +125,11 @@ pub(super) fn search_item_source_from_backend(
             size_bytes: *size_bytes,
             crc32: *crc32,
         },
-        gmpublished_backend::SearchItemSource::MyWorkshop(id) => {
-            SearchItemSource::MyWorkshop(PublishedFileId::from(*id))
+        gmpublished_backend::SearchItemSource::MyWorkshop { id, tags } => {
+            SearchItemSource::MyWorkshop {
+                id: PublishedFileId::from(*id),
+                tags: tags.clone(),
+            }
         }
         gmpublished_backend::SearchItemSource::WorkshopItem(id) => {
             SearchItemSource::WorkshopItem(PublishedFileId::from(*id))

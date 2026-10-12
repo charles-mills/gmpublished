@@ -53,7 +53,6 @@ fn verify_still_icon(
     let (rgba, width, height) = display_preview_rgba(&image);
     let icon = VerifiedIcon {
         display_path: request.display_path,
-        source_path: request.path.clone(),
         path: request.path,
         format,
         width,
@@ -121,7 +120,6 @@ fn verify_gif_icon(
 
     let icon = VerifiedIcon {
         display_path: request.display_path,
-        source_path: request.path.clone(),
         path: request.path,
         format: IconFormat::Gif,
         width,

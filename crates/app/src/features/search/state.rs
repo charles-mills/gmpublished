@@ -806,8 +806,6 @@ mod tests {
                     crc32: 77,
                 },
                 "rp_riverden_v1a.bsp",
-                ["maps/rp_riverden_v1a.bsp", "Riverden"],
-                0,
             ),
         );
 
@@ -837,8 +835,6 @@ mod tests {
             item: SearchItem::new(
                 SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
                 label,
-                Vec::<String>::new(),
-                0,
             ),
         }
     }
@@ -847,10 +843,11 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::MyWorkshop(PublishedFileId::fixture(workshop_id)),
+                SearchItemSource::MyWorkshop {
+                    id: PublishedFileId::fixture(workshop_id),
+                    tags: Vec::new(),
+                },
                 label,
-                Vec::<String>::new(),
-                0,
             ),
         }
     }

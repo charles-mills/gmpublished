@@ -2385,8 +2385,6 @@ fn search_hit(label: &str, workshop_id: u64) -> SearchHit {
         item: SearchItem::new(
             SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
             label,
-            Vec::<String>::new(),
-            0,
         ),
     }
 }

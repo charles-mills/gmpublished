@@ -690,49 +690,24 @@ pub enum SearchItemSource {
         size_bytes: u64,
         crc32: u32,
     },
-    MyWorkshop(PublishedFileId),
+    MyWorkshop {
+        id: PublishedFileId,
+        tags: Vec<String>,
+    },
     WorkshopItem(PublishedFileId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchItem {
     pub(crate) label: String,
-    pub(crate) terms: Vec<String>,
-    pub(crate) timestamp: u64,
-    pub(crate) len: usize,
     pub(crate) source: SearchItemSource,
 }
 
 impl SearchItem {
     #[cfg(test)]
-    pub(crate) fn new<L, Terms, Term>(
-        source: SearchItemSource,
-        label: L,
-        terms: Terms,
-        timestamp: u64,
-    ) -> Self
-    where
-        L: Into<String>,
-        Terms: IntoIterator<Item = Term>,
-        Term: Into<String>,
-    {
-        let label = label.into();
-        let mut terms: Vec<String> = terms.into_iter().map(Into::into).collect();
-        terms.sort_by_key(String::len);
-        terms.dedup();
-
-        let len = terms
-            .iter()
-            .map(String::len)
-            .max()
-            .unwrap_or(0)
-            .max(label.len());
-
+    pub(crate) fn new(source: SearchItemSource, label: impl Into<String>) -> Self {
         Self {
-            label,
-            terms,
-            timestamp,
-            len,
+            label: label.into(),
             source,
         }
     }

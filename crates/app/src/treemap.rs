@@ -95,9 +95,13 @@ impl SizeAnalyzerAddon {
 
 fn normalized_group_tag(addon_type: Option<&str>, tags: &[String]) -> String {
     addon_type
-        .filter(|addon_type| !addon_type.trim().is_empty())
-        .or_else(|| tags.get(1).map(String::as_str))
-        .filter(|tag| !tag.trim().is_empty())
+        .map(str::trim)
+        .filter(|addon_type| !addon_type.is_empty())
+        .or_else(|| {
+            tags.iter()
+                .map(|tag| tag.trim())
+                .find(|tag| !tag.is_empty())
+        })
         .unwrap_or(DEFAULT_ADDON_TAG)
         .to_lowercase()
 }
@@ -602,6 +606,22 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn group_tags_trim_whitespace_and_prefer_the_addon_type() {
+        let tags = vec![" Fun ".to_owned(), "Build".to_owned()];
+        assert_eq!(normalized_group_tag(Some(" MAP "), &tags), "map");
+        assert_eq!(normalized_group_tag(Some(" \t "), &tags), "fun");
+        assert_eq!(normalized_group_tag(None, &tags[..1]), "fun");
+    }
+
+    #[test]
+    fn group_tags_skip_blank_tags_and_default_when_none_remain() {
+        let tags = vec![" \t ".to_owned(), " RolePlay ".to_owned()];
+        assert_eq!(normalized_group_tag(None, &tags), "roleplay");
+        assert_eq!(normalized_group_tag(None, &tags[..1]), DEFAULT_ADDON_TAG);
+        assert_eq!(normalized_group_tag(None, &[]), DEFAULT_ADDON_TAG);
+    }
 
     #[test]
     fn a_large_library_keeps_every_addon_in_the_layout() {

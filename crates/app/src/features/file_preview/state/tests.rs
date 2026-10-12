@@ -535,3 +535,24 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
     assert_eq!(state.selected_skin(), 0);
     assert!(state.bodygroup_choices().is_empty());
 }
+
+#[test]
+fn loading_ui_uses_the_same_companion_and_audio_rules_as_the_decoder() {
+    for path in [
+        "models/example.ANI",
+        "models/example.dx90.vtx",
+        "models/example.PHY",
+    ] {
+        let mut state = State::default();
+        state.begin_open(request(path));
+        assert!(
+            matches!(state.content_ui, ContentUiState::Model(_)),
+            "{path}"
+        );
+    }
+    let mut state = State::default();
+    state.begin_open(request("sound/example.FLAC"));
+    assert!(matches!(state.content_ui, ContentUiState::None));
+    state.begin_open(request("sound/example.OGG"));
+    assert!(matches!(state.content_ui, ContentUiState::Audio(_)));
+}

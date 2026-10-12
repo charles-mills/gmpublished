@@ -84,7 +84,7 @@ impl State {
         let (icon_source_path, upscale) = {
             let selected = self.verified_icon()?;
             (
-                selected.icon.source_path.clone(),
+                selected.icon.path.clone(),
                 self.upscale_icon && selected.icon.can_upscale,
             )
         };

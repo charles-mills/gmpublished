@@ -30,7 +30,7 @@ impl CachedWorkshopMetadata {
     }
 }
 
-/// Wall-clock unix seconds; pre-epoch clocks degrade to zero (always stale).
+/// Wall-clock Unix seconds, falling back to zero for pre-epoch clocks.
 pub fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -61,8 +61,7 @@ struct SnapshotEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     owner_steamid: Option<SteamId>,
     fetched_at: u64,
-    // Added after v1 shipped; `default` keeps pre-ThumbHash snapshots loadable
-    // without a version bump.
+    // Missing hashes are computed when the image is decoded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thumbhash: Option<Vec<u8>>,
 }

@@ -142,14 +142,6 @@ pub fn release_offscreen_thumbnails<R: GridRow>(
     changed
 }
 
-pub fn invalidate_ready_thumbnails<R: GridRow>(rows: &mut [R]) -> bool {
-    let mut changed = false;
-    for row in rows {
-        changed |= row.invalidate_ready_thumbnail();
-    }
-    changed
-}
-
 pub fn score_bucket(score: f32) -> i32 {
     (score.clamp(0.0, 1.0) * 5.0).round() as i32
 }
@@ -324,6 +316,22 @@ impl GridPane {
         thumbnail_demands(rows, self.visible_row_range(rows.len()), generation, owner)
     }
 
+    pub fn invalidate_ready_thumbnails<R: GridRow>(&mut self, rows: &mut [R]) -> bool {
+        let mut changed = false;
+        for index in 0..rows.len() {
+            if rows[index].invalidate_ready_thumbnail() {
+                self.refresh_item_thumbnail(rows, index);
+                changed = true;
+            }
+        }
+        if changed {
+            self.clear_animation_clock();
+        }
+        changed
+    }
+
+    /// Retain the visible and prefetch window even while hidden so returning
+    /// to a route paints cached pixels without replaying every card's fade-in.
     pub fn release_offscreen_thumbnails<R: GridRow>(&mut self, rows: &mut [R]) -> bool {
         let visible = self.visible_row_range(rows.len());
         let changed = release_offscreen_thumbnails(rows, visible);

@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use crate::media::file_kind::{EntryClass, PreviewClass, classify_entry_path, lower_extension};
+
 mapped_enum_with_all! {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     #[repr(usize)]
@@ -66,13 +68,8 @@ pub struct FileTypeInfo<'a> {
 }
 
 pub fn file_type_info(name: &str) -> FileTypeInfo<'_> {
-    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
-    let extension = if extension.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        Cow::Owned(extension.to_ascii_lowercase())
-    } else {
-        Cow::Borrowed(extension)
-    };
-    let (icon, translation_key) = icon_and_type_key(&extension);
+    let extension = lower_extension(name);
+    let (icon, translation_key) = icon_and_type_key(&extension, classify_entry_path(name));
     FileTypeInfo {
         icon,
         translation_key,
@@ -80,12 +77,20 @@ pub fn file_type_info(name: &str) -> FileTypeInfo<'_> {
     }
 }
 
-fn icon_and_type_key(extension: &str) -> (SilkIcon, &'static str) {
+fn icon_and_type_key(extension: &str, class: EntryClass) -> (SilkIcon, &'static str) {
+    match class {
+        EntryClass::Previewable(PreviewClass::Audio) => {
+            return (SilkIcon::Sound, "file-type-audio");
+        }
+        EntryClass::Previewable(PreviewClass::Image(
+            crate::media::file_kind::ImageClass::Encoded,
+        )) => return (SilkIcon::Photo, "file-type-image"),
+        EntryClass::Previewable(PreviewClass::Map) => return (SilkIcon::Map, "file-type-map"),
+        _ => {}
+    }
     match extension {
         "lua" => (SilkIcon::ScriptCode, "file-type-lua"),
-        "mp3" | "ogg" | "wav" => (SilkIcon::Sound, "file-type-audio"),
-        "png" | "jpg" | "jpeg" => (SilkIcon::Photo, "file-type-image"),
-        "bsp" | "map" => (SilkIcon::Map, "file-type-map"),
+        "map" => (SilkIcon::Map, "file-type-map"),
         "nav" => (SilkIcon::Map, "file-type-nav"),
         "ain" => (SilkIcon::Map, "file-type-ain"),
         "fgd" => (SilkIcon::Map, "file-type-fgd"),

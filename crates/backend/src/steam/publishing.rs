@@ -18,8 +18,6 @@ use std::{
 use steamworks::SteamError;
 
 use crate::WorkshopId;
-#[cfg(test)]
-use walkdir::WalkDir;
 
 /// Item updates can legitimately spend a long time preparing or committing
 /// without changing the byte counters exposed by Steam. Keep an absolute
@@ -32,19 +30,10 @@ pub const fn workshop_icon_can_upscale(width: u32, height: u32, animated: bool) 
     !animated && (width < 512 || height < 512 || width != height)
 }
 
-#[cfg(test)]
-use crate::gma::GmaEntry;
-#[cfg(test)]
-use std::collections::HashSet;
-
 #[derive(Debug, thiserror::Error)]
 pub enum PublishError {
-    #[error("{} files are not whitelisted for upload", .0.len())]
-    NotWhitelisted(Vec<String>),
     #[error("the addon folder contains no uploadable files")]
     NoEntries,
-    #[error("duplicate entry path: {0}")]
-    DuplicateEntry(String),
     #[error("the content path is not an absolute directory")]
     InvalidContentPath,
     #[error("the addon folder contains more than one GMA")]
@@ -82,9 +71,7 @@ impl crate::error_key::HasErrorKey for PublishError {
     fn error_key(&self) -> crate::error_key::ErrorKey {
         use crate::error_key::keys;
         match self {
-            Self::NotWhitelisted(_) => keys::WHITELIST,
             Self::NoEntries => keys::NO_ENTRIES,
-            Self::DuplicateEntry(_) => keys::DUPLICATE_ENTRIES,
             Self::InvalidContentPath => keys::INVALID_CONTENT_PATH,
             Self::MultipleGMAs => keys::MULTIPLE_GMAS,
             Self::IconTooLarge => keys::ICON_TOO_LARGE,
@@ -105,8 +92,6 @@ impl crate::error_key::HasErrorKey for PublishError {
 
     fn error_detail(&self) -> Option<String> {
         match self {
-            Self::NotWhitelisted(failed) => Some(failed.join("\n")),
-            Self::DuplicateEntry(path) => Some(path.clone()),
             Self::IoError(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::SteamError(error) => Some(error.to_string()),
@@ -976,96 +961,6 @@ fn prepare_publish_temp_dir(settings: &PublishSettingsSnapshot) -> Result<(), Pu
 }
 
 #[cfg(test)]
-pub(crate) fn verify_whitelist(
-    path: &Path,
-    ignore_globs: &[String],
-    whitelist: &AddonWhitelist,
-) -> Result<(Vec<GmaEntry>, u64), PublishError> {
-    if !path.is_dir() || !path.is_absolute() {
-        return Err(PublishError::InvalidContentPath);
-    }
-
-    let content_root = path.to_path_buf();
-
-    let ignore = ignore_globs.to_vec();
-    let whitelist_snapshot = whitelist.snapshot();
-
-    let mut size = 0;
-    let mut failed_extra = false;
-    let mut failed = Vec::with_capacity(10);
-    let mut files = Vec::new();
-
-    #[cfg(not(target_os = "windows"))]
-    let mut dedup: HashSet<String> = HashSet::new();
-
-    for (entry, relative_path) in WalkDir::new(path)
-        .follow_links(false)
-        .contents_first(true)
-        .into_iter()
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-
-            if entry.path_is_symlink() {
-                return None;
-            }
-
-            if entry.file_type().is_dir() {
-                return None;
-            }
-
-            let relative_path = match entry.path().strip_prefix(&content_root) {
-                Ok(rel_path) => rel_path.to_string_lossy().replace('\\', "/"),
-                Err(_) => return None,
-            };
-
-            Some((entry, relative_path))
-        })
-        .filter(|(_, relative_path)| !crate::gma::whitelist::is_default_ignored(relative_path))
-        .filter(|(_, relative_path)| !crate::gma::whitelist::is_ignored(relative_path, &ignore))
-    {
-        #[cfg(not(target_os = "windows"))]
-        {
-            if !dedup.insert(relative_path.clone()) {
-                return Err(PublishError::DuplicateEntry(relative_path));
-            }
-        }
-
-        if !crate::gma::whitelist::is_whitelisted_in(&whitelist_snapshot, &relative_path) {
-            if failed.len() == 9 {
-                failed_extra = true;
-                break;
-            }
-            failed.push(relative_path);
-        } else if failed.is_empty() {
-            let entry_size = entry.metadata().map_or(0, |metadata| metadata.len());
-            size += entry_size;
-            files.push(GmaEntry {
-                path: relative_path,
-                size: entry_size,
-                crc: 0,
-                index: 0,
-            });
-        }
-    }
-
-    if failed.is_empty() {
-        if files.is_empty() {
-            Err(PublishError::NoEntries)
-        } else {
-            Ok((files, size))
-        }
-    } else {
-        failed.sort_unstable();
-
-        if failed_extra {
-            failed.push("...".to_string());
-        }
-
-        Err(PublishError::NotWhitelisted(failed))
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use crate::workshop_id::workshop_id;
 
@@ -1166,20 +1061,6 @@ mod tests {
         }
     }
 
-    fn assert_verify_whitelist_error(fixture: &Fixture, path: &Path, expected: &str) {
-        match verify_whitelist(
-            path,
-            &fixture.app_data.settings().ignore_globs,
-            &fixture.whitelist,
-        ) {
-            Ok(_) => panic!("expected verify whitelist error"),
-            Err(error) => {
-                use crate::error_key::HasErrorKey;
-                assert_eq!(error.error_key().as_str(), expected, "{error}");
-            }
-        }
-    }
-
     #[test]
     fn publishing_error_keys_match_upstream_strings() {
         use crate::error_key::HasErrorKey;
@@ -1190,13 +1071,7 @@ mod tests {
         };
 
         assert_wire(
-            PublishError::NotWhitelisted(vec!["bad.exe".to_string(), "bad.dll".to_string()]),
-            "ERR_WHITELIST",
-            Some("bad.exe\nbad.dll"),
-        );
-        assert_wire(PublishError::NoEntries, "ERR_NO_ENTRIES", None);
-        assert_wire(
-            PublishError::DuplicateEntry("lua/init.lua".to_string()),
+            PublishError::Gma(crate::GmaError::DuplicateEntry("lua/init.lua".to_string())),
             "ERR_DUPLICATE_ENTRIES",
             Some("lua/init.lua"),
         );
@@ -1281,60 +1156,6 @@ mod tests {
         fs::write(multiple.join("one.gma"), "").expect("first gma marker");
         fs::write(multiple.join("two.gma"), "").expect("second gma marker");
         assert_content_path_error(&multiple, "ERR_MULTIPLE_GMAS");
-    }
-
-    #[test]
-    fn publishing_whitelist_respects_default_and_custom_ignores() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let content = dir.path().join("content");
-        fs::create_dir(&content).expect("content dir");
-        fs::create_dir(content.join("lua")).expect("lua dir");
-        fs::create_dir(content.join("materials")).expect("materials dir");
-        fs::write(content.join("lua/phase6.lua"), "print('phase6')\n").expect("lua file");
-        fs::write(
-            content.join("materials/skipped.png"),
-            "ignored by custom glob",
-        )
-        .expect("material file");
-        fs::write(content.join("addon.json"), "ignored by default glob").expect("addon metadata");
-
-        let fixture =
-            Fixture::with_publishing_settings(dir.path(), &["materials/*.png".to_string()]);
-        let (entries, size) = match verify_whitelist(
-            &content,
-            &fixture.app_data.settings().ignore_globs,
-            &fixture.whitelist,
-        ) {
-            Ok(verified) => verified,
-            Err(error) => panic!("unexpected whitelist error: {error}"),
-        };
-
-        assert_eq!(size, "print('phase6')\n".len() as u64);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, "lua/phase6.lua");
-        assert_eq!(entries[0].size, "print('phase6')\n".len() as u64);
-    }
-
-    #[test]
-    fn publishing_whitelist_reports_invalid_no_entry_and_not_whitelisted_errors() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let fixture = Fixture::with_publishing_settings(dir.path(), &[]);
-
-        assert_verify_whitelist_error(
-            &fixture,
-            &PathBuf::from("relative-content"),
-            "ERR_INVALID_CONTENT_PATH",
-        );
-
-        let ignored_only = dir.path().join("ignored");
-        fs::create_dir(&ignored_only).expect("ignored dir");
-        fs::write(ignored_only.join("addon.json"), "{}").expect("default ignored file");
-        assert_verify_whitelist_error(&fixture, &ignored_only, "ERR_NO_ENTRIES");
-
-        let invalid = dir.path().join("invalid");
-        fs::create_dir(&invalid).expect("invalid dir");
-        fs::write(invalid.join("bad.exe"), "bad").expect("invalid file");
-        assert_verify_whitelist_error(&fixture, &invalid, "ERR_WHITELIST");
     }
 
     #[test]

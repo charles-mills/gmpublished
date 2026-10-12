@@ -35,7 +35,7 @@ fn create_temp_file(final_path: &Path) -> Result<NamedTempFile, GmaError> {
 fn relative_entry_name(relative: &Path) -> Option<String> {
     relative
         .to_str()
-        .map(|path| path.replace('\\', "/").trim_matches('/').to_lowercase())
+        .and_then(crate::path::normalize_archive_path)
 }
 
 #[cfg(test)]
@@ -47,7 +47,7 @@ mod entry_name_tests {
     fn relative_entry_name_preserves_normalization_contract() {
         assert_eq!(
             relative_entry_name(Path::new("\\Materials\\Über\\FILE.VMT/")),
-            Some("materials/über/file.vmt".to_owned())
+            Some("materials/Über/file.vmt".to_owned())
         );
     }
 }
@@ -161,6 +161,9 @@ impl GmaFile {
                         Ok(metadata) => metadata.len(),
                         Err(_) => return Err(path_io_error(entry.into_path())),
                     };
+                    if file_list.contains_key(&relative_path) {
+                        return Err(GmaError::DuplicateEntry(relative_path));
+                    }
                     file_list.insert(
                         relative_path,
                         Pending {
@@ -305,6 +308,62 @@ impl GmaFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pack_source(source: &Path, destination: &Path) -> Result<(), GmaError> {
+        let transactions =
+            crate::transactions::Transactions::new(std::sync::Arc::new(crate::NullEventSink));
+        let gma = GmaFile::for_creation(
+            destination.to_path_buf(),
+            GmaMetadata::Standard {
+                title: "Packing Fixture".to_owned(),
+                addon_type: "tool".to_owned(),
+                tags: Vec::new(),
+                ignore: vec!["materials/*.png".to_owned()],
+            },
+        );
+        gma.create(
+            source,
+            &transactions.begin(),
+            &AddonWhitelist::builtin_only(),
+            &CpuExecutor::build(2).expect("test CPU executor"),
+        )
+    }
+
+    #[test]
+    fn packing_preserves_non_ascii_names_and_applies_custom_ignores() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source");
+        fs::create_dir_all(source.join("lua")).expect("lua directory");
+        fs::create_dir(source.join("materials")).expect("materials directory");
+        fs::write(source.join("lua/Über.lua"), b"print('ok')").expect("lua file");
+        fs::write(source.join("materials/ignored.png"), b"ignored").expect("ignored file");
+        fs::write(source.join("addon.json"), b"{}").expect("manifest");
+        let destination = root.path().join("addon.gma");
+
+        pack_source(&source, &destination).expect("pack source");
+
+        let index = GmaFile::open_index(&destination).expect("read packed index");
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].path, "lua/Über.lua");
+        assert_eq!(index.entries[0].size, 11);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn packing_rejects_normalized_collisions_without_replacing_the_destination() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source");
+        fs::create_dir_all(source.join("lua")).expect("lua directory");
+        fs::write(source.join("lua/init.lua"), b"one").expect("nested file");
+        fs::write(source.join(r"lua\init.lua"), b"two").expect("aliased file");
+        let destination = root.path().join("addon.gma");
+        fs::write(&destination, b"original").expect("existing destination");
+
+        let error = pack_source(&source, &destination).expect_err("paths collide");
+
+        assert_eq!(error, GmaError::DuplicateEntry("lua/init.lua".to_owned()));
+        assert_eq!(fs::read(&destination).expect("destination"), b"original");
+    }
 
     #[test]
     fn cancelling_stops_the_pack_instead_of_warning_once_per_file() {

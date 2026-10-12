@@ -71,15 +71,23 @@ impl OrbitPose {
 pub struct State {
     open: bool,
     expanded: bool,
-    loading: bool,
-    loading_stage: Option<PreviewLoadStage>,
-    error: Option<PreviewLoadError>,
+    load: LoadState,
     request_id: Generation,
     request: Option<PreviewRequest>,
-    current: Option<PreviewData>,
     spinner: SpinnerClock,
     content_ui: ContentUiState,
     inspector_panes: split_pane::State<Pane>,
+}
+
+#[derive(Debug, Default)]
+enum LoadState {
+    #[default]
+    Idle,
+    Loading {
+        stage: Option<PreviewLoadStage>,
+    },
+    Ready(Box<PreviewData>),
+    Failed(PreviewLoadError),
 }
 
 /// CP0 is the effect origin, pinned at the viewport centre; the rest fan out
@@ -189,27 +197,17 @@ impl Default for ParticleUiState {
 
 impl ContentUiState {
     fn from_request(request: &PreviewRequest) -> Self {
-        let extension = request
-            .entry_path
-            .rsplit_once('.')
-            .map(|(_, extension)| extension)
-            .unwrap_or_default();
-        if extension.eq_ignore_ascii_case("bsp") {
-            Self::Map(MapUiState::default())
-        } else if ["mdl", "vvd", "vtx", "phy"]
-            .iter()
-            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        {
-            Self::Model(ModelUiState::default())
-        } else if extension.eq_ignore_ascii_case("pcf") {
-            Self::Particle(ParticleUiState::default())
-        } else if ["wav", "mp3", "ogg", "flac"]
-            .iter()
-            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        {
-            Self::Audio(AudioUiState::default())
-        } else {
-            Self::None
+        use crate::media::file_kind::{EntryClass, PreviewClass, classify_entry_path};
+        match classify_entry_path(&request.entry_path) {
+            EntryClass::ModelCompanion | EntryClass::Previewable(PreviewClass::Model) => {
+                Self::Model(ModelUiState::default())
+            }
+            EntryClass::Previewable(PreviewClass::Map) => Self::Map(MapUiState::default()),
+            EntryClass::Previewable(PreviewClass::Particle) => {
+                Self::Particle(ParticleUiState::default())
+            }
+            EntryClass::Previewable(PreviewClass::Audio) => Self::Audio(AudioUiState::default()),
+            EntryClass::Previewable(_) => Self::None,
         }
     }
 
@@ -253,12 +251,9 @@ impl Default for State {
         Self {
             open: false,
             expanded: false,
-            loading: false,
-            loading_stage: None,
-            error: None,
+            load: LoadState::Idle,
             request_id: Generation::INITIAL,
             request: None,
-            current: None,
             spinner: SpinnerClock::Idle,
             content_ui: ContentUiState::None,
             inspector_panes: split_pane::State::vertical(
@@ -280,19 +275,28 @@ impl State {
     }
 
     pub(crate) const fn loading(&self) -> bool {
-        self.loading
+        matches!(self.load, LoadState::Loading { .. })
     }
 
     pub(crate) const fn loading_stage(&self) -> Option<PreviewLoadStage> {
-        self.loading_stage
+        match self.load {
+            LoadState::Loading { stage } => stage,
+            _ => None,
+        }
     }
 
     pub(crate) fn error(&self) -> Option<&PreviewLoadError> {
-        self.error.as_ref()
+        match &self.load {
+            LoadState::Failed(error) => Some(error),
+            _ => None,
+        }
     }
 
-    pub(crate) const fn current(&self) -> Option<&PreviewData> {
-        self.current.as_ref()
+    pub(crate) fn current(&self) -> Option<&PreviewData> {
+        match &self.load {
+            LoadState::Ready(data) => Some(data.as_ref()),
+            _ => None,
+        }
     }
 
     pub(super) const fn inspector_panes(&self) -> &pane_grid::State<Pane> {
@@ -337,7 +341,7 @@ impl State {
     }
 
     pub(crate) fn current_audio_bytes(&self) -> Option<std::sync::Arc<[u8]>> {
-        match self.current.as_ref().map(|data| &data.content) {
+        match self.current().map(|data| &data.content) {
             Some(PreviewContent::Audio { bytes, .. }) => Some(std::sync::Arc::clone(bytes)),
             _ => None,
         }
@@ -346,7 +350,7 @@ impl State {
     /// Only loaded audio has a playback identity; ignore callbacks while a request is loading.
     pub(crate) fn current_audio_request_id(&self) -> Option<Generation> {
         matches!(
-            self.current.as_ref().map(|data| &data.content),
+            self.current().map(|data| &data.content),
             Some(PreviewContent::Audio { .. })
         )
         .then_some(self.request_id)
@@ -359,7 +363,7 @@ impl State {
     pub(crate) fn related_preview(
         &self,
     ) -> Option<&crate::media::preview_model::RelatedPreviewTarget> {
-        self.current.as_ref()?.related_preview.as_ref()
+        self.current()?.related_preview.as_ref()
     }
 
     pub(crate) fn related_preview_request(&self, entry_path: &str) -> Option<PreviewRequest> {
@@ -391,10 +395,7 @@ impl State {
         request.request_id = self.request_id;
         self.open = true;
         self.expanded = false;
-        self.loading = true;
-        self.loading_stage = None;
-        self.error = None;
-        self.current = None;
+        self.load = LoadState::Loading { stage: None };
         self.request = Some(request.clone());
         self.spinner.stop();
         self.content_ui = ContentUiState::from_request(&request);
@@ -402,7 +403,7 @@ impl State {
     }
 
     pub(crate) const fn spinner_visible(&self) -> bool {
-        self.open && self.loading
+        self.open && self.loading()
     }
 
     pub(crate) fn spinner_elapsed(&self) -> f32 {
@@ -477,10 +478,10 @@ impl State {
         request_id: Generation,
         stage: PreviewLoadStage,
     ) -> bool {
-        if !self.open || !self.loading || self.request_id != request_id {
+        if !self.open || !self.loading() || self.request_id != request_id {
             return false;
         }
-        self.loading_stage = Some(stage);
+        self.load = LoadState::Loading { stage: Some(stage) };
         true
     }
 
@@ -493,18 +494,14 @@ impl State {
             return false;
         }
 
-        self.loading = false;
-        self.loading_stage = None;
         match result {
             Ok(data) => {
                 self.content_ui.reconcile_with_content(&data.content);
-                self.error = None;
-                self.current = Some(data);
+                self.load = LoadState::Ready(Box::new(data));
             }
             Err(error) => {
                 self.content_ui = ContentUiState::None;
-                self.error = Some(error);
-                self.current = None;
+                self.load = LoadState::Failed(error);
             }
         }
         true
@@ -617,14 +614,14 @@ impl State {
 
     pub(crate) fn map_fog_control_visible(&self) -> bool {
         matches!(
-            self.current.as_ref().map(|data| &data.content),
+            self.current().map(|data| &data.content),
             Some(PreviewContent::Map { fog: Some(_), .. })
         )
     }
 
     pub(crate) fn map_skybox_control_visible(&self) -> bool {
         matches!(
-            self.current.as_ref().map(|data| &data.content),
+            self.current().map(|data| &data.content),
             Some(PreviewContent::Map { stats, .. })
                 if stats.skybox_face_count > 0
                     || stats.skybox_prop_count > 0
@@ -635,13 +632,13 @@ impl State {
 
     pub(crate) fn map_visibility_control_visible(&self) -> bool {
         matches!(
-            self.current.as_ref().map(|data| &data.content),
+            self.current().map(|data| &data.content),
             Some(PreviewContent::Map { scene, .. }) if scene.visibility.is_some()
         )
     }
 
     pub(crate) fn phy_debug_control_visible(&self) -> bool {
-        match self.current.as_ref().map(|data| &data.content) {
+        match self.current().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => !model.scene.phy_debug_meshes.is_empty(),
             Some(PreviewContent::Map { scene, .. }) => !scene.scene.phy_debug_meshes.is_empty(),
             _ => false,
@@ -703,7 +700,7 @@ impl State {
     pub(crate) fn current_model(
         &self,
     ) -> Option<&std::sync::Arc<crate::media::preview_model::ModelPreview>> {
-        match self.current.as_ref().map(|data| &data.content) {
+        match self.current().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => Some(model),
             _ => None,
         }
@@ -790,7 +787,7 @@ impl State {
         if !request.archive.supports_entry_extraction() {
             return None;
         }
-        self.current.as_ref().map(|data| data.entry_path.clone())
+        self.current().map(|data| data.entry_path.clone())
     }
 
     pub(super) fn toggle_expanded(&mut self) {
@@ -834,17 +831,14 @@ impl State {
     }
 
     pub(crate) fn close(&mut self) {
-        if !self.open && !self.loading && self.current.is_none() && self.request.is_none() {
+        if !self.open && !self.loading() && self.current().is_none() && self.request.is_none() {
             return;
         }
         self.request_id.bump();
         self.open = false;
         self.expanded = false;
-        self.loading = false;
-        self.loading_stage = None;
-        self.error = None;
         self.request = None;
-        self.current = None;
+        self.load = LoadState::Idle;
         self.spinner.stop();
         self.content_ui = ContentUiState::None;
     }

@@ -741,7 +741,6 @@ fn verified_icon_preview(display_path: &str, can_upscale: bool) -> VerifiedIconP
     VerifiedIconPreview {
         icon: VerifiedIcon {
             display_path: display_path.to_owned(),
-            source_path: display_path.into(),
             path: display_path.into(),
             format: IconFormat::Png,
             width: 1,

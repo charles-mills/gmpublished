@@ -72,6 +72,8 @@ pub enum GmaError {
     GmodPathMissing,
     #[error("packing failed on {}", path.display())]
     PathIo { path: PathBuf },
+    #[error("duplicate entry path: {0}")]
+    DuplicateEntry(String),
 }
 impl From<std::io::Error> for GmaError {
     fn from(error: std::io::Error) -> Self {
@@ -93,6 +95,7 @@ impl crate::error_key::HasErrorKey for GmaError {
             Self::DestinationUnavailable => keys::GMA_DESTINATION_UNAVAILABLE,
             Self::GmodPathMissing => keys::GMOD_PATH_MISSING,
             Self::PathIo { .. } => keys::PATH_IO_ERROR,
+            Self::DuplicateEntry(_) => keys::DUPLICATE_ENTRIES,
         }
     }
 
@@ -103,6 +106,7 @@ impl crate::error_key::HasErrorKey for GmaError {
             | Self::DecompressionInput(source)
             | Self::DecompressionOutput(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
+            Self::DuplicateEntry(path) => Some(path.clone()),
             Self::ExtractionFailed {
                 extracted,
                 failed,

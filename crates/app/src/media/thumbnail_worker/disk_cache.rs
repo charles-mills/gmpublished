@@ -4,7 +4,7 @@ use image::{
 };
 use std::{
     borrow::Borrow,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -405,10 +405,12 @@ fn remove_indexed_cache_file(cache: &WorkerDiskCache, path: &Path) {
 const EVICTION_PREFERENCE_SCAN: usize = 64;
 
 fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex) {
+    let mut failed = HashSet::new();
     while index.total_bytes > cache.max_bytes() {
         let victim = index
             .by_age
             .iter()
+            .filter(|((_, path), _)| !failed.contains(path.as_path()))
             .take(EVICTION_PREFERENCE_SCAN)
             .find(|((_, path), _)| {
                 index
@@ -416,14 +418,16 @@ fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex)
                     .get(path.as_path())
                     .is_some_and(|metadata| metadata.tier == CacheTier::Derived)
             })
-            .or_else(|| index.by_age.iter().next())
+            .or_else(|| {
+                index
+                    .by_age
+                    .iter()
+                    .find(|((_, path), _)| !failed.contains(path.as_path()))
+            })
             .map(|((modified, path), len)| ((*modified, path.clone()), *len));
         let Some(((modified, path), len)) = victim else {
             break;
         };
-        index.by_age.remove(&(modified, path.clone()));
-        index.by_path.remove(path.as_path());
-
         match fs::remove_file(path.as_path()) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -432,8 +436,13 @@ fn evict_indexed_disk_cache(cache: &WorkerDiskCache, index: &mut DiskCacheIndex)
                     "failed to remove thumbnail cache file {}: {error}",
                     path.as_path().display()
                 );
+                // Keep failed files in the budget and retry them on the next sweep.
+                failed.insert(path);
+                continue;
             }
         }
+        index.by_age.remove(&(modified, path.clone()));
+        index.by_path.remove(path.as_path());
         index.total_bytes = index.total_bytes.saturating_sub(len);
     }
 }
@@ -728,6 +737,48 @@ mod tests {
 
     use super::*;
     use crate::test_support::TestDir;
+
+    #[test]
+    fn eviction_retains_failed_deletions_and_retries_them_on_the_next_sweep() {
+        let root = TestDir::new("disk-cache-eviction-failure");
+        let cache = WorkerDiskCache::new(root.path().to_path_buf(), 0);
+        let blocked = root.path().join("blocked.rgba");
+        let removable = root.path().join("removable.rgba");
+        let missing = root.path().join("missing.rgba");
+        // Removing a directory as a file fails on every supported platform.
+        fs::create_dir(&blocked).expect("blocked cache path");
+        fs::write(&removable, [0_u8; 40]).expect("removable cache file");
+        let mut index = DiskCacheIndex::default();
+        for path in [&blocked, &removable, &missing] {
+            insert_indexed_cache_file(
+                &mut index,
+                CacheFile {
+                    path: path.clone(),
+                    tier: CacheTier::Derived,
+                    len: 40,
+                    modified: UNIX_EPOCH,
+                },
+            );
+        }
+
+        evict_indexed_disk_cache(&cache, &mut index);
+
+        assert!(blocked.exists());
+        assert!(!removable.exists());
+        assert_eq!(index.total_bytes, 40);
+        assert_eq!(index.by_path.len(), 1);
+        assert_eq!(index.by_age.len(), 1);
+        assert!(index.by_path.contains_key(blocked.as_path()));
+
+        fs::remove_dir(&blocked).expect("unblock cache path");
+        fs::write(&blocked, [0_u8; 40]).expect("replace blocked cache file");
+        evict_indexed_disk_cache(&cache, &mut index);
+
+        assert!(!blocked.exists());
+        assert_eq!(index.total_bytes, 0);
+        assert!(index.by_path.is_empty());
+        assert!(index.by_age.is_empty());
+    }
 
     #[test]
     fn thumbnails_disk_cache_file_names_are_stable_for_bytes_and_files() {

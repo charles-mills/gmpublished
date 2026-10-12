@@ -107,18 +107,6 @@ impl SourceContent {
     }
 }
 
-impl Clone for SourceContent {
-    fn clone(&self) -> Self {
-        Self::restore(&self.snapshot())
-    }
-}
-
-impl PartialEq for SourceContent {
-    fn eq(&self, other: &Self) -> bool {
-        self.text() == other.text()
-    }
-}
-
 #[derive(Debug)]
 enum MediaEntry {
     Ready {

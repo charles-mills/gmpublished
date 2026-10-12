@@ -34,12 +34,25 @@ pub struct BackendServices {
     configuration: ConfigStore,
     steam_runtime: SteamRuntime,
     library: LibraryStore,
-    workshop_metadata: Mutex<HashMap<PublishedFileId, CachedWorkshopMetadata>>,
+    workshop_metadata: Mutex<WorkshopMetadataCache>,
+    metadata_writer: Mutex<u64>,
     metadata_snapshot_file: Option<PathBuf>,
     text_journal: Mutex<crate::bridge::workshop_text::TextJournal>,
     _backend_event_sink: Option<BackendEventSinkRegistration>,
     #[cfg(test)]
     _test_data_root: Option<tempfile::TempDir>,
+}
+
+#[derive(Debug, Default)]
+struct WorkshopMetadataCache {
+    entries: HashMap<PublishedFileId, CachedWorkshopMetadata>,
+    revision: u64,
+}
+
+impl WorkshopMetadataCache {
+    fn changed(&mut self) {
+        self.revision += 1;
+    }
 }
 
 fn steam_not_connected() -> UiError {
@@ -131,7 +144,8 @@ impl BackendServices {
             configuration,
             steam_runtime,
             library,
-            workshop_metadata: Mutex::new(HashMap::new()),
+            workshop_metadata: Mutex::new(WorkshopMetadataCache::default()),
+            metadata_writer: Mutex::new(0),
             metadata_snapshot_file: config.metadata_snapshot_file,
             _backend_event_sink: backend_event_sink,
             #[cfg(test)]
@@ -283,13 +297,17 @@ fn record_thumbhash_in_cache(
     cache: &mut HashMap<PublishedFileId, CachedWorkshopMetadata>,
     url: &str,
     hash: &[u8],
-) {
-    if let Some(cached) = cache.values_mut().find(|cached| {
+) -> bool {
+    let hash: Arc<[u8]> = Arc::from(hash);
+    let mut changed = false;
+    for cached in cache.values_mut().filter(|cached| {
         cached.metadata.thumbhash.is_none()
             && cached.metadata.preview_url.as_deref().map(str::trim) == Some(url)
     }) {
-        cached.metadata.thumbhash = Some(Arc::from(hash));
+        cached.metadata.thumbhash = Some(Arc::clone(&hash));
+        changed = true;
     }
+    changed
 }
 
 #[cfg(not(test))]
@@ -342,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn one_hash_per_shared_preview_url_is_sufficient() {
+    fn a_decoded_hash_updates_every_item_sharing_the_preview_url() {
         let mut cache = (1..=2)
             .map(|raw_id| {
                 let id = PublishedFileId::fixture(raw_id);
@@ -369,14 +387,18 @@ mod tests {
             })
             .collect::<HashMap<_, _>>();
 
-        record_thumbhash_in_cache(&mut cache, "https://example.test/shared.jpg", &[1, 2, 3]);
+        assert!(record_thumbhash_in_cache(
+            &mut cache,
+            "https://example.test/shared.jpg",
+            &[1, 2, 3]
+        ));
 
         assert_eq!(
             cache
                 .values()
                 .filter(|cached| cached.metadata.thumbhash.is_some())
                 .count(),
-            1
+            2
         );
     }
 }

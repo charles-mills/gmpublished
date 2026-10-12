@@ -83,19 +83,21 @@ impl UploadCache {
                     slot,
                     slot.texture.as_deref(),
                 );
-                let base2_view = resources.create_slot_texture_view(
-                    device,
-                    queue,
-                    "file_preview.model_viewer.texture2",
-                    slot,
-                    slot.texture2.as_deref().or(slot.texture.as_deref()),
-                );
+                let base2_view = slot.texture2.as_deref().map(|texture| {
+                    resources.create_slot_texture_view(
+                        device,
+                        queue,
+                        "file_preview.model_viewer.texture2",
+                        slot,
+                        Some(texture),
+                    )
+                });
                 resources.create_material(
                     device,
                     queue,
                     MaterialTextureViews {
                         base: &base_view,
-                        base2: &base2_view,
+                        base2: base2_view.as_ref().unwrap_or(&base_view),
                         lightmap: &lightmap_view,
                     },
                     MaterialUploadMode {

@@ -267,11 +267,12 @@ fn discover(
     let addons_dir_count = candidates.len();
     complete &= collect_gma_dir(gmod, WORKSHOP_CACHE_DIR, &mut candidates);
     let cache_dir_count = candidates.len() - addons_dir_count;
-    collect_workshop_content_dir(gmod, &mut candidates);
+    complete &= collect_workshop_content_dir(gmod, &mut candidates);
     let workshop_count = candidates.len() - addons_dir_count - cache_dir_count;
 
     let candidate_count = candidates.len();
     let (mut addons, seen_cache_keys) = process_candidates(candidates, header_cache);
+    complete &= addons.len() == candidate_count;
     log::info!(
         "library scan: {} addons from {candidate_count} candidates \
          (addons dir {addons_dir_count}, cache {cache_dir_count}, workshop content {workshop_count}; \
@@ -327,9 +328,24 @@ fn collect_gma_dir(
     };
     let canonical_dir = gmpublished_backend::path::canonicalize(dir);
 
-    for entry in read_dir.flatten() {
-        let Some((path, canonical_path)) = discovered_file_paths(&entry, &canonical_dir) else {
-            continue;
+    let mut complete = true;
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                log::warn!("failed to read addon directory entry: {error}");
+                complete = false;
+                continue;
+            }
+        };
+        let (path, canonical_path) = match discovered_file_paths(&entry, &canonical_dir) {
+            Ok(Some(paths)) => paths,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!("failed to inspect {}: {error}", entry.path().display());
+                complete = false;
+                continue;
+            }
         };
         if !is_gma_path(&path) {
             continue;
@@ -344,35 +360,50 @@ fn collect_gma_dir(
             workshop_id,
         });
     }
-    true
+    complete
 }
 
 const ADDONS_DIR: &str = "GarrysMod/addons";
 const WORKSHOP_CACHE_DIR: &str = "GarrysMod/cache/workshop";
 
-fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) {
+fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCandidate>) -> bool {
     let Some(content_dir) = gmod
         .parent()
         .and_then(Path::parent)
         .map(|root| root.join("workshop/content/4000"))
     else {
-        return;
+        return true;
     };
     let read_dir = match content_dir.read_dir() {
         Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
         Err(error) => {
             log::warn!(
                 "failed to enumerate workshop content dir {}: {error}",
                 content_dir.display()
             );
-            return;
+            return false;
         }
     };
     let canonical_content_dir = gmpublished_backend::path::canonicalize(content_dir);
 
-    for entry in read_dir.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+    let mut complete = true;
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                log::warn!("failed to read Workshop directory entry: {error}");
+                complete = false;
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                log::warn!("failed to inspect {}: {error}", entry.path().display());
+                complete = false;
+                continue;
+            }
         };
         if !file_type.is_dir() {
             continue;
@@ -383,13 +414,28 @@ fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCand
             .and_then(|name| name.parse::<u64>().ok())
             .and_then(PublishedFileId::new);
         let addon_path = entry.path();
-        let Ok(addon_dir) = addon_path.read_dir() else {
-            continue;
+        let mut addon_dir = match addon_path.read_dir() {
+            Ok(addon_dir) => addon_dir,
+            Err(error) => {
+                log::warn!("failed to enumerate {}: {error}", addon_path.display());
+                complete = false;
+                continue;
+            }
         };
         let canonical_addon_dir = canonical_content_dir.join(entry.file_name());
-        let Some((path, canonical_path)) = addon_dir.flatten().find_map(|entry| {
-            let (path, canonical_path) = discovered_file_paths(&entry, &canonical_addon_dir)?;
-            is_gma_path(&path).then_some((path, canonical_path))
+        let Some((path, canonical_path)) = addon_dir.find_map(|entry| {
+            let paths = entry.and_then(|entry| discovered_file_paths(&entry, &canonical_addon_dir));
+            match paths {
+                Ok(Some((path, canonical_path))) => {
+                    is_gma_path(&path).then_some((path, canonical_path))
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    log::warn!("failed to inspect Workshop addon entry: {error}");
+                    complete = false;
+                    None
+                }
+            }
         }) else {
             continue;
         };
@@ -399,25 +445,25 @@ fn collect_workshop_content_dir(gmod: &Path, candidates: &mut Vec<DiscoveredCand
             workshop_id,
         });
     }
+    complete
 }
 
 /// Regular files inherit the canonical parent. Symlinks still need canonicalizing.
-fn discovered_file_paths(entry: &DirEntry, canonical_parent: &Path) -> Option<(PathBuf, PathBuf)> {
+fn discovered_file_paths(
+    entry: &DirEntry,
+    canonical_parent: &Path,
+) -> std::io::Result<Option<(PathBuf, PathBuf)>> {
     let path = entry.path();
-    match entry.file_type() {
-        Ok(file_type) if file_type.is_file() => {
+    match entry.file_type()? {
+        file_type if file_type.is_file() => {
             let canonical_path = canonical_parent.join(entry.file_name());
-            Some((path, canonical_path))
+            Ok(Some((path, canonical_path)))
         }
-        Ok(file_type) if file_type.is_symlink() && path.is_file() => {
+        file_type if file_type.is_symlink() && path.metadata()?.is_file() => {
             let canonical_path = gmpublished_backend::path::canonicalize(path.clone());
-            Some((path, canonical_path))
+            Ok(Some((path, canonical_path)))
         }
-        Err(_) if path.is_file() => {
-            let canonical_path = gmpublished_backend::path::canonicalize(path.clone());
-            Some((path, canonical_path))
-        }
-        Ok(_) | Err(_) => None,
+        _ => Ok(None),
     }
 }
 
@@ -939,6 +985,44 @@ mod tests {
     use super::*;
     use crate::bridge::gma::{GmaError, GmaHeader, GmaMetadata};
     use crate::test_support::{GmaFixtureBuilder, TestDir, write_gma_fixture};
+
+    #[test]
+    fn an_incomplete_workshop_scan_preserves_previously_cached_headers() {
+        let root = TestDir::new("library-incomplete-workshop");
+        let gmod = root.dir("steamapps/common/GarrysMod");
+        let workshop = root.join("steamapps/workshop/content/4000");
+        let fixture = GmaFixtureBuilder::new("Workshop Fixture")
+            .entry("lua/init.lua", b"print('ok')".to_vec())
+            .build();
+        write_gma_fixture(workshop.join("123/addon.gma"), &fixture);
+        let paths = paths_with_gmod(gmod);
+        let cache = test_cache();
+        assert_eq!(discover(&paths, &cache).expect("initial scan").len(), 1);
+        assert_eq!(cache.lock().entries.len(), 1);
+
+        fs::remove_dir_all(&workshop).expect("remove fixture content");
+        fs::write(&workshop, b"not a directory").expect("block Workshop directory");
+        assert!(discover(&paths, &cache).expect("partial scan").is_empty());
+        assert_eq!(cache.lock().entries.len(), 1);
+
+        fs::remove_file(&workshop).expect("unblock Workshop directory");
+        assert!(discover(&paths, &cache).expect("complete scan").is_empty());
+        assert!(cache.lock().entries.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_addon_entry_marks_the_scan_incomplete() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new("library-unreadable-entry");
+        let addons = root.dir(ADDONS_DIR);
+        symlink(root.join("missing.gma"), addons.join("broken.gma")).expect("broken symlink");
+
+        let mut candidates = Vec::new();
+        assert!(!collect_gma_dir(root.path(), ADDONS_DIR, &mut candidates));
+        assert!(candidates.is_empty());
+    }
 
     fn test_execution() -> gmpublished_backend::ExecutionResources {
         gmpublished_backend::ExecutionResources::build(gmpublished_backend::ExecutionConfig {

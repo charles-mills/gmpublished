@@ -179,23 +179,13 @@ impl State {
     }
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
-        let changed = grid_rows::invalidate_ready_thumbnails(self.library.rows_mut());
-        if changed {
-            self.sync_grid_items();
-            self.pane.clear_animation_clock();
-        }
-        changed
+        self.pane
+            .invalidate_ready_thumbnails(self.library.rows_mut())
     }
 
-    /// Drops Ready thumbnails outside the visible+prefetch window; the
-    /// demand/cache path re-delivers. The window is kept even while the
-    /// route is hidden so returning to it paints real pixels on the first
-    /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
-        let mut library = std::mem::take(&mut self.library);
-        let changed = self.pane.release_offscreen_thumbnails(library.rows_mut());
-        self.library = library;
-        changed
+        self.pane
+            .release_offscreen_thumbnails(self.library.rows_mut())
     }
 
     pub(crate) fn has_active_animations(&self) -> bool {

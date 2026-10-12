@@ -1468,8 +1468,6 @@ fn full_search_transaction_payload_maps_to_app_batch() {
             item: SearchItem::new(
                 SearchItemSource::WorkshopItem(PublishedFileId::fixture(1)),
                 "Needle Quick",
-                Vec::<String>::new(),
-                0,
             ),
         }],
         true,

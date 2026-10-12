@@ -33,7 +33,9 @@ impl BackendServices {
         };
         let loaded = metadata_snapshot::load(path);
         if !loaded.is_empty() {
-            *self.workshop_metadata.lock() = loaded;
+            let mut cache = self.workshop_metadata.lock();
+            cache.entries = loaded;
+            cache.changed();
         }
     }
 
@@ -80,7 +82,7 @@ impl BackendServices {
         let mut metadata = Vec::new();
         let mut stale = Vec::new();
         for id in item_ids.iter().copied() {
-            match cache.get(&id) {
+            match cache.entries.get(&id) {
                 Some(cached) if cached.language == language => {
                     metadata.push(cached.metadata.clone());
                     if !cached.is_fresh_at(now) {
@@ -183,6 +185,7 @@ impl BackendServices {
     pub(crate) fn cached_item_details(&self, id: PublishedFileId) -> Option<WorkshopMetadata> {
         self.workshop_metadata
             .lock()
+            .entries
             .get(&id)
             .filter(|cached| cached.language == self.workshop_language())
             .map(|cached| cached.metadata.clone())
@@ -242,12 +245,16 @@ impl BackendServices {
     }
 
     pub(crate) fn record_thumbhash(&self, url: &str, hash: &[u8]) {
-        record_thumbhash_in_cache(&mut self.workshop_metadata.lock(), url.trim(), hash);
+        let mut cache = self.workshop_metadata.lock();
+        if record_thumbhash_in_cache(&mut cache.entries, url.trim(), hash) {
+            cache.changed();
+        }
     }
 
     pub(crate) fn thumbhash_seed(&self) -> Vec<(String, Arc<[u8]>)> {
         self.workshop_metadata
             .lock()
+            .entries
             .values()
             .filter_map(|cached| {
                 Some((
@@ -318,6 +325,7 @@ impl BackendServices {
         let mut cache = self.workshop_metadata.lock();
         for item in &mut metadata {
             if let Some(existing) = cache
+                .entries
                 .get(&item.id)
                 .filter(|cached| cached.language == language)
             {
@@ -332,7 +340,7 @@ impl BackendServices {
                     item.owner_steamid = existing.metadata.owner_steamid;
                 }
             }
-            cache.insert(
+            cache.entries.insert(
                 item.id,
                 CachedWorkshopMetadata {
                     language,
@@ -341,6 +349,7 @@ impl BackendServices {
                 },
             );
         }
+        cache.changed();
         metadata
     }
 
@@ -363,13 +372,13 @@ impl BackendServices {
 
         let fetched_at = metadata_snapshot::now_unix_seconds();
         let mut cache = self.workshop_metadata.lock();
-        if let Some(existing) = cache.get(&metadata.id)
+        if let Some(existing) = cache.entries.get(&metadata.id)
             && existing.language == language
             && metadata.thumbhash.is_none()
         {
             metadata.thumbhash.clone_from(&existing.metadata.thumbhash);
         }
-        cache.insert(
+        cache.entries.insert(
             metadata.id,
             CachedWorkshopMetadata {
                 language,
@@ -377,19 +386,43 @@ impl BackendServices {
                 fetched_at,
             },
         );
+        cache.changed();
     }
 
     fn write_metadata_snapshot_best_effort(&self) {
         let Some(path) = self.metadata_snapshot_file.as_deref() else {
             return;
         };
-        let snapshot = metadata_snapshot::prepare(&self.workshop_metadata.lock());
-        if let Err(error) = metadata_snapshot::write_prepared(path, &snapshot) {
+        if let Err(error) = self
+            .write_metadata_snapshot(|snapshot| metadata_snapshot::write_prepared(path, snapshot))
+        {
             log::warn!(
                 "failed to write Workshop metadata snapshot {}: {error}",
                 path.display()
             );
         }
+    }
+
+    fn write_metadata_snapshot(
+        &self,
+        write: impl FnOnce(
+            &metadata_snapshot::PreparedMetadataSnapshot,
+        ) -> Result<(), crate::bridge::snapshot::SnapshotWriteError>,
+    ) -> Result<(), crate::bridge::snapshot::SnapshotWriteError> {
+        // Acquire the writer before capturing a revision: queued writers capture
+        // the latest cache and skip revisions an earlier writer already saved.
+        let mut persisted_revision = self.metadata_writer.lock();
+        let cache = self.workshop_metadata.lock();
+        if cache.revision == *persisted_revision {
+            return Ok(());
+        }
+        let revision = cache.revision;
+        let snapshot = metadata_snapshot::prepare(&cache.entries);
+        drop(cache);
+        write(&snapshot)?;
+        *persisted_revision = revision;
+        drop(persisted_revision);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -404,8 +437,84 @@ impl BackendServices {
 
     #[cfg(test)]
     pub(crate) fn set_metadata_fetched_at_for_test(&self, id: PublishedFileId, fetched_at: u64) {
-        if let Some(cached) = self.workshop_metadata.lock().get_mut(&id) {
+        let mut cache = self.workshop_metadata.lock();
+        if let Some(cached) = cache.entries.get_mut(&id) {
             cached.fetched_at = fetched_at;
+            cache.changed();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    fn cache_title(services: &BackendServices, title: &str) {
+        let mut item = WorkshopItem::from(PublishedFileId::fixture(42));
+        item.dead = false;
+        item.title = title.to_owned();
+        services.cache_items_for_test(&[item]);
+    }
+
+    #[test]
+    fn queued_snapshot_writer_saves_latest_revision_and_coalesces_redundant_requests() {
+        let services = BackendServices::for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.snap");
+        cache_title(&services, "old");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let services = &services;
+            let path = &path;
+            let first = scope.spawn(move || {
+                services.write_metadata_snapshot(|snapshot| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    metadata_snapshot::write_prepared(path, snapshot)
+                })
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cache_title(services, "new");
+            let second = scope.spawn(move || {
+                services.write_metadata_snapshot(|snapshot| {
+                    metadata_snapshot::write_prepared(path, snapshot)
+                })
+            });
+            release_tx.send(()).unwrap();
+            first.join().unwrap().unwrap();
+            second.join().unwrap().unwrap();
+        });
+        let loaded = metadata_snapshot::load(&path);
+        assert_eq!(loaded[&PublishedFileId::fixture(42)].metadata.title, "new");
+        services
+            .write_metadata_snapshot(|_| panic!("unchanged revision must not be written again"))
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_snapshot_write_leaves_revision_available_for_retry() {
+        let services = BackendServices::for_test();
+        let dir = tempfile::tempdir().unwrap();
+        cache_title(&services, "retry me");
+        assert!(
+            services
+                .write_metadata_snapshot(|snapshot| metadata_snapshot::write_prepared(
+                    dir.path(),
+                    snapshot
+                ))
+                .is_err()
+        );
+        let path = dir.path().join("metadata.snap");
+        services
+            .write_metadata_snapshot(|snapshot| metadata_snapshot::write_prepared(&path, snapshot))
+            .unwrap();
+        assert_eq!(
+            metadata_snapshot::load(&path)[&PublishedFileId::fixture(42)]
+                .metadata
+                .title,
+            "retry me"
+        );
     }
 }

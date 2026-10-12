@@ -174,8 +174,6 @@ impl Steam {
                 let language = steam.workshop_language();
                 let (done_tx, done_rx) = mpsc::channel();
 
-                search.reserve(chunk.len());
-
                 if let Ok(query) = client
                     .ugc()
                     .query_items(chunk.into_iter().map(Into::into).collect())
@@ -321,9 +319,7 @@ impl Steam {
             && let Some(page) = page.as_ref()
             && let Some(search) = index_into
         {
-            for item in &page.items {
-                search.add(item);
-            }
+            search.add_bulk(&page.items);
         }
         drop(current_language);
         page

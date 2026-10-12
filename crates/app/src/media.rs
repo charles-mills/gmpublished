@@ -1,6 +1,7 @@
 pub mod audio_output;
 pub mod audio_playback;
 pub mod backdrop;
+pub mod file_kind;
 pub mod file_preview_decode;
 pub mod pixel;
 pub mod preview_model;

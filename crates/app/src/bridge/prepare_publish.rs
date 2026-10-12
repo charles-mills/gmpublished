@@ -201,7 +201,6 @@ pub struct IconVerificationRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedIcon {
     pub(crate) display_path: String,
-    pub(crate) source_path: PathBuf,
     pub(crate) path: PathBuf,
     pub(crate) format: IconFormat,
     pub(crate) width: u32,
@@ -347,6 +346,49 @@ mod tests {
     }
 
     #[test]
+    fn verify_content_path_rejects_empty_and_ignored_only_folders() {
+        let root = TestDir::new("prepare-publish-empty-content");
+        let request = ContentPathVerificationRequest {
+            generation: Generation::INITIAL,
+            display_path: root.path_text(),
+            path: root.path().to_path_buf(),
+        };
+        assert_eq!(
+            verify_content_path(request.clone(), &[], &["lua/*.lua".to_owned()])
+                .expect_err("empty folder")
+                .key,
+            keys::NO_ENTRIES
+        );
+        root.file(".git/config", b"ignored");
+        assert_eq!(
+            verify_content_path(request, &[], &["lua/*.lua".to_owned()])
+                .expect_err("ignored-only folder")
+                .key,
+            keys::NO_ENTRIES
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_content_path_rejects_the_same_normalized_collisions_as_packing() {
+        let root = TestDir::new("prepare-publish-colliding-content");
+        root.file("lua/init.lua", b"one");
+        root.file(r"lua\init.lua", b"two");
+        let error = verify_content_path(
+            ContentPathVerificationRequest {
+                generation: Generation::INITIAL,
+                display_path: root.path_text(),
+                path: root.path().to_path_buf(),
+            },
+            &[],
+            &["lua/*.lua".to_owned()],
+        )
+        .expect_err("paths collide");
+        assert_eq!(error.key, keys::DUPLICATE_ENTRIES);
+        assert_eq!(error.detail.as_deref(), Some("lua/init.lua"));
+    }
+
+    #[test]
     fn missing_content_path_preserves_path_and_io_failure() {
         let root = TestDir::new("prepare-publish-missing-content");
         let missing = root.path().join("missing");
@@ -392,7 +434,7 @@ mod tests {
         .expect("png icon should verify");
 
         assert_eq!((verified.icon.width, verified.icon.height), (32, 48));
-        assert_eq!(verified.icon.source_path, source);
+        assert_eq!(verified.icon.path, source);
         assert!(verified.animation.is_none());
     }
 
@@ -429,6 +471,5 @@ mod tests {
         // Display preview is bounded; submit still reads the original file.
         assert_eq!((verified.icon.width, verified.icon.height), (512, 512));
         assert_eq!(verified.icon.path, source);
-        assert_eq!(verified.icon.source_path, source);
     }
 }

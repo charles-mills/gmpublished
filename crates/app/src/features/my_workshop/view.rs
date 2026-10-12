@@ -78,7 +78,10 @@ fn partial_count_line(state: &State, i18n: &I18n) -> Option<String> {
 
 fn status_line(state: &State, i18n: &I18n) -> Option<String> {
     match state.page_status() {
-        PageStatus::Idle | PageStatus::Loaded => None,
+        PageStatus::Idle
+        | PageStatus::Loaded
+        | PageStatus::Complete
+        | PageStatus::LoadingNextPage => None,
         PageStatus::LoadingFirstPage => Some(i18n.tr("my-workshop-loading")),
         PageStatus::Failed(error) => Some(i18n.trn(
             "my-workshop-error",

@@ -21,26 +21,4 @@ impl fmt::Display for ContentPath {
     }
 }
 
-pub fn normalize_archive_path(path: &str) -> Option<String> {
-    let path = path
-        .trim()
-        .trim_matches(|character| matches!(character, '/' | '\\'));
-    let mut normalized = String::with_capacity(path.len());
-    for segment in path.split(['/', '\\']) {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return None;
-        }
-        if !normalized.is_empty() {
-            normalized.push('/');
-        }
-        normalized.push_str(segment);
-    }
-    if normalized.is_empty() {
-        return None;
-    }
-    normalized.make_ascii_lowercase();
-    Some(normalized)
-}
+pub use gmpublished_backend::path::normalize_archive_path;
