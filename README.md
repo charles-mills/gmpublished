@@ -28,6 +28,7 @@ yay -S gmpublished-bin
 
 <img alt="the workshop page" src="https://github.com/user-attachments/assets/b30afbe6-3519-46ea-9600-594187207aae" />
 <img alt="the addon update modal" src="https://github.com/user-attachments/assets/50b7af77-b324-4edb-8dd4-5d64900b7a14" />
+<img alt="the addon description editor and previewer" src="https://github.com/user-attachments/assets/e0ac9f3a-a668-4ea9-8bfc-284df00c56cb" />
 <img alt="the search modal" src="https://github.com/user-attachments/assets/25236541-45f8-4b8f-b9e2-52a1edc69679" />
 <img alt="the addon size analyzer" src="https://github.com/user-attachments/assets/75716efa-4e85-4a8b-8e34-d61b774a7d37" />
 <img alt="the code previewer" src="https://github.com/user-attachments/assets/e6fb6f8b-7ecf-4d54-a9a4-fb21498f6604" />
