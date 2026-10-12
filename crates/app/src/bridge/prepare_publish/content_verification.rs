@@ -1,23 +1,20 @@
 use super::{
-    Arc, ArchiveEntryPath, ArchiveService, ConfigService, ContentPathVerificationRequest,
-    GmaMetaEntry, HashSet, MAX_WHITELIST_FAILURES, Path, PathBuf, PathOperation,
-    PreparePublishPathError, UiError, VerifiedContentPath, WorkshopSnapshotInventory, file_browser,
-    keys, whitelist,
+    Arc, ArchiveEntryPath, ContentPathVerificationRequest, GmaMetaEntry, HashSet,
+    MAX_WHITELIST_FAILURES, Path, PathBuf, PathOperation, PreparePublishPathError, UiError,
+    VerifiedContentPath, WorkshopSnapshotInventory, file_browser, keys, whitelist,
 };
 
 pub fn verify_content_path(
-    config: ConfigService<'_>,
-    archive: ArchiveService<'_>,
     request: ContentPathVerificationRequest,
+    ignore_globs: &[String],
+    whitelist: &[String],
 ) -> Result<Arc<VerifiedContentPath>, UiError> {
-    let settings = config.settings_snapshot();
-    let whitelist = archive.whitelist_snapshot();
     collect_content_tree(
         request.display_path,
         request.path,
         ContentCollectionPolicy::Publish {
-            ignore_globs: &settings.backend.ignore_globs,
-            whitelist: &whitelist,
+            ignore_globs,
+            whitelist,
         },
     )
     .map(VerifiedContentPath::from)

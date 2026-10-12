@@ -10,9 +10,11 @@ const GITHUB_LATEST_RELEASE_API_URL: &str =
 const GITHUB_RELEASE_TAG_URL_PREFIX: &str =
     "https://github.com/charles-mills/gmpublished/releases/tag/";
 const UPDATE_CHECK_USER_AGENT: &str = concat!("gmpublished/", env!("CARGO_PKG_VERSION"));
-const UPDATE_CHECK_TIMEOUTS: crate::net::HttpTimeouts = crate::net::HttpTimeouts::new()
-    .global_timeout(Duration::from_secs(3))
-    .connect_timeout(Duration::from_secs(2));
+const UPDATE_CHECK_HTTP_CONFIG: gmpublished_backend::HttpAgentConfig =
+    gmpublished_backend::HttpAgentConfig::new()
+        .global_timeout(Duration::from_secs(3))
+        .connect_timeout(Duration::from_secs(2))
+        .http_status_as_error(true);
 
 #[derive(Debug, Error)]
 pub enum UpdateCheckError {
@@ -25,7 +27,7 @@ pub enum UpdateCheckError {
 pub fn fetch_latest_update(
     current_version: &str,
 ) -> Result<Option<UpdateRelease>, UpdateCheckError> {
-    let agent = update_check_agent();
+    let agent = gmpublished_backend::build_http_agent(UPDATE_CHECK_HTTP_CONFIG);
     let mut response = agent
         .get(GITHUB_LATEST_RELEASE_API_URL)
         .header("Accept", "application/vnd.github+json")
@@ -40,10 +42,6 @@ pub fn fetch_latest_update(
         .map_err(UpdateCheckError::ResponseRead)?;
 
     Ok(update_release_from_json(&body, current_version))
-}
-
-fn update_check_agent() -> ureq::Agent {
-    crate::net::build_agent(UPDATE_CHECK_TIMEOUTS)
 }
 
 fn update_release_from_json(json: &str, current_version: &str) -> Option<UpdateRelease> {

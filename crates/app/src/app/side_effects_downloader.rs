@@ -160,9 +160,9 @@ impl App {
             .ctx
             .run_blocking("downloader-workshop-title", move |app| {
                 let requested_item_ids = item_ids.clone();
-                let (mut items, stale_ids) = app.workshop().resolve_metadata(&item_ids);
-                if !stale_ids.is_empty() && app.workshop().connected() {
-                    match app.workshop().refresh_metadata(&stale_ids) {
+                let (mut items, stale_ids) = app.resolve_metadata(&item_ids);
+                if !stale_ids.is_empty() && app.steam_connected() {
+                    match app.refresh_metadata(&stale_ids) {
                         Ok(fresh_items) => items.extend(fresh_items),
                         Err(error) => {
                             log::debug!("Downloader Workshop title refresh failed: {error}");

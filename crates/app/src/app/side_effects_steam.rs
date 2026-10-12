@@ -159,7 +159,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("apply-appdata-snapshot", move |services| {
-                let (settings, paths) = services.config().apply_appdata_snapshot(*snapshot);
+                let (settings, paths) = services.apply_appdata_snapshot(*snapshot);
                 Box::new(settings::SettingsSnapshot::new(
                     settings,
                     paths,
@@ -191,9 +191,7 @@ impl App {
     pub(super) fn steam_connect_task(&self) -> Task<RootMessage> {
         self.environment
             .ctx
-            .run_blocking("steam-connect", |app| {
-                connect_steam_for_operation(app.workshop())
-            })
+            .run_blocking("steam-connect", connect_steam_for_operation)
             .map(|result| {
                 let attempt = match result {
                     Ok(attempt) => attempt,
@@ -212,8 +210,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("steam-current-user", |app| {
-                app.workshop()
-                    .current_user()
+                app.current_steam_user()
                     .map(steam_session::SteamIdentity::from_user)
             })
             .map(move |result| {

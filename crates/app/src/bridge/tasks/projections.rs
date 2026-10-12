@@ -75,7 +75,7 @@ pub(super) fn search_quick_batch_from_backend(
     SearchQuickBatch::new(key, hits, result.has_more)
 }
 
-pub(super) fn search_full_batch_from_transaction_payload(
+pub fn search_full_batch_from_transaction_payload(
     request: &SearchFullRequest,
     sequence: u64,
     payload: &TransactionPayload,

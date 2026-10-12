@@ -15,7 +15,7 @@ use crate::bridge::{
         DEFAULT_WORKSHOP_ICON_FILE_NAME, IconFormat, PublishSelectedPreview, PublishSubmitOutcome,
         PublishSubmitRequest,
     },
-    tasks::{ArchiveService, ConfigService, WorkshopSnapshotId},
+    tasks::{BackendServices, WorkshopSnapshotId},
 };
 use gmpublished_backend::error_keys as keys;
 use gmpublished_backend::{ErrorKey, HasErrorKey};
@@ -251,7 +251,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::bridge::tasks::BackendServices;
     use crate::test_support::TestDir;
 
     #[test]
@@ -303,39 +302,45 @@ mod tests {
     }
 
     #[test]
-    fn verify_content_path_builds_file_browser_entries() {
+    fn verify_content_path_applies_publish_rules_before_building_browser_entries() {
         let root = TestDir::new("prepare-publish-verify");
         root.file("lua/autorun/init.lua", b"print('ready')");
+        root.file("private.bin", b"ignored");
+        root.file(".git/config", b"default ignored");
+        let request = ContentPathVerificationRequest {
+            generation: Generation::from_raw(1),
+            display_path: root.path_text(),
+            path: root.path().to_path_buf(),
+        };
+        let ignore_globs = ["private.bin".to_owned()];
+        let whitelist = ["lua/*.lua".to_owned()];
 
-        let services = BackendServices::for_test();
-        let verified = verify_content_path(
-            services.config(),
-            services.archive(),
-            ContentPathVerificationRequest {
-                generation: Generation::from_raw(1),
-                display_path: root.path_text(),
-                path: root.path().to_path_buf(),
-            },
-        )
-        .expect("content path should verify");
+        let verified = verify_content_path(request.clone(), &ignore_globs, &whitelist)
+            .expect("content path should verify");
 
         let browser = file_browser::State::from_entries(verified.entries().iter().cloned());
         assert_eq!(verified.total_size(), 14);
+        assert_eq!(verified.entries().len(), 1);
         assert_eq!(browser.rows()[0].shortcut_prefix(), Some("lua/"));
         assert_eq!(browser.rows()[0].display_name(), "autorun");
+
+        root.file("notes/private.bin", b"unlisted");
+        let error = verify_content_path(request, &ignore_globs, &whitelist)
+            .expect_err("unlisted files must block publishing");
+        assert_eq!(error.key, keys::WHITELIST);
+        assert_eq!(error.detail.as_deref(), Some("notes/private.bin"));
     }
 
     #[test]
     fn verify_content_path_rejects_relative_paths() {
-        let services = BackendServices::for_test();
         let result = verify_content_path(
-            services.config(),
-            services.archive(),
             ContentPathVerificationRequest {
                 generation: Generation::from_raw(1),
                 display_path: "relative".to_owned(),
                 path: PathBuf::from("relative"),
             },
+            &[],
+            &["lua/*.lua".to_owned()],
         );
 
         assert!(result.is_err());

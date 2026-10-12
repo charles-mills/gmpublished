@@ -1,64 +1,20 @@
-#[cfg(test)]
-use std::path::Path;
 use std::time::Duration;
 
 use super::{
-    FetchOutcome, Thumbnail, ThumbnailCancellation, ThumbnailError, ThumbnailResult,
-    ThumbnailWorkerOutcome, thumbnail::ThumbnailDecoder as AppThumbnailDecoder,
+    FetchOutcome, Thumbnail, ThumbnailCancellation, ThumbnailDecoder, ThumbnailError,
+    ThumbnailResult, ThumbnailWorkerOutcome,
 };
-use crate::net::{HttpTimeouts, build_agent_with_max_idle_connections_per_host};
+use gmpublished_backend::{HttpAgentConfig, build_http_agent};
 
-const HTTP_TIMEOUTS: HttpTimeouts = HttpTimeouts::new()
+const HTTP_CONFIG: HttpAgentConfig = HttpAgentConfig::new()
     .global_timeout(Duration::from_secs(20))
     .connect_timeout(Duration::from_secs(8))
     .receive_response_timeout(Duration::from_secs(12))
-    .receive_body_timeout(Duration::from_secs(12));
-// Matches the media pool width so keep-alive connections cover every worker
-// during sustained scrolling and avoid TLS re-handshakes mid-scroll.
-const HTTP_MAX_IDLE_CONNECTIONS_PER_HOST: usize = 16;
-
-pub struct ThumbnailDecoder {
-    inner: AppThumbnailDecoder,
-}
+    .receive_body_timeout(Duration::from_secs(12))
+    .http_status_as_error(true)
+    .max_idle_connections_per_host(16);
 
 impl ThumbnailDecoder {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: AppThumbnailDecoder::new(),
-        }
-    }
-
-    pub(crate) fn decode_and_resize_bytes(
-        &mut self,
-        bytes: &[u8],
-        max_edge: u32,
-    ) -> ThumbnailResult<Thumbnail> {
-        self.inner
-            .decode_and_resize_bytes(bytes, max_edge)
-            .map_err(Into::into)
-    }
-
-    pub(crate) fn resize_static_thumbnail(
-        &mut self,
-        thumbnail: Thumbnail,
-        max_edge: u32,
-    ) -> ThumbnailResult<Thumbnail> {
-        self.inner
-            .resize_static_thumbnail(thumbnail, max_edge)
-            .map_err(Into::into)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn decode_and_resize_file(
-        &mut self,
-        path: impl AsRef<Path>,
-        max_edge: u32,
-    ) -> ThumbnailResult<Thumbnail> {
-        self.inner
-            .decode_and_resize_file(path, max_edge)
-            .map_err(Into::into)
-    }
-
     pub(super) fn fetch_decode_and_resize_url_with_agent(
         &mut self,
         agent: &ureq::Agent,
@@ -100,7 +56,9 @@ impl ThumbnailDecoder {
 
         let decoded = self.decode_and_resize_bytes(&bytes, max_edge);
 
-        decoded.map(|thumbnail| Some((bytes, thumbnail)))
+        decoded
+            .map(|thumbnail| Some((bytes, thumbnail)))
+            .map_err(Into::into)
     }
 }
 
@@ -166,10 +124,7 @@ fn steam_cdn_variant_url(url: &str, max_edge: u32) -> Option<String> {
 }
 
 pub(super) fn http_agent() -> ureq::Agent {
-    build_agent_with_max_idle_connections_per_host(
-        HTTP_TIMEOUTS,
-        HTTP_MAX_IDLE_CONNECTIONS_PER_HOST,
-    )
+    build_http_agent(HTTP_CONFIG)
 }
 
 fn fetch_url_bytes(agent: &ureq::Agent, url: &str) -> ThumbnailResult<Vec<u8>> {
@@ -380,26 +335,13 @@ mod tests {
     }
 
     #[test]
-    fn thumbnails_decode_limits_are_app_owned() {
-        let limits = super::super::thumbnail::thumbnail_decode_limits();
-
-        assert!(limits.max_image_width.is_some());
-        assert!(limits.max_image_height.is_some());
-        assert!(limits.max_alloc.is_some());
-    }
-
-    #[test]
-    fn thumbnails_zero_edge_uses_app_error_surface() {
+    fn thumbnails_reject_zero_edge_before_decoding() {
         let mut decoder = ThumbnailDecoder::new();
         let error = decoder
             .decode_and_resize_bytes(b"not decoded", 0)
             .expect_err("zero max edge should be rejected before decode");
 
-        assert!(matches!(
-            error,
-            ThumbnailError::Decode(ThumbnailDecodeError::InvalidMaxEdge)
-        ));
-        assert!(super::super::validate_max_edge(0).is_err());
+        assert!(matches!(error, ThumbnailDecodeError::InvalidMaxEdge));
     }
 
     #[test]

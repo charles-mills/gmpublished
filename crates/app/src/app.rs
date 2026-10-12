@@ -49,7 +49,6 @@ const WORKSHOP_DRAG_PREFIX: &str = "gmpublished/workshop-id:";
 
 mod drag;
 mod hidden_addons;
-mod ports;
 mod routes;
 pub mod runners;
 mod side_effects_addons;
@@ -622,19 +621,6 @@ macro_rules! feature_dispatch {
 }
 
 impl App {
-    fn ports(&self) -> ports::Ports<'_> {
-        ports::Ports {
-            ctx: &self.environment.ctx,
-            i18n: &self.state.i18n,
-            tokens: &self.state.tokens,
-            workshop_snapshot_sequence: &self.environment.workshop_snapshot_sequence,
-        }
-    }
-
-    fn publish(&self) -> side_effects_publish::PublishRunner<'_> {
-        side_effects_publish::PublishRunner::new(self.ports())
-    }
-
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         Self::from_context(
@@ -1018,7 +1004,7 @@ impl App {
                 .steam_session
                 .identity()
                 .map(steam_session::SteamIdentity::steamid),
-            gmpublished_backend::WorkshopLanguage::from_locale(self.ports().i18n.locale_id()),
+            gmpublished_backend::WorkshopLanguage::from_locale(self.state.i18n.locale_id()),
         );
         let effects =
             preview_gma::update_at(&mut self.state.features.preview_gma, message, update.now);
@@ -1428,7 +1414,7 @@ impl App {
                 .environment
                 .ctx
                 .run_blocking("preview-localized-text", move |app| {
-                    app.workshop().localized_text(workshop_id, language)
+                    app.localized_text(workshop_id, language)
                 })
                 .map(move |result| {
                     RootMessage::PreviewGma(preview_gma::Message::LocalizedTextFetched(

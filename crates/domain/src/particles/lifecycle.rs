@@ -84,11 +84,6 @@ impl ParticleEngine {
     }
 
     #[must_use]
-    pub fn root_system(&self) -> &CompiledSystem {
-        &self.systems[0]
-    }
-
-    #[must_use]
     pub fn time(&self) -> f32 {
         self.time
     }

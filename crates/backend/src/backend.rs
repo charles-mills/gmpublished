@@ -204,7 +204,7 @@ impl Backend {
     #[must_use]
     pub fn quick_search(
         &self,
-        query: String,
+        query: &str,
         scope: crate::search::SearchScope,
     ) -> crate::search::QuickSearchResult {
         self.search.quick_search_with_scope(query, scope)
@@ -289,21 +289,6 @@ impl Backend {
             &self.steam,
             &self.whitelist,
             self.execution.cpu(),
-        )
-    }
-
-    pub fn update_publish_description(
-        &self,
-        workshop_id: crate::WorkshopId,
-        description: &str,
-        transaction: &crate::Transaction,
-    ) -> Result<bool, crate::steam::publishing::PublishError> {
-        self.update_publish_metadata(
-            workshop_id,
-            crate::WorkshopLanguage::English,
-            None,
-            Some(description),
-            transaction,
         )
     }
 

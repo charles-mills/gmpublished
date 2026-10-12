@@ -1,7 +1,7 @@
 use crate::bridge::snapshot::SnapshotWriteError;
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -16,7 +16,6 @@ use super::domain::{PublishedFileId, WorkshopMetadata};
 pub const METADATA_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 const SNAPSHOT_VERSION: u32 = 1;
-const SNAPSHOT_FILE_NAME: &str = "metadata.snap";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CachedWorkshopMetadata {
@@ -36,10 +35,6 @@ pub fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
-}
-
-pub fn snapshot_path() -> Option<PathBuf> {
-    gmpublished_backend::cache_dir().map(|dir| dir.join(SNAPSHOT_FILE_NAME))
 }
 
 /// Bump SNAPSHOT_VERSION when the schema changes. Discard incompatible snapshots.

@@ -23,7 +23,7 @@ pub struct Details {
     pub(crate) archive_path: String,
     pub(crate) author: Option<AuthorDisplay>,
     pub(crate) metadata_rows: Vec<MetadataRow>,
-    pub(crate) tag_rows: Vec<TagRow>,
+    pub(crate) tag_rows: Vec<String>,
     pub(crate) description: BbCodeDocument,
     pub(crate) has_stats: bool,
     pub(crate) subscriptions: String,
@@ -78,11 +78,6 @@ impl MetadataRow {
 pub struct RelativeTime {
     pub(crate) key: &'static str,
     pub(crate) count: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TagRow {
-    pub(crate) label: String,
 }
 
 pub fn details_for_archive(
@@ -219,7 +214,7 @@ fn details_description(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadat
     }
 }
 
-fn tag_rows(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadata>) -> Vec<TagRow> {
+fn tag_rows(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadata>) -> Vec<String> {
     let mut rows = Vec::new();
     if let Some(addon_type) = metadata
         .addon_type()
@@ -241,14 +236,12 @@ fn tag_rows(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadata>) -> Vec<
     rows
 }
 
-fn push_tag(rows: &mut Vec<TagRow>, raw_tag: &str) {
+fn push_tag(rows: &mut Vec<String>, raw_tag: &str) {
     let tag = raw_tag.trim();
-    if tag.is_empty() || rows.iter().any(|row| row.label.eq_ignore_ascii_case(tag)) {
+    if tag.is_empty() || rows.iter().any(|row| row.eq_ignore_ascii_case(tag)) {
         return;
     }
-    rows.push(TagRow {
-        label: tag.to_owned(),
-    });
+    rows.push(tag.to_owned());
 }
 
 fn relative_timestamp(timestamp: u64) -> Option<(RelativeTime, String)> {
@@ -466,7 +459,7 @@ mod tests {
             ),
         );
         assert_eq!(period_details.subscriptions, "12.345");
-        assert!(details.tag_rows.iter().any(|row| row.label == "fun"));
+        assert!(details.tag_rows.iter().any(|row| row == "fun"));
         assert!(
             details
                 .metadata_rows

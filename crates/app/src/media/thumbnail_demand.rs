@@ -235,7 +235,7 @@ impl Manager {
                         set.generation,
                         demand.id,
                         key,
-                        ThumbnailDeliveryError::Thumbnail(Arc::new(error)),
+                        ThumbnailDeliveryError::Thumbnail(Arc::new(error.into())),
                     ))));
                 }
                 continue;

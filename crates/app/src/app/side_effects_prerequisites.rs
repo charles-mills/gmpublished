@@ -76,12 +76,11 @@ impl App {
         self.environment
             .ctx
             .run_blocking_ui("prerequisites-set-gmod-dir", move |app| {
-                app.config()
-                    .update_settings_snapshot(|settings| {
-                        settings.backend.gmod = Some(path);
-                    })
-                    .map(|()| app.config().paths().gmod_dir)
-                    .ui_err()
+                app.update_settings_snapshot(|settings| {
+                    settings.backend.gmod = Some(path);
+                })
+                .map(|()| app.paths().gmod_dir)
+                .ui_err()
             })
             .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
@@ -93,7 +92,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking_ui("prerequisites-discover-gmod-dir", |app| {
-                Ok(app.config().rediscover_gmod_dir())
+                Ok(app.rediscover_gmod_dir())
             })
             .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))

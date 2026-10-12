@@ -1,4 +1,4 @@
-use crate::bridge::archive::PreviewArchiveSource;
+use crate::bridge::archive::{ArchivePreviewEntry, PreviewArchiveSource};
 use crate::media::preview_model::{PreviewRequest, RelatedPreviewKind, RelatedPreviewTarget};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,9 +68,9 @@ pub(super) fn model_companion_preview_request(request: &PreviewRequest) -> Optio
     let parent_path = model_companion_parent_path(&request.entry_path)?;
     let parent = archive_entry_for_path(&request.archive, &parent_path)?;
     let mut request = request.clone();
-    request.entry_path.clone_from(&parent.path);
+    parent.path.clone_into(&mut request.entry_path);
     request.display_name = parent.path.rsplit_once('/').map_or_else(
-        || parent.path.clone(),
+        || parent.path.to_owned(),
         |(_, file_name)| file_name.to_owned(),
     );
     request.size_bytes = parent.size;
@@ -78,35 +78,14 @@ pub(super) fn model_companion_preview_request(request: &PreviewRequest) -> Optio
     Some(request)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RedirectedArchiveEntry {
-    path: String,
-    size: u64,
-    crc32: u32,
-}
-
-fn archive_entry_for_path(
-    archive: &PreviewArchiveSource,
+fn archive_entry_for_path<'a>(
+    archive: &'a PreviewArchiveSource,
     path: &str,
-) -> Option<RedirectedArchiveEntry> {
+) -> Option<ArchivePreviewEntry<'a>> {
     archive
         .entry(path)
+        .or_else(|_| archive.entry_ignore_ascii_case(path))
         .ok()
-        .map(|entry| RedirectedArchiveEntry {
-            path: entry.path.to_owned(),
-            size: entry.size,
-            crc32: entry.crc32,
-        })
-        .or_else(|| {
-            archive
-                .entry_ignore_ascii_case(path)
-                .ok()
-                .map(|entry| RedirectedArchiveEntry {
-                    path: entry.path.to_owned(),
-                    size: entry.size,
-                    crc32: entry.crc32,
-                })
-        })
 }
 
 pub(super) fn related_preview_target(
@@ -125,7 +104,7 @@ fn same_stem_material_target(request: &PreviewRequest) -> Option<RelatedPreviewT
     let material_path = format!("{stem}.vmt");
     let entry = archive_entry_for_path(&request.archive, &material_path)?;
     Some(RelatedPreviewTarget {
-        entry_path: entry.path,
+        entry_path: entry.path.to_owned(),
         kind: RelatedPreviewKind::Material,
     })
 }
@@ -136,7 +115,7 @@ fn base_texture_target(request: &PreviewRequest, bytes: &[u8]) -> Option<Related
     let texture_path = material_texture_entry_path(&texture_name);
     let entry = archive_entry_for_path(&request.archive, &texture_path)?;
     Some(RelatedPreviewTarget {
-        entry_path: entry.path,
+        entry_path: entry.path.to_owned(),
         kind: RelatedPreviewKind::Texture,
     })
 }

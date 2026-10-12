@@ -1,10 +1,10 @@
 use super::{
-    ConfigService, IgnorePatternMutation, IgnorePatternMutationResult, IgnoredPattern, Settings,
+    BackendServices, IgnorePatternMutation, IgnorePatternMutationResult, IgnoredPattern, Settings,
     whitelist,
 };
 
 pub fn apply_ignore_pattern_mutation(
-    config: ConfigService<'_>,
+    config: &BackendServices,
     mutation: IgnorePatternMutation,
 ) -> IgnorePatternMutationResult {
     let mut changed = false;

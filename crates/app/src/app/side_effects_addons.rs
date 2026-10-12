@@ -30,8 +30,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("my-workshop-page", move |app| {
-                app.workshop()
-                    .browse_my_page(page)
+                app.browse_my_page(page)
                     .map(|result| my_workshop::PageResult::from_page(page, &result))
             })
             .map(move |result| {
@@ -67,7 +66,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("my-workshop-stats-refresh", move |app| {
-                app.workshop().refresh_subscription_counts(pages)
+                app.refresh_subscription_counts(pages)
             })
             .map(move |result| {
                 RootMessage::MyWorkshop(my_workshop::Message::StatsRefreshCompleted(
@@ -86,7 +85,7 @@ impl App {
             my_workshop::PreparePublishTarget::Update(update) => {
                 let workshop_id = update.workshop_id;
                 let (snapshot_request_id, snapshot_destination) =
-                    self.publish().workshop_snapshot(workshop_id);
+                    self.prepare_publish_workshop_snapshot(workshop_id);
                 prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
                     workshop_id,
                     title: update.title,
@@ -97,13 +96,7 @@ impl App {
                 })
             }
         };
-        Task::done(RootMessage::PreparePublish(
-            prepare_publish::Message::OpenRequested {
-                target,
-                ignored_patterns: self.publish().ignored_patterns(),
-                upscale_icon_default: self.publish().upscale_default(),
-            },
-        ))
+        self.prepare_publish_open_task(target)
     }
 
     pub(super) fn my_workshop_context_menu_task(
@@ -136,7 +129,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("installed-addons-metadata", move |app| {
-                let (metadata, stale_ids) = app.workshop().resolve_metadata(&worker_item_ids);
+                let (metadata, stale_ids) = app.resolve_metadata(&worker_item_ids);
                 installed_addons::resolve_metadata(&metadata, stale_ids)
             })
             .map(move |result| {

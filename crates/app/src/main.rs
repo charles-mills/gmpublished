@@ -75,7 +75,6 @@ mod format;
 mod generation;
 mod i18n;
 mod media;
-mod net;
 mod platform;
 #[cfg(target_os = "macos")]
 mod platform_chrome;

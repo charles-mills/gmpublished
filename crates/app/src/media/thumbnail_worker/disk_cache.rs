@@ -932,7 +932,7 @@ mod tests {
         let root = TestDir::new("disk-cache-animation-not-derived");
         let cache = WorkerDiskCache::new(root.path().to_path_buf(), 1024 * 1024);
         let gif = multi_frame_gif_bytes();
-        let mut decoder = super::super::decode::ThumbnailDecoder::new();
+        let mut decoder = super::super::ThumbnailDecoder::new();
         let thumbnail = decoder
             .decode_and_resize_bytes(&gif, 256)
             .expect("animated GIF should decode");
@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn thumbnails_cached_round_trips_animated_gif() {
         let gif = multi_frame_gif_bytes();
-        let mut decoder = super::super::decode::ThumbnailDecoder::new();
+        let mut decoder = super::super::ThumbnailDecoder::new();
         let thumbnail = decoder
             .decode_and_resize_bytes(&gif, 256)
             .expect("animated GIF should decode");

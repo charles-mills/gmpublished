@@ -261,17 +261,6 @@ impl MapWalkCollision {
         self
     }
 
-    #[cfg(feature = "test-support")]
-    #[must_use]
-    pub fn without_prop_collisions_for_tests(mut self) -> Self {
-        self.props = MapWalkPropCollision::default();
-        self
-    }
-
-    pub fn brush_count(&self) -> usize {
-        self.brushes.len()
-    }
-
     pub fn displacement_count(&self) -> usize {
         self.displacements.len()
     }

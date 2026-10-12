@@ -4,8 +4,8 @@ use super::{
         PublishedFileId, SearchFullBatch, SearchFullRequest, SearchHit, SearchItem,
         SearchItemSource, SearchQuickBatch, SearchQuickRequest, SteamUser, WorkshopItem,
     },
-    library::{self, LibraryRefresh, LibraryRefreshReason, LibrarySnapshot, LibraryStore},
-    metadata_snapshot::{self, CachedWorkshopMetadata},
+    library::{LibraryRefresh, LibraryRefreshReason, LibrarySnapshot, LibraryStore},
+    metadata_snapshot::CachedWorkshopMetadata,
     native::{self, NativeOpenTarget},
     publish::{
         PublishSelectedPreview, PublishSubmitMode, PublishSubmitPreview, PublishSubmitRequest,
@@ -14,11 +14,14 @@ use super::{
 };
 
 #[cfg(test)]
-use super::domain::{SearchMode, WorkshopMetadata};
+use super::{
+    domain::{SearchMode, WorkshopMetadata},
+    metadata_snapshot,
+};
 #[cfg(test)]
 use projections::{
-    publish_submission_from_app_request, search_full_batch_from_transaction_payload,
-    search_quick_batch_from_backend, subscription_counts_from_items,
+    publish_submission_from_app_request, search_quick_batch_from_backend,
+    subscription_counts_from_items,
 };
 
 #[cfg(test)]
@@ -27,6 +30,7 @@ use super::UiSettings;
 mod context;
 mod correlation;
 mod projections;
+pub use projections::search_full_batch_from_transaction_payload;
 mod runtime_events;
 mod services;
 mod task_events;
@@ -42,9 +46,7 @@ pub use runtime_events::{
     BackendRuntimeAction, BackendRuntimeEvent, BackendRuntimeEventEffects,
     BackendRuntimeEventSubscription, TransactionRuntimeEvent,
 };
-pub use services::{
-    ArchiveService, BackendServices, ConfigService, PublishService, WorkshopService,
-};
+pub use services::BackendServices;
 #[cfg(test)]
 use task_events::task_event_stream;
 use task_events::{BackendEventStreamFactory, TaskEventStreamFactory};
@@ -54,7 +56,7 @@ pub use task_events::{
     CoalescedTaskTerminal, CoalescedTaskUpdate, TaskEvent, TaskHandle, TaskId, TaskKind,
     TaskUpdate, Tasks, WorkshopDownloadTaskKind,
 };
-use worker_runtime::{AppWorkerRuntime, WorkerPoolSpawner, show_native_open_error_dialog};
+use worker_runtime::show_native_open_error_dialog;
 pub use worker_runtime::{RunBlockingError, ScheduleError};
 const TASK_EVENTS_ID: u64 = 1;
 const BACKEND_EVENTS_ID: u64 = 2;

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::WorkshopMetadata;
 use super::{
     BackendEventSinkRegistration, BackendRuntimeEventSubscription, CachedWorkshopMetadata,
-    LibraryStore, NativeOpenTarget, PublishedFileId, UiError, library, metadata_snapshot, native,
+    LibraryStore, NativeOpenTarget, PublishedFileId, UiError, native,
 };
 use crate::bridge::config_store::ConfigStore;
 use crate::bridge::domain::SteamId;
@@ -27,13 +27,6 @@ mod library_service;
 mod publish_service;
 mod search_service;
 mod workshop_service;
-
-pub use archive_service::ArchiveService;
-pub use config_service::ConfigService;
-pub use library_service::LibraryService;
-pub use publish_service::PublishService;
-pub use search_service::SearchService;
-pub use workshop_service::WorkshopService;
 
 #[derive(Debug)]
 pub struct BackendServices {
@@ -62,11 +55,13 @@ pub(super) struct BackendServicesConfig {
 }
 
 impl BackendServicesConfig {
+    #[cfg(not(test))]
     fn production() -> Self {
+        let cache_dir = gmpublished_backend::cache_dir();
         Self {
             persist_settings: true,
-            metadata_snapshot_file: metadata_snapshot::snapshot_path(),
-            header_snapshot_file: library::header_snapshot_path(),
+            metadata_snapshot_file: cache_dir.as_ref().map(|dir| dir.join("metadata.snap")),
+            header_snapshot_file: cache_dir.map(|dir| dir.join("library-headers.json")),
         }
     }
 
@@ -81,36 +76,6 @@ impl BackendServicesConfig {
 }
 
 impl BackendServices {
-    #[must_use]
-    pub(crate) fn config(&self) -> ConfigService<'_> {
-        ConfigService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn library(&self) -> LibraryService<'_> {
-        LibraryService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn workshop(&self) -> WorkshopService<'_> {
-        WorkshopService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn publish(&self) -> PublishService<'_> {
-        PublishService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn search(&self) -> SearchService<'_> {
-        SearchService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn archive(&self) -> ArchiveService<'_> {
-        ArchiveService::new(self)
-    }
-
     pub(super) fn new(
         backend_event_sink: Option<BackendEventSinkRegistration>,
     ) -> Result<Self, gmpublished_backend::BackendInitError> {
@@ -123,12 +88,11 @@ impl BackendServices {
         #[cfg(test)]
         let (backend, test_data_root) = build_default_backend(event_sink)?;
         let steam_runtime = backend.steam_runtime();
-        let services = Self::with_steam_runtime(
-            backend,
-            steam_runtime,
-            backend_event_sink,
-            BackendServicesConfig::production(),
-        );
+        #[cfg(not(test))]
+        let config = BackendServicesConfig::production();
+        #[cfg(test)]
+        let config = BackendServicesConfig::isolated();
+        let services = Self::with_steam_runtime(backend, steam_runtime, backend_event_sink, config);
         #[cfg(test)]
         let services = {
             let mut services = services;
@@ -290,23 +254,10 @@ impl BackendServices {
     #[cfg(test)]
     pub(super) fn quick_addon_search_for_test(
         &self,
-        query: String,
+        query: &str,
     ) -> gmpublished_backend::QuickSearchResult {
         self.backend
             .quick_search(query, gmpublished_backend::SearchScope::Addons)
-    }
-
-    #[cfg(test)]
-    pub(super) fn extract_gma_for_test(
-        &self,
-        view: &gmpublished_backend::GmaView,
-        gma: &gmpublished_backend::GmaFile,
-        destination: gmpublished_backend::ExtractDestination,
-        options: gmpublished_backend::ExtractOptions,
-        transaction: &Transaction,
-    ) -> Result<PathBuf, gmpublished_backend::GmaError> {
-        let extraction = self.backend.resolve_extraction(gma, destination, options)?;
-        self.backend.extract_gma(view, gma, transaction, extraction)
     }
 
     pub(crate) fn open_native_target(
@@ -341,13 +292,54 @@ fn record_thumbhash_in_cache(
     }
 }
 
+#[cfg(not(test))]
+fn build_default_backend(
+    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
+) -> Result<Arc<Backend>, gmpublished_backend::BackendInitError> {
+    gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
+        event_sink,
+        ..gmpublished_backend::BackendConfig::default()
+    })
+}
+
 #[cfg(test)]
-#[expect(
-    clippy::items_after_test_module,
-    reason = "production/test backend constructors remain adjacent below the performance-only module"
-)]
-mod performance_tests {
+fn build_default_backend(
+    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
+) -> Result<(Arc<Backend>, tempfile::TempDir), gmpublished_backend::BackendInitError> {
+    let root = tempfile::tempdir().expect("test backend tempdir");
+    let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
+        event_sink,
+        ..gmpublished_backend::BackendConfig::for_test(root.path())
+    })?;
+    Ok((backend, root))
+}
+
+fn backend_workshop_ids(ids: &[PublishedFileId]) -> Vec<gmpublished_backend::WorkshopId> {
+    ids.iter().copied().map(Into::into).collect()
+}
+
+fn backend_steam_id(id: SteamId) -> gmpublished_backend::SteamId {
+    gmpublished_backend::SteamId::from_raw(id.get())
+}
+
+#[cfg(test)]
+mod tests {
     use super::*;
+
+    #[test]
+    fn test_constructor_keeps_caches_and_settings_in_memory() {
+        let services = BackendServices::new(None).unwrap();
+        let settings_file = services.app_data_snapshot_for_test().paths.settings_file;
+        assert!(services.metadata_snapshot_file.is_none());
+        assert!(!settings_file.exists());
+
+        services
+            .update_settings_snapshot(|settings| {
+                settings.backend.sounds = !settings.backend.sounds;
+            })
+            .unwrap();
+        assert!(!settings_file.exists());
+    }
 
     #[test]
     fn one_hash_per_shared_preview_url_is_sufficient() {
@@ -387,38 +379,4 @@ mod performance_tests {
             1
         );
     }
-}
-
-#[cfg(not(test))]
-fn build_default_backend(
-    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
-) -> Result<Arc<Backend>, gmpublished_backend::BackendInitError> {
-    gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
-        event_sink,
-        ..gmpublished_backend::BackendConfig::default()
-    })
-}
-
-#[cfg(test)]
-fn build_default_backend(
-    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
-) -> Result<(Arc<Backend>, tempfile::TempDir), gmpublished_backend::BackendInitError> {
-    let root = tempfile::tempdir().expect("test backend tempdir");
-    let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
-        event_sink,
-        ..gmpublished_backend::BackendConfig::for_test(root.path())
-    })?;
-    Ok((backend, root))
-}
-
-fn backend_workshop_id(id: PublishedFileId) -> gmpublished_backend::WorkshopId {
-    id.into()
-}
-
-fn backend_workshop_ids(ids: &[PublishedFileId]) -> Vec<gmpublished_backend::WorkshopId> {
-    ids.iter().copied().map(backend_workshop_id).collect()
-}
-
-fn backend_steam_id(id: SteamId) -> gmpublished_backend::SteamId {
-    gmpublished_backend::SteamId::from_raw(id.get())
 }

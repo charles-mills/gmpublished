@@ -329,7 +329,6 @@ impl PreviewArchive {
     pub(crate) fn extract_all_with_transaction(
         &self,
         destination: ExtractDestination,
-        options: &PreviewExtractOptions,
         transaction: &Transaction,
         backend: &gmpublished_backend::Backend,
     ) -> Result<PathBuf, GmaError> {
@@ -338,40 +337,10 @@ impl PreviewArchive {
             destination,
             ExtractOptions {
                 open_after: false,
-                whitelist: if options.ignore_whitelist {
-                    Whitelist::Ignore
-                } else {
-                    Whitelist::Enforce
-                },
+                whitelist: Whitelist::Ignore,
             },
         )?;
         backend.extract_gma(&self.view, &self.gma, transaction, context)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreviewExtractRequest {
-    pub(crate) destination: ExtractDestination,
-    pub(crate) options: PreviewExtractOptions,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreviewExtractOptions {
-    pub(crate) ignore_whitelist: bool,
-}
-
-impl Default for PreviewExtractOptions {
-    fn default() -> Self {
-        Self {
-            ignore_whitelist: true,
-        }
-    }
-}
-
-pub fn build_preview_extract_request(settings: super::Settings) -> PreviewExtractRequest {
-    PreviewExtractRequest {
-        destination: settings.backend.extract_destination,
-        options: PreviewExtractOptions::default(),
     }
 }
 

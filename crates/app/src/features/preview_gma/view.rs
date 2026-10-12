@@ -424,7 +424,7 @@ fn preview_image<'a>(
 fn tag_chips<'a>(details: &'a Details, tokens: &Tokens) -> Element<'a, Message> {
     let mut chips = row![].spacing(tokens.spacing.gap_xs);
     for tag in &details.tag_rows {
-        chips = chips.push(tag_chip(&tag.label, tokens));
+        chips = chips.push(tag_chip(tag, tokens));
     }
     chips.wrap().into()
 }

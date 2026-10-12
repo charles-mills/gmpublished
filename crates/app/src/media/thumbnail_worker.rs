@@ -10,12 +10,13 @@ mod thumbnail;
 mod thumbnail_key;
 mod types;
 
-pub use decode::ThumbnailDecoder;
 pub use disk_cache::{
     WorkerDiskCache, read_disk_cache, read_source_bytes, remove_source_bytes, write_disk_cache,
     write_source_bytes,
 };
+#[cfg(test)]
 pub use thumbnail::ThumbnailDecodeError;
+pub use thumbnail::{ThumbnailDecoder, validate_max_edge};
 pub use thumbnail_key::{
     THUMBNAIL_SOURCE_FILE_EXTENSION, ThumbnailKey, ThumbnailMode, normalized_url,
 };
@@ -196,14 +197,6 @@ fn finish_fresh_decode(mut thumbnail: Thumbnail, key: &ThumbnailKey) -> Thumbnai
         crate::media::thumbhash::encode(metadata.width, metadata.height, thumbnail.rgba_bytes());
     thumbnail.set_thumbhash(thumbhash.map(Arc::from));
     thumbnail
-}
-
-pub fn validate_max_edge(max_edge: u32) -> ThumbnailResult<()> {
-    if max_edge == 0 {
-        return Err(ThumbnailDecodeError::InvalidMaxEdge.into());
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

@@ -159,7 +159,7 @@ fn sync_installed_addons_added_addon_is_findable_immediately() {
         vec!["needle-live".to_owned()],
         4_u64,
     )]);
-    let result = search.quick_search("needle-live".to_owned());
+    let result = search.quick_search_with_scope("needle-live", SearchScope::Addons);
 
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].item.label(), "Live Refresh Addon");
@@ -175,10 +175,16 @@ fn sync_installed_addons_removed_addon_stops_matching() {
         vec!["gone-needle".to_owned()],
         5_u64,
     )]);
-    assert_eq!(search.quick_search("gone-needle".to_owned()).hits.len(), 1);
+    assert_eq!(
+        search
+            .quick_search_with_scope("gone-needle", SearchScope::Addons)
+            .hits
+            .len(),
+        1
+    );
 
     search.sync_installed_addons(Vec::new());
-    let result = search.quick_search("gone-needle".to_owned());
+    let result = search.quick_search_with_scope("gone-needle", SearchScope::Addons);
 
     assert!(result.hits.is_empty());
 }
@@ -217,11 +223,11 @@ fn sync_installed_addon_files_searches_file_scope_only() {
 
     assert!(
         search
-            .quick_search("rp_riverden".to_owned())
+            .quick_search_with_scope("rp_riverden", SearchScope::Addons)
             .hits
             .is_empty()
     );
-    let result = search.quick_search_with_scope("rp_riverden".to_owned(), SearchScope::Files);
+    let result = search.quick_search_with_scope("rp_riverden", SearchScope::Files);
 
     assert_eq!(result.hits.len(), 1);
     match &result.hits[0].item.source {
@@ -235,7 +241,7 @@ fn sync_installed_addon_files_searches_file_scope_only() {
     }
     assert_eq!(
         search
-            .quick_search_with_scope("bsp".to_owned(), SearchScope::Files)
+            .quick_search_with_scope("bsp", SearchScope::Files)
             .hits
             .len(),
         2
@@ -479,8 +485,20 @@ fn refresh_installed_addon_labels_replaces_stale_label_everywhere() {
         .collect();
     assert_eq!(items_labels, vec!["New Title".to_owned()]);
 
-    assert_eq!(search.quick_search("New Title".to_owned()).hits.len(), 1);
-    assert_eq!(search.quick_search("Old Title".to_owned()).hits.len(), 1);
+    assert_eq!(
+        search
+            .quick_search_with_scope("New Title", SearchScope::Addons)
+            .hits
+            .len(),
+        1
+    );
+    assert_eq!(
+        search
+            .quick_search_with_scope("Old Title", SearchScope::Addons)
+            .hits
+            .len(),
+        1
+    );
 }
 
 #[test]

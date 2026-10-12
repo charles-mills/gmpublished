@@ -23,7 +23,7 @@ use crate::{bridge::archive::PreviewArchiveSource, features::file_preview};
 use crate::{
     bridge::{
         DownloadCountFormat, ExtractDestination, SystemColorScheme, ThemePreset,
-        gma::{GmaError, GmaHeader, GmaMeta, GmaMetadata, PreviewArchive, PreviewExtractOptions},
+        gma::{GmaError, GmaHeader, GmaMeta, GmaMetadata, PreviewArchive},
         library::{LibraryRefresh, LibraryRefreshReason, LibrarySnapshot},
         tasks::{
             BackendRuntimeAction, BackendRuntimeEvent, TaskId, TaskKind, WorkshopDownloadTaskKind,
@@ -192,13 +192,30 @@ fn destination_overlay_layers_over_preview_and_closes_first() {
 fn prepare_publish_open_claims_modal_stack_slot() {
     let mut app = App::new_for_test();
 
-    let _task = app.update(RootMessage::PreparePublish(
-        prepare_publish::Message::OpenRequested {
+    app.environment
+        .ctx
+        .update_settings_snapshot_for_test(|settings| {
+            settings.backend.ignore_globs = vec!["lua/private/*".to_owned()];
+            settings.backend.upscale_addon_icon = true;
+        })
+        .unwrap();
+    let task = app.batch_effects(
+        vec![my_workshop::Effect::PreparePublishRequested(
+            my_workshop::PreparePublishTarget::New,
+        )],
+        App::run_my_workshop_effect,
+    );
+    let messages = task_messages(task);
+    assert!(matches!(messages.as_slice(),
+        [RootMessage::PreparePublish(prepare_publish::Message::OpenRequested {
             target: prepare_publish::OpenTarget::New,
-            ignored_patterns: Vec::new(),
-            upscale_icon_default: false,
-        },
+            ignored_patterns,
+            upscale_icon_default: true,
+        })] if ignored_patterns.iter().any(|pattern| pattern.pattern == "lua/private/*" && !pattern.default_pattern)
     ));
+    for message in messages {
+        let _task = app.update(message);
+    }
 
     assert_eq!(
         app.state.features.modal_stack.active(),
@@ -430,7 +447,6 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
     let result = app.environment.ctx.extract_preview_archive(
         &archive,
         ExtractDestination::Temp,
-        &PreviewExtractOptions::default(),
         &transaction,
     );
 
@@ -1717,7 +1733,7 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
     let result = app
         .environment
         .ctx
-        .quick_addon_search_for_test("root-needle".to_owned());
+        .quick_addon_search_for_test("root-needle");
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].item.label(), "Root Fanout Addon");
 

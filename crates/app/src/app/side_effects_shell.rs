@@ -267,17 +267,14 @@ impl App {
         self.environment
             .ctx
             .run_blocking("destination-create-folder-save", move |app| {
-                app.config()
-                    .update_settings_snapshot(|settings| {
-                        settings.backend.create_folder_on_extract = enabled;
-                    })
-                    .map(|()| {
-                        Box::new(destination_select::SettingsSnapshot::new(
-                            app.config().settings_snapshot(),
-                            app.config().paths(),
-                        ))
-                    })
-                    .ui_err()
+                app.update_settings_snapshot(|settings| {
+                    settings.backend.create_folder_on_extract = enabled;
+                })
+                .map(|()| {
+                    let (settings, paths) = app.settings_and_paths_snapshot();
+                    Box::new(destination_select::SettingsSnapshot::new(settings, paths))
+                })
+                .ui_err()
             })
             .map(|result| {
                 RootMessage::DestinationSelect(destination_select::Message::CreateFolderSaved(
@@ -313,17 +310,14 @@ impl App {
         self.environment
             .ctx
             .run_blocking("destination-select-save", move |app| {
-                app.config()
-                    .update_settings_snapshot(|settings| {
-                        destination_select::apply_persist_request(settings, request);
-                    })
-                    .map(|()| {
-                        Box::new(destination_select::SettingsSnapshot::new(
-                            app.config().settings_snapshot(),
-                            app.config().paths(),
-                        ))
-                    })
-                    .ui_err()
+                app.update_settings_snapshot(|settings| {
+                    destination_select::apply_persist_request(settings, request);
+                })
+                .map(|()| {
+                    let (settings, paths) = app.settings_and_paths_snapshot();
+                    Box::new(destination_select::SettingsSnapshot::new(settings, paths))
+                })
+                .ui_err()
             })
             .map(|result| {
                 let result = flatten_blocking_ui_result(result);

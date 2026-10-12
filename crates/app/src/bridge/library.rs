@@ -19,7 +19,6 @@ use super::{
 };
 
 const HEADER_SNAPSHOT_VERSION: u32 = 1;
-const HEADER_SNAPSHOT_FILE_NAME: &str = "library-headers.json";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LibraryRefreshReason {
@@ -150,10 +149,6 @@ impl PersistTestHook {
         drop(state);
         self.changed.notify_all();
     }
-}
-
-pub fn header_snapshot_path() -> Option<PathBuf> {
-    gmpublished_backend::cache_dir().map(|dir| dir.join(HEADER_SNAPSHOT_FILE_NAME))
 }
 
 impl LibraryStore {

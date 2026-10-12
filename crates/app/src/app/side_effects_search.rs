@@ -28,7 +28,7 @@ impl App {
         let key = request.key().clone();
         self.environment
             .ctx
-            .run_blocking("search-quick", move |app| app.search().quick(&request))
+            .run_blocking("search-quick", move |app| app.quick_search(&request))
             .map(move |result| {
                 RootMessage::Search(search::Message::QuickSearchCompleted(
                     key.clone(),
@@ -47,7 +47,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("search-metadata", move |app| {
-                let (metadata, stale_ids) = app.workshop().resolve_metadata(&worker_item_ids);
+                let (metadata, stale_ids) = app.resolve_metadata(&worker_item_ids);
                 search::resolve_metadata(&metadata, stale_ids)
             })
             .map(move |result| {
@@ -78,8 +78,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("search-metadata-refresh", move |app| {
-                app.workshop()
-                    .refresh_metadata(&worker_item_ids)
+                app.refresh_metadata(&worker_item_ids)
                     .map(|metadata| search::refresh_metadata(&metadata))
             })
             .map(move |result| {
@@ -162,24 +161,20 @@ impl App {
                 title,
                 tags,
                 preview_url,
-            } => Task::done(RootMessage::PreparePublish(
-                prepare_publish::Message::OpenRequested {
-                    target: {
-                        let (snapshot_request_id, snapshot_destination) =
-                            self.publish().workshop_snapshot(workshop_id);
-                        prepare_publish::OpenTarget::Update(prepare_publish::UpdateTarget {
-                            workshop_id,
-                            title,
-                            tags,
-                            preview_url,
-                            snapshot_request_id,
-                            snapshot_destination,
-                        })
+            } => {
+                let (snapshot_request_id, snapshot_destination) =
+                    self.prepare_publish_workshop_snapshot(workshop_id);
+                self.prepare_publish_open_task(prepare_publish::OpenTarget::Update(
+                    prepare_publish::UpdateTarget {
+                        workshop_id,
+                        title,
+                        tags,
+                        preview_url,
+                        snapshot_request_id,
+                        snapshot_destination,
                     },
-                    ignored_patterns: self.publish().ignored_patterns(),
-                    upscale_icon_default: self.publish().upscale_default(),
-                },
-            )),
+                ))
+            }
             search::SelectionAction::SteamWorkshop { workshop_id } => {
                 self.open_url_task(workshop_url::workshop_item_url(workshop_id))
             }

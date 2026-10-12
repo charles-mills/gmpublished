@@ -1143,7 +1143,7 @@ impl SourceRef<'_> {
             Self::Addon(addon) => addon.for_each_path(visit),
             Self::Loose(loose_dir) => loose_dir.paths().iter().for_each(|path| visit(path)),
             Self::SiblingGma(sibling_gmas) => sibling_gmas.for_each_path(visit),
-            Self::GameVpk(vpk) => vpk.entries().iter().for_each(|entry| visit(&entry.path)),
+            Self::GameVpk(vpk) => vpk.paths().iter().for_each(|path| visit(path)),
         }
     }
 }

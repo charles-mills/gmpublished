@@ -11,7 +11,7 @@ pub use effect::Effect;
 pub use message::Message;
 pub use model::PublishIconSubmitResult;
 pub use model::{
-    ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation, IgnoredPattern,
+    ContentPathVerificationRequest, IconVerificationRequest, IgnorePatternMutation,
     PublishIconSubmitRequestEnvelope, PublishSubmitContext, PublishSubmitRequestEnvelope,
     PublishSubmitResult, WorkshopContentRequest,
 };

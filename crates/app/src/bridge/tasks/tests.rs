@@ -46,50 +46,34 @@ fn appdata_snapshot_event_payload_for_test() -> gmpublished_backend::AppDataSnap
 
 #[test]
 fn app_scheduler_uses_the_process_owned_blocking_and_network_executors() {
-    let execution =
-        gmpublished_backend::ExecutionResources::build(gmpublished_backend::ExecutionConfig {
-            cpu_threads: 1,
-            blocking_threads: 1,
-            network_threads: 1,
-            queue_capacity: 4,
-        })
-        .expect("test execution resources");
-    let runtime = AppWorkerRuntime::new(execution);
+    use futures::StreamExt as _;
 
-    let (done_tx, done_rx) = mpsc::channel();
-    runtime
-        .spawn_blocking("blocking-job", move || {
-            done_tx
-                .send(std::thread::current().name().map(str::to_owned))
-                .unwrap();
-        })
-        .unwrap();
-
-    assert!(
+    let ctx = BackendContext::new().expect("test backend context");
+    for (media, prefix) in [
+        (false, "gmpublished-blocking-"),
+        (true, "gmpublished-network-"),
+    ] {
+        let (done_tx, done_rx) = mpsc::channel();
+        let job = move |_: &BackendServices| {
+            let name = std::thread::current().name().map(str::to_owned);
+            done_tx.send(()).unwrap();
+            name
+        };
+        let task = if media {
+            ctx.run_blocking_media("media-job", job)
+        } else {
+            ctx.run_blocking("blocking-job", job)
+        };
         done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-            .is_some_and(|name| name.starts_with("gmpublished-blocking-"))
-    );
-
-    let (media_done_tx, media_done_rx) = mpsc::channel();
-    runtime
-        .spawn_media_job(
-            std::sync::Arc::from("first-media-job"),
-            Box::new(move || {
-                media_done_tx
-                    .send(std::thread::current().name().map(str::to_owned))
-                    .unwrap();
-            }),
-        )
-        .unwrap();
-
-    assert!(
-        media_done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-            .is_some_and(|name| name.starts_with("gmpublished-network-"))
-    );
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker must run before the deadline");
+        let mut stream = iced_runtime::task::into_stream(task).expect("scheduled task");
+        let action = futures::executor::block_on(stream.next()).expect("worker result");
+        let iced_runtime::Action::Output(Ok(Some(name))) = action else {
+            panic!("worker must return its thread name");
+        };
+        assert!(name.starts_with(prefix), "{name} must run on {prefix}");
+    }
 }
 
 #[test]
@@ -249,7 +233,7 @@ fn standalone_ui_settings_are_migrated_before_the_old_file_is_retired() {
     .expect("legacy UI settings");
 
     let services = BackendServices::for_test_with_data_root(temp.path());
-    let settings = services.config().settings_snapshot();
+    let settings = services.settings_snapshot();
     assert!(!settings.ui.play_gifs_by_default);
     assert_eq!(
         settings.ui.download_count_format,
@@ -274,20 +258,19 @@ fn resetting_settings_persists_default_ui_settings() {
     let services = BackendServices::for_test_with_data_root(temp.path());
 
     services
-        .config()
         .update_settings_snapshot(|settings| {
             settings.ui.play_gifs_by_default = false;
             settings.ui.download_count_format = DownloadCountFormat::Period;
             settings.ui.theme_preset = ThemePreset::ClassicSource;
         })
         .expect("non-default UI settings update");
-    services.config().reset_settings().expect("reset settings");
+    services.reset_settings().expect("reset settings");
 
-    let settings = services.config().settings_snapshot();
+    let settings = services.settings_snapshot();
     assert_eq!(UiSettings::from_settings(&settings), UiSettings::default());
     let restarted = BackendServices::for_test_with_data_root(temp.path());
     assert_eq!(
-        UiSettings::from_settings(&restarted.config().settings_snapshot()),
+        UiSettings::from_settings(&restarted.settings_snapshot()),
         UiSettings::default()
     );
 }
@@ -297,7 +280,6 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
     let temp = tempfile::tempdir().expect("tempdir");
     let services = BackendServices::for_test_with_data_root(temp.path());
     services
-        .config()
         .update_settings_snapshot(|settings| {
             settings.ui.play_gifs_by_default = false;
             settings.ui.download_count_format = DownloadCountFormat::Space;
@@ -317,23 +299,21 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
         language: Some("fr".to_owned()),
         ..Default::default()
     };
-    let (settings, paths) = services
-        .config()
-        .apply_appdata_snapshot(BackendAppDataSnapshot {
-            settings: backend_settings,
-            settings_revision: 2,
-            version: "test",
-            paths: gmpublished_backend::AppDataPathsSnapshot {
-                settings_file: temp.path().join("settings.json"),
-                default_user_data_dir: temp.path().join("default-user-data"),
-                default_temp_dir: temp.path().join("default-temp"),
-                default_downloads_dir: Some(temp.path().join("default-downloads")),
-                temp_dir: temp_dir.clone(),
-                user_data_dir,
-                downloads_dir: Some(downloads_dir),
-                gmod_dir: None,
-            },
-        });
+    let (settings, paths) = services.apply_appdata_snapshot(BackendAppDataSnapshot {
+        settings: backend_settings,
+        settings_revision: 2,
+        version: "test",
+        paths: gmpublished_backend::AppDataPathsSnapshot {
+            settings_file: temp.path().join("settings.json"),
+            default_user_data_dir: temp.path().join("default-user-data"),
+            default_temp_dir: temp.path().join("default-temp"),
+            default_downloads_dir: Some(temp.path().join("default-downloads")),
+            temp_dir: temp_dir.clone(),
+            user_data_dir,
+            downloads_dir: Some(downloads_dir),
+            gmod_dir: None,
+        },
+    });
 
     assert!(!settings.backend.sounds);
     assert_eq!(settings.backend.language.as_deref(), Some("fr"));
@@ -349,18 +329,18 @@ fn appdata_refresh_preserves_persisted_ui_settings() {
 #[test]
 fn failed_backend_settings_save_leaves_snapshot_and_live_appdata_unchanged() {
     let services = BackendServices::for_test_with_settings_persist_enabled();
-    let before = services.config().settings_snapshot();
+    let before = services.settings_snapshot();
 
     let settings_file = services.app_data_snapshot_for_test().paths.settings_file;
     fs::create_dir_all(&settings_file).expect("directory blocks the settings file");
 
-    let result = services.config().update_settings_snapshot(|settings| {
+    let result = services.update_settings_snapshot(|settings| {
         settings.backend.sounds = !settings.backend.sounds;
         settings.backend.language = Some("unsaved".to_owned());
     });
 
     assert!(result.is_err(), "saving over a directory must fail");
-    assert_eq!(services.config().settings_snapshot(), before);
+    assert_eq!(services.settings_snapshot(), before);
 }
 
 #[test]
@@ -374,7 +354,6 @@ fn concurrent_settings_mutations_are_serialized_without_lost_fields() {
         std::thread::spawn(move || {
             barrier.wait();
             services
-                .config()
                 .update_settings_snapshot(|settings| settings.backend.sounds = false)
                 .expect("backend setting update");
         })
@@ -385,7 +364,6 @@ fn concurrent_settings_mutations_are_serialized_without_lost_fields() {
         std::thread::spawn(move || {
             barrier.wait();
             services
-                .config()
                 .update_settings_snapshot(|settings| {
                     settings.ui.theme_preset = ThemePreset::Light;
                 })
@@ -397,7 +375,7 @@ fn concurrent_settings_mutations_are_serialized_without_lost_fields() {
     backend_writer.join().expect("backend writer");
     ui_writer.join().expect("UI writer");
 
-    let settings = services.config().settings_snapshot();
+    let settings = services.settings_snapshot();
     assert!(!settings.backend.sounds);
     assert_eq!(settings.ui.theme_preset, ThemePreset::Light);
 }
@@ -409,13 +387,12 @@ fn stale_backend_settings_events_cannot_replace_a_newer_publication() {
     let stale = services.app_data_snapshot_for_test();
 
     services
-        .config()
         .update_settings_snapshot(|settings| settings.backend.sounds = false)
         .expect("newer settings update");
-    let applied = services.config().apply_appdata_snapshot(stale).0;
+    let applied = services.apply_appdata_snapshot(stale).0;
 
     assert!(!applied.backend.sounds);
-    assert!(!services.config().settings_snapshot().backend.sounds);
+    assert!(!services.settings_snapshot().backend.sounds);
 }
 
 #[test]
@@ -1181,23 +1158,22 @@ fn a_settings_save_publishes_the_configured_and_resolved_game_paths_together() {
     std::fs::create_dir_all(&gmod_dir).expect("gmod dir");
     let services = BackendServices::for_test();
 
-    assert_eq!(services.config().game_paths(), (None, None));
+    assert_eq!(services.game_paths(), (None, None));
 
     services
-        .config()
         .update_settings_snapshot(|settings| {
             settings.backend.gmod = Some(gmod_dir.clone());
         })
         .expect("settings should persist");
 
-    let (configured, resolved) = services.config().game_paths();
+    let (configured, resolved) = services.game_paths();
     assert_eq!(configured.as_deref(), Some(gmod_dir.as_path()));
     assert_eq!(
         resolved.as_deref(),
         Some(gmod_dir.as_path()),
         "the resolved path must reflect the settings published in the same write"
     );
-    let (settings, paths) = services.config().settings_and_paths_snapshot();
+    let (settings, paths) = services.settings_and_paths_snapshot();
     assert_eq!(settings.backend.gmod, configured);
     assert_eq!(paths.gmod_dir, resolved);
 }
@@ -1208,7 +1184,6 @@ fn downloader_workshop_submission_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .workshop()
             .submit_downloads(vec![PublishedFileId::fixture(123)])
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
@@ -1221,21 +1196,18 @@ fn workshop_metadata_refresh_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .workshop()
             .refresh_metadata(&[PublishedFileId::fixture(123)])
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
     assert_eq!(
         services
-            .workshop()
             .item_details(PublishedFileId::fixture(123))
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
     assert_eq!(
         services
-            .workshop()
             .user_details(SteamId::new(76561198000000000))
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
@@ -1248,14 +1220,12 @@ fn my_workshop_page_requires_connected_steam_runtime() {
 
     assert_eq!(
         services
-            .workshop()
             .browse_my_page(1)
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
     );
     assert_eq!(
         services
-            .workshop()
             .refresh_subscription_counts(1)
             .map_err(|error| error.to_string()),
         Err("ERR_STEAM_ERROR:STEAM_NOT_CONNECTED".to_owned())
@@ -1266,10 +1236,7 @@ fn my_workshop_page_requires_connected_steam_runtime() {
 fn my_workshop_zero_page_stats_refresh_is_noop_without_steam() {
     let services = BackendServices::for_test();
 
-    assert_eq!(
-        services.workshop().refresh_subscription_counts(0),
-        Ok(HashMap::new())
-    );
+    assert_eq!(services.refresh_subscription_counts(0), Ok(HashMap::new()));
 }
 
 #[test]
@@ -1359,7 +1326,7 @@ fn publish_submit_requires_connected_steam_runtime_and_errors_transaction() {
     let transaction = services.begin_transaction();
     let transaction_id = transaction.id();
 
-    let result = services.publish().submit(
+    let result = services.submit_publish(
         PublishSubmitRequest {
             language: gmpublished_backend::WorkshopLanguage::English,
             localized_drafts: Default::default(),
@@ -1563,9 +1530,7 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
     };
     let dead_item = WorkshopItem::dead(PublishedFileId::fixture(456));
 
-    let metadata = services
-        .workshop()
-        .cache_items_for_test(&[live_item, dead_item]);
+    let metadata = services.cache_items_for_test(&[live_item, dead_item]);
 
     assert_eq!(
         metadata,
@@ -1584,7 +1549,7 @@ fn workshop_metadata_cache_projects_live_items_and_skips_dead_items() {
         }]
     );
 
-    let (cached, stale) = services.workshop().resolve_metadata(&[
+    let (cached, stale) = services.resolve_metadata(&[
         PublishedFileId::fixture(123),
         PublishedFileId::fixture(456),
         PublishedFileId::fixture(789),
@@ -1602,10 +1567,9 @@ fn workshop_detail_cache_persists_full_description_across_summary_refreshes() {
     let mut item = live_workshop_item_for_metadata_tests(123);
     item.description = Some("  Full Workshop description  ".to_owned());
 
-    services.workshop().cache_item_details_for_test(&item);
+    services.cache_item_details_for_test(&item);
     let id = item.id;
     let cached = services
-        .workshop()
         .cached_item_details(id)
         .expect("detail query should populate the detail cache");
     assert_eq!(
@@ -1615,9 +1579,8 @@ fn workshop_detail_cache_persists_full_description_across_summary_refreshes() {
     assert_eq!(cached.owner_steamid, item.steamid);
 
     item.description = Some("short summary".to_owned());
-    services.workshop().cache_items_for_test(&[item]);
+    services.cache_items_for_test(&[item]);
     let cached = services
-        .workshop()
         .cached_item_details(id)
         .expect("summary refresh should retain full details");
     assert_eq!(
@@ -1647,27 +1610,19 @@ fn live_workshop_item_for_metadata_tests(id: u64) -> WorkshopItem {
 #[test]
 fn workshop_metadata_older_than_ttl_serves_stale_while_marking_for_refresh() {
     let services = BackendServices::for_test();
-    let metadata = services
-        .workshop()
-        .cache_items_for_test(&[live_workshop_item_for_metadata_tests(123)]);
+    let metadata = services.cache_items_for_test(&[live_workshop_item_for_metadata_tests(123)]);
 
-    let (cached, stale) = services
-        .workshop()
-        .resolve_metadata(&[PublishedFileId::fixture(123)]);
+    let (cached, stale) = services.resolve_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, metadata);
     assert!(stale.is_empty());
 
     let aged =
         metadata_snapshot::now_unix_seconds() - metadata_snapshot::METADATA_TTL.as_secs() - 1;
-    services
-        .workshop()
-        .set_metadata_fetched_at_for_test(PublishedFileId::fixture(123), aged);
+    services.set_metadata_fetched_at_for_test(PublishedFileId::fixture(123), aged);
 
     // Stale-while-revalidate: the aged entry still renders AND is re-queued
     // for the background refresh.
-    let (cached, stale) = services
-        .workshop()
-        .resolve_metadata(&[PublishedFileId::fixture(123)]);
+    let (cached, stale) = services.resolve_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, metadata);
     assert_eq!(stale, vec![PublishedFileId::fixture(123)]);
 }
@@ -1679,19 +1634,15 @@ fn workshop_metadata_snapshot_write_hydrates_across_restart() {
 
     let mut services = BackendServices::for_test();
     services.set_metadata_snapshot_file_for_test(snapshot_file.clone());
-    let written = services
-        .workshop()
-        .cache_items_for_test(&[live_workshop_item_for_metadata_tests(123)]);
-    services.workshop().persist_metadata_cache();
+    let written = services.cache_items_for_test(&[live_workshop_item_for_metadata_tests(123)]);
+    services.persist_metadata_cache();
     assert!(snapshot_file.is_file());
 
     let mut restarted = BackendServices::for_test();
     restarted.set_metadata_snapshot_file_for_test(snapshot_file);
-    restarted.workshop().hydrate_metadata_snapshot();
+    restarted.hydrate_metadata_snapshot();
 
-    let (cached, stale) = restarted
-        .workshop()
-        .resolve_metadata(&[PublishedFileId::fixture(123)]);
+    let (cached, stale) = restarted.resolve_metadata(&[PublishedFileId::fixture(123)]);
     assert_eq!(cached, written);
     assert!(stale.is_empty());
 }
@@ -1778,12 +1729,18 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
 
 #[test]
 fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events() {
-    use gmpublished_backend::{ExtractDestination, ExtractOptions, GmaFile, Whitelist};
+    use crate::bridge::gma::{ExtractDestination, PreviewArchive};
 
     let _lock = BACKEND_EVENT_SINK_TEST_LOCK.lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let gma_path = temp.path().join("fixture.gma");
-    write_raw_gma(&gma_path, &[("lua/autorun/safe.lua", b"safe")]);
+    write_raw_gma(
+        &gma_path,
+        &[
+            ("lua/autorun/safe.lua", b"safe"),
+            ("notes/private.bin", b"unlisted"),
+        ],
+    );
 
     let ctx = BackendContext::new_with_backend_event_sink_for_test();
     let backend_receiver = ctx
@@ -1795,21 +1752,15 @@ fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events(
         .take_receiver()
         .expect("task event receiver");
 
-    let gma = GmaFile::open(&gma_path).expect("fixture gma");
-    let view = gma.view().expect("fixture view");
+    let archive = PreviewArchive::open(&gma_path).expect("fixture archive");
     let transaction = ctx.begin_transaction();
     let task = ctx.create_task(TaskKind::Extract, TransactionStatus::Extracting);
     ctx.correlate_backend_transaction(transaction.id(), task);
 
     let extract_dir = temp.path().join("extract");
-    ctx.extract_gma_for_test(
-        &view,
-        &gma,
+    ctx.extract_preview_archive(
+        &archive,
         ExtractDestination::Directory(extract_dir.clone()),
-        ExtractOptions {
-            open_after: false,
-            whitelist: Whitelist::Ignore,
-        },
         &transaction,
     )
     .expect("extract fixture");
@@ -1827,6 +1778,10 @@ fn correlated_local_gma_extraction_updates_task_from_backend_transaction_events(
     assert_eq!(
         std::fs::read_to_string(extract_dir.join("lua/autorun/safe.lua")).expect("extracted file"),
         "safe"
+    );
+    assert_eq!(
+        std::fs::read(extract_dir.join("notes/private.bin")).expect("unlisted file"),
+        b"unlisted"
     );
 }
 
@@ -1894,33 +1849,32 @@ fn workshop_cache_never_reuses_another_languages_title_or_full_description() {
     let mut item = live_workshop_item_for_metadata_tests(123);
     item.title = "English title".into();
     item.description = Some("English description".into());
-    services.workshop().set_language(Language::English);
-    services.workshop().cache_item_details_for_test(&item);
-    assert!(services.workshop().cached_item_details(item.id).is_some());
-    services.workshop().set_language(Language::French);
-    assert!(services.workshop().cached_item_details(item.id).is_none());
+    services.set_workshop_language(Language::English);
+    services.cache_item_details_for_test(&item);
+    assert!(services.cached_item_details(item.id).is_some());
+    services.set_workshop_language(Language::French);
+    assert!(services.cached_item_details(item.id).is_none());
     assert_eq!(
-        services.workshop().resolve_metadata(&[item.id]),
+        services.resolve_metadata(&[item.id]),
         (vec![], vec![item.id])
     );
     item.title = "Titre français".into();
     item.description = Some("Résumé".into());
-    services.workshop().cache_items_for_test(&[item.clone()]);
-    let (metadata, stale) = services.workshop().resolve_metadata(&[item.id]);
+    services.cache_items_for_test(&[item.clone()]);
+    let (metadata, stale) = services.resolve_metadata(&[item.id]);
     assert!(stale.is_empty());
     assert_eq!(metadata[0].title, "Titre français");
     assert!(metadata[0].full_description.is_none());
     item.description = Some("Description française".into());
-    services.workshop().cache_item_details_for_test(&item);
+    services.cache_item_details_for_test(&item);
     assert_eq!(
         services
-            .workshop()
             .cached_item_details(item.id)
             .unwrap()
             .full_description
             .as_deref(),
         Some("Description française")
     );
-    services.workshop().set_language(Language::English);
-    assert!(services.workshop().cached_item_details(item.id).is_none());
+    services.set_workshop_language(Language::English);
+    assert!(services.cached_item_details(item.id).is_none());
 }
