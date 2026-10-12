@@ -29,10 +29,8 @@ use crate::{
     transactions::Transactions,
 };
 
-/// Cadence `Downloads::watchdog` re-checks in-progress download callbacks at.
 const CALLBACK_PUMP_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Granularity of legacy-CDN download progress events.
 const HTTP_PROGRESS_STEP: f64 = 0.01;
 
 #[derive(Debug)]
@@ -153,13 +151,10 @@ fn append_pending_batch<T>(downloading: &mut Vec<T>, pending: &mut Vec<T>) -> us
     batch_len
 }
 
-/// Everything [`Downloads::watchdog`] parks on, under one mutex — a condvar
-/// predicate has to be guarded by the mutex the notifier holds, or the wakeup
-/// is lost.
+/// Guard the queue predicate and its condvar with the same mutex to avoid lost wakeups.
 #[derive(Default)]
 struct WatchdogQueue {
     ready: Vec<Download>,
-    /// Set once by [`Downloads::wake_watchdog`]; never cleared.
     shutting_down: bool,
 }
 
@@ -169,11 +164,7 @@ impl WatchdogQueue {
     }
 }
 
-/// Identifies one submission batch for cancellation purposes.
-///
-/// `request_id` carries two facts: which app request a download belongs to,
-/// and — by its absence — that the download is part of a bulk batch and so
-/// covered by `cancel_all`. An explicitly requested single download is exempt.
+/// Bulk cancellation excludes single downloads with an explicit `request_id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BatchToken {
     epoch: CancellationEpoch,
@@ -212,9 +203,8 @@ mod batch_token_tests {
 pub(crate) struct Downloads {
     pending: Mutex<Vec<Download>>,
     downloading: Mutex<WatchdogQueue>,
-    /// Signals the watchdog that [`Self::downloading`] changed. It parks here
-    /// with no timeout while the queue is empty, so shutdown has to wake it
-    /// explicitly — see [`Self::wake_watchdog`].
+    /// The watchdog parks without a timeout when idle. Shutdown must explicitly
+    /// wake it via Self::wake_watchdog.
     watchdog: Condvar,
     /// Bumped by [`Self::cancel_all`]. Submission batches capture the epoch
     /// on entry and stop queueing new downloads once it moves, so a
@@ -249,9 +239,6 @@ impl Downloads {
         }
     }
 
-    /// Stops in-flight submission batches from queueing any further
-    /// downloads. Already-queued items are cancelled through their
-    /// individual transactions, not here.
     pub(crate) fn cancel_all(&self) {
         self.cancel_epoch.fetch_add(1, Ordering::SeqCst);
     }
@@ -260,8 +247,6 @@ impl Downloads {
         CancellationEpoch(self.cancel_epoch.load(Ordering::SeqCst)) != epoch
     }
 
-    /// Whether `cancel_all` has fired since `token`'s batch began *and*
-    /// covers it.
     fn batch_cancelled(&self, token: BatchToken) -> bool {
         !token.is_exempt_from_cancel_all() && self.cancelled_since(token.epoch)
     }
@@ -291,14 +276,9 @@ impl Downloads {
         let schedule = self
             .execution
             .spawn_blocking("workshop-extraction", move || {
-                // Keeps a downloaded temp payload alive until extraction is done.
                 let _temp_guard = temp_guard;
                 let transaction = worker_transaction;
 
-                // Installed workshop content keeps its .gma on disk after
-                // extraction, so the started event advertises it as a
-                // previewable source. Temp payloads (the .bin branch below) are
-                // deleted once extraction finishes, so they stay anonymous.
                 let source_gma = if folder.is_dir() {
                     unique_gma_in_dir(&folder)
                 } else {
@@ -461,7 +441,6 @@ impl Downloads {
         }
     }
 
-    /// Emits the failed-download row shown when Steam does not know an item.
     fn missing_item(&self, item: WorkshopId, token: BatchToken) {
         if self.batch_cancelled(token) {
             return;
@@ -510,10 +489,6 @@ impl Downloads {
         };
         let extract_destination = Arc::new(extract_destination);
 
-        // Web API preflight: resolves collections and legacy CDN URLs in a
-        // few batched keyless calls, with no side effects on failure —
-        // items with a public `file_url` then bypass the Steam client's
-        // serial download queue entirely.
         let (known_items, possible_collections) = self.steam.with_known_workshop_items(|cache| {
             cache.map_or_else(
                 || (Vec::new(), ids.clone()),
@@ -534,9 +509,6 @@ impl Downloads {
         Ok(())
     }
 
-    /// Routes preflighted items to the cheapest lane: already-installed
-    /// content extracts from disk, legacy items download in parallel over
-    /// HTTPS, SteamPipe items queue on the Steam client.
     fn dispatch_preflighted(
         self: &Arc<Self>,
         details: Vec<webapi::PublishedFileDetail>,
@@ -653,8 +625,7 @@ impl Downloads {
         }
     }
 
-    /// Streams one legacy CDN payload to a temp `.bin`. Returns `Ok(None)`
-    /// when the transaction was aborted mid-transfer.
+    /// Return Ok(None) if cancellation interrupts the CDN transfer.
     fn http_download(
         &self,
         url: &str,
@@ -726,14 +697,8 @@ impl Downloads {
         }
         writer.flush()?;
 
-        // A short body must not read as a finished download: the truncated
-        // `.bin` would go straight to the extractor and surface as a GMA
-        // format error, blaming the addon for a transfer that was cut off.
-        //
-        // Comparable only because the workspace builds ureq without its
-        // compression features, so nothing between the header and this counter
-        // re-encodes the body. Enabling gzip/brotli would make `written` the
-        // decompressed length and this check wrong.
+        // Reject short transfers before extraction. This compares wire bytes only
+        // because ureq's compression features are disabled.
         if let Some(content_length) = content_length
             && written < content_length
         {
@@ -746,8 +711,6 @@ impl Downloads {
         Ok(Some(temp_path))
     }
 
-    // The pending guard is deliberately held across the whole batch append
-    // so a concurrent download() cannot interleave mid-batch.
     #[expect(clippy::significant_drop_tightening)]
     fn download_via_steamworks(
         self: &Arc<Self>,
@@ -782,8 +745,6 @@ impl Downloads {
             ) {
                 Ok(query) => query,
                 Err(error) => {
-                    // Steam refused to create the query; surface it as a failed
-                    // download task instead of aborting the process.
                     let transaction = self.transactions.begin();
                     self.transactions
                         .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
@@ -839,10 +800,6 @@ impl Downloads {
                                                     Vec::new()
                                                 })
                                                 .into_iter()
-                                                // A child of zero names no
-                                                // item; Steam should not send
-                                                // one, and there is nothing to
-                                                // download if it does.
                                                 .filter_map(|child| WorkshopId::try_from(child).ok())
                                                 .collect(),
                                         })
@@ -911,25 +868,17 @@ impl Downloads {
         self.watchdog.notify_one();
     }
 
-    /// Latches the shutdown flag and wakes [`Self::watchdog`]. Registered as a
-    /// shutdown waker when the watchdog is spawned.
     pub(super) fn wake_watchdog(&self) {
         self.downloading.lock().shutting_down = true;
         self.watchdog.notify_all();
     }
 
-    // Condvar pairings in the drain loop: the guards are handed to
-    // `wait_while` (the idle park) and `wait_for` (the in-flight poll).
     #[expect(clippy::significant_drop_tightening)]
     pub(super) fn watchdog(
         downloads: &Arc<Self>,
         client: &steamworks::Client,
         shutdown: &crate::signal::Signal,
     ) {
-        // `Option`, not a map: the Steam client downloads workshop items
-        // serially, so exactly one can be in flight. The loop below only ever
-        // started a download when the map was empty — which made "at most one"
-        // an invariant of the loop rather than a fact about the type.
         let in_progress_state: Arc<(Mutex<Option<Download>>, Condvar)> =
             Arc::new((Mutex::new(None), Condvar::new()));
         let in_progress_ref = in_progress_state.clone();
@@ -979,12 +928,9 @@ impl Downloads {
             }
         });
 
-        // The Steam client downloads workshop items serially, and every
-        // high-priority DownloadItem call preempts the in-flight one — so
-        // items are fed one at a time: high priority (which also overrides
-        // the client's "pause downloads during gameplay" policy, active
-        // because this process runs as appid 4000) without ever preempting
-        // our own queue.
+        // High-priority DownloadItem calls preempt the current download, so send
+        // one at a time. High priority also bypasses Steam's gameplay pause policy,
+        // which applies while this process uses appid 4000.
         let mut queue: VecDeque<Download> = VecDeque::new();
         loop {
             // Checked here rather than only at the idle park: a shutdown
@@ -1026,10 +972,8 @@ impl Downloads {
 
             let ugc = client.ugc();
             let keep = in_progress.as_ref().is_some_and(|download| {
-                // ISteamUGC has no per-item cancel: dropping our tracking is
-                // all a cancel can do here — the Steam client finishes the
-                // transfer in the background, and the completion callback
-                // above ignores untracked items instead of extracting them.
+                // ISteamUGC has no per-item cancel. Stop tracking the item and ignore its
+                // completion callback; Steam finishes the transfer in the background.
                 if download.transaction.aborted() {
                     return false;
                 }
@@ -1055,7 +999,6 @@ impl Downloads {
             }
 
             if in_progress.is_none() {
-                // Feed the next queued item immediately.
                 continue;
             }
 
@@ -1082,8 +1025,6 @@ pub(crate) fn queue_workshop_download_to(
     downloads.download_one_to(item, destination, request_id)
 }
 
-/// The folder's single `.gma` payload; `None` when absent or ambiguous
-/// (multiple `.gma` files mean we'd be guessing which one to use).
 fn unique_gma_in_dir(folder: &std::path::Path) -> Option<PathBuf> {
     let mut gma_path = None;
     for entry in folder.read_dir().ok()?.flatten() {

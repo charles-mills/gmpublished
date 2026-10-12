@@ -55,12 +55,6 @@ impl App {
             })
     }
 
-    /// Runs the quick document-open extraction flow for `.gma` paths opened
-    /// via the OS file association (macOS double-click / "Open With").
-    ///
-    /// Paths are filtered (existing, unique, `.gma`) at the bridge, each
-    /// archive extracts to the temp destination on a worker thread with its
-    /// own task overlay row, and the extracted folder opens on success.
     #[cfg(target_os = "macos")]
     pub(super) fn gma_documents_opened_task(&self, paths: Vec<PathBuf>) -> Task<RootMessage> {
         for path in crate::platform_open::filter_open_gma_paths(paths) {
@@ -166,9 +160,9 @@ impl App {
             .ctx
             .run_blocking("downloader-workshop-title", move |app| {
                 let requested_item_ids = item_ids.clone();
-                let (mut items, stale_ids) = app.workshop().resolve_metadata(&item_ids);
-                if !stale_ids.is_empty() && app.workshop().connected() {
-                    match app.workshop().refresh_metadata(&stale_ids) {
+                let (mut items, stale_ids) = app.resolve_metadata(&item_ids);
+                if !stale_ids.is_empty() && app.steam_connected() {
+                    match app.refresh_metadata(&stale_ids) {
                         Ok(fresh_items) => items.extend(fresh_items),
                         Err(error) => {
                             log::debug!("Downloader Workshop title refresh failed: {error}");

@@ -1,8 +1,3 @@
-//! Composition root: constructs every backend service, wires their
-//! dependencies together explicitly, and owns the process-lifetime execution
-//! and background runtimes. Services take dependencies as constructor
-//! parameters or fields set here rather than reaching for each other.
-
 use std::{
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -27,37 +22,20 @@ use crate::{
     transactions::Transactions,
 };
 
-/// Configures one `Backend` instance: the event sink it delivers to and
-/// environment-path overrides for tests.
-///
-/// A caller that wants no events delivered — the headless CLI extraction path
-/// — says so by passing [`NullEventSink`], rather than by a mode flag the
-/// services below would each have to know about.
 pub struct BackendConfig {
     pub event_sink: Arc<dyn BackendEventSink>,
-    /// Overrides the OS-derived settings/temp/user-data/downloads roots.
-    /// Production leaves this `None`; tests pass a private tempdir so
-    /// parallel test processes never share a settings file.
+    /// Overrides settings, temp, user-data, and download paths. Tests use a private tempdir.
     pub data_root: Option<PathBuf>,
-    /// Whether process-lifetime Steam and whitelist services may be started.
     pub background_services: BackgroundServices,
-    /// Whether process-global logging should write to this backend's app-data
-    /// directory. Test backends disable it because many isolated roots coexist
-    /// in one process and only the first can own the global sink.
+    /// Logging has one process-wide sink; tests with separate data roots must disable it.
     pub file_logging: bool,
-    /// Process-wide execution budgets. Calculated once by the composition
-    /// root rather than independently by each subsystem.
     pub execution: ExecutionConfig,
 }
 
-/// Controls process-lifetime services independently from construction of the
-/// cheap service handles they use.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BackgroundServices {
-    /// Allow an explicit, one-shot start after backend construction.
     #[default]
     Enabled,
-    /// Never start them (CLI and isolated tests).
     Disabled,
 }
 
@@ -74,9 +52,6 @@ impl Default for BackendConfig {
 }
 
 impl BackendConfig {
-    /// A config appropriate for tests: no event delivery beyond what the
-    /// caller wires up, a private tempdir root, and no background threads
-    /// (no Steam connect attempt, no whitelist network fetch).
     #[must_use]
     pub fn for_test(data_root: &std::path::Path) -> Self {
         Self {
@@ -120,8 +95,6 @@ impl Drop for Backend {
     }
 }
 
-/// A failure during backend construction. Fatal: it aborts startup before any
-/// window exists, so it is printed rather than localized — no `HasErrorKey`.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendInitError {
     #[error("failed to install backend logger: {0}")]
@@ -135,14 +108,12 @@ pub enum BackendInitError {
     },
 }
 
-/// Failure to start a process-lifetime background service.
 #[derive(Debug, thiserror::Error)]
 #[error("failed to start backend background services: {source}")]
 pub struct BackgroundStartError {
     source: Box<dyn std::error::Error + Send + Sync>,
 }
 
-/// Result of asking the process-lifetime services to start.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackgroundStartOutcome {
     Started,
@@ -233,7 +204,7 @@ impl Backend {
     #[must_use]
     pub fn quick_search(
         &self,
-        query: String,
+        query: &str,
         scope: crate::search::SearchScope,
     ) -> crate::search::QuickSearchResult {
         self.search.quick_search_with_scope(query, scope)
@@ -321,21 +292,6 @@ impl Backend {
         )
     }
 
-    pub fn update_publish_description(
-        &self,
-        workshop_id: crate::WorkshopId,
-        description: &str,
-        transaction: &crate::Transaction,
-    ) -> Result<bool, crate::steam::publishing::PublishError> {
-        self.update_publish_metadata(
-            workshop_id,
-            crate::WorkshopLanguage::English,
-            None,
-            Some(description),
-            transaction,
-        )
-    }
-
     pub fn update_publish_metadata(
         &self,
         workshop_id: crate::WorkshopId,
@@ -402,9 +358,7 @@ impl Backend {
         self.search.clear();
     }
 
-    /// Constructs every service in dependency order. Process-lifetime work
-    /// remains dormant until the caller explicitly releases it with
-    /// [`Self::start_background_services`].
+    /// Construction leaves background work dormant until start_background_services is called.
     pub fn init(config: BackendConfig) -> Result<Arc<Self>, BackendInitError> {
         let BackendConfig {
             event_sink,
@@ -471,8 +425,6 @@ impl Backend {
         Ok(backend)
     }
 
-    /// Resolves one extraction against a coherent snapshot of paths,
-    /// overwrite mode and whitelist policy before the archive reader starts.
     pub fn resolve_extraction(
         &self,
         handle: &GmaFile,
@@ -489,8 +441,6 @@ impl Backend {
         )
     }
 
-    /// Starts process-lifetime services at most once and reports the exact
-    /// lifecycle state observed by the request.
     pub fn start_background_services(
         self: &Arc<Self>,
     ) -> Result<BackgroundStartOutcome, BackgroundStartError> {
@@ -523,7 +473,6 @@ impl Backend {
                 whitelist.refresh_from_remote();
             })
         {
-            // The built-in list stays in force; only the remote refresh is lost.
             log::warn!("could not schedule the GMA whitelist warm-up: {error}");
         }
         Ok(BackgroundStartOutcome::Started)

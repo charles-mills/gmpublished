@@ -7,17 +7,6 @@ use crate::generation::Generation;
 use crate::media::thumbnail_demand;
 use crate::widgets::addon_grid;
 
-/// What identifies one card within a grid.
-///
-/// A distinct type rather than a `String` for two reasons. It is compared and
-/// carried on every hover, click and delivery, so an `Arc` clone replaces a
-/// string copy on each of those. And a card id, a row title and an archive
-/// path are all text: giving the id its own type is what stops one being
-/// passed where another belongs.
-///
-/// Opaque on purpose — the grid never interprets it. Each feature mints ids in
-/// whatever shape identifies its rows (a workshop id, an addon path) and only
-/// ever compares them.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CardId(Arc<str>);
 
@@ -27,11 +16,6 @@ impl CardId {
     }
 }
 
-/// Lets the id index be probed with a borrowed `&str`.
-///
-/// Deliveries arrive carrying a plain string; without this, matching one to
-/// its row means minting a `CardId` — an allocation per delivery, which is the
-/// cost this type exists to remove.
 impl std::borrow::Borrow<str> for CardId {
     fn borrow(&self) -> &str {
         &self.0
@@ -56,19 +40,14 @@ impl fmt::Display for CardId {
     }
 }
 
-/// Longest edge a grid card's thumbnail is decoded to.
 pub const ADDON_THUMBNAIL_MAX_EDGE: u32 = 256;
 
-/// Grid cards animate on hover only: a wall of GIFs all playing at once is
-/// both unreadable and expensive.
 pub const THUMBNAIL_PLAY_POLICY: crate::media::thumbnail_animation::PlayPolicy =
     crate::media::thumbnail_animation::PlayPolicy::OnHover;
 
-/// What a grid card currently has to draw.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowThumbnail {
     Loading,
-    /// Blurred ThumbHash stand-in shown until the real pixels decode.
     Placeholder(iced::widget::image::Handle),
     Dead,
     Ready {
@@ -77,11 +56,6 @@ pub enum RowThumbnail {
     },
 }
 
-/// What [`GridPane`] needs of a row to draw and animate it.
-///
-/// The split is deliberate: this covers only how a row *presents*, so the pane
-/// can drive one without knowing which route owns it. What a row *means* —
-/// where it came from, what a click on it does — stays with the route.
 pub trait GridRow {
     fn id(&self) -> &CardId;
 
@@ -99,7 +73,6 @@ pub trait GridRow {
     /// for cards that are not playing.
     fn is_animating(&self, play_gifs_by_default: bool) -> bool;
 
-    /// Advances one frame; returns whether anything changed.
     fn advance_animation(&mut self, elapsed: Duration, play_gifs_by_default: bool) -> bool;
 
     fn thumbnail_demand(
@@ -152,12 +125,6 @@ fn thumbnail_demands_for_range<R: GridRow>(
         .filter_map(move |row| row.thumbnail_demand(priority))
 }
 
-/// Releases Ready thumbnails outside visible+prefetch so scrolled-away rows
-/// stop pinning decoded RGBA; the demand/cache path re-delivers on return.
-///
-/// Returns the indices actually changed, not a bare "something changed", so a
-/// release that touches two rows costs two card refreshes rather than a full
-/// sweep of the library.
 pub fn release_offscreen_thumbnails<R: GridRow>(
     rows: &mut [R],
     visible_range: Range<usize>,
@@ -171,14 +138,6 @@ pub fn release_offscreen_thumbnails<R: GridRow>(
         if !retained.contains(&index) && row.invalidate_ready_thumbnail() {
             changed.push(index);
         }
-    }
-    changed
-}
-
-pub fn invalidate_ready_thumbnails<R: GridRow>(rows: &mut [R]) -> bool {
-    let mut changed = false;
-    for row in rows {
-        changed |= row.invalidate_ready_thumbnail();
     }
     changed
 }
@@ -211,31 +170,9 @@ pub fn append_grid_follow_up_effects<S, E>(
     }
 }
 
-/// The grid widget a card route draws into, plus the per-route bookkeeping
-/// that surrounds it.
-///
-/// Shared by both card routes (My Workshop, Installed Addons): the id index,
-/// delivery routing, animation tick and display flags are the same mechanism
-/// whichever `Row` fills it.
-///
-/// Rows themselves stay with the route. Each owns them differently — a paged
-/// accumulation on one side, a scan outcome on the other — and holding them
-/// here would put a row set beside a status that has to agree with it.
-///
-/// A route may place items before its rows (My Workshop's "publish new" tile),
-/// so a row index and its grid item index are not equal. That offset is
-/// recalculated by [`Self::sync_items`] from the lead it actually placed,
-/// rather than accepted as a caller-supplied claim that could disagree with
-/// the grid.
 #[derive(Debug)]
 pub struct GridPane {
     grid: addon_grid::State,
-    /// Card id -> index into the route's rows.
-    ///
-    /// A delivery names exactly one row. Without this, finding it and then
-    /// refreshing costs O(rows) twice per delivery — and deliveries arrive in
-    /// bursts, which is what dominates per-tick tail latency on large
-    /// libraries.
     row_index: HashMap<CardId, usize>,
     lead_cards: usize,
     play_gifs_by_default: bool,
@@ -282,7 +219,6 @@ impl GridPane {
         self.last_animation_tick = None;
     }
 
-    /// Each returns whether the value changed, so a caller can skip a re-sync.
     pub fn set_play_gifs_by_default(&mut self, enabled: bool) {
         self.play_gifs_by_default = enabled;
     }
@@ -299,13 +235,11 @@ impl GridPane {
         self.index_of_str(id.as_str())
     }
 
-    /// Looks up by borrowed text, for callers holding a delivery's raw id.
     pub fn index_of_str(&self, id: &str) -> Option<usize> {
         self.row_index.get(id).copied()
     }
 
-    /// Rebuilds the id index. Must follow every mutation of the route's rows,
-    /// which is why the sync helpers below do it rather than each call site.
+    /// Rebuild the id index after every change to the rows.
     pub fn reindex<R: GridRow>(&mut self, rows: &[R]) {
         self.row_index.clear();
         self.row_index.reserve(rows.len());
@@ -314,13 +248,6 @@ impl GridPane {
         }
     }
 
-    /// Replaces the grid's items with `lead` followed by `rows`, reindexes,
-    /// and re-derives the row/item offset from the lead actually placed.
-    ///
-    /// Every path that changes the items goes through here, which is what
-    /// makes the offset used by [`Self::visible_row_range`] and
-    /// [`Self::refresh_item_thumbnail`] a fact about the grid rather than a
-    /// claim about it.
     #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub fn sync_items<R: GridRow>(
         &mut self,
@@ -353,7 +280,6 @@ impl GridPane {
             .update_item_thumbnail(index + self.lead_cards, &id, thumbnail);
     }
 
-    /// The row range currently on screen, in row (not item) coordinates.
     pub fn visible_row_range(&self, row_count: usize) -> Range<usize> {
         self.rows_within(self.grid.visible_item_range(), row_count)
     }
@@ -390,8 +316,22 @@ impl GridPane {
         thumbnail_demands(rows, self.visible_row_range(rows.len()), generation, owner)
     }
 
-    /// Releases off-screen thumbnails and refreshes only the cards that
-    /// changed. Returns whether anything did.
+    pub fn invalidate_ready_thumbnails<R: GridRow>(&mut self, rows: &mut [R]) -> bool {
+        let mut changed = false;
+        for index in 0..rows.len() {
+            if rows[index].invalidate_ready_thumbnail() {
+                self.refresh_item_thumbnail(rows, index);
+                changed = true;
+            }
+        }
+        if changed {
+            self.clear_animation_clock();
+        }
+        changed
+    }
+
+    /// Retain the visible and prefetch window even while hidden so returning
+    /// to a route paints cached pixels without replaying every card's fade-in.
     pub fn release_offscreen_thumbnails<R: GridRow>(&mut self, rows: &mut [R]) -> bool {
         let visible = self.visible_row_range(rows.len());
         let changed = release_offscreen_thumbnails(rows, visible);
@@ -410,8 +350,6 @@ impl GridPane {
                 .any(|row| row.is_animating(self.play_gifs_by_default))
     }
 
-    /// Advances visible rows' animations and swaps the changed frames into
-    /// their cards. Returns whether anything moved.
     pub fn tick_visible_animations<R: GridRow>(
         &mut self,
         rows: &mut [R],
@@ -447,7 +385,6 @@ mod tests {
     use crate::media::thumbnail_demand;
     use crate::widgets::{addon_card, addon_grid};
 
-    /// The least a row can be and still be drawn.
     struct TestRow(CardId);
 
     impl GridRow for TestRow {
@@ -497,9 +434,6 @@ mod tests {
             .collect()
     }
 
-    /// The offset must come from what was actually placed. Stored separately,
-    /// it can disagree with the grid — and then every row range, thumbnail
-    /// swap and animation tick is off by that difference, silently.
     #[test]
     fn the_row_offset_is_derived_from_the_lead_actually_placed() {
         let mut pane = GridPane::new(true);
@@ -515,7 +449,6 @@ mod tests {
         assert_eq!(pane.grid().items_len(), 4);
     }
 
-    /// Losing the lead tile must move the offset back with it.
     #[test]
     fn dropping_the_lead_returns_the_offset_to_zero() {
         let mut pane = GridPane::new(true);
@@ -529,10 +462,6 @@ mod tests {
         assert_eq!(pane.lead_cards_for_test(), 0);
     }
 
-    /// Item indices include the route's lead cards; row indices do not. A pane
-    /// that conflated them would tick and demand the wrong rows — off by
-    /// exactly the number of lead cards, which is invisible until the list is
-    /// long enough for the last row to fall off the end.
     #[test]
     fn a_lead_card_shifts_item_indices_off_the_row_range() {
         let with_lead = GridPane::with_lead_cards_for_test(1);
@@ -550,7 +479,6 @@ mod tests {
         assert_eq!(no_lead.visible_row_range_for_test(2..5, 10), 2..5);
     }
 
-    /// A range running past the rows is clamped, not wrapped.
     #[test]
     fn a_range_beyond_the_rows_is_clamped() {
         let pane = GridPane::with_lead_cards_for_test(1);

@@ -28,7 +28,6 @@ pub(super) fn publish_submission_from_app_request(
     request: PublishSubmitRequest,
 ) -> steam_publishing::PublishSubmission {
     let (icon_path, upscale) = publish_preview_from_app_request(request.preview);
-    // The changelog belongs to the update case, so it travels inside it.
     let mode = match request.mode {
         PublishSubmitMode::New => steam_publishing::PublishSubmissionMode::Create,
         PublishSubmitMode::Update { workshop_id } => {
@@ -76,7 +75,7 @@ pub(super) fn search_quick_batch_from_backend(
     SearchQuickBatch::new(key, hits, result.has_more)
 }
 
-pub(super) fn search_full_batch_from_transaction_payload(
+pub fn search_full_batch_from_transaction_payload(
     request: &SearchFullRequest,
     sequence: u64,
     payload: &TransactionPayload,
@@ -102,9 +101,6 @@ pub(super) fn search_hit_from_backend(hit: &gmpublished_backend::QuickSearchHit)
 pub(super) fn search_item_from_backend(item: &gmpublished_backend::SearchItem) -> SearchItem {
     SearchItem {
         label: item.label().to_owned(),
-        terms: item.terms().to_vec(),
-        timestamp: item.timestamp,
-        len: item.len,
         source: search_item_source_from_backend(&item.source),
     }
 }
@@ -113,9 +109,6 @@ pub(super) fn search_item_source_from_backend(
     source: &gmpublished_backend::SearchItemSource,
 ) -> SearchItemSource {
     match source {
-        // The backend's own `PublishedFileId` already excludes zero (see
-        // its `nonzero_workshop_id` helper), so every id it hands us
-        // converts cleanly.
         gmpublished_backend::SearchItemSource::InstalledAddons(path, id) => {
             SearchItemSource::InstalledAddons(path.clone(), id.map(PublishedFileId::from))
         }
@@ -132,8 +125,11 @@ pub(super) fn search_item_source_from_backend(
             size_bytes: *size_bytes,
             crc32: *crc32,
         },
-        gmpublished_backend::SearchItemSource::MyWorkshop(id) => {
-            SearchItemSource::MyWorkshop(PublishedFileId::from(*id))
+        gmpublished_backend::SearchItemSource::MyWorkshop { id, tags } => {
+            SearchItemSource::MyWorkshop {
+                id: PublishedFileId::from(*id),
+                tags: tags.clone(),
+            }
         }
         gmpublished_backend::SearchItemSource::WorkshopItem(id) => {
             SearchItemSource::WorkshopItem(PublishedFileId::from(*id))

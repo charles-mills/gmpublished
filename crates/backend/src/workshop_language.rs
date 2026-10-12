@@ -1,4 +1,3 @@
-//! Languages accepted by the Steamworks UGC title and description APIs.
 use serde::{Deserialize, Serialize};
 
 #[derive(

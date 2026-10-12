@@ -1,11 +1,6 @@
-//! Shared preview-quality BSP map decoding: geometry, static/detail props,
-//! lighting, visibility, and walk collision, built on
-//! [`vformats::bsp`]. A handful of small algorithms here (the leaf
-//! tree walk in `walk_to_leaf`, the invalid-vertex face tolerance in
-//! `discard_faces_with_invalid_vertices`, and the displacement
-//! corner-rotation logic) are ported from vbsp (MIT, © icewind1991),
-//! since vformats deliberately leaves scene-assembly concerns like
-//! these to its callers.
+//! BSP preview geometry, props, lighting, visibility, and walk collision over
+//! [`vformats::bsp`]. Leaf traversal, invalid-vertex tolerance, and displacement
+//! corner rotation are ported from vbsp (MIT, © icewind1991).
 
 use crate::math::Vec3;
 use std::{
@@ -120,18 +115,13 @@ use walk::{
     prop_brush_from_local, trace_brush_aabb, walk_brush_from_brush_planes, walk_brush_from_planes,
 };
 
-/// Advisory threshold: callers warn (and ask) above this rather than
-/// load unprompted. `load_map` itself decodes any size handed to it.
+/// UI warning threshold, not a limit enforced by load_map.
 pub const MAX_BSP_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum BspError {
-    /// The upstream decode error, kept whole: it distinguishes truncation,
-    /// limit violations and decompression failures, which a flattened message
-    /// throws away.
     #[error("BSP decode failed: {0}")]
     Decode(#[from] bsp::BspError),
-    /// A structural check `scene::map` makes itself, which upstream does not.
     #[error("BSP decode failed: {message}")]
     Malformed { message: &'static str },
     #[error("BSP pakfile decode failed: {message}")]
@@ -146,10 +136,6 @@ pub fn load_map(bytes: &[u8]) -> Result<MapData, BspError> {
     load_map_with_skybox_partition(bytes, true)
 }
 
-/// Loads a map using a caller-owned Rayon pool for independent lump decodes.
-///
-/// Requiring the pool at this boundary makes the executor choice explicit and
-/// prevents an accidental dependency on Rayon's process-global executor.
 pub fn load_map_with_pool(bytes: &[u8], pool: &rayon::ThreadPool) -> Result<MapData, BspError> {
     load_map_impl(bytes, true, Some(pool))
 }
@@ -171,8 +157,6 @@ fn load_map_impl(
         return Err(BspError::UnsupportedVersion { version });
     }
 
-    // No whole-input cap: the caller gates size (and gets the user's
-    // consent above MAX_BSP_BYTES); these bytes are already in memory.
     let limits = Limits {
         max_input_bytes: u64::MAX,
         ..Limits::default()
@@ -388,13 +372,8 @@ fn vector_is_finite_nonzero(vector: Vec3) -> bool {
     vector.is_finite() && vector.length_squared() > f32::EPSILON
 }
 
-/// Whole-map bounds, tolerating wild content: non-finite vertices are skipped,
-/// and a map with no usable vertex degrades to a zero box. The camera derives
-/// its center and radius from these directly, so NaN must not escape.
-///
-/// Distinct from [`bounds_from_map_meshes`], which is all-or-nothing: one
-/// non-finite vertex rejects the whole set, which is right for a single door's
-/// local bounds and wrong for the map.
+/// Skip non-finite vertices; use a zero box if none remain. Door bounds
+/// use [`bounds_from_map_meshes`], which rejects the whole set instead.
 fn bounds_from_meshes(meshes: &[MapMesh]) -> MapBounds {
     let mut bounds = BoundsBuilder::default();
     for position in meshes

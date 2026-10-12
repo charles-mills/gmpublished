@@ -1,10 +1,10 @@
-//! Turning VTF bytes into something the renderer can upload: decode, downscale,
-//! and mip-chain generation for both the RGBA and block-compressed paths.
-
 use std::collections::BTreeSet;
+#[cfg(not(test))]
 use std::panic;
+#[cfg(not(test))]
 use std::sync::OnceLock;
 
+#[cfg(not(test))]
 use iced::wgpu;
 use vformats::Limits;
 
@@ -13,22 +13,13 @@ use super::{
     linear_to_srgb_byte, normalize_archive_path, srgb_byte_to_linear,
 };
 
-/// Frame 0 / face 0 / mip 0 of a VTF as RGBA8 — the app's standard
-/// "show me this texture" decode.
 pub fn decode_vtf_rgba(bytes: &[u8]) -> Result<vformats::vtf::RgbaImage, vformats::vtf::VtfError> {
     vformats::vtf::parse(bytes, &Limits::default())?.decode_rgba(0, 0, 0, &Limits::default())
 }
 
-/// Like [`decode_vtf_rgba`], but when `max_dimension` is set, decodes the
-/// stored mip nearest (at or below) that size instead of decoding mip 0
-/// and downscaling — the same stored-mip strategy the BC path already
-/// ships via `drop_bc_mips_to_max_dimension`. Falls back to mip 0 when
-/// the chosen mip fails to decode (truncated files lose the *large* mips,
-/// so this fallback rarely helps, but it never makes things worse).
-///
-/// Returns the decoded image plus the texture's TRUE mip-0 dimensions:
-/// BSP texel UVs normalize against the source size, not the decoded mip
-/// (see [`ResolvedTexture::original_dimensions`]).
+/// Decodes the stored mip nearest at or below `max_dimension`, falling back
+/// to mip 0 on failure. Returns original mip-0 dimensions as well: BSP texel
+/// UVs normalize against them, not the decoded mip size.
 pub(super) fn decode_vtf_rgba_max(
     bytes: &[u8],
     max_dimension: Option<u32>,
@@ -291,6 +282,7 @@ pub(super) fn force_opaque_alpha(rgba: &mut [u8]) {
     }
 }
 
+#[cfg(not(test))]
 pub(super) fn bc_supported() -> bool {
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
     *SUPPORTED.get_or_init(|| {
@@ -307,4 +299,10 @@ pub(super) fn bc_supported() -> bool {
         })
         .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+pub(super) fn bc_supported() -> bool {
+    // Tests opt into BC payloads explicitly; adapter discovery needs a real GPU.
+    false
 }

@@ -1,10 +1,6 @@
-//! Engine construction, lifecycle, stepping, and control points.
-
 use super::*;
 
 impl ParticleEngine {
-    /// Compiles `root` plus its transitive children out of `file`. Returns
-    /// `None` when the index is out of range.
     pub fn new(file: &PcfFile, root: usize, seed: u64) -> Option<Self> {
         if root >= file.systems.len() {
             return None;
@@ -49,12 +45,6 @@ impl ParticleEngine {
         Some(engine)
     }
 
-    /// Spawns a system and its child systems.
-    ///
-    /// An explicit stack, not recursion: `.pcf` child links are untrusted and
-    /// can cycle, so depth would be attacker-controlled stack frames. Bounded
-    /// twice — [`MAX_INSTANCE_TREE_DEPTH`] for a deep chain, the instance
-    /// count for a wide one.
     fn spawn_instance_tree(&mut self, system: usize, start_time: f32, parent: Option<usize>) {
         let mut pending = vec![(system, start_time, parent, 0_usize)];
         while let Some((system, start_time, parent, depth)) = pending.pop() {
@@ -77,8 +67,6 @@ impl ParticleEngine {
                         .wrapping_mul(0x9E3779B97F4A7C15),
                 ),
             });
-            // Reversed: a stack pops last-pushed first, so pushing in
-            // reverse spawns children in declaration order.
             for child in self.systems[system].children.clone().into_iter().rev() {
                 pending.push((
                     child.system,
@@ -90,25 +78,16 @@ impl ParticleEngine {
         }
     }
 
-    /// Every compiled system in parent-before-child order.
     #[must_use]
     pub fn systems(&self) -> &[CompiledSystem] {
         &self.systems
     }
 
-    /// Root system selected when the engine was constructed.
-    #[must_use]
-    pub fn root_system(&self) -> &CompiledSystem {
-        &self.systems[0]
-    }
-
-    /// Current simulation time in seconds.
     #[must_use]
     pub fn time(&self) -> f32 {
         self.time
     }
 
-    /// Total live particle count across every instance.
     #[must_use]
     pub fn live_particles(&self) -> usize {
         self.instances
@@ -117,8 +96,6 @@ impl ParticleEngine {
             .sum()
     }
 
-    /// World-space framing radius over the whole effect tree, including
-    /// control point spread.
     #[must_use]
     pub fn bounding_radius(&self) -> f32 {
         let system_radius = self
@@ -132,8 +109,6 @@ impl ParticleEngine {
         system_radius + control_point_reach
     }
 
-    /// Highest control point index read by any compiled operator, i.e. how
-    /// many gizmos are worth showing.
     #[must_use]
     pub fn highest_control_point(&self) -> usize {
         self.systems
@@ -152,8 +127,6 @@ impl ParticleEngine {
         self.control_points[index.get()] = position;
     }
 
-    /// True once every emitter has finished and no particles remain; the
-    /// caller can restart to loop the effect.
     #[must_use]
     pub fn finished(&self) -> bool {
         !self.emitters_alive && self.live_particles() == 0
@@ -170,8 +143,6 @@ impl ParticleEngine {
         }
     }
 
-    /// Aggregate coverage across every compiled system, deduplicated by
-    /// function name (worst level wins).
     #[must_use]
     pub fn coverage_summary(&self) -> Vec<CoverageEntry> {
         let mut entries: Vec<CoverageEntry> = Vec::new();
@@ -216,8 +187,6 @@ impl ParticleEngine {
         }
     }
 
-    /// Reports control point motion since the last step so operators that
-    /// track a moving control point respond to gizmo drags.
     pub fn drag_control_point(&mut self, index: ControlPointIndex, position: Vec3, dt_hint: f32) {
         let index = index.get();
         let previous = self.control_points[index];
@@ -241,8 +210,6 @@ impl ParticleEngine {
             }
             let system = self.instances[instance_index].system;
 
-            // Run system-level control point writers before emission so the
-            // frame's spawns see fresh control points.
             self.run_control_point_operators(instance_index, local_time);
 
             let spawned = self.emit(instance_index, local_time, dt, &mut spawn_budget);

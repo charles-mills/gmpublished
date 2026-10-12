@@ -163,8 +163,6 @@ pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effec
                 return Vec::new();
             }
             let Ok(outcome) = result else {
-                // The failure itself reaches the user through the task
-                // overlay; the editor stays open with the text intact.
                 state.fail_save();
                 return vec![Effect::ThumbnailDemandsChanged];
             };
@@ -179,8 +177,6 @@ pub fn update_at(state: &mut State, message: Message, now: Instant) -> Vec<Effec
                     text,
                 });
             }
-            // Same answer as the publish and icon flows: the revision went
-            // through, but Steam wants the agreement accepted.
             if outcome.legal_agreement_required {
                 effects.push(Effect::OpenUrlRequested(WORKSHOP_LEGAL_URL.to_owned()));
             }
@@ -275,8 +271,6 @@ fn apply_enter(state: &mut State) -> Vec<Effect> {
             state.perform(Action::Edit(Edit::Enter));
             state.perform(Action::Edit(Edit::Paste(Arc::new("[*] ".to_owned()))));
         }
-        // Enter on a bare marker dissolves it: the emptied line ends the
-        // list, exactly like Steam's blank-line rule.
         EnterBehavior::ClearMarker => {
             state.perform(Action::Move(Motion::End));
             state.perform(Action::Select(Motion::Home));
@@ -332,8 +326,6 @@ mod tests {
         assert!(!state.can_save());
     }
 
-    /// Both the current backend default and the one earlier builds wrote:
-    /// items created by old versions still carry the legacy text.
     #[test]
     fn placeholder_descriptions_open_as_an_empty_editor() {
         for placeholder in super::super::state::PLACEHOLDER_DESCRIPTIONS {
@@ -387,7 +379,6 @@ mod tests {
         let text = state.source().expect("open session").text();
 
         assert!(text.contains("[b][/b]"), "{text:?}");
-        // Typing at the caret lands inside the pair.
         let _effects = update(
             &mut state,
             Message::SourceActionPerformed(Action::Edit(Edit::Insert('x'))),
@@ -430,15 +421,11 @@ mod tests {
         let text = state.source().expect("open session").text();
         assert!(text.ends_with("[*] first\n[*] "), "{text:?}");
 
-        // Enter again on the bare marker clears it instead of stacking.
         let _effects = update(&mut state, Message::EnterPressed);
         let text = state.source().expect("open session").text();
         assert!(text.ends_with("[*] first\n"), "{text:?}");
     }
 
-    /// Enter with an active selection must replace the selection with a
-    /// newline; the `ClearMarker` motion sequence would otherwise collapse
-    /// the selection and leave the selected text standing.
     #[test]
     fn enter_with_a_selection_replaces_it_with_a_newline() {
         let mut state = State::default();
@@ -459,9 +446,6 @@ mod tests {
         assert_eq!(text, "\n");
     }
 
-    /// A delivery landing after the edit that removed its tag must be
-    /// dropped: an invisible stored entry would otherwise keep state (and,
-    /// for GIFs, the animation subscription) alive until the next edit.
     #[test]
     fn deliveries_for_no_longer_referenced_urls_are_dropped() {
         use crate::media::{
@@ -497,8 +481,6 @@ mod tests {
         assert!(!state.apply_thumbnail_delivery(&delivery_for(removed, generation)));
     }
 
-    /// Non-http sources are never demanded, so an absent media entry must
-    /// read as "unavailable" (link fallback), not as loading forever.
     #[test]
     fn non_http_image_sources_render_as_link_fallbacks_not_loading() {
         use crate::widgets::bbcode::{MediaLookup, MediaView};
@@ -523,8 +505,6 @@ mod tests {
         ));
     }
 
-    /// The editor is read-only while a save is in flight; anything typed
-    /// after the submitted snapshot would be discarded by the auto-close.
     #[test]
     fn edits_are_ignored_while_a_save_is_in_flight() {
         let mut state = opened_state();
@@ -590,7 +570,6 @@ mod tests {
         );
         assert!(state.saving());
 
-        // A second request while in flight is refused.
         assert!(update(&mut state, Message::SaveRequested).is_empty());
 
         let generation = state.generation();
@@ -607,9 +586,6 @@ mod tests {
         assert!(!state.dirty());
     }
 
-    /// Steam can accept a revision while the account still owes the Workshop
-    /// legal agreement; the editor answers exactly like the publish and icon
-    /// flows — by opening the agreement page.
     #[test]
     fn saves_needing_the_legal_agreement_open_the_agreement_page() {
         let mut state = opened_state();

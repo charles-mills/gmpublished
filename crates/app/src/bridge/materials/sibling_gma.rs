@@ -1,10 +1,5 @@
-//! Sibling GMAs: the addons installed next to the one being previewed, which
-//! Source content routinely depends on.
-//!
-//! Two archive shapes to read. Plain `.gma` files go through the backend's
-//! reader; Steam's legacy `.bin` downloads are LZMA-compressed whole, so this
-//! carries its own index parser and a decompressed-prefix cache rather than
-//! inflating a multi-gigabyte archive to reach one entry.
+//! Legacy `.bin` downloads are LZMA-compressed. Cache the decompressed prefix
+//! so reading one entry does not require inflating the whole archive.
 
 use std::{
     collections::HashMap,
@@ -44,9 +39,7 @@ impl SiblingGmaIndex {
             return Ok(None);
         };
         match (&archive.kind, &entry.location) {
-            // Opened per read: a retained view would hold a file descriptor
-            // for every sibling archive, and a workshop folder routinely has
-            // more archives than a GUI process's descriptor budget.
+            // Open per read; retaining every sibling archive can exhaust file descriptors.
             (
                 SiblingGmaArchiveKind::Plain { path },
                 SiblingGmaEntryLocation::Plain { offset, len },
@@ -202,18 +195,13 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
         );
     }
 
-    // Opening every archive (and LZMA-decompressing every legacy-bin entry
-    // table) is the expensive part and each path is independent — do it in
-    // parallel, then merge sequentially so first-wins entry priority keeps
-    // the original path order.
+    // Index in parallel, then merge in path order to preserve first-match priority.
     type IndexedArchive = (SiblingGmaArchive, Vec<(String, SiblingGmaEntryLocation)>);
     let indexed: Vec<Option<IndexedArchive>> = paths[..paths.len().min(MAX_SIBLING_GMA_ARCHIVES)]
         .par_iter()
         .map(|path| match path.kind {
             SiblingGmaPathKind::Plain => {
-                // One file open + one parse for the entry table; the file is
-                // closed again once the offsets are recorded, so an indexed
-                // archive costs no descriptor while it sits idle.
+                // Close after indexing so idle archives hold no file descriptors.
                 let view = match GmaView::open(&path.path) {
                     Ok(view) => view,
                     Err(error) => {

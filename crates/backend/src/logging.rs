@@ -17,18 +17,10 @@ use std::{
 const LOG_FILE_NAME: &str = "gmpublished.log";
 const LOCAL_TARGET_PREFIX: &str = "gmpublished";
 
-/// Depth of the queue between [`log::Log::log`] and the writer thread.
-///
-/// Emitting never blocks on it. A caller can be the UI thread, and stalling a
-/// frame to record a debug line is a worse outcome than losing the line, so a
-/// burst past this depth is counted and reported into the log rather than
-/// applying backpressure.
+/// Drop and count excess log lines rather than block the UI thread.
 const LOG_QUEUE_CAPACITY: usize = 4096;
 
-/// Lines held while the file sink is unresolved — the logs directory is not
-/// known until appdata loads, and everything logged before then has nowhere to
-/// go yet. Reaching this bound drops the *oldest* held lines: what explains a
-/// startup failure is at the tail.
+/// Hold early lines until appdata resolves the logs directory. Drop oldest lines past the cap.
 const MAX_PENDING_LINES: usize = 4096;
 
 /// Bound on [`flush`](log::Log::flush) and on the shutdown join, so a wedged
@@ -40,13 +32,10 @@ struct BackendLogger;
 static LOGGER: BackendLogger = BackendLogger;
 static LEVEL_CONFIG: OnceLock<LevelConfig> = OnceLock::new();
 static FILE_SINK_READY: AtomicBool = AtomicBool::new(false);
-// Process-wide by necessity: [`log_panic`] is reached from the process panic
-// hook, which has no way to receive a `&Backend`. Set once, by whichever
-// `Backend` finishes construction first (`enable_file_sink`).
+// The process panic hook uses this sink without a Backend reference. Initialize it once.
 static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
 static LOG_SINK: OnceLock<LogSink> = OnceLock::new();
-/// Lines the queue or the pending bound refused, reported into the log so a
-/// burst that outran the writer reads as a stated gap and not a silent one.
+/// Report dropped-line counts so bounded queues cannot silently hide gaps.
 static DROPPED_LINES: AtomicU64 = AtomicU64::new(0);
 
 impl log::Log for BackendLogger {
@@ -85,19 +74,12 @@ impl log::Log for BackendLogger {
 
 enum LogCommand {
     Line(String),
-    /// Write everything queued ahead of this, then acknowledge.
-    ///
-    /// The ack is what lets `flush` wait for its own line to land rather than
-    /// merely enqueue it. It is a barrier only while the writer keeps up:
-    /// both the send and the wait are bounded, so a writer that has stalled
-    /// leaves `flush` returning with lines still queued. That is the deliberate
-    /// trade — a caller on the way out must not be held by a stuck writer.
+    /// Acknowledges after preceding lines are written. Sending and waiting are
+    /// bounded, so a stalled writer may leave lines queued when `flush` returns.
     Flush(SyncSender<()>),
     Stop,
 }
 
-/// Owns the writer thread and the queue feeding it, so the thread is joinable
-/// rather than merely detached and the queue has an end the caller can wait on.
 struct LogSink {
     sender: SyncSender<LogCommand>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -130,15 +112,8 @@ impl LogSink {
         }
     }
 
-    /// Drains what is queued and joins the writer, if the writer can be told
-    /// to stop.
-    ///
-    /// The handle is put back when the stop signal does not land, so a later
-    /// call can try again. Taking it unconditionally would make the one case
-    /// this deadline exists for — a writer so far behind that the queue stays
-    /// full — permanently unrecoverable: the sender is a process-global that
-    /// is never dropped, so a writer that never sees `Stop` parks in `recv`
-    /// for the life of the process with nothing left able to wake it.
+    /// Drains and joins the writer if `Stop` can be sent before the deadline.
+    /// Retains the handle when sending fails so a later shutdown can retry.
     fn shutdown(&self) {
         let mut slot = self
             .worker
@@ -149,9 +124,6 @@ impl LogSink {
         };
 
         if !send_within(&self.sender, LogCommand::Stop, LOG_DRAIN_TIMEOUT) {
-            // The writer is either gone already (nothing to join) or too far
-            // behind to accept the signal (joining would just burn the
-            // deadline). Either way, hand the handle back.
             *slot = Some(worker);
             return;
         }
@@ -161,12 +133,7 @@ impl LogSink {
     }
 }
 
-/// Sends within `timeout`, reporting whether it landed.
-///
-/// `SyncSender::send_timeout` is unstable, and a plain `send` would block for
-/// as long as a wedged writer takes to drain — which is the thing every caller
-/// here is trying to avoid. A full queue means the writer is behind but alive,
-/// so retrying is worth more than failing immediately.
+/// Retry full queues until the deadline; a blocking send could hang shutdown.
 fn send_within(sender: &SyncSender<LogCommand>, command: LogCommand, timeout: Duration) -> bool {
     const RETRY_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -206,7 +173,6 @@ fn writer_loop(receiver: &mpsc::Receiver<LogCommand>) {
     settle(&mut file, &mut pending);
 }
 
-/// Returns whether the writer should keep running.
 fn apply(command: LogCommand, file: &mut Option<File>, pending: &mut VecDeque<String>) -> bool {
     match command {
         LogCommand::Line(line) => {
@@ -226,8 +192,6 @@ fn apply(command: LogCommand, file: &mut Option<File>, pending: &mut VecDeque<St
     }
 }
 
-/// Opens the log file and writes out everything held for it, once the logs
-/// directory is known. Returns whether the file is available to write to.
 fn open_sink(file: &mut Option<File>, pending: &mut VecDeque<String>) -> bool {
     if !FILE_SINK_READY.load(Ordering::Acquire) {
         return false;
@@ -246,8 +210,6 @@ fn open_sink(file: &mut Option<File>, pending: &mut VecDeque<String>) -> bool {
     file.is_some()
 }
 
-/// Holds a line until the file sink resolves, dropping the oldest once the
-/// bound is reached.
 fn hold(pending: &mut VecDeque<String>, line: String) {
     if pending.len() >= MAX_PENDING_LINES {
         let _ = pending.pop_front();
@@ -266,8 +228,6 @@ fn report_dropped_lines(file: &mut Option<File>) {
     }
 }
 
-/// Gets everything queued onto disk and durable. The `sync_data` is what makes
-/// this worth calling before process exit rather than trusting the write.
 fn settle(file: &mut Option<File>, pending: &mut VecDeque<String>) {
     if open_sink(file, pending)
         && let Some(open_file) = file.as_mut()
@@ -285,8 +245,6 @@ fn write_log_line(file: &mut Option<File>, log: &str) {
     }
 }
 
-/// Drains and closes the file sink. Safe when logging was never installed, and
-/// safe to call more than once.
 pub fn shutdown() {
     if let Some(sink) = LOG_SINK.get() {
         sink.shutdown();
@@ -298,14 +256,6 @@ pub(crate) fn enable_file_sink(logs_dir: PathBuf) {
     FILE_SINK_READY.store(true, Ordering::Release);
 }
 
-/// Idempotent: `log::set_logger` is a one-shot process resource, so a second
-/// `Backend` built in the same process (tests, or a hypothetical re-init)
-/// reuses the first one's install rather than erroring.
-///
-/// Deliberately does not install a panic hook. The process hook is a single
-/// global slot with no way to chain onto an existing owner, so it belongs to
-/// the executable; this module only offers [`log_panic`] for that owner to
-/// call. See `gmpublished::install_panic_log_hook`.
 pub(crate) fn install() -> Result<(), log::SetLoggerError> {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
@@ -409,16 +359,7 @@ fn open_log_file() -> Option<File> {
         .ok()
 }
 
-/// Records a panic in the backend log file, for the process hook owner to call.
-///
-/// Writes nothing anywhere else: the owner captured `backtrace` and is
-/// responsible for stderr, so echoing here would double every panic report.
-/// A no-op until the file sink is up — the logs directory is not known until
-/// appdata loads, and resolving it during an appdata-init panic would re-enter
-/// the very state that failed.
-///
-/// The write is synchronous. Under `panic = "abort"` the process dies before
-/// the async writer thread would drain a channel send.
+/// Write panic logs synchronously for panic = abort. Never resolve appdata from the hook.
 pub fn log_panic(panic: &PanicHookInfo<'_>, backtrace: &Backtrace) {
     if !FILE_SINK_READY.load(Ordering::Acquire) {
         return;
@@ -438,9 +379,7 @@ pub fn log_panic(panic: &PanicHookInfo<'_>, backtrace: &Backtrace) {
 mod tests {
     use super::*;
 
-    /// Nothing else in this crate's test binary resolves the file sink
-    /// (`BackendConfig::for_test` sets `file_logging: false`), so these two own
-    /// the process-global logs directory between them.
+    /// These tests own the process-wide log sink; test backends disable file logging.
     fn redirect_file_sink_to(dir: &std::path::Path) {
         assert!(
             LOGS_DIR.set(dir.to_path_buf()).is_ok(),
@@ -449,10 +388,6 @@ mod tests {
         FILE_SINK_READY.store(true, Ordering::Release);
     }
 
-    /// `flush` is a barrier: once it returns, everything sent before it is on
-    /// disk. Without the ack it is a hint, and a process that exits promptly
-    /// after logging loses the tail — which is the case that matters, because
-    /// that tail is what explains the exit.
     #[test]
     fn flush_lands_queued_lines_on_disk_before_it_returns() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -474,16 +409,11 @@ mod tests {
         }
 
         sink.shutdown();
-        // Idempotent: the handle is taken, so this has nothing left to join.
         sink.shutdown();
     }
 
-    /// The pending bound drops the *oldest* held lines and counts them, rather
-    /// than growing without limit while the logs directory is unresolved.
-    /// `DROPPED_LINES` is process-global and a live writer swaps it on every
-    /// line, so this asserts on the delta it observes rather than on the
-    /// counter's absolute value — otherwise a concurrent test's writer steals
-    /// the count and this fails for reasons unrelated to the bound.
+    /// Check the local delta. A concurrent writer can drain the global
+    /// `DROPPED_LINES` count while this test runs.
     #[test]
     fn holding_past_the_bound_drops_oldest_and_counts_the_loss() {
         let mut pending = VecDeque::new();
@@ -502,8 +432,6 @@ mod tests {
         );
     }
 
-    /// A send to a writer that is gone reports failure instead of blocking, so
-    /// shutdown after the thread has already exited still returns.
     #[test]
     fn sending_to_a_departed_writer_fails_rather_than_blocking() {
         let (sender, receiver) = mpsc::sync_channel(1);

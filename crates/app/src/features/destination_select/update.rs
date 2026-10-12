@@ -8,8 +8,6 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             vec![Effect::ModalOpenRequested, Effect::SnapshotApplied]
         }
         Message::KindToggled(DestinationKind::Browse) => {
-            // Browse toggles off like the other tiles, but selecting it goes
-            // through the native folder picker.
             if state.kind_active(DestinationKind::Browse) {
                 state.deselect();
                 Vec::new()
@@ -39,7 +37,6 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             Vec::new()
         }
         Message::BrowseCompleted(Some(path)) => {
-            // The native folder picker only returns selected directories.
             state.select_trusted_custom(path);
             Vec::new()
         }
@@ -50,7 +47,6 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::CreateFolderSaved(result) => {
             match result {
-                // Absorb without resetting: the user is mid-choice.
                 Ok(snapshot) => state.absorb_snapshot(*snapshot),
                 Err(error) => state.set_error(error),
             }

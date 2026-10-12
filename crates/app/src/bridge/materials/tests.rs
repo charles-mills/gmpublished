@@ -199,10 +199,6 @@ fn resolves_patch_include_with_overrides() {
     assert_eq!(texture_rgba(&texture), rgba);
 }
 
-/// A patch's `include` is resolved by the same tier fan-out as any other
-/// content path, so the base material can live in a different tier from the
-/// patch that includes it — a map's pakfile patching a material shipped by an
-/// addon is the ordinary case.
 #[test]
 fn resolves_a_patch_include_whose_base_lives_in_another_tier() {
     let rgba = vec![
@@ -536,8 +532,7 @@ fn decoded_texture_cap_downscales_resolved_vtf() {
 
     assert_eq!((texture.width, texture.height), (2, 1));
     assert_eq!(texture.rgba_bytes().expect("rgba texture").len(), 2 * 4);
-    // BSP texel UVs must keep normalizing against the source size, or
-    // downscaled map textures tile too often (the six-lane road bug).
+    // Downscaling must not change the source dimensions used to normalize BSP texel UVs.
     assert_eq!(texture.original_dimensions(), (4, 2));
 }
 
@@ -1755,9 +1750,6 @@ fn write_c_string(bytes: &mut Vec<u8>, value: &str) {
     bytes.push(0);
 }
 
-/// Rebuilding the shared state for a variant means reopening every game VPK
-/// and re-indexing the whole workshop folder — per map preview, since
-/// `map_preview` derives three resolvers in a chain plus one for the skybox.
 #[test]
 fn a_resolver_variant_shares_the_indexes_the_original_already_built() {
     let archive = archive_with_texture(
@@ -1777,9 +1769,6 @@ fn a_resolver_variant_shares_the_indexes_the_original_already_built() {
     assert_eq!(resolver.config.decoded_texture_max_dimension, None);
 }
 
-/// Sharing the decode cache between variants removes the accidental isolation
-/// that made the missing dimension safe: without it a resolver capped at 512
-/// is served whatever an uncapped sibling decoded first.
 #[test]
 fn the_decoded_texture_cache_key_separates_resolutions() {
     let uncapped = DecodedTextureCacheKey::Rgba {
@@ -1796,20 +1785,12 @@ fn the_decoded_texture_cache_key_separates_resolutions() {
     assert_ne!(uncapped, capped);
 }
 
-/// The whole point of the tier boundary returning a `Result`. Reporting both
-/// as `None` would leave "materials resolved 12/340" unable to tell a
-/// self-contained addon from a disk it has no permission to read.
-#[cfg(unix)]
 #[test]
-fn a_loose_dir_distinguishes_an_unreadable_file_from_an_absent_one() {
-    use std::os::unix::fs::PermissionsExt as _;
-
+fn a_loose_dir_distinguishes_a_read_error_from_an_absent_file() {
     let root = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(root.path().join("materials/test")).expect("source tree");
     let unreadable = root.path().join("materials/test/locked.vmt");
-    std::fs::write(&unreadable, b"\"UnlitGeneric\" {}").expect("entry");
-    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
-        .expect("drop read permission");
+    std::fs::create_dir(&unreadable).expect("directory at the material path");
 
     let dir = LooseSourceDir::new(root.path().to_owned());
 

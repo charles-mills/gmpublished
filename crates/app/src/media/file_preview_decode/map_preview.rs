@@ -1,14 +1,3 @@
-//! Turns a decoded BSP into the [`PreviewContent::Map`] the viewer draws:
-//! world geometry, static and detail props, overlays, lighting and the walk
-//! collision the camera moves against.
-//!
-//! Preview-quality by design. Props are baked into the world mesh rather than
-//! instanced, lighting is sampled per-placement from the ambient cube instead
-//! of per-pixel, and everything runs under caps (placement, triangle, texture
-//! budget) so a pathological map degrades rather than exhausting memory.
-//!
-//! [`PreviewContent::Map`]: crate::media::preview_model::PreviewContent::Map
-
 use super::materials::{
     resolve_detail_sprites, resolve_map_material_slots_parallel, resolve_map_overlays,
     resolve_skybox, sky_log_status,
@@ -249,7 +238,6 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .map(|mesh| mesh.indices.len() / 3)
         .sum::<usize>();
     let material_slot_count = table.len();
-    // Read before the table is consumed into the preview's slot list.
     let resolved_material_count = table.resolved_count();
     let water_fallback_material_count = table.water_fallback_count();
     let material_count = u32::try_from(material_slot_count).unwrap_or(u32::MAX);
@@ -373,7 +361,6 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     )
 }
 
-/// Maps `work` over `items` in parallel, preserving order.
 pub(super) fn parallel_collect<T, R, F>(items: &[T], work: F) -> Vec<R>
 where
     T: Sync + Send,

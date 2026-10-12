@@ -1,13 +1,5 @@
-//! The stopwatch behind every indeterminate spinner in the UI.
-
 use std::time::Instant;
 
-/// Elapsed time for a spinner, advanced only by the animation loop.
-///
-/// `Running` carries the frame it was last advanced to rather than reading the
-/// clock on demand, so every widget drawn from one frame reports the same
-/// elapsed time. `Idle` has no timestamps at all, so a stopped spinner cannot
-/// report a stale duration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SpinnerClock {
     #[default]
@@ -19,7 +11,6 @@ pub enum SpinnerClock {
 }
 
 impl SpinnerClock {
-    /// Restarts from zero at `now`.
     pub const fn start(&mut self, now: Instant) {
         *self = Self::Running {
             started_at: now,
@@ -27,7 +18,6 @@ impl SpinnerClock {
         };
     }
 
-    /// Moves a running clock to `now`, reporting whether one was running.
     pub fn advance(&mut self, now: Instant) -> bool {
         let Self::Running {
             now: current_frame, ..
@@ -39,7 +29,6 @@ impl SpinnerClock {
         true
     }
 
-    /// Moves the clock to `now`, starting it if it was idle.
     pub fn advance_or_start(&mut self, now: Instant) {
         if !self.advance(now) {
             self.start(now);

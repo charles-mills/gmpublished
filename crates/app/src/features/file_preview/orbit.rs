@@ -1,5 +1,3 @@
-//! Orbit-camera input shared by the model and particle viewers.
-
 use super::state::OrbitPose;
 
 /// Radians of rotation per pixel of drag.
@@ -20,9 +18,7 @@ const MAX_DISTANCE: f32 = 8.0;
 /// does not.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ZoomFloor {
-    /// Far enough out that a solid model's surface stays ahead of the eye.
     SolidMesh,
-    /// Inside a sparse cloud, where there is nothing to clip through.
     ParticleCloud,
 }
 
@@ -35,10 +31,6 @@ impl ZoomFloor {
     }
 }
 
-/// Yaw, pitch and distance driven by drag and scroll.
-///
-/// Owns the clamps so a viewer cannot apply its own: pitch past vertical
-/// flips the view, and a distance of zero puts the eye inside the subject.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Orbit {
     yaw: f32,
@@ -85,7 +77,6 @@ impl Orbit {
         self.distance = distance.clamp(self.floor.min_distance(), MAX_DISTANCE);
     }
 
-    /// Applies a drag of `(dx, dy)` pixels.
     pub(super) fn drag(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * SENSITIVITY;
         self.pitch = (self.pitch + dy * SENSITIVITY).clamp(MIN_PITCH, MAX_PITCH);
@@ -110,8 +101,6 @@ mod tests {
         assert_eq!(orbit.pitch(), MIN_PITCH);
     }
 
-    /// Zoom is unbounded scroll input against a bounded distance, so the
-    /// clamps have to hold however far the wheel is spun.
     #[test]
     fn zoom_saturates_rather_than_passing_through_the_subject() {
         let mut orbit = Orbit::new(ZoomFloor::SolidMesh);
@@ -121,10 +110,6 @@ mod tests {
         assert_eq!(orbit.distance(), MAX_DISTANCE);
     }
 
-    /// The two viewers frame identically (`radius * 2.2 * distance`) but hold
-    /// different subjects, so they stop at different distances: a mesh has a
-    /// surface to clip through, a particle cloud does not. Sharing one floor
-    /// would let the model viewer scroll four times closer than it does.
     #[test]
     fn a_solid_mesh_stops_further_out_than_a_particle_cloud() {
         let mut mesh = Orbit::new(ZoomFloor::SolidMesh);
@@ -137,7 +122,6 @@ mod tests {
         assert!(cloud.distance() < mesh.distance());
     }
 
-    /// A pose arriving from persisted state is outside this type's control.
     #[test]
     fn a_restored_pose_is_clamped_on_the_way_in() {
         let orbit = Orbit::from_pose(

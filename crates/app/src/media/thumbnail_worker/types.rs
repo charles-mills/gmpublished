@@ -15,10 +15,8 @@ pub use super::thumbnail::{Thumbnail, ThumbnailMetadata};
 
 pub type ThumbnailResult<T> = Result<T, ThumbnailError>;
 
-/// Input for a thumbnail request.
 #[derive(Clone, Debug)]
 pub enum ThumbnailInput {
-    /// Fetch and decode an image from an HTTP(S) URL.
     Url { url: Arc<str> },
 }
 
@@ -55,11 +53,6 @@ impl ThumbnailInput {
     }
 }
 
-/// Thumbnail payload prepared for Iced presentation.
-///
-/// Static pixels remain in [`Thumbnail`]. Animated GIFs additionally carry baked
-/// per-frame RGBA payloads and delays. The expensive GIF bake happens on the
-/// blocking worker; Iced handles are created once at the UI cache boundary.
 #[derive(Clone, Debug)]
 pub struct PreparedThumbnail {
     thumbnail: Thumbnail,
@@ -67,11 +60,7 @@ pub struct PreparedThumbnail {
 }
 
 impl PreparedThumbnail {
-    /// Prepares a thumbnail for presentation, baking any animation frames.
-    ///
-    /// Animation is presentation garnish: when the bake fails, the already
-    /// decoded first frame must still ship, so bake failures degrade to a
-    /// still thumbnail instead of failing the whole request.
+    /// Keep the decoded first frame if animation baking fails.
     pub(crate) fn from_thumbnail(thumbnail: Thumbnail) -> Self {
         let animation = thumbnail
             .animation()
@@ -102,7 +91,6 @@ impl PreparedThumbnail {
     }
 }
 
-/// Baked animated thumbnail frames ready to become stable Iced handles.
 #[derive(Clone, Debug)]
 pub struct PreparedAnimation {
     frames: Vec<PreparedAnimationFrame>,
@@ -178,9 +166,6 @@ impl PreparedAnimationFrame {
         &self.rgba
     }
 
-    /// Returns a cheap `Arc` clone of the frame's RGBA pixel bytes, for
-    /// callers that hand ownership to a zero-copy wrapper instead of
-    /// borrowing.
     pub(crate) fn rgba_arc(&self) -> Arc<[u8]> {
         Arc::clone(&self.rgba)
     }
@@ -269,30 +254,20 @@ fn frame_rgba(
     Ok(rgba)
 }
 
-/// Errors returned while fetching a thumbnail's bytes, plus whatever decoding
-/// them reported.
-///
-/// Decoding has its own error type, carried whole rather than re-listed: a
-/// second enum mirroring its variants needs a hand-written map between them,
-/// which is one edit away from disagreeing.
 #[derive(Debug, Error)]
 pub enum ThumbnailError {
     #[error(transparent)]
     Decode(#[from] ThumbnailDecodeError),
-    /// URL is not a valid HTTP(S) URL.
     #[error("invalid thumbnail URL {url}")]
     InvalidUrl { url: String },
-    /// URL uses a scheme unsupported by the thumbnail fetcher.
     #[error("unsupported thumbnail URL scheme for {url}")]
     UnsupportedUrlScheme { url: String },
-    /// Failed to fetch image bytes from a URL.
     #[error("failed to fetch thumbnail URL {url}")]
     UrlFetch {
         url: String,
         #[source]
         source: ureq::Error,
     },
-    /// Failed to read URL response bytes.
     #[error("failed to read thumbnail URL response {url}")]
     UrlRead {
         url: String,
@@ -354,11 +329,6 @@ mod tests {
     }
 }
 
-/// One thumbnail job: what to fetch, at what size, and the cache key those two
-/// imply.
-///
-/// The key is derived here rather than passed alongside, so it cannot describe
-/// a different input or edge than the fetch actually uses.
 #[derive(Clone, Debug)]
 pub struct ThumbnailRequest {
     key: ThumbnailKey,

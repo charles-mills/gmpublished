@@ -1,7 +1,3 @@
-//! Custom wgpu pipeline rendering a static Source model inside the preview
-//! modal. Damage-driven: redraws happen only on orbit/zoom input, so an idle
-//! open viewer costs zero CPU/GPU.
-
 use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
 
@@ -138,21 +134,11 @@ fn skybox_eye(world_eye: Vec3, sky_origin: Vec3, sky_scale: f32) -> Vec3 {
     )
 }
 
-/// A direction, falling back to Source's world up.
-///
-/// The camera-basis convention: a `look_at` needs three usable axes, and a
-/// zero vector there produces a NaN view matrix rather than a degenerate one.
-/// A direction, treating a degenerate vector as straight up.
-///
-/// Distinct from [`Vec3::normalize`], which reports the degenerate case: the
-/// viewer's camera basis needs *a* usable axis more than it needs to know
-/// there wasn't one.
 fn normalize_or_up(v: Vec3) -> Vec3 {
     v.normalize().unwrap_or(SOURCE_UP)
 }
 
-/// Source's world up. The engine is Z-up, so this is +Z rather than the +Y
-/// most renderers default to.
+/// Source is Z-up.
 pub(super) const SOURCE_UP: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 /// Right-handed look-at, column-major.
@@ -200,11 +186,9 @@ mod tests {
         assert!((proj[2][2] - 1.0 / 99.0).abs() < 1e-6);
         assert!((proj[3][2] - 100.0 / 99.0).abs() < 1e-6);
 
-        // Clip-space depth of a point at z = -near must be 1 after divide.
         let near_z = -proj[2][2] + proj[3][2];
         let near_w = 1.0;
         assert!((near_z / near_w - 1.0).abs() < 1e-6);
-        // ... and z = -far must be 0.
         let far_z = proj[2][2] * -100.0 + proj[3][2];
         let far_w = 100.0;
         assert!((far_z / far_w).abs() < 1e-6);
@@ -217,7 +201,6 @@ mod tests {
             Vec3::new(0.0, 0.0, 0.0),
             SOURCE_UP,
         );
-        // Transforming the eye position must land on the origin.
         let x = view[0][0] * 5.0 + view[3][0];
         let y = view[0][1] * 5.0 + view[3][1];
         let z = view[0][2] * 5.0 + view[3][2];

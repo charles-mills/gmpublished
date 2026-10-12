@@ -37,8 +37,6 @@ fn lazy_preview_holds_only_first_decoded_frame_initially() -> Result<(), Box<dyn
     assert_eq!(preview.frame_count(), 3);
     assert_eq!(preview.initial_decoded_byte_len(), 6 * 4 * 4);
     assert_eq!(preview.initial_peak_decoded_byte_len(), 6 * 4 * 4);
-    // The per-frame delays live on the decoded frames, not the preview — the
-    // preview only carries the count. Assert them at the source.
     assert_eq!(
         gif_frame_delays(preview.encoded_bytes())?,
         vec![
@@ -127,17 +125,8 @@ fn bakes_steady_state_loop_fills_partial_first_frame() -> Result<(), Box<dyn std
 #[test]
 fn decimation_caps_the_frame_count_and_preserves_playback_time()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Named for what it actually pins. The motivating change was that a long
-    // animation should not *tile* every source frame only to discard most of
-    // them, but nothing here counts `decode_frame` calls — the previous
-    // decode-everything-then-decimate implementation satisfies every assertion
-    // below. What this does pin is the output contract that rewrite had to
-    // preserve, which is the part a future edit is likely to break.
-    //
-    // Time preservation is asserted relatively rather than as an absolute, so
-    // the test does not encode the decoder's minimum-delay clamp: four times
-    // the frames at the same cadence must take four times as long, whether or
-    // not those frames survive decimation.
+    // Checks decimation output and relative playback time, independent of the
+    // minimum-delay clamp. Does not measure how many frames are decoded.
     let clip = |count: usize| {
         (0..count)
             .map(|index| ([index as u8, 1, 2, 255], 4))
@@ -212,10 +201,6 @@ fn atlas_budget_edge_cap_budgets_the_whole_packed_grid() -> Result<(), Box<dyn s
     let per_frame_cap = (BAKED_ANIMATION_MAX_ATLAS_BYTES as u64 / (4 * 26)).isqrt() as usize;
     assert!(grid_bytes(per_frame_cap) > BAKED_ANIMATION_MAX_ATLAS_BYTES);
 
-    // At the frame ceiling the byte budget must not be what limits tile size —
-    // display resolution should be. Asserted as headroom rather than an exact
-    // edge so it keeps its meaning if the frame ceiling moves: the previous
-    // form hardcoded 256, which was only true at a 64-frame ceiling.
     assert!(
         atlas_budget_edge_cap(BAKED_ANIMATION_MAX_FRAMES, BAKED_ANIMATION_MAX_ATLAS_BYTES)?
             >= GIF_PREVIEW_MAX_EDGE,
@@ -687,10 +672,6 @@ fn rgba_pixels(frame: &GifPreviewFrame) -> Vec<[u8; 4]> {
         .collect()
 }
 
-/// Frame count is the dimension the screen, allocation and atlas limits leave
-/// open: frames composite one at a time over a reused canvas, so an
-/// over-long GIF costs unbounded work at flat memory — and pays it twice,
-/// once priming and once baking.
 #[test]
 fn a_gif_with_more_source_frames_than_the_cap_is_refused_by_every_walk()
 -> Result<(), Box<dyn std::error::Error>> {

@@ -1,8 +1,5 @@
-//! Submission editor values and prerequisite state.
-
 use super::text_editor;
 
-/// Changelog editor content with value semantics for state snapshots.
 #[derive(Debug, Default)]
 pub struct ChangelogContent(pub(super) text_editor::Content);
 
@@ -41,8 +38,6 @@ impl PartialEq for ChangelogContent {
 }
 
 mapped_enum_with_all! {
-    /// A submit prerequisite the user supplies themselves, ordered as the modal
-    /// lays them out.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     #[repr(u8)]
     pub enum Requirement {
@@ -61,11 +56,6 @@ impl Requirement {
     }
 }
 
-/// Everything standing between the modal's contents and a submit.
-///
-/// The two halves read differently, so they stay apart: `pending` work clears
-/// itself and only ever earns a "hold on" line, while `missing` requirements
-/// wait on the user and are the ones that redden a control.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Blockers {
     pub(super) pending: bool,

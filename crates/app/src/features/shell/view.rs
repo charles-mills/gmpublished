@@ -19,7 +19,6 @@ use crate::{
 
 use super::{ChromeStrategy, Message, Route, State, sidebar_rail_width, sidebar_width};
 
-/// Renders the full-height shared shell sidebar.
 pub fn sidebar<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
@@ -100,8 +99,6 @@ fn rail_search_button(ctx: ViewCtx<'_>, drag_active: bool) -> Element<'_, Messag
         !drag_active,
     );
 
-    // The search palette is not a drop target, so it gets the same
-    // can't-drop cursor as the non-Downloader routes below it.
     if drag_active {
         mouse_area(control)
             .interaction(mouse::Interaction::NoDrop)
@@ -159,7 +156,6 @@ fn drag_region<'a>(width: Length, height: f32) -> Element<'a, Message> {
     .into()
 }
 
-/// Renders the floating account menu layer anchored to the sidebar bottom.
 pub fn account_menu_overlay<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
@@ -332,9 +328,6 @@ fn rail_account_button<'a>(
     drag_active: bool,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    // Rail hover feedback is a ring on the avatar circle itself (the
-    // presence badge layers over it); it has to come from the tracked
-    // hover state because the button spans the whole row (click target).
     let hovered = state.account_row_hovered();
     let button = button(
         container(account_avatar(
@@ -359,8 +352,6 @@ fn rail_account_button<'a>(
         .on_enter(Message::AccountRowHoverChanged(true))
         .on_exit(Message::AccountRowHoverChanged(false));
 
-    // The account menu is not a drop target either; match the rail icons'
-    // can't-drop cursor while a drag is in flight.
     if drag_active {
         area.interaction(mouse::Interaction::NoDrop).into()
     } else {
@@ -991,7 +982,6 @@ mod tests {
 
         assert_eq!(interaction_at(search_y), mouse::Interaction::NoDrop);
         assert_eq!(interaction_at(search_y + gap), mouse::Interaction::NoDrop);
-        // Route::ALL[2] is the Downloader: the one live drop target.
         assert_eq!(
             interaction_at(search_y + 3.0 * gap),
             mouse::Interaction::Copy

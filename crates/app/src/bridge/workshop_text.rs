@@ -1,4 +1,3 @@
-//! Localized Workshop drafts and reconciliation of successful metadata writes.
 use super::domain::{PublishedFileId, SteamId};
 pub use gmpublished_backend::WorkshopLanguage;
 use serde::{Deserialize, Serialize};

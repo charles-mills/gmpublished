@@ -1,5 +1,3 @@
-//! Query, palette, and backend search-session lifecycle.
-
 use super::*;
 
 impl State {
@@ -78,9 +76,6 @@ impl State {
         }
 
         self.input = input;
-        // Editing keeps the palette open even when the input empties out
-        // (e.g. backspacing over a typo'd first character) — an empty query
-        // hides the results section, not the palette itself.
         let change = self.session.begin_query(&self.input, self.mode);
         self.replace_rows(Vec::new());
         self.pending_quick.clone_from(&change.quick_request);
@@ -143,9 +138,7 @@ impl State {
         cancel_task
     }
 
-    /// Returns true when the close animation just settled and the palette
-    /// fully reset — the caller should re-sweep thumbnail demands, since the
-    /// fading rows kept theirs alive until this moment.
+    /// True when closing finishes. Recalculate demands now that the fading rows are gone.
     pub(crate) fn tick_motion(&mut self, now: Instant) -> bool {
         if self.palette.presence.tick(now) && !self.palette.expanded && self.palette.visible {
             self.reset_after_close();

@@ -1,4 +1,4 @@
-use gmpublished_backend::{ExecutionResources, ExecutionScheduleError};
+use gmpublished_backend::ExecutionScheduleError;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -31,51 +31,6 @@ pub(super) fn show_native_open_error_dialog(description: String) {
             .set_description(description)
             .show(),
     );
-}
-
-pub(super) type RuntimeJob = Box<dyn FnOnce() + Send + 'static>;
-pub(super) type WorkerPoolSpawner =
-    fn(&AppWorkerRuntime, Arc<str>, RuntimeJob) -> Result<(), ScheduleError>;
-
-/// App-facing scheduler over the process-owned backend execution resources.
-///
-/// There is deliberately no second set of app pools here: filesystem/Steam
-/// work shares the bounded blocking executor, media/CDN work shares the
-/// bounded network executor, and CPU-parallel work enters through
-/// `BackendServices::cpu_executor`.
-#[derive(Debug)]
-pub(super) struct AppWorkerRuntime {
-    execution: ExecutionResources,
-}
-
-impl AppWorkerRuntime {
-    pub(super) fn new(execution: ExecutionResources) -> Self {
-        Self { execution }
-    }
-
-    pub(super) fn spawn_blocking(
-        &self,
-        name: impl Into<Arc<str>>,
-        job: impl FnOnce() + Send + 'static,
-    ) -> Result<(), ScheduleError> {
-        self.execution.spawn_blocking(name, job).map_err(Into::into)
-    }
-
-    pub(super) fn spawn_blocking_job(
-        &self,
-        name: Arc<str>,
-        job: RuntimeJob,
-    ) -> Result<(), ScheduleError> {
-        self.execution.spawn_blocking(name, job).map_err(Into::into)
-    }
-
-    pub(super) fn spawn_media_job(
-        &self,
-        name: Arc<str>,
-        job: RuntimeJob,
-    ) -> Result<(), ScheduleError> {
-        self.execution.spawn_network(name, job).map_err(Into::into)
-    }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]

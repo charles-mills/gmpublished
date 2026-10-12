@@ -1,25 +1,20 @@
-//! Content-tree collection and publish/snapshot verification.
-
 use super::{
-    Arc, ArchiveEntryPath, ArchiveService, ConfigService, ContentPathVerificationRequest,
-    GmaMetaEntry, HashSet, MAX_WHITELIST_FAILURES, Path, PathBuf, PathOperation,
-    PreparePublishPathError, UiError, VerifiedContentPath, WorkshopSnapshotInventory, file_browser,
-    keys, whitelist,
+    Arc, ArchiveEntryPath, ContentPathVerificationRequest, GmaMetaEntry, HashSet,
+    MAX_WHITELIST_FAILURES, Path, PathBuf, PathOperation, PreparePublishPathError, UiError,
+    VerifiedContentPath, WorkshopSnapshotInventory, file_browser, keys, whitelist,
 };
 
 pub fn verify_content_path(
-    config: ConfigService<'_>,
-    archive: ArchiveService<'_>,
     request: ContentPathVerificationRequest,
+    ignore_globs: &[String],
+    whitelist: &[String],
 ) -> Result<Arc<VerifiedContentPath>, UiError> {
-    let settings = config.settings_snapshot();
-    let whitelist = archive.whitelist_snapshot();
     collect_content_tree(
         request.display_path,
         request.path,
         ContentCollectionPolicy::Publish {
-            ignore_globs: &settings.backend.ignore_globs,
-            whitelist: &whitelist,
+            ignore_globs,
+            whitelist,
         },
     )
     .map(VerifiedContentPath::from)
@@ -136,12 +131,6 @@ impl From<CollectedContentTree> for WorkshopSnapshotInventory {
     }
 }
 
-/// Accumulator state threaded through the recursive directory walk in
-/// [`collect_content_entries`]. Bundled into one struct because these fields
-/// are mutated together at every recursion depth, and each is written from
-/// multiple call sites rather than just one — passing them individually
-/// would mean a long, unwieldy parameter list threaded through every
-/// recursive call for no benefit.
 #[derive(Default)]
 struct ContentCollectionState {
     entries: Vec<(GmaMetaEntry, PathBuf)>,
@@ -218,12 +207,6 @@ fn collect_content_entries(
     Ok(())
 }
 
-/// A path under `root` in the archive's canonical form.
-///
-/// ASCII lowercasing specifically, matching
-/// [`crate::bridge::content_path::normalize_archive_path`]: a Unicode
-/// lowercase would fold characters it does not, so `CAFÉ.vmt` would index one
-/// way here and be looked up another, and nothing would ever find it.
 pub(super) fn relative_slash_path(root: &Path, path: &Path) -> Result<String, UiError> {
     let relative = path.strip_prefix(root).map_err(|_| {
         PreparePublishPathError::OutsideContentRoot {
@@ -232,20 +215,18 @@ pub(super) fn relative_slash_path(root: &Path, path: &Path) -> Result<String, Ui
         }
         .into_ui()
     })?;
-    let mut output = String::new();
-    for component in relative.components() {
-        let std::path::Component::Normal(component) = component else {
-            continue;
-        };
-        let component = component.to_string_lossy().to_ascii_lowercase();
-        if !component.is_empty() {
-            if !output.is_empty() {
-                output.push('/');
-            }
-            output.push_str(&component);
-        }
-    }
-    Ok(output)
+    relative
+        .to_str()
+        .and_then(gmpublished_backend::path::normalize_archive_path)
+        .ok_or_else(|| {
+            UiError::detailed(
+                keys::INVALID_CONTENT_PATH,
+                Some(format!(
+                    "invalid archive entry path: {}",
+                    relative.display()
+                )),
+            )
+        })
 }
 
 fn file_browser_entry(entry: &GmaMetaEntry) -> Result<file_browser::Entry, UiError> {

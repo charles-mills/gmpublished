@@ -1,5 +1,3 @@
-//! Search thumbnail state and demand ownership.
-
 use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

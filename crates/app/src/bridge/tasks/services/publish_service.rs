@@ -8,22 +8,13 @@ use crate::bridge::{
 use gmpublished_backend::{SteamRuntimeError, Transaction, publishing as steam_publishing};
 use std::path::Path;
 
-/// Workshop publishing capability exposed to app features.
-#[derive(Clone, Copy)]
-pub struct PublishService<'a> {
-    inner: &'a BackendServices,
-}
-
-impl<'a> PublishService<'a> {
-    pub(super) const fn new(inner: &'a BackendServices) -> Self {
-        Self { inner }
-    }
-    pub(crate) fn submit(
-        self,
+impl BackendServices {
+    pub(crate) fn submit_publish(
+        &self,
         request: PublishSubmitRequest,
         transaction: &Transaction,
     ) -> Result<PublishSubmitOutcome, UiError> {
-        if !self.inner.steam_runtime.is_connected() {
+        if !self.steam_runtime.is_connected() {
             transaction.error(&SteamRuntimeError::NotConnected);
             return Err(steam_not_connected());
         }
@@ -35,7 +26,6 @@ impl<'a> PublishService<'a> {
         let content_source_path = request.content_source_path.clone();
         let submission = publish_submission_from_app_request(request);
         let outcome = self
-            .inner
             .backend
             .submit_publish(submission, transaction)
             .ui_err()?;
@@ -46,8 +36,8 @@ impl<'a> PublishService<'a> {
         };
         if creating {
             use crate::bridge::workshop_text::{FieldEdit, MetadataEdit};
-            if let (Some(primary), Ok(user)) = (primary, self.inner.workshop().current_user()) {
-                self.inner.text_journal.lock().record(
+            if let (Some(primary), Ok(user)) = (primary, self.current_steam_user()) {
+                self.text_journal.lock().record(
                     user.steamid,
                     &MetadataEdit {
                         workshop_id: outcome.published_file_id,
@@ -79,8 +69,8 @@ impl<'a> PublishService<'a> {
                         value: text.description.clone(),
                     }),
                 };
-                let revision = self.inner.begin_transaction();
-                match self.update_metadata(&edit, &revision) {
+                let revision = self.begin_transaction();
+                match self.update_publish_metadata(&edit, &revision) {
                     Ok(legal) => {
                         outcome.legal_agreement_required |= legal;
                         revision.finished(gmpublished_backend::TransactionPayload::None);
@@ -96,7 +86,7 @@ impl<'a> PublishService<'a> {
                 }
             }
         }
-        if let Err(error) = self.inner.config().update_settings_snapshot(|settings| {
+        if let Err(error) = self.update_settings_snapshot(|settings| {
             settings
                 .backend
                 .my_workshop_local_paths
@@ -107,18 +97,15 @@ impl<'a> PublishService<'a> {
         Ok(outcome)
     }
 
-    pub(crate) fn update_metadata(
-        self,
+    pub(crate) fn update_publish_metadata(
+        &self,
         edit: &crate::bridge::workshop_text::MetadataEdit,
         transaction: &Transaction,
     ) -> Result<bool, UiError> {
-        let account = self.inner.workshop().current_user()?.steamid;
+        let account = self.current_steam_user()?.steamid;
         let mut edit = edit.clone();
         if edit.needs_baseline() {
-            let remote = self
-                .inner
-                .workshop()
-                .localized_text(edit.workshop_id, edit.language)?;
+            let remote = self.localized_text(edit.workshop_id, edit.language)?;
             edit.resolve_baseline(remote);
         }
         edit.remove_unchanged();
@@ -126,7 +113,6 @@ impl<'a> PublishService<'a> {
             return Ok(false);
         }
         let result = self
-            .inner
             .backend
             .update_publish_metadata(
                 edit.workshop_id.into(),
@@ -136,27 +122,25 @@ impl<'a> PublishService<'a> {
                 transaction,
             )
             .ui_err()?;
-        self.inner.text_journal.lock().record(account, &edit);
+        self.text_journal.lock().record(account, &edit);
         Ok(result)
     }
 
-    pub(crate) fn update_icon(
-        self,
+    pub(crate) fn update_publish_icon(
+        &self,
         icon_source_path: &Path,
         upscale: bool,
         workshop_id: PublishedFileId,
         transaction: &Transaction,
     ) -> Result<bool, UiError> {
-        self.inner
-            .backend
+        self.backend
             .connected_steam()
             .inspect_err(|_| {
                 transaction.error(&SteamRuntimeError::NotConnected);
             })
             .ui_err()?;
         let icon = steam_publishing::WorkshopIcon::new(icon_source_path, upscale).ui_err()?;
-        self.inner
-            .backend
+        self.backend
             .update_publish_icon(workshop_id.into(), icon, transaction)
             .ui_err()
     }

@@ -1,7 +1,3 @@
-//! CPU-side frame parameters: the uniform block every pass reads, the
-//! camera frames that fill it, and the scene-colour analysis (water fog,
-//! sky tint) feeding those values. Owns no GPU objects.
-
 use super::{
     AMBIENT, Camera, FOV_Y, FlyCamera, MapFog, MapPreview, MapSkyCamera, Rectangle, RenderMode,
     RenderScene, ResolvedTexture, SOURCE_UP, Skybox, decode_bc_texture, half_extent, look_at,
@@ -271,73 +267,57 @@ fn srgb_channel_to_linear(channel: u8) -> f32 {
 
 #[cfg(test)]
 mod uniform_layout_tests {
+    use iced::wgpu::naga::{self, TypeInner};
+    use std::mem::{offset_of, size_of};
+
     use super::Uniforms;
 
-    /// Every shader that binds the shared uniform buffer declares its own copy
-    /// of the struct, and WGSL only requires the buffer to be *at least* as
-    /// large as the declaration. A shader carrying a prefix therefore compiles
-    /// and runs, reading the wrong fields the moment one is inserted anywhere
-    /// but the end — silently, on the GPU, with no Rust-side symptom.
-    ///
-    /// `min_binding_size` catches a buffer that is too small; nothing catches
-    /// a declaration that is too short. This does.
     #[test]
-    fn every_shader_declares_the_whole_uniform_struct() {
-        for (name, source) in [
+    fn shaders_validate_and_match_the_uploaded_uniform_layout() {
+        let fields = [
+            ("view_proj", offset_of!(Uniforms, view_proj)),
+            ("light", offset_of!(Uniforms, light)),
+            ("camera_position", offset_of!(Uniforms, camera_position)),
+            ("fog_color", offset_of!(Uniforms, fog_color)),
+            ("fog_params", offset_of!(Uniforms, fog_params)),
             (
-                "model_viewer.wgsl",
-                super::super::super::MODEL_SHADER_SOURCE,
+                "water_time_sky_tint",
+                offset_of!(Uniforms, water_time_sky_tint),
             ),
-            ("water.wgsl", super::super::super::WATER_SHADER_SOURCE),
-            ("detail.wgsl", super::super::super::DETAIL_SHADER_SOURCE),
-            ("sky.wgsl", super::super::super::SKY_SHADER_SOURCE),
+            (
+                "water_depth_params",
+                offset_of!(Uniforms, water_depth_params),
+            ),
+        ];
+        for (name, source) in [
+            ("model_viewer", super::super::super::MODEL_SHADER_SOURCE),
+            ("water", super::super::super::WATER_SHADER_SOURCE),
+            ("detail", super::super::super::DETAIL_SHADER_SOURCE),
+            ("sky", super::super::super::SKY_SHADER_SOURCE),
         ] {
-            assert_eq!(
-                declared_uniform_size(source),
-                Some(std::mem::size_of::<Uniforms>()),
-                "{name} does not declare the whole `Uniforms` struct"
-            );
-        }
-    }
-
-    /// Every `.wgsl` in this feature declares `Uniforms` with these seven
-    /// members at these offsets, and the bind-group layout pins the buffer to
-    /// this size. Nothing can check the WGSL side from Rust, so this pins the
-    /// Rust side exactly: a reorder or an inserted member fails here, and the
-    /// fix is to mirror it in `model_viewer.wgsl`, `detail.wgsl`, `sky.wgsl`
-    /// and `water.wgsl`.
-    #[test]
-    fn uniforms_layout_matches_the_shaders() {
-        assert_eq!(size_of::<Uniforms>(), 160);
-        assert_eq!(align_of::<Uniforms>(), 4);
-        assert_eq!(std::mem::offset_of!(Uniforms, view_proj), 0);
-        assert_eq!(std::mem::offset_of!(Uniforms, light), 64);
-        assert_eq!(std::mem::offset_of!(Uniforms, camera_position), 80);
-        assert_eq!(std::mem::offset_of!(Uniforms, fog_color), 96);
-        assert_eq!(std::mem::offset_of!(Uniforms, fog_params), 112);
-        assert_eq!(std::mem::offset_of!(Uniforms, water_time_sky_tint), 128);
-        assert_eq!(std::mem::offset_of!(Uniforms, water_depth_params), 144);
-    }
-
-    /// Byte size of the `Uniforms` struct a WGSL source declares, by summing
-    /// its members. `None` if it declares none, or uses a member type this
-    /// does not know — either is a reason to look rather than pass.
-    fn declared_uniform_size(source: &str) -> Option<usize> {
-        let body = source.split_once("struct Uniforms {")?.1.split_once('}')?.0;
-        let mut total = 0;
-        for line in body.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("//") {
-                continue;
-            }
-            let ty = line.split_once(':')?.1.trim().trim_end_matches(',');
-            total += match ty {
-                "mat4x4<f32>" => 64,
-                "vec4<f32>" => 16,
-                _ => return None,
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let uniform = module
+                .types
+                .iter()
+                .find_map(|(_, ty)| (ty.name.as_deref() == Some("Uniforms")).then_some(&ty.inner))
+                .expect("Uniforms declaration");
+            let TypeInner::Struct { members, span } = uniform else {
+                panic!("{name}: Uniforms must be a struct");
             };
+            assert_eq!(*span as usize, size_of::<Uniforms>(), "{name}: size");
+            assert_eq!(members.len(), fields.len(), "{name}: fields");
+            for (member, (field, offset)) in members.iter().zip(fields) {
+                assert_eq!(member.name.as_deref(), Some(field), "{name}: field name");
+                assert_eq!(member.offset as usize, offset, "{name}: {field} offset");
+            }
         }
-        Some(total)
     }
 }
 

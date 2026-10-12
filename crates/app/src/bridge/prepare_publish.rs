@@ -1,9 +1,3 @@
-//! Bridge-owned Prepare Publish verification and operational DTOs.
-//!
-//! The feature state consumes these values but performs no filesystem, image,
-//! settings, transaction, or backend work itself. Runners invoke this module
-//! on the shared worker runtime and feed the resulting DTOs back to update.
-
 use crate::bridge::tasks::TransactionStatus;
 use std::{
     collections::HashSet,
@@ -21,7 +15,7 @@ use crate::bridge::{
         DEFAULT_WORKSHOP_ICON_FILE_NAME, IconFormat, PublishSelectedPreview, PublishSubmitOutcome,
         PublishSubmitRequest,
     },
-    tasks::{ArchiveService, ConfigService, WorkshopSnapshotId},
+    tasks::{BackendServices, WorkshopSnapshotId},
 };
 use gmpublished_backend::error_keys as keys;
 use gmpublished_backend::{ErrorKey, HasErrorKey};
@@ -73,10 +67,6 @@ impl std::fmt::Display for PathOperation {
     }
 }
 
-/// Rich filesystem failures at the feature boundary. The full operation and
-/// source chain are retained for logs; the UI receives the stable localized
-/// key plus a path/source detail that does not bake English prose into the
-/// translation payload.
 #[derive(Debug, Error)]
 enum PreparePublishPathError {
     #[error("could not {operation} at {}: {source}", path.display())]
@@ -173,12 +163,8 @@ impl VerifiedContentPath {
     }
 }
 
-/// An unfiltered inventory of content already published to the Workshop.
-///
-/// This is intentionally distinct from [`VerifiedContentPath`]: snapshot
-/// entries are suitable for browsing and previewing, but have not passed the
-/// current publish whitelist or ignore policy and therefore cannot be used as
-/// a publish source.
+/// Published content is safe to browse, but has not passed the current
+/// whitelist or ignore rules and cannot be used as a publish source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkshopSnapshotInventory {
     entries: Vec<file_browser::Entry>,
@@ -197,7 +183,6 @@ impl WorkshopSnapshotInventory {
     }
 }
 
-/// Minimal verified path state retained after the browser tree is built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedContentPathState {
     pub(crate) display_path: String,
@@ -216,7 +201,6 @@ pub struct IconVerificationRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedIcon {
     pub(crate) display_path: String,
-    pub(crate) source_path: PathBuf,
     pub(crate) path: PathBuf,
     pub(crate) format: IconFormat,
     pub(crate) width: u32,
@@ -266,13 +250,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::bridge::tasks::BackendServices;
     use crate::test_support::TestDir;
 
-    /// The verifier indexes an entry by this path; a material referencing the
-    /// same name is looked up through `ContentPath`. Both must reduce that one
-    /// name identically — two lowercasing rules agree on ASCII and diverge on
-    /// everything else, so the entry would exist and never be found.
     #[test]
     fn entry_paths_and_content_paths_reduce_a_name_identically() {
         let root = PathBuf::from("/addon");
@@ -322,42 +301,91 @@ mod tests {
     }
 
     #[test]
-    fn verify_content_path_builds_file_browser_entries() {
+    fn verify_content_path_applies_publish_rules_before_building_browser_entries() {
         let root = TestDir::new("prepare-publish-verify");
         root.file("lua/autorun/init.lua", b"print('ready')");
+        root.file("private.bin", b"ignored");
+        root.file(".git/config", b"default ignored");
+        let request = ContentPathVerificationRequest {
+            generation: Generation::from_raw(1),
+            display_path: root.path_text(),
+            path: root.path().to_path_buf(),
+        };
+        let ignore_globs = ["private.bin".to_owned()];
+        let whitelist = ["lua/*.lua".to_owned()];
 
-        let services = BackendServices::for_test();
-        let verified = verify_content_path(
-            services.config(),
-            services.archive(),
-            ContentPathVerificationRequest {
-                generation: Generation::from_raw(1),
-                display_path: root.path_text(),
-                path: root.path().to_path_buf(),
-            },
-        )
-        .expect("content path should verify");
+        let verified = verify_content_path(request.clone(), &ignore_globs, &whitelist)
+            .expect("content path should verify");
 
         let browser = file_browser::State::from_entries(verified.entries().iter().cloned());
         assert_eq!(verified.total_size(), 14);
+        assert_eq!(verified.entries().len(), 1);
         assert_eq!(browser.rows()[0].shortcut_prefix(), Some("lua/"));
         assert_eq!(browser.rows()[0].display_name(), "autorun");
+
+        root.file("notes/private.bin", b"unlisted");
+        let error = verify_content_path(request, &ignore_globs, &whitelist)
+            .expect_err("unlisted files must block publishing");
+        assert_eq!(error.key, keys::WHITELIST);
+        assert_eq!(error.detail.as_deref(), Some("notes/private.bin"));
     }
 
     #[test]
     fn verify_content_path_rejects_relative_paths() {
-        let services = BackendServices::for_test();
         let result = verify_content_path(
-            services.config(),
-            services.archive(),
             ContentPathVerificationRequest {
                 generation: Generation::from_raw(1),
                 display_path: "relative".to_owned(),
                 path: PathBuf::from("relative"),
             },
+            &[],
+            &["lua/*.lua".to_owned()],
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_content_path_rejects_empty_and_ignored_only_folders() {
+        let root = TestDir::new("prepare-publish-empty-content");
+        let request = ContentPathVerificationRequest {
+            generation: Generation::INITIAL,
+            display_path: root.path_text(),
+            path: root.path().to_path_buf(),
+        };
+        assert_eq!(
+            verify_content_path(request.clone(), &[], &["lua/*.lua".to_owned()])
+                .expect_err("empty folder")
+                .key,
+            keys::NO_ENTRIES
+        );
+        root.file(".git/config", b"ignored");
+        assert_eq!(
+            verify_content_path(request, &[], &["lua/*.lua".to_owned()])
+                .expect_err("ignored-only folder")
+                .key,
+            keys::NO_ENTRIES
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_content_path_rejects_the_same_normalized_collisions_as_packing() {
+        let root = TestDir::new("prepare-publish-colliding-content");
+        root.file("lua/init.lua", b"one");
+        root.file(r"lua\init.lua", b"two");
+        let error = verify_content_path(
+            ContentPathVerificationRequest {
+                generation: Generation::INITIAL,
+                display_path: root.path_text(),
+                path: root.path().to_path_buf(),
+            },
+            &[],
+            &["lua/*.lua".to_owned()],
+        )
+        .expect_err("paths collide");
+        assert_eq!(error.key, keys::DUPLICATE_ENTRIES);
+        assert_eq!(error.detail.as_deref(), Some("lua/init.lua"));
     }
 
     #[test]
@@ -406,7 +434,7 @@ mod tests {
         .expect("png icon should verify");
 
         assert_eq!((verified.icon.width, verified.icon.height), (32, 48));
-        assert_eq!(verified.icon.source_path, source);
+        assert_eq!(verified.icon.path, source);
         assert!(verified.animation.is_none());
     }
 
@@ -443,6 +471,5 @@ mod tests {
         // Display preview is bounded; submit still reads the original file.
         assert_eq!((verified.icon.width, verified.icon.height), (512, 512));
         assert_eq!(verified.icon.path, source);
-        assert_eq!(verified.icon.source_path, source);
     }
 }

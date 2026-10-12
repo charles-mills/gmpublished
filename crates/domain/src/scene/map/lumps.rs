@@ -1,5 +1,3 @@
-//! Typed BSP lump access used during scene assembly.
-
 use super::{
     BTreeSet, Brush, BrushSide, BspError, BspModel, ColorRgbExp, Cow, DetailProp, DetailProps,
     DispInfo, DispVert, Face, KvValue, Leaf, LeafAmbientIndex, LeafAmbientSample, Limits, Node,
@@ -17,18 +15,7 @@ const SURF_SKIP: i32 = 0x0200;
 
 const BSP_MAGIC: &[u8; 4] = b"VBSP";
 
-/// One entity's flat string keyvalue pairs (real Source entity lumps
-/// have no nested blocks, so [`vformats::keyvalues::KvValue::Block`]
-/// pairs are dropped). Lookup is exact-match, first-occurrence-wins,
-/// matching vbsp's own `RawEntity::prop` (vformats' `KvDocument::get_str`
-/// is case-insensitive, which is not the same lookup). Both keys and
-/// values are ASCII-lowercased at construction: vbsp's GMod-tolerance
-/// fork lowercases the whole entities lump text before parsing it
-/// (`reader::LumpReader::read_entities`), so wild content's inconsistent
-/// `WorldSpawn`/`worldspawn` classname casing (etc.) still matches the
-/// lowercase literal keys/values every lookup across `scene::map`
-/// compares against. Lowercasing per-pair after parsing is equivalent: ASCII
-/// case-folding never changes token boundaries or UTF-8 validity.
+/// ASCII-lowercase keys and values. Lookup is exact and first-match; nested blocks are dropped.
 #[derive(Clone, Debug, Default)]
 pub(super) struct MapEntity {
     pairs: Vec<(String, String)>,
@@ -58,19 +45,11 @@ impl MapEntity {
             .map(|(_, value)| value.as_str())
     }
 
-    /// Whether this is an entity of `classname`.
-    ///
-    /// Named rather than spelled `prop("classname") == Some(..)` at each use:
-    /// `classname` is the one key every lookup starts from, and a misspelling
-    /// of it silently matches nothing rather than failing.
     pub(super) fn is_class(&self, classname: &str) -> bool {
         self.prop("classname") == Some(classname)
     }
 }
 
-/// Every BSP lump the scene builder needs, decoded once at load time from
-/// [`bsp::parse`] into owned storage (no borrow of the source bytes) so
-/// it can be threaded through the whole `load_map` pipeline by reference.
 pub(super) struct MapBsp {
     pub(super) vertices: Vec<Vec3>,
     pub(super) planes: Vec<Plane>,
@@ -107,16 +86,6 @@ pub(super) struct MapBsp {
 }
 
 impl MapBsp {
-    /// Decodes every lump the scene builder needs. The per-lump decodes are
-    /// independent passes over disjoint byte ranges — and on repacked
-    /// workshop maps each one is an LZMA decompression that dominates load
-    /// time — so, when an explicit pool is supplied, they run in one scoped
-    /// batch on that pool. Without a pool they decode serially. Only the *selected*
-    /// lighting set is decoded: `selected_lightmap_samples` /
-    /// `selected_ambient_lighting` prefer LDR and use exactly one of each
-    /// pair, and the preference is decidable from raw lump lengths (an
-    /// empty raw lump decodes to an empty vec) before decompressing
-    /// anything.
     pub(super) fn parse(
         bytes: &[u8],
         limits: &Limits,
@@ -247,9 +216,6 @@ impl MapBsp {
             .and_then(|index| self.texdatas.get(index))
     }
 
-    /// The resolved texture name for `texinfo`'s texdata, or `""` when
-    /// either lookup misses (matches the empty-string fallback the
-    /// preview mesh builder already tolerates for stray content).
     pub(super) fn texinfo_name(&self, texinfo: &TexInfo) -> &str {
         self.texinfo_texdata(texinfo)
             .and_then(|texdata| {
@@ -260,12 +226,6 @@ impl MapBsp {
             .map_or("", String::as_str)
     }
 
-    /// Vertex positions in face winding order, following surfedges
-    /// through their edges (vbsp `Handle<Face>::vertices`). Missing
-    /// indices are dropped rather than the whole face failing — matches
-    /// vbsp's own tolerance (a `Handle` there assumes validated indices,
-    /// but the fallible pieces this crate cannot pre-validate degrade the
-    /// same way its `Option`-returning lookups already did downstream).
     pub(super) fn face_vertex_positions(&self, face: &Face) -> Vec<Vec3> {
         self.face_vertex_indices(face)
             .filter_map(|index| self.vertices.get(usize::from(index)).copied())
@@ -290,19 +250,14 @@ impl MapBsp {
             .and_then(|index| self.displacements.get(index))
     }
 
-    /// The plane normal for `face`'s own side (not yet flipped for
-    /// `face.side`; see the free function `face_normal`).
     pub(super) fn face_plane_normal(&self, face: &Face) -> Vec3 {
         self.planes
             .get(usize::from(face.plane))
             .map_or(Vec3::ZERO, |plane| Vec3::from(plane.normal))
     }
 
-    /// vbsp `Handle<Face>::is_visible`: false for sky, 2D-sky, trigger,
-    /// hint, skip, and nodraw surfaces. A face whose texinfo is out of
-    /// range (never happens for validated vbsp input, but this crate
-    /// does not cross-validate at parse) is treated as not visible
-    /// rather than assumed drawable.
+    /// Matches vbsp `Handle<Face>::is_visible`: excludes sky, 2D-sky, trigger,
+    /// hint, skip, and nodraw. Invalid texinfo is treated as invisible.
     pub(super) fn face_is_visible(&self, face: &Face) -> bool {
         let Some(texinfo) = self.face_texinfo(face) else {
             return false;
@@ -317,11 +272,6 @@ impl MapBsp {
             == 0
     }
 
-    /// Displacement vertices for `disp`'s `(2^power + 1)^2` grid, in
-    /// row-major order. Indices past the end of the lump are dropped
-    /// (matches vbsp's `Option`-filtering `displacement_vertices`
-    /// iterator, which silently shortens the sequence rather than
-    /// zero-filling it).
     pub(super) fn displacement_vertices(&self, disp: &DispInfo) -> impl Iterator<Item = &DispVert> {
         let start = i64::from(disp.vert_start);
         let count = displacement_vertex_count(disp.power);
@@ -329,7 +279,6 @@ impl MapBsp {
             .filter_map(|index| self.displacement_verts.get(usize::try_from(index).ok()?))
     }
 
-    /// The static prop placements (absent game lump yields none).
     pub(super) fn static_props_iter(&self) -> impl Iterator<Item = &StaticProp> {
         self.static_props
             .iter()
@@ -343,8 +292,6 @@ impl MapBsp {
             .map_or("", String::as_str)
     }
 
-    /// The prop's leaf span into the game lump's shared leaf table (used
-    /// to derive multi-cluster visibility).
     pub(super) fn static_prop_leaves(&self, prop: &StaticProp) -> Option<&[u16]> {
         let props = self.static_props.as_ref()?;
         let start = usize::from(prop.first_leaf);
@@ -364,19 +311,14 @@ impl MapBsp {
             .map_or(&[], |props| props.props.as_slice())
     }
 
-    /// The map's visibility cluster count, or 0 when the map has no
-    /// visibility lump (fullbright/unvised).
     pub(super) fn cluster_count(&self) -> u32 {
         self.visibility
             .as_ref()
             .map_or(0, |vis| vis.cluster_count() as u32)
     }
 
-    /// Every cluster reachable from `from` by following PVS edges
-    /// (treated as an undirected reachability graph, matching the flood
-    /// fill vbsp's `LazyVisData::reachable_clusters` used for skybox
-    /// partitioning — ported here since visibility derivation is scene
-    /// assembly, not something `vformats::bsp` does itself).
+    /// Undirected PVS reachability for skybox partitioning, ported from
+    /// vbsp's `LazyVisData::reachable_clusters`.
     pub(super) fn reachable_clusters(&self, from: i16) -> Vec<bool> {
         let Some(vis) = self.visibility.as_ref() else {
             return Vec::new();
@@ -388,10 +330,6 @@ impl MapBsp {
         else {
             return vec![false; cluster_count];
         };
-        // u64-bitset fill: the BFS visits ~every cluster, and a Vec<bool>
-        // row per visit is O(clusters²) byte traffic plus an allocation per
-        // cluster. Word-wise rows into a reusable buffer are ~64× less
-        // traffic; expand to Vec<bool> once at the end for the consumers.
         let words = cluster_count.div_ceil(64);
         let mut reached = vec![0u64; words];
         let mut row = vec![0u64; words];
@@ -416,7 +354,6 @@ impl MapBsp {
             .collect()
     }
 
-    /// Find the leaf containing `point` (see [`walk_to_leaf`]).
     pub(super) fn leaf_at(&self, point: Vec3) -> Option<usize> {
         walk_to_leaf(
             point,
@@ -434,22 +371,11 @@ impl MapBsp {
     }
 }
 
-/// Walk a BSP tree from the root to the leaf containing `point`
-/// (ported from vbsp's `Bsp::leaf_at`, MIT, © icewind1991). Node and
-/// plane lookup are closures because the two callers store the tree
-/// differently: [`MapBsp`] as the decoded lumps,
-/// [`MapLeafLocator`](super::MapLeafLocator) as
-/// a retained projection of them.
+/// Walks to the leaf containing `point` (ported from vbsp's `Bsp::leaf_at`,
+/// MIT, © icewind1991). Closures support decoded and retained tree layouts.
 ///
-/// `node_count` bounds the descent. Node children are read verbatim from
-/// the file — `vformats` validates nothing about them — so wild content can
-/// point a child back up the tree, and an unbounded walk spins forever. That
-/// is not merely a stalled worker: `leaf_at` is reached per frame from the
-/// map previewer's camera (`MapVisibility::cluster_at`), so a cycle wedges
-/// the render thread. An acyclic walk descends into a distinct node each
-/// step and so cannot visit more nodes than exist; needing more than that
-/// means a node repeated, and `None` (leaf unknown) is the same answer
-/// callers already handle for an out-of-range index.
+/// Untrusted child indices can cycle. An acyclic descent visits at most
+/// `node_count` nodes; exceeding that returns `None`, as for an invalid index.
 pub(super) fn walk_to_leaf(
     point: Vec3,
     node_count: usize,
@@ -471,7 +397,6 @@ pub(super) fn walk_to_leaf(
     None
 }
 
-/// `(2^power + 1)^2`: a displacement's vertex grid side squared.
 fn displacement_vertex_count(power: i32) -> i64 {
     let side = 2_i64
         .saturating_pow(power.clamp(0, 32) as u32)
@@ -479,12 +404,9 @@ fn displacement_vertex_count(power: i32) -> i64 {
     side.saturating_mul(side)
 }
 
-/// vbsp's `discard_faces_with_invalid_vertices` (MIT, © icewind1991):
-/// wild content sometimes has faces whose surfedges reference
-/// out-of-range vertices. Rather than let every downstream face-vertex
-/// lookup degrade independently, zero the edge count up front so the
-/// face is skipped everywhere a valid face would be processed (mirrors
-/// `append_face`'s existing `num_edges < 3` skip).
+/// Ported from vbsp's `discard_faces_with_invalid_vertices` (MIT, © icewind1991).
+/// Zero edge counts for faces with invalid vertex references so downstream
+/// assembly skips them consistently.
 fn discard_faces_with_invalid_vertices(
     faces: &mut [Face],
     surfedges: &[i32],
@@ -517,13 +439,8 @@ fn discard_faces_with_invalid_vertices(
     }
 }
 
-/// Reads the container version from the first eight bytes.
-///
-/// `bsp::parse` also reports a version, but only after a full 1036-byte header
-/// and lump directory. Anything shorter than that fails there as `Truncated`,
-/// so a truncated map of a version this build cannot open would be diagnosed as
-/// a broken file rather than an unsupported one. Eight bytes is all the version
-/// costs, and it is read before the parse for exactly that reason.
+/// Reads the version before full parsing so short files with unsupported
+/// versions report that error rather than a truncated-header error.
 pub(super) fn bsp_version(bytes: &[u8]) -> Result<u32, BspError> {
     let Some(header) = bytes.get(..8) else {
         return Err(BspError::Malformed {
@@ -542,12 +459,6 @@ pub(super) fn bsp_version(bytes: &[u8]) -> Result<u32, BspError> {
     ))
 }
 
-/// Index into `MapBsp::models` — a brush model ("bmodel"), the geometry a
-/// brush entity like a door refers to as `*3`.
-///
-/// Distinct from [`BrushIndex`] and from a static prop's model index, which
-/// names an entry in the game lump's model table. All three are `usize`-shaped
-/// and none is interchangeable.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ModelIndex(usize);
 
@@ -569,11 +480,7 @@ impl fmt::Display for ModelIndex {
     }
 }
 
-/// A BSP node's child link, decoded.
-///
-/// The file stores one `i32` per child: non-negative is an index into
-/// [`MapBsp::nodes`], negative is the bitwise complement of an index into
-/// [`MapBsp::leaves`].
+/// Non-negative child links index nodes; negative links are bitwise-complemented leaf indices.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NodeChild {
     Node(usize),
@@ -581,8 +488,6 @@ pub(super) enum NodeChild {
 }
 
 impl NodeChild {
-    /// `None` when a node index does not fit `usize`. Leaf links always fit —
-    /// the complement of a negative `i32` is non-negative.
     pub(super) fn decode(raw: i32) -> Option<Self> {
         if raw < 0 {
             usize::try_from(!raw).ok().map(Self::Leaf)
@@ -592,7 +497,6 @@ impl NodeChild {
     }
 }
 
-/// Index into `MapBsp::brushes`.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BrushIndex(usize);
 

@@ -1,12 +1,5 @@
-//! Captures global keyboard shortcuts ahead of the widget tree.
-//!
-//! Subscription listeners (`event::listen_with`) observe key events only
-//! after the widget tree has processed them, so a focused text input can
-//! consume the keystroke first — e.g. a closing ⌘F inserting a stray "f"
-//! into the search palette for a frame (iced's `text_input` tracks
-//! modifiers in widget state that a freshly remounted input starts
-//! without). This wrapper sees the event before any child, publishes the
-//! mapped message, and captures the event so no child ever receives it.
+//! Captures global shortcuts before child widgets can consume them as text.
+//! Subscription listeners run after the widget tree, too late to prevent that.
 
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, overlay, renderer};
@@ -14,7 +7,6 @@ use iced::{Element, Event, Length, Rectangle, Size, Vector, keyboard, mouse};
 
 use crate::widgets::forward::forward_widget_body;
 
-/// Maps a key press to a message, or `None` to let it pass through.
 type Mapper<Message> = fn(&keyboard::Key, keyboard::Modifiers) -> Option<Message>;
 
 pub struct ShortcutCapture<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {

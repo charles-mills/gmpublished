@@ -1,19 +1,3 @@
-//! The root of the Elm loop: the model every feature's state hangs off, the
-//! message enum they all fold into, and the update/view/subscription trio Iced
-//! drives.
-//!
-//! Feature state and update code never holds backend/service handles or starts
-//! operational work. Each `update` returns plain `Effect` values; runners in
-//! `side_effects_*` invoke bridge services on the shared executors, perform
-//! window/native operations, and translate their results back into messages.
-//! Bridge modules own filesystem, image, Steam, and transaction orchestration;
-//! features own UI state and pure projections of bridge DTOs.
-//!
-//! A feature may deliberately compose another UI feature. Prepare Publish, for
-//! example, embeds File Preview and forwards its messages as an effect. This is
-//! view/state composition, not permission to reach the embedded feature's
-//! runner or operational dependencies directly.
-
 use std::{
     collections::HashMap,
     fs,
@@ -65,7 +49,6 @@ const WORKSHOP_DRAG_PREFIX: &str = "gmpublished/workshop-id:";
 
 mod drag;
 mod hidden_addons;
-mod ports;
 mod routes;
 pub mod runners;
 mod side_effects_addons;
@@ -117,24 +100,14 @@ pub struct App {
     state: State,
     window_id: Option<window::Id>,
     startup_phase: StartupPhase,
-    /// One warm pass per session; set when the first library snapshot kicks it.
     library_warm_kicked: bool,
     audio_playback: Option<AudioPlayback>,
-    /// Timestamp shared by every synchronous state transition in the current
-    /// root-message dispatch.
     update_context: UpdateContext,
-    /// App-data snapshots arrive in backend order but are sanitized on a
-    /// CPU executor. Keep exactly one such job in flight so an older
-    /// snapshot can never finish after, and overwrite, a newer one. While it
-    /// runs, only the newest queued snapshot matters.
+    /// Only sanitize one snapshot at a time so an older job cannot overwrite newer settings.
     appdata_snapshot_in_flight: bool,
     pending_appdata_snapshot: Option<Box<gmpublished_backend::AppDataSnapshot>>,
 }
 
-/// Operational dependencies shared by root effect runners.
-///
-/// Keeping this concrete avoids smuggling services into feature state while
-/// making the root's environment boundary explicit.
 #[derive(Debug)]
 pub struct AppEnvironment {
     ctx: BackendContext,
@@ -163,15 +136,6 @@ impl StartupPhase {
 }
 
 impl Drop for App {
-    /// Iced drops the root model when the event loop ends, so this is where
-    /// app quit reaches the background threads: signal and join them here
-    /// rather than leaving process exit to race a still-running connect retry,
-    /// callback pump, or archive write.
-    ///
-    /// Transactions are cancelled first. When the model's remaining fields are
-    /// dropped after this hook, the shared executors stop accepting work and
-    /// release their workers under a bounded deadline. Cancelling gives active
-    /// jobs the chance to stop at their own next checkpoint first.
     fn drop(&mut self) {
         let cancelled = self.environment.ctx.shutdown();
         if cancelled > 0 {
@@ -196,11 +160,6 @@ pub struct State {
     i18n: I18n,
 }
 
-/// Concrete ownership of every independent feature model.
-///
-/// This is deliberately only an aggregate: features keep their existing
-/// messages and update functions, and no generic feature abstraction is
-/// introduced.
 #[derive(Debug, Default)]
 pub struct FeatureStates {
     shell: shell::State,
@@ -259,9 +218,6 @@ impl State {
             .set_play_gifs_by_default(enabled);
     }
 
-    /// GIFs never play while the window is unfocused: every playback site
-    /// pauses on its current frame and its clock subscription drops, so a
-    /// backgrounded window idles at 0% CPU.
     fn set_window_focused(&mut self, focused: bool) {
         self.features.my_workshop.set_window_focused(focused);
         self.features.installed_addons.set_window_focused(focused);
@@ -541,8 +497,6 @@ pub enum RootMessage {
     ContextMenu(context_menu::Message),
     SteamSession(steam_session::Message),
     Prerequisites(prerequisites::Message),
-    /// Whether a Steam client exists on this machine at all, probed once at
-    /// startup so "isn't running" and "isn't installed" stay distinguishable.
     SteamClientInstalledProbed(bool),
     ModalStack(modal_stack::Message),
     TasksOverlay(tasks_overlay::Message),
@@ -560,8 +514,6 @@ pub enum RootMessage {
     ),
     UpdateCheckCompleted(UpdateCheckOutcome),
     ThumbnailDemand(thumbnail_demand::Message),
-    /// Cached preview URLs for the whole library, resolved once per session
-    /// to warm the thumbnail disk cache in the background.
     WarmLibraryResolved(Vec<(PublishedFileId, String)>),
     FirstFramePresented(window::Id),
     WindowEvent(window::Id, window::Event),
@@ -639,9 +591,6 @@ fn search_file_items_from_library(
         .sum();
     let mut items = Vec::with_capacity(entry_count);
     for addon in snapshot.addons.iter() {
-        // One shared identity per addon; every file item Arc-shares it
-        // instead of copying the path/title/id per file. Label and
-        // extension derive from the entry path inside the backend.
         let shared = gmpublished_backend::FileSearchAddon::new(
             addon.canonical_path.clone(),
             addon.display_title(),
@@ -660,12 +609,6 @@ fn search_file_items_from_library(
     items
 }
 
-/// Generates the root's per-feature message handlers.
-///
-/// `method => feature.field, run_effect;` expands to the three-step handler
-/// every uniform feature needs. Stating the mapping once keeps the list
-/// readable as a list, which is the thing thirty near-identical lines stop
-/// being.
 macro_rules! feature_dispatch {
     ($($method:ident => $feature:ident . $field:ident, $run:ident;)*) => {
         $(
@@ -678,43 +621,37 @@ macro_rules! feature_dispatch {
 }
 
 impl App {
-    /// The narrow surface an effect runner gets. See [`ports`].
-    fn ports(&self) -> ports::Ports<'_> {
-        ports::Ports {
-            ctx: &self.environment.ctx,
-            i18n: &self.state.i18n,
-            tokens: &self.state.tokens,
-            workshop_snapshot_sequence: &self.environment.workshop_snapshot_sequence,
-        }
-    }
-
-    fn publish(&self) -> side_effects_publish::PublishRunner<'_> {
-        side_effects_publish::PublishRunner::new(self.ports())
-    }
-
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         Self::from_context(
             BackendContext::new().expect("test backend context"),
             StartupPhase::Started,
+            thumbnail_demand::Config::default(),
         )
     }
 
     pub(crate) fn new(ctx: BackendContext) -> (Self, Task<RootMessage>) {
         (
-            Self::from_context(ctx, StartupPhase::WaitingForFirstFrame),
+            Self::from_context(
+                ctx,
+                StartupPhase::WaitingForFirstFrame,
+                thumbnail_demand::Config {
+                    disk_cache_dir: gmpublished_backend::cache_dir()
+                        .map(|dir| dir.join("thumbnails")),
+                    ..thumbnail_demand::Config::default()
+                },
+            ),
             Task::none(),
         )
     }
 
-    /// Deterministic construction shared by production and tests. External
-    /// startup work is deliberately kept in `startup_tasks`, so ordinary
-    /// state/effect tests never launch HTTP, discovery, or warm-up jobs.
-    fn from_context(ctx: BackendContext, startup_phase: StartupPhase) -> Self {
-        let thumbnails = thumbnail_demand::Manager::new(thumbnail_demand::Config {
-            disk_cache_dir: gmpublished_backend::cache_dir().map(|dir| dir.join("thumbnails")),
-            ..thumbnail_demand::Config::default()
-        });
+    /// Keep external work in `startup_tasks` so state tests cannot start network or discovery jobs.
+    fn from_context(
+        ctx: BackendContext,
+        startup_phase: StartupPhase,
+        thumbnail_config: thumbnail_demand::Config,
+    ) -> Self {
+        let thumbnails = thumbnail_demand::Manager::new(thumbnail_config);
         let mut state = State::default();
         let (settings, paths) = ctx.settings_and_paths_snapshot();
         let _result = state.apply_settings_snapshot(settings, paths);
@@ -748,13 +685,9 @@ impl App {
         }
 
         if let Err(error) = self.environment.ctx.activate_startup_services() {
-            // Local browsing and archive operations remain usable without
-            // Steam, so a supervisor startup failure is reported but does not
-            // tear down the already-visible application.
+            // Local browsing still works if Steam startup fails.
             log::error!("could not start backend background services: {error}");
         }
-        // Seed placeholders from the persisted metadata snapshot so grids
-        // paint blurred-then-sharp instead of blank while decoding.
         self.environment
             .thumbnails
             .seed_thumbhashes(self.environment.ctx.thumbhash_seed());
@@ -796,9 +729,7 @@ impl App {
                     RootMessage::LibraryRefreshed(LibraryRefreshReason::Startup, result)
                 })
             });
-        // Connectivity is a level, not an edge. Seed the session from the
-        // current backend state as well as consuming its event stream; the
-        // session state machine dedups a repeated Connected.
+        // Steam may already be connected before the event subscription starts.
         let steam_bootstrap_task = if self.environment.ctx.steam_connected() {
             Task::done(RootMessage::SteamSession(
                 steam_session::Message::ConnectionEvent(steam_session::ConnectionEvent::Connected),
@@ -813,10 +744,7 @@ impl App {
                 shell::fetch_latest_update(env!("CARGO_PKG_VERSION")).map_err(Arc::new)
             })
             .map(|result| RootMessage::UpdateCheckCompleted(result.into()));
-        // The analyzer rasterizes its category labels synchronously in
-        // update(); loading the font database is the one expensive part, so
-        // warm the shared context off the UI thread before the route is
-        // first entered. One-shot — no timer.
+        // Warm the font database off-thread before the analyzer needs it in update().
         let label_context_warmup_task = self
             .environment
             .ctx
@@ -976,9 +904,6 @@ impl App {
                 Task::none()
             }
             RootMessage::GlobalShortcut(shortcut) => {
-                // ⌘, is a toggle: it alone passes the modal gate, and only
-                // while Settings itself is the top layer, so it can close
-                // what it opened.
                 if matches!(shortcut, GlobalShortcut::ToggleSettings)
                     && self.settings_shortcut_should_close()
                 {
@@ -1030,10 +955,6 @@ impl App {
         }
     }
 
-    /// Runs each effect through `run` and batches the resulting tasks. The
-    /// single generic replaces a `run_x_effects` wrapper per feature module;
-    /// each item still needs its own `&mut self`, so the intermediate
-    /// `Vec<Task<_>>` is unavoidable.
     fn batch_effects<E>(
         &mut self,
         effects: Vec<E>,
@@ -1046,12 +967,6 @@ impl App {
         Task::batch(tasks)
     }
 
-    // The uniform half of the root's dispatch. Each of these is the same
-    // three steps — update the feature, take the effects it asked for, run
-    // each — so they are stated as a table rather than written out. Features
-    // whose update needs more than a message (shell, modal_stack,
-    // prepare_publish, my_workshop's debug filter) keep their own handler
-    // below, where the difference is visible.
     feature_dispatch! {
         apply_installed_addons_message => installed_addons.installed_addons, run_installed_addons_effect;
         apply_size_analyzer_message => size_analyzer.size_analyzer, run_size_analyzer_effect;
@@ -1089,7 +1004,7 @@ impl App {
                 .steam_session
                 .identity()
                 .map(steam_session::SteamIdentity::steamid),
-            gmpublished_backend::WorkshopLanguage::from_locale(self.ports().i18n.locale_id()),
+            gmpublished_backend::WorkshopLanguage::from_locale(self.state.i18n.locale_id()),
         );
         let effects =
             preview_gma::update_at(&mut self.state.features.preview_gma, message, update.now);
@@ -1105,8 +1020,6 @@ impl App {
             tasks_overlay::update_at(&mut self.state.features.tasks_overlay, message, update.now);
         self.batch_effects(effects, |app, effect| match effect {
             tasks_overlay::Effect::CancelRequested(task_id) => {
-                // Uncorrelated tasks have nothing to cancel; the press is a
-                // no-op and the toast settles when its work does.
                 let _cancelled = app.environment.ctx.cancel_task(task_id);
                 Task::none()
             }
@@ -1149,7 +1062,6 @@ impl App {
         }
     }
 
-    /// `Message` is uninhabited here, so this arm can never run.
     #[cfg(not(target_os = "macos"))]
     #[expect(
         clippy::unused_self,
@@ -1333,10 +1245,8 @@ impl App {
             installed_addons::Effect::ThumbnailDemandsChanged => {
                 self.installed_addons_thumbnail_demands()
             }
-            // Relative on purpose: the feature's mirrored offset is
-            // u32-quantized by the on_scroll echo, so anchoring via an
-            // absolute scroll_to would drift by up to 0.5px per anchor and
-            // discard any user scroll racing the hydration batch.
+            // Use relative scrolling. The mirrored offset is rounded to u32, so absolute
+            // anchors would accumulate drift and discard concurrent user scrolls.
             installed_addons::Effect::GridScrollAnchored(delta) => {
                 iced::widget::operation::scroll_by(
                     addon_grid::scrollable_id(installed_addons::GRID_KEY),
@@ -1504,7 +1414,7 @@ impl App {
                 .environment
                 .ctx
                 .run_blocking("preview-localized-text", move |app| {
-                    app.workshop().localized_text(workshop_id, language)
+                    app.localized_text(workshop_id, language)
                 })
                 .map(move |result| {
                     RootMessage::PreviewGma(preview_gma::Message::LocalizedTextFetched(
@@ -1631,9 +1541,7 @@ impl App {
             .into();
 
         let mut layers = stack![base].width(Length::Fill).height(Length::Fill);
-        // Cursor-only layers. The drag overlay must exclude the sidebar: a
-        // layer with a cursor interaction levitates the cursor for everything
-        // below it, which would blind the Downloader drop-target hover.
+        // Exclude the sidebar or this layer masks the Downloader drop-target cursor.
         if self.state.addon_drag.is_dragging() {
             layers = layers.push(addon_drag_cursor_overlay(&self.state, &tokens, now));
         }
@@ -1666,9 +1574,6 @@ impl App {
                     .map(RootMessage::ModalStack),
             );
 
-            // Only these two host a file preview. An expanded preview leaves
-            // just a thin ring of app visible; black it out so it reads as
-            // background, not glow.
             let hosts_preview = matches!(
                 active,
                 modal_stack::ActiveModal::PreparePublish | modal_stack::ActiveModal::PreviewGma
@@ -1706,7 +1611,6 @@ impl App {
                     settings::view(&self.state.features.settings, ctx, self.state.viewport_size)
                         .map(RootMessage::Settings),
                 ),
-                // Overlay-only; drawn in the overlay block below.
                 modal_stack::ActiveModal::DestinationSelect
                 | modal_stack::ActiveModal::DescriptionEditor => None,
             };
@@ -1715,8 +1619,6 @@ impl App {
             }
         }
 
-        // Overlay modals layer on top of whatever base modal is open, behind
-        // their own scrim.
         if let Some(overlay_modal) = self.state.features.modal_stack.overlay_modal() {
             let overlay_scale = self.state.features.modal_stack.overlay_scale(now);
             let overlay_interactive = self.state.features.modal_stack.overlay_interactive();
@@ -1743,7 +1645,6 @@ impl App {
                     )
                     .map(RootMessage::DescriptionEditor),
                 ),
-                // Base modals; the stack never raises these to the overlay layer.
                 modal_stack::ActiveModal::PreparePublish
                 | modal_stack::ActiveModal::PreviewGma
                 | modal_stack::ActiveModal::Settings => None,
@@ -1773,8 +1674,6 @@ impl App {
             layers = layers.push(addon_drag_ghost(&self.state.addon_drag, ctx));
         }
 
-        // The tasks overlay is the topmost layer, above modal scrims, so
-        // publish/extract progress stays visible whatever else is open.
         if let Some(overlay) = tasks_overlay::view(
             &self.state.features.tasks_overlay,
             ctx,
@@ -1784,10 +1683,7 @@ impl App {
             layers = layers.push(overlay.map(RootMessage::TasksOverlay));
         }
 
-        // The wrapper intercepts ⌘F/⌘, ahead of every widget so a focused
-        // palette input can never swallow the keystroke as text. While
-        // Settings is the top layer only ⌘, stays live (to toggle it
-        // closed); every other keystroke belongs to the modal's widgets.
+        // Capture shortcuts before a focused text input can consume them.
         let shortcuts = if self.global_shortcuts_enabled() {
             Some(map_global_shortcut as _)
         } else if self.settings_shortcut_should_close() {
@@ -1801,9 +1697,6 @@ impl App {
     fn active_route_view(&self) -> Element<'_, RootMessage> {
         let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
         let route = self.state.features.shell.route();
-        // Prerequisites are a shell concern, not a feature one: the routes
-        // stay ignorant of Steam and Garry's Mod availability, and the one
-        // place that knows decides what they get to render.
         let blocker = prerequisites::blocker_for(
             route,
             self.state.features.steam_session.status(),
@@ -1820,9 +1713,6 @@ impl App {
         };
 
         match (route, blocker.as_ref()) {
-            // The Downloader keeps its input row live and blocks only the
-            // queue: pasting IDs while Steam boots is a reasonable thing to
-            // be doing, and the queue starts as soon as it connects.
             (shell::Route::Downloader, blocker) => downloader::view(
                 &self.state.features.downloader,
                 ctx,
@@ -1982,9 +1872,6 @@ impl App {
             && !self.state.features.context_menu.visible()
     }
 
-    /// ⌘, may close Settings only while it is the top layer; an overlay or
-    /// context menu above it keeps the toggle inert like every other global
-    /// shortcut, and a different active modal is never closed by it.
     fn settings_shortcut_should_close(&self) -> bool {
         self.state.features.modal_stack.active() == Some(modal_stack::ActiveModal::Settings)
             && !self.state.features.modal_stack.overlay_active()
@@ -2059,12 +1946,8 @@ impl App {
             context_menu::subscription(&self.state.features.context_menu)
                 .map(RootMessage::ContextMenu),
         );
-        // Global shortcuts (⌘F/⌘,) are handled by the shortcut_capture
-        // wrapper in view(), not a subscription: subscriptions observe key
-        // events after the widget tree, which let a focused palette input
-        // swallow the closing ⌘F as text for a frame.
-        // The context menu owns Escape while it is visible; the modal keeps
-        // its scrim-click dismissal in the meantime.
+        // The context menu owns Escape while visible. Global shortcuts are
+        // handled by `shortcut_capture` before the widget tree sees them.
         if !self.state.features.context_menu.visible() {
             streams.push(
                 modal_stack::subscription(&self.state.features.modal_stack)
@@ -2073,17 +1956,12 @@ impl App {
         }
         streams.push(window::events().map(|(id, event)| RootMessage::WindowEvent(id, event)));
         if !self.startup_phase.started() {
-            // `window::events` deliberately filters redraws. The raw listener
-            // exists for one frame only, avoiding an idle frame loop.
+            // `window::events` filters redraws. Listen for one frame to avoid an idle frame loop.
             streams.push(event::listen_raw(first_frame_presented_event));
         }
         if self.state.addon_drag.is_active() {
             streams.push(event::listen_with(addon_drag_event));
         }
-        // No continuous cursor-position stream: the Size Analyzer tooltip
-        // anchors to the hovered square and redraws only on hover enter/leave,
-        // and context menus capture their position at press time. Pointer
-        // movement stays out of the message loop entirely (idle-0%).
         streams.push(event::listen_with(file_drop_event));
         streams.extend(
             crate::platform::subscriptions()
@@ -2137,9 +2015,6 @@ fn addon_drag_cursor_overlay(
     .into()
 }
 
-/// Mapper installed while Settings is the top modal layer: ⌘, alone is
-/// intercepted so it can toggle Settings closed; everything else passes
-/// through to the modal's widgets.
 fn map_settings_toggle_shortcut(
     key: &keyboard::Key,
     modifiers: keyboard::Modifiers,

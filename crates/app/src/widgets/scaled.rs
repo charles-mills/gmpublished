@@ -16,7 +16,6 @@ fn is_invisible(scale: f32) -> bool {
     scale <= MIN_VISIBLE_SCALE
 }
 
-/// Scales content around its center without changing layout.
 pub struct Scaled<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
     scale: f32,
@@ -154,9 +153,8 @@ where
         let bounds = layout.bounds();
 
         if self.lifts_to_overlay() {
-            // Accepted tradeoff: while scale != 1.0, content renders in the
-            // overlay layer and may draw above sibling overlays for the short
-            // animation window. At rest, scale == 1.0 restores normal z-order.
+            // While scaled, content uses the overlay layer and can draw above
+            // sibling overlays. At scale 1 it returns to normal paint order.
             let origin = match self.origin {
                 Origin::Center => (
                     bounds.x + bounds.width / 2.0,

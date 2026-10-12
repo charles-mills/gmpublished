@@ -44,8 +44,6 @@ pub enum ContextMenuAction {
     SimulateToast(SimulatedToast),
 }
 
-/// Debug-only fake tasks for exercising the tasks overlay end to end,
-/// including cancellation of the slow-running success case.
 #[cfg(feature = "debug")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatedToast {
@@ -72,7 +70,6 @@ pub enum Icon {
     DebugMinus,
 }
 
-/// One row of a context menu: either a divider, or something pressable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Entry {
     Separator,
@@ -356,8 +353,6 @@ impl State {
         self.position = request.position;
         self.entries = request.entries;
 
-        // Overlay simulators ride along in every menu so the toast states
-        // can be exercised from anywhere.
         #[cfg(feature = "debug")]
         self.entries.extend([
             Entry::separator(),

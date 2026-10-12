@@ -30,9 +30,6 @@ pub(super) const fn install_backend_event_sink_by_default() -> bool {
     false
 }
 
-/// Forwards `Backend`-emitted events into the app's task/event pipeline:
-/// this is itself the `Arc<dyn BackendEventSink>` handed to `BackendConfig`
-/// at `Backend::init` time — no process-global sink involved.
 pub(super) struct BackendEventSinkRegistration {
     hub: Arc<BackendEventHub>,
 }
@@ -44,7 +41,6 @@ impl BackendEventSinkRegistration {
         }
     }
 
-    /// The sink to hand to `BackendConfig::event_sink`.
     pub(super) fn sink(&self) -> Arc<dyn BackendEventSink> {
         let hub = Arc::clone(&self.hub);
         Arc::new(move |event: BackendSinkEvent| {
@@ -87,9 +83,8 @@ impl BackendEventHub {
 
     fn emit(&self, event: &BackendRuntimeEvent) {
         if event.must_not_drop() {
-            // The consumer is the dedicated forwarder thread, which always
-            // drains, so a full queue here is a transient backlog rather than
-            // a stall worth dropping state-establishing events to avoid.
+            // The forwarder always drains. Wait through backpressure rather than
+            // dropping lifecycle events.
             let _disconnected = self.root.send(event.clone());
         } else {
             match self.root.try_send(event.clone()) {
@@ -127,12 +122,6 @@ impl BackendRuntimeEventSubscription {
 pub enum BackendRuntimeEvent {
     SteamConnected,
     SteamDisconnected,
-    // Boxed: every `BackendRuntimeEvent`, whatever its variant, is sized by
-    // the largest one and moves through `BackendEventHub`'s bounded channels
-    // (the root `SyncSender` plus one `mpsc::Sender` per subscriber, cloned
-    // per recipient in `emit`). An unboxed snapshot here would tax every
-    // channel slot and every fieldless variant (e.g. `SteamConnected`) with
-    // the ~500-byte `AppDataSnapshot` payload, not just appdata updates.
     AppDataUpdated(Box<BackendAppDataSnapshot>),
     InstalledAddonsRefreshed,
     DownloadStarted {
@@ -162,18 +151,9 @@ impl BackendRuntimeEvent {
         }
     }
 
-    /// Whether this event is a transaction's terminal delivery
-    /// (Finished/Error - cancellation rides the `Error` variant with a
-    /// `CANCELLED` error key). Terminal events must reach their subscriber;
-    /// everything else may be dropped under backpressure.
-    /// Whether dropping this event would leave the app in a wrong state
-    /// rather than merely a stale one.
-    ///
-    /// Progress is safe to drop: the next one supersedes it. Lifecycle is not.
-    /// `DownloadStarted` and `ExtractionStarted` are what correlate a backend
-    /// transaction with an app task, and a terminal for an uncorrelated
-    /// transaction is discarded — so dropping a start strands its task as
-    /// running forever, and dropping a terminal loses the completion.
+    /// Lifecycle events must survive backpressure. Start events correlate backend
+    /// transactions with app tasks; terminal events complete them. Progress may be
+    /// dropped because later updates supersede it.
     pub(crate) const fn must_not_drop(&self) -> bool {
         matches!(
             self,
@@ -244,9 +224,7 @@ pub enum BackendRuntimeAction {
     },
 }
 
-/// These values update the task overlay only when a live-service boundary has
-/// explicitly correlated the backend transaction id with an app `TaskId`.
-/// Uncorrelated transaction events remain data-only no-ops.
+/// Ignore transaction events until a live service correlates them with an app task.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionRuntimeEvent {
     Finished {
@@ -297,11 +275,6 @@ impl From<BackendSinkEvent> for BackendRuntimeEvent {
         match event {
             BackendSinkEvent::SteamConnected => Self::SteamConnected,
             BackendSinkEvent::SteamDisconnected => Self::SteamDisconnected,
-            // `BackendSinkEvent::AppDataUpdated` already carries a
-            // `Box<AppDataSnapshot>` (boxed at the source in
-            // crates/backend/src/events.rs), which is the same boxed type
-            // this variant expects, so this is a plain move, not a
-            // second allocation.
             BackendSinkEvent::AppDataUpdated(snapshot) => Self::AppDataUpdated(snapshot),
             BackendSinkEvent::InstalledAddonsRefreshed => Self::InstalledAddonsRefreshed,
             BackendSinkEvent::DownloadStarted(event) => event.into(),

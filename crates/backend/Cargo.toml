@@ -1,6 +1,6 @@
 [package]
 name = "gmpublished-backend"
-description = "Upstream-aligned backend for gmpublished."
+description = "Addon publishing and archive tools for gmpublished."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,14 +14,6 @@ name = "gmpublished_backend"
 path = "src/lib.rs"
 
 [features]
-# Surface that exists only for tests to reach: probes that observe state no
-# real operation needs (the `GmaView` spill-file pair), constructors for
-# states production never builds (`SteamRuntime::unavailable_for_tests`,
-# `TransactionId::from_raw`, the `MapWalkCollision` box builders), and
-# `events::BackendEventCollector`. Off by default so a reader of the public
-# API cannot mistake them for real operations; the self dev-dependency below
-# turns it on for this crate's own integration tests, and the app crate's
-# dev-dependencies turn it on for theirs.
 test-support = []
 
 [dependencies]
@@ -51,8 +43,6 @@ walkdir.workspace = true
 gmpublished-backend = { path = ".", features = ["test-support"] }
 # The encoder feature is only needed to build LZMA-alone test fixtures.
 lzma-rust2 = { workspace = true, features = ["encoder"] }
-steamworks-sys = "0.13.0"
-tempfile.workspace = true
 
 [lints]
 workspace = true

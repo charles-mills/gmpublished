@@ -1,11 +1,3 @@
-//! The GMA container: reading an addon archive, writing one, extracting
-//! entries, and the whitelist that decides what may go in.
-//!
-//! [`vformats::gma`] is the canonical whole-buffer format implementation and
-//! writer. This module adds the addon-shaped layer — identity (workshop id,
-//! extracted name), safe-path rules, and a narrow owned-index reader that can
-//! stream multi-gigabyte on-disk payloads without mapping or allocating them.
-
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
@@ -16,18 +8,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const GMA_HEADER: &[u8; 4] = b"GMAD";
-/// GMA format version emitted by this writer and accepted as the newest
-/// supported read version.
 pub const GMA_VERSION: u8 = 3;
 
-/// Zero is never a real Steam Workshop id; treat it as "no id" wherever a
-/// digit-suffix or folder-name parse can produce it.
 pub(crate) fn nonzero_workshop_id(id: u64) -> Option<WorkshopId> {
     WorkshopId::new(id)
 }
 
-/// Recovers a workshop id from a GMA file's name: `ds_`-prefixed folder ids,
-/// bare numeric names, or a trailing digit suffix on a descriptive name.
 pub fn ws_id_from_file_name<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
     let file_name = file_name.as_ref();
     let file_name = file_name.strip_prefix("ds_").unwrap_or(file_name);
@@ -39,9 +25,6 @@ pub fn ws_id_from_file_name<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
     extract_suffix_ws_id(file_name)
 }
 
-// Deliberate divergence from upstream, which computes `(id + digit) * 10`
-// per step and so returns the id multiplied by 10 for `name_123`-style
-// suffixes (the pure-numeric fast path in ws_id_from_file_name hides this).
 fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
     let file_name = file_name.as_ref();
     let start = file_name
@@ -57,7 +40,6 @@ fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-/// Failures produced while reading, writing, or extracting GMA archives.
 pub enum GmaError {
     #[error("GMA I/O failed")]
     IoError(#[source] crate::IoFailure),
@@ -75,11 +57,8 @@ pub enum GmaError {
     DecompressionOutput(#[source] crate::IoFailure),
     #[error("cancelled")]
     Cancelled,
-    /// Extraction finished without writing everything it should have: at
-    /// least one entry failed, or nothing was extracted at all (including a
-    /// GMA whose every entry the whitelist rejected). Never raised for a
-    /// partial success that's otherwise fine — only for outcomes that must
-    /// not be reported as `Finished`.
+    /// Extraction wrote no entries or at least one entry failed, including when
+    /// the whitelist rejected every entry. Must not be reported as `Finished`.
     #[error("extraction failed")]
     ExtractionFailed {
         extracted: usize,
@@ -87,21 +66,14 @@ pub enum GmaError {
         rejected: usize,
         first_error: Option<std::sync::Arc<str>>,
     },
-    /// Every numbered fallback name (` (1)` through ` (255)`) at the
-    /// destination was already taken.
     #[error("the extraction destination is unavailable")]
     DestinationUnavailable,
     #[error("the Garry's Mod directory is required for Addons extraction")]
     GmodPathMissing,
-    /// A filesystem operation failed while packing, and the path it failed on
-    /// is the reportable part.
-    ///
-    /// Carried on the error rather than emitted alongside it: reporting is
-    /// derived from the error the caller receives, so a path cannot reach the
-    /// user through one route while the error it belongs to travels another
-    /// and arrives empty.
     #[error("packing failed on {}", path.display())]
     PathIo { path: PathBuf },
+    #[error("duplicate entry path: {0}")]
+    DuplicateEntry(String),
 }
 impl From<std::io::Error> for GmaError {
     fn from(error: std::io::Error) -> Self {
@@ -123,6 +95,7 @@ impl crate::error_key::HasErrorKey for GmaError {
             Self::DestinationUnavailable => keys::GMA_DESTINATION_UNAVAILABLE,
             Self::GmodPathMissing => keys::GMOD_PATH_MISSING,
             Self::PathIo { .. } => keys::PATH_IO_ERROR,
+            Self::DuplicateEntry(_) => keys::DUPLICATE_ENTRIES,
         }
     }
 
@@ -133,6 +106,7 @@ impl crate::error_key::HasErrorKey for GmaError {
             | Self::DecompressionInput(source)
             | Self::DecompressionOutput(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
+            Self::DuplicateEntry(path) => Some(path.clone()),
             Self::ExtractionFailed {
                 extracted,
                 failed,
@@ -152,11 +126,8 @@ impl crate::error_key::HasErrorKey for GmaError {
     }
 }
 
-/// Deserialized in code, not by `#[serde(untagged)]`: with every `Standard`
-/// field defaulted, untagged matched `Standard` for *any* JSON object, so a
-/// legacy description that happened to be one silently lost its text and
-/// `Legacy` was unreachable. The archive reader's embedded-field projection
-/// owns this compatibility distinction.
+/// Check manifest keys explicitly. With defaulted fields, untagged serde would accept any JSON
+/// object and lose legacy text.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum GmaMetadata {
@@ -176,7 +147,6 @@ pub enum GmaMetadata {
         description: String,
     },
 }
-/// The `addon.json` shape newer GMAs serialize into the description field.
 #[derive(Deserialize)]
 pub(crate) struct StandardManifest {
     #[serde(rename = "type")]
@@ -194,7 +164,6 @@ impl StandardManifest {
 }
 
 impl GmaMetadata {
-    /// Display title stored in either metadata representation.
     #[must_use]
     pub fn title(&self) -> &str {
         match &self {
@@ -204,7 +173,6 @@ impl GmaMetadata {
         .as_str()
     }
 
-    /// Standard-manifest addon type, absent for legacy metadata.
     #[must_use]
     pub fn addon_type(&self) -> Option<&str> {
         match &self {
@@ -213,7 +181,6 @@ impl GmaMetadata {
         }
     }
 
-    /// Standard-manifest Workshop tags, absent for legacy metadata.
     #[must_use]
     pub fn tags(&self) -> Option<&[String]> {
         match &self {
@@ -222,7 +189,6 @@ impl GmaMetadata {
         }
     }
 
-    /// Standard-manifest ignore globs, absent for legacy metadata.
     #[must_use]
     pub fn ignore(&self) -> Option<&[String]> {
         match &self {
@@ -233,21 +199,14 @@ impl GmaMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Parsed GMA header independent of its payload index.
 pub struct GmaHeader {
-    /// On-disk GMA format version.
     pub version: u8,
-    /// Archive timestamp field.
     pub timestamp: u64,
-    /// Parsed standard or legacy addon metadata.
     pub metadata: GmaMetadata,
-    /// Author field stored by the archive.
     pub author: String,
-    /// Addon revision stored by the archive.
     pub addon_version: i32,
 }
 impl GmaHeader {
-    /// Display title projected from the parsed metadata.
     #[must_use]
     pub fn title(&self) -> &str {
         self.metadata.title()
@@ -255,26 +214,15 @@ impl GmaHeader {
 }
 
 #[derive(Clone, Debug, Serialize)]
-/// Indexed GMA payload entry.
 pub struct GmaEntry {
-    /// Normalized archive-relative path.
     pub path: String,
-    /// Payload size in bytes.
     pub size: u64,
-    /// CRC-32 of the payload.
     pub crc: u32,
 
     #[serde(skip)]
-    /// Source entry ordinal.
     pub index: u64,
 }
 
-/// Whether a GMA entry path could escape an extraction root, or otherwise
-/// name something the archive has no business naming.
-///
-/// Exported because the app crate validates the same paths at its own
-/// boundary. It is deliberately the single definition: a second copy that
-/// drifted would leave one of the two boundaries accepting traversals.
 pub fn is_unsafe_entry_path(path: &str) -> bool {
     if path.is_empty() {
         return true;
@@ -293,9 +241,6 @@ pub fn is_unsafe_entry_path(path: &str) -> bool {
     false
 }
 
-/// `PartialEq` is structural, and deliberately so: keying it on the discovery
-/// list's order would make two different archives at one path compare equal
-/// whenever their mtimes match.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GmaFile {
     path: PathBuf,
@@ -325,11 +270,6 @@ impl std::fmt::Debug for GmaFile {
     }
 }
 impl GmaFile {
-    /// Creates an archive handle for content that will be packed to `path`.
-    ///
-    /// Identity derived from an existing archive belongs to the read path;
-    /// newly packed content starts without a Workshop id or filesystem
-    /// timestamp, and always writes the current GMA version.
     #[must_use]
     pub fn for_creation(path: impl Into<PathBuf>, metadata: GmaMetadata) -> Self {
         let mut file = Self {
@@ -345,7 +285,6 @@ impl GmaFile {
         file
     }
 
-    /// Opens and indexes an existing GMA archive.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GmaError> {
         read::GmaView::open_file(path.as_ref())?.handle(path)
     }
@@ -385,7 +324,6 @@ impl GmaFile {
         self.modified
     }
 
-    /// Assigns Workshop identity and refreshes every value derived from it.
     pub fn set_workshop_id(&mut self, id: WorkshopId) {
         self.id = Some(id);
         self.refresh_extracted_name();
@@ -396,13 +334,6 @@ impl GmaFile {
         self.modified = modified;
     }
 
-    /// Takes the workshop id from the file name when the archive itself did not
-    /// carry one, then derives the extraction name.
-    ///
-    /// Steam names a downloaded addon after its published file id, so a file on
-    /// disk identifies itself even when its embedded metadata does not — but
-    /// that is an identity change, not a naming one, which is why it is in this
-    /// method's name rather than hidden inside the derive.
     pub(crate) fn adopt_path_id_and_name(&mut self) {
         self.id = self.id.or_else(|| id_from_path(&self.path));
         self.refresh_extracted_name();
@@ -461,7 +392,6 @@ impl GmaFile {
     }
 }
 
-/// The workshop id a `.gma`'s own file name carries, if any.
 fn id_from_path(path: &Path) -> Option<WorkshopId> {
     ws_id_from_file_name(path.file_stem()?.to_string_lossy())
 }
@@ -479,10 +409,6 @@ pub(crate) mod write;
 
 #[cfg(test)]
 mod tests {
-    /// `0.gma` is a legal filename, and the app turns every discovered id into
-    /// a `NonZeroU64` — so a zero reaching the bridge panics library discovery
-    /// rather than being ignored. Every parse path has to filter it, including
-    /// the whole-name-is-a-number fast path.
     #[test]
     fn a_zero_workshop_id_is_no_id_on_every_parse_path() {
         assert_eq!(super::ws_id_from_file_name("0"), None);
@@ -498,8 +424,6 @@ mod tests {
     fn ws_id_from_file_name_fixes_the_upstream_suffix_off_by_ten() {
         assert_eq!(ws_id_from_file_name("12345"), WorkshopId::new(12345));
         assert_eq!(ws_id_from_file_name("ds_12345"), WorkshopId::new(12345));
-        // Upstream returns 123450 here (its call sites divide by 10 to
-        // compensate); we parse the suffix correctly instead.
         assert_eq!(ws_id_from_file_name("addon_12345"), WorkshopId::new(12345));
         assert_eq!(extract_suffix_ws_id("addon_12345"), WorkshopId::new(12345));
         assert_eq!(ws_id_from_file_name("addon_without_digits"), None);

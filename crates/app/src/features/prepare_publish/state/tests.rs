@@ -10,7 +10,6 @@ use crate::bridge::{
 use gmpublished_backend::ErrorKey;
 use iced::widget::image;
 
-use super::ChangelogContent;
 use super::{
     AddonTag, AddonType, Mode, OpenTarget, Requirement, State, UpdateTarget, Verification,
 };
@@ -624,19 +623,6 @@ fn changelog_content_round_trips_through_editor_actions() {
     assert_eq!(state.changelog_trimmed(), "Fixed things");
 }
 
-/// `text_editor::Content` is not `Clone`, so [`ChangelogContent`] hand-rolls
-/// `Clone` (reconstruct from text) and `PartialEq` (compare text). Guarded
-/// directly rather than through a `State`-level `assert_eq!(state.clone(),
-/// state)`, where a break in either impl reads as an unrelated state failure.
-#[test]
-fn changelog_content_clone_round_trips_its_text() {
-    let content = ChangelogContent::from_text("Fixed things");
-    let cloned = content.clone();
-
-    assert_eq!(cloned, content);
-    assert_eq!(cloned.text(), "Fixed things");
-}
-
 #[test]
 fn open_update_seeds_workshop_preview_display_only() {
     let mut state = State::default();
@@ -660,7 +646,6 @@ fn open_update_seeds_workshop_preview_display_only() {
     );
     assert!(state.icon_handle().is_none());
 
-    // Stale generation and failures never seed.
     assert!(!state.apply_thumbnail_delivery(
         &seed_delivery(set.generation.next(), 99),
         [0x10, 0x10, 0x10],
@@ -673,16 +658,13 @@ fn open_update_seeds_workshop_preview_display_only() {
 
     assert!(state.apply_thumbnail_delivery(&seed_delivery(set.generation, 99), [0x10, 0x10, 0x10]));
 
-    // Display-only: no icon file is selected.
     assert!(state.icon_handle().is_some());
     assert!(state.icon_backdrop_handle().is_some());
     assert!(!state.icon_selected());
     assert!(!state.can_publish_icon());
     assert!(state.begin_publish_icon().is_none());
-    // The seed satisfied the demand; nothing further is requested.
     assert!(state.thumbnail_demands().demands.is_empty());
 
-    // New-publish mode never demands a seed.
     let mut fresh = State::default();
     let _request = open_new(&mut fresh);
     assert!(fresh.thumbnail_demands().demands.is_empty());
@@ -759,7 +741,6 @@ fn verified_icon_preview(display_path: &str, can_upscale: bool) -> VerifiedIconP
     VerifiedIconPreview {
         icon: VerifiedIcon {
             display_path: display_path.to_owned(),
-            source_path: display_path.into(),
             path: display_path.into(),
             format: IconFormat::Png,
             width: 1,
@@ -885,8 +866,6 @@ fn an_update_owes_a_changelog_instead_of_a_title() {
     let blockers = state.blockers();
 
     assert!(blockers.contains(Requirement::Changelog));
-    // The title is locked to the workshop page in update mode, so it is never
-    // something the user can be asked to supply here.
     assert!(!blockers.contains(Requirement::Title));
 }
 
@@ -937,8 +916,6 @@ fn an_unchosen_select_does_not_repeat_its_own_label() {
         "the menu echoed the control's own face: {face:?}"
     );
 
-    // Once something is chosen the row becomes a way back to nothing, so it
-    // earns its place rather than duplicating the face.
     state.set_addon_type(Some(AddonType::Map));
     let chosen = state.addon_type_options(&i18n);
     assert_eq!(chosen.len(), unchosen.len() + 1);

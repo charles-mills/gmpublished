@@ -52,7 +52,6 @@ pub enum Message {
     },
     SourceActionPerformed(text_editor::Action),
     ToolbarApplied(ToolbarAction),
-    /// Enter inside the source editor; list lines continue themselves.
     EnterPressed,
     SpoilerToggled(SpoilerId),
     LinkOpenRequested(String),
@@ -64,9 +63,7 @@ pub enum Message {
     CloseRequested,
     DiscardConfirmed,
     DiscardCancelled,
-    /// The modal finished its close animation; drop session state.
     CloseFinished,
-    /// The animation clock fired; playback advances to `update_at`'s `now`.
     AnimationTick,
 }
 

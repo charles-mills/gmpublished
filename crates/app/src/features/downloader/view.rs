@@ -47,9 +47,7 @@ fn layout_mode(available_width: f32) -> LayoutMode {
     }
 }
 
-/// `blocked` replaces the job columns when Steam can't take the queue. The
-/// input row above it stays live either way: what you paste is kept and
-/// starts as soon as the connection lands.
+/// Keep the input live while blocked so queued IDs start when Steam connects.
 pub fn view<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
@@ -1020,9 +1018,6 @@ mod tests {
         );
     }
 
-    /// A finished workshop row whose source `.gma` survived shows Open and
-    /// Preview side by side; clicking across the Extracting section must
-    /// dispatch both row actions.
     #[test]
     fn finished_row_dispatches_both_open_and_preview() {
         let mut state = State::default();

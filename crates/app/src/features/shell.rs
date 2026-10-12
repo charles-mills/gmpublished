@@ -1,5 +1,3 @@
-//! Shared shell chrome for the Iced app.
-
 mod effect;
 mod message;
 mod startup;

@@ -52,3 +52,28 @@ pub fn open_file_location<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
         }
     }
 }
+
+/// Canonical archive lookup form: ASCII lowercase, forward slashes, no parent segments.
+pub fn normalize_archive_path(path: &str) -> Option<String> {
+    let path = path
+        .trim()
+        .trim_matches(|character| matches!(character, '/' | '\\'));
+    let mut normalized = String::with_capacity(path.len());
+    for segment in path.split(['/', '\\']) {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return None;
+        }
+        if !normalized.is_empty() {
+            normalized.push('/');
+        }
+        normalized.push_str(segment);
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+    normalized.make_ascii_lowercase();
+    Some(normalized)
+}

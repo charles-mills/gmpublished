@@ -1,6 +1,6 @@
-//! File-type mapping: extension → silkicon + type label.
-
 use std::borrow::Cow;
+
+use crate::media::file_kind::{EntryClass, PreviewClass, classify_entry_path, lower_extension};
 
 mapped_enum_with_all! {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,14 +54,12 @@ mapped_enum_with_all! {
 }
 
 impl SilkIcon {
-    /// This icon's position in [`Self::ALL`], which is declaration order.
     #[must_use]
     pub const fn index(self) -> usize {
         self as usize
     }
 }
 
-/// Matches steam.js `getFileTypeInfo`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileTypeInfo<'a> {
     pub(crate) icon: SilkIcon,
@@ -70,13 +68,8 @@ pub struct FileTypeInfo<'a> {
 }
 
 pub fn file_type_info(name: &str) -> FileTypeInfo<'_> {
-    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
-    let extension = if extension.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        Cow::Owned(extension.to_ascii_lowercase())
-    } else {
-        Cow::Borrowed(extension)
-    };
-    let (icon, translation_key) = icon_and_type_key(&extension);
+    let extension = lower_extension(name);
+    let (icon, translation_key) = icon_and_type_key(&extension, classify_entry_path(name));
     FileTypeInfo {
         icon,
         translation_key,
@@ -84,14 +77,20 @@ pub fn file_type_info(name: &str) -> FileTypeInfo<'_> {
     }
 }
 
-/// One table so an extension cannot gain a label without an icon, or the
-/// reverse. Extensions sharing a label share this arm.
-fn icon_and_type_key(extension: &str) -> (SilkIcon, &'static str) {
+fn icon_and_type_key(extension: &str, class: EntryClass) -> (SilkIcon, &'static str) {
+    match class {
+        EntryClass::Previewable(PreviewClass::Audio) => {
+            return (SilkIcon::Sound, "file-type-audio");
+        }
+        EntryClass::Previewable(PreviewClass::Image(
+            crate::media::file_kind::ImageClass::Encoded,
+        )) => return (SilkIcon::Photo, "file-type-image"),
+        EntryClass::Previewable(PreviewClass::Map) => return (SilkIcon::Map, "file-type-map"),
+        _ => {}
+    }
     match extension {
         "lua" => (SilkIcon::ScriptCode, "file-type-lua"),
-        "mp3" | "ogg" | "wav" => (SilkIcon::Sound, "file-type-audio"),
-        "png" | "jpg" | "jpeg" => (SilkIcon::Photo, "file-type-image"),
-        "bsp" | "map" => (SilkIcon::Map, "file-type-map"),
+        "map" => (SilkIcon::Map, "file-type-map"),
         "nav" => (SilkIcon::Map, "file-type-nav"),
         "ain" => (SilkIcon::Map, "file-type-ain"),
         "fgd" => (SilkIcon::Map, "file-type-fgd"),
@@ -115,9 +114,6 @@ fn icon_and_type_key(extension: &str) -> (SilkIcon, &'static str) {
 mod tests {
     use super::{SilkIcon, file_type_info};
 
-    /// `.map` and `.bsp` share a label, so they must share an icon. Two
-    /// separate tables let `.map` keep the label while falling through to the
-    /// generic page icon.
     #[test]
     fn extensions_sharing_a_label_share_an_icon() {
         let bsp = file_type_info("de_dust2.bsp");
@@ -159,9 +155,6 @@ mod tests {
         assert_eq!(bare.extension, "");
     }
 
-    /// `ALL` is indexed by `index()`, which is the discriminant. If the two
-    /// disagree, every icon past the divergence renders as another icon —
-    /// which nothing else in the app would notice.
     #[test]
     fn all_matches_declaration_order() {
         for (index, icon) in SilkIcon::ALL.into_iter().enumerate() {
@@ -169,9 +162,6 @@ mod tests {
         }
     }
 
-    /// Two icons sharing a PNG is always a copy-paste slip, and the slip
-    /// pairs a *correct* name with the wrong bytes — so comparing names alone
-    /// would miss it.
     #[test]
     fn every_icon_has_its_own_bundled_image() {
         for (position, icon) in SilkIcon::ALL.into_iter().enumerate() {

@@ -361,15 +361,12 @@ fn preview_url_ids_are_taken_once_per_snapshot_epoch() {
         state.take_pending_preview_url_ids(),
         vec![PublishedFileId::fixture(123)]
     );
-    // Same epoch: a resize reprojects but must not redispatch a resolve.
     state.note_viewport(Size::new(660.0, 360.0));
     assert!(state.take_pending_preview_url_ids().is_empty());
 
-    // A content-identical refresh under a bumped epoch must not re-arm.
     state.apply_snapshot(Ok(Some(workshop_snapshot(2))));
     assert!(state.take_pending_preview_url_ids().is_empty());
 
-    // A genuinely changed library re-arms the resolve.
     state.apply_snapshot(Ok(Some(workshop_snapshot_resized(3))));
     assert_eq!(
         state.take_pending_preview_url_ids(),
@@ -386,7 +383,6 @@ fn content_identical_refresh_preserves_projection_thumbnails_and_urls() {
     let key = state.projection_key_for_test();
     let invalidations_before = state.layers.recorded.borrow().len();
 
-    // Same content, bumped epoch: nothing gets re-projected or wiped.
     state.apply_snapshot(Ok(Some(workshop_snapshot(2))));
 
     assert_eq!(state.projection_key_for_test(), key);
@@ -421,7 +417,6 @@ fn thumbnail_deliveries_coalesce_into_one_invalidation() {
     let second = ready_delivery(ANALYZER_THUMBNAIL_GENERATION, 123, [40, 50, 60, 255]);
     let thumbnails_before = state.thumbnail_invalidation_count_for_test();
 
-    // Deliveries only mark the layer dirty; none clears the cache yet.
     assert_eq!(
         state.apply_thumbnail_delivery(&first),
         LayerInvalidation::THUMBNAILS
@@ -435,7 +430,6 @@ fn thumbnail_deliveries_coalesce_into_one_invalidation() {
         thumbnails_before
     );
 
-    // The draw-time flush drains both arrivals as a single re-record.
     assert_eq!(
         state.flush_thumbnail_invalidation(),
         LayerInvalidation::THUMBNAILS
@@ -476,8 +470,6 @@ fn placeholder_delivery_fills_tile_until_real_pixels_replace_it() {
         state.apply_thumbnail_delivery(&placeholder),
         LayerInvalidation::THUMBNAILS
     );
-    // The placeholder paints (tile_for finds it) yet the sharp image is still
-    // demanded.
     assert!(state.tile_for(id).is_some());
     assert!(state.thumbnail_tiles().is_empty());
     assert!(!state.thumbnail_demands().demands.is_empty());
@@ -530,8 +522,6 @@ fn thumbnail_pending_tracks_deliverable_cells_only() {
     let mut state = ready_state_with_workshop();
 
     assert!(state.thumbnail_pending(Some(PublishedFileId::fixture(123))));
-    // Local addon (no workshop id) and unknown workshop cells never
-    // deliver, so their cells show the dead placeholder immediately.
     assert!(!state.thumbnail_pending(None));
     assert!(!state.thumbnail_pending(Some(PublishedFileId::fixture(999))));
 
@@ -849,8 +839,6 @@ fn workshop_snapshot(epoch: u64) -> LibrarySnapshot {
     )
 }
 
-/// Same addons as [`workshop_snapshot`] but with a changed file size, so the
-/// content differs even though the workshop item set is unchanged.
 fn workshop_snapshot_resized(epoch: u64) -> LibrarySnapshot {
     snapshot_from_addons(
         epoch,

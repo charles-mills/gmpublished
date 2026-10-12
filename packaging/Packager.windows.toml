@@ -34,10 +34,8 @@ resources = [
 [wix]
 languages = ["en-US"]
 component-refs = ["FileTypeAssociationsReg"]
-# cargo-packager 0.11.8 passes fragment-paths to WiX with a verbatim \\?\ path
-# on Windows. WiX 3 candle.exe is not reliable with that path form, so keep the
-# custom file association fragment inline; cargo-packager writes inline fragments
-# beside generated main.wxs before compiling them.
+# WiX 3 candle.exe cannot reliably use cargo-packager's verbatim \\?\ fragment paths.
+# Keep fragments inline so cargo-packager writes them beside main.wxs.
 fragments = ['''
 <?xml version="1.0" encoding="utf-8"?>
 <?if $(sys.BUILDARCH)="x86"?>

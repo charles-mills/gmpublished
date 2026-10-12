@@ -6,7 +6,6 @@ use crate::theme::{self, motion};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveModal {
-    /// Extraction destination picker (always the overlay layer).
     DestinationSelect,
     DescriptionEditor,
     PreparePublish,
@@ -100,9 +99,6 @@ impl Layer {
     }
 }
 
-/// State owned by the modal-stack host: a base layer for the primary modals
-/// plus an overlay layer for secondary modals that stack over an open base
-/// modal instead of replacing it.
 #[derive(Debug, Default)]
 pub struct State {
     base: Layer,
@@ -160,8 +156,6 @@ impl State {
         self.base.needs_ticks() || self.overlay.needs_ticks()
     }
 
-    /// Advances close animations, returning every modal that finished
-    /// closing this tick so the root can run its per-modal close task.
     pub(crate) fn tick(&mut self, now: Instant) -> Vec<ActiveModal> {
         let mut finished = Vec::new();
         finished.extend(self.overlay.tick(now));
@@ -169,8 +163,6 @@ impl State {
         finished
     }
 
-    /// Returns the modal that was displaced without animating closed, so the
-    /// caller can run the teardown [`Self::tick`] will never report.
     pub(super) fn open(&mut self, modal: ActiveModal, now: Instant) -> Option<ActiveModal> {
         if modal.is_overlay() {
             self.overlay.open(modal, now)
@@ -192,8 +184,6 @@ impl State {
 }
 
 impl ActiveModal {
-    /// Overlays stack above an open base modal instead of replacing it: the
-    /// description editor must not displace the publish modal that opened it.
     const fn is_overlay(self) -> bool {
         matches!(self, Self::DestinationSelect | Self::DescriptionEditor)
     }

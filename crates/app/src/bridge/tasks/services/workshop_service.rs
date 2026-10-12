@@ -1,6 +1,6 @@
 use super::{
-    BackendServices, backend_steam_id, backend_workshop_id, backend_workshop_ids,
-    record_thumbhash_in_cache, steam_not_connected,
+    BackendServices, backend_steam_id, backend_workshop_ids, record_thumbhash_in_cache,
+    steam_not_connected,
 };
 use crate::bridge::{
     domain::{PublishedFileId, SteamId, SteamUser, WorkshopItem, WorkshopMetadata, WorkshopPage},
@@ -16,36 +16,31 @@ use gmpublished_backend::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-/// Steam session, Workshop browsing, metadata, and download capability.
-#[derive(Clone, Copy)]
-pub struct WorkshopService<'a> {
-    inner: &'a BackendServices,
-}
-
-impl<'a> WorkshopService<'a> {
-    pub(super) const fn new(inner: &'a BackendServices) -> Self {
-        Self { inner }
+impl BackendServices {
+    pub(crate) fn workshop_language(&self) -> gmpublished_backend::WorkshopLanguage {
+        self.backend.workshop_language()
+    }
+    pub(crate) fn set_workshop_language(
+        &self,
+        language: gmpublished_backend::WorkshopLanguage,
+    ) -> bool {
+        self.backend.set_workshop_language(language)
     }
 
-    pub(crate) fn language(self) -> gmpublished_backend::WorkshopLanguage {
-        self.inner.backend.workshop_language()
-    }
-    pub(crate) fn set_language(self, language: gmpublished_backend::WorkshopLanguage) -> bool {
-        self.inner.backend.set_workshop_language(language)
-    }
-
-    pub(crate) fn hydrate_metadata_snapshot(self) {
-        let Some(path) = self.inner.metadata_snapshot_file.as_deref() else {
+    pub(crate) fn hydrate_metadata_snapshot(&self) {
+        let Some(path) = self.metadata_snapshot_file.as_deref() else {
             return;
         };
         let loaded = metadata_snapshot::load(path);
         if !loaded.is_empty() {
-            *self.inner.workshop_metadata.lock() = loaded;
+            let mut cache = self.workshop_metadata.lock();
+            cache.entries = loaded;
+            cache.changed();
         }
     }
 
-    pub(crate) fn browse_my_page(self, page: u32) -> Result<WorkshopPage, UiError> {
-        if !self.connected() {
+    pub(crate) fn browse_my_page(&self, page: u32) -> Result<WorkshopPage, UiError> {
+        if !self.steam_connected() {
             return Err(steam_not_connected());
         }
         let page = self.fetch_my_page_connected(page)?;
@@ -56,13 +51,13 @@ impl<'a> WorkshopService<'a> {
     }
 
     pub(crate) fn refresh_subscription_counts(
-        self,
+        &self,
         pages: u32,
     ) -> Result<HashMap<PublishedFileId, u64>, UiError> {
         if pages == 0 {
             return Ok(HashMap::new());
         }
-        if !self.connected() {
+        if !self.steam_connected() {
             return Err(steam_not_connected());
         }
 
@@ -78,16 +73,16 @@ impl<'a> WorkshopService<'a> {
     }
 
     pub(crate) fn resolve_metadata(
-        self,
+        &self,
         item_ids: &[PublishedFileId],
     ) -> (Vec<WorkshopMetadata>, Vec<PublishedFileId>) {
         let now = metadata_snapshot::now_unix_seconds();
-        let language = self.language();
-        let cache = self.inner.workshop_metadata.lock();
+        let language = self.workshop_language();
+        let cache = self.workshop_metadata.lock();
         let mut metadata = Vec::new();
         let mut stale = Vec::new();
         for id in item_ids.iter().copied() {
-            match cache.get(&id) {
+            match cache.entries.get(&id) {
                 Some(cached) if cached.language == language => {
                     metadata.push(cached.metadata.clone());
                     if !cached.is_fresh_at(now) {
@@ -101,10 +96,10 @@ impl<'a> WorkshopService<'a> {
     }
 
     pub(crate) fn refresh_metadata(
-        self,
+        &self,
         item_ids: &[PublishedFileId],
     ) -> Result<Vec<WorkshopMetadata>, UiError> {
-        let language = self.language();
+        let language = self.workshop_language();
         let items = self.fetch_items(item_ids, language)?;
         let metadata = self.cache_items(&items, language);
         if !metadata.is_empty() {
@@ -114,7 +109,7 @@ impl<'a> WorkshopService<'a> {
     }
 
     pub(crate) fn refresh_metadata_streaming(
-        self,
+        &self,
         item_ids: &[PublishedFileId],
         mut on_batch: impl FnMut(Vec<WorkshopMetadata>),
     ) -> Result<(), UiError> {
@@ -142,16 +137,16 @@ impl<'a> WorkshopService<'a> {
         result.ui_err()
     }
 
-    pub(crate) fn item_details(self, id: PublishedFileId) -> Result<WorkshopItem, UiError> {
+    pub(crate) fn item_details(&self, id: PublishedFileId) -> Result<WorkshopItem, UiError> {
         let steam = self.require_steam_client()?;
         let language = steam.workshop_language();
-        let mut item = steam_workshop::query_workshop_item_details(steam, backend_workshop_id(id))
+        let mut item = steam_workshop::query_workshop_item_details(steam, id.into())
             .map(workshop_item_from_backend)
             .ui_err()?;
         if !item.dead
-            && let Ok(user) = self.current_user()
+            && let Ok(user) = self.current_steam_user()
         {
-            let text = self.inner.text_journal.lock().reconcile(
+            let text = self.text_journal.lock().reconcile(
                 user.steamid,
                 id,
                 language,
@@ -168,45 +163,44 @@ impl<'a> WorkshopService<'a> {
     }
 
     pub(crate) fn localized_text(
-        self,
+        &self,
         id: PublishedFileId,
         language: crate::bridge::workshop_text::WorkshopLanguage,
     ) -> Result<crate::bridge::workshop_text::WorkshopText, UiError> {
-        let account = self.current_user()?.steamid;
+        let account = self.current_steam_user()?.steamid;
         let item = self
             .require_steam_client()?
-            .query_localized_item_details(backend_workshop_id(id), language)
+            .query_localized_item_details(id.into(), language)
             .ui_err()?;
         let text = crate::bridge::workshop_text::WorkshopText {
             title: item.title,
             description: item.description.unwrap_or_default(),
         };
         Ok(self
-            .inner
             .text_journal
             .lock()
             .reconcile(account, id, language, text))
     }
 
-    pub(crate) fn cached_item_details(self, id: PublishedFileId) -> Option<WorkshopMetadata> {
-        self.inner
-            .workshop_metadata
+    pub(crate) fn cached_item_details(&self, id: PublishedFileId) -> Option<WorkshopMetadata> {
+        self.workshop_metadata
             .lock()
+            .entries
             .get(&id)
-            .filter(|cached| cached.language == self.language())
+            .filter(|cached| cached.language == self.workshop_language())
             .map(|cached| cached.metadata.clone())
             .filter(|metadata| metadata.full_description.is_some())
     }
 
     #[cfg(test)]
-    pub(crate) fn user_details(self, steamid: SteamId) -> Result<SteamUser, UiError> {
+    pub(crate) fn user_details(&self, steamid: SteamId) -> Result<SteamUser, UiError> {
         Ok(steam_user_from_workshop_backend(
             steam_users::fetch_steam_user(self.require_steam_client()?, backend_steam_id(steamid)),
         ))
     }
 
     pub(crate) fn user_details_streaming(
-        self,
+        &self,
         steamid: SteamId,
         mut on_user: impl FnMut(SteamUser),
     ) -> Result<(), UiError> {
@@ -218,49 +212,49 @@ impl<'a> WorkshopService<'a> {
         Ok(())
     }
 
-    pub(crate) fn connected(self) -> bool {
-        self.inner.steam_runtime.is_connected()
+    pub(crate) fn steam_connected(&self) -> bool {
+        self.steam_runtime.is_connected()
     }
 
-    pub(crate) fn connect(self) -> Result<(), UiError> {
-        self.inner.steam_runtime.connect().ui_err()
+    pub(crate) fn connect_steam(&self) -> Result<(), UiError> {
+        self.steam_runtime.connect().ui_err()
     }
 
-    pub(crate) fn current_user(self) -> Result<SteamUser, UiError> {
-        self.inner
-            .steam_runtime
+    pub(crate) fn current_steam_user(&self) -> Result<SteamUser, UiError> {
+        self.steam_runtime
             .current_user()
             .map(steam_user_from_backend)
             .ui_err()
     }
 
-    pub(crate) fn submit_downloads(self, item_ids: Vec<PublishedFileId>) -> Result<(), UiError> {
-        self.inner
-            .backend
+    pub(crate) fn submit_downloads(&self, item_ids: Vec<PublishedFileId>) -> Result<(), UiError> {
+        self.backend
             .queue_workshop_downloads(item_ids.into_iter().map(Into::into))
             .ui_err()
     }
 
     pub(crate) fn submit_snapshot(
-        self,
+        &self,
         item_id: PublishedFileId,
         destination: crate::bridge::gma::ExtractDestination,
         request_id: WorkshopSnapshotId,
     ) -> Result<(), UiError> {
-        self.inner
-            .backend
+        self.backend
             .queue_workshop_download_to(item_id.into(), destination, request_id)
             .ui_err()
     }
 
-    pub(crate) fn record_thumbhash(self, url: &str, hash: &[u8]) {
-        record_thumbhash_in_cache(&mut self.inner.workshop_metadata.lock(), url.trim(), hash);
+    pub(crate) fn record_thumbhash(&self, url: &str, hash: &[u8]) {
+        let mut cache = self.workshop_metadata.lock();
+        if record_thumbhash_in_cache(&mut cache.entries, url.trim(), hash) {
+            cache.changed();
+        }
     }
 
-    pub(crate) fn thumbhash_seed(self) -> Vec<(String, Arc<[u8]>)> {
-        self.inner
-            .workshop_metadata
+    pub(crate) fn thumbhash_seed(&self) -> Vec<(String, Arc<[u8]>)> {
+        self.workshop_metadata
             .lock()
+            .entries
             .values()
             .filter_map(|cached| {
                 Some((
@@ -271,16 +265,16 @@ impl<'a> WorkshopService<'a> {
             .collect()
     }
 
-    pub(crate) fn persist_metadata_cache(self) {
+    pub(crate) fn persist_metadata_cache(&self) {
         self.write_metadata_snapshot_best_effort();
     }
 
-    fn require_steam_client(self) -> Result<gmpublished_backend::ConnectedSteam<'a>, UiError> {
-        self.inner.backend.connected_steam().ui_err()
+    fn require_steam_client(&self) -> Result<gmpublished_backend::ConnectedSteam<'_>, UiError> {
+        self.backend.connected_steam().ui_err()
     }
 
     fn fetch_items(
-        self,
+        &self,
         item_ids: &[PublishedFileId],
         language: gmpublished_backend::WorkshopLanguage,
     ) -> Result<Vec<WorkshopItem>, UiError> {
@@ -296,10 +290,9 @@ impl<'a> WorkshopService<'a> {
         .ui_err()
     }
 
-    fn fetch_my_page_connected(self, page: u32) -> Result<WorkshopPage, UiError> {
-        let language = self.language();
+    fn fetch_my_page_connected(&self, page: u32) -> Result<WorkshopPage, UiError> {
+        let language = self.workshop_language();
         let page = self
-            .inner
             .backend
             .browse_my_workshop_page(page, language)
             .ok_or_else(|| UiError::new(keys::STEAM_ERROR))?;
@@ -316,7 +309,7 @@ impl<'a> WorkshopService<'a> {
     }
 
     fn cache_items(
-        self,
+        &self,
         items: &[WorkshopItem],
         language: gmpublished_backend::WorkshopLanguage,
     ) -> Vec<WorkshopMetadata> {
@@ -329,9 +322,10 @@ impl<'a> WorkshopService<'a> {
         }
 
         let fetched_at = metadata_snapshot::now_unix_seconds();
-        let mut cache = self.inner.workshop_metadata.lock();
+        let mut cache = self.workshop_metadata.lock();
         for item in &mut metadata {
             if let Some(existing) = cache
+                .entries
                 .get(&item.id)
                 .filter(|cached| cached.language == language)
             {
@@ -346,7 +340,7 @@ impl<'a> WorkshopService<'a> {
                     item.owner_steamid = existing.metadata.owner_steamid;
                 }
             }
-            cache.insert(
+            cache.entries.insert(
                 item.id,
                 CachedWorkshopMetadata {
                     language,
@@ -355,11 +349,12 @@ impl<'a> WorkshopService<'a> {
                 },
             );
         }
+        cache.changed();
         metadata
     }
 
     fn cache_item_details(
-        self,
+        &self,
         item: &WorkshopItem,
         language: gmpublished_backend::WorkshopLanguage,
     ) {
@@ -376,14 +371,14 @@ impl<'a> WorkshopService<'a> {
         metadata.owner_steamid = item.steamid;
 
         let fetched_at = metadata_snapshot::now_unix_seconds();
-        let mut cache = self.inner.workshop_metadata.lock();
-        if let Some(existing) = cache.get(&metadata.id)
+        let mut cache = self.workshop_metadata.lock();
+        if let Some(existing) = cache.entries.get(&metadata.id)
             && existing.language == language
             && metadata.thumbhash.is_none()
         {
             metadata.thumbhash.clone_from(&existing.metadata.thumbhash);
         }
-        cache.insert(
+        cache.entries.insert(
             metadata.id,
             CachedWorkshopMetadata {
                 language,
@@ -391,14 +386,16 @@ impl<'a> WorkshopService<'a> {
                 fetched_at,
             },
         );
+        cache.changed();
     }
 
-    fn write_metadata_snapshot_best_effort(self) {
-        let Some(path) = self.inner.metadata_snapshot_file.as_deref() else {
+    fn write_metadata_snapshot_best_effort(&self) {
+        let Some(path) = self.metadata_snapshot_file.as_deref() else {
             return;
         };
-        let snapshot = metadata_snapshot::prepare(&self.inner.workshop_metadata.lock());
-        if let Err(error) = metadata_snapshot::write_prepared(path, &snapshot) {
+        if let Err(error) = self
+            .write_metadata_snapshot(|snapshot| metadata_snapshot::write_prepared(path, snapshot))
+        {
             log::warn!(
                 "failed to write Workshop metadata snapshot {}: {error}",
                 path.display()
@@ -406,20 +403,118 @@ impl<'a> WorkshopService<'a> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn cache_items_for_test(self, items: &[WorkshopItem]) -> Vec<WorkshopMetadata> {
-        self.cache_items(items, self.language())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cache_item_details_for_test(self, item: &WorkshopItem) {
-        self.cache_item_details(item, self.language());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_metadata_fetched_at_for_test(self, id: PublishedFileId, fetched_at: u64) {
-        if let Some(cached) = self.inner.workshop_metadata.lock().get_mut(&id) {
-            cached.fetched_at = fetched_at;
+    fn write_metadata_snapshot(
+        &self,
+        write: impl FnOnce(
+            &metadata_snapshot::PreparedMetadataSnapshot,
+        ) -> Result<(), crate::bridge::snapshot::SnapshotWriteError>,
+    ) -> Result<(), crate::bridge::snapshot::SnapshotWriteError> {
+        // Acquire the writer before capturing a revision: queued writers capture
+        // the latest cache and skip revisions an earlier writer already saved.
+        let mut persisted_revision = self.metadata_writer.lock();
+        let cache = self.workshop_metadata.lock();
+        if cache.revision == *persisted_revision {
+            return Ok(());
         }
+        let revision = cache.revision;
+        let snapshot = metadata_snapshot::prepare(&cache.entries);
+        drop(cache);
+        write(&snapshot)?;
+        *persisted_revision = revision;
+        drop(persisted_revision);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_items_for_test(&self, items: &[WorkshopItem]) -> Vec<WorkshopMetadata> {
+        self.cache_items(items, self.workshop_language())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_item_details_for_test(&self, item: &WorkshopItem) {
+        self.cache_item_details(item, self.workshop_language());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_metadata_fetched_at_for_test(&self, id: PublishedFileId, fetched_at: u64) {
+        let mut cache = self.workshop_metadata.lock();
+        if let Some(cached) = cache.entries.get_mut(&id) {
+            cached.fetched_at = fetched_at;
+            cache.changed();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    fn cache_title(services: &BackendServices, title: &str) {
+        let mut item = WorkshopItem::from(PublishedFileId::fixture(42));
+        item.dead = false;
+        item.title = title.to_owned();
+        services.cache_items_for_test(&[item]);
+    }
+
+    #[test]
+    fn queued_snapshot_writer_saves_latest_revision_and_coalesces_redundant_requests() {
+        let services = BackendServices::for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.snap");
+        cache_title(&services, "old");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let services = &services;
+            let path = &path;
+            let first = scope.spawn(move || {
+                services.write_metadata_snapshot(|snapshot| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    metadata_snapshot::write_prepared(path, snapshot)
+                })
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cache_title(services, "new");
+            let second = scope.spawn(move || {
+                services.write_metadata_snapshot(|snapshot| {
+                    metadata_snapshot::write_prepared(path, snapshot)
+                })
+            });
+            release_tx.send(()).unwrap();
+            first.join().unwrap().unwrap();
+            second.join().unwrap().unwrap();
+        });
+        let loaded = metadata_snapshot::load(&path);
+        assert_eq!(loaded[&PublishedFileId::fixture(42)].metadata.title, "new");
+        services
+            .write_metadata_snapshot(|_| panic!("unchanged revision must not be written again"))
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_snapshot_write_leaves_revision_available_for_retry() {
+        let services = BackendServices::for_test();
+        let dir = tempfile::tempdir().unwrap();
+        cache_title(&services, "retry me");
+        assert!(
+            services
+                .write_metadata_snapshot(|snapshot| metadata_snapshot::write_prepared(
+                    dir.path(),
+                    snapshot
+                ))
+                .is_err()
+        );
+        let path = dir.path().join("metadata.snap");
+        services
+            .write_metadata_snapshot(|snapshot| metadata_snapshot::write_prepared(&path, snapshot))
+            .unwrap();
+        assert_eq!(
+            metadata_snapshot::load(&path)[&PublishedFileId::fixture(42)]
+                .metadata
+                .title,
+            "retry me"
+        );
     }
 }

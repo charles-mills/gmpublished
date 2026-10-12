@@ -24,7 +24,7 @@ arc-swap.workspace = true
 bytemuck.workspace = true
 vformats.workspace = true
 clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
-# pinned to match iced 0.14's internal version — do not bump independently
+# Must match iced 0.14's cosmic-text version.
 cosmic-text = { version = "0.15.0", default-features = false, features = ["std", "swash"] }
 unicode-segmentation = "1.13"
 fast_image_resize.workspace = true
@@ -57,8 +57,6 @@ ureq.workspace = true
 thumbhash = "0.1.0"
 crc32fast.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
@@ -72,10 +70,10 @@ raw-window-handle = "0.6.2"
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [dev-dependencies]
-crc32fast.workspace = true
 gmpublished-backend = { path = "../backend", features = ["test-support"] }
 gmpublished-domain = { path = "../domain", features = ["test-support"] }
 iced_test = "0.14.0"
+iced_runtime = "0.14.0"
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [lints]

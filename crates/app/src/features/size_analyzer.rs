@@ -1,5 +1,3 @@
-//! Size Analyzer route surface for the Iced application.
-
 mod effect;
 mod message;
 mod state;

@@ -1,4 +1,3 @@
-use super::ports::Ports;
 use super::{
     App, PathBuf, PublishedFileId, RootMessage, Task, TaskKind, UiError, UpdateContext,
     WORKSHOP_LEGAL_URL, connect_steam_for_operation, flatten_blocking_ui_result, modal_stack,
@@ -6,11 +5,12 @@ use super::{
 };
 use crate::bridge::tasks::TransactionStatus;
 use crate::bridge::tasks::{
-    BackendContext, BackendRuntimeEvent, PublishService, TaskHandle, TransactionRuntimeEvent,
-    WorkshopService, WorkshopSnapshotId,
+    BackendContext, BackendRuntimeEvent, BackendServices, TaskHandle, TransactionRuntimeEvent,
+    WorkshopSnapshotId,
 };
 use crate::bridge::ui_error::ResultExt as _;
 use crate::features::file_preview;
+use crate::util::paths::fallback_current_dir;
 use gmpublished_backend::error_keys as keys;
 
 impl App {
@@ -27,7 +27,7 @@ impl App {
         );
         if opening {
             self.state.features.prepare_publish.set_initial_language(
-                gmpublished_backend::WorkshopLanguage::from_locale(self.ports().i18n.locale_id()),
+                gmpublished_backend::WorkshopLanguage::from_locale(self.state.i18n.locale_id()),
             );
         }
         let localized = if opening && self.state.features.prepare_publish.update_mode() {
@@ -39,7 +39,7 @@ impl App {
                 self.environment
                     .ctx
                     .run_blocking("publish-localized-text", move |app| {
-                        app.workshop().localized_text(id, language)
+                        app.localized_text(id, language)
                     })
                     .map(move |result| {
                         RootMessage::PreparePublish(prepare_publish::Message::LocalizedTextFetched(
@@ -57,9 +57,7 @@ impl App {
         ])
     }
 
-    /// Direct close requests (e.g. the modal's Cancel button) only start the
-    /// close animation; the actual state reset and icon cleanup are deferred
-    /// to `finish_modal_close_task`, which runs once that animation settles.
+    /// Reset state and clean up the icon only after the close animation finishes.
     pub(super) fn prepare_publish_message_task(
         &mut self,
         message: prepare_publish::Message,
@@ -113,7 +111,7 @@ impl App {
                 self.apply_description_editor_message(message, self.update_context)
             }
             prepare_publish::Effect::WorkshopContentRequested(request) => {
-                self.publish().workshop_content_task(request)
+                self.prepare_publish_workshop_content_task(request)
             }
             prepare_publish::Effect::WorkshopSnapshotInspectionRequested(request) => {
                 let generation = request.generation;
@@ -132,26 +130,28 @@ impl App {
                     })
             }
             prepare_publish::Effect::CleanupPathRequested(path) => {
-                self.publish().cleanup_path_task(path)
+                self.prepare_publish_cleanup_path_task(path)
             }
             prepare_publish::Effect::PathVerificationRequested(request) => {
-                self.publish().content_verification_task(request)
+                self.prepare_publish_content_verification_task(request)
             }
             prepare_publish::Effect::EntryPreviewRequested(request) => {
                 self.apply_file_preview_message(file_preview::Message::OpenRequested(request))
             }
             prepare_publish::Effect::IconVerificationRequested(request) => {
-                self.publish().icon_verification_task(request)
+                self.prepare_publish_icon_verification_task(request)
             }
             prepare_publish::Effect::IgnorePatternMutationRequested(mutation) => {
-                self.publish().ignore_mutation_task(mutation)
+                self.prepare_publish_ignore_mutation_task(mutation)
             }
-            prepare_publish::Effect::SubmitContextRequested => self.publish().submit_context_task(),
+            prepare_publish::Effect::SubmitContextRequested => {
+                self.prepare_publish_submit_context_task()
+            }
             prepare_publish::Effect::PublishSubmitRequested(request) => {
-                self.publish().submit_task(request)
+                self.prepare_publish_submit_task(request)
             }
             prepare_publish::Effect::PublishIconSubmitRequested(request) => {
-                self.publish().publish_icon_task(request)
+                self.prepare_publish_icon_submit_task(request)
             }
             prepare_publish::Effect::PublishSuccessUrlsRequested(result) => {
                 let recovery = if result.pending_translations.is_empty() {
@@ -174,20 +174,6 @@ impl App {
         }
     }
 
-    pub(super) fn prepare_publish_content_picker_task(&self) -> Task<RootMessage> {
-        let directory = prepare_publish_initial_content_directory(
-            self.state.features.prepare_publish.addon_path(),
-        );
-        self.publish().content_picker_task(directory)
-    }
-
-    pub(super) fn prepare_publish_icon_picker_task(&self) -> Task<RootMessage> {
-        let directory = prepare_publish_initial_icon_directory(
-            self.state.features.prepare_publish.icon_display_path(),
-        );
-        self.publish().icon_picker_task(directory)
-    }
-
     pub(super) fn prepare_publish_success_urls_task(
         &self,
         result: &prepare_publish::PublishSubmitResult,
@@ -203,7 +189,7 @@ impl App {
 }
 
 pub(super) fn prepare_publish_connect_steam(
-    workshop: crate::bridge::tasks::WorkshopService<'_>,
+    workshop: &crate::bridge::tasks::BackendServices,
 ) -> Result<(), UiError> {
     let attempt = connect_steam_for_operation(workshop);
     if attempt.connected() {
@@ -218,13 +204,12 @@ pub(super) fn prepare_publish_connect_steam(
 
 fn run_publish_submit(
     backend_ctx: &BackendContext,
-    publish: PublishService<'_>,
-    workshop: WorkshopService<'_>,
+    publish: &BackendServices,
     task: TaskHandle,
     request: crate::bridge::publish::PublishSubmitRequest,
 ) -> Result<prepare_publish::PublishSubmitResult, UiError> {
     task.status(TransactionStatus::PublishStarting);
-    if let Err(error) = prepare_publish_connect_steam(workshop) {
+    if let Err(error) = prepare_publish_connect_steam(publish) {
         task.error(error.clone());
         return Err(error);
     }
@@ -233,7 +218,7 @@ fn run_publish_submit(
     let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
-    match publish.submit(request, &transaction) {
+    match publish.submit_publish(request, &transaction) {
         Ok(outcome) => {
             let _effects = backend_ctx.handle_backend_runtime_event(
                 &BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished {
@@ -253,13 +238,12 @@ fn run_publish_submit(
 
 fn run_publish_icon_submit(
     backend_ctx: &BackendContext,
-    publish: PublishService<'_>,
-    workshop: WorkshopService<'_>,
+    publish: &BackendServices,
     task: TaskHandle,
     request: &prepare_publish::PublishIconSubmitRequestEnvelope,
 ) -> Result<prepare_publish::PublishIconSubmitResult, UiError> {
     task.status(TransactionStatus::PublishProcessingIcon);
-    if let Err(error) = prepare_publish_connect_steam(workshop) {
+    if let Err(error) = prepare_publish_connect_steam(publish) {
         task.error(error.clone());
         return Err(error);
     }
@@ -268,7 +252,7 @@ fn run_publish_icon_submit(
     let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
-    match publish.update_icon(
+    match publish.update_publish_icon(
         &request.icon_source_path,
         request.upscale,
         request.workshop_id,
@@ -313,41 +297,30 @@ fn normalized_picker_path(input: &str) -> Option<PathBuf> {
     }
 }
 
-pub(super) fn fallback_current_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|error| {
-        log::debug!("current_dir failed while opening Prepare Publish picker: {error}");
-        std::env::temp_dir()
-    })
-}
-
-/// Publish effects that need only [`Ports`] — no `State`, and so no way to
-/// reach another feature's.
-pub(super) struct PublishRunner<'a> {
-    ports: Ports<'a>,
-}
-
-impl<'a> PublishRunner<'a> {
-    pub(super) const fn new(ports: Ports<'a>) -> Self {
-        Self { ports }
+impl App {
+    pub(super) fn prepare_publish_open_task(
+        &self,
+        target: prepare_publish::OpenTarget,
+    ) -> Task<RootMessage> {
+        let (settings, _) = self.environment.ctx.settings_and_paths_snapshot();
+        Task::done(RootMessage::PreparePublish(
+            prepare_publish::Message::OpenRequested {
+                target,
+                ignored_patterns: crate::bridge::prepare_publish::ignored_patterns_from_settings(
+                    &settings,
+                ),
+                upscale_icon_default: settings.backend.upscale_addon_icon,
+            },
+        ))
     }
 
-    pub(super) fn ignored_patterns(&self) -> Vec<prepare_publish::IgnoredPattern> {
-        let (settings, _paths) = self.ports.ctx.settings_and_paths_snapshot();
-        crate::bridge::prepare_publish::ignored_patterns_from_settings(&settings)
-    }
-
-    pub(super) fn upscale_default(&self) -> bool {
-        let (settings, _paths) = self.ports.ctx.settings_and_paths_snapshot();
-        settings.backend.upscale_addon_icon
-    }
-
-    pub(super) fn workshop_snapshot(
+    pub(super) fn prepare_publish_workshop_snapshot(
         &self,
         workshop_id: PublishedFileId,
     ) -> (WorkshopSnapshotId, PathBuf) {
-        let (_settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
-        let sequence = self.ports.workshop_snapshot_sequence.get();
-        self.ports
+        let (_settings, paths) = self.environment.ctx.settings_and_paths_snapshot();
+        let sequence = self.environment.workshop_snapshot_sequence.get();
+        self.environment
             .workshop_snapshot_sequence
             .set(sequence.wrapping_add(1));
         let request_id = WorkshopSnapshotId::new(sequence);
@@ -358,12 +331,12 @@ impl<'a> PublishRunner<'a> {
         (request_id, path)
     }
 
-    pub(super) fn workshop_content_task(
+    pub(super) fn prepare_publish_workshop_content_task(
         &self,
         request: prepare_publish::WorkshopContentRequest,
     ) -> Task<RootMessage> {
         let request_id = request.request_id;
-        self.ports
+        self.environment
             .ctx
             .run_blocking("prepare-publish-workshop-content", move |app| {
                 if request.destination.exists() {
@@ -371,8 +344,8 @@ impl<'a> PublishRunner<'a> {
                         UiError::detailed(keys::IO_ERROR, Some(error.to_string()))
                     })?;
                 }
-                prepare_publish_connect_steam(app.workshop())?;
-                app.workshop().submit_snapshot(
+                prepare_publish_connect_steam(app)?;
+                app.submit_snapshot(
                     request.workshop_id,
                     crate::bridge::gma::ExtractDestination::Directory(request.destination),
                     request_id,
@@ -388,8 +361,8 @@ impl<'a> PublishRunner<'a> {
             })
     }
 
-    pub(super) fn cleanup_path_task(&self, path: PathBuf) -> Task<RootMessage> {
-        self.ports
+    pub(super) fn prepare_publish_cleanup_path_task(&self, path: PathBuf) -> Task<RootMessage> {
+        self.environment
             .ctx
             .run_blocking("prepare-publish-workshop-cleanup", move |_app| {
                 match std::fs::remove_dir_all(&path) {
@@ -406,18 +379,20 @@ impl<'a> PublishRunner<'a> {
             .discard()
     }
 
-    pub(super) fn content_verification_task(
+    pub(super) fn prepare_publish_content_verification_task(
         &self,
         request: prepare_publish::ContentPathVerificationRequest,
     ) -> Task<RootMessage> {
         let generation = request.generation;
-        self.ports
+        self.environment
             .ctx
             .run_blocking("prepare-publish-verify", move |app| {
+                let settings = app.settings_snapshot();
+                let whitelist = app.whitelist_snapshot();
                 crate::bridge::prepare_publish::verify_content_path(
-                    app.config(),
-                    app.archive(),
                     request,
+                    &settings.backend.ignore_globs,
+                    &whitelist,
                 )
             })
             .map(move |result| {
@@ -428,12 +403,12 @@ impl<'a> PublishRunner<'a> {
             })
     }
 
-    pub(super) fn icon_verification_task(
+    pub(super) fn prepare_publish_icon_verification_task(
         &self,
         request: prepare_publish::IconVerificationRequest,
     ) -> Task<RootMessage> {
         let generation = request.generation;
-        self.ports
+        self.environment
             .ctx
             .run_blocking("prepare-publish-icon", move |_app| {
                 crate::bridge::prepare_publish::verify_icon_preview(request)
@@ -446,18 +421,15 @@ impl<'a> PublishRunner<'a> {
             })
     }
 
-    pub(super) fn ignore_mutation_task(
+    pub(super) fn prepare_publish_ignore_mutation_task(
         &self,
         mutation: prepare_publish::IgnorePatternMutation,
     ) -> Task<RootMessage> {
         let worker_name = mutation.worker_name();
-        self.ports
+        self.environment
             .ctx
             .run_blocking(worker_name, move |app| {
-                crate::bridge::prepare_publish::apply_ignore_pattern_mutation(
-                    app.config(),
-                    mutation,
-                )
+                crate::bridge::prepare_publish::apply_ignore_pattern_mutation(app, mutation)
             })
             .map(move |result| {
                 RootMessage::PreparePublish(
@@ -466,8 +438,8 @@ impl<'a> PublishRunner<'a> {
             })
     }
 
-    pub(super) fn submit_context_task(&self) -> Task<RootMessage> {
-        let (settings, paths) = self.ports.ctx.settings_and_paths_snapshot();
+    pub(super) fn prepare_publish_submit_context_task(&self) -> Task<RootMessage> {
+        let (settings, paths) = self.environment.ctx.settings_and_paths_snapshot();
         let context = prepare_publish::PublishSubmitContext {
             ignore_globs: settings.backend.ignore_globs,
             temp_dir: paths.temp_dir,
@@ -478,21 +450,21 @@ impl<'a> PublishRunner<'a> {
         ))
     }
 
-    pub(super) fn submit_task(
+    pub(super) fn prepare_publish_submit_task(
         &self,
         envelope: prepare_publish::PublishSubmitRequestEnvelope,
     ) -> Task<RootMessage> {
         let generation = envelope.generation;
         let initial_status = envelope.initial_status();
         let task = self
-            .ports
+            .environment
             .ctx
             .create_task(TaskKind::Publish, initial_status);
-        let ctx = self.ports.ctx.clone();
-        self.ports
+        let ctx = self.environment.ctx.clone();
+        self.environment
             .ctx
             .run_blocking("prepare-publish-submit", move |app| {
-                run_publish_submit(&ctx, app.publish(), app.workshop(), task, envelope.request)
+                run_publish_submit(&ctx, app, task, envelope.request)
             })
             .map(move |result| {
                 RootMessage::PreparePublish(prepare_publish::Message::PublishSubmitCompleted(
@@ -502,20 +474,20 @@ impl<'a> PublishRunner<'a> {
             })
     }
 
-    pub(super) fn publish_icon_task(
+    pub(super) fn prepare_publish_icon_submit_task(
         &self,
         request: prepare_publish::PublishIconSubmitRequestEnvelope,
     ) -> Task<RootMessage> {
         let generation = request.generation;
         let task = self
-            .ports
+            .environment
             .ctx
             .create_task(TaskKind::Publish, TransactionStatus::PublishProcessingIcon);
-        let ctx = self.ports.ctx.clone();
-        self.ports
+        let ctx = self.environment.ctx.clone();
+        self.environment
             .ctx
             .run_blocking("prepare-publish-icon-submit", move |app| {
-                run_publish_icon_submit(&ctx, app.publish(), app.workshop(), task, &request)
+                run_publish_icon_submit(&ctx, app, task, &request)
             })
             .map(move |result| {
                 RootMessage::PreparePublish(prepare_publish::Message::PublishIconSubmitCompleted(
@@ -525,9 +497,12 @@ impl<'a> PublishRunner<'a> {
             })
     }
 
-    pub(super) fn content_picker_task(&self, directory: PathBuf) -> Task<RootMessage> {
+    pub(super) fn prepare_publish_content_picker_task(&self) -> Task<RootMessage> {
+        let directory = prepare_publish_initial_content_directory(
+            self.state.features.prepare_publish.addon_path(),
+        );
         let title = self
-            .ports
+            .state
             .i18n
             .tr("native-dialog-select-addon-content-folder");
 
@@ -545,10 +520,13 @@ impl<'a> PublishRunner<'a> {
         })
     }
 
-    pub(super) fn icon_picker_task(&self, directory: PathBuf) -> Task<RootMessage> {
-        let title = self.ports.i18n.tr("native-dialog-select-workshop-icon");
-        let filter = self.ports.i18n.tr("native-dialog-workshop-icon-filter");
-        let well = self.ports.tokens.colors.surface_sunken;
+    pub(super) fn prepare_publish_icon_picker_task(&self) -> Task<RootMessage> {
+        let directory = prepare_publish_initial_icon_directory(
+            self.state.features.prepare_publish.icon_display_path(),
+        );
+        let title = self.state.i18n.tr("native-dialog-select-workshop-icon");
+        let filter = self.state.i18n.tr("native-dialog-workshop-icon-filter");
+        let well = self.state.tokens.colors.surface_sunken;
         let well_rgb = [well.r, well.g, well.b];
         Task::future(async move {
             let selected = rfd::AsyncFileDialog::new()

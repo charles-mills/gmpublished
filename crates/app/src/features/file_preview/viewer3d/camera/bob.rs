@@ -1,5 +1,3 @@
-//! View bob: the walk cycle's vertical sway and the landing dip.
-
 use super::super::super::state::MovementMode;
 use super::{FlyCamera, LAND_BOB_DURATION};
 

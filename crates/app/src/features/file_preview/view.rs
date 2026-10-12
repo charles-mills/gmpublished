@@ -1,13 +1,3 @@
-//! Draws the preview pane: the header and its controls, and the body for
-//! whichever [`PreviewContent`] loaded — image, audio, text, model, map or
-//! particle system.
-//!
-//! Each content kind renders through its own builder rather than one branching
-//! layout, because their chrome genuinely differs: a model gets a viewport and
-//! camera controls, text gets a scrollable gutter, audio gets a transport.
-//!
-//! [`PreviewContent`]: crate::media::preview_model::PreviewContent
-
 use crate::i18n::Arg;
 use gmpublished_domain::math::Vec3;
 use iced::widget::{
@@ -69,7 +59,6 @@ const MODE_PILL_SLOT_WIDTH: f32 = 34.0;
 const MODE_PILL_SLOT_HEIGHT: f32 = 28.0;
 const MODE_PILL_ICON_SIZE: f32 = 18.0;
 
-/// Renders the in-archive File Preview pane embedded in Preview GMA.
 pub fn pane<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
@@ -1014,7 +1003,6 @@ fn particle_inspector_rows<'a>(
     rows.into()
 }
 
-/// One operator line in the fidelity panel: a support-level dot + name.
 fn coverage_row<'a>(
     entry: &'a gmpublished_domain::particles::CoverageEntry,
     ctx: ViewCtx<'a>,

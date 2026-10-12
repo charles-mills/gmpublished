@@ -1,5 +1,3 @@
-//! BSP visibility partitioning.
-
 use super::{
     BoundsBuilder, BspModel, GeometryPartition, MapBounds, MapBsp, MapLeafLocator, MapPlayerStart,
     MapPropVisibility, MapSkyCamera, MapVisibilityBucket, SKYBOX_COMPLETION_AABB_EXPANSION,
@@ -52,9 +50,6 @@ impl MapVisibility {
     }
 }
 
-/// The 2D-skybox flood fill. `Active` carries both reachability rows, which
-/// `from_bsp` only produces together and only for a map that has a
-/// `sky_camera`; every other outcome is `Inactive`, which partitions nothing.
 #[derive(Clone, Debug)]
 pub(super) enum SkyboxPartition {
     Inactive {
@@ -322,11 +317,7 @@ impl FaceAttributions {
     }
 }
 
-/// Which clusters a face is drawn for.
-///
-/// An empty `clusters` means the face is drawn unconditionally, so
-/// `always_visible` is always true in that case — [`MapFaceVisibilityBuilder`]
-/// is the only way to produce one, and it establishes that.
+/// No clusters means always visible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MapFaceVisibility {
     pub(super) always_visible: bool,
@@ -389,10 +380,6 @@ pub(super) fn visibility_bucket(cluster: i16, cluster_count: u32) -> MapVisibili
     }
 }
 
-/// The skybox completion AABB for an active partition, or `None` when the
-/// candidate volume is unusable — it swallows the player spawn, or it is a
-/// large enough fraction of the world that reattributing everything inside it
-/// would hide real geometry.
 fn derive_completion_bounds(
     bsp: &MapBsp,
     face_attributions: &FaceAttributions,
@@ -427,8 +414,6 @@ fn derive_completion_bounds(
     Some(completion_bounds)
 }
 
-/// Bounds enclosing everything the flood fill already attributed to the
-/// skybox: its faces, and the origins of props standing in sky-only clusters.
 fn seed_completion_bounds(
     bsp: &MapBsp,
     face_attributions: &FaceAttributions,

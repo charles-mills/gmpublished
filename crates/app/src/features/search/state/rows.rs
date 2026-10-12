@@ -1,5 +1,3 @@
-//! Search result projection, selection actions, and thumbnail row state.
-
 use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,7 +96,6 @@ impl Row {
             thumbnail_demand::DeliveryResult::Ready(ready) => {
                 RowThumbnail::Ready(ready.handle().clone())
             }
-            // Search rows keep their spinner rather than a blurred placeholder.
             thumbnail_demand::DeliveryResult::Placeholder(_) => return false,
             thumbnail_demand::DeliveryResult::Failed { .. } => RowThumbnail::Dead,
         };
@@ -208,7 +205,7 @@ pub(super) fn row_from_search_item(index: usize, item: &SearchItem) -> Row {
                 entry_path: entry_path.clone(),
             },
         },
-        SearchItemSource::MyWorkshop(id) => Row {
+        SearchItemSource::MyWorkshop { id, tags } => Row {
             id: index,
             title: title.clone(),
             source: RowSource::MyWorkshop,
@@ -219,7 +216,7 @@ pub(super) fn row_from_search_item(index: usize, item: &SearchItem) -> Row {
             action: SelectionAction::MyWorkshop {
                 workshop_id: *id,
                 title,
-                tags: my_workshop_tags_from_terms(&item.terms, *id),
+                tags: tags.clone(),
                 preview_url: None,
             },
         },
@@ -244,12 +241,24 @@ fn thumbnail_for_workshop_id(workshop_id: Option<PublishedFileId>) -> RowThumbna
     }
 }
 
-fn my_workshop_tags_from_terms(terms: &[impl AsRef<str>], id: PublishedFileId) -> Vec<String> {
-    let id_term = id.to_string();
-    terms
-        .iter()
-        .map(AsRef::as_ref)
-        .filter(|term| *term != id_term.as_str())
-        .map(str::to_owned)
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workshop_selection_uses_explicit_tags() {
+        let id = PublishedFileId::fixture(42);
+        let tags = vec!["model".to_owned(), "fun".to_owned()];
+        let item = SearchItem::new(
+            SearchItemSource::MyWorkshop {
+                id,
+                tags: tags.clone(),
+            },
+            "Example",
+        );
+        let row = row_from_search_item(0, &item);
+        assert!(
+            matches!(row.action, SelectionAction::MyWorkshop { tags: selected, .. } if selected == tags)
+        );
+    }
 }

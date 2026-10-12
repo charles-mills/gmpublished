@@ -68,7 +68,6 @@ mapped_enum_with_all! {
 }
 
 impl ColorSetting {
-    /// Declaration-order position used only to place the picker popover.
     pub(crate) const fn index(self) -> usize {
         self as usize
     }
@@ -181,9 +180,7 @@ impl ResetAction {
 pub enum SettingsMutation {
     Sounds(bool),
     PlayGifsByDefault(bool),
-    // Only ever constructed from the macOS-only system-titlebar toggle
-    // (see `Message::SystemTitlebarToggled`), but `Settings::titlebar`
-    // itself is a cross-platform persisted field, so the variant stays.
+    // Only macOS constructs this mutation; the persisted setting is cross-platform.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Titlebar(TitlebarPreference),
     Language(Option<String>),
@@ -231,9 +228,6 @@ pub fn apply_settings_mutation(settings: &mut Settings, mutation: SettingsMutati
     }
 }
 
-/// Whether applying `mutation` would actually change `settings`, checked
-/// against just the field(s) the mutation touches instead of cloning the
-/// whole `Settings` to diff it afterward.
 fn mutation_changes(settings: &Settings, mutation: &SettingsMutation) -> bool {
     match mutation {
         SettingsMutation::Sounds(enabled) => settings.backend.sounds != *enabled,
@@ -590,10 +584,6 @@ impl State {
         Some(action)
     }
 
-    /// Applies a finished reset and, on success, hands back the snapshot now
-    /// stored in `self` (post-sanitize) so the caller can forward it as an
-    /// effect without keeping its own separate clone of the pre-sanitize
-    /// value.
     pub(crate) fn apply_reset_completed(
         &mut self,
         action: ResetAction,
@@ -618,11 +608,6 @@ impl State {
         }
     }
 
-    /// Stamps a save and returns the token its completion must carry.
-    ///
-    /// Saves run on the multi-worker runtime, so two rapid edits can complete
-    /// out of order. Without a token the older completion's snapshot is
-    /// reapplied over the newer one and the UI reverts.
     #[cfg(test)]
     pub(crate) const fn save_generation_for_test(&self) -> Generation {
         self.save_generation
@@ -634,8 +619,6 @@ impl State {
         self.save_generation
     }
 
-    /// Applies a finished save and, on success, hands back the snapshot now
-    /// stored in `self` (see `apply_reset_completed`).
     pub(crate) fn apply_save_completed(
         &mut self,
         generation: Generation,
@@ -732,9 +715,6 @@ impl State {
 
         match mutation {
             SettingsMutation::Path { .. } => {
-                // Rebuilt from the accepted settings, so every field's text and
-                // error describe what is now stored — including siblings whose
-                // rejected text this mutation just superseded.
                 self.path_fields = PathFields::from_settings(&self.settings);
             }
             SettingsMutation::Theme { .. } => {
@@ -768,8 +748,6 @@ enum SettingsStatus {
     ResetFailed,
 }
 
-/// One path setting's editable text and the validation error recorded against
-/// it. Paired so editing cannot leave an error describing the previous value.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct PathField {
     text: String,
@@ -824,7 +802,6 @@ impl PathFields {
         self.get(kind).error
     }
 
-    /// Clears the error: it described the text being replaced.
     fn set_text(&mut self, kind: PathSetting, value: String) {
         *self.get_mut(kind) = PathField {
             text: value,
@@ -837,7 +814,6 @@ impl PathFields {
     }
 }
 
-/// One accent colour's editable hex text and whether it currently parses.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct ColorField {
     text: String,
@@ -1076,8 +1052,6 @@ mod tests {
         assert_eq!(state.theme_preset(), ThemePreset::Auto);
     }
 
-    /// The "follow the system" row carries `None`, so choosing it clears an
-    /// explicit language rather than storing a sentinel string.
     #[test]
     fn language_default_maps_to_none() {
         let mut state = State::default();

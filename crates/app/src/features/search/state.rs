@@ -1,13 +1,3 @@
-//! The search palette's state: the query, the rows currently shown, and which
-//! one is selected.
-//!
-//! Two result kinds share one list — installed addons and files inside them —
-//! and results arrive from two paths: a debounced quick search answered from
-//! memory, and a full search that runs as a cancellable backend task. Both are
-//! generation-stamped so a slower earlier query cannot overwrite a newer one.
-
-// The submodules below are one module split across files: each holds a slice
-// of the state's impl and reaches the shared types through `super::*`.
 #![allow(clippy::wildcard_imports)]
 
 use std::{
@@ -287,9 +277,7 @@ impl State {
     }
 
     pub(crate) fn thumbnail_demands(&self, viewport_height: f32) -> thumbnail_demand::DemandSet {
-        // The closing palette keeps its rows on screen while fading out, so
-        // their thumbnails must stay demanded until the animation settles —
-        // releasing them at dismiss time blanks the images mid-fade.
+        // Keep thumbnails demanded until closing finishes or images disappear mid-fade.
         let closing_with_rows =
             self.palette.visible && !self.palette.expanded && !self.rows.is_empty();
         if !self.dropdown_open() && !closing_with_rows {
@@ -501,9 +489,8 @@ mod tests {
 
     #[test]
     fn command_f_spam_cannot_accumulate_leaked_characters() {
-        // Regression: iced's text_input tracks modifiers in widget state, so
-        // a remounted palette input treats the closing ⌘F as a plain "f"
-        // edit. Dismissal must discard it so toggling can never accumulate.
+        // Iced tracks modifiers in text_input state. Ignore edits during dismissal so
+        // closing Cmd-F cannot insert f.
         let mut state = State::default();
         let started = Instant::now();
 
@@ -576,11 +563,9 @@ mod tests {
         ));
         assert!(!state.thumbnail_demands(600.0).demands.is_empty());
 
-        // Rows fade out with the palette; their thumbnails stay demanded.
         let _cancel = state.dismiss(started + Duration::from_millis(1));
         assert!(!state.thumbnail_demands(600.0).demands.is_empty());
 
-        // Fully settled: everything resets and the demands empty out.
         assert!(state.tick_motion(started + Duration::from_millis(500)));
         assert!(state.thumbnail_demands(600.0).demands.is_empty());
     }
@@ -821,8 +806,6 @@ mod tests {
                     crc32: 77,
                 },
                 "rp_riverden_v1a.bsp",
-                ["maps/rp_riverden_v1a.bsp", "Riverden"],
-                0,
             ),
         );
 
@@ -852,8 +835,6 @@ mod tests {
             item: SearchItem::new(
                 SearchItemSource::WorkshopItem(PublishedFileId::fixture(workshop_id)),
                 label,
-                Vec::<String>::new(),
-                0,
             ),
         }
     }
@@ -862,10 +843,11 @@ mod tests {
         SearchHit {
             score: 1,
             item: SearchItem::new(
-                SearchItemSource::MyWorkshop(PublishedFileId::fixture(workshop_id)),
+                SearchItemSource::MyWorkshop {
+                    id: PublishedFileId::fixture(workshop_id),
+                    tags: Vec::new(),
+                },
                 label,
-                Vec::<String>::new(),
-                0,
             ),
         }
     }

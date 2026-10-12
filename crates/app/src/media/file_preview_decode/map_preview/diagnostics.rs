@@ -1,5 +1,3 @@
-//! Structured diagnostics for the map-preview build pipeline.
-
 use std::time::Duration;
 
 use crate::media::preview_model::MapStats;
@@ -21,7 +19,6 @@ pub(super) fn lightmap_status(
     )
 }
 
-/// Pre-formatted status fragments used by the map build summary.
 pub(super) struct MapPreviewStatuses<'a> {
     pub(super) water: &'a str,
     pub(super) render_mode: &'a str,
@@ -31,7 +28,6 @@ pub(super) struct MapPreviewStatuses<'a> {
     pub(super) sky: &'a str,
 }
 
-/// Wall-clock duration of each map-build phase.
 pub(super) struct MapPreviewTimings {
     pub(super) bsp: Duration,
     pub(super) materials: Duration,
@@ -41,7 +37,6 @@ pub(super) struct MapPreviewTimings {
     pub(super) lightmap: Duration,
 }
 
-/// Emits the single high-value summary line for a completed map build.
 pub(super) fn log_map_preview_summary(
     entry_path: &str,
     stats: &MapStats,

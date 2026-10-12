@@ -1,5 +1,3 @@
-//! Workshop metadata resolution and patches for search rows.
-
 use super::*;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

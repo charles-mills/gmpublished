@@ -11,7 +11,6 @@ const BYTE_UNIT_KEYS: [&str; 5] = [
     "byte-unit-tb",
 ];
 
-/// Formats a byte count with binary 1024-byte units and existing app labels.
 #[must_use]
 pub fn format_bytes(bytes: u64, i18n: &I18n) -> String {
     let (value, unit_key) = byte_value_and_unit(bytes, i18n);
@@ -41,8 +40,6 @@ fn byte_value_and_unit(bytes: u64, i18n: &I18n) -> (String, &'static str) {
         )
         .format_count(bytes)
     } else {
-        // Round to two decimals and trim trailing zeros (and a bare trailing
-        // dot), e.g. "531.29 MB", "1.5 MB", "1 MB".
         let rounded = format!("{value:.2}");
         let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
         trimmed.to_owned()
@@ -56,9 +53,6 @@ pub struct DownloadCountFormatter {
 }
 
 impl Default for DownloadCountFormatter {
-    /// Follows the same automatic policy as any other formatter rather than
-    /// hardcoding one locale's separator. Used before settings load, then
-    /// replaced by `set_download_count_formatter`.
     fn default() -> Self {
         Self::from_format_and_locale(DownloadCountFormat::default(), None)
     }
@@ -133,7 +127,6 @@ mod tests {
         assert_eq!(format_bytes(1_024, &i18n), "1 KB");
         assert_eq!(format_bytes(12_500, &i18n), "12.21 KB");
         assert_eq!(format_bytes(1_572_864, &i18n), "1.5 MB");
-        // filesize.js v6 two-decimal rounding with trailing zeros trimmed.
         assert_eq!(format_bytes(557_046_046, &i18n), "531.24 MB");
         assert_eq!(format_bytes(1_048_576, &i18n), "1 MB");
     }

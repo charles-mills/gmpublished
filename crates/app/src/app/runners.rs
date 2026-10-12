@@ -7,7 +7,7 @@ use super::{
     WorkshopDownloadSuccess, downloader, gma, iced_mpsc, installed_addons, prepare_publish,
     preview_gma, search, size_analyzer, steam_session, tasks,
 };
-use crate::bridge::tasks::{TransactionStatus, WorkshopService};
+use crate::bridge::tasks::TransactionStatus;
 use crate::generation::Generation;
 use gmpublished_backend::TransactionId;
 
@@ -20,12 +20,13 @@ pub(super) fn flatten_blocking_ui_result<T>(
     }
 }
 
-/// Runner-owned Steam connection orchestration shared by every operation
-/// that needs a connected Workshop service.
 pub(super) fn connect_steam_for_operation(
-    workshop: WorkshopService<'_>,
+    workshop: &BackendServices,
 ) -> steam_session::ConnectionAttempt {
-    steam_session::connect_for_operation_with(|| workshop.connected(), || workshop.connect())
+    steam_session::connect_for_operation_with(
+        || workshop.steam_connected(),
+        || workshop.connect_steam(),
+    )
 }
 
 pub(super) fn run_search_full(
@@ -47,7 +48,7 @@ pub(super) fn run_search_full(
     let transaction = app.begin_transaction();
     let transaction_id = transaction.id();
     ctx.correlate_backend_transaction(transaction_id, task);
-    let started_id = app.search().start_full(&request, transaction);
+    let started_id = app.start_full_search(&request, transaction);
     debug_assert_eq!(started_id, transaction_id);
 
     let mut sequence = 0;
@@ -58,10 +59,9 @@ pub(super) fn run_search_full(
             {
                 match event {
                     tasks::TransactionRuntimeEvent::Data { payload, .. } => {
-                        match app
-                            .search()
-                            .full_batch_from_transaction_payload(&request, sequence, &payload)
-                        {
+                        match tasks::search_full_batch_from_transaction_payload(
+                            &request, sequence, &payload,
+                        ) {
                             Ok(batch) => {
                                 sequence = sequence.wrapping_add(1);
                                 let _sent = send_root_message(
@@ -126,23 +126,20 @@ pub(super) fn run_installed_metadata_refresh(
     item_ids: &[PublishedFileId],
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let result = app
-        .workshop()
-        .refresh_metadata_streaming(item_ids, |metadata| {
-            let patches = installed_addons::metadata_patches(&metadata);
-            if patches.is_empty() {
-                return;
-            }
-            let _sent = send_root_message(
-                &mut output,
-                RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
-                    generation,
-                    // A landed batch needs no re-queue bookkeeping.
-                    Vec::new(),
-                    Ok(patches),
-                )),
-            );
-        });
+    let result = app.refresh_metadata_streaming(item_ids, |metadata| {
+        let patches = installed_addons::metadata_patches(&metadata);
+        if patches.is_empty() {
+            return;
+        }
+        let _sent = send_root_message(
+            &mut output,
+            RootMessage::InstalledAddons(installed_addons::Message::MetadataRefreshCompleted(
+                generation,
+                Vec::new(),
+                Ok(patches),
+            )),
+        );
+    });
     if let Err(error) = result {
         let _sent = send_root_message(
             &mut output,
@@ -160,15 +157,13 @@ pub(super) fn run_size_analyzer_preview_urls(
     ids: &[PublishedFileId],
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let (cached_metadata, stale_ids) = app.workshop().resolve_metadata(ids);
+    let (cached_metadata, stale_ids) = app.resolve_metadata(ids);
     send_preview_urls(&mut output, preview_urls_from_metadata(cached_metadata));
 
-    if !stale_ids.is_empty() && app.workshop().connected() {
-        let result = app
-            .workshop()
-            .refresh_metadata_streaming(&stale_ids, |metadata| {
-                send_preview_urls(&mut output, preview_urls_from_metadata(metadata));
-            });
+    if !stale_ids.is_empty() && app.steam_connected() {
+        let result = app.refresh_metadata_streaming(&stale_ids, |metadata| {
+            send_preview_urls(&mut output, preview_urls_from_metadata(metadata));
+        });
         if let Err(error) = result {
             log::debug!("Size Analyzer preview URL refresh failed: {error}");
         }
@@ -219,8 +214,7 @@ pub(super) fn run_downloader_local_extraction(
     paths: Vec<PathBuf>,
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let settings = app.config().settings_snapshot();
-    let plan = gma::build_preview_extract_request(settings);
+    let destination = app.settings_snapshot().backend.extract_destination;
     let paths = paths
         .into_iter()
         .filter(|path| path.is_file() && gma::is_gma_path(path))
@@ -249,8 +243,7 @@ pub(super) fn run_downloader_local_extraction(
             return;
         }
 
-        let result =
-            run_local_gma_extraction(ctx, &path, plan.destination.clone(), &plan.options, task);
+        let result = run_local_gma_extraction(ctx, &path, destination.clone(), task);
 
         if !send_root_message(
             &mut output,
@@ -273,22 +266,18 @@ pub(super) fn create_downloader_local_extract_task(
     create_extract_task(ctx, TaskKind::Extract, total_bytes)
 }
 
-/// Correlates a fresh backend transaction with `task` (mirroring the
-/// Steam-download path) so terminal delivery and per-task cancellation both
-/// flow through the same mechanism instead of a hidden, uncorrelated
-/// transaction extraction would otherwise create for itself.
+/// Use a correlated transaction so task cancellation reaches the extraction.
 pub(super) fn run_local_gma_extraction(
     ctx: &BackendContext,
     path: &Path,
     destination: gma::ExtractDestination,
-    options: &gma::PreviewExtractOptions,
     task: TaskHandle,
 ) -> Result<PathBuf, gma::GmaError> {
     let archive = gma::PreviewArchive::open(path)?;
 
     let transaction = ctx.begin_transaction();
     ctx.correlate_backend_transaction(transaction.id(), task);
-    let result = ctx.extract_preview_archive(&archive, destination, options, &transaction);
+    let result = ctx.extract_preview_archive(&archive, destination, &transaction);
     if let Err(error) = &result {
         let _handled = ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
@@ -304,20 +293,12 @@ pub(super) fn local_extraction_outcome(
     }
 }
 
-/// Extracts one document-opened `.gma` archive with quick-open semantics:
-/// temp destination, task-overlay progress row, open-after-extract.
 #[cfg(target_os = "macos")]
 pub(super) fn run_document_open_extraction(ctx: &BackendContext, path: &Path) {
     let total_bytes = path.metadata().map_or(0, |metadata| metadata.len());
     let task = create_preview_gma_extract_task(ctx, total_bytes);
 
-    let result = run_local_gma_extraction(
-        ctx,
-        path,
-        gma::ExtractDestination::Temp,
-        &gma::PreviewExtractOptions::default(),
-        task,
-    );
+    let result = run_local_gma_extraction(ctx, path, gma::ExtractDestination::Temp, task);
 
     open_preview_gma_extracted_path(
         ctx,
@@ -353,12 +334,11 @@ pub(super) fn run_preview_gma_archive_extraction(
     ctx: &BackendContext,
     request: &preview_gma::ExtractionRequest,
     destination: gma::ExtractDestination,
-    options: &gma::PreviewExtractOptions,
 ) {
     let total_bytes = request.intent.total_bytes();
     let subject = request.request_id.to_string();
     let transaction = create_preview_gma_extract_transaction(ctx, total_bytes);
-    let result = ctx.extract_preview_archive(&request.archive, destination, options, &transaction);
+    let result = ctx.extract_preview_archive(&request.archive, destination, &transaction);
     if let Err(error) = &result {
         ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
@@ -380,8 +360,6 @@ pub(super) fn create_preview_gma_extract_task(
     ctx: &BackendContext,
     total_bytes: u64,
 ) -> TaskHandle {
-    // Extractions invoked outside the Downloader page surface as overlay
-    // toasts instead of Downloader rows.
     create_extract_task(ctx, TaskKind::OverlayExtract, total_bytes)
 }
 
@@ -420,10 +398,6 @@ pub(super) fn schedule_native_open_target(
     }
 }
 
-/// Schedules `job` on the backend's blocking pool via `spawn_blocking_detached`,
-/// logging a warning naming `what` if scheduling itself failed. Returns
-/// whether scheduling succeeded, for callers that need to react further
-/// (e.g. sending a fallback message) beyond the log line.
 pub(super) fn spawn_blocking_detached_or_warn(
     ctx: &BackendContext,
     name: impl Into<Arc<str>>,
@@ -503,7 +477,7 @@ pub(super) fn run_downloader_submission(
     item_ids: Vec<PublishedFileId>,
     mut output: iced_mpsc::Sender<RootMessage>,
 ) {
-    let attempt = connect_steam_for_operation(app.workshop());
+    let attempt = connect_steam_for_operation(app);
     let connected = attempt.connected();
     let connection_error = attempt.error().cloned();
     if !send_root_message(
@@ -522,7 +496,7 @@ pub(super) fn run_downloader_submission(
         return;
     }
 
-    if let Err(error) = app.workshop().submit_downloads(item_ids.clone()) {
+    if let Err(error) = app.submit_downloads(item_ids.clone()) {
         send_downloader_submission_failed(&mut output, item_ids, error);
     }
 }

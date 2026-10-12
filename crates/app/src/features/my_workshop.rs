@@ -12,8 +12,6 @@ pub use message::Message;
 #[cfg(all(test, feature = "debug"))]
 pub use model::Row;
 pub use model::{ContextMenuRequest, PageResult, PreparePublishTarget};
-/// Only the route's own view reads the load status in anger; the app-level
-/// reconnect test needs to name it too. Same shape as the `Row` export above.
 #[cfg(test)]
 pub use state::PageStatus;
 pub use state::State;
@@ -35,7 +33,6 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         subscriptions
             .push(crate::theme::motion::redraw_subscription(true).map(Message::AnimationTick));
     } else if state.has_active_animations() {
-        // Only GIF playback is live: tick at the GIF cadence, not 60Hz.
         subscriptions
             .push(crate::theme::motion::gif_redraw_subscription().map(Message::AnimationTick));
     }

@@ -409,10 +409,7 @@ pub(super) fn take_workshop_start_action(
     }]
 }
 
-/// What applying one transaction event to its task produced.
 struct AppliedEvent {
-    /// Whether the transaction reached a terminal state and its correlation
-    /// entry should be dropped.
     pub(super) terminal: bool,
     pub(super) actions: Vec<BackendRuntimeAction>,
 }

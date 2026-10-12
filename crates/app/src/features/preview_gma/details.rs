@@ -23,7 +23,7 @@ pub struct Details {
     pub(crate) archive_path: String,
     pub(crate) author: Option<AuthorDisplay>,
     pub(crate) metadata_rows: Vec<MetadataRow>,
-    pub(crate) tag_rows: Vec<TagRow>,
+    pub(crate) tag_rows: Vec<String>,
     pub(crate) description: BbCodeDocument,
     pub(crate) has_stats: bool,
     pub(crate) subscriptions: String,
@@ -45,14 +45,12 @@ pub struct MetadataRow {
     pub(crate) avatar: Option<image::Handle>,
 }
 
-/// Author row projection: a resolved profile or the Steam2 placeholder.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorDisplay {
     pub(crate) name: String,
     /// `None` renders the anonymous placeholder avatar.
     pub(crate) avatar: Option<image::Handle>,
     pub(crate) profile_url: Option<String>,
-    /// The async profile lookup failed; a small dead glyph joins the row.
     pub(crate) failed: bool,
 }
 
@@ -82,11 +80,6 @@ pub struct RelativeTime {
     pub(crate) count: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TagRow {
-    pub(crate) label: String,
-}
-
 pub fn details_for_archive(
     archive: &PreviewArchive,
     archive_path: &str,
@@ -102,7 +95,6 @@ pub fn details_for_archive(
         metadata_rows.push(MetadataRow::bytes("preview-gma-size", total_size));
     }
 
-    // Author/timestamp rows come from Workshop data only.
     if let Some(workshop) = workshop {
         push_timestamp_rows(&mut metadata_rows, workshop);
     }
@@ -222,7 +214,7 @@ fn details_description(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadat
     }
 }
 
-fn tag_rows(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadata>) -> Vec<TagRow> {
+fn tag_rows(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadata>) -> Vec<String> {
     let mut rows = Vec::new();
     if let Some(addon_type) = metadata
         .addon_type()
@@ -244,14 +236,12 @@ fn tag_rows(metadata: &GmaMetadata, workshop: Option<&WorkshopMetadata>) -> Vec<
     rows
 }
 
-fn push_tag(rows: &mut Vec<TagRow>, raw_tag: &str) {
+fn push_tag(rows: &mut Vec<String>, raw_tag: &str) {
     let tag = raw_tag.trim();
-    if tag.is_empty() || rows.iter().any(|row| row.label.eq_ignore_ascii_case(tag)) {
+    if tag.is_empty() || rows.iter().any(|row| row.eq_ignore_ascii_case(tag)) {
         return;
     }
-    rows.push(TagRow {
-        label: tag.to_owned(),
-    });
+    rows.push(tag.to_owned());
 }
 
 fn relative_timestamp(timestamp: u64) -> Option<(RelativeTime, String)> {
@@ -398,7 +388,6 @@ mod tests {
             DownloadCountFormatter::default(),
         );
 
-        // The click-source title wins over the gma header (no title pop-in).
         assert_eq!(details.title, "Fallback");
         assert_eq!(details.archive_path, "/tmp/local.gma");
         assert!(details.metadata_rows.iter().any(|row| {
@@ -470,7 +459,7 @@ mod tests {
             ),
         );
         assert_eq!(period_details.subscriptions, "12.345");
-        assert!(details.tag_rows.iter().any(|row| row.label == "fun"));
+        assert!(details.tag_rows.iter().any(|row| row == "fun"));
         assert!(
             details
                 .metadata_rows

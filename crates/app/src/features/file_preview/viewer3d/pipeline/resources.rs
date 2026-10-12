@@ -1,8 +1,3 @@
-//! GPU objects created once per device and immutable for the pipeline's
-//! life: shader modules compiled into the render pipelines, plus the bind
-//! group layouts, samplers, shared uniform buffers, and static vertex data
-//! that every later-lived stage borrows.
-
 use super::uniforms::{MaterialUniform, Uniforms};
 use super::{
     BLIT_SHADER_SOURCE, DETAIL_SHADER_SOURCE, DETAIL_VERTEX_ATTRIBUTES, DETAIL_VERTEX_FLOAT_COUNT,
@@ -15,9 +10,7 @@ use gmpublished_domain::math::Vec3;
 pub struct RenderResources {
     pub opaque_pipeline: wgpu::RenderPipeline,
     pub water_pipeline: wgpu::RenderPipeline,
-    /// `None` on backends whose shader translation rejects the refractive
-    /// water shader (naga's GLSL backend cannot translate `textureLoad` on a
-    /// depth texture); water then renders through `water_pipeline` instead.
+    /// None when shader translation fails; use the single-pass water pipeline instead.
     pub refractive_water_pipeline: Option<wgpu::RenderPipeline>,
     pub translucent_pipeline: wgpu::RenderPipeline,
     pub additive_pipeline: wgpu::RenderPipeline,
@@ -137,11 +130,6 @@ impl RenderResources {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        // Declared, not `None`: this is wgpu's one hook for
-                        // catching a shader whose declaration of this uniform
-                        // has drifted from the Rust struct, and `None`
-                        // declines it. Binding 0 above already declares its
-                        // size; this one was the exception.
                         min_binding_size: wgpu::BufferSize::new(
                             std::mem::size_of::<MaterialUniform>() as u64,
                         ),
@@ -481,9 +469,6 @@ impl RenderResources {
             "file_preview.model_viewer.map_skybox_uniform",
         );
 
-        // The four samplers differ only in the three axes `sampler` takes;
-        // spelled out, the differences were the easiest thing in this function
-        // to misread.
         let material_sampler = sampler(
             device,
             "file_preview.model_viewer.material_sampler",
@@ -566,9 +551,7 @@ impl RenderResources {
     }
 }
 
-/// Pops the top error scope off `device`. Native wgpu records scoped errors
-/// synchronously, so the returned future is already resolved; a single poll
-/// retrieves it without blocking.
+/// Native wgpu resolves scoped errors synchronously, so one poll is enough.
 fn take_scoped_error(device: &wgpu::Device) -> Option<wgpu::Error> {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -593,11 +576,6 @@ struct PipelineShaderEntry {
     label: &'static str,
 }
 
-/// A uniform buffer sized for [`Uniforms`] and the bind group that reaches it.
-///
-/// The three uniform slots (model, sky, map skybox) are the same buffer and
-/// the same single-entry bind group; only the label distinguishes them, and
-/// labels are what a GPU capture shows you.
 fn uniforms(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -621,7 +599,6 @@ fn uniforms(
     (buffer, bind_group)
 }
 
-/// The axes this viewer's samplers actually vary on.
 #[derive(Clone, Copy)]
 struct SamplerSpec {
     address: wgpu::AddressMode,
@@ -804,16 +781,8 @@ fn create_detail_pipeline(
 }
 
 fn overlay_depth_bias_state() -> wgpu::DepthBiasState {
-    // Depth bias ADDS to the fragment depth. This viewer is reverse-Z
-    // (clear 0.0, GreaterEqual, closer = LARGER depth), so pulling a
-    // coplanar decal toward the viewer needs a POSITIVE constant; a
-    // negative one pushes it behind its wall and loses the depth test.
-    //
-    // The constant alone is a couple of float ULPs — nowhere near the
-    // interpolation divergence between a decal quad and its wall's
-    // triangles at oblique angles, so decals flickered in and out with
-    // camera movement. Slope-scaled bias grows with the polygon's depth
-    // gradient; polygon offset exists precisely for coplanar decals.
+    // Reverse-Z needs positive depth bias to pull decals toward the viewer.
+    // Slope bias covers interpolation differences at oblique angles.
     wgpu::DepthBiasState {
         constant: 2,
         slope_scale: 2.0,

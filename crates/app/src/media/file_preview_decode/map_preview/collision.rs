@@ -1,5 +1,3 @@
-//! Prop collision enrichment and PHY diagnostic geometry.
-
 use super::{
     Arc, BTreeMap, ConvexLedge, HashMap, LoadedPhy, LoadedPropModel, LoadedPropPhysics,
     MAP_PROP_PLACEMENT_CAP, MapWalkCollision, MapWalkPropModelPlacement, MeshData, ModelVertex,

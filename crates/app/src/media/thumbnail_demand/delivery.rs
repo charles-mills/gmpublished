@@ -1,7 +1,3 @@
-//! What the manager hands back to owners: decoded pixels wrapped as GPU-ready
-//! handles, the deliveries that carry them, and the messages worker
-//! completions arrive on.
-
 use std::{fmt, sync::Arc};
 
 use bytes::Bytes;
@@ -19,9 +15,6 @@ use crate::{
 
 use super::{DemandId, JobId, Owner, PlaceholderImage, RetryAttempt, RetryId};
 
-/// Why a thumbnail request failed: either the decode/resize pipeline
-/// rejected it, or the worker pool couldn't schedule it. Kept transparent so
-/// `Display` reproduces the underlying error text verbatim for logging.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ThumbnailDeliveryError {
     #[error(transparent)]
@@ -36,8 +29,6 @@ pub enum Message {
         key: ThumbnailKey,
         job_id: JobId,
         attempt: RetryAttempt,
-        /// Boxed to keep this variant from setting the size of `RootMessage`,
-        /// which every message in the app pays.
         result: Box<Result<ThumbnailWorkerOutcome<PreparedThumbnail>, ThumbnailDeliveryError>>,
     },
     WorkerBackpressured {
@@ -49,8 +40,6 @@ pub enum Message {
         key: ThumbnailKey,
         retry_id: RetryId,
     },
-    /// Boxed: `Delivery` embeds a `ReadyThumbnail` (~184 bytes) inline, which
-    /// would otherwise set the size of `RootMessage`.
     Delivered(Box<Delivery>),
 }
 
@@ -228,12 +217,8 @@ impl Delivery {
 #[derive(Clone, Debug)]
 pub enum DeliveryResult {
     Ready(ReadyThumbnail),
-    /// A blurred ThumbHash stand-in painted before real pixels arrive. Replaced
-    /// by [`DeliveryResult::Ready`] once the decode lands.
     Placeholder(PlaceholderImage),
-    Failed {
-        error: ThumbnailDeliveryError,
-    },
+    Failed { error: ThumbnailDeliveryError },
 }
 
 #[derive(Clone)]

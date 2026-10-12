@@ -1,5 +1,3 @@
-//! Ambient and direct-light projections for placed props.
-
 use super::{
     AmbientCube, Arc, MapAmbientLighting, MapEnvironmentLighting, MapWalkCollision, PropModelAsset,
     StaticPropPlacement, Vec3,

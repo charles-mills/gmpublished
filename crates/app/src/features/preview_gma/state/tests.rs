@@ -189,8 +189,6 @@ fn open_seeds_the_thumbnail_demand_before_the_archive_loads() {
     let mut state = State::default();
     let request = state.begin_open(seeded_target());
 
-    // The demand goes out immediately (grid RAM cache serves it), even
-    // while the archive-open worker is still running.
     assert!(state.loading());
     assert!(state.thumbnail_loading());
     let demands = state.thumbnail_demands();
@@ -201,7 +199,6 @@ fn open_seeds_the_thumbnail_demand_before_the_archive_loads() {
     assert!(state.thumbnail_handle().is_some());
     assert!(state.thumbnail_demands().demands.is_empty());
 
-    // Metadata arriving with the SAME url must not reset the image.
     state.apply_archive_opened(request.request_id, Ok(loaded_archive()));
     let metadata = WorkshopMetadata {
         id: PublishedFileId::fixture(42),
@@ -229,8 +226,6 @@ fn open_seeds_the_thumbnail_demand_before_the_archive_loads() {
 
 #[test]
 fn pending_image_square_is_reserved_until_metadata_settles() {
-    // Workshop id but no seeded URL: the square shows the spinner, never
-    // a dead flash, until metadata resolves (or fails).
     let mut state = State::default();
     let request = state.begin_open(target());
     assert!(state.thumbnail_loading());
@@ -248,7 +243,6 @@ fn pending_image_square_is_reserved_until_metadata_settles() {
     assert!(!state.thumbnail_loading());
     assert!(state.thumbnail_handle().is_none());
 
-    // No workshop id and no seed: settles dead immediately.
     let mut plain = State::default();
     let _request = plain.begin_open(OpenTarget::new(
         PathBuf::from("/tmp/plain.gma"),
@@ -264,7 +258,6 @@ fn click_time_stats_and_title_render_before_hydration() {
     let request = state.begin_open(seeded_target());
     state.apply_archive_opened(request.request_id, Ok(loaded_archive()));
 
-    // First loaded frame: grid data, no zero flash, click title.
     let details = state.details();
     assert!(details.has_stats);
     assert_eq!(details.subscriptions, "12,345");
@@ -398,7 +391,6 @@ fn author_fetch_is_one_shot_and_generation_guarded() {
         "Fresh description"
     );
 
-    // A failed fetch keeps the placeholder and flags the row.
     let mut failed_state = State::default();
     let request = failed_state.begin_open(target());
     failed_state.apply_archive_opened(request.request_id, Ok(loaded_archive()));
@@ -446,7 +438,6 @@ fn window_unfocus_pauses_thumbnail_animation() {
 
     state.set_window_focused(false);
     assert!(!state.has_active_animation());
-    // Spinner-driven ticks must not advance the paused GIF.
     let now = Instant::now();
     let _ = state.tick_animation(now);
     assert!(!state.tick_animation(now + std::time::Duration::from_secs(1)));

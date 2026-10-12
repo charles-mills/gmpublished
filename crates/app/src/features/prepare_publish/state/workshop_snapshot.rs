@@ -1,5 +1,3 @@
-//! In-flight Workshop snapshot ownership.
-
 use super::{PathBuf, PublishedFileId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

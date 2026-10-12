@@ -1,11 +1,11 @@
 use std::{
     cell::RefCell,
     cmp::Ordering,
-    collections::BTreeMap,
+    collections::{BTreeMap, BinaryHeap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32},
+        atomic::{AtomicU32, Ordering as AtomicOrdering},
     },
 };
 
@@ -35,7 +35,6 @@ thread_local! {
         RefCell::new((Matcher::new(Config::DEFAULT), Vec::new()));
 }
 
-/// Scores `haystack` against `pattern`, reusing this thread's matcher state.
 fn score(pattern: &Pattern, haystack: &str) -> Option<u32> {
     MATCHER.with(|state| {
         let (matcher, buf) = &mut *state.borrow_mut();
@@ -43,19 +42,10 @@ fn score(pattern: &Pattern, haystack: &str) -> Option<u32> {
     })
 }
 
-/// Best fuzzy-match score for `search_item` against `pattern`: its label if
-/// long enough to match `query`, and its best-scoring qualifying term,
-/// whichever is higher.
-fn best_search_item_score(pattern: &Pattern, query: &str, search_item: &SearchItem) -> Option<u32> {
-    let label_score = {
-        let label = search_item.label();
-        (label.len() >= query.len())
-            .then(|| score(pattern, label))
-            .flatten()
-    };
+fn best_search_item_score(pattern: &Pattern, search_item: &SearchItem) -> Option<u32> {
+    let label_score = score(pattern, search_item.label());
 
-    // File items don't carry a `terms` vec — their haystacks live on the
-    // shared source (entry path subsumes file name and extension).
+    // File haystacks use the shared source; the entry path includes name and extension.
     let term_score = match &search_item.source {
         SearchItemSource::InstalledAddonFile {
             addon, entry_path, ..
@@ -66,13 +56,11 @@ fn best_search_item_score(pattern: &Pattern, query: &str, search_item: &SearchIt
         ]
         .into_iter()
         .flatten()
-        .filter(|term| term.len() >= query.len())
         .filter_map(|term| score(pattern, term))
         .max(),
         _ => search_item
             .terms()
             .iter()
-            .filter(|term| term.len() >= query.len())
             .filter_map(|term| score(pattern, term))
             .max(),
     };
@@ -132,6 +120,53 @@ impl QuickSearchAccumulator {
     }
 }
 
+#[derive(Eq, PartialEq)]
+struct RankedHit(QuickSearchHit);
+
+impl Ord for RankedHit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        quick_hit_order(&self.0, &other.0)
+    }
+}
+
+impl PartialOrd for RankedHit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct BestHits {
+    hits: BinaryHeap<RankedHit>,
+    limit: usize,
+}
+
+impl BestHits {
+    fn new(limit: usize) -> Self {
+        Self {
+            hits: BinaryHeap::new(),
+            limit,
+        }
+    }
+
+    fn push(&mut self, hit: QuickSearchHit) {
+        if self.hits.len() < self.limit {
+            self.hits.push(RankedHit(hit));
+        } else if let Some(mut worst) = self.hits.peek_mut()
+            && quick_hit_order(&hit, &worst.0).is_lt()
+        {
+            *worst = RankedHit(hit);
+        }
+    }
+
+    fn into_sorted(self) -> Vec<QuickSearchHit> {
+        self.hits
+            .into_sorted_vec()
+            .into_iter()
+            .map(|hit| hit.0)
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SearchScope {
     Addons,
@@ -150,31 +185,22 @@ pub enum SearchItemSource {
         size_bytes: u64,
         crc32: u32,
     },
-    MyWorkshop(WorkshopId),
+    MyWorkshop {
+        id: WorkshopId,
+        tags: Vec<String>,
+    },
     WorkshopItem(WorkshopId),
 }
 
-/// Shared per-addon identity for file search items: a library has ~10³
-/// addons but ~10⁵ file entries, so per-file copies of the addon path,
-/// title and id string dominated the file index's memory. One `Arc` per
-/// addon, shared by all of its files; the file items themselves carry only
-/// their entry path (label and extension are substrings of it).
 #[derive(Debug, Serialize)]
 pub struct FileSearchAddon {
-    /// Canonicalized addon path (see [`SearchItem::new_installed_addon`]).
     pub path: PathBuf,
     pub title: String,
     pub workshop_id: Option<WorkshopId>,
-    /// The workshop id formatted once, so id queries can match file items
-    /// without a per-file copy.
     pub id_str: Option<Box<str>>,
 }
 
 impl FileSearchAddon {
-    /// Takes the id already refined, so the searchable text and the typed id
-    /// cannot describe different addons — a raw `Some(0)` would otherwise
-    /// leave `workshop_id: None` beside an `id_str` of `"0"` that file search
-    /// happily matches on.
     pub fn new(path: PathBuf, title: String, workshop_id: Option<WorkshopId>) -> Arc<Self> {
         Arc::new(Self {
             path,
@@ -185,8 +211,6 @@ impl FileSearchAddon {
     }
 }
 
-// serde's blanket `Arc<T>` impl is feature-gated (`rc`); serialize the
-// shared struct directly — this only feeds transaction detail logging.
 fn serialize_shared_addon<S>(addon: &Arc<FileSearchAddon>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -204,8 +228,6 @@ pub struct SearchItem {
 }
 impl SearchItem {
     pub fn label(&self) -> &str {
-        // File items derive their label (the file name) from the entry
-        // path instead of storing a per-file copy.
         if let SearchItemSource::InstalledAddonFile { entry_path, .. } = &self.source {
             entry_path
                 .rsplit_once('/')
@@ -226,10 +248,6 @@ impl PartialOrd for SearchItem {
 }
 impl Ord for SearchItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Tie-break by source identity so distinct addons never compare
-        // Equal (upstream compared the two Orderings to each other, which is
-        // not transitive and let binary-search replacement hit the wrong
-        // item when timestamp and length collided).
         self.timestamp
             .cmp(&other.timestamp)
             .reverse()
@@ -246,7 +264,7 @@ fn source_order_key(
         SearchItemSource::InstalledAddonFile {
             addon, entry_path, ..
         } => (1, Some(addon.path.as_path()), Some(entry_path.as_str()), 0),
-        SearchItemSource::MyWorkshop(id) => (2, None, None, id.get()),
+        SearchItemSource::MyWorkshop { id, .. } => (2, None, None, id.get()),
         SearchItemSource::WorkshopItem(id) => (3, None, None, id.get()),
     }
 }
@@ -259,7 +277,7 @@ fn search_scope_matches(source: &SearchItemSource, scope: SearchScope) -> bool {
             SearchScope::Files
         ) | (
             SearchItemSource::InstalledAddons(_, _)
-                | SearchItemSource::MyWorkshop(_)
+                | SearchItemSource::MyWorkshop { .. }
                 | SearchItemSource::WorkshopItem(_),
             SearchScope::Addons
         )
@@ -268,9 +286,6 @@ fn search_scope_matches(source: &SearchItemSource, scope: SearchScope) -> bool {
 
 impl PartialEq for SearchItem {
     fn eq(&self, other: &Self) -> bool {
-        // Delegate to the full sort key so Eq and Ord agree: a partial
-        // comparison here (e.g. source identity alone) would violate the
-        // Ord contract and break dedup()'s adjacency assumption after sorting.
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
@@ -299,9 +314,7 @@ impl SearchItem {
         }
     }
 
-    /// `path` must already be canonicalized by the caller — resolving it here
-    /// would mean a filesystem syscall per addon on every index rebuild,
-    /// which is exactly the cost this split was made to avoid.
+    /// The caller must canonicalize path; index rebuilds must not make filesystem calls per addon.
     pub fn new_installed_addon<D: Into<u64>>(
         path: PathBuf,
         workshop_id: Option<u64>,
@@ -317,11 +330,6 @@ impl SearchItem {
         )
     }
 
-    /// One file entry of an installed addon. `addon` is the shared
-    /// per-addon identity ([`FileSearchAddon::new`], one per addon, its
-    /// `path` already canonicalized); the item itself owns only its entry
-    /// path. Label, extension and search terms all derive from the source,
-    /// so `label`/`terms` stay empty.
     pub fn new_installed_addon_file<D: Into<u64>>(
         addon: Arc<FileSearchAddon>,
         entry_path: String,
@@ -329,8 +337,6 @@ impl SearchItem {
         crc32: u32,
         timestamp: D,
     ) -> Self {
-        // Mirrors `new`'s len: the longest haystack this item can match
-        // (see `best_search_item_score`'s file-item arm).
         let len = entry_path
             .len()
             .max(addon.title.len())
@@ -376,7 +382,10 @@ impl Searchable for WorkshopItem {
         }
 
         Some(SearchItem::new(
-            SearchItemSource::MyWorkshop(self.id),
+            SearchItemSource::MyWorkshop {
+                id: self.id,
+                tags: self.tags.clone(),
+            },
             self.title.clone(),
             terms,
             self.time_updated,
@@ -419,178 +428,102 @@ impl Searchable for std::sync::Arc<crate::Addon> {
     }
 }
 
+#[derive(Default)]
+struct SearchIndex {
+    items: Vec<Arc<SearchItem>>,
+    installed_addons: BTreeMap<WorkshopId, Arc<SearchItem>>,
+}
+
+impl SearchIndex {
+    fn upsert(&mut self, additions: &[Arc<SearchItem>]) {
+        let mut identities = HashSet::new();
+        let replacements = additions
+            .iter()
+            .rev()
+            .filter(|item| identities.insert(source_order_key(&item.source)))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.items
+            .retain(|item| !identities.contains(&source_order_key(&item.source)));
+        self.items.extend(replacements);
+        self.rebuild_installed_lookup();
+    }
+
+    fn rebuild_installed_lookup(&mut self) {
+        self.installed_addons = self
+            .items
+            .iter()
+            .filter_map(|item| match &item.source {
+                SearchItemSource::InstalledAddons(_, Some(id)) => Some((*id, Arc::clone(item))),
+                _ => None,
+            })
+            .collect();
+    }
+}
+
 pub struct Search {
     cpu: crate::execution::CpuExecutor,
-    dirty: AtomicBool,
-    items: RwLock<Vec<Arc<SearchItem>>>,
-
-    installed_addons: RwLock<BTreeMap<WorkshopId, Arc<SearchItem>>>,
+    index: RwLock<SearchIndex>,
 }
 impl Search {
     #[must_use]
     pub fn new(cpu: crate::execution::CpuExecutor) -> Self {
         Self {
             cpu,
-            items: RwLock::new(Vec::new()),
-            dirty: AtomicBool::new(false),
-
-            installed_addons: RwLock::new(BTreeMap::new()),
+            index: RwLock::new(SearchIndex::default()),
         }
     }
 
-    pub fn ensure_sorted(&self) {
-        self.cpu.install(|| self.ensure_sorted_on_cpu());
-    }
-
-    fn ensure_sorted_on_cpu(&self) {
-        // Cheap check before contending for the write lock; the swap below
-        // is the one that actually matters.
-        if !self.dirty.load(std::sync::atomic::Ordering::Acquire) {
-            return;
+    #[cfg(test)]
+    fn add<V: Searchable>(&self, item: &V) {
+        if let Some(item) = item.search_item() {
+            self.index.write().upsert(&[Arc::new(item)]);
         }
-
-        let mut items = self.items.write();
-        // Clear the flag only once we hold the write lock: `add()`'s
-        // binary-search path only runs when it sees a clean flag, and it
-        // needs the same lock to do so, so it can never observe "clean"
-        // while this sort is still in flight. Clearing the flag first (the
-        // old order) left a window where a concurrent `add()` could read
-        // "clean", grab the lock before this sort ran, and binary-search
-        // into a still-unsorted vec. A bulk add racing us re-flags after it
-        // releases its own write lock, so we never clear a flag out from
-        // under a pending write.
-        if !self.dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            return;
-        }
-        items.par_sort();
-        items.dedup();
-    }
-
-    pub fn add<V: Searchable>(&self, item: &V) {
-        if let Some(search_item) = item.search_item() {
-            let search_item = Arc::new(search_item);
-
-            if let SearchItemSource::InstalledAddons(_, Some(id)) = &search_item.source {
-                self.installed_addons
-                    .write()
-                    .insert(*id, search_item.clone());
-            }
-
-            if self.dirty.load(std::sync::atomic::Ordering::Acquire) {
-                self.items.write().push(search_item);
-            } else {
-                let mut items = self.items.write();
-                // Replace by identity (source), not by Ord position or full
-                // equality: a re-added addon usually carries a new
-                // timestamp, so its old entry sits elsewhere in the sort
-                // order and no longer compares equal to the new one.
-                if let Some(existing) = items.iter().position(|cmp| {
-                    source_order_key(&cmp.source) == source_order_key(&search_item.source)
-                }) {
-                    items.remove(existing);
-                }
-                let pos = items.binary_search(&search_item).unwrap_or_else(|pos| pos);
-                items.insert(pos, search_item);
-            }
-        }
-    }
-
-    pub fn reserve(&self, amount: usize) {
-        self.items.write().reserve(amount);
     }
 
     pub fn add_bulk<V: Searchable>(&self, items: &[V]) {
-        let mut new_installed_addons = Vec::new();
-
-        let mut store = self.items.write();
-        store.reserve(items.len());
-        store.extend(items.iter().filter_map(|v| {
-            v.search_item().map(|search_item| {
-                let search_item = Arc::new(search_item);
-                if let SearchItemSource::InstalledAddons(_, Some(id)) = &search_item.source {
-                    new_installed_addons.push((*id, search_item.clone()));
-                }
-                search_item
-            })
-        }));
-        drop(store);
-
-        if !new_installed_addons.is_empty() {
-            self.installed_addons.write().extend(new_installed_addons);
-        }
-
-        // Flag AFTER the items are appended: an ensure_sorted() racing the extend may
-        // sort without them, but this store re-flags so the next query sorts.
-        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        let additions = items
+            .iter()
+            .filter_map(Searchable::search_item)
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        self.index.write().upsert(&additions);
     }
 
     pub fn sync_installed_addons(&self, items: Vec<SearchItem>) {
-        let installed_items = items.into_iter().map(Arc::new).collect::<Vec<_>>();
-
-        {
-            let mut store = self.items.write();
-            store.retain(|item| !matches!(item.source, SearchItemSource::InstalledAddons(_, _)));
-            store.extend(installed_items.iter().cloned());
-        }
-
-        {
-            let mut installed_addons = self.installed_addons.write();
-            *installed_addons = installed_items
-                .iter()
-                .filter_map(|item| match &item.source {
-                    SearchItemSource::InstalledAddons(_, Some(id)) => Some((*id, item.clone())),
-                    _ => None,
-                })
-                .collect();
-        }
-
-        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        let mut index = self.index.write();
+        index
+            .items
+            .retain(|item| !matches!(item.source, SearchItemSource::InstalledAddons(_, _)));
+        index.upsert(&items.into_iter().map(Arc::new).collect::<Vec<_>>());
     }
 
     pub fn sync_installed_addon_files(&self, items: Vec<SearchItem>) {
-        let mut store = self.items.write();
-        store.retain(|item| !matches!(item.source, SearchItemSource::InstalledAddonFile { .. }));
-        store.reserve(items.len());
-        store.extend(items.into_iter().map(Arc::new));
-        drop(store);
-
-        self.dirty.store(true, std::sync::atomic::Ordering::Release);
+        let mut index = self.index.write();
+        index
+            .items
+            .retain(|item| !matches!(item.source, SearchItemSource::InstalledAddonFile { .. }));
+        index.items.extend(items.into_iter().map(Arc::new));
     }
 
-    pub fn quick_search(&self, query: String) -> QuickSearchResult {
-        self.quick_search_with_scope(query, SearchScope::Addons)
-    }
-
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "app-layer callers across the crate boundary already own this string"
-    )]
-    pub fn quick_search_with_scope(&self, query: String, scope: SearchScope) -> QuickSearchResult {
-        self.cpu.install(|| {
-            self.ensure_sorted_on_cpu();
-            self.quick_scored(&query, scope)
-        })
+    pub fn quick_search_with_scope(&self, query: &str, scope: SearchScope) -> QuickSearchResult {
+        self.cpu.install(|| self.quick_scored(query, scope))
     }
 
     fn quick_scored(&self, query: &str, scope: SearchScope) -> QuickSearchResult {
-        // Queries use fzf-style atom syntax: whitespace-separated AND terms,
-        // with `!` negation, `^`/`$` anchors and `'` exact matching.
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
         let result = self
-            .items
+            .index
             .read()
+            .items
             .par_iter()
             .filter_map(|search_item| {
                 if !search_scope_matches(&search_item.source, scope) {
                     return None;
                 }
 
-                if search_item.len < query.len() {
-                    return None;
-                }
-
-                best_search_item_score(&pattern, query, search_item).map(|score| QuickSearchHit {
+                best_search_item_score(&pattern, search_item).map(|score| QuickSearchHit {
                     score,
                     item: search_item.clone(),
                 })
@@ -610,14 +543,6 @@ impl Search {
         }
     }
 
-    pub fn full_with_transaction(
-        self: &Arc<Self>,
-        query: String,
-        transaction: Transaction,
-    ) -> TransactionId {
-        self.full_with_transaction_scope(query, SearchScope::Addons, transaction)
-    }
-
     pub fn full_with_transaction_scope(
         self: &Arc<Self>,
         query: String,
@@ -628,7 +553,6 @@ impl Search {
         let search = Arc::clone(self);
 
         self.cpu.spawn(move || {
-            search.ensure_sorted_on_cpu();
             search.full_scored(&query, scope, &transaction);
         });
 
@@ -636,61 +560,51 @@ impl Search {
     }
 
     fn full_scored(&self, query: &str, scope: SearchScope, transaction: &Transaction) {
-        let items = self.items.read();
-        let items_n = items
+        let index = self.index.read();
+        let items_n = index
+            .items
             .iter()
             .filter(|item| search_scope_matches(&item.source, scope))
             .count()
             .max(1) as u64;
-        let i = Arc::new(AtomicU32::new(0));
-
-        // Queries use fzf-style atom syntax: whitespace-separated AND terms,
-        // with `!` negation, `^`/`$` anchors and `'` exact matching.
+        let progress = AtomicU32::new(0);
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-
-        // Hits are accumulated and delivered as a single batch, and progress
-        // is only emitted on whole-percent boundaries: per-item events flood
-        // the UI event queue on file-scope searches, where the index holds
-        // hundreds of thousands of entries.
-        let hits: Result<Vec<Option<QuickSearchHit>>, ()> = items
+        let hits = index
+            .items
             .par_iter()
-            .map_with(i, |i, search_item| {
-                if !search_scope_matches(&search_item.source, scope) {
-                    return Ok(None);
-                }
-
-                if transaction.aborted() {
-                    return Err(());
-                }
-
-                let idx = u64::from(i.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
-                if idx * 100 / items_n != (idx + 1) * 100 / items_n {
-                    transaction.progress((idx + 1) as f64 / items_n as f64);
-                }
-
-                if search_item.len < query.len() {
-                    return Ok(None);
-                }
-
-                Ok(
-                    best_search_item_score(&pattern, query, search_item).map(|score| {
-                        QuickSearchHit {
-                            score,
-                            item: search_item.clone(),
+            .try_fold(
+                || BestHits::new(FULL_SEARCH_MAX_HITS),
+                |mut hits, item| {
+                    if transaction.aborted() {
+                        return Err(());
+                    }
+                    if search_scope_matches(&item.source, scope) {
+                        let idx = u64::from(progress.fetch_add(1, AtomicOrdering::Relaxed));
+                        if idx * 100 / items_n != (idx + 1) * 100 / items_n {
+                            transaction.progress((idx + 1) as f64 / items_n as f64);
                         }
-                    }),
-                )
-            })
-            .collect();
-        drop(items);
-
-        // Err means the transaction was aborted mid-search; finishing an
-        // aborted transaction violates the transaction contract.
+                        if let Some(score) = best_search_item_score(&pattern, item) {
+                            hits.push(QuickSearchHit {
+                                score,
+                                item: Arc::clone(item),
+                            });
+                        }
+                    }
+                    Ok(hits)
+                },
+            )
+            .try_reduce(
+                || BestHits::new(FULL_SEARCH_MAX_HITS),
+                |mut left, right| {
+                    for hit in right.hits {
+                        left.push(hit.0);
+                    }
+                    Ok(left)
+                },
+            );
+        drop(index);
         let Ok(hits) = hits else { return };
-
-        let mut hits: Vec<QuickSearchHit> = hits.into_iter().flatten().collect();
-        hits.sort_unstable_by_key(|hit| std::cmp::Reverse(hit.score));
-        hits.truncate(FULL_SEARCH_MAX_HITS);
+        let hits = hits.into_sorted();
 
         if !hits.is_empty() {
             transaction.data(TransactionPayload::SearchHits(hits));
@@ -699,35 +613,25 @@ impl Search {
     }
 
     pub(crate) fn invalidate_workshop_titles(&self) {
-        self.items
+        self.index
             .write()
-            .retain(|item| !matches!(item.source, SearchItemSource::MyWorkshop(_)));
+            .items
+            .retain(|item| !matches!(item.source, SearchItemSource::MyWorkshop { .. }));
     }
 
     pub fn clear(&self) {
-        *self.items.write() = Vec::new();
-        *self.installed_addons.write() = BTreeMap::new();
-        self.dirty
-            .store(false, std::sync::atomic::Ordering::Release);
+        *self.index.write() = SearchIndex::default();
     }
 
-    /// Refreshes installed-addon labels from freshly fetched workshop data,
-    /// moving any stale label into `terms` so it stays searchable.
-    ///
-    /// `SearchItem` is immutable (`len` is a cached sort key derived from
-    /// `label`/`terms` at construction), so a change in label builds a whole
-    /// replacement item rather than editing the existing one in place, and
-    /// swaps it into both `items` and `installed_addons`.
     pub fn refresh_installed_addon_labels(&self, items: &[WorkshopItem]) {
-        self.ensure_sorted();
+        let mut index = self.index.write();
         for item in items {
-            let Some(existing) = self.installed_addons.read().get(&item.id).cloned() else {
+            let Some(existing) = index.installed_addons.get(&item.id).cloned() else {
                 continue;
             };
             if existing.label == item.title {
                 continue;
             }
-
             let mut terms = existing.terms.clone();
             terms.push(existing.label.clone());
             let replacement = Arc::new(SearchItem::new(
@@ -736,14 +640,15 @@ impl Search {
                 terms,
                 existing.timestamp,
             ));
-
-            self.installed_addons
-                .write()
-                .insert(item.id, replacement.clone());
-
-            let mut store = self.items.write();
-            if let Some(index) = store.iter().position(|slot| Arc::ptr_eq(slot, &existing)) {
-                store[index] = replacement;
+            index
+                .installed_addons
+                .insert(item.id, Arc::clone(&replacement));
+            if let Some(slot) = index
+                .items
+                .iter_mut()
+                .find(|slot| Arc::ptr_eq(slot, &existing))
+            {
+                *slot = replacement;
             }
         }
     }

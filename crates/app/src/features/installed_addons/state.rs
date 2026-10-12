@@ -29,31 +29,20 @@ pub struct State {
     watch_degraded: bool,
     watch_retry_attempted: bool,
     watch_arm_epoch: Generation,
-    /// The full local library and its scan state as one value; see [`Library`].
-    /// The grid virtualizes rendering and windows hydration itself, so every
-    /// row is handed to it at once — paging a fully-known local list only made
-    /// the scrollable's content (and scrollbar) grow while scrolling.
+    /// Give the grid every row at once so its scrollbar reflects the full library.
     library: Library,
     /// workshop_id -> indices into `rows` sharing that id. Rebuilt any time
     /// `rows` is structurally replaced.
     workshop_index: HashMap<PublishedFileId, Vec<usize>>,
     metadata_in_flight: HashSet<PublishedFileId>,
-    /// Steam answered for these ids; there is nothing left to ask.
     metadata_finished: HashSet<PublishedFileId>,
-    /// The lookup or the refresh behind it failed for these ids. Held
-    /// separately from `metadata_finished` because the failure is transient:
-    /// they are excluded from requests only until something that could change
-    /// the answer happens — route entry, or Steam reaching *connected* — at
-    /// which point [`Self::retry_failed_metadata`] releases them. Marking them
-    /// finished instead stranded the rows until the next loud refresh.
+    /// Park transient failures until route entry or Steam reconnects. Do not mark
+    /// them finished; that would prevent retries.
     metadata_failed: HashSet<PublishedFileId>,
     pending_preview: Option<PreviewTarget>,
     pending_context_menu: Option<ContextMenuRequest>,
-    /// Accumulated offset delta the grid anchored itself by after hydration
-    /// changed row heights; drained by `update` into an effect that drives a
-    /// relative `scroll_by` (the widget's real offset lives in Iced). An
-    /// anchor landing while the route is hidden still moves the mirror
-    /// offset only — route re-entry snaps Iced back to the mirror.
+    /// Pending relative scroll adjustment. Hidden routes update the mirror;
+    /// re-entry restores Iced's offset from it.
     pending_scroll_anchor: Option<f32>,
 }
 
@@ -130,9 +119,6 @@ impl State {
         self.watch_gmod_dir.as_deref()
     }
 
-    /// Points the library watcher at a (new) gmod dir. The subscription is
-    /// keyed on the derived roots, so a change re-arms the watcher by itself;
-    /// the fresh stream reports its own `WatchArmed` status.
     pub(crate) fn set_watch_gmod_dir(&mut self, gmod_dir: Option<PathBuf>) {
         if self.watch_gmod_dir == gmod_dir {
             return;
@@ -146,8 +132,6 @@ impl State {
         self.pane.grid()
     }
 
-    /// `row_index` is rebuilt by `sync_grid_items` after every structural
-    /// mutation of `rows`, so id lookups here are O(1) instead of scanning.
     fn row_by_id(&self, id: &CardId) -> Option<&Row> {
         self.rows().get(self.pane.index_of(id)?)
     }
@@ -195,23 +179,13 @@ impl State {
     }
 
     pub(crate) fn invalidate_ready_thumbnails(&mut self) -> bool {
-        let changed = grid_rows::invalidate_ready_thumbnails(self.library.rows_mut());
-        if changed {
-            self.sync_grid_items();
-            self.pane.clear_animation_clock();
-        }
-        changed
+        self.pane
+            .invalidate_ready_thumbnails(self.library.rows_mut())
     }
 
-    /// Drops Ready thumbnails outside the visible+prefetch window; the
-    /// demand/cache path re-delivers. The window is kept even while the
-    /// route is hidden so returning to it paints real pixels on the first
-    /// frame instead of replaying every card's fade-in.
     pub(crate) fn release_offscreen_thumbnails(&mut self) -> bool {
-        let mut library = std::mem::take(&mut self.library);
-        let changed = self.pane.release_offscreen_thumbnails(library.rows_mut());
-        self.library = library;
-        changed
+        self.pane
+            .release_offscreen_thumbnails(self.library.rows_mut())
     }
 
     pub(crate) fn has_active_animations(&self) -> bool {
@@ -265,13 +239,10 @@ impl State {
     pub(super) fn enter_route(&mut self) {
         self.route_visible = true;
         self.rearm_watch_on_route_entry();
-        // Re-entering is the gesture people already use to re-ask a route that
-        // gave up, so it retries lookups that failed while Steam was down.
         let _ = self.retry_failed_metadata();
         if matches!(self.library, Library::Unscanned | Library::Failed(_)) {
             self.library = Library::Scanning;
-            // Grid is always empty here (guarded above): no layout reflow,
-            // so no follow-up message can be produced.
+            // The grid is empty, so reconciliation cannot emit a follow-up event.
             let _follow_ups = self.pane.grid_mut().set_page_status(true, false);
         }
     }
@@ -282,9 +253,8 @@ impl State {
         self.pending_preview = None;
         self.pending_context_menu = None;
         self.watch_retry_attempted = false;
-        // Items/scroll/viewport are untouched and has_more_pages is forced
-        // false, so reconciliation can't change the visible range or ask
-        // for another page.
+        // Items, scroll and viewport are unchanged; has_more_pages = false cannot widen
+        // the visible range.
         let _follow_ups = self.pane.grid_mut().set_page_status(false, false);
     }
 
@@ -298,7 +268,7 @@ impl State {
             self.begin_loud_refresh();
         } else if self.route_visible && !self.library.is_scanned() {
             self.library = Library::Scanning;
-            // Same as enter_route: grid is empty while discovery is pending.
+            // Discovery is pending and the grid is empty.
             let _follow_ups = self.pane.grid_mut().set_page_status(true, false);
         }
     }
@@ -316,10 +286,7 @@ impl State {
         self.pane.clear_animation_clock();
         self.pending_preview = None;
         self.pending_context_menu = None;
-        // Clearing to empty can shift the visible range, but the pending
-        // `SnapshotPushed` that always follows a refresh re-syncs metadata
-        // and thumbnail demands from scratch, so an echoed
-        // `VisibleRangeChanged` here would be redundant.
+        // The following SnapshotPushed recalculates metadata and thumbnail demand from scratch.
         let _follow_ups = self.pane.grid_mut().set_items(Vec::new());
         let _follow_ups = self
             .pane
@@ -340,9 +307,6 @@ impl State {
         } else {
             self.apply_quiet_discovery(result);
         }
-        // Launch-time triage: says whether rows reached this state and what
-        // the grid was told, so a short grid is attributable to delivery,
-        // discovery, or paging.
         log::info!(
             "installed addons snapshot applied: {reason:?} incoming {incoming:?} -> \
              rows {}, grid items {}, library {}, route_visible {}",
@@ -360,9 +324,8 @@ impl State {
         }
     }
 
-    /// A degraded watch (some root failed to arm — e.g. dir didn't exist
-    /// yet) gets one retry per route entry: bumping the epoch re-keys the
-    /// subscription, which drops and re-arms the watcher on every root.
+    /// Retry failed watch roots once per route entry. Bumping the epoch rebuilds
+    /// the subscription and re-arms every root.
     fn rearm_watch_on_route_entry(&mut self) {
         if self.watch_degraded && !self.watch_retry_attempted {
             self.watch_retry_attempted = true;
@@ -441,14 +404,8 @@ impl State {
         self.pending_context_menu = None;
     }
 
-    /// Returns metadata IDs for visible rows, then the thumbnail prefetch
-    /// window.
-    ///
-    /// The metadata window must match `model::thumbnail_demands` and
-    /// `thumbnail_demand::retained_rows`: all three use `prefetch_ranges` so
-    /// rows retained or requested for thumbnail prefetch have a resolved
-    /// `preview_url`; without metadata, no thumbnail demand can exist. Visible
-    /// IDs stay first because Steam UGC queries are chunked at 50.
+    /// Use the same prefetch window as thumbnail demand, which needs these URLs.
+    /// Visible ids come first; Steam queries them in batches of 50.
     pub(super) fn take_visible_metadata_request(
         &mut self,
     ) -> Option<(Generation, Vec<PublishedFileId>)> {
@@ -458,7 +415,6 @@ impl State {
 
         let mut seen = HashSet::new();
         let mut item_ids = Vec::new();
-        // Row coordinates, not item coordinates: these index `rows` below.
         let visible = self.pane.visible_row_range(self.rows().len());
         let (before, after) = thumbnail_demand::prefetch_ranges(visible.clone(), self.rows().len());
         for range in [visible, after, before] {
@@ -502,10 +458,8 @@ impl State {
         let resolution = match result {
             Ok(resolution) => resolution,
             Err(error) => {
-                // A failed lookup says nothing about these ids, so they are
-                // not finished — only parked until a retry point. The rows
-                // keep the local title and dead thumbnail they were scanned
-                // with; what is missing is everything Steam adds on top.
+                // Park failed IDs until a retry point; do not mark them finished
+                // or retry them on every update.
                 log::debug!("installed addons metadata lookup failed: {error}");
                 self.metadata_failed.extend(item_ids.iter().copied());
                 return None;
@@ -517,11 +471,6 @@ impl State {
         (!resolution.stale_ids.is_empty()).then_some((generation, resolution.stale_ids))
     }
 
-    /// Releases ids parked by a failed lookup so the next poll asks again.
-    ///
-    /// Called on route entry and when Steam connects — the two points where
-    /// the answer can plausibly have changed. Returns whether anything was
-    /// actually released, so callers can skip a pointless request.
     pub(super) fn retry_failed_metadata(&mut self) -> bool {
         !std::mem::take(&mut self.metadata_failed).is_empty()
     }
@@ -543,10 +492,8 @@ impl State {
                 if generation != self.generation {
                     return;
                 }
-                // The cache lookup that queued this refresh already marked
-                // these ids finished, so dropping the failure silently left
-                // them unaskable — the rows kept whatever the cache held (for
-                // an id never cached, nothing at all) until a loud refresh.
+                // Cache hits were marked finished before refresh. Clear that
+                // flag so failed refreshes can retry.
                 log::debug!("installed addons metadata refresh failed: {error}");
                 for item_id in item_ids {
                     self.metadata_finished.remove(item_id);
@@ -594,9 +541,6 @@ impl State {
         let Some(row) = self.library.rows_mut().get_mut(index) else {
             return false;
         };
-        // The play flag is recorded either way (a GIF delivered mid-hover
-        // starts playing), but only a row that already has an animation
-        // changes appearance — and then a thumbnail swap in place suffices.
         if !row.set_thumbnail_play_requested(hovered) || !row.holds_animation() {
             return false;
         }
@@ -631,10 +575,7 @@ impl State {
             return;
         }
 
-        // A patch names a few rows; swapping just those grid items in place
-        // keeps a metadata batch from re-allocating every card in the
-        // library. Row ids are untouched by patches, so `row_index` and the
-        // follow-up messages the callers re-derive stay valid.
+        // Patch only the changed cards. Row IDs and row_index remain valid.
         let updates = changed_indices
             .iter()
             .filter_map(|&index| {
@@ -647,13 +588,8 @@ impl State {
             })
             .collect();
         for message in self.pane.grid_mut().patch_items(updates) {
-            // Visible-range echoes are re-derived by the caller (it re-runs
-            // the metadata/thumbnail effects from state after this); hover
-            // echoes are dropped as on every sync path — a hover retargeted
-            // by rows shifting under a stationary cursor self-corrects on
-            // the next cursor move. The anchor delta is the one follow-up
-            // that must reach the runtime, and deltas from batches landing
-            // before a drain accumulate.
+            // The caller recalculates demand and metadata. Keep the scroll delta;
+            // several patches can arrive before it is drained.
             if let addon_grid::Message::ScrollAnchored(delta) = message {
                 *self.pending_scroll_anchor.get_or_insert(0.0) += delta;
             }
@@ -664,15 +600,6 @@ impl State {
         self.pending_scroll_anchor.take()
     }
 
-    /// Pushes every row's current thumbnail into the grid in place. A
-    /// thumbnail never changes card geometry, so thumbnail-only changes
-    /// (delivery, offscreen release, hover play/pause) skip the full
-    /// `sync_grid_items` rebuild — re-allocating every card and re-measuring
-    /// every title per scroll event is what makes large libraries lag.
-    /// Pushes one row's current thumbnail into the grid in place.
-    ///
-    /// Installed-addon grids have no lead card, so the row index is the item
-    /// index — unlike My Workshop, where item 0 is "publish new".
     fn refresh_item_thumbnail(&mut self, index: usize) {
         let Some(row) = self.library.rows().get(index) else {
             return;
@@ -684,18 +611,9 @@ impl State {
             .update_item_thumbnail(index, row.id(), thumbnail);
     }
 
-    /// Rebuilds the grid's item list and page status from `rows`.
-    ///
-    /// Visible-range follow-ups are dropped because every caller re-derives
-    /// metadata and thumbnail effects from state after the sync. Hover
-    /// follow-ups are dropped too — a hover retargeted by rows shifting
-    /// under a stationary cursor misses one GIF play/pause transition and
-    /// self-corrects on the next cursor move.
+    /// Callers recalculate metadata and thumbnail demand after syncing.
+    /// A shifted hover is picked up on the next cursor move.
     fn sync_grid_items(&mut self) {
-        // Every mutation of `rows` is already followed by a sync, so the
-        // reindex rides along rather than needing its own call sites.
-        // Installed-addon grids have no lead card, so a row's index is its
-        // item index.
         let library = std::mem::take(&mut self.library);
         let _follow_ups = self.pane.sync_items(library.rows(), []);
         self.library = library;
@@ -710,23 +628,12 @@ const fn thumbnail_animation_tick() -> Duration {
     crate::media::thumbnail_animation::ANIMATION_TICK_INTERVAL
 }
 
-/// What this route knows about the local library, and why.
-///
-/// One value rather than a `Vec` beside a status that has to agree with it:
-/// every variant either holds the rows or says why there are none. That makes
-/// "scanned and found nothing" and "nobody has looked yet" different answers
-/// instead of the same empty slice, and leaves no combination — a `Ready` with
-/// no rows, an `Empty` holding some — for a branch downstream to rule out.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Library {
-    /// No scan has completed, and none is running.
     #[default]
     Unscanned,
-    /// A first scan is in flight; there is nothing to show yet.
     Scanning,
-    /// A scan completed. Empty means the library genuinely has no addons.
     Scanned(Vec<Row>),
-    /// The scan failed, leaving nothing to show.
     Failed(UiError),
 }
 
@@ -745,8 +652,6 @@ impl Library {
         }
     }
 
-    /// Whether a scan has completed, whatever it found. The trigger for
-    /// starting one, so it must not be confused with "has rows".
     const fn is_scanned(&self) -> bool {
         matches!(self, Self::Scanned(_))
     }
@@ -758,8 +663,6 @@ impl Library {
         }
     }
 
-    /// The variant alone, for log lines. `Debug` on the whole value would
-    /// print every row.
     const fn kind(&self) -> &'static str {
         match self {
             Self::Unscanned => "unscanned",
@@ -770,9 +673,6 @@ impl Library {
     }
 }
 
-/// Builds a `workshop_id -> row indices` lookup so metadata patches can be
-/// applied in O(patches + rows) instead of scanning the whole slice per
-/// patch. Call whenever `rows` is structurally replaced.
 fn build_workshop_index(rows: &[Row]) -> HashMap<PublishedFileId, Vec<usize>> {
     let mut index = HashMap::new();
     for (i, row) in rows.iter().enumerate() {

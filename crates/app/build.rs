@@ -17,19 +17,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Locale ids, in the order [`CATALOGS`](../src/i18n/mod.rs) declares them.
-/// The generated table is keyed by id rather than position, so this order is
-/// cosmetic — unlike `FONT_SOURCES`, adding or reordering an entry here cannot
-/// silently mis-map a catalog.
 const CATALOG_LOCALE_IDS: &[&str] = &[
     "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
 ];
 
-/// Concatenates the Fluent catalogs and stores one LZMA blob plus an
-/// id-keyed table of the byte ranges needed to recover each one at runtime.
-///
-/// The catalogs are ~232 KiB of highly repetitive UTF-8 and compress by about
-/// 80%, which is worth having in a binary that ships as an ~8 MB AppImage.
 fn compress_bundled_catalogs() -> Result<(), Box<dyn Error>> {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("no manifest dir")?);
     let mut concatenated = Vec::new();
@@ -72,11 +63,6 @@ fn compress_bundled_catalogs() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The bundled faces, and the constant each is reachable by at runtime.
-///
-/// The generated constants are what `assets.rs` uses, so reordering this list
-/// moves the *names* with the faces rather than silently repointing a
-/// hardcoded index at a different font.
 const FONT_SOURCES: &[(&str, &str)] = &[
     ("INTER_REGULAR", "ui/fonts/Inter-Regular.ttf"),
     ("INTER_SEMI_BOLD", "ui/fonts/Inter-SemiBold.ttf"),
@@ -87,8 +73,6 @@ const FONT_SOURCES: &[(&str, &str)] = &[
     ("CJK_KR_REGULAR", "ui/fonts/GMPCJKKRUI-Regular.otf"),
 ];
 
-/// Concatenates the bundled font faces and stores one LZMA blob plus the
-/// byte ranges needed to recover each original file at runtime.
 fn compress_bundled_fonts() -> Result<(), Box<dyn Error>> {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("no manifest dir")?);
     let mut concatenated = Vec::new();
@@ -123,10 +107,7 @@ fn compress_bundled_fonts() -> Result<(), Box<dyn Error>> {
     fs::write(
         out_dir.join("font_segments.rs"),
         format!(
-            "/// Where one bundled face sits in the decompressed blob. Named\n\
-             /// fields because `start` and `len` are both `usize` and a swap\n\
-             /// would yield a valid-looking range over the wrong bytes.\n\
-             struct FontSegment {{\n    start: usize,\n    len: usize,\n}}\n\n\
+            "struct FontSegment {{\n    start: usize,\n    len: usize,\n}}\n\n\
              const FONT_SEGMENTS: &[FontSegment] = &[\n{segments}];\n\
              pub const FONT_COUNT: usize = {};\n\
              const FONTS_UNCOMPRESSED_LEN: usize = {};\n\n{constants}",

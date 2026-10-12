@@ -100,10 +100,6 @@ impl Row {
     }
 }
 
-/// Shared row renderer for archive/folder browsers: silkicon, name (with the
-/// dimmed collapsed-chain prefix), and for files a type label and size
-/// column. The host modal supplies the activation message — directory
-/// navigation or file preview/extraction — and `None` renders the row inert.
 pub fn row_view<'a, Message: Clone + 'a>(
     row_data: &'a Row,
     activation: Option<Message>,
@@ -603,7 +599,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].shortcut_prefix(), Some("materials/models/"));
         assert_eq!(rows[0].display_name(), "props");
-        // Clicking navigates to the END of the chain.
         assert_eq!(rows[0].path(), "materials/models/props");
     }
 
@@ -614,8 +609,6 @@ mod tests {
             entry("materials/models/props/metal.vmt", 64),
         ]);
 
-        // `materials` has a file, so it renders plain; the empty
-        // `models` level collapses into `props`.
         let rows = browser.rows();
         assert_eq!(rows[0].shortcut_prefix(), None);
         assert_eq!(rows[0].display_name(), "materials");

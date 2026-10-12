@@ -112,11 +112,8 @@ impl App {
     }
 }
 
-/// My Workshop and Installed Addons render structurally identical trees, so
-/// the scrollable's widget state is shared between them by Iced's positional
-/// tree diff: switching routes leaves the viewport wherever the *other*
-/// grid was scrolled. Entering a grid route snaps the widget back to this
-/// route's own remembered offset.
+/// Iced reuses scrollable state between these identical route trees.
+/// Restore this route's saved offset on entry.
 fn grid_scroll_restore(key: &'static str, offset: f32) -> Task<RootMessage> {
     iced::widget::operation::scroll_to(
         addon_grid::scrollable_id(key),

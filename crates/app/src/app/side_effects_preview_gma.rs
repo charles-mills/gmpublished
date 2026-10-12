@@ -1,5 +1,5 @@
 use super::{
-    App, RootMessage, Task, UiError, connect_steam_for_operation, flatten_blocking_ui_result, gma,
+    App, RootMessage, Task, UiError, connect_steam_for_operation, flatten_blocking_ui_result,
     preview_gma, run_preview_gma_archive_extraction, run_preview_gma_entry_extraction,
     send_root_message, spawn_blocking_detached_or_warn, stream,
 };
@@ -8,10 +8,6 @@ use gmpublished_backend::error_keys as keys;
 use iced::widget::operation;
 
 impl App {
-    /// Preview GMA keeps its base-layer modal open while Destination Select
-    /// runs in the overlay: dismissing the overlay only drops the pending
-    /// extraction, a successful save starts it, and a failed save leaves the
-    /// overlay open showing the error.
     pub(super) fn preview_gma_destination_dismissed_task(&mut self) -> Task<RootMessage> {
         if self.state.features.preview_gma.has_pending_extraction() {
             self.state.features.preview_gma.clear_pending_extraction();
@@ -60,7 +56,6 @@ impl App {
                 move |app| {
                     let mut output = output;
                     if let Some(cached) = app
-                        .workshop()
                         .cached_item_details(workshop_id)
                         .map(preview_gma::cached_workshop_metadata)
                     {
@@ -76,10 +71,9 @@ impl App {
                         );
                     }
 
-                    let attempt = connect_steam_for_operation(app.workshop());
+                    let attempt = connect_steam_for_operation(&app);
                     let result = if attempt.connected() {
-                        app.workshop()
-                            .item_details(workshop_id)
+                        app.item_details(workshop_id)
                             .map(preview_gma::workshop_metadata_from_details)
                     } else {
                         Err(attempt
@@ -99,7 +93,7 @@ impl App {
                     // Keep snapshot I/O behind delivery so a cold detail query
                     // can paint as soon as Steam responds.
                     if should_persist {
-                        app.workshop().persist_metadata_cache();
+                        app.persist_metadata_cache();
                     }
                 },
             );
@@ -131,7 +125,7 @@ impl App {
                 "Preview GMA author",
                 move |app| {
                     let mut output = output;
-                    let result = app.workshop().user_details_streaming(steamid64, |user| {
+                    let result = app.user_details_streaming(steamid64, |user| {
                         let result = preview_gma::author_info_from_user(user);
                         let _sent = send_root_message(
                             &mut output,
@@ -208,7 +202,14 @@ impl App {
             return Task::none();
         };
 
-        let settings = self.state.features.destination_select.settings().clone();
+        let destination = self
+            .state
+            .features
+            .destination_select
+            .settings()
+            .backend
+            .extract_destination
+            .clone();
 
         let ctx = self.environment.ctx.clone();
         Task::future(async move {
@@ -217,15 +218,8 @@ impl App {
                 &ctx,
                 "preview-gma-extract-archive",
                 "Preview GMA archive extraction",
-                move |app| {
-                    let _app = app;
-                    let plan = gma::build_preview_extract_request(settings);
-                    run_preview_gma_archive_extraction(
-                        &worker_ctx,
-                        &request,
-                        plan.destination,
-                        &plan.options,
-                    );
+                move |_| {
+                    run_preview_gma_archive_extraction(&worker_ctx, &request, destination);
                 },
             );
         })

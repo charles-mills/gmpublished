@@ -21,7 +21,6 @@ use raw_window_handle::RawWindowHandle;
 /// frames, so the treatment must be re-applied afterwards.
 const APPEARANCE_CHANGED_NOTIFICATION: &str = "AppleInterfaceThemeChangedNotification";
 
-/// Emits `()` each time the system appearance flips between light and dark.
 pub fn appearance_change_subscription() -> Subscription<()> {
     Subscription::run(appearance_change_stream)
 }
@@ -46,12 +45,9 @@ fn appearance_change_stream() -> impl iced::futures::Stream<Item = ()> + use<> {
                     &block,
                 )
         };
-        // Deliberate leak, but not for the reason it looks like:
-        // `NSNotificationCenter` retains the observer token itself, so dropping
-        // our `Retained` would *not* deregister it (only `removeObserver:`
-        // does). What the leak keeps alive is the `RcBlock` — and therefore the
-        // `futures` mpsc sender cloned into it — which is what holds this
-        // stream open. Dropping the token would close the stream.
+        // Keep the `RcBlock` and its sender alive for the subscription.
+        // NSNotificationCenter retains the observer token; only `removeObserver:`
+        // deregisters it.
         let process_lifetime_observer = observer;
         std::mem::forget(process_lifetime_observer);
     })
@@ -76,11 +72,8 @@ pub fn position_traffic_lights(
     }
 }
 
-/// Installs a process-lifetime observer that re-asserts the traffic-light
-/// treatment synchronously inside every resize layout pass. AppKit re-lays
-/// out the titlebar container on each live-resize frame, so an asynchronous
-/// re-apply (round-tripped through the Iced message loop) visibly loses the
-/// fight until the resize settles; only a same-pass reposition is flicker-free.
+/// Reposition traffic lights during AppKit's resize layout pass.
+/// An async update arrives too late and flickers during live resize.
 pub fn install_resize_keepalive(
     origin_x: f64,
     center_y: f64,
@@ -131,10 +124,8 @@ fn install_resize_keepalive_on_window(
             &block,
         )
     };
-    // App-lifetime observer for the app's one window: the notification center
-    // retains its registration, and leaking our token keeps the captured
-    // block alive for every future resize. There is deliberately no teardown
-    // before process exit.
+    // Keep the observer and captured block alive until process exit;
+    // NSNotificationCenter retains the registration.
     let process_lifetime_observer = observer;
     std::mem::forget(process_lifetime_observer);
     Ok(())
@@ -239,10 +230,8 @@ fn set_button_origin(button: &NSButton, origin: ButtonOrigin) {
 fn apply_to_window(window: &dyn iced::window::Window, inset: bool) -> Result<(), ApplyError> {
     let ns_window = ns_window_for(window)?;
 
-    // Captured before any treatment: toggling FullSizeContentView remaps
-    // content-rect ↔ frame-rect, and a cached content size re-asserted under
-    // the new mapping shrinks the window by exactly the titlebar height —
-    // the window must end this function at the frame it entered with.
+    // Preserve the frame across FullSizeContentView changes. Reusing the old
+    // content size under the new mapping would shrink the window by the titlebar height.
     let original_frame = ns_window.frame();
 
     ns_window.setTitlebarAppearsTransparent(inset);
@@ -260,13 +249,9 @@ fn apply_to_window(window: &dyn iced::window::Window, inset: bool) -> Result<(),
     }
     ns_window.setStyleMask(style_mask);
 
-    // AppKit does not re-lay out a live window's content view when
-    // FullSizeContentView is toggled — the content keeps its old frame until
-    // the next real resize, leaving the band hidden under (or shy of) the
-    // titlebar. Force a layout pass via a 1pt frame detour; a same-rect
-    // setFrame is short-circuited and does nothing. Ending on the entry
-    // frame (not the post-toggle frame, which may already be shrunken)
-    // also undoes any mid-flip size reassertion.
+    // AppKit does not resize the content view when FullSizeContentView changes.
+    // Nudge the frame by 1pt and back to force layout; setting the same frame
+    // does nothing. Restore the original frame, not the post-toggle one.
     let mut nudged = original_frame;
     nudged.size.height -= 1.0;
     ns_window.setFrame_display(nudged, false);
@@ -311,10 +296,8 @@ fn traffic_light_button_origins(
     miniaturize: ButtonFrame,
     zoom: ButtonFrame,
 ) -> TrafficLightButtonOrigins {
-    // x preserves the system's inter-button spacing (read from the live
-    // frames — it shifts across macOS releases); y centers each button in
-    // the grown container, which is correct whether or not the titlebar
-    // view is flipped.
+    // Read live button spacing, which varies across macOS releases. Center
+    // vertically in the titlebar container.
     let button_origin = |button: ButtonFrame| ButtonOrigin {
         x: origin_x + (button.x - close.x),
         y: (container_height - button.height) / 2.0,

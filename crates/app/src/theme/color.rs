@@ -1,8 +1,3 @@
-//! Colour-space maths for the theme tokens: sRGB bytes <-> HSL.
-//!
-//! No backend contact — it lived under `bridge` only because the theme
-//! preset resolution next to it did.
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rgb {
     pub(crate) r: u8,

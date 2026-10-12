@@ -12,7 +12,6 @@ const VPK_VERSION_1_HEADER_SIZE: u64 = 12;
 const VPK_VERSION_2_HEADER_SIZE: u64 = 28;
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-/// Failures produced while indexing or reading Valve package archives.
 pub enum VpkError {
     #[error("VPK I/O failed")]
     IoError(#[source] crate::IoFailure),
@@ -56,11 +55,8 @@ impl crate::error_key::HasErrorKey for VpkError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Indexed VPK entry metadata.
 pub struct VpkEntry {
-    /// Combined preload and external payload size.
     pub size: u64,
-    /// CRC-32 recorded by the package tree.
     pub crc: u32,
 
     location: vformats::vpk::VpkLocation,
@@ -68,23 +64,15 @@ pub struct VpkEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Read-only index over a VPK directory file and its numbered siblings.
 pub struct VpkFile {
-    /// Path to the directory VPK.
     pub path: PathBuf,
-    /// VPK format version.
     pub version: u8,
 
     entries: HashMap<String, VpkEntry>,
 }
 
-/// Length of the header+tree prefix to buffer, refusing one the file cannot
-/// hold.
-///
-/// `tree_size` is an unchecked u32 read straight out of the header, so a
-/// 12-byte file can claim a tree of nearly 4GiB. Trusting it sized the read
-/// buffer off a hostile number instead of the bytes that actually exist; the
-/// read then failed anyway, having already reserved the space.
+/// Bounds the header/tree prefix by file length before allocating from the
+/// untrusted `tree_size`.
 fn validated_prefix_len(
     header_size: u64,
     tree_size: u32,
@@ -107,7 +95,6 @@ fn map_parse_error(error: &vformats::vpk::VpkError) -> VpkError {
 }
 
 impl VpkFile {
-    /// Opens a directory VPK and indexes every safe entry.
     pub fn open(dir_vpk_path: impl AsRef<Path>) -> Result<Self, VpkError> {
         main_thread_forbidden!();
 
@@ -133,8 +120,6 @@ impl VpkFile {
         file.read_exact(&mut prefix)
             .map_err(|_| VpkError::FormatError)?;
 
-        // Entry payload extents are locations for us to read later, so
-        // the header+tree prefix is a complete parse input.
         let directory = vformats::vpk::parse(&prefix, &vformats::Limits::default())
             .map_err(|error| map_parse_error(&error))?;
         let entries = directory
@@ -160,13 +145,11 @@ impl VpkFile {
         })
     }
 
-    /// Indexed entries keyed by normalized package path.
     #[must_use]
     pub fn entries(&self) -> &HashMap<String, VpkEntry> {
         &self.entries
     }
 
-    /// Reads one complete entry, joining preload and external bytes.
     pub fn read_entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, VpkError> {
         main_thread_forbidden!();
 
@@ -219,7 +202,6 @@ impl VpkFile {
     }
 }
 
-/// Finds supported game-content directory VPKs in deterministic order.
 #[must_use]
 pub fn discover_game_vpks(gmod_dir: &Path) -> Vec<PathBuf> {
     discover_game_vpks_with_mounts(gmod_dir, &[])

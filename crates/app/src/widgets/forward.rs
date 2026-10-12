@@ -1,15 +1,3 @@
-//! Shared boilerplate for wrapper widgets that forward most of the `Widget`
-//! trait surface to a single wrapped `content` element, overriding only a
-//! handful of methods.
-//!
-//! Two forwarding flavors, chosen per invocation:
-//! - `forward_widget_body!(content; method, ...)` passes the `Tree` given to
-//!   the wrapper straight through, for wrappers that are transparent to
-//!   widget state (the content's `Tree` node is the wrapper's own).
-//! - `forward_widget_body!(content in children[0]; method, ...)` forwards
-//!   through `tree.children[0]`, for wrappers that keep a `Tree` node of
-//!   their own and store the content's tree as its only child.
-
 macro_rules! forward_widget_body {
     ($content:ident; $($method:ident),+ $(,)?) => {
         $(forward_widget_body!(@direct $content, $method);)+

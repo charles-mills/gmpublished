@@ -18,10 +18,7 @@ use super::gif_preview::{GifPreviewError, LazyGifPreview, decode_lazy_gif_previe
 
 pub type ThumbnailDecodeResult<T> = Result<T, ThumbnailDecodeError>;
 
-/// Decoded and resized thumbnail data safe to move between workers and UI code.
-///
-/// The payload is plain straight-RGBA bytes. UI code wraps those bytes in Iced
-/// image handles at the presentation cache boundary.
+/// Straight RGBA bytes, safe to send between workers and the UI. Create Iced handles on delivery.
 #[derive(Clone)]
 pub struct Thumbnail {
     rgba: Arc<[u8]>,
@@ -33,7 +30,6 @@ pub struct Thumbnail {
 }
 
 impl Thumbnail {
-    /// Creates a still thumbnail payload from straight RGBA bytes and metadata.
     pub fn new(
         rgba: impl Into<Arc<[u8]>>,
         metadata: ThumbnailMetadata,
@@ -48,10 +44,7 @@ impl Thumbnail {
         })
     }
 
-    /// Creates an animated thumbnail from a decoded GIF preview.
-    ///
-    /// The first frame becomes the still RGBA payload; the preview is retained
-    /// so UI code can prepare or play the remaining frames later.
+    /// Use frame 0 as the still image and retain the GIF for animation baking.
     #[must_use]
     pub fn from_gif_preview(preview: LazyGifPreview, max_edge: u32) -> Self {
         let frame = preview.first_frame();
@@ -70,47 +63,36 @@ impl Thumbnail {
         }
     }
 
-    /// Returns the straight RGBA pixel bytes.
     #[must_use]
     pub fn rgba_bytes(&self) -> &[u8] {
         &self.rgba
     }
 
-    /// Returns a cheap `Arc` clone of the straight RGBA pixel bytes, for
-    /// callers that hand ownership to a zero-copy wrapper instead of
-    /// borrowing.
     #[must_use]
     pub fn rgba_arc(&self) -> Arc<[u8]> {
         Arc::clone(&self.rgba)
     }
 
-    /// Returns thumbnail dimensions and source metadata.
     #[must_use]
     pub fn metadata(&self) -> &ThumbnailMetadata {
         &self.metadata
     }
 
-    /// Returns the animation source when this thumbnail is an animated GIF.
     #[must_use]
     pub fn animation(&self) -> Option<&LazyGifPreview> {
         self.animation.as_ref()
     }
 
-    /// Returns this thumbnail's ThumbHash, when one is attached.
     #[must_use]
     pub fn thumbhash(&self) -> Option<&[u8]> {
         self.thumbhash.as_deref()
     }
 
-    /// Returns a cheap `Arc` clone of this thumbnail's ThumbHash, for callers
-    /// that hand ownership downstream instead of borrowing.
     #[must_use]
     pub fn thumbhash_arc(&self) -> Option<Arc<[u8]>> {
         self.thumbhash.clone()
     }
 
-    /// Attaches (or clears) this thumbnail's ThumbHash. Callers pass the hash
-    /// computed on a fresh decode or read back from the disk cache.
     pub fn set_thumbhash(&mut self, thumbhash: Option<Arc<[u8]>>) {
         self.thumbhash = thumbhash;
     }
@@ -119,7 +101,6 @@ impl Thumbnail {
         self.animation = None;
     }
 
-    /// Returns the in-memory byte weight of this payload.
     #[must_use]
     pub fn byte_len(&self) -> usize {
         self.rgba.len()
@@ -143,40 +124,29 @@ impl fmt::Debug for Thumbnail {
     }
 }
 
-/// Metadata describing a decoded thumbnail.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThumbnailMetadata {
-    /// Output thumbnail width in pixels.
     pub width: u32,
-    /// Output thumbnail height in pixels.
     pub height: u32,
     /// Source image width before resizing.
     pub source_width: u32,
     /// Source image height before resizing.
     pub source_height: u32,
-    /// Requested maximum output width or height.
     pub max_edge: u32,
 }
 
-/// Errors returned by thumbnail decode and resize helpers.
 #[derive(Debug, Error)]
 pub enum ThumbnailDecodeError {
-    /// Requested size was zero.
     #[error("thumbnail max edge must be greater than zero")]
     InvalidMaxEdge,
-    /// Source image has no pixels.
     #[error("source image has invalid dimensions {width}x{height}")]
     EmptyImage { width: u32, height: u32 },
-    /// Output dimensions overflowed supported integer bounds.
     #[error("thumbnail dimensions overflowed")]
     DimensionOverflow,
-    /// A trusted RGBA payload could not be represented.
     #[error("thumbnail RGBA dimensions {width}x{height} overflow byte length")]
     RgbaLengthOverflow { width: u32, height: u32 },
-    /// A trusted RGBA payload has the wrong length.
     #[error("thumbnail RGBA buffer length mismatch: expected {expected}, got {actual}")]
     RgbaLengthMismatch { expected: usize, actual: usize },
-    /// Failed to read a local image file.
     #[cfg(test)]
     #[error("failed to read image file {}", path.display())]
     FileRead {
@@ -184,31 +154,24 @@ pub enum ThumbnailDecodeError {
         #[source]
         source: std::io::Error,
     },
-    /// Failed while guessing an encoded image format.
     #[error("failed to inspect image bytes")]
     ImageIo(#[source] std::io::Error),
-    /// Failed to decode an encoded image.
     #[error("failed to decode image")]
     ImageDecode(#[source] image::ImageError),
-    /// Failed to decode GIF thumbnail frames.
     #[error("failed to decode GIF thumbnail")]
     GifDecode(#[source] GifPreviewError),
-    /// Failed to construct a resize image view.
     #[error("failed to construct resize image")]
     ResizeImage(#[source] fast_image_resize::ImageBufferError),
-    /// Failed to resize decoded image data.
     #[error("failed to resize image")]
     Resize(#[source] fast_image_resize::ResizeError),
 }
 
-/// Thumbnail decoder for image bytes and local files.
 pub struct ThumbnailDecoder {
     resizer: Resizer,
     resize_options: ResizeOptions,
 }
 
 impl ThumbnailDecoder {
-    /// Creates a thumbnail decoder with the production resize policy.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -217,7 +180,6 @@ impl ThumbnailDecoder {
         }
     }
 
-    /// Decodes encoded image bytes into a bounded straight-RGBA thumbnail.
     pub fn decode_and_resize_bytes(
         &mut self,
         bytes: &[u8],
@@ -262,7 +224,6 @@ impl ThumbnailDecoder {
         Ok(resized)
     }
 
-    /// Decodes a local image file into a bounded straight-RGBA thumbnail.
     #[cfg(test)]
     pub fn decode_and_resize_file(
         &mut self,
@@ -361,7 +322,6 @@ pub fn validate_max_edge(max_edge: u32) -> ThumbnailDecodeResult<()> {
     Ok(())
 }
 
-/// Returns the production image decode limits used by thumbnail generation.
 #[must_use]
 pub fn thumbnail_decode_limits() -> Limits {
     let mut limits = Limits::default();

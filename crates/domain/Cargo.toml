@@ -1,6 +1,6 @@
 [package]
 name = "gmpublished-domain"
-description = "Shared preview, scene, and renderer domain for gmpublished."
+description = "Preview scenes and particle simulation for gmpublished."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

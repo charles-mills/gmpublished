@@ -1,11 +1,3 @@
-//! Where the app keeps its state on disk, and the settings living there.
-//!
-//! One [`AppData`] owns every derived path (settings file, temp, user data,
-//! downloads) so nothing else has to re-derive them, and it resolves the
-//! Garry's Mod directory — configured, discovered through Steam, or absent.
-//! Every root is overridable, which is what lets tests run against a private
-//! tempdir instead of the developer's real profile.
-
 use std::{
     collections::HashMap,
     fs,
@@ -24,9 +16,6 @@ use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-/// Environment-derived roots `AppData` resolves paths against. Production
-/// builds derive these from `dirs`/`std::env`; tests supply a private
-/// tempdir root so parallel tests never share a settings file.
 #[derive(Clone, Debug)]
 pub struct AppDataPaths {
     pub settings_file: PathBuf,
@@ -38,11 +27,7 @@ pub struct AppDataPaths {
 impl AppDataPaths {
     #[must_use]
     pub fn production() -> Self {
-        // `current_exe()` names a file, not a directory, and its parent may
-        // be read-only (notably for packaged installs). If the platform does
-        // not expose a persistent data root, the system temp directory is the
-        // only environment-provided location with directory semantics and a
-        // reasonable expectation of writability.
+        // Packaged executable directories may be read-only. Use temp as the fallback.
         let data_root = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
         let settings_root = dirs::config_dir().unwrap_or_else(|| data_root.clone());
 
@@ -54,9 +39,6 @@ impl AppDataPaths {
         }
     }
 
-    /// A private root for exactly one test: every path lives under `root`,
-    /// so distinct tests (and nextest's per-test processes) never share a
-    /// settings file on disk.
     #[must_use]
     pub fn for_test_root(root: &Path) -> Self {
         Self {
@@ -68,16 +50,9 @@ impl AppDataPaths {
     }
 }
 
-/// Default scratch root: where a publish packs its GMA and materializes the
-/// preview icon it then hands Steam an absolute path to.
-///
-/// On Linux this must sit under the user's home rather than the system temp
-/// dir. The Steam *client* — not this process — reads the content at that
-/// path, and packaged Steam commonly runs sandboxed with a private `/tmp`
-/// (NixOS's FHS wrapper and Flatpak both mount a fresh tmpfs over it, while
-/// binding home through). A path under `/tmp` therefore reads back as empty
-/// and the upload fails with "Build for workshop item has no content". Every
-/// other platform runs Steam unsandboxed, so the system temp dir is fine.
+/// Scratch root for content and icons read by the Steam client.
+/// Linux uses the user's home because sandboxed Steam may have a private `/tmp`.
+/// Other platforms use the system temp directory.
 fn default_temp_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
     if let Some(cache_dir) = cache_dir() {
@@ -87,20 +62,11 @@ fn default_temp_dir() -> PathBuf {
     std::env::temp_dir().join("gmpublisher")
 }
 
-/// Returns the app-owned cache root (`<OS cache dir>/gmpublished`).
-///
-/// Every file under this directory is disposable: deleting it at any moment
-/// loses no user data and self-heals on next use. Stateless and
-/// environment-derived only (no settings override, no test-mode branch), so
-/// it is a plain recomputed lookup rather than a stored path.
 #[must_use]
 pub fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("gmpublished"))
 }
 
-/// The `steamapps/common` directory of every Steam library on this machine,
-/// from Steam's own library-folders manifest. Empty when Steam cannot be
-/// located. Stateless and environment-derived, like [`cache_dir`].
 #[must_use]
 pub fn steam_library_common_dirs() -> Vec<PathBuf> {
     let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
@@ -130,13 +96,8 @@ pub enum TitlebarPreference {
     reason = "each bool is an independent, orthogonal user setting, not a mode"
 )]
 pub struct Settings {
-    /// The schema version that wrote the file.
-    ///
-    /// A file with no `schema` predates versioning and is by definition the
-    /// original shape, so it reads as `1` rather than as whatever this build
-    /// writes — otherwise a future bump would mistake every pre-versioning
-    /// file for a current one and skip its migration. Serializing always
-    /// writes the schema this build produces, whatever was loaded.
+    /// Schema that wrote the file. Missing schema means version 1, independent
+    /// of this build's version. Saving always writes the current schema.
     #[serde(
         default = "original_settings_schema",
         serialize_with = "serialize_current_schema"
@@ -173,8 +134,7 @@ pub struct Settings {
     pub color_error: u32,
     pub color_success: u32,
 
-    /// App-owned settings that the backend deliberately does not interpret.
-    /// Backend-only writes preserve this versioned document verbatim.
+    /// Preserve the versioned UI document verbatim during backend-only writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<serde_json::Value>,
 }
@@ -201,12 +161,8 @@ pub struct AppDataPathsSnapshot {
     pub gmod_dir: Option<PathBuf>,
 }
 
-/// The shape [`Settings`] is written in today.
-///
-/// Schema 2 makes the app-owned `ui` section part of this authoritative file.
-/// Although serde could absorb that additive field, the bump is intentional:
-/// a schema-1 binary must reject the combined document rather than accept it,
-/// discard `ui`, and later rewrite the file in its older shape.
+/// Schema 2 includes `ui`. Older builds must reject it rather than discard
+/// the unknown section and overwrite it on save.
 pub(crate) const SETTINGS_SCHEMA: u32 = 2;
 
 const fn original_settings_schema() -> u32 {
@@ -220,13 +176,6 @@ fn serialize_current_schema<S: serde::Serializer>(
     serializer.serialize_u32(SETTINGS_SCHEMA)
 }
 
-/// Reads the map through raw ids and drops any key of zero, rather than
-/// letting [`WorkshopId`]'s own rejection abort the parse.
-///
-/// A settings file is loaded as a whole: a single unusable key failing the
-/// field would fail `Settings`, and the caller's recovery from that is to
-/// replace every setting the user has with defaults. Dropping the one entry
-/// that names no item costs a path this build could not have used anyway.
 fn deserialize_workshop_local_paths<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<HashMap<WorkshopId, PathBuf>, D::Error> {
@@ -302,7 +251,6 @@ impl SettingsEnvironment {
     }
 }
 
-/// Errors that can occur while loading or saving the settings file.
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
     #[error(transparent)]
@@ -368,9 +316,6 @@ impl Settings {
         }
     }
 
-    /// Moves an unreadable settings file to `<name>.bak` so the defaults that
-    /// replace it do not destroy the only copy. Best-effort: a failure here
-    /// must not stop the app from starting.
     fn back_up_unreadable(paths: &AppDataPaths) {
         let source = &paths.settings_file;
         if !source.exists() {
@@ -402,20 +347,14 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Brings a parsed file up to [`SETTINGS_SCHEMA`], or refuses it.
-    ///
-    /// A file from a newer build is an error rather than a silent downgrade:
-    /// serde has already dropped the fields this build does not know, and
-    /// saving would write that truncated shape back over the user's config.
+    /// Reject newer schemas; saving would otherwise lose fields this build cannot read.
     fn migrate(&mut self) -> Result<(), SettingsError> {
         if self.schema > SETTINGS_SCHEMA {
             return Err(SettingsError::UnsupportedSchema { found: self.schema });
         }
 
         match self.schema {
-            // Schema 2 adds the optional, opaque UI document. Serde has
-            // already supplied `None` for schema 1; stamping 2 provides the
-            // downgrade barrier even when there is no UI section yet.
+            // Stamp schema 2 even without UI settings so older builds cannot overwrite them later.
             0 | 1 => {}
             2 => {}
             _ => unreachable!("newer schemas returned above"),
@@ -452,11 +391,8 @@ impl Settings {
         tmp.persist(&paths.settings_file)
             .map_err(|error| SettingsError::Io(error.error))?;
         if let Some(parent) = parent {
-            // The rename above is the logical commit point: returning an
-            // error now would leave disk holding the new value while the live
-            // store kept the old one. Directory sync only strengthens crash
-            // durability, so report degradation without rolling back the
-            // already-committed update.
+            // The rename has committed the file. A directory-sync failure must not
+            // leave the live settings behind the saved ones.
             if let Err(error) = sync_parent(parent) {
                 log::warn!(
                     "settings {} were committed, but directory {} could not be synced: {error}",
@@ -611,10 +547,6 @@ impl AppData {
         self.settings_sequence.fetch_add(1, Ordering::Release);
     }
 
-    /// Cheap snapshot accessor: the user-configured path, else a previously
-    /// [`Self::discover_gmod_dir`]-ed path. Never blocks or performs I/O
-    /// beyond a single `is_dir` check, so `Serialize`/`snapshot` can call it
-    /// freely.
     pub fn gmod_dir(&self) -> Option<PathBuf> {
         let settings = self.settings.load();
         if let Some(gmod) = settings.gmod.as_ref()
@@ -627,11 +559,7 @@ impl AppData {
         self.discovered_gmod_dir.lock().clone()
     }
 
-    /// Full Garry's Mod discovery: the user-configured path, else Steam
-    /// library folders, else (after a short wait for Steam to connect) the
-    /// Steamworks install-dir query. May block for several seconds and
-    /// perform I/O; never call from a path that must not block (accessors,
-    /// `Serialize`). A discovered path is cached for [`Self::gmod_dir`].
+    /// May block for several seconds on filesystem and Steam queries; caches the result.
     pub fn discover_gmod_dir(&self, steam: &Steam) -> Option<PathBuf> {
         let configured = self.settings.load().gmod.clone();
         self.discover_gmod_dir_for_settings(configured.as_deref(), steam)
@@ -773,15 +701,11 @@ impl AppData {
         self.settings.load().ignore_globs.clone()
     }
 
-    /// The live settings. Runtime mutations go through
-    /// [`Self::update_settings`], which sanitizes, persists and emits.
     #[must_use]
     pub fn settings(&self) -> arc_swap::Guard<std::sync::Arc<Settings>> {
         self.settings.load()
     }
 
-    /// Edits the settings in place without sanitizing, saving or emitting.
-    /// Test-only: production changes must go through [`Self::update_settings`].
     #[cfg(test)]
     pub(crate) fn mutate_settings(&self, mut mutate: impl FnMut(&mut Settings)) {
         self.settings.rcu(|settings| {
@@ -804,10 +728,8 @@ impl AppData {
         }
     }
 
-    /// Serializes the complete clone -> mutate -> sanitize -> persist ->
-    /// publish transaction. The mutation returns environment facts it
-    /// resolved explicitly; saving itself never performs Steam discovery.
-    /// Persistence happens first, so a failed save leaves live state intact.
+    /// Hold the writer lock through clone, mutate, sanitize, persist, and publish. The
+    /// mutation returns resolved paths.
     pub fn update_settings(
         &self,
         update: impl FnOnce(&mut Settings) -> SettingsEnvironment,
@@ -830,9 +752,6 @@ impl AppData {
     }
 }
 
-/// Whether a Steam client installation exists on this machine at all, as
-/// distinct from one that exists but isn't running. Reads only the Steam
-/// directory layout, so it answers with Steam closed.
 #[must_use]
 pub fn steam_client_installed() -> bool {
     steamlocate::SteamDir::locate().is_ok()

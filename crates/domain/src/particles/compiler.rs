@@ -1,18 +1,8 @@
-//! Compiles a parsed PCF definition into the fixed-shape shared runtime
-//! simulates: typed initializers, operators and emitters with their attribute
-//! lookups already resolved.
-//!
-//! Source's particle attributes are strings looked up per-frame; doing that
-//! once here is what lets the simulation step be a plain match. Unsupported
-//! operators are dropped at compile time rather than checked per particle.
-
 use super::{
     ControlPointIndex, CoverageEntry, PcfAttributes, PcfFunction, PcfSystem, SupportLevel,
     color_to_rgb,
 };
 use crate::math::Vec3;
-
-// --- Scalar/vector field ids (Source particle attribute indices) ---------
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ScalarField {
@@ -53,8 +43,6 @@ impl VectorField {
         })
     }
 }
-
-// --- Compiled operator types ----------------------------------------------
 
 #[derive(Clone, Debug)]
 pub(super) enum Emitter {
@@ -317,32 +305,22 @@ pub(super) enum Force {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Rendering topology requested by a compiled particle system.
 pub enum RendererKind {
-    /// Camera-facing sprites; the workhorse.
+    /// Camera-facing sprites.
     AnimatedSprites,
-    /// Velocity-stretched quads.
     SpriteTrail,
-    /// A ribbon threaded through the live particles in spawn order.
     Rope,
 }
 
 #[derive(Clone, Debug)]
-/// Renderer parameters projected from a PCF renderer function.
 pub struct RendererInfo {
-    /// Rendering topology.
     pub kind: RendererKind,
     /// Trail length is expressed in seconds of motion.
     pub trail_length_fade_in: f32,
-    /// Minimum trail length in world units.
     pub trail_min_length: f32,
-    /// Maximum trail length in world units.
     pub trail_max_length: f32,
-    /// Number of interpolated rope segments between particles.
     pub rope_subdivisions: u32,
-    /// Sprite sheet playback speed multiplier (or FPS, see below).
     pub animation_rate: f32,
-    /// Stretch the sheet sequence over the particle's whole lifetime.
     pub animation_fit_lifetime: bool,
     /// Interpret `animation_rate` as frames per second instead of a
     /// sequence-time multiplier.
@@ -364,8 +342,6 @@ impl Default for RendererInfo {
     }
 }
 
-// --- Compiled system -------------------------------------------------------
-
 #[derive(Clone, Debug)]
 pub(super) struct CompiledChild {
     pub(super) system: usize,
@@ -373,7 +349,6 @@ pub(super) struct CompiledChild {
 }
 
 #[derive(Clone, Debug)]
-/// Immutable, typed particle-system program consumed by the simulator.
 pub struct CompiledSystem {
     pub(super) name: String,
     pub(super) material: String,
@@ -393,47 +368,33 @@ pub struct CompiledSystem {
     pub(super) renderer: RendererInfo,
     pub(super) children: Vec<CompiledChild>,
     pub(super) coverage: Vec<CoverageEntry>,
-    /// Highest control point index any compiled op reads.
     pub(super) highest_control_point: usize,
-    /// Rough world-space extent for camera framing.
     pub(super) bounding_radius: f32,
-    /// Whether any operator retires particles at end of life.
-    ///
-    /// A property of the compiled system, so it is decided once here rather
-    /// than rediscovered by two full scans of `operators` per instance per
-    /// substep — which is what the simulator did, on data that cannot change
-    /// after compilation.
     pub(super) retires_particles: bool,
 }
 
 impl CompiledSystem {
-    /// Original PCF system name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Canonical material name used by renderers.
     #[must_use]
     pub fn material(&self) -> &str {
         &self.material
     }
 
-    /// Coverage classification for every source function.
     #[must_use]
     pub fn coverage(&self) -> &[CoverageEntry] {
         &self.coverage
     }
 
-    /// Compiled renderer parameters.
     #[must_use]
     pub fn renderer(&self) -> &RendererInfo {
         &self.renderer
     }
 }
 
-/// Normalizes a PCF function name: the authoritative `functionName`
-/// attribute when present, lowercased, underscores as spaces.
 pub(super) fn canonical_name(function: &PcfFunction) -> String {
     function
         .attributes
@@ -461,7 +422,6 @@ impl SystemCompiler {
         });
     }
 
-    /// The single place a PCF-supplied control point number becomes an index.
     fn control_point(&mut self, attrs: &PcfAttributes, names: &[&str]) -> ControlPointIndex {
         let index = ControlPointIndex::clamped(
             names
@@ -539,8 +499,6 @@ pub(super) fn compile_system(
         .collect();
 
     let color = attrs.get_color("color").unwrap_or([255, 255, 255, 255]);
-    // Framing: declared bounding box, spawn-sphere reach, and a nod to how
-    // far the fastest sphere-spawned particles travel in half a second.
     let bbox_min = SystemCompiler::vec3(attrs, "bounding_box_min", Vec3::splat(-10.0));
     let bbox_max = SystemCompiler::vec3(attrs, "bounding_box_max", Vec3::splat(10.0));
     let bbox_extent = bbox_min
@@ -1236,8 +1194,7 @@ pub(super) fn compile_renderer(
                 compiler.record(function, "renderers", SupportLevel::Approximate);
             }
             _ => {
-                // Unknown renderers fall back to sprites so the sim is still
-                // visible; coverage tells the user the look is wrong.
+                // Fall back to sprites for unknown renderers and report the mismatch in coverage.
                 compiler.record(function, "renderers", SupportLevel::Unsupported);
             }
         }

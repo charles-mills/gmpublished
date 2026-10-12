@@ -4,7 +4,7 @@ use super::{
 };
 use crate::bridge::tasks::TransactionStatus;
 use crate::bridge::tasks::{
-    BackendContext, BackendRuntimeEvent, PublishService, TaskHandle, TransactionRuntimeEvent,
+    BackendContext, BackendRuntimeEvent, BackendServices, TaskHandle, TransactionRuntimeEvent,
 };
 
 impl App {
@@ -15,7 +15,7 @@ impl App {
     ) -> Task<RootMessage> {
         if matches!(message, description_editor::Message::OpenRequested { .. }) {
             self.state.features.description_editor.set_initial_language(
-                gmpublished_backend::WorkshopLanguage::from_locale(self.ports().i18n.locale_id()),
+                gmpublished_backend::WorkshopLanguage::from_locale(self.state.i18n.locale_id()),
             );
         }
         let effects = description_editor::update_at(
@@ -77,9 +77,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("description-editor-fetch", move |app| {
-                let item = app
-                    .workshop()
-                    .localized_text(request.workshop_id, request.language)?;
+                let item = app.localized_text(request.workshop_id, request.language)?;
                 Ok::<_, UiError>(description_editor::FetchedSource {
                     title: item.title,
                     description: item.description,
@@ -103,7 +101,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("description-editor-save", move |app| {
-                run_metadata_update(&ctx, app.publish(), task, &request)
+                run_metadata_update(&ctx, app, task, &request)
             })
             .map(move |result| {
                 RootMessage::DescriptionEditor(description_editor::Message::SaveCompleted {
@@ -114,11 +112,9 @@ impl App {
     }
 }
 
-/// Submits localized title and description edits under a correlated
-/// transaction so failures reach the task overlay.
 fn run_metadata_update(
     backend_ctx: &BackendContext,
-    publish: PublishService<'_>,
+    publish: &BackendServices,
     task: TaskHandle,
     request: &description_editor::SaveRequest,
 ) -> Result<description_editor::SaveOutcome, UiError> {
@@ -126,7 +122,7 @@ fn run_metadata_update(
     let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
-    match publish.update_metadata(&request.edit, &transaction) {
+    match publish.update_publish_metadata(&request.edit, &transaction) {
         Ok(legal_agreement_required) => {
             let _effects = backend_ctx.handle_backend_runtime_event(
                 &BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished {

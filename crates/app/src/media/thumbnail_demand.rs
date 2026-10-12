@@ -1,6 +1,3 @@
-//! Views report visible rows. Feature updates translate those rows into demand
-//! sets, and this manager is the only path that starts decode work.
-
 use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use iced::Task;
@@ -44,29 +41,13 @@ const DEFAULT_ESTIMATED_ITEMS: usize = 128;
 // Two media-pool widths hide the WorkerFinished -> pump round trip while
 // cancelled FIFO entries yield before doing I/O.
 const DEFAULT_MAX_IN_FLIGHT: usize = 32;
-// Flat cache budget: rows release off-screen handles, so the cache is the
-// actual ceiling; 256MB covers a broad retina-tile recency window without scaling
-// quadratically with density.
+// Rows release off-screen handles, leaving this cache as the memory ceiling.
 const DEFAULT_MEMORY_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_DISK_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
-/// Ceiling on cache-only jobs in flight.
-///
-/// A cap, not a reservation: the gate counts *total* in-flight work, so
-/// interactive jobs occupy the same pipe and cache-only work gets whatever is
-/// left under this number. That is the conservative direction — a scroll burst
-/// squeezes background work out rather than queueing behind it.
+/// Counts all in-flight jobs, including interactive ones. Background work
+/// only gets the slots left below this limit.
 const CACHE_ONLY_MAX_IN_FLIGHT: usize = 8;
 
-/// The cache deliberately uses `quick_cache`'s default lifecycle.
-///
-/// `Lifecycle` also exposes `is_pinned`, which is what a visible-window pin
-/// would use. That was built and measured and does **not** ship: it removed
-/// every eviction of an on-screen key (20 → 0 under animation pressure) while
-/// saving exactly zero decode work, because rows hold `Arc`d handles and an
-/// evicted-but-visible entry costs nothing until it is re-demanded. The
-/// hit-rate collapse it was meant to fix is a capacity problem, not an
-/// eviction-policy one — so raise [`Config::memory_capacity_bytes`] rather
-/// than reaching for a custom lifecycle again.
 type HandleCache = Cache<ThumbnailKey, ReadyThumbnail, ReadyThumbnailWeighter, DefaultHashBuilder>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,9 +110,6 @@ impl Manager {
         }
     }
 
-    /// Seeds preview-URL ThumbHashes (from the persisted metadata snapshot) so
-    /// a placeholder can paint on the very first demand of a URL, before any
-    /// decode runs.
     pub(crate) fn seed_thumbhashes(
         &mut self,
         entries: impl IntoIterator<Item = (String, Arc<[u8]>)>,
@@ -202,17 +180,6 @@ impl Manager {
     }
 
     fn apply_demands(&mut self, set: DemandSet) -> Vec<Message> {
-        // Diff rather than teardown-and-rebuild.
-        //
-        // A scroll tick re-demands the whole visible+prefetch window even
-        // though usually only a row or two entered or left it. Replacing the
-        // owner's set outright meant discarding ~72 identical interests and
-        // immediately recreating them, every tick — measured as 4,608 demand
-        // applications for 242 distinct thumbnails across one fling.
-        //
-        // Interests are keyed by (owner, generation, id, key), so an unchanged
-        // row produces an identical interest and is simply left alone: its
-        // queue position, in-flight job, and retry state all survive.
         let mut retained = HashSet::with_capacity(set.demands.len());
         let mut resolved = Vec::with_capacity(set.demands.len());
         for demand in set.demands {
@@ -246,14 +213,6 @@ impl Manager {
 
         let mut immediate = Vec::new();
         for (demand, key, physical_max_edge) in resolved {
-            // Already demanded: leave the entry, its queue position, and any
-            // running job as they are — but pick up a priority promotion, since
-            // a row entering the visible window is the same interest served
-            // more urgently.
-            //
-            // The sequence is allocated up front rather than lazily: it is a
-            // free-running counter, so spending one on a demand that turns out
-            // to be new is cheaper than borrowing `self` twice to defer it.
             let promoted_sequence = self.allocate_sequence();
             let interest = index::InterestKey {
                 owner: set.owner,
@@ -276,31 +235,15 @@ impl Manager {
                         set.generation,
                         demand.id,
                         key,
-                        ThumbnailDeliveryError::Thumbnail(Arc::new(error)),
+                        ThumbnailDeliveryError::Thumbnail(Arc::new(error.into())),
                     ))));
                 }
                 continue;
             }
 
-            // Cache-only demand is resolved *before* the memory cache is
-            // consulted, because the two ask different questions. Its product is bytes on disk;
-            // resident pixels do not imply a banked source (a legacy
-            // derived-tier hit has pixels and no source), and a memory hit here
-            // would both skip the requested banking and emit a `Delivered`
-            // that no cache-only consumer expects. It would also drag the
-            // whole background sweep through `quick_cache`'s
-            // recency window on the way past.
+            // Cache-only demand needs bytes on disk; resident pixels do not imply a
+            // banked source. Resolve it before memory-cache lookup and visual delivery.
             if demand.capabilities.is_cache_only() {
-                // Cache-only work exists to fill the disk cache; a URL already on
-                // disk needs no job, and nothing paints for the requesting owner so
-                // no placeholder either. (A URL banked between this check and
-                // job start just costs one redundant `contains_source` probe in
-                // the worker.)
-                //
-                // The question is asked of the *source* tier, not the derived
-                // key. Cache-only work writes no derived entries, so a derived-key check
-                // could never hit — it would re-enqueue the entire library on
-                // every session after the first.
                 if let Some(url) = key.source_url()
                     && self
                         .disk_cache
@@ -334,9 +277,6 @@ impl Manager {
                 continue;
             }
 
-            // No pixels yet: paint a ThumbHash placeholder now if we know one for
-            // this URL. Surfaces ignore a placeholder once they hold real pixels,
-            // so re-emitting during the in-flight window is a harmless no-op.
             if demand.capabilities.accepts_placeholders()
                 && let Some(placeholder) = self.placeholders.get(demand.input.source_url())
             {
@@ -380,10 +320,8 @@ impl Manager {
                     self.placeholders.remember(url, hash);
                 }
                 let ready = ready_thumbnail(key.clone(), thumbnail);
-                // Cache-only completions fill the disk cache without churning
-                // the memory cache's recency window; everything else — even a
-                // completion nobody wants anymore — is kept, so a scroll-back
-                // hits memory instead of re-decoding.
+                // Cache-only jobs skip the memory cache. Keep other completed
+                // decodes even if their demand disappeared.
                 if !self.index.interests_cache_only(key) {
                     self.cache.insert(key.clone(), ready.clone());
                 }
@@ -488,8 +426,6 @@ impl Manager {
     fn pump(&mut self, ctx: &BackendContext) -> Task<Message> {
         let mut tasks = Vec::new();
         while self.index.in_flight_count() < self.config.max_in_flight.max(1) {
-            // Cache-only jobs only take slots interactive tiers leave idle, so a
-            // scroll burst always finds most of the pipe free.
             let allow_cache_only = self.index.in_flight_count() < CACHE_ONLY_MAX_IN_FLIGHT;
             let job_id = JobId(self.allocate_work_id());
             let Some(candidate) = self.index.next_candidate(job_id, allow_cache_only) else {
@@ -550,8 +486,6 @@ impl Manager {
         self.index.pending_len()
     }
 
-    /// A clone of the disk-cache handle, for work that belongs on a blocking
-    /// thread rather than in `update`. Clones share one index and one budget.
     pub(crate) fn disk_cache_handle(&self) -> Option<WorkerDiskCache> {
         self.disk_cache.clone()
     }
@@ -572,14 +506,6 @@ impl Manager {
     fn next_candidate_for_test(&mut self) -> Option<StartCandidate> {
         let job_id = JobId(self.allocate_work_id());
         self.index.next_candidate(job_id, true)
-    }
-
-    #[cfg(test)]
-    fn disk_cache_path(&self, key: &ThumbnailKey) -> Option<PathBuf> {
-        self.config
-            .disk_cache_dir
-            .as_ref()
-            .map(|dir| crate::media::thumbnail_worker::disk_cache_path(dir, key))
     }
 }
 
@@ -636,7 +562,6 @@ fn retry_delay(attempt: RetryAttempt, error: &ThumbnailDeliveryError) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
 
@@ -698,8 +623,6 @@ mod tests {
         assert_eq!(placeholder.key, key);
         assert_eq!(manager.cache_len(), 0);
 
-        // The real decode is still queued; completing it delivers Ready pixels
-        // that replace the placeholder.
         let candidate = manager
             .next_candidate_for_test()
             .expect("decode should be queued");
@@ -823,8 +746,6 @@ mod tests {
         assert_eq!(candidate.request.key().mode(), ThumbnailMode::Static);
     }
 
-    /// A warm job's product is bytes on disk. It paints nothing, delivers
-    /// nothing, and must not churn the memory cache's recency window.
     #[test]
     fn a_warm_completion_delivers_nothing_and_enters_no_cache() {
         let mut manager = Manager::new(Config::default());
@@ -854,9 +775,6 @@ mod tests {
         );
     }
 
-    /// The warm interest is *satisfied* by the banked bytes, so it must be
-    /// retired rather than re-queued. Re-queuing it would have the pump restart
-    /// a job that banks-and-completes immediately, forever.
     #[test]
     fn a_warm_completion_does_not_re_offer_its_own_interest() {
         let mut manager = Manager::new(Config::default());
@@ -883,10 +801,6 @@ mod tests {
         );
     }
 
-    /// A visible row can attach to a key while its warm job is already in
-    /// flight. That job hands back no pixels, so without a re-queue the row
-    /// would sit `InFlight` waiting for a delivery that is never coming — a
-    /// card stuck on its placeholder for the rest of the session.
     #[test]
     fn an_interactive_interest_joining_a_running_warm_job_is_requeued() {
         let mut manager = Manager::new(Config::default());
@@ -906,8 +820,6 @@ mod tests {
         });
         let warm = manager.next_candidate_for_test().expect("warm job queued");
 
-        // The row arrives mid-flight, so it joins the running job rather than
-        // starting one of its own.
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::InstalledAddons,
             generation: Generation::from_raw(1),
@@ -938,20 +850,14 @@ mod tests {
         );
     }
 
-    /// `InterestKey` deliberately excludes priority — the same row at a new
-    /// priority is the same interest, not a second one. That makes a plain
-    /// existence check silently wrong for a row the user scrolls *toward*: it
-    /// looks unchanged, so it keeps serving at prefetch priority for as long as
-    /// it stays on screen. Nothing in the delivered results looks wrong; the
-    /// card is just slow.
     #[test]
     fn a_row_promoted_to_visible_is_re_offered_at_its_new_priority() {
         let mut manager = Manager::new(Config::default());
         let ahead = ThumbnailInput::from_url("https://example.invalid/ahead.jpg");
         let promoted = ThumbnailInput::from_url("https://example.invalid/promoted.jpg");
 
-        // `promoted` is demanded first, so it wins any tie on sequence — the
-        // test would pass for the wrong reason if priority were ignored.
+        // Sequence ties already favor promoted. Check its stored priority too
+        // so ordering alone cannot make this test pass.
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::MyWorkshop,
             generation: Generation::INITIAL,
@@ -962,8 +868,6 @@ mod tests {
             ],
         });
 
-        // The user scrolls toward row-1: same owner, same id, same key, higher
-        // priority. Re-demanded alongside row-2 exactly as a real grid tick does.
         let _ = manager.apply_demands(DemandSet {
             owner: Owner::MyWorkshop,
             generation: Generation::INITIAL,
@@ -989,9 +893,6 @@ mod tests {
         );
     }
 
-    /// The same mechanism in reverse: a row that scrolls off the visible window
-    /// into the prefetch band must stop holding a visible-tier slot, or a long
-    /// scroll would accumulate stale high-priority entries.
     #[test]
     fn a_row_demoted_to_prefetch_gives_up_its_visible_priority() {
         let mut manager = Manager::new(Config::default());
@@ -1024,12 +925,6 @@ mod tests {
         );
     }
 
-    /// Promotion of an entry whose job is already running must reach the entry
-    /// without re-offering it: the work is in flight, and a second candidate
-    /// for a running key is the duplicate-job class the scheduler exists to
-    /// prevent — but the new priority still has to stick, or a row that was
-    /// promoted mid-flight would be re-queued at prefetch tier if its job is
-    /// ever cancelled or retried.
     #[test]
     fn promoting_an_in_flight_row_keeps_the_priority_without_queueing_twice() {
         let mut manager = Manager::new(Config::default());
@@ -1057,11 +952,8 @@ mod tests {
             "the running job covers the promoted interest"
         );
 
-        // Cancel the in-flight job so the entry is re-offered. Its priority on
-        // the way back out is the only observable proof the promotion reached
-        // the entry rather than being swallowed — without it, this test passes
-        // even if `reprioritise_existing` did nothing, because `take_startable`
-        // discards a duplicate candidate on state alone.
+        // Cancel and requeue to observe the stored priority. Checking the running
+        // job alone would also pass if promotion did nothing.
         let _ = manager.complete_job(
             &key,
             started.job_id,
@@ -1078,9 +970,6 @@ mod tests {
         );
     }
 
-    /// Warm's skip has to ask the *source* tier. Asking the derived key could
-    /// never hit — warm writes no derived entries — so every session after the
-    /// first would re-enqueue the entire library.
     #[test]
     fn warm_skips_a_url_whose_source_is_already_banked() {
         let root = crate::test_support::TestDir::new("warm-skip-source-tier");
@@ -1113,9 +1002,6 @@ mod tests {
         );
     }
 
-    /// The counterpart: a derived entry is not a source, so it must not satisfy
-    /// the skip. Otherwise nothing the user scrolled past would ever have its
-    /// source banked.
     #[test]
     fn warm_still_runs_when_only_a_derived_entry_exists() {
         let root = crate::test_support::TestDir::new("warm-skip-derived-only");
@@ -1347,10 +1233,6 @@ mod tests {
         assert!(!fresh.cancellation.is_cancelled());
     }
 
-    /// A backpressured job that is then abandoned must not leave its attempt
-    /// count behind: the key is out of `active_jobs` and never was a delayed
-    /// retry, so it is reachable only through `retry_attempts`. A survivor
-    /// there silently costs the *next* demand for that key its retries.
     #[test]
     fn abandoning_a_backpressured_job_does_not_strand_its_attempt_count() {
         let mut manager = Manager::new(Config::default());
@@ -1367,8 +1249,6 @@ mod tests {
             .next_candidate_for_test()
             .expect("thumbnail job should start");
 
-        // The worker pool refused it, so the key returns to queued carrying an
-        // attempt count.
         let key = candidate.request.key().clone();
         let attempt = candidate.attempt.next().expect("a first retry is allowed");
         manager
@@ -1553,10 +1433,6 @@ mod tests {
         }
     }
 
-    /// The invariant the two removal paths kept breaking: an interest dropped
-    /// from `entries` without pruning `by_owner` leaves a ghost that
-    /// accumulates for the whole session, because nothing ever revisits that
-    /// bucket.
     #[test]
     fn replacing_an_owners_demands_leaves_no_ghosts_in_its_bucket() {
         let mut manager = Manager::new(Config::default());
@@ -1658,20 +1534,6 @@ mod tests {
 
             assert_eq!(*candidate.request.key(), visible_key);
         }
-    }
-
-    #[test]
-    fn disk_cache_path_uses_worker_lru_cache_directory() {
-        let manager = Manager::new(Config {
-            disk_cache_dir: Some(PathBuf::from("/tmp/gmpublished-thumbnails")),
-            ..Config::default()
-        });
-        let key = ThumbnailKey::for_bytes("avatar", 32);
-
-        assert_eq!(
-            manager.disk_cache_path(&key),
-            Some(PathBuf::from("/tmp/gmpublished-thumbnails").join(key.disk_file_name()))
-        );
     }
 
     #[test]

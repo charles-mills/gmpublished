@@ -1,6 +1,3 @@
-//! Hull queries against the map: the player's swept AABB traces and the
-//! unstick search used when a spawn lands inside geometry.
-
 use super::super::super::state::MovementMode;
 use super::super::{MapTrace, bounds_intersect, expand_bounds, trace_aabb_against_aabb};
 use super::{FlyCamera, WALK_STEP_HEIGHT, WalkHull};

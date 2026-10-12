@@ -1,5 +1,3 @@
-//! Content selection, Workshop tags, and browser interaction value types.
-
 use super::{Easing, PathBuf, PublishedFileId, WorkshopSnapshotId, motion, theme};
 
 mapped_enum_with_all! {
@@ -30,7 +28,6 @@ impl AddonType {
 }
 
 mapped_enum_with_all! {
-    /// Steam Workshop content tag (up to three per addon).
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum AddonTag {
         Fun => "fun",
@@ -76,7 +73,6 @@ pub enum Mode {
     Update(UpdateTarget),
 }
 
-/// Hover presence of the file-browser empty state, with value semantics.
 #[derive(Clone, Debug)]
 pub struct BrowserSelectHover(pub(super) motion::Presence<bool>);
 

@@ -1,7 +1,3 @@
-//! Cluster-visibility state for an uploaded map: the tracker that decides
-//! when the camera's visibility cluster changed, and the visible-subset
-//! index and vertex buffers rebuilt when it does.
-
 use super::upload::UploadedDetailSprites;
 use super::{DETAIL_VERTEX_FLOAT_COUNT, WorldVisibilityPlan, wgpu};
 use gmpublished_domain::math::Vec3;

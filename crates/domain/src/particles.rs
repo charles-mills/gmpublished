@@ -1,19 +1,6 @@
-//! Shared Source engine particle system simulation.
-//!
-//! Compiles [`crate::scene::pcf`] definitions into typed operators
-//! and steps them on the CPU. Coverage is honest: every function name in the
-//! file is classified as fully simulated, approximated, inert-in-preview
-//! (world collision / lighting that has no meaning without a map), or
-//! unsupported, so a preview can say exactly what it is and is not showing.
-//!
-//! Conventions follow Source: Z-up world, distances in hammer units, colors
-//! as sRGB bytes in the file (kept as 0..1 sRGB floats here), rotation in
-//! radians internally (degrees in the file), lifetimes in seconds. Operators
-//! that derive a value from age recompute it from the spawn-time initial
-//! value each step, so operator order cannot accumulate drift.
+//! Source conventions: Z-up, Hammer units, 0..1 sRGB colors, radians, seconds.
+//! Age-based operators start from spawn-time values each step to avoid drift.
 
-// The submodules below are one module split across files: each holds a slice
-// of `ParticleEngine`'s impl and reaches the shared types through `super::*`.
 #![allow(clippy::wildcard_imports)]
 
 use crate::scene::pcf::{PcfAttributes, PcfFile, PcfFunction, PcfSystem};
@@ -34,8 +21,6 @@ use storage::ParticleSet;
 
 use crate::math::{Vec3, simple_spline};
 
-/// Canonical material identity shared by particle loading, compilation, and
-/// per-frame rendering.
 pub fn normalize_material_name(name: &str) -> String {
     let name = name.trim();
     let bytes = name.as_bytes();
@@ -67,18 +52,10 @@ pub fn normalize_material_name(name: &str) -> String {
 
 pub const MAX_CONTROL_POINTS: usize = 8;
 
-/// An index into a system's control points, guaranteed in range.
-///
-/// PCF files name control points freely, so the clamp happens once, here. Every
-/// path that reaches a control point — the compiler, reads, writes — therefore
-/// resolves an out-of-range number the same way.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ControlPointIndex(usize);
 
 impl ControlPointIndex {
-    /// Clamps into range: content naming control point 40 gets the last one
-    /// rather than being dropped, so a wild index degrades rather than
-    /// silently removing the effect that used it.
     #[must_use]
     pub const fn clamped(index: usize) -> Self {
         if index >= MAX_CONTROL_POINTS {
@@ -93,29 +70,21 @@ impl ControlPointIndex {
         self.0
     }
 
-    /// Every valid index, ascending. The only way to iterate control points
-    /// without a `usize` that has to be re-bounded at each use.
     pub fn all() -> impl DoubleEndedIterator<Item = Self> + ExactSizeIterator {
         (0..MAX_CONTROL_POINTS).map(Self)
     }
 }
-/// How deep a chain of child systems may go. Separate from the instance-count
-/// ceiling, which bounds how many instances a file produces rather than how
-/// far the walk descends.
+/// Bound child depth separately from the total instance count.
 pub const MAX_INSTANCE_TREE_DEPTH: usize = 64;
 
 /// Hard ceiling across all instances so a hostile file cannot OOM the app.
 pub const MAX_TOTAL_PARTICLES: usize = 100_000;
 
-// --- Coverage ------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SupportLevel {
-    /// Simulated with Source-equivalent math.
     Full,
-    /// Simulated, but with simplified math; the look may differ.
     Approximate,
-    /// Meaningless without a map/entity context; deliberately inert.
+    /// No map or entity context in previews; leave this operator inert.
     PreviewInert,
     Unsupported,
 }
@@ -123,12 +92,9 @@ pub enum SupportLevel {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoverageEntry {
     pub function: String,
-    /// Which operator list the function came from ("emitters", ...).
     pub list: &'static str,
     pub level: SupportLevel,
 }
-
-// --- Small vector helpers ------------------------------------------------
 
 fn color_to_rgb(color: [u8; 4]) -> Vec3 {
     Vec3::new(
@@ -146,12 +112,9 @@ fn bias(t: f32, amount: f32) -> f32 {
     t / ((1.0 / amount.clamp(1e-3, 1.0 - 1e-3) - 2.0) * (1.0 - t) + 1.0)
 }
 
-// --- Engine ----------------------------------------------------------------
-
 #[derive(Clone, Debug)]
 struct Instance {
     system: usize,
-    /// Engine time at which this instance starts simulating.
     start_time: f32,
     parent: Option<usize>,
     particles: ParticleSet,
@@ -275,11 +238,6 @@ mod tests {
         ParticleEngine::new(&file, 0, 7).expect("engine builds")
     }
 
-    /// Decided at compile time, not rediscovered by two full scans of
-    /// `operators` per instance per substep. The predicate has to keep
-    /// matching both operators that retire particles — dropping either would
-    /// leave dead particles on screen forever, which no frame-count assertion
-    /// elsewhere distinguishes from a slow emitter.
     #[test]
     fn retirement_is_decided_once_at_compile_time() {
         let with_decay = engine_for(vec![basic_system()]);
@@ -298,10 +256,8 @@ mod tests {
     fn continuous_emission_rate_and_decay() {
         let mut engine = engine_for(vec![basic_system()]);
         engine.step(0.5);
-        // 10/s for 0.5s: allow off-by-one from accumulator flooring.
         let live = engine.live_particles();
         assert!((4..=6).contains(&live), "live={live}");
-        // After the 1s lifetime elapses, the earliest particles die off.
         engine.step(2.0);
         assert!(engine.live_particles() <= 11);
         assert!(!engine.finished(), "continuous emitters never finish");
@@ -359,7 +315,6 @@ mod tests {
         engine.step(0.90);
         let late = engine.render_instances()[0].particles[0].alpha;
         assert!(early > 0.9, "early={early}");
-        // Age ~0.90 of a 1s life with a 0.5-proportional fade => ~0.2.
         assert!(late < 0.3, "late={late}");
         assert!(late < early);
     }
@@ -381,7 +336,6 @@ mod tests {
             &[("num_to_emit", PcfValue::Int(1))],
         )];
         let mut engine = engine_for(vec![system]);
-        // Past end_time (0.5 of proportional life) the scale is pinned at 3.
         engine.step(0.8);
         let particle = engine.render_instances()[0].particles[0];
         assert!(
@@ -409,9 +363,6 @@ mod tests {
         assert!(particle.velocity[2] < -20.0);
     }
 
-    /// A `.pcf` is untrusted, and its child links can chain arbitrarily deep.
-    /// The walk must stop at a fixed depth rather than following the file —
-    /// a recursive version would spend attacker-controlled stack frames.
     #[test]
     fn a_deep_child_chain_stops_at_the_depth_bound() {
         let depth = MAX_INSTANCE_TREE_DEPTH * 2;
@@ -439,7 +390,6 @@ mod tests {
         );
     }
 
-    /// A cycle between two systems must terminate on the instance ceiling.
     #[test]
     fn a_child_cycle_terminates() {
         let mut first = basic_system();
@@ -564,9 +514,6 @@ mod tests {
         engine.step(1.0);
         assert!(engine.live_particles() <= MAX_TOTAL_PARTICLES);
     }
-    /// PCF files name control points freely, and the clamp is the only thing
-    /// keeping an out-of-range number from meaning something different on each
-    /// path that reaches it.
     #[test]
     fn an_out_of_range_control_point_clamps_once_at_construction() {
         assert_eq!(ControlPointIndex::clamped(0).get(), 0);
@@ -584,9 +531,6 @@ mod tests {
         );
     }
 
-    /// Every read indexes all sixteen arrays by the same position, so a
-    /// whole-set operation that misses one desynchronises them permanently.
-    /// Spawning *and* expiring particles exercises `push` and `swap_remove`.
     #[test]
     fn whole_set_operations_keep_the_arrays_parallel() {
         let mut engine = engine_for(vec![basic_system()]);
@@ -596,10 +540,6 @@ mod tests {
             assert!(instance.particles.arrays_are_parallel(), "push went ragged");
         }
 
-        // Past the 1s lifetime, so the earliest particles swap_remove out
-        // while the continuous emitter keeps spawning. The live count alone
-        // cannot show that — it stays roughly flat — but having spawned more
-        // than are alive can.
         engine.step(2.0);
         assert!(
             engine

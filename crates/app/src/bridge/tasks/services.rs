@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::WorkshopMetadata;
 use super::{
     BackendEventSinkRegistration, BackendRuntimeEventSubscription, CachedWorkshopMetadata,
-    LibraryStore, NativeOpenTarget, PublishedFileId, UiError, library, metadata_snapshot, native,
+    LibraryStore, NativeOpenTarget, PublishedFileId, UiError, native,
 };
 use crate::bridge::config_store::ConfigStore;
 use crate::bridge::domain::SteamId;
@@ -28,22 +28,14 @@ mod publish_service;
 mod search_service;
 mod workshop_service;
 
-pub use archive_service::ArchiveService;
-pub use config_service::ConfigService;
-pub use library_service::LibraryService;
-pub use publish_service::PublishService;
-pub use search_service::SearchService;
-pub use workshop_service::WorkshopService;
-
-/// App composition root. Features receive one of its narrow borrowed service
-/// capabilities; scheduler and lifecycle code alone retain this registry.
 #[derive(Debug)]
 pub struct BackendServices {
     backend: Arc<Backend>,
     configuration: ConfigStore,
     steam_runtime: SteamRuntime,
     library: LibraryStore,
-    workshop_metadata: Mutex<HashMap<PublishedFileId, CachedWorkshopMetadata>>,
+    workshop_metadata: Mutex<WorkshopMetadataCache>,
+    metadata_writer: Mutex<u64>,
     metadata_snapshot_file: Option<PathBuf>,
     text_journal: Mutex<crate::bridge::workshop_text::TextJournal>,
     _backend_event_sink: Option<BackendEventSinkRegistration>,
@@ -51,18 +43,23 @@ pub struct BackendServices {
     _test_data_root: Option<tempfile::TempDir>,
 }
 
-/// The error every Steam-facing call returns when it finds no connection.
+#[derive(Debug, Default)]
+struct WorkshopMetadataCache {
+    entries: HashMap<PublishedFileId, CachedWorkshopMetadata>,
+    revision: u64,
+}
+
+impl WorkshopMetadataCache {
+    fn changed(&mut self) {
+        self.revision += 1;
+    }
+}
+
 fn steam_not_connected() -> UiError {
     UiError::from(&SteamRuntimeError::NotConnected)
 }
 
-/// What a [`BackendServices`] needs to know about its environment.
-///
-/// Production and tests both build one and call the same constructor. Deciding
-/// it with `cfg!(test)` inside would run different code on the two paths,
-/// making a production-only bug invisible to the suite.
 pub(super) struct BackendServicesConfig {
-    /// Whether settings changes are written back to the backend's store.
     persist_settings: bool,
     /// Where the Workshop metadata snapshot lives; `None` keeps it in memory.
     metadata_snapshot_file: Option<PathBuf>,
@@ -71,17 +68,16 @@ pub(super) struct BackendServicesConfig {
 }
 
 impl BackendServicesConfig {
-    /// Reads and writes the real user directories.
+    #[cfg(not(test))]
     fn production() -> Self {
+        let cache_dir = gmpublished_backend::cache_dir();
         Self {
             persist_settings: true,
-            metadata_snapshot_file: metadata_snapshot::snapshot_path(),
-            header_snapshot_file: library::header_snapshot_path(),
+            metadata_snapshot_file: cache_dir.as_ref().map(|dir| dir.join("metadata.snap")),
+            header_snapshot_file: cache_dir.map(|dir| dir.join("library-headers.json")),
         }
     }
 
-    /// Touches no directory the developer also uses, and persists nothing —
-    /// many isolated roots coexist in one test process.
     #[cfg(test)]
     fn isolated() -> Self {
         Self {
@@ -93,42 +89,6 @@ impl BackendServicesConfig {
 }
 
 impl BackendServices {
-    #[must_use]
-    pub(crate) fn config(&self) -> ConfigService<'_> {
-        ConfigService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn library(&self) -> LibraryService<'_> {
-        LibraryService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn workshop(&self) -> WorkshopService<'_> {
-        WorkshopService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn publish(&self) -> PublishService<'_> {
-        PublishService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn search(&self) -> SearchService<'_> {
-        SearchService::new(self)
-    }
-
-    #[must_use]
-    pub(crate) fn archive(&self) -> ArchiveService<'_> {
-        ArchiveService::new(self)
-    }
-
-    /// The default entry point every `App::new()` (production) or
-    /// `BackendContext::new()` (tests) goes through. Builds one `Backend`
-    /// (with explicitly-started background services in production; a
-    /// private-tempdir, no-background-services one in tests —
-    /// [`build_default_backend`]) and derives the initial settings/paths from
-    /// its `AppData` snapshot.
     pub(super) fn new(
         backend_event_sink: Option<BackendEventSinkRegistration>,
     ) -> Result<Self, gmpublished_backend::BackendInitError> {
@@ -141,12 +101,11 @@ impl BackendServices {
         #[cfg(test)]
         let (backend, test_data_root) = build_default_backend(event_sink)?;
         let steam_runtime = backend.steam_runtime();
-        let services = Self::with_steam_runtime(
-            backend,
-            steam_runtime,
-            backend_event_sink,
-            BackendServicesConfig::production(),
-        );
+        #[cfg(not(test))]
+        let config = BackendServicesConfig::production();
+        #[cfg(test)]
+        let config = BackendServicesConfig::isolated();
+        let services = Self::with_steam_runtime(backend, steam_runtime, backend_event_sink, config);
         #[cfg(test)]
         let services = {
             let mut services = services;
@@ -185,7 +144,8 @@ impl BackendServices {
             configuration,
             steam_runtime,
             library,
-            workshop_metadata: Mutex::new(HashMap::new()),
+            workshop_metadata: Mutex::new(WorkshopMetadataCache::default()),
+            metadata_writer: Mutex::new(0),
             metadata_snapshot_file: config.metadata_snapshot_file,
             _backend_event_sink: backend_event_sink,
             #[cfg(test)]
@@ -198,10 +158,7 @@ impl BackendServices {
         Self::for_test_with_event_sink(Arc::new(gmpublished_backend::NullEventSink))
     }
 
-    /// Like [`Self::for_test`], but with the real `AppData`-backed settings
-    /// persistence path enabled (disabled by default in tests), so a test
-    /// can exercise `update_settings_snapshot`'s actual disk write and its
-    /// failure propagation.
+    /// Enables real settings persistence under the test's private data root.
     #[cfg(test)]
     pub(crate) fn for_test_with_settings_persist_enabled() -> Self {
         let (backend, test_data_root) =
@@ -220,9 +177,7 @@ impl BackendServices {
         services
     }
 
-    /// Like [`Self::for_test`], but with an explicit event sink (a
-    /// `BackendEventCollector`, typically) so the test can observe events
-    /// the backend emits directly, without going through a `BackendContext`.
+    /// Uses the supplied event sink so tests can observe backend events directly.
     #[cfg(test)]
     pub(crate) fn for_test_with_event_sink(
         event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
@@ -269,11 +224,6 @@ impl BackendServices {
         )
     }
 
-    /// Stops every background service this process owns, for app exit.
-    ///
-    /// Transactions are cancelled before Steam is shut down so a job still
-    /// running gets the chance to stop at its own next checkpoint rather than
-    /// being abandoned mid-write. Returns how many were cancelled.
     pub(crate) fn shutdown(&self) -> usize {
         let cancelled = self.backend.cancel_all_transactions();
         self.backend.shutdown_background_services();
@@ -318,23 +268,10 @@ impl BackendServices {
     #[cfg(test)]
     pub(super) fn quick_addon_search_for_test(
         &self,
-        query: String,
+        query: &str,
     ) -> gmpublished_backend::QuickSearchResult {
         self.backend
             .quick_search(query, gmpublished_backend::SearchScope::Addons)
-    }
-
-    #[cfg(test)]
-    pub(super) fn extract_gma_for_test(
-        &self,
-        view: &gmpublished_backend::GmaView,
-        gma: &gmpublished_backend::GmaFile,
-        destination: gmpublished_backend::ExtractDestination,
-        options: gmpublished_backend::ExtractOptions,
-        transaction: &Transaction,
-    ) -> Result<PathBuf, gmpublished_backend::GmaError> {
-        let extraction = self.backend.resolve_extraction(gma, destination, options)?;
-        self.backend.extract_gma(view, gma, transaction, extraction)
     }
 
     pub(crate) fn open_native_target(
@@ -360,25 +297,70 @@ fn record_thumbhash_in_cache(
     cache: &mut HashMap<PublishedFileId, CachedWorkshopMetadata>,
     url: &str,
     hash: &[u8],
-) {
-    if let Some(cached) = cache.values_mut().find(|cached| {
+) -> bool {
+    let hash: Arc<[u8]> = Arc::from(hash);
+    let mut changed = false;
+    for cached in cache.values_mut().filter(|cached| {
         cached.metadata.thumbhash.is_none()
             && cached.metadata.preview_url.as_deref().map(str::trim) == Some(url)
     }) {
-        cached.metadata.thumbhash = Some(Arc::from(hash));
+        cached.metadata.thumbhash = Some(Arc::clone(&hash));
+        changed = true;
     }
+    changed
+}
+
+#[cfg(not(test))]
+fn build_default_backend(
+    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
+) -> Result<Arc<Backend>, gmpublished_backend::BackendInitError> {
+    gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
+        event_sink,
+        ..gmpublished_backend::BackendConfig::default()
+    })
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::items_after_test_module,
-    reason = "production/test backend constructors remain adjacent below the performance-only module"
-)]
-mod performance_tests {
+fn build_default_backend(
+    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
+) -> Result<(Arc<Backend>, tempfile::TempDir), gmpublished_backend::BackendInitError> {
+    let root = tempfile::tempdir().expect("test backend tempdir");
+    let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
+        event_sink,
+        ..gmpublished_backend::BackendConfig::for_test(root.path())
+    })?;
+    Ok((backend, root))
+}
+
+fn backend_workshop_ids(ids: &[PublishedFileId]) -> Vec<gmpublished_backend::WorkshopId> {
+    ids.iter().copied().map(Into::into).collect()
+}
+
+fn backend_steam_id(id: SteamId) -> gmpublished_backend::SteamId {
+    gmpublished_backend::SteamId::from_raw(id.get())
+}
+
+#[cfg(test)]
+mod tests {
     use super::*;
 
     #[test]
-    fn one_hash_per_shared_preview_url_is_sufficient() {
+    fn test_constructor_keeps_caches_and_settings_in_memory() {
+        let services = BackendServices::new(None).unwrap();
+        let settings_file = services.app_data_snapshot_for_test().paths.settings_file;
+        assert!(services.metadata_snapshot_file.is_none());
+        assert!(!settings_file.exists());
+
+        services
+            .update_settings_snapshot(|settings| {
+                settings.backend.sounds = !settings.backend.sounds;
+            })
+            .unwrap();
+        assert!(!settings_file.exists());
+    }
+
+    #[test]
+    fn a_decoded_hash_updates_every_item_sharing_the_preview_url() {
         let mut cache = (1..=2)
             .map(|raw_id| {
                 let id = PublishedFileId::fixture(raw_id);
@@ -405,53 +387,18 @@ mod performance_tests {
             })
             .collect::<HashMap<_, _>>();
 
-        record_thumbhash_in_cache(&mut cache, "https://example.test/shared.jpg", &[1, 2, 3]);
+        assert!(record_thumbhash_in_cache(
+            &mut cache,
+            "https://example.test/shared.jpg",
+            &[1, 2, 3]
+        ));
 
         assert_eq!(
             cache
                 .values()
                 .filter(|cached| cached.metadata.thumbhash.is_some())
                 .count(),
-            1
+            2
         );
     }
-}
-
-/// Production: the one real `Backend` (background threads included, OS
-/// paths). Tests: a throwaway `Backend` on a private tempdir root, with no
-/// background threads (no Steam connect attempt, no whitelist network
-/// fetch) — so every test is fully isolated.
-#[cfg(not(test))]
-fn build_default_backend(
-    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
-) -> Result<Arc<Backend>, gmpublished_backend::BackendInitError> {
-    gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
-        event_sink,
-        ..gmpublished_backend::BackendConfig::default()
-    })
-}
-
-#[cfg(test)]
-fn build_default_backend(
-    event_sink: Arc<dyn gmpublished_backend::BackendEventSink>,
-) -> Result<(Arc<Backend>, tempfile::TempDir), gmpublished_backend::BackendInitError> {
-    let root = tempfile::tempdir().expect("test backend tempdir");
-    let backend = gmpublished_backend::Backend::init(gmpublished_backend::BackendConfig {
-        event_sink,
-        ..gmpublished_backend::BackendConfig::for_test(root.path())
-    })?;
-    Ok((backend, root))
-}
-
-/// The backend's id types, built at the one place the app hands ids across.
-fn backend_workshop_id(id: PublishedFileId) -> gmpublished_backend::WorkshopId {
-    id.into()
-}
-
-fn backend_workshop_ids(ids: &[PublishedFileId]) -> Vec<gmpublished_backend::WorkshopId> {
-    ids.iter().copied().map(backend_workshop_id).collect()
-}
-
-fn backend_steam_id(id: SteamId) -> gmpublished_backend::SteamId {
-    gmpublished_backend::SteamId::from_raw(id.get())
 }

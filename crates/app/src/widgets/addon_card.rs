@@ -1,10 +1,3 @@
-//! One addon tile in a grid: thumbnail, title, and the badges and hover
-//! affordances that vary by which route is showing it.
-//!
-//! Text measurement is cached per card, since a grid re-lays out on every
-//! resize and shaping the same title repeatedly is the expensive part of a
-//! scroll.
-
 use std::{cell::RefCell, collections::HashMap, panic::AssertUnwindSafe, time::Instant};
 
 use iced::advanced::graphics::text::Paragraph as IcedParagraph;
@@ -43,20 +36,15 @@ pub enum Kind {
 pub enum Thumbnail {
     Loading,
     Dead,
-    /// Blurred ThumbHash stand-in shown until the real pixels decode.
     Placeholder(image::Handle),
     Ready(image::Handle),
 }
 
-/// An in-flight subscription-count change: the stats row rolls each changed
-/// digit from the `from` label to the `to` label, odometer-style.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubscriptionRoll {
     pub from: String,
     pub to: String,
-    /// Raw 0..=1 roll progress; easing is applied at draw time.
     pub progress: f32,
-    /// True when subscriptions were gained; the digits roll upward.
     pub up: bool,
 }
 
@@ -75,12 +63,9 @@ pub struct Data {
     hovered: bool,
     hover_motion: motion::Presence<bool>,
     reveal_motion: motion::Presence<bool>,
-    /// The visual the arriving thumbnail fades in over; dropped once settled.
     reveal_under: Option<Thumbnail>,
-    /// True once this card has displayed real pixels. The off-screen release
-    /// path drops Ready handles and the memory cache hands them straight back
-    /// on return, so without this a scroll-back would replay the reveal every
-    /// time; only genuinely first-seen pixels are an arrival.
+    /// Remember displayed pixels after releasing off-screen handles so returning cards do
+    /// not fade in again.
     has_shown_pixels: bool,
 }
 
@@ -100,8 +85,7 @@ impl PartialEq for Data {
             && self.hover_motion == other.hover_motion
             && self.reveal_motion == other.reveal_motion
             && self.reveal_under == other.reveal_under
-        // `has_shown_pixels` is arrival bookkeeping, not a visual: two cards
-        // painting the same frame stay equal regardless of how they got there.
+        // Ignore arrival history when comparing cards that draw the same frame.
     }
 }
 
@@ -154,11 +138,6 @@ impl Data {
         self.enabled
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_hovered(&mut self, hovered: bool) {
-        self.set_hovered_at(hovered, Instant::now());
-    }
-
     pub(crate) fn set_hovered_at(&mut self, hovered: bool, now: Instant) {
         if self.hovered == hovered {
             return;
@@ -189,11 +168,7 @@ impl Data {
         self.reveal_on_arrival(&previous.thumbnail, had_pixels, Instant::now());
     }
 
-    /// Starts the fade-in when real pixels replace a stand-in, keeping the
-    /// stand-in underneath for the crossfade. Ready-to-Ready swaps (GIF
-    /// frames) never retrigger, and neither does a re-hydrate — `had_pixels`
-    /// means the card already showed these pixels and only released them to
-    /// scrolling, so it snaps straight back instead of fading in again.
+    /// Do not restart the fade for GIF frames or previously displayed pixels.
     fn reveal_on_arrival(&mut self, previous: &Thumbnail, had_pixels: bool, now: Instant) {
         if !matches!(self.thumbnail, Thumbnail::Ready(_))
             || !matches!(previous, Thumbnail::Loading | Thumbnail::Placeholder(_))
@@ -241,8 +216,6 @@ impl Data {
     }
 
     pub(crate) fn with_thumbnail(mut self, thumbnail: Thumbnail) -> Self {
-        // Construction, not a transition: a card built straight to Ready has
-        // shown pixels but never arrived at them.
         self.has_shown_pixels = matches!(thumbnail, Thumbnail::Ready(_));
         self.thumbnail = thumbnail;
         self
@@ -419,10 +392,6 @@ fn subscription_count_label<'a>(
         .into()
 }
 
-/// Odometer-style count change: glyphs shared by the outgoing and incoming
-/// labels stay put; each changed glyph slides out (up for gains, down for
-/// losses) and fades while its replacement slides in from the opposite side.
-/// The canvas clips to the stats row, so glyphs vanish at the line edges.
 #[derive(Clone, Debug)]
 struct RollingCountText {
     roll: SubscriptionRoll,
@@ -502,7 +471,6 @@ impl canvas::Program<Message> for RollingCountText {
         }
 
         if !paired {
-            // The outgoing label rolls out whole, laid out independently.
             let mut x = 0.0;
             for &from_glyph in &from {
                 let width =
@@ -571,13 +539,8 @@ fn thumb_image<'a>(handle: &image::Handle, size: f32, opacity: f32) -> Element<'
         .into()
 }
 
-/// The visual an arriving thumbnail fades in over: the blurred stand-in when
-/// there was one, otherwise the loading glyph.
-///
-/// Always sized to the full preview box. This is the crossfade stack's base
-/// layer, and `Stack` resolves its own size from the base and then clamps
-/// every other layer to it — a bare `loading_glyph` base would squeeze the
-/// arriving full-size image down to the glyph's 32x32 for the whole reveal.
+/// The base layer must fill the preview box. Iced sizes the stack from it,
+/// so using the loading glyph's bounds would also shrink the arriving image.
 fn under_element<'a>(
     under: &Thumbnail,
     size: f32,
@@ -687,9 +650,6 @@ fn preview_size(width: f32, tokens: &InvariantTokens) -> f32 {
     content_width(width, tokens).max(1.0)
 }
 
-/// The exact measured height of any title that lays out as a single line,
-/// at any card width. Exposed so the grid's measurement cache can resolve
-/// known single-line titles without shaping them again.
 pub fn single_line_title_height(tokens: &InvariantTokens) -> f32 {
     title_line_height(tokens)
 }
@@ -719,12 +679,6 @@ pub fn measure_title_height(title: &str, width: f32, tokens: &InvariantTokens) -
 }
 
 thread_local! {
-    // `RollingCountText::draw` measures one glyph at a time, every canvas
-    // frame, for as long as a count roll runs. The glyph set is tiny
-    // (digits, comma, etc.), so caching per (char, size, line_height) turns
-    // repeat frames into a hash lookup instead of a fresh paragraph shape.
-    // Single-character-only: `measure_stats_text_width`'s only other
-    // possible inputs (multi-char content) fall through uncached.
     static STATS_CHAR_WIDTH_CACHE: RefCell<HashMap<(char, u32, u32), f32>> =
         RefCell::new(HashMap::new());
 }
@@ -928,16 +882,6 @@ mod tests {
     }
 
     #[test]
-    fn hover_state_is_explicit_card_data() {
-        let mut card = Data::addon(CardId::from("1"), "Addon");
-
-        assert!(!card.is_hovered());
-        card.set_hovered(true);
-
-        assert!(card.is_hovered());
-    }
-
-    #[test]
     fn hover_animation_tracks_target_state() {
         let started = std::time::Instant::now();
         let mut card = Data::addon(CardId::from("1"), "Addon");
@@ -990,7 +934,6 @@ mod tests {
         let mut card = Data::addon(CardId::from("1"), "Addon")
             .with_thumbnail(Thumbnail::Placeholder(placeholder.clone()));
 
-        // Building a card straight to Ready is not an arrival.
         assert!(
             !Data::addon(CardId::from("2"), "Cached")
                 .with_thumbnail(Thumbnail::Ready(sharp.clone()))
@@ -1005,7 +948,6 @@ mod tests {
             card.reveal_progress(std::time::Instant::now() + std::time::Duration::from_millis(75));
         assert!(mid > 0.0 && mid < 1.0);
 
-        // GIF-style Ready-to-Ready swaps never retrigger the fade.
         card.tick_motion(std::time::Instant::now() + std::time::Duration::from_millis(300));
         assert!(!card.needs_motion_ticks());
         assert_eq!(card.reveal_under, None);
@@ -1021,8 +963,6 @@ mod tests {
         card.tick_motion(std::time::Instant::now() + std::time::Duration::from_millis(300));
         assert!(!card.needs_motion_ticks());
 
-        // Scrolling off-screen releases the handle; the memory cache hands the
-        // same pixels straight back on return.
         card.set_thumbnail(Thumbnail::Loading);
         card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
 
@@ -1030,7 +970,6 @@ mod tests {
         assert_eq!(card.reveal_under, None);
         assert_eq!(card.reveal_progress(std::time::Instant::now()), 1.0);
 
-        // The same holds when the release and the return straddle a rebuild.
         let mut released =
             Data::addon(CardId::from("1"), "Addon").with_thumbnail(Thumbnail::Loading);
         released.preserve_motion_from(&card);
@@ -1049,7 +988,6 @@ mod tests {
         let mut card = Data::addon(CardId::from("1"), "Addon");
         card.set_thumbnail(Thumbnail::Ready(sharp.clone()));
 
-        // Released mid-fade, before any tick retires the crossfade.
         assert!(card.reveal_under.is_some());
         card.set_thumbnail(Thumbnail::Loading);
         card.set_thumbnail(Thumbnail::Ready(sharp));

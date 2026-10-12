@@ -1,10 +1,10 @@
 use super::{
-    AppPaths, AppWorkerRuntime, BACKEND_EVENT_QUEUE_CAPACITY, BackendEventSinkRegistration,
+    AppPaths, BACKEND_EVENT_QUEUE_CAPACITY, BackendEventSinkRegistration,
     BackendEventStreamFactory, BackendRuntimeEvent, BackendRuntimeEventEffects, BackendServices,
     BackendTaskCancelResult, BackendTaskSource, BackendTransactionTasks, LibraryRefresh,
     LibraryRefreshReason, LibrarySnapshot, NativeOpenTarget, RunBlockingError, ScheduleError,
     Settings, TaskEvent, TaskEventStreamFactory, TaskHandle, TaskId, TaskKind, Tasks,
-    TransactionStatus, UiError, WorkerPoolSpawner, install_backend_event_sink_by_default,
+    TransactionStatus, UiError, install_backend_event_sink_by_default,
     show_native_open_error_dialog,
 };
 #[cfg(test)]
@@ -18,11 +18,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 
-/// Root-owned backend boundary cloned into Iced workers and subscriptions.
+type WorkerPoolSpawner = fn(
+    &gmpublished_backend::ExecutionResources,
+    Arc<str>,
+    Box<dyn FnOnce() + Send + 'static>,
+) -> Result<(), gmpublished_backend::ExecutionScheduleError>;
+
 #[derive(Clone)]
 pub struct BackendContext {
     pub(super) services: Arc<BackendServices>,
-    runtime: Arc<AppWorkerRuntime>,
+    runtime: gmpublished_backend::ExecutionResources,
     tasks: Arc<Tasks>,
     pub(super) transaction_tasks: Arc<BackendTransactionTasks>,
     pub(super) task_events: TaskEventStreamFactory,
@@ -34,19 +39,11 @@ impl BackendContext {
         &self,
         language: gmpublished_backend::WorkshopLanguage,
     ) -> bool {
-        self.services.workshop().set_language(language)
+        self.services.set_workshop_language(language)
     }
 
     pub(crate) fn new() -> Result<Self, gmpublished_backend::BackendInitError> {
         Self::with_backend_event_sink(install_backend_event_sink_by_default())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn apply_appdata_snapshot_for_test(
-        &self,
-        snapshot: gmpublished_backend::AppDataSnapshot,
-    ) -> (Settings, AppPaths) {
-        self.services.config().apply_appdata_snapshot(snapshot)
     }
 
     fn with_backend_event_sink(
@@ -67,7 +64,7 @@ impl BackendContext {
         let backend_event_sink = install_backend_event_sink
             .then(|| BackendEventSinkRegistration::new(backend_event_sender));
         let services = Arc::new(services(backend_event_sink)?);
-        let runtime = Arc::new(AppWorkerRuntime::new(services.execution_resources()));
+        let runtime = services.execution_resources();
         let (tasks, receiver) = Tasks::channel();
         let task_events = TaskEventStreamFactory::new(receiver);
         let backend_events = BackendEventStreamFactory::new(backend_event_receiver);
@@ -92,16 +89,13 @@ impl BackendContext {
         name: impl Into<Arc<str>>,
         job: impl FnOnce(&BackendServices) -> T + Send + 'static,
     ) -> Task<Result<T, RunBlockingError>> {
-        self.run_worker_pool(name, job, AppWorkerRuntime::spawn_blocking_job)
+        self.run_worker_pool(
+            name,
+            job,
+            gmpublished_backend::ExecutionResources::spawn_blocking,
+        )
     }
 
-    /// [`Self::run_blocking`] for a job that is itself fallible.
-    ///
-    /// Flattens at the boundary instead of at each call site. A job that fails
-    /// and a job that never got scheduled both arrive as one `UiError`, which
-    /// is the point: the nested `Result` made "discard the scheduling error"
-    /// the shortest thing to write, and several call sites took it — turning a
-    /// failure to schedule into a result indistinguishable from success.
     pub(crate) fn run_blocking_ui<T: Send + 'static>(
         &self,
         name: impl Into<Arc<str>>,
@@ -118,7 +112,11 @@ impl BackendContext {
         name: impl Into<Arc<str>>,
         job: impl FnOnce(&BackendServices) -> T + Send + 'static,
     ) -> Task<Result<T, RunBlockingError>> {
-        self.run_worker_pool(name, job, AppWorkerRuntime::spawn_media_job)
+        self.run_worker_pool(
+            name,
+            job,
+            gmpublished_backend::ExecutionResources::spawn_network,
+        )
     }
 
     fn run_worker_pool<T: Send + 'static>(
@@ -131,7 +129,7 @@ impl BackendContext {
         let (sender, receiver) = oneshot::channel();
 
         match spawn(
-            self.runtime.as_ref(),
+            &self.runtime,
             name.into(),
             Box::new(move || {
                 let _send_result = sender.send(job(&services));
@@ -142,7 +140,7 @@ impl BackendContext {
                     async move { receiver.await.map_err(|_| RunBlockingError::WorkerDropped) },
                 )
             }
-            Err(error) => Task::done(Err(RunBlockingError::Schedule(error))),
+            Err(error) => Task::done(Err(RunBlockingError::Schedule(error.into()))),
         }
     }
 
@@ -152,7 +150,9 @@ impl BackendContext {
         job: impl FnOnce(Arc<BackendServices>) + Send + 'static,
     ) -> Result<(), ScheduleError> {
         let services = Arc::clone(&self.services);
-        self.runtime.spawn_blocking(name, move || job(services))
+        self.runtime
+            .spawn_blocking(name, move || job(services))
+            .map_err(Into::into)
     }
 
     pub(crate) fn open_native_target_detached(
@@ -168,16 +168,15 @@ impl BackendContext {
     }
 
     pub(crate) fn sounds_enabled(&self) -> bool {
-        self.services.config().sounds_enabled()
+        self.services.sounds_enabled()
     }
 
     pub(crate) fn settings_and_paths_snapshot(&self) -> (Settings, AppPaths) {
-        self.services.config().settings_and_paths_snapshot()
+        self.services.settings_and_paths_snapshot()
     }
 
-    /// The configured Garry's Mod path paired with the one that resolved.
     pub(crate) fn game_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
-        self.services.config().game_paths()
+        self.services.game_paths()
     }
 
     pub(crate) fn begin_transaction(&self) -> gmpublished_backend::Transaction {
@@ -192,34 +191,29 @@ impl BackendContext {
     #[cfg(test)]
     pub(crate) fn quick_addon_search_for_test(
         &self,
-        query: String,
+        query: &str,
     ) -> gmpublished_backend::QuickSearchResult {
         self.services.quick_addon_search_for_test(query)
     }
 
-    /// Republishes the installed-addon and installed-file search corpora.
     pub(crate) fn sync_installed_addon_search(
         &self,
         addons: Vec<gmpublished_backend::SearchItem>,
         files: Vec<gmpublished_backend::SearchItem>,
     ) {
-        self.services.search().sync_installed(addons, files);
+        self.services.sync_installed_search(addons, files);
     }
 
-    /// Extracts every entry of an opened preview archive.
     pub(crate) fn extract_preview_archive(
         &self,
         archive: &super::super::gma::PreviewArchive,
         destination: super::super::gma::ExtractDestination,
-        options: &super::super::gma::PreviewExtractOptions,
         transaction: &gmpublished_backend::Transaction,
     ) -> Result<PathBuf, super::super::gma::GmaError> {
         self.services
-            .archive()
-            .extract_preview_archive(archive, destination, options, transaction)
+            .extract_preview_archive(archive, destination, transaction)
     }
 
-    /// Extracts one entry of an opened preview archive to the temp directory.
     pub(crate) fn extract_preview_archive_entry(
         &self,
         archive: &super::super::gma::PreviewArchive,
@@ -227,43 +221,40 @@ impl BackendContext {
         transaction: &gmpublished_backend::Transaction,
     ) -> Result<PathBuf, super::super::gma::GmaError> {
         self.services
-            .archive()
             .extract_preview_archive_entry(archive, entry_path, transaction)
     }
 
-    /// Stops every background service this process owns, for app exit.
-    /// Returns how many in-flight transactions were cancelled.
     pub(crate) fn shutdown(&self) -> usize {
         self.services.shutdown()
     }
 
     pub(crate) fn library_snapshot(&self) -> Option<LibrarySnapshot> {
-        self.services.library().snapshot()
+        self.services.library_snapshot()
     }
 
     pub(crate) fn record_thumbhash(&self, url: &str, hash: &[u8]) {
-        self.services.workshop().record_thumbhash(url, hash);
+        self.services.record_thumbhash(url, hash);
     }
 
     pub(crate) fn thumbhash_seed(&self) -> Vec<(String, Arc<[u8]>)> {
-        self.services.workshop().thumbhash_seed()
+        self.services.thumbhash_seed()
     }
 
     pub(crate) fn begin_library_refresh(
         &self,
         reason: LibraryRefreshReason,
     ) -> Option<Task<Result<LibraryRefresh, RunBlockingError>>> {
-        if !self.services.library().begin_refresh(reason) {
+        if !self.services.begin_library_refresh(reason) {
             return None;
         }
 
         Some(self.run_blocking("library-refresh", move |services| {
-            services.library().refresh(reason)
+            services.refresh_library(reason)
         }))
     }
 
     pub(crate) fn abort_library_refresh(&self) -> Option<LibraryRefreshReason> {
-        self.services.library().abort_refresh()
+        self.services.abort_library_refresh()
     }
 
     #[cfg(test)]
@@ -271,11 +262,11 @@ impl BackendContext {
         &self,
         update: impl FnOnce(&mut Settings),
     ) -> Result<(), SettingsPersistError> {
-        self.services.config().update_settings_snapshot(update)
+        self.services.update_settings_snapshot(update)
     }
 
     pub(crate) fn steam_connected(&self) -> bool {
-        self.services.workshop().connected()
+        self.services.steam_connected()
     }
 
     pub(crate) fn activate_startup_services(
@@ -286,13 +277,13 @@ impl BackendContext {
     > {
         // Hydrate before starting Steam so a live metadata response cannot be
         // overwritten by the persisted snapshot loaded a moment later.
-        self.services.workshop().hydrate_metadata_snapshot();
+        self.services.hydrate_metadata_snapshot();
         self.services.start_background_services()
     }
 
     #[cfg(test)]
     pub(crate) fn connect_steam(&self) -> Result<(), UiError> {
-        self.services.workshop().connect()
+        self.services.connect_steam()
     }
 
     /// Stops in-flight Workshop submission batches from queueing further
@@ -316,19 +307,6 @@ impl BackendContext {
     #[cfg(test)]
     pub(super) fn emit_backend_event_for_test(&self, event: gmpublished_backend::BackendEvent) {
         self.services.emit_backend_event_for_test(event);
-    }
-
-    #[cfg(test)]
-    pub(super) fn extract_gma_for_test(
-        &self,
-        view: &gmpublished_backend::GmaView,
-        gma: &gmpublished_backend::GmaFile,
-        destination: super::super::gma::ExtractDestination,
-        options: gmpublished_backend::ExtractOptions,
-        transaction: &gmpublished_backend::Transaction,
-    ) -> Result<PathBuf, super::super::gma::GmaError> {
-        self.services
-            .extract_gma_for_test(view, gma, destination, options, transaction)
     }
 
     pub(crate) fn create_task(&self, kind: TaskKind, status: TransactionStatus) -> TaskHandle {
@@ -444,10 +422,7 @@ impl fmt::Debug for BackendContext {
     }
 }
 
-/// Last-resort `AppPaths` for when nothing better has resolved yet — the
-/// backend before it reads settings, and the pickers rendering before a
-/// backend exists. The directories land under one temp subdirectory so a
-/// fallback run's scratch space is removable in one go.
+/// Keep fallback scratch files under one temp subdirectory for later cleanup.
 pub fn fallback_paths(settings: &Settings) -> AppPaths {
     let temp = std::env::temp_dir().join("gmpublished");
     AppPaths::resolve_with_defaults(

@@ -18,7 +18,6 @@ pub(super) enum DoorTarget {
     Open,
 }
 
-/// Where a door is in its open/close cycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) enum DoorMotion {
     #[default]
@@ -36,7 +35,6 @@ pub(super) enum DoorMotion {
 }
 
 impl DoorMotion {
-    /// Whether the door still needs frames: moving, or counting down to close.
     pub(super) const fn needs_tick(self) -> bool {
         matches!(self, Self::Moving | Self::HoldingOpen { .. })
     }
@@ -58,8 +56,6 @@ pub(super) struct DoorRenderPose {
     pub(super) swing: DoorSwing,
 }
 
-/// Which way a door actually swings, once [`MapDoorOpenDirection::Both`] has
-/// been resolved against the side the player opened it from.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum DoorSwing {
     #[default]
@@ -417,7 +413,6 @@ impl FlyCamera {
                     };
                     continue;
                 }
-                // The hold elapsed: close on its own, exactly as a toggle would.
                 runtime.motion = DoorMotion::Moving;
                 runtime.target = DoorTarget::Closed;
                 if let Some(door) = scene.doors.get(index) {
@@ -647,7 +642,6 @@ mod tests {
             local_bounds_max: Vec3::new(8.0, 16.0, 32.0),
             visibility: MapVisibilityBucket::Always,
             initial_progress: 0.0,
-            // Stays open: the auto-close tests opt in explicitly.
             auto_close_after: None,
             motion: MapDoorMotion::Linear {
                 direction: Vec3::new(1.0, 0.0, 0.0),
@@ -749,7 +743,6 @@ mod tests {
             "the hold needs frames or its timer never advances"
         );
 
-        // Part-way through the hold nothing has moved yet.
         let _ = camera.integrate_doors(&scene, 1, 0.3);
         assert_eq!(camera.doors[0].progress, 1.0);
 

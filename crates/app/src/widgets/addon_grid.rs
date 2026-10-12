@@ -14,11 +14,8 @@ use crate::widgets::grid_rows::CardId;
 pub const DEFAULT_CARD_WIDTH: f32 = 200.0;
 pub const MIN_CARD_WIDTH: f32 = 120.0;
 const DEFAULT_CARD_GAP: f32 = 16.0;
-/// Rows rendered beyond each edge of the viewport. A scroll event reaches the
-/// visible-range reconcile one frame after Iced paints the new offset, so
-/// edge rows would otherwise pop in a frame late; overscan keeps them already
-/// painted. Render-only: `visible_rows` (demands, metadata windows) is not
-/// widened.
+/// Paint beyond the viewport because scroll reconciliation arrives a frame
+/// after Iced draws. This does not widen thumbnail or metadata demand.
 const RENDER_OVERSCAN_ROWS: usize = 1;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,10 +33,8 @@ pub struct State {
     has_more_pages: bool,
     next_page_requested: bool,
     card_heights: Vec<f32>,
-    /// Measurement cache per title string. Titles are the only per-item
-    /// input to card height, so re-layouts (metadata patches, thumbnail
-    /// rebuilds, width changes) only shape titles whose answer is genuinely
-    /// unknown; see [`TitleMeasure`] for what survives a width change.
+    /// Cache height by title and width so thumbnail and metadata updates do not reshape
+    /// unchanged text.
     title_measures: HashMap<String, TitleMeasure>,
     card_width: f32,
     card_gap: f32,
@@ -88,16 +83,8 @@ impl State {
         self.reconcile_layout_at(now)
     }
 
-    /// Replaces items in place by id and re-reconciles the layout. The
-    /// hydration path for metadata patches: a patch names a handful of rows,
-    /// while `set_items` re-allocates every card in the grid. Motion/hover
-    /// state carries over per item exactly as `set_items` preserves it.
-    /// `index_hint` makes the common case O(1); like
-    /// `update_item_thumbnail`, a stale hint falls back to an id scan, so
-    /// the item is keyed by identity and a hint that drifts (e.g. a future
-    /// lead card offsetting the grid) degrades to a slower lookup instead of
-    /// a silently dropped patch. An id that is no longer in the grid at all
-    /// is skipped — that item was removed.
+    /// Patches items by id while preserving motion and hover state.
+    /// Uses `index_hint` when valid, otherwise scans by id; removed ids are skipped.
     #[must_use = "grid follow-ups must be relayed to the owner or explicitly bound and justified"]
     pub(crate) fn patch_items(&mut self, updates: Vec<(usize, Item)>) -> Vec<Message> {
         self.patch_items_at(updates, Instant::now())
@@ -121,12 +108,7 @@ impl State {
             return Vec::new();
         }
 
-        // Scroll anchoring: a patched title can re-wrap and change its row's
-        // height. When that happens to a row above the viewport the content
-        // would shift under the (pixel-anchored) scroll offset — visible as
-        // the grid jumping mid-hydration. Item indices are stable across a
-        // patch, so the first visible row is a valid anchor: shift the
-        // offset by however far that row moved.
+        // Keep the first visible row stationary when patched titles change heights above it.
         let anchor_row = self.visible_rows.start;
         let anchor_top = self.layout.top_offset(anchor_row);
         self.recompute_layout_cache();
@@ -141,11 +123,6 @@ impl State {
         messages
     }
 
-    /// Swaps just one item's thumbnail in place. Animation frame advances go
-    /// through here instead of `set_items`: a thumbnail never changes card
-    /// layout (the preview box is fixed), so no rebuild or re-layout runs.
-    /// `index_hint` (the caller's row-to-item index) makes the common case
-    /// O(1); an id mismatch falls back to a scan so a stale hint stays safe.
     pub(crate) fn update_item_thumbnail(
         &mut self,
         index_hint: usize,
@@ -213,13 +190,8 @@ impl State {
         self.reconcile_layout_at(now)
     }
 
-    /// Whether the grid has reached the point of needing another page, and
-    /// claims the request if so.
-    ///
-    /// A pull rather than a message: the decision latches
-    /// `next_page_requested`, so a caller that could not act on a returned
-    /// message would leave the latch suppressing every later request. Re-armed
-    /// by [`Self::set_page_status`] once the fetch is no longer in flight.
+    /// Only claim this when the caller can fetch a page. The request stays
+    /// latched until [`Self::set_page_status`] clears it.
     #[must_use]
     pub(crate) fn take_next_page_request(&mut self) -> bool {
         let row_count = self.layout.rows.len();
@@ -320,11 +292,6 @@ impl State {
     fn recompute_layout_cache(&mut self) {
         let tokens = theme::invariant();
         let card_width = self.resolved_card_width(tokens);
-        // Theme switches do not invalidate this cache: addon-card geometry
-        // uses theme-invariant spacing, dimensions, and typography tokens.
-        // Width changes do not clear it either — entries carry their own
-        // width validity — so the map is bounded here instead, against a
-        // long session churning through title sets.
         if !self.items.is_empty() && self.title_measures.len() > self.items.len() * 2 + 64 {
             let current = self
                 .items
@@ -388,7 +355,7 @@ impl State {
         let columns = self.columns.max(1);
         let x = finite_nonnegative(cursor.x);
         let y = finite_nonnegative(cursor.y) + finite_nonnegative(self.scroll_offset);
-        // Rows are contiguous and sorted; bisect — this runs per mouse move.
+        // Rows are sorted; bisect instead of scanning on every mouse move.
         let row_index = self.layout.rows.partition_point(|row| row.bottom() <= y);
         let row = self.layout.rows.get(row_index)?;
         if row.top() > y {
@@ -439,15 +406,9 @@ fn preserve_hovered_items(previous: &[Item], next: &mut [Item]) {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// What the grid asks of its owner.
-///
-/// The mutators above return these rather than applying them, because two of
-/// them cannot be applied from in here: [`Self::VisibleRangeChanged`] drives
-/// thumbnail demands and metadata windows the grid knows nothing about, and
-/// [`Self::ScrollAnchored`] has to reach the Iced runtime as a *relative*
-/// scroll. Dropping either is therefore a claim that nothing downstream cares
-/// — true only when the grid is empty, or when the caller re-derives both from
-/// state immediately afterwards. Bind the result to a named `_` and say which.
+/// Follow-up events for the owner to apply. Visible ranges drive demands and
+/// scroll anchors require a relative runtime scroll. Discard only when the
+/// grid is empty or the caller recomputes the affected state.
 pub enum Message {
     ColumnsChanged(u32),
     Scrolled(u32),
@@ -460,12 +421,8 @@ pub enum Message {
     CursorMoved(Point),
     CursorLeft,
     CardHoverChanged(CardId, bool),
-    /// The grid moved its own scroll offset by this delta to keep the first
-    /// visible row stationary after item heights changed above it. The owner
-    /// must relay it to the runtime as a *relative* `scroll_by` — the
-    /// widget's real offset lives in Iced's scrollable state, and this
-    /// mirror is `u32`-quantized by the `Scrolled` echo, so an absolute
-    /// `scroll_to` would inject up to 0.5px of drift per anchor.
+    /// Relay as relative `scroll_by`. The mirrored offset is rounded by
+    /// `Scrolled`; an absolute scroll would accumulate drift.
     ScrollAnchored(f32),
 }
 
@@ -515,22 +472,15 @@ pub fn scrollable_id(key: &'static str) -> iced::widget::Id {
     iced::widget::Id::new(key)
 }
 
-/// `key` must be unique per route surface. My Workshop and Installed Addons
-/// render structurally identical trees, so a direct switch between them
-/// reuses this subtree's widget state in place: an unkeyed sensor would
-/// never re-fire `on_show`, leaving the newly shown grid with a stale (or
-/// never-observed) viewport.
+/// Use a unique key per route so Iced fires `on_show` when switching
+/// between otherwise identical grid trees.
 pub fn view<'a>(state: &'a State, tokens: &Tokens, key: &'static str) -> Element<'a, Message> {
     let tokens = *tokens;
     let now = Instant::now();
     let layout = &state.layout;
-    // A Sensor notification is an optimization prerequisite, not a
-    // correctness prerequisite. If Iced misses the initial on_show during a
-    // route-tree swap, render enough rows around the scroll offset to cover
-    // any plausible viewport until a real measurement arrives. Clamping an
-    // empty range to one row here would otherwise paint that row followed
-    // by a full-height blank spacer — while rendering every row would build
-    // a card widget per library entry on the pre-sensor frame.
+    // Iced can miss `on_show` when switching routes. Until it measures the
+    // viewport, draw a window around the saved offset rather than one row
+    // or the entire library.
     let visible = if state.viewport_height > 0.0 {
         state
             .visible_rows
@@ -684,8 +634,6 @@ impl Item {
         self.preferred_height_cached(width, tokens, &mut HashMap::new())
     }
 
-    /// Like `addon_card::preferred_height`, but resolves the title
-    /// measurement through the grid's cache before shaping.
     fn preferred_height_cached(
         &self,
         width: f32,
@@ -718,18 +666,11 @@ fn map_card_message(message: addon_card::Message) -> Message {
     }
 }
 
-/// What the grid knows about one title's measured geometry. Both fields
-/// survive card-width changes: the memo carries the width it was shaped at,
-/// and the watermark exploits monotonicity — wrapping only ever *removes*
-/// line breaks as width grows, so a title that fit one line at some width
-/// fits one line at every width above it. Live window resizes then re-shape
-/// only titles that are genuinely multi-line at the new width, instead of
-/// every title per resize event.
+/// A title that fits one line still fits at any wider width. Keep that
+/// threshold across resizes to avoid shaping it again.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct TitleMeasure {
-    /// Smallest card width observed to lay this title out as one line.
     single_line_at: Option<f32>,
-    /// Exact measurement memo: (card width bits, clamped title height).
     measured: Option<(u32, f32)>,
 }
 
@@ -925,11 +866,6 @@ impl RowModel {
     }
 }
 
-/// Rows to paint while no viewport measurement exists: everything straddling
-/// a window this tall — the tallest display we plausibly run on — starting
-/// at the current scroll offset. Unmeasured usually also means unscrolled,
-/// but a missed on_show does not reset an already-scrolled offset, so the
-/// window follows it rather than assuming the top of the list.
 const FALLBACK_RENDER_HEIGHT: f32 = 4096.0;
 
 fn fallback_rows(rows: &[RowModel], scroll_offset: f32) -> VisibleRowRange {
@@ -960,9 +896,7 @@ fn visible_rows_for_viewport(
 
     let top = finite_nonnegative(scroll_offset);
     let bottom = top + finite_nonnegative(viewport_height);
-    // Rows are contiguous and sorted by construction (each row's top is the
-    // previous row's bottom), so both viewport edges bisect instead of
-    // scanning — this runs on every scroll event.
+    // Rows are sorted and contiguous; bisect both viewport edges on every scroll.
     let start = rows.partition_point(|row| row.bottom() <= top);
     if start == rows.len() {
         // Scrolled past the end (transient while content shrinks, before

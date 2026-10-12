@@ -1,7 +1,3 @@
-//! Audio playback for the file previewer: a rodio mixer device, door-loop
-//! pooling with gain-based eviction, and a per-reference round-robin wave
-//! cursor. Sibling of [`crate::media::sounds`], which plays the UI one-shots.
-
 use std::{collections::HashMap, fmt, io::Cursor, sync::Arc, time::Duration};
 
 use rodio::Source as _;
@@ -47,9 +43,6 @@ struct DoorPlayer {
     gain: f32,
 }
 
-/// A door player eligible for eviction when the pool is full, carrying the
-/// gain it's compared on so the two player kinds don't need co-varying
-/// `Option` slots.
 enum EvictionCandidate {
     Loop(DoorLoopKey, f32),
     OneShot(usize, f32),

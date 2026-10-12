@@ -1,6 +1,3 @@
-//! Ducking: the hull swap, the unduck headroom check, and the eased view
-//! offset that keeps the camera from snapping between eye heights.
-
 use super::super::super::state::MovementMode;
 use super::{DuckViewAnimation, FlyCamera, PLAYER_START_EYE_NUDGE, WALK_DUCK_EYE_HEIGHT, WalkHull};
 use gmpublished_domain::math::{Vec3, simple_spline};

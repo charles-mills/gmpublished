@@ -1,6 +1,3 @@
-//! Shared workshop tag chip: a colored label pill with a trailing point,
-//! used by the GMA preview metadata and the size analyzer tooltip.
-
 use iced::widget::{container, row, svg, text};
 use iced::{Color, Element, Length};
 

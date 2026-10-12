@@ -1,10 +1,3 @@
-//! Versioned JSON snapshots written beside the app's caches.
-//!
-//! Both the Workshop metadata cache and the library header cache persist the
-//! same way: a version-tagged document, discarded wholesale if it is missing,
-//! unreadable, unparseable or from another version, and rewritten through a
-//! tempfile so a crash mid-write cannot truncate the previous one.
-
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -12,14 +5,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-/// A document that records the schema it was written against.
 pub trait Versioned: DeserializeOwned {
-    /// Bumped whenever the shape changes. Older files are discarded rather
-    /// than migrated: a snapshot is a cache, so losing one costs a refetch.
+    /// Bump when the schema changes. Incompatible cache files are discarded.
     const VERSION: u32;
-    /// What the file on disk claims to be.
     fn version(&self) -> u32;
-    /// Names this snapshot in the log lines below.
     const NOUN: &'static str;
 }
 
@@ -40,10 +29,7 @@ pub enum SnapshotWriteError {
     },
 }
 
-/// Reads a snapshot, or `None` if there is nothing usable at `path`.
-///
-/// Every failure is a miss rather than an error: the caller's fallback is to
-/// rebuild the cache, which is always available and never wrong.
+/// Treat unreadable or incompatible snapshots as cache misses.
 pub fn load<T: Versioned>(path: &Path) -> Option<T> {
     let noun = T::NOUN;
     let contents = match std::fs::read_to_string(path) {
@@ -83,8 +69,7 @@ pub fn load<T: Versioned>(path: &Path) -> Option<T> {
     Some(snapshot)
 }
 
-/// Writes a snapshot through a tempfile in the same directory, so the rename
-/// onto `path` is atomic and a crash cannot leave a half-written cache.
+/// Use a tempfile beside the target so rename is atomic.
 pub fn write<T: Versioned + Serialize>(
     path: &Path,
     snapshot: &T,

@@ -1,6 +1,4 @@
-//! Fixtures shared by the viewer's test modules.
-
-use super::{MapPreview, ModelPreview, RenderScene};
+use super::{MapPreview, RenderScene};
 use crate::media::preview_model::ModelStats;
 use gmpublished_domain::math::Vec3;
 use std::sync::Arc;
@@ -22,14 +20,6 @@ fn empty_render_scene(bounds_min: Vec3, bounds_max: Vec3) -> Arc<RenderScene> {
         bounds_min,
         bounds_max,
     })
-}
-
-pub(super) fn empty_model_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPreview {
-    ModelPreview {
-        scene: empty_render_scene(bounds_min, bounds_max),
-        skin_tables: vec![Vec::new()],
-        bodygroups: Vec::new(),
-    }
 }
 
 pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> MapPreview {

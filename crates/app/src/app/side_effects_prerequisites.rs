@@ -3,11 +3,8 @@ use std::path::PathBuf;
 
 use super::{App, LibraryRefreshReason, RootMessage, Task, UiError, prerequisites, steam_session};
 
-/// Opens (or focuses) the Steam client.
 const STEAM_OPEN_URL: &str = "steam://open/main";
-/// Steam's own install page, for a machine with no client at all.
 const STEAM_DOWNLOAD_URL: &str = "https://store.steampowered.com/about/";
-/// Opens the client's install dialog for Garry's Mod.
 const GMOD_INSTALL_URL: &str = "steam://install/4000";
 
 impl App {
@@ -40,9 +37,7 @@ impl App {
         }
     }
 
-    /// Connects now instead of waiting for the next background attempt. The
-    /// session moves to Connecting first so the panel spins the button that
-    /// was pressed rather than replacing itself.
+    /// Enter Connecting before retrying so the panel keeps its content and spins the button.
     fn steam_retry_now_task(&mut self) -> Task<RootMessage> {
         if self.environment.ctx.steam_connected()
             || self.state.features.steam_session.status()
@@ -72,14 +67,8 @@ impl App {
         })
     }
 
-    /// Persists the chosen folder exactly as Settings does, so an invalid
-    /// pick is rejected by the one validator that already knows what a
-    /// Garry's Mod folder looks like.
     fn game_folder_chosen_task(&mut self, path: PathBuf) -> Task<RootMessage> {
         if !gmpublished_backend::validate_gmod(path.clone()) {
-            // Nothing was persisted, so there is nothing to re-evaluate: the
-            // panel stays as it was rather than reporting a second, different
-            // failure for what was really a mis-click.
             return Task::none();
         }
 
@@ -87,12 +76,11 @@ impl App {
         self.environment
             .ctx
             .run_blocking_ui("prerequisites-set-gmod-dir", move |app| {
-                app.config()
-                    .update_settings_snapshot(|settings| {
-                        settings.backend.gmod = Some(path);
-                    })
-                    .map(|()| app.config().paths().gmod_dir)
-                    .ui_err()
+                app.update_settings_snapshot(|settings| {
+                    settings.backend.gmod = Some(path);
+                })
+                .map(|()| app.paths().gmod_dir)
+                .ui_err()
             })
             .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
@@ -104,7 +92,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking_ui("prerequisites-discover-gmod-dir", |app| {
-                Ok(app.config().rediscover_gmod_dir())
+                Ok(app.rediscover_gmod_dir())
             })
             .map(|resolved| {
                 RootMessage::Prerequisites(prerequisites::Message::GameSearchCompleted(resolved))
@@ -115,9 +103,7 @@ impl App {
         &mut self,
         resolved: Result<Option<PathBuf>, UiError>,
     ) -> Task<RootMessage> {
-        // A search that could not run is not a search that found nothing: the
-        // status stays as it was, so the user is not told the folder is
-        // missing when we never looked.
+        // A failed search does not establish that the folder is missing. Keep the previous status.
         let resolved = match resolved {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -138,14 +124,11 @@ impl App {
             return Task::none();
         }
 
-        // A newly resolved folder is a library this session has never scanned.
         Task::done(RootMessage::LibraryRefreshRequested(
             LibraryRefreshReason::SettingsChanged,
         ))
     }
 
-    /// Re-reads the prerequisite facts from whatever settings snapshot just
-    /// landed. Cheap: both halves are already-cached values.
     pub(super) fn sync_game_prerequisite(&mut self) {
         let (configured, resolved) = self.environment.ctx.game_paths();
         self.state
@@ -157,9 +140,7 @@ impl App {
             ));
     }
 
-    /// One-shot probe at startup. Reads the Steam directory layout, so it
-    /// answers with the client closed — which is exactly the case that has to
-    /// tell "not running" apart from "not installed".
+    /// Probe the installation without requiring the Steam client to be running.
     pub(super) fn steam_installed_probe_task(&self) -> Task<RootMessage> {
         self.environment
             .ctx

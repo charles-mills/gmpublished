@@ -1,5 +1,3 @@
-//! Cohesive build phases used by the map-preview orchestrator.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

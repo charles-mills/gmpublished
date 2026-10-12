@@ -2,8 +2,7 @@ use super::{App, RootMessage, Task, search, thumbnail_demand};
 use crate::bridge::library::LibrarySnapshot;
 use crate::generation::Generation;
 
-/// Must equal the grids' demand edge (installed addons, size analyzer, My
-/// Workshop all use 256) so a warm fill lands on the exact keys they read.
+/// Must match the grids' 256px demand so warming fills the keys they read.
 const WARM_THUMBNAIL_MAX_EDGE: u32 = 256;
 
 impl App {
@@ -117,12 +116,7 @@ impl App {
             .map(RootMessage::ThumbnailDemand)
     }
 
-    /// Once per session, after the first library snapshot: resolve every
-    /// library item's cached preview URL off-thread, then trickle the whole
-    /// library into the thumbnail disk cache at the lowest priority. Also the
-    /// point where the disk-cache budget learns the library's size. Items
-    /// without cached metadata (fresh install, Steam offline) simply are not
-    /// warmed this session — the interactive paths fetch them as ever.
+    /// Warm only items with cached metadata. Others are fetched when viewed.
     pub(super) fn warm_library_kick_task(
         &mut self,
         snapshot: &LibrarySnapshot,
@@ -143,21 +137,9 @@ impl App {
         if ids.is_empty() {
             return Task::none();
         }
-        // "Which of these still need warming?" is a question about the disk, so
-        // it is answered here rather than on the main thread.
-        //
-        // `apply_demands` asks the same question per key, and asking it there
-        // meant two things landed inside one `update`: the first call built the
-        // whole disk index (`read_dir` plus one `stat` per cached file), and
-        // every subsequent one formatted a path and probed it. Measured at
-        // 20.5 ms and 5.8 ms respectively for a 20k library — a visible hitch.
-        //
-        // Filtering here removes both, and shrinks what is left: a warmed cache
-        // resolves to almost no demands, so the main thread stops building
-        // ~20k index entries it would immediately have discarded. The skip in
-        // `apply_demands` stays as the guard for the window between this check
-        // and the set being applied, and is now cheap because this primed the
-        // index.
+        // Prime and filter the disk index off-thread: its first access scans the
+        // cache directory. `apply_demands` checks again for sources banked between
+        // this filter and demand application.
         let disk_cache = self.environment.thumbnails.disk_cache_handle();
         self.environment
             .ctx
@@ -165,7 +147,7 @@ impl App {
                 if let Some(cache) = &disk_cache {
                     cache.prime_index();
                 }
-                let (cached, _stale) = app.workshop().resolve_metadata(&ids);
+                let (cached, _stale) = app.resolve_metadata(&ids);
                 cached
                     .into_iter()
                     .filter_map(|metadata| {

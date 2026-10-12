@@ -100,7 +100,6 @@ fn load_anyway_reloads_the_current_entry_without_size_gates() {
     assert!(load.bypass_size_limits);
     assert_eq!(load.request_id, Generation::from_raw(2));
 
-    // Without a current request there is nothing to re-load.
     let mut state = State::default();
     assert!(update(&mut state, Message::LoadAnywayRequested).is_empty());
 }

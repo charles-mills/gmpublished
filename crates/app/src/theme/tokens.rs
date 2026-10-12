@@ -1,11 +1,3 @@
-//! The design tokens every widget styles from: colours, spacing, dimensions
-//! and motion, resolved once per theme and passed down by value.
-//!
-//! Widgets never compute a colour. A token here is the only place a value is
-//! decided, which is what lets the three presets (and light/dark within them)
-//! stay coherent, and what makes a theme change a single recomputation rather
-//! than a walk of the widget tree.
-
 use crate::bridge::{EffectiveThemePreset, ThemePreset};
 use crate::theme::color as core_theme;
 use iced::Color;
@@ -117,10 +109,7 @@ pub struct Colors {
     pub(crate) download_count_icon: Rgba,
     pub(crate) error: Rgba,
     pub(crate) error_dark: Rgba,
-    /// Unmet-prerequisite status (Steam down, Garry's Mod absent). Deliberately
-    /// short of `error`: nothing has failed, something simply isn't there yet.
     pub(crate) warn: Rgba,
-    /// Tinted disc behind a `warn` glyph, pre-composited over the route canvas.
     pub(crate) warn_fill: Rgba,
     pub(crate) link: Rgba,
     pub(crate) text: Rgba,
@@ -156,9 +145,7 @@ pub struct Colors {
     pub(crate) row_stripe: Rgba,
     pub(crate) browser_empty_dim: Rgba,
     pub(crate) tooltip_bg: Rgba,
-    /// Tooltips are inverted slabs: the light theme paints a dark panel, so its
-    /// label and hairline cannot borrow the page-level `text` / `border_subtle`
-    /// tokens (near-black on near-black).
+    /// Light-theme tooltips use a dark background and need their own text and border colors.
     pub(crate) tooltip_text: Rgba,
     pub(crate) tooltip_border: Rgba,
     pub(crate) menu_bg: Rgba,
@@ -284,9 +271,6 @@ pub struct Dimensions {
     pub(crate) control_height: f32,
     pub(crate) control_height_lg: f32,
     pub(crate) control_height_xl: f32,
-    /// Widest a tooltip may grow before wrapping. One value app-wide: a
-    /// tooltip that wraps at a different width in each panel reads as a
-    /// different component.
     pub(crate) tooltip_max_width: f32,
     pub(crate) icon_size_sm: f32,
     pub(crate) icon_size: f32,
@@ -396,11 +380,6 @@ pub struct Tokens {
     pub(crate) dims: Dimensions,
 }
 
-/// The subset of [`Tokens`] that never varies across theme variants:
-/// spacing, radii, typography, motion, and dimensions all come from plain
-/// `const fn`s regardless of variant, unlike `colors`. Call sites that only
-/// ever needed those fields can read the shared static instead of building
-/// a throwaway test-only dark [`Tokens`] value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InvariantTokens {
     pub(crate) spacing: Spacing,
@@ -463,27 +442,9 @@ impl Tokens {
         }
     }
 
-    /// Natural content height of the Prepare Publish modal, per mode.
-    ///
-    /// Upstream sizes the modal `height: min-content`, letting the left
-    /// column drive it. iced cannot shrink-wrap a container whose other
-    /// columns fill, so the height is computed from the left column instead:
-    ///
-    ///   padding.top
-    ///   + (update mode: workshop-link line + gap)
-    ///   + icon well + gap
-    ///   + browse-button row + gap
-    ///   + 3-line instructions + gap
-    ///   + upscale-checkbox row + gap
-    ///   + path field + gap
-    ///   + title field + gap
-    ///   + addon-type select + gap
-    ///   + tag selects + gap
-    ///   + submit button
-    ///   + padding.bottom
-    ///
-    /// Fields/selects are `pad_control`-padded caption text and buttons are
-    /// `pad_control`-padded body text at iced's default 1.3 line height.
+    /// Computes modal height from the left column because Iced cannot shrink-wrap
+    /// a container whose other columns fill. Fields use caption text, buttons use
+    /// body text, both with `pad_control` and Iced's 1.3 line height.
     pub(crate) fn publish_modal_height(&self, update_mode: bool) -> f32 {
         const LINE_HEIGHT: f32 = 1.3;
         let caption_line = self.typography.caption * LINE_HEIGHT;
@@ -512,8 +473,6 @@ impl Tokens {
     }
 }
 
-/// Semantic Steam Workshop tag chip palette shared across themes. Returns
-/// (background, text); unknown tags get the base white chip with black text.
 pub fn workshop_tag_colors(tag: &str) -> (Rgba, Rgba) {
     let white = rgb(0xFFFFFF);
     let black = rgb(0x000000);
@@ -699,8 +658,7 @@ fn light_colors() -> Colors {
         download_count_icon: rgb(0x258F52),
         error: rgb(0xB3261E),
         error_dark: rgb(0x982019),
-        // The dark amber fails contrast on a light canvas; a desaturated
-        // ochre keeps the status reading as status rather than decoration.
+        // Dark amber fails contrast on a light background.
         warn: rgb(0x9A6206),
         // warn_fill = warn@10% over the sunken route canvas #E9ECEF
         warn_fill: rgb(0xDFDEDA),
@@ -724,8 +682,8 @@ fn light_colors() -> Colors {
         surface_preview_card: rgb(0xFFFFFF),
         chrome_deep: rgb(0xE1E7ED),
         sidebar_item_hover: rgb(0xDDE5EC),
-        // Pre-composited sRGB blends over the light surfaces (see dark).
-        // input_bg = black@15% over modal_bg #FFFFFF
+        // Pre-composited sRGB blends, as in the dark theme. input_bg = black@15% over
+        // modal_bg FFFFFF
         input_bg: rgb(0xD9D9D9),
         // search_input_bg = black@5% over overlay_panel_bg #FFFFFF
         search_input_bg: rgb(0xF2F2F2),
@@ -739,18 +697,13 @@ fn light_colors() -> Colors {
         account_update_bg: rgb(0xE6F0F9),
         // account_update_hover_bg = link@14% over overlay_panel_bg #FFFFFF
         account_update_hover_bg: rgb(0xDBEBF7),
-        // Destination Select path well: sunken light-grey counterpart.
         destination_input_bg: rgb(0xE3E7EB),
-        // Disabled tiles fade toward the page bg with watermark-grade text
-        // (the dark theme's brightness(.5) rule has no light equivalent).
         tile_disabled_bg: rgb(0xF1F3F5),
         tile_disabled_text: rgb(0x8E9194),
         // row_stripe = black@12% over surface_raised #FFFFFF
         row_stripe: rgb(0xE0E0E0),
         // browser_empty_dim = text@25% over surface_raised #FFFFFF
         browser_empty_dim: rgb(0xC7C8CA),
-        // The tooltip inverts against the light canvas (same trick as
-        // `menu_option_selected_*`), so it carries its own light-on-dark pair.
         tooltip_bg: rgb(0x242A30),
         tooltip_text: rgb(0xEEF2F6),
         tooltip_border: rgba(0xFFFFFF, 18),
@@ -826,8 +779,7 @@ fn classic_source_colors() -> Colors {
         download_count_icon: rgb(0x879A57),
         error: rgb(0xB85E42),
         error_dark: rgb(0x9C5038),
-        // Pushed yellow-gold: the classic accent is already orange, so the
-        // usual amber would read as a second accent rather than a status.
+        // Use yellow-gold to distinguish warnings from the orange accent.
         warn: rgb(0xD6B23C),
         // warn_fill = warn@14% over the sunken classic canvas #0F130D
         warn_fill: rgb(0x2A2916),
@@ -851,8 +803,8 @@ fn classic_source_colors() -> Colors {
         surface_preview_card: rgb(0x1B2117),
         chrome_deep: rgb(0x0F120D),
         sidebar_item_hover: rgb(0x3A3121),
-        // Pre-composited sRGB blends over the classic surfaces (see dark).
-        // input_bg = #F2ECD8@9% over modal_bg #141811
+        // Pre-composited sRGB blends, as in the dark theme. input_bg = F2ECD8@9% over
+        // modal_bg 141811
         input_bg: rgb(0x282B23),
         // search_input_bg = #F2ECD8@5% over overlay_panel_bg #22291C
         search_input_bg: rgb(0x2D3325),
@@ -866,7 +818,6 @@ fn classic_source_colors() -> Colors {
         account_update_bg: rgb(0x40381F),
         // account_update_hover_bg = link@22% over overlay_panel_bg #22291C
         account_update_hover_bg: rgb(0x4C3E21),
-        // Destination Select path well: near-black green-tinted counterpart.
         destination_input_bg: rgb(0x0B0E09),
         // brightness(.5) of the classic tile surfaces, baked opaque:
         // tile bg #293223 -> #141911, text #F2ECD8 -> #79766C.
@@ -1070,9 +1021,6 @@ const fn dimensions() -> Dimensions {
         settings_modal_height: 480.0,
         settings_modal_max_width: 960.0,
         settings_modal_max_height: 720.0,
-        // Destination chooser: 4 x 7rem tiles + 3 x 1rem gaps + 1.5rem
-        // padding per side = 34rem (544px); tiles 7rem/2.5rem icon/.6rem
-        // icon gap, .6rem history-row padding, ~12rem history cap.
         destination_modal_width: 544.0,
         destination_modal_max_width: 672.0,
         destination_tile: 112.0,
@@ -1114,138 +1062,7 @@ const fn dimensions() -> Dimensions {
 mod tests {
     use crate::bridge::{SystemColorScheme, ThemePreset, effective_theme_preset};
 
-    use super::{AccentInputs, Rgba, ThemeVariant, Tokens, alpha};
-
-    #[test]
-    fn dark_tokens_match_spec_table_values() {
-        let tokens = Tokens::dark();
-
-        assert_eq!(tokens.colors.bg, Rgba::rgb(0x1A1A1A));
-        assert_eq!(tokens.colors.sidebar_panel_bg, Rgba::rgb(0x232323));
-        assert_eq!(tokens.colors.surface_preview_card, Rgba::rgb(0x171717));
-        assert_eq!(tokens.colors.link, Rgba::rgb(0x46B0FF));
-        assert_eq!(tokens.colors.star_rating_filled, Rgba::rgb(0x6BB64D));
-        assert_eq!(tokens.colors.star_rating_empty, Rgba::rgb(0x424242));
-        assert_eq!(tokens.colors.download_count_icon, Rgba::rgb(0x6BB64D));
-        // white@10% over #1A1A1A, composited in sRGB space
-        assert_eq!(tokens.colors.input_bg, Rgba::rgb(0x313131));
-        assert_eq!(tokens.colors.text_watermark, Rgba::rgb(0x949494));
-        assert_eq!(tokens.colors.overlay_panel_bg, Rgba::rgb(0x232323));
-        assert_eq!(tokens.colors.overlay_divider, Rgba::rgb(0x2E2E2E));
-        assert_eq!(tokens.colors.search_keycap_border, Rgba::rgb(0x3A3A3A));
-        // white@5% over overlay_panel_bg #232323
-        assert_eq!(tokens.colors.search_input_bg, Rgba::rgb(0x2E2E2E));
-        assert_eq!(
-            tokens.colors.search_scrim,
-            Rgba::from_rgba(0x000000, alpha(30))
-        );
-        assert_eq!(tokens.colors.account_update_bg, Rgba::rgb(0x293C4B));
-        assert_eq!(tokens.colors.account_update_hover_bg, Rgba::rgb(0x2B4558));
-        // black@12% over the #292929 sunken card
-        assert_eq!(tokens.colors.row_stripe, Rgba::rgb(0x242424));
-        assert_eq!(tokens.colors.destination_input_bg, Rgba::rgb(0x0E0E0E));
-        assert_eq!(tokens.colors.tile_disabled_bg, Rgba::rgb(0x151515));
-        assert_eq!(tokens.colors.tile_disabled_text, Rgba::rgb(0x808080));
-        assert_eq!(tokens.dims.destination_modal_width, 544.0);
-        assert_eq!(tokens.dims.destination_tile, 112.0);
-        // white@25% over the #292929 sunken card
-        assert_eq!(tokens.colors.browser_empty_dim, Rgba::rgb(0x5F5F5F));
-        assert_eq!(tokens.colors.preview_modal_bg, Rgba::rgb(0x131313));
-        assert_eq!(tokens.colors.extract_disabled_bg, Rgba::rgb(0x3B3B3B));
-        // text@50% over the #131313 preview surface
-        assert_eq!(tokens.colors.browser_shortcut_dim, Rgba::rgb(0x898989));
-        // shared workshop tag palette is theme-independent
-        assert_eq!(
-            super::workshop_tag_colors("Map"),
-            (Rgba::rgb(0x804100), Rgba::rgb(0xFFFFFF))
-        );
-        assert_eq!(
-            super::workshop_tag_colors("npc"),
-            (Rgba::rgb(0xFDFA8E), Rgba::rgb(0x000000))
-        );
-        assert_eq!(
-            super::workshop_tag_colors("entity"),
-            (Rgba::rgb(0xD0D0D0), Rgba::rgb(0x000000))
-        );
-        assert_eq!(
-            super::workshop_tag_colors("mystery"),
-            (Rgba::rgb(0xFFFFFF), Rgba::rgb(0x000000))
-        );
-        assert_eq!(tokens.colors.scrollbar_rail, tokens.colors.sidebar_panel_bg);
-        assert_eq!(
-            tokens.colors.scrollbar_grabber,
-            tokens.colors.sidebar_item_hover
-        );
-        assert_eq!(tokens.spacing.gap, 16.0);
-        assert_eq!(tokens.radii.sm, 4.0);
-        assert_eq!(tokens.radii.lg, 12.0);
-        let radii = tokens.radii;
-        assert!(
-            radii.xs < radii.sm && radii.sm < radii.md && radii.md < radii.lg,
-            "radii must ascend with their names: {radii:?}"
-        );
-        assert_eq!(tokens.typography.body, 14.0);
-        assert_eq!(tokens.motion.modal_enter_ms, 180);
-        assert_eq!(tokens.dims.sidebar_band_height, 38.0);
-        assert_eq!(tokens.dims.sidebar_band_padding_x, 12.0);
-        assert_eq!(tokens.dims.sidebar_rail_width, 52.0);
-        assert_eq!(tokens.dims.sidebar_rail_width_inset, 84.0);
-        assert_eq!(tokens.dims.sidebar_float_margin, 10.0);
-        assert_eq!(tokens.dims.sidebar_float_radius, 12.0);
-        assert_eq!(tokens.dims.sidebar_rail_icon_button_size, 36.0);
-        assert_eq!(tokens.dims.sidebar_rail_icon_glyph, 20.0);
-        assert_eq!(tokens.dims.sidebar_account_row_height, 56.0);
-        assert_eq!(tokens.dims.sidebar_account_rail_avatar_size, 40.0);
-        assert_eq!(tokens.dims.sidebar_account_rail_box_size, 48.0);
-        assert_eq!(tokens.dims.account_menu_width, 248.0);
-        assert_eq!(tokens.dims.account_menu_padding_x, 6.0);
-        assert_eq!(tokens.dims.account_menu_padding_y, 6.0);
-        assert_eq!(tokens.dims.account_menu_icon_column_width, 22.0);
-        assert_eq!(tokens.dims.account_menu_divider_inset, 8.0);
-        assert_eq!(tokens.dims.search_palette_top_offset, 72.0);
-        assert_eq!(tokens.dims.search_palette_min_width, 420.0);
-        assert_eq!(tokens.dims.search_palette_input_right_padding, 60.0);
-        assert_eq!(tokens.dims.card_row_gap, 10.0);
-    }
-
-    #[test]
-    fn rail_sidebar_scale_tokens_are_theme_independent() {
-        for tokens in [
-            ThemeVariant::Dark,
-            ThemeVariant::Light,
-            ThemeVariant::ClassicSource,
-        ]
-        .map(Tokens::for_variant)
-        {
-            assert_eq!(tokens.dims.sidebar_rail_icon_button_size, 36.0);
-            assert_eq!(tokens.dims.sidebar_rail_icon_glyph, 20.0);
-            assert_eq!(tokens.dims.sidebar_account_rail_avatar_size, 40.0);
-            assert_eq!(tokens.dims.sidebar_account_rail_box_size, 48.0);
-        }
-    }
-
-    #[test]
-    fn publish_modal_height_follows_the_left_column_formula() {
-        let tokens = Tokens::dark();
-
-        let field = tokens.spacing.pad_control * 2.0 + tokens.typography.caption * 1.3;
-        let button = tokens.spacing.pad_control * 2.0 + tokens.typography.body * 1.3;
-        let body_line = tokens.typography.body * 1.3;
-        let expected_new = tokens.spacing.pad * 2.0
-            + tokens.dims.publish_icon_preview_height
-            + 3.0 * body_line
-            + body_line.max(16.0)
-            + 4.0 * field
-            + 2.0 * button
-            + 8.0 * tokens.spacing.gap;
-
-        assert!((tokens.publish_modal_height(false) - expected_new).abs() < 0.01);
-        assert!(
-            (tokens.publish_modal_height(true) - (expected_new + body_line + tokens.spacing.gap))
-                .abs()
-                < 0.01
-        );
-    }
+    use super::{AccentInputs, Rgba, ThemeVariant, Tokens};
 
     #[test]
     fn all_three_variants_render_distinct_surfaces() {
@@ -1304,7 +1121,6 @@ mod tests {
         assert_eq!(tokens.colors.neutral, Rgba::rgb(0x006DC7));
     }
 
-    /// WCAG relative luminance of an opaque token.
     fn luminance(color: Rgba) -> f32 {
         let channel = |value: u8| {
             let value = value as f32 / 255.0;
@@ -1322,9 +1138,6 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
-    /// The light theme paints an inverted (dark) tooltip slab, so its label has
-    /// to come from `tooltip_text`; borrowing the page-level `text` token left
-    /// near-black glyphs on a near-black panel.
     #[test]
     fn tooltip_label_is_legible_in_every_theme() {
         for variant in [

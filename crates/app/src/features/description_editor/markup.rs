@@ -1,13 +1,7 @@
-//! Pure BBCode edit planning for the toolbar: given an action and the
-//! current selection, produce the text to insert and where the caret lands.
-//! Kept free of widget types so every toolbar behavior is testable as plain
-//! string manipulation; `update` replays a plan through the editor content.
-
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::widgets::bbcode::heading_index;
 
-/// A formatting operation the toolbar or a shortcut can request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolbarAction {
     Bold,
@@ -27,11 +21,7 @@ pub enum ToolbarAction {
     HorizontalRule,
 }
 
-/// The text to paste over the current selection, and how many grapheme
-/// clusters to step the caret back afterwards so it lands where typing
-/// continues naturally (inside the empty tag pair, on a placeholder value,
-/// …). Grapheme clusters, not `char`s: the plan is replayed as cursor
-/// motions, and the editor's cursor moves one cluster at a time.
+/// Caret movement counts grapheme clusters, as the editor does, rather than chars.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct EditPlan {
     pub insert: String,
@@ -92,7 +82,6 @@ pub(super) fn plan(action: ToolbarAction, selection: Option<&str>) -> EditPlan {
         ),
         ToolbarAction::Table => {
             let table = "[table]\n[tr][th][/th][/tr]\n[tr][td][/td][/tr]\n[/table]";
-            // Caret inside the first header cell.
             let after_caret = "[/th][/tr]\n[tr][td][/td][/tr]\n[/table]";
             EditPlan::new(table, after_caret.chars().count())
         }
@@ -120,14 +109,9 @@ fn list_plan(name: &str, selection: Option<&str>) -> EditPlan {
     )
 }
 
-/// What pressing Enter should do given the caret's current line: continue a
-/// `[*]` list with a fresh item, dissolve the marker the user just abandoned,
-/// or fall through to a plain newline.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum EnterBehavior {
-    /// Insert a newline and the next `[*] ` marker.
     ContinueList,
-    /// The line is a bare marker: clear it instead of adding another.
     ClearMarker,
     Plain,
 }
@@ -212,8 +196,6 @@ mod tests {
         assert_eq!(enter_at_end(""), EnterBehavior::Plain);
     }
 
-    /// Splitting a line at or inside its marker must not clone the marker
-    /// onto the new line: `⏎[*] item` would otherwise become `[*] [*] item`.
     #[test]
     fn enter_before_the_item_content_is_a_plain_newline() {
         assert_eq!(enter_behavior("[*] item", 0), EnterBehavior::Plain);
@@ -222,13 +204,10 @@ mod tests {
         assert_eq!(enter_behavior("[*] item", 4), EnterBehavior::ContinueList);
         assert_eq!(enter_behavior("  [*] item", 5), EnterBehavior::Plain);
         assert_eq!(enter_behavior("  [*] item", 6), EnterBehavior::ContinueList);
-        // Splitting an item's content makes two items out of it.
         assert_eq!(enter_behavior("[*] item", 6), EnterBehavior::ContinueList);
         assert_eq!(enter_behavior("[*] ", 0), EnterBehavior::Plain);
     }
 
-    /// `caret_back` counts grapheme clusters because it replays as cursor
-    /// motions: a flag emoji is four `char`s but a single cursor step.
     #[test]
     fn link_caret_counts_selection_graphemes_not_chars() {
         let plan = plan(ToolbarAction::Link, Some("🇬🇧"));

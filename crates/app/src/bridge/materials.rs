@@ -1,13 +1,3 @@
-//! Resolving a Source material reference to pixels the viewer can bind.
-//!
-//! A `.vmt` names a `.vtf`, which may live in the addon being previewed, a
-//! sibling GMA, the game's own VPKs, or nowhere at all — so resolution is a
-//! search across content sources with a defined precedence, and a miss is a
-//! normal outcome that yields a placeholder rather than an error.
-//!
-//! Decoding is budgeted: textures are downscaled to fit a per-preview byte
-//! ceiling, because a map can reference more texture data than the GPU has.
-
 use gmpublished_domain::math::Vec3;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -58,14 +48,10 @@ const PATCH_INCLUDE_LIMIT: usize = 4;
 const MAX_SIBLING_GMA_ARCHIVES: usize = 2048;
 const MAX_LEGACY_BIN_ENTRY_TABLE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LEGACY_BIN_FETCH_BYTES: u64 = 1024 * 1024 * 1024;
-/// Source's fallback water fog tint, in linear space. Shared with the render
-/// pipeline: a material without `$fogcolor` and the shader's own default have
-/// to agree, or water changes colour when a map omits the keyvalue.
+/// Must match the shader's default water fog tint when a material omits $fogcolor.
 pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
 const GMA_MAGIC: &[u8; 4] = b"GMAD";
-/// Stand-in albedo for chrome-style materials: `$envmap` with no
-/// `$basetexture`. The engine renders these as reflective metal, so a flat
-/// mid-gray reads far closer than the missing-material checkerboard.
+/// Use gray for envmaps without a basetexture, matching Source's reflective-metal fallback.
 const ENVMAP_FALLBACK_RGBA: [u8; 4] = [128, 128, 128, 255];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -284,8 +270,6 @@ struct ResolverConfig {
     bc_textures: BcTextures,
 }
 
-/// The content sources and their lazily-built indexes, shared by every
-/// resolver variant derived from the same addon.
 #[derive(Debug)]
 struct ResolverShared {
     addon: Arc<PreviewArchiveSource>,
@@ -299,16 +283,10 @@ struct ResolverShared {
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
 }
 
-/// Whether this resolver may hand back BC-compressed textures.
-///
-/// A single value so the decision has exactly one stated precedence: a
-/// resolver that must decode to RGBA cannot be out-argued by a support probe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BcTextures {
-    /// Ask the GPU once, process-wide, the first time it matters.
     IfGpuSupports,
-    /// This resolver decodes to RGBA regardless — the skybox and PHY paths
-    /// upload through code paths that cannot take a compressed texture.
+    /// Skybox and PHY uploads require RGBA, even when the GPU supports BC textures.
     Never,
     #[cfg(test)]
     Forced(bool),
@@ -366,8 +344,6 @@ struct ResolvedContentBytes {
     bytes: Vec<u8>,
 }
 
-/// Owned mirror of the fields this app reads from a parsed
-/// soundscript (the parse borrows from a transient file buffer).
 #[derive(Debug)]
 struct StoredSoundScript {
     volume: Option<String>,
@@ -388,9 +364,6 @@ impl From<&soundscript::SoundScript<'_>> for StoredSoundScript {
 #[derive(Debug)]
 struct SoundScriptLibrary {
     scripts: HashMap<String, StoredSoundScript>,
-    // Only read by `sound_script_files()`, which is test-only (asserts manifest
-    // discovery found the expected `scripts/game_sounds_*.txt` files). Gating the
-    // field itself keeps release builds honest instead of suppressing dead_code.
     #[cfg(test)]
     script_files: Vec<String>,
 }
@@ -457,10 +430,6 @@ enum DecodedTextureCacheKey {
 }
 
 impl MaterialResolver {
-    /// A variant of this resolver that keeps every index it has already built.
-    ///
-    /// Rebuilding them means up to [`MAX_SIBLING_GMA_ARCHIVES`] GMA opens plus
-    /// every game VPK, and a variant differs only in how it decodes textures.
     fn variant(&self, config: ResolverConfig) -> Self {
         Self {
             config,
@@ -554,9 +523,6 @@ impl MaterialResolver {
         })
     }
 
-    /// Stands in for the GPU probe. `Never` still wins: those resolvers feed
-    /// upload paths that cannot take a compressed texture at all, so no probe
-    /// answer makes one usable.
     #[cfg(test)]
     fn with_bc_texture_support(&self, supported: bool) -> Self {
         self.variant(ResolverConfig {
@@ -607,11 +573,6 @@ impl MaterialResolver {
         self.entry_bytes_from_sources(&ContentPath::new(path)?)
     }
 
-    /// Cache key for a sound reference.
-    ///
-    /// `None` for a reference with nothing in it. Sound scripts, the resolved
-    /// cache and the door-sound cache all key on this, so they have to derive
-    /// it identically or a lookup misses an entry that is present.
     pub(crate) fn sound_reference_key(reference: &str) -> Option<String> {
         let key = reference.trim().to_ascii_lowercase();
         (!key.is_empty()).then_some(key)
@@ -772,9 +733,8 @@ impl MaterialResolver {
         preserve_alpha: bool,
     ) -> Option<Arc<ResolvedTexture>> {
         let texture_path = texture_path(base_texture)?;
-        // The dimension is part of the key, not just the config: variants now
-        // share one cache, so without it a resolver capped at 512 would be
-        // served an uncapped sibling's decode.
+        // Include the size cap in the shared cache key or a bounded resolver can receive
+        // an uncapped decode.
         let max_dimension = self.config.decoded_texture_max_dimension;
         let bc_cache_key = DecodedTextureCacheKey::Bc {
             path: texture_path.clone(),
@@ -855,11 +815,9 @@ impl MaterialResolver {
         Some(texture)
     }
 
-    /// Chrome-style materials name an `$envmap` and no `$basetexture` at all;
-    /// the engine renders them as reflective metal, not as an error. Uses the
-    /// envmap itself when it names a decodable texture, else flat gray. Only
-    /// for a missing `$basetexture` *key* — a named-but-unresolvable base
-    /// texture stays a miss, matching the engine's error checkerboard.
+    /// An envmap without a basetexture is chrome, not a missing material.
+    /// Use the envmap if readable, else gray. A named but missing basetexture
+    /// still gets the error checkerboard.
     fn envmap_fallback_texture(
         &self,
         material: &EffectiveMaterial,
@@ -1043,11 +1001,7 @@ impl MaterialResolver {
         self.find_entry_by_source(std::slice::from_ref(path), |_, bytes| Some(bytes))
     }
 
-    /// Every content source this resolver can read from, in lookup-priority order.
-    /// The sibling-GMA and game-VPK tails are `once_with`-deferred: building
-    /// them means indexing the whole workshop folder / opening every game
-    /// VPK, so it must only happen when an earlier tier misses — for
-    /// self-contained addons it never happens at all.
+    /// Defer sibling GMA and VPK indexing until earlier sources miss.
     fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.config
             .pakfile
@@ -1064,8 +1018,6 @@ impl MaterialResolver {
             )
     }
 
-    /// One tier's answer. A broken tier is logged and skipped: the next may
-    /// have the content, so failure does not stop the search.
     fn tier_bytes(source: &SourceRef<'_>, path: &ContentPath) -> Option<Vec<u8>> {
         match source.entry_bytes(path) {
             Ok(bytes) => bytes,
@@ -1130,11 +1082,6 @@ impl MaterialResolver {
     }
 }
 
-/// Why a content source could not answer a lookup.
-///
-/// Distinct from "not here", which is `Ok(None)`: a permission-denied read, a
-/// truncated VPK and a corrupt GMA payload are not a file the addon does not
-/// ship.
 #[derive(Debug, thiserror::Error)]
 enum SourceError {
     #[error("BSP pakfile: {0}")]
@@ -1149,8 +1096,6 @@ enum SourceError {
     GameVpk(#[from] VpkError),
 }
 
-/// One content source a material/texture/sound lookup can be read from, in
-/// the tier order `sources()` yields them.
 enum SourceRef<'a> {
     Pakfile(&'a PakSource),
     Addon(&'a PreviewArchiveSource),
@@ -1198,7 +1143,7 @@ impl SourceRef<'_> {
             Self::Addon(addon) => addon.for_each_path(visit),
             Self::Loose(loose_dir) => loose_dir.paths().iter().for_each(|path| visit(path)),
             Self::SiblingGma(sibling_gmas) => sibling_gmas.for_each_path(visit),
-            Self::GameVpk(vpk) => vpk.entries().iter().for_each(|entry| visit(&entry.path)),
+            Self::GameVpk(vpk) => vpk.paths().iter().for_each(|path| visit(path)),
         }
     }
 }
@@ -1385,12 +1330,6 @@ pub fn srgb_byte_to_linear(byte: u8) -> f32 {
     }
 }
 
-/// The BSP's embedded pakfile, indexed by entry path.
-///
-/// One shared reader, not a pool. `MapPakFile` owns its bytes outright, so
-/// each pooled reader was a full copy of the pakfile — hundreds of megabytes
-/// on a large map — cloned to serialise reads that `entry_bytes_by_index`
-/// never needed serialised: it takes `&self`.
 #[derive(Debug)]
 struct PakSource {
     pakfile: MapPakFile,
@@ -1443,9 +1382,7 @@ impl LooseSourceDir {
 
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
         let mut candidate = self.root.clone();
-        // `ContentPath` already rejects these, but this is the one tier that
-        // turns a content path into a filesystem path: kept deliberately so
-        // relaxing the constructor could never widen into a traversal read.
+        // Reject traversal here too, before turning a content path into a filesystem path.
         for segment in path.as_str().split('/') {
             if segment.is_empty() || segment == "." || segment == ".." {
                 return Ok(None);

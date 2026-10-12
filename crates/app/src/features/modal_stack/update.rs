@@ -90,9 +90,6 @@ mod tests {
         assert!(state.has_active_modal());
     }
 
-    /// A swapped-out modal never animates closed, so `tick` will never report
-    /// it and its feature would otherwise keep staged temp files and thumbnail
-    /// demands alive behind the modal that replaced it.
     #[test]
     fn base_modals_swap_within_the_base_layer_and_report_the_one_they_displaced() {
         let mut state = State::default();
@@ -112,9 +109,6 @@ mod tests {
         assert!(!state.overlay_active());
     }
 
-    /// The overlay is a separate layer, so raising it over a base modal
-    /// displaces nothing — and re-issuing the open for the modal already on a
-    /// layer reverses its close rather than displacing itself.
     #[test]
     fn only_a_different_modal_on_the_same_layer_counts_as_displaced() {
         let mut state = State::default();
@@ -257,7 +251,6 @@ mod tests {
         assert!(opacity > 0.0 && opacity < 1.0);
         assert_eq!(state.opacity(now + Duration::from_millis(300)), 1.0);
 
-        // A standalone overlay drives its own scrim; the base dim stays off.
         let mut overlay_only = State::default();
         overlay_only.open(ActiveModal::DestinationSelect, now);
         assert_eq!(overlay_only.opacity(now + Duration::from_millis(300)), 0.0);
@@ -284,7 +277,6 @@ mod tests {
         publish.open(ActiveModal::PreparePublish, now);
         assert!(super::listens_for_escape(&publish));
 
-        // The overlay always listens, even over Settings.
         let mut overlay_over_settings = State::default();
         overlay_over_settings.open(ActiveModal::Settings, now);
         overlay_over_settings.open(ActiveModal::DestinationSelect, now);

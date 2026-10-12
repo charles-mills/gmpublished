@@ -1,7 +1,3 @@
-//! Per-preview GPU uploads keyed by content id: vertex, index, sprite,
-//! overlay, and skybox buffers plus material bind groups, and the cache
-//! that keeps an upload alive only while its preview still draws.
-
 use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 
@@ -19,12 +15,9 @@ use super::{
     transform_door_vertices, wgpu,
 };
 
-/// Uploads keyed by preview content id, kept only while their preview still
-/// draws.
 #[derive(Debug, Default)]
 pub struct UploadCache {
     uploads: HashMap<u64, UploadedModel>,
-    /// Content ids drawn since the last [`Self::trim`].
     live: Vec<u64>,
 }
 
@@ -44,8 +37,6 @@ impl UploadCache {
     }
 
     pub fn trim(&mut self) {
-        // Keep only uploads drawn since the last trim; a closed/replaced
-        // preview drops its GPU buffers on the next frame.
         let live = std::mem::take(&mut self.live);
         self.uploads.retain(|id, _| live.contains(id));
     }
@@ -92,19 +83,21 @@ impl UploadCache {
                     slot,
                     slot.texture.as_deref(),
                 );
-                let base2_view = resources.create_slot_texture_view(
-                    device,
-                    queue,
-                    "file_preview.model_viewer.texture2",
-                    slot,
-                    slot.texture2.as_deref().or(slot.texture.as_deref()),
-                );
+                let base2_view = slot.texture2.as_deref().map(|texture| {
+                    resources.create_slot_texture_view(
+                        device,
+                        queue,
+                        "file_preview.model_viewer.texture2",
+                        slot,
+                        Some(texture),
+                    )
+                });
                 resources.create_material(
                     device,
                     queue,
                     MaterialTextureViews {
                         base: &base_view,
-                        base2: &base2_view,
+                        base2: base2_view.as_ref().unwrap_or(&base_view),
                         lightmap: &lightmap_view,
                     },
                     MaterialUploadMode {
@@ -609,8 +602,6 @@ pub fn upload_overlays(
         .collect()
 }
 
-/// The overlay quad as two triangles. Overlays carry no lightmap, vertex
-/// colour, or blend weight, so those lanes take their neutral values.
 pub fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
     [0_usize, 1, 2, 0, 2, 3].map(|index| {
         let vertex = overlay.vertices[index];

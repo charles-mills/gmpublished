@@ -33,7 +33,6 @@ const MAX_LABEL_SCALE: f32 = 3.0;
 /// the one generation that `Generation::next` never issues.
 const ANALYZER_THUMBNAIL_GENERATION: Generation = Generation::INITIAL;
 
-/// State owned by the Size Analyzer route.
 #[derive(Debug)]
 pub struct State {
     route_visible: bool,
@@ -45,9 +44,6 @@ pub struct State {
     last_completed_viewport: Option<RenderViewport>,
     projection_key: Option<LayoutProjectionKey>,
     layout: Option<Arc<TreemapLayout>>,
-    /// Workshop ids of the current layout's leaves, projected once when the
-    /// layout is installed so the demand, retain, and delivery paths never
-    /// re-walk `leaf_rects()`.
     layout_workshop_ids: HashSet<PublishedFileId>,
     /// Snapshot epoch whose missing preview URLs were already handed to a
     /// resolve worker.
@@ -62,7 +58,6 @@ pub struct State {
     labels: Vec<SizeAnalyzerLabelSprite>,
     layers: TreemapLayers,
     hover: Option<HoverProbe>,
-    /// Tag whose big label is omitted while the cursor hovers inside it.
     hidden_tag: Option<String>,
     pending_context_menu: Option<ContextMenuRequest>,
 }
@@ -148,8 +143,6 @@ impl State {
         &self.thumbnails
     }
 
-    /// The tile to paint for a leaf: the real thumbnail if decoded, otherwise
-    /// its ThumbHash placeholder.
     pub(crate) fn tile_for(&self, id: PublishedFileId) -> Option<&ThumbnailTile> {
         self.thumbnails
             .get(&id)
@@ -222,12 +215,8 @@ impl State {
         match result {
             Ok(Some(snapshot)) => {
                 self.snapshot_error = None;
-                // A refresh bumps the epoch on every run, including ones that
-                // rediscover byte-for-byte the same library. Keeping the
-                // existing snapshot (and its epoch) for content-identical
-                // refreshes leaves the projection, thumbnails, and resolved
-                // preview URLs untouched instead of re-projecting and
-                // re-resolving for nothing.
+                // Keep the epoch for identical content so resizing cannot re-arm
+                // failed URL lookups.
                 if self
                     .snapshot
                     .as_ref()
@@ -255,8 +244,6 @@ impl State {
         self.project_current();
     }
 
-    /// Applies the window scale factor; returns true when the bucketed label
-    /// raster scale changed and label bitmaps should re-rasterize.
     pub(crate) fn set_scale_factor(&mut self, scale_factor: f32) -> bool {
         let bucket = bucketed_label_scale(scale_factor);
         if bucket.to_bits() == self.scale_factor.to_bits() {
@@ -267,8 +254,6 @@ impl State {
         true
     }
 
-    /// Reacts to a label-scale bucket change by re-rasterizing label bitmaps
-    /// for the current layout.
     pub(super) fn scale_factor_changed(&mut self) {
         if !self.route_visible {
             return;
@@ -304,10 +289,6 @@ impl State {
         }
     }
 
-    /// Re-derives the hovered cell from a cursor point. `sync_hidden_tag`
-    /// (run once per message, see its doc comment) is what actually
-    /// invalidates the labels layer when the hover changes; this method just
-    /// updates `self.hover`.
     pub(super) fn update_hover_at(&mut self, point: Point) {
         if !self.route_visible || !matches!(self.load_status, LoadStatus::Ready) {
             self.clear_hover();
@@ -420,7 +401,6 @@ impl State {
                 self.mark_thumbnails_dirty()
             }
             DeliveryResult::Placeholder(placeholder) => {
-                // Only fill an empty cell; the real tile, once present, wins.
                 if placeholder.width() == 0
                     || placeholder.height() == 0
                     || self.thumbnails.contains_key(&workshop_id)
@@ -446,10 +426,8 @@ impl State {
         }
     }
 
-    /// Records a thumbnail arrival without clearing the canvas cache yet, so a
-    /// burst of deliveries re-records the thumbnail layer once — on the next
-    /// draw, via [`Self::flush_thumbnail_invalidation`] — instead of once per
-    /// delivery.
+    /// Coalesce thumbnail arrivals until the next draw clears the cache via
+    /// Self::flush_thumbnail_invalidation.
     fn mark_thumbnails_dirty(&self) -> LayerInvalidation {
         self.layers.mark_thumbnails_dirty();
         LayerInvalidation::THUMBNAILS
@@ -485,12 +463,6 @@ impl State {
         })
     }
 
-    /// Re-derives which tag label the hover hides; invalidates the labels
-    /// layer when it changes.
-    ///
-    /// Called once per message so every path that moves or clears hover
-    /// (exit events, resize reflow, route exit) restores the label without
-    /// any polling; same-tag cursor moves compare equal and do nothing.
     pub(super) fn sync_hidden_tag(&mut self) -> LayerInvalidation {
         let next = self.hover.as_ref().map(|hover| hover.tag.clone());
         if next == self.hidden_tag {
@@ -501,19 +473,12 @@ impl State {
         self.invalidate_layers(LayerInvalidation::LABELS)
     }
 
-    /// Routes every invalidation through `TreemapLayers::invalidate`, the
-    /// single place the caches are touched, and echoes the set for callers
-    /// and tests.
     fn invalidate_layers(&self, invalidation: LayerInvalidation) -> LayerInvalidation {
         self.layers.invalidate(invalidation);
         invalidation
     }
 
-    /// Workshop ids missing preview URLs for the current layout, handed out
-    /// once per snapshot epoch. Layout leaves depend only on the snapshot,
-    /// so one resolve per epoch covers every viewport; ids that can never
-    /// cache (dead workshop items) must not redispatch live Steam refreshes
-    /// on every resize event.
+    /// Resolve once per snapshot epoch so dead items are not retried on every resize.
     pub(crate) fn take_pending_preview_url_ids(&mut self) -> Vec<PublishedFileId> {
         if !self.route_visible || !matches!(self.load_status, LoadStatus::Ready) {
             return Vec::new();
@@ -591,16 +556,13 @@ impl State {
                 self.retain_workshop_ids(&workshop_ids);
                 self.layout_workshop_ids = workshop_ids;
                 self.thumbnail_plan = spatial_thumbnail_plan(&layout);
-                // Labels rasterize synchronously with the layout so every
-                // frame of a live resize draws a coherent label set — the
-                // category count is small and the raster cache absorbs
-                // repeats.
+                // Rasterize labels with the layout so live resizes never draw
+                // labels from an older layout.
                 self.labels = rasterize_labels_for(&layout, self.scale_factor);
                 self.layout = Some(layout);
                 self.load_status = LoadStatus::Ready;
                 let _invalidation = self.invalidate_layers(LayerInvalidation::ALL);
             }
-            // "No addons" is an empty library, not a failure to show the user.
             Err(SizeAnalyzerError::NoAddonsFound) => {
                 self.clear_projection(LoadStatus::Empty);
             }
@@ -666,7 +628,6 @@ impl State {
     }
 }
 
-/// Returns the label sprites with the hovered category's label removed.
 pub fn visible_tag_labels<'a>(
     labels: &'a [SizeAnalyzerLabelSprite],
     hidden_tag: Option<&'a str>,
@@ -676,9 +637,6 @@ pub fn visible_tag_labels<'a>(
         .filter(move |label| hidden_tag != Some(label.text.as_str()))
 }
 
-/// Rasterizes the layout's tag labels through the shared label context.
-/// Category counts are small and the (text, fitted-size, scale) cache
-/// absorbs repeats, so this is sub-millisecond warm.
 fn rasterize_labels_for(layout: &TreemapLayout, scale: f32) -> Vec<SizeAnalyzerLabelSprite> {
     crate::media::size_analyzer_render::with_shared_label_context(|context| {
         context.rasterize_layout_labels(layout, scale)
@@ -755,19 +713,11 @@ fn analyzer_thumbnail_edge(rect: Rect) -> u32 {
         .min(ADDON_THUMBNAIL_MAX_EDGE)
 }
 
-/// Epoch differences alone do not count as a content change; everything
-/// else does. Full addon equality is deliberately conservative — the
-/// projection consumes titles, types, and tags (grouping and labels), not
-/// just identity and size, so a narrower comparison would keep stale
-/// labels after an in-place addon update.
+/// Compare labels, types, and tags too; equal ids and sizes can still need a redraw.
 fn snapshots_content_identical(a: &LibrarySnapshot, b: &LibrarySnapshot) -> bool {
     a.addons == b.addons
 }
 
-/// A delivered thumbnail's shared texture handle plus its pixel dimensions.
-///
-/// The handle is the same one the grids display, so the GPU uploads each
-/// thumbnail once ever; the treemap references it with zero pixel copies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThumbnailTile {
     pub(crate) handle: image::Handle,
@@ -775,14 +725,10 @@ pub struct ThumbnailTile {
     pub(crate) height: u32,
 }
 
-/// Which cached canvas layers an event invalidated.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LayerInvalidation {
-    /// Tag-region and addon-cell fills must re-record.
     pub(crate) geometry: bool,
-    /// Thumbnail cover-draws and dead placeholders must re-record.
     pub(crate) thumbnails: bool,
-    /// Tag label bitmap draws must re-record.
     pub(crate) labels: bool,
 }
 
@@ -809,12 +755,6 @@ impl LayerInvalidation {
     };
 }
 
-/// Cached draw commands for the three treemap canvas layers.
-///
-/// The caches are render-side memoization, not model state: `Clone` yields
-/// fresh empty caches, `PartialEq` treats layer sets as always equal, and
-/// `Debug` prints a marker, so `State` keeps its derives without caches
-/// participating in comparisons.
 pub struct TreemapLayers {
     geometry: canvas::Cache,
     thumbnails: canvas::Cache,
@@ -891,10 +831,6 @@ pub enum LoadStatus {
     Error(UiError),
 }
 
-/// Resolves the tooltip/preview title for a hovered addon. The analyzer
-/// carries no live workshop metadata, so the retained installed GMA title
-/// installed GMA title) is always used when non-blank, falling back to the
-/// workshop id otherwise.
 fn resolve_hover_title(title: &str, workshop_id: Option<PublishedFileId>) -> String {
     let title = title.trim();
     if !title.is_empty() {
@@ -1047,7 +983,6 @@ impl ContextMenuRequest {
     }
 }
 
-/// Identity of the synchronous treemap projection currently installed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayoutProjectionKey {
     snapshot_epoch: Generation,
@@ -1079,8 +1014,6 @@ impl RenderViewport {
         self.dimensions.bounds()
     }
 
-    /// Logical surface size the hover rects live in (same space the tooltip
-    /// is positioned within).
     const fn logical_size(self) -> Size {
         Size::new(self.logical_width, self.logical_height)
     }
@@ -1096,7 +1029,6 @@ impl RenderViewport {
     }
 }
 
-/// Treemap layout dimensions in logical points rounded to whole units.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RenderDimensions {
     width: u32,

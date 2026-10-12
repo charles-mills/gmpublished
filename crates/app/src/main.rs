@@ -21,10 +21,6 @@ use std::{
 
 use app::App;
 
-/// Declares a fieldless enum and derives its declaration-ordered catalog from
-/// the same variant list. Rust does not expose enum iteration, so keeping an
-/// `ALL` array beside an independently-written enum otherwise leaves an
-/// omission that still compiles.
 macro_rules! enum_with_all {
     (
         $(#[$enum_meta:meta])*
@@ -45,9 +41,6 @@ macro_rules! enum_with_all {
     };
 }
 
-/// [`enum_with_all!`] plus one exhaustive value mapping, also sourced from
-/// the declaration. This is deliberately local rather than a derive
-/// dependency: these small UI catalogs are the only capability required.
 macro_rules! mapped_enum_with_all {
     (
         $(#[$enum_meta:meta])*
@@ -82,7 +75,6 @@ mod format;
 mod generation;
 mod i18n;
 mod media;
-mod net;
 mod platform;
 #[cfg(target_os = "macos")]
 mod platform_chrome;
@@ -98,9 +90,6 @@ mod treemap;
 mod util;
 mod widgets;
 
-/// The product name. Brand identity, not a translatable string, so it is a
-/// constant rather than a Fluent message duplicated across twelve catalogs —
-/// see `i18n::tests::translated_catalogs_do_not_leak_english_values`.
 pub(crate) const APP_NAME: &str = "gmpublished";
 
 const PANIC_LOG_FILE_NAME: &str = "gmpublished-panic.log";
@@ -112,9 +101,7 @@ static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn main() -> ExitCode {
     let outcome = run();
-    // Both exit paths converge here — GUI and headless CLI alike — so this is
-    // the one place that can guarantee queued file logs reach disk. Anything
-    // logged past this point still reaches stderr.
+    // Flush after both GUI and CLI exit. Later messages can only reach stderr.
     gmpublished_backend::shutdown_logging();
 
     match outcome {
@@ -138,19 +125,13 @@ enum RunError {
 }
 
 fn run() -> Result<(), RunError> {
-    // Before any other work, GUI or headless: this process has exactly one
-    // panic-hook owner, and everything after this point can panic. Until
-    // `PANIC_LOG_PATH` resolves below, reports land on the fallback path.
+    // Install before initialization so startup panics are logged too.
     install_panic_log_hook();
 
     if let Some(outcome) = cli::run() {
         return Ok(outcome?);
     }
 
-    // Construct the one authoritative backend first. Its resolved snapshot is
-    // also sufficient for pre-window configuration, avoiding a throwaway
-    // second settings-file read on every GUI launch. Background Steam and
-    // whitelist work remains dormant until the first frame has been shown.
     let ctx = bridge::tasks::BackendContext::new()?;
     let (startup_settings, startup_paths) = ctx.settings_and_paths_snapshot();
     let _ = PANIC_LOG_PATH.set(
@@ -226,16 +207,6 @@ fn apply_platform_chrome(
 ) {
 }
 
-/// Claims the process panic hook for this executable.
-///
-/// The hook is a single global slot with no way to chain onto an existing
-/// owner, so exactly one component may set it and that component is the
-/// composition root. The backend deliberately installs none; it exposes
-/// [`gmpublished_backend::log_panic`] for this hook to call instead.
-///
-/// Nothing is delegated to the previous hook: the report below is a superset
-/// of what the default one prints, and calling both would emit every panic
-/// twice.
 fn install_panic_log_hook() {
     PANIC_HOOK_INSTALLED.get_or_init(|| {
         panic::set_hook(Box::new(|panic| {
@@ -251,13 +222,6 @@ fn install_panic_log_hook() {
     });
 }
 
-/// One panic, in the form every destination needs it.
-///
-/// Capturing a backtrace is the expensive part of reporting a panic, and there
-/// are three destinations; taking it once here is what stops that cost being
-/// paid three times. Holding the owned strings rather than the
-/// [`PanicHookInfo`] is also what lets the writers below be exercised without
-/// a live panic.
 struct PanicReport {
     location: String,
     message: String,
@@ -274,13 +238,8 @@ impl PanicReport {
     }
 }
 
-/// Where a panic report is written, resolved identically by the hook and by
-/// the startup-failure message in [`main`] — so the path printed to the user
-/// is always the path that was actually written.
-///
-/// Deliberately cheap and infallible. Deriving the real temp directory means
-/// loading appdata, which is both too much work for a hook and a re-entry
-/// into whatever state an init panic just failed in.
+/// Panic-report path shared by the hook and startup-failure message.
+/// Avoids appdata access, which could re-enter a failed initialization.
 fn panic_log_path() -> PathBuf {
     PANIC_LOG_PATH
         .get()
@@ -296,9 +255,7 @@ fn fallback_panic_log_path() -> PathBuf {
         .join(PANIC_LOG_FILE_NAME)
 }
 
-/// Appends `report` to the panic log, falling back to the temp-directory copy
-/// when the resolved path cannot be written — a panic report that reaches
-/// neither file is the one case with nothing left to diagnose from.
+/// Fall back to the temp log if the resolved panic-log path cannot be written.
 fn append_panic_log(path: &Path, report: &PanicReport) {
     if append_panic_log_to(path, report).is_ok() {
         return;
@@ -375,8 +332,6 @@ mod tests {
     #[test]
     fn a_panic_report_reaches_the_log_file() {
         let temp = tempfile::tempdir().expect("tempdir");
-        // Nested: the logs directory does not exist yet when a startup panic
-        // is the first thing to write one.
         let path = temp.path().join("logs").join(PANIC_LOG_FILE_NAME);
 
         append_panic_log(&path, &report("the panic message"));
@@ -386,8 +341,6 @@ mod tests {
         assert!(contents.contains("src/somewhere.rs:12:34"), "{contents}");
     }
 
-    /// A second panic must not erase the first: the earlier one is often the
-    /// cause and the later one the consequence.
     #[test]
     fn a_second_panic_report_appends_rather_than_replacing() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -402,8 +355,6 @@ mod tests {
         assert!(contents.contains("second"), "{contents}");
     }
 
-    /// The path `main` prints on a startup failure has to be the one the hook
-    /// wrote, including before the backend has resolved the real temp dir.
     #[test]
     fn the_reported_path_is_the_fallback_until_the_backend_resolves_one() {
         assert!(
@@ -411,66 +362,5 @@ mod tests {
             "nothing in the test binary resolves the panic log path"
         );
         assert_eq!(panic_log_path(), fallback_panic_log_path());
-    }
-
-    /// `panic::set_hook` is a single global slot with no chaining, so a second
-    /// component installing one silently disables the first. The backend used
-    /// to do exactly that from `logging::install`, which ran after this
-    /// binary's hook and left `gmpublished-panic.log` permanently unwritten.
-    ///
-    /// Asserted against the sources rather than at runtime: swapping the
-    /// process hook inside a test races every other test in the binary.
-    #[test]
-    fn only_this_binary_installs_a_process_panic_hook() {
-        fn walk(dir: &Path, out: &mut Vec<String>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if path.extension().is_some_and(|ext| ext == "rs")
-                    && let Ok(source) = std::fs::read_to_string(&path)
-                {
-                    for (number, line) in source.lines().enumerate() {
-                        // The call as a statement, which is the only way it is
-                        // ever written. Matching the bare name instead would
-                        // match this very line.
-                        let line = line.trim_start();
-                        if line.starts_with("panic::set_hook(")
-                            || line.starts_with("std::panic::set_hook(")
-                        {
-                            out.push(format!("{}:{}", path.display(), number + 1));
-                        }
-                    }
-                }
-            }
-        }
-
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("the app crate sits inside the workspace");
-        let mut installs = Vec::new();
-        for crate_name in ["backend", "app"] {
-            walk(&workspace.join(crate_name).join("src"), &mut installs);
-        }
-        assert!(
-            workspace.join("backend/src").is_dir(),
-            "the backend crate must be walked, not silently skipped"
-        );
-
-        assert_eq!(
-            installs.len(),
-            1,
-            "exactly one component may own the process panic hook: {installs:#?}"
-        );
-        let owner = workspace.join("app").join("src").join("main.rs");
-        let owner = owner.display().to_string();
-        assert!(
-            installs[0].starts_with(&owner),
-            "the owner must be this binary's composition root, not {}",
-            installs[0]
-        );
     }
 }

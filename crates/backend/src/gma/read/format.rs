@@ -1,20 +1,10 @@
-//! Owned, streaming GMA index parsing.
-//!
-//! `vformats::gma` is the canonical whole-slice parser and writer. Its parsed
-//! representation borrows both the entry table and every payload, which is a
-//! great fit for in-memory data but would require mapping or allocating an
-//! entire multi-gigabyte addon here. This small adapter mirrors the read-side
-//! wire layout while retaining only the header and entry extents.
-
 use std::io::{BufRead, BufReader, Read};
 
 use crate::gma::{GMA_VERSION, GmaError};
 
 const MAGIC: &[u8; 4] = b"GMAD";
 
-// Payloads are deliberately uncapped, but the retained index must stay
-// bounded even when the archive is hostile. These limits are far above real
-// GMA metadata/path sizes and allow roughly a million ordinary entry rows.
+// Bound retained metadata and paths even though payload size is uncapped.
 const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
 

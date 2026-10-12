@@ -1,9 +1,5 @@
-//! A transparent wrapper that reports right-presses with their position.
-//!
-//! `mouse_area::on_right_press` publishes a fixed message, so context menus
-//! opened through it would need globally tracked cursor state. Capturing the
-//! position at press time keeps the cursor-move event listener gated off
-//! (idle-0%: pointer movement outside the Size Analyzer costs nothing).
+//! Capture the position on right-click so context menus do not need
+//! continuous cursor tracking.
 
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, overlay, renderer};
@@ -16,10 +12,8 @@ pub struct ContextArea<'a, Message, Theme, Renderer> {
     on_right_press: Box<dyn Fn(Point) -> Message + 'a>,
 }
 
-/// Ancestors like `scrollable` translate the `Cursor` they hand to children
-/// into content space, but overlays (the context menu) anchor in window
-/// space. Raw `CursorMoved` events keep window coordinates, so the last one
-/// is remembered here — locally, without publishing any message.
+/// Scrollable cursors use content coordinates, but context menus need window
+/// coordinates. Remember raw CursorMoved positions without publishing a message.
 #[derive(Default)]
 struct State {
     last_window_cursor: Option<Point>,

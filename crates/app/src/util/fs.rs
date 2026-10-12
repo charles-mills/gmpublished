@@ -1,5 +1,3 @@
-//! Filesystem helpers: atomic write-then-rename and friends.
-
 use std::{
     fs,
     io::{self, Write},
@@ -8,14 +6,6 @@ use std::{
 
 pub const ATOMIC_WRITE_BUFFER_SIZE: usize = 16 * 1024;
 
-/// Writes `bytes` to `path` atomically: create parent directories, write to a
-/// tempfile in the target's directory (so the final rename stays on one
-/// filesystem), then persist over `path`. A crash or error mid-write can
-/// never leave a torn file at `path`.
-///
-/// The stages (create dir, create tempfile, write, persist) are collapsed
-/// into a single `io::Error`; callers that need a typed error wrap it with
-/// their own context.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = atomic_tempfile(path)?;
     tmp.write_all(bytes)?;

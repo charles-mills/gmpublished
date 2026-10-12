@@ -1,6 +1,3 @@
-//! Shared cosmic-text font system for UI text measurement and worker-side
-//! label rasterization, both shaped over the same bundled Inter Regular face.
-
 use std::sync::{Arc, OnceLock};
 
 use cosmic_text::{Align, Attrs, Buffer, FontSystem, Metrics, PlatformFallback, Shaping, fontdb};
@@ -22,16 +19,11 @@ fn new_font_system() -> FontSystem {
     FontSystem::new_with_locale_and_db_and_fallback("en-US".to_owned(), db, PlatformFallback)
 }
 
-/// The process-wide Inter font system shared by UI text measurement and
-/// worker-side label rasterization.
 pub fn shared_font_system() -> &'static Mutex<FontSystem> {
     static FONT_SYSTEM: OnceLock<Mutex<FontSystem>> = OnceLock::new();
     FONT_SYSTEM.get_or_init(|| Mutex::new(new_font_system()))
 }
 
-/// Shapes `text` at `font_size` into a buffer sized `(width, height)`,
-/// running the shaper to completion. `align` controls line alignment within
-/// the buffer.
 pub fn shape(
     font_system: &mut FontSystem,
     text: &str,

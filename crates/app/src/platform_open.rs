@@ -1,20 +1,6 @@
-//! macOS `.gma` document-open bridge.
-//!
-//! Packaging registers the `.gma` file association (`CFBundleDocumentTypes` in
-//! `packaging/macos/Info.extra.plist`), but macOS delivers double-clicked
-//! documents through Apple Events, not `argv`. This module installs the two
-//! native handlers (see [`macos`]) and forwards accepted `.gma` paths through
-//! a process-global queue into the Iced runtime as a [`Subscription`].
-//!
-//! Paths that arrive before the subscription is live (i.e. documents that
-//! launched the app) are buffered inside the queue's std `mpsc` channel and
-//! drained once the subscription's forwarder thread starts.
-//!
-//! There is no sibling module for other platforms, and that is not an
-//! omission: elsewhere the shell puts the path in `argv`, which the binary's
-//! CLI composition root treats as a headless extraction
-//! request — so the GUI never starts and there is nothing to forward. That
-//! divergence is documented there, where both halves are visible.
+//! macOS delivers document opens through Apple Events rather than `argv`.
+//! Accepted `.gma` paths are queued until the Iced subscription starts.
+//! Other platforms handle file-association arguments through the CLI.
 
 use std::{
     collections::HashSet,
@@ -52,7 +38,6 @@ pub fn install() {
     macos::install();
 }
 
-/// Subscribes to document-open batches delivered by the native handlers.
 pub fn subscription() -> Subscription<Vec<PathBuf>> {
     Subscription::run(document_open_stream)
 }
@@ -88,8 +73,6 @@ fn forward_document_opens(
     }
 }
 
-/// Callable from any thread, including native Apple Event callbacks. Paths
-/// queued before the subscription drains are buffered, not lost.
 pub fn accept_paths(paths: Vec<PathBuf>) {
     let paths = filter_open_gma_paths(paths);
     if paths.is_empty() {
@@ -104,7 +87,6 @@ pub fn accept_paths(paths: Vec<PathBuf>) {
     let _send_result = DOCUMENT_OPEN_QUEUE.sender.send(paths);
 }
 
-/// Keeps unique, existing `.gma` files (case-insensitive extension match).
 pub fn filter_open_gma_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     paths

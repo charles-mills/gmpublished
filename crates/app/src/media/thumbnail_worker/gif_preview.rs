@@ -1,5 +1,3 @@
-//! App-local GIF preview decode, composition, resizing, and animation atlas data.
-
 use std::{
     fmt,
     io::{Cursor, Read},
@@ -13,25 +11,12 @@ use fast_image_resize::{
 use gif::{ColorOutput, DecodeOptions, DisposalMethod, MemoryLimit};
 use thiserror::Error;
 
-/// Minimum frame delay used for GIFs that declare a zero or tiny delay.
 pub const MIN_FRAME_DELAY: Duration = Duration::from_millis(10);
-/// Maximum width or height retained for decoded GIF preview frames in tests.
 #[cfg(test)]
 pub const GIF_PREVIEW_MAX_EDGE: u32 = 256;
-/// Frames retained in a baked display atlas.
-///
-/// 32, not 64. Combined with the 256 px tile ceiling this halves the worst-case
-/// atlas — and therefore an animation's weight in the memory cache — from 16 MB
-/// to 8 MB, roughly 3% of the 256 MB budget per animated card instead of 6%.
-///
-/// Halving the *byte* budget instead would have hit the same total by shrinking
-/// tiles to ~181 px, which is visible softening on a ~200 pt card. Dropping
-/// frames costs nothing on the observed content: Workshop previews are short
-/// loops, well under this ceiling, so decimation rarely engages at all. Total
-/// playback time is preserved either way — dropped frames hand their delay to
-/// the frame that replaces them.
+/// Maximum retained atlas frames. At the 256 px tile ceiling, 32 frames use
+/// 8 MiB. Decimation preserves playback time by combining dropped-frame delays.
 pub const BAKED_ANIMATION_MAX_FRAMES: usize = 32;
-/// Maximum transient display-atlas byte weight.
 pub const BAKED_ANIMATION_MAX_ATLAS_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(test)]
@@ -41,17 +26,11 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const GIF_DECODER_MAX_IMAGE_EDGE: u32 = 4096;
 const GIF_DECODER_MAX_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Source frames walked before a GIF is refused.
-///
-/// Frames composite one at a time over a reused canvas, so frame count is the
-/// one dimension the size limits above do not bound. Refused rather than
-/// truncated: the baked atlas summarises the whole animation, so a short walk
-/// is a wrong answer rather than a smaller one.
+/// Limit source frames too; atlas dimensions do not bound the work to decode them.
 const GIF_SOURCE_MAX_FRAMES: usize = 1024;
 
 pub type GifPreviewResult<T> = Result<T, GifPreviewError>;
 
-/// One decoded GIF frame as plain RGBA bytes with a normalized frame delay.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GifPreviewFrame {
     width: u32,
@@ -84,31 +63,26 @@ impl GifPreviewFrame {
         })
     }
 
-    /// Returns the decoded preview frame width in pixels.
     #[must_use]
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// Returns the decoded preview frame height in pixels.
     #[must_use]
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// Returns the normalized delay before advancing to the next frame.
     #[must_use]
     pub fn delay(&self) -> Duration {
         self.delay
     }
 
-    /// Returns the decoded RGBA pixel bytes for this frame.
     #[must_use]
     pub fn rgba_bytes(&self) -> &[u8] {
         &self.rgba
     }
 
-    /// Returns the decoded byte weight of this frame.
     #[must_use]
     pub fn byte_len(&self) -> usize {
         self.rgba.len()
@@ -127,20 +101,14 @@ impl fmt::Debug for GifPreviewFrame {
     }
 }
 
-/// Pixel-space source clip for one frame in a baked animation atlas.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BakedAnimationFrameClip {
-    /// Left edge of the frame tile inside the atlas.
     pub x: u32,
-    /// Top edge of the frame tile inside the atlas.
     pub y: u32,
-    /// Width of the frame tile.
     pub width: u32,
-    /// Height of the frame tile.
     pub height: u32,
 }
 
-/// Display-resolution sprite atlas for one animated image.
 #[derive(Clone, Debug)]
 pub struct BakedAnimation {
     atlas_width: u32,
@@ -152,27 +120,23 @@ pub struct BakedAnimation {
 }
 
 impl BakedAnimation {
-    /// Returns the atlas width in pixels.
     #[must_use]
     pub fn atlas_width(&self) -> u32 {
         self.atlas_width
     }
 
-    /// Returns the atlas height in pixels.
     #[cfg(test)]
     #[must_use]
     pub fn atlas_height(&self) -> u32 {
         self.rows().saturating_mul(self.tile_height)
     }
 
-    /// Returns the per-frame tile width in pixels.
     #[cfg(test)]
     #[must_use]
     pub fn tile_width(&self) -> u32 {
         self.tile_width
     }
 
-    /// Returns the per-frame tile height in pixels.
     #[cfg(test)]
     #[must_use]
     pub fn tile_height(&self) -> u32 {
@@ -192,13 +156,11 @@ impl BakedAnimation {
         frame_count.div_ceil(self.columns.max(1))
     }
 
-    /// Returns the number of animation frames retained in the atlas.
     #[must_use]
     pub fn frame_count(&self) -> usize {
         self.cumulative_frame_times.len()
     }
 
-    /// Returns the normalized total loop duration.
     #[cfg(test)]
     #[must_use]
     pub fn total_duration(&self) -> Duration {
@@ -226,7 +188,6 @@ impl BakedAnimation {
         &self.cumulative_frame_times
     }
 
-    /// Returns the source clip for `frame_index`.
     #[must_use]
     pub fn frame_clip(&self, frame_index: usize) -> Option<BakedAnimationFrameClip> {
         if frame_index >= self.frame_count() {
@@ -244,7 +205,6 @@ impl BakedAnimation {
         })
     }
 
-    /// Returns the frame visible at `elapsed` in a looping playback.
     #[cfg(test)]
     #[must_use]
     pub fn frame_index_at(&self, elapsed: Duration) -> usize {
@@ -264,8 +224,7 @@ impl BakedAnimation {
     }
 }
 
-/// GIF preview data that keeps only encoded bytes, timing metadata, and the
-/// first decoded frame at initial readiness.
+/// Retain encoded GIF bytes, timings, and frame 0. Decode the remaining frames when baking.
 #[derive(Clone, Debug)]
 pub struct LazyGifPreview {
     bytes: Arc<[u8]>,
@@ -275,47 +234,38 @@ pub struct LazyGifPreview {
 }
 
 impl LazyGifPreview {
-    /// Returns the number of frames discovered in the GIF stream.
     #[must_use]
     pub fn frame_count(&self) -> usize {
         self.frame_count
     }
 
-    /// Returns the first decoded frame, available immediately at readiness.
     #[must_use]
     pub fn first_frame(&self) -> &GifPreviewFrame {
         &self.first_frame
     }
 
-    /// Returns the byte length of the retained encoded GIF stream.
     #[must_use]
     pub fn encoded_byte_len(&self) -> usize {
         self.bytes.len()
     }
 
-    /// Returns the retained encoded GIF stream, e.g. for persisting to a cache.
     #[must_use]
     pub fn encoded_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Returns the display edge cap used when decoding this preview.
     #[must_use]
     pub fn max_edge(&self) -> u32 {
         self.max_edge
     }
 
-    /// Returns the byte weight of decoded RGBA held immediately after preview preparation.
     #[cfg(test)]
     #[must_use]
     pub fn initial_decoded_byte_len(&self) -> usize {
         self.first_frame.byte_len()
     }
 
-    /// Returns the peak decoded RGBA byte weight held while preparing the preview.
-    ///
-    /// Readiness decodes only frame 0, so the peak equals the retained first
-    /// frame; later frames are decoded one at a time during playback.
+    /// Preparation decodes only frame 0. Later frames are composited during atlas baking.
     #[cfg(test)]
     #[must_use]
     pub fn initial_peak_decoded_byte_len(&self) -> usize {
@@ -323,10 +273,7 @@ impl LazyGifPreview {
     }
 }
 
-/// Decodes all GIF frames into plain RGBA buffers with normalized delays.
-///
-/// Frames larger than [`GIF_PREVIEW_MAX_EDGE`] are downscaled with bilinear,
-/// alpha-aware filtering. Smaller frames are copied without upscaling.
+/// Decodes frames with normalized delays and alpha-aware downscaling.
 #[cfg(test)]
 pub fn decode_gif_preview_frames(bytes: &[u8]) -> GifPreviewResult<Vec<GifPreviewFrame>> {
     let mut frame_stream = gif_preview_frame_stream(Cursor::new(bytes))?;
@@ -346,7 +293,6 @@ pub fn decode_gif_preview_frames(bytes: &[u8]) -> GifPreviewResult<Vec<GifPrevie
     Ok(decoded)
 }
 
-/// Bakes encoded GIF bytes into one display-resolution sprite atlas.
 pub fn bake_gif_animation(bytes: &[u8], display_max_edge: u32) -> GifPreviewResult<BakedAnimation> {
     // A baked atlas must be loop-invariant, but GIF frame 0 differs between the
     // first loop and later loops when disposal leaves previous-frame pixels.
@@ -361,14 +307,8 @@ pub fn bake_gif_animation(bytes: &[u8], display_max_edge: u32) -> GifPreviewResu
     frame_stream.seed_canvas(primed_canvas);
     let mut frame_decoder = GifFrameDecoder::new(tile_max_edge);
 
-    // Decimation is decided up front rather than after the fact.
-    //
-    // Every frame still has to be *composited* — GIF frames are deltas over a
-    // running canvas, so skipping one corrupts every frame after it. But only
-    // the frames that survive decimation need resizing into a tile, and those
-    // are the expensive part in both CPU and peak memory. Decoding all of a
-    // long animation's tiles and then discarding most of them meant a 200-frame
-    // GIF built 200 tiles to keep 64.
+    // Composite every GIF delta to keep the canvas correct, but resize only
+    // frames selected for the atlas.
     let mut kept = Decimation::new(frame_count);
     let mut frames = Vec::with_capacity(kept.kept_count());
     let mut frame_index = 0_usize;
@@ -386,8 +326,6 @@ pub fn bake_gif_animation(bytes: &[u8], display_max_edge: u32) -> GifPreviewResu
     if frames.is_empty() {
         return Err(GifPreviewError::EmptyFrameSet);
     }
-    // No second decimation pass: `Decimation` above already capped the set at
-    // `BAKED_ANIMATION_MAX_FRAMES`, and this is the only route into packing.
     pack_baked_animation(&frames)
 }
 
@@ -399,12 +337,8 @@ fn budgeted_tile_edge(
     Ok(display_max_edge.min(atlas_budget_edge_cap(frame_count, budget_bytes)?))
 }
 
-/// Returns the largest square tile edge whose packed atlas stays within `budget_bytes`.
-///
-/// The budget divides across the same `columns x rows` grid that
-/// `pack_baked_animation` allocates, which can hold more tiles than
-/// `frame_count`. Non-square tiles are capped on their long edge and the short
-/// edge rounds down, so the atlas can only get smaller than this bound.
+/// Budget for the allocated grid, including empty cells. Non-square tiles
+/// round their short edge down.
 fn atlas_budget_edge_cap(frame_count: usize, budget_bytes: usize) -> GifPreviewResult<u32> {
     let columns = atlas_columns(frame_count)?;
     let rows = atlas_rows(frame_count, columns)?;
@@ -416,16 +350,7 @@ fn atlas_budget_edge_cap(frame_count: usize, budget_bytes: usize) -> GifPreviewR
     Ok(u32::try_from(tile_pixel_budget.isqrt()).unwrap_or(u32::MAX))
 }
 
-/// Which frame indices survive decimation, and where each dropped frame's time
-/// goes.
-///
-/// The bucket starts are materialised rather than inverted on the fly. The
-/// inverse of `floor(bucket * frame_count / MAX)` is a ceiling division whose
-/// off-by-one failure mode is silent and severe — it keeps a handful of frames
-/// out of dozens — and the table is at most `MAX` entries.
 struct Decimation {
-    /// First frame index of each bucket, ascending. Empty when no decimation
-    /// applies.
     starts: Vec<usize>,
     bucket: usize,
 }
@@ -450,8 +375,6 @@ impl Decimation {
         }
     }
 
-    /// Advances to the bucket owning `index`. Indices arrive in order, so this
-    /// is a walk rather than a search.
     fn advance_to(&mut self, index: usize) {
         while self.bucket + 1 < self.starts.len() && self.starts[self.bucket + 1] <= index {
             self.bucket += 1;
@@ -464,11 +387,8 @@ impl Decimation {
             .is_none_or(|start| *start == index)
     }
 
-    /// Adds a dropped frame's delay to the kept frame that owns it, so the
-    /// animation runs at its original speed rather than shortening.
     fn absorb_delay(&self, index: usize, delay: Duration, frames: &mut [GifPreviewFrame]) {
         if self.starts.is_empty() || self.keeps(index) {
-            // Kept frames already carry their own delay from the decoder.
             return;
         }
         if let Some(frame) = frames.get_mut(self.bucket) {
@@ -477,7 +397,6 @@ impl Decimation {
     }
 }
 
-/// Composites one full loop and returns the steady-state canvas and frame count.
 fn prime_gif_canvas(bytes: &[u8]) -> GifPreviewResult<(Vec<u8>, usize)> {
     let mut frame_stream = gif_preview_frame_stream(Cursor::new(bytes))?;
     let mut frame_count = 0_usize;
@@ -491,11 +410,6 @@ pub fn bake_lazy_gif_preview(preview: &LazyGifPreview) -> GifPreviewResult<Baked
     bake_gif_animation(preview.encoded_bytes(), preview.max_edge())
 }
 
-/// Prepares a GIF preview by decoding only the first frame.
-///
-/// The frame count and per-frame delays come from `gif_frame_delays`, a
-/// metadata-only walk that never decodes pixels. Initial readiness then decodes
-/// exactly frame 0: the only frame needed to paint the preview.
 pub fn decode_lazy_gif_preview(
     bytes: impl Into<Arc<[u8]>>,
     max_edge: u32,
@@ -514,8 +428,6 @@ pub fn decode_lazy_gif_preview(
     })
 }
 
-/// Builds a preview whose retained bytes cannot be re-decoded, to exercise an
-/// animation bake failure while a healthy first frame exists.
 #[cfg(test)]
 #[must_use]
 pub fn broken_multi_frame_gif_preview() -> LazyGifPreview {
@@ -600,7 +512,6 @@ fn validate_gif_logical_screen(width: u16, height: u16) -> GifPreviewResult<()> 
     Ok(())
 }
 
-/// Returns the saturated decoded byte weight for a set of GIF preview frames.
 #[cfg(test)]
 #[must_use]
 pub fn decoded_byte_len(frames: &[GifPreviewFrame]) -> usize {
@@ -769,10 +680,8 @@ impl<R: Read> CompositedGifFrameStream<R> {
         let Some(info) = self.next_frame_info()? else {
             return Ok(None);
         };
-        // Enforced here rather than at each walk: the priming pass, the bake
-        // pass and the test decode all reach frames only through this method.
-        // After the `None` check, not before — every walk calls once past the
-        // last frame to discover the end, and that call is not a frame.
+        // Apply the source-frame cap here so every decoder pass respects it. Check EOF
+        // first to allow exactly the cap.
         if frame_index >= GIF_SOURCE_MAX_FRAMES {
             return Err(GifPreviewError::TooManyFrames {
                 limit: GIF_SOURCE_MAX_FRAMES,
@@ -1109,49 +1018,38 @@ fn duration_from_nanos_saturating(nanos: u128) -> Duration {
     Duration::new(seconds, subsecond_nanos)
 }
 
-/// Errors returned by GIF preview decoding and playback setup.
 #[derive(Debug, Error)]
 pub enum GifPreviewError {
-    /// Failed to decode the GIF container or one of its frames.
     #[error("failed to decode GIF preview")]
     Decode(#[source] gif::DecodingError),
-    /// Failed to parse GIF metadata without decoding frame pixels.
     #[error("failed to parse GIF preview metadata")]
     GifParse(#[source] gif::DecodingError),
-    /// Failed to encode a generated GIF fixture.
     #[cfg(test)]
     #[error("failed to encode GIF preview fixture")]
     Encode(#[source] gif::EncodingError),
-    /// The GIF decoded successfully but did not contain any frames.
     #[error("GIF preview contains no frames")]
     EmptyFrameSet,
-    /// The GIF declares more source frames than the preview decoder will walk.
     #[error("GIF preview has more than {limit} source frames")]
     TooManyFrames { limit: usize },
-    /// Requested GIF frame was not present.
     #[error("GIF preview frame {frame_index} was out of range for {frame_count} frames")]
     FrameIndexOutOfRange {
         frame_index: usize,
         frame_count: usize,
     },
-    /// GIF logical screen exceeds the preview decoder safety limit.
     #[error("GIF preview logical screen is too large: {width}x{height}")]
     LogicalScreenTooLarge { width: u32, height: u32 },
-    /// A decoded frame has invalid zero dimensions.
     #[error("decoded GIF frame {frame_index} has invalid dimensions {width}x{height}")]
     EmptyFrame {
         frame_index: usize,
         width: u32,
         height: u32,
     },
-    /// A decoded frame is too large to address in memory.
     #[error("decoded GIF frame {frame_index} is too large: {width}x{height}")]
     FrameTooLarge {
         frame_index: usize,
         width: u32,
         height: u32,
     },
-    /// A decoded RGBA frame did not contain the expected number of bytes.
     #[error(
         "decoded GIF frame {frame_index} byte count mismatch: expected {expected}, got {actual}"
     )]
@@ -1160,10 +1058,8 @@ pub enum GifPreviewError {
         expected: usize,
         actual: usize,
     },
-    /// Resized frame dimensions overflowed supported integer bounds.
     #[error("decoded GIF frame {frame_index} resize dimensions overflowed")]
     DimensionOverflow { frame_index: usize },
-    /// A decoded frame set changed dimensions before atlas packing.
     #[error(
         "decoded GIF frame {frame_index} dimensions changed: expected {expected_width}x{expected_height}, got {actual_width}x{actual_height}"
     )]
@@ -1174,7 +1070,6 @@ pub enum GifPreviewError {
         actual_width: u32,
         actual_height: u32,
     },
-    /// The packed display atlas would exceed the transient animation budget.
     #[error(
         "GIF display atlas is too large: {width}x{height}, {frame_count} frames, {byte_len} bytes"
     )]
@@ -1184,22 +1079,15 @@ pub enum GifPreviewError {
         frame_count: usize,
         byte_len: usize,
     },
-    /// An atlas-packing size computation overflowed integer bounds, as
-    /// distinct from `AtlasTooLarge`, which reports a fully measured atlas
-    /// that exceeded the transient animation budget.
     #[error("GIF atlas packing arithmetic overflowed for {frame_count} frames")]
     AtlasDimensionOverflow { frame_count: usize },
-    /// Failed to construct a resize image view.
     #[error("failed to construct GIF preview resize image")]
     ResizeImage(#[source] fast_image_resize::ImageBufferError),
-    /// Failed to resize decoded GIF frame data.
     #[error("failed to resize GIF preview frame")]
     Resize(#[source] fast_image_resize::ResizeError),
 }
 
 impl GifPreviewError {
-    /// The one genuinely-too-large case: a fully measured atlas that
-    /// exceeds the transient animation budget.
     fn atlas_too_large(width: u32, height: u32, frame_count: usize, byte_len: usize) -> Self {
         Self::AtlasTooLarge {
             width,

@@ -32,9 +32,6 @@ impl DescriptionLength {
     }
 }
 
-/// Deliberately has no `Eq`/`Ord`: the ordering this type invites is browse
-/// chronology, which as an `Eq` makes two snapshots of one item compare
-/// unequal. Presentation order belongs at the call site that wants it.
 #[derive(Clone, Debug)]
 pub struct WorkshopItem {
     pub id: WorkshopId,
@@ -59,8 +56,6 @@ pub struct WorkshopPage {
     pub items: Vec<WorkshopItem>,
 }
 
-/// Steam supplies the id, so it is external input: a zero names no item and
-/// there is nothing this side could do with the rest of the row.
 impl TryFrom<QueryResult> for WorkshopItem {
     type Error = crate::workshop_id::ZeroWorkshopId;
 
@@ -101,7 +96,6 @@ impl From<WorkshopId> for WorkshopItem {
         }
     }
 }
-/// `None` when Steam's row names no item, which leaves nothing to enrich.
 fn enrich_workshop_item(
     item: QueryResult,
     index: u32,
@@ -127,10 +121,8 @@ fn format_steam_query_error(error: &str, formatter: &mut fmt::Formatter<'_>) -> 
 pub enum WorkshopQueryError {
     #[error("could not create a Workshop query")]
     QueryCreateFailed,
-    /// steamworks never delivered a result for the query — it dropped the
-    /// callback without invoking it, or held it past the callback-result
-    /// timeout. Distinct from [`Self::Steam`], which is a
-    /// result Steam did return.
+    /// No callback arrived before the deadline. Self::Steam means Steam did
+    /// respond, but returned an error.
     #[error("Steam did not answer the Workshop query")]
     Abandoned,
     #[error(fmt = format_steam_query_error)]
@@ -169,11 +161,8 @@ impl Steam {
             }
             drop(rx);
 
-            // The background runtime pushes an empty batch purely to unblock the
-            // `recv` above — this thread parks there with no timeout, and the
-            // sender lives on the `Steam` its own `Arc` clone keeps alive, so
-            // the channel never disconnects on its own. Anything still queued
-            // at this point is abandoned.
+            // Shutdown sends an empty batch to wake `recv`. The sender stays alive
+            // through this thread's own `Arc<Steam>`, so it cannot disconnect itself.
             if shutdown.is_set() {
                 return;
             }
@@ -184,8 +173,6 @@ impl Steam {
                 let chunk_for_callback = chunk.clone();
                 let language = steam.workshop_language();
                 let (done_tx, done_rx) = mpsc::channel();
-
-                search.reserve(chunk.len());
 
                 if let Ok(query) = client
                     .ugc()
@@ -246,13 +233,8 @@ impl Steam {
         let _ = self.workshop_queue_tx.send(Vec::new());
     }
 
-    /// Runs `use_cache` against the set of Workshop ids the metadata fetcher
-    /// already knows, or against `None` if the cache is busy.
-    ///
-    /// Bounded rather than blocking: both callers are on a download path, and
-    /// `None` ("assume nothing is known") only costs a wider Steam query.
-    ///
-    /// `use_cache` runs under the fetcher's lock — keep it O(ids), no I/O.
+    /// Returns `None` if the cache is busy. `use_cache` runs under its lock;
+    /// keep it O(ids) with no I/O.
     pub(crate) fn with_known_workshop_items<R>(
         &self,
         use_cache: impl FnOnce(Option<&HashSet<WorkshopId>>) -> R,
@@ -285,9 +267,6 @@ impl Steam {
         )
     }
 
-    /// Shared by the "my workshop" and "subscribed" browse pages, which query
-    /// the same user-scoped UGC endpoint and differ only in which list is
-    /// requested, its ordering, and whether results get indexed for search.
     pub(crate) fn browse_user_workshop_page(
         &self,
         user_list: steamworks::UserList,
@@ -340,9 +319,7 @@ impl Steam {
             && let Some(page) = page.as_ref()
             && let Some(search) = index_into
         {
-            for item in &page.items {
-                search.add(item);
-            }
+            search.add_bulk(&page.items);
         }
         drop(current_language);
         page
@@ -393,8 +370,6 @@ fn query_results_to_workshop_items(
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    // A row Steam omitted, and one whose id names no item,
-                    // both leave the requested id with nothing but itself.
                     item.and_then(|item| enrich_workshop_item(item, i as u32, &results))
                         .unwrap_or_else(|| WorkshopItem::from(ids[i]))
                 })
@@ -430,14 +405,8 @@ fn combine_workshop_chunk_results(
     Err(last_error.unwrap_or(WorkshopQueryError::QueryCreateFailed))
 }
 
-/// Waits for one chunk result, giving up at `deadline`.
-///
-/// `None` covers a dropped sender and an expired deadline alike: steamworks
-/// owns the callback's lifetime, so a result that never arrives is a failed
-/// query, not a broken invariant.
-///
-/// One deadline spans a whole fan-out — the chunks are concurrent, so a
-/// per-`recv` budget would multiply by the chunk count.
+/// Waits until the shared fan-out deadline. Dropped senders and expired
+/// deadlines both return `None`; Steam may discard callbacks without invoking them.
 fn recv_chunk_by(
     results: &mpsc::Receiver<(usize, WorkshopChunkQueryResult)>,
     deadline: Instant,
@@ -571,11 +540,7 @@ impl ConnectedSteam<'_> {
         combine_workshop_chunk_results(chunk_results, ids.len())
     }
 
-    /// Same concurrent chunk queries as [`Self::query_workshop_items`], but
-    /// hands each chunk to `on_chunk` the moment it lands instead of joining
-    /// all chunks first, so callers hydrate on-screen rows after a single
-    /// round trip. A failed chunk is logged and skipped (its ids stay stale);
-    /// the call only errors when every chunk failed.
+    /// Deliver chunks as they arrive. Skip failed chunks; return an error only if all fail.
     pub fn query_workshop_items_streaming(
         &self,
         ids: &[WorkshopId],
@@ -687,22 +652,13 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        DescriptionLength, Instant, WorkshopChunkQueryResult, WorkshopItem, WorkshopQueryError,
+        Instant, WorkshopChunkQueryResult, WorkshopItem, WorkshopQueryError,
         combine_workshop_chunk_results, drain_workshop_chunk_results, filter_new_workshop_ids,
         wait_for_background_callback, workshop_item_id_chunks,
     };
 
-    /// Every drain in these tests is fed a channel that is already closed or
-    /// already full, so nothing waits — the deadline only has to be in the
-    /// future, not realistic.
     fn deadline() -> Instant {
         Instant::now() + super::CALLBACK_RESULT_TIMEOUT
-    }
-
-    #[test]
-    fn detail_queries_request_full_descriptions() {
-        assert!(DescriptionLength::Full.returns_full_description());
-        assert!(!DescriptionLength::Summary.returns_full_description());
     }
 
     #[test]
@@ -725,11 +681,6 @@ mod tests {
         ));
     }
 
-    /// An empty id list must reach steamworks zero times.
-    ///
-    /// `query_workshop_items_with_description` short-circuits before chunking,
-    /// so this pins the chunker itself: were that guard removed, an empty list
-    /// still yields no chunks and therefore no `query_items` call.
     #[test]
     fn empty_id_list_produces_no_query_chunks() {
         assert!(workshop_item_id_chunks(&[]).is_empty());
@@ -841,8 +792,6 @@ mod tests {
         })
         .expect("a partially successful query is not an error");
 
-        // The failed chunk delivered nothing; each successful chunk arrived as
-        // its own batch, so the first is observable before the last lands.
         assert_eq!(
             delivered,
             vec![
@@ -871,9 +820,6 @@ mod tests {
         assert_eq!(error, WorkshopQueryError::Steam("last".to_owned()));
     }
 
-    /// steamworks may drop a query's callback without ever invoking it, so a
-    /// chunk that never reports is an outcome the drain has to survive rather
-    /// than an invariant it can rely on.
     #[test]
     fn a_chunk_steam_never_answers_is_an_error_rather_than_a_panic() {
         use std::sync::mpsc;

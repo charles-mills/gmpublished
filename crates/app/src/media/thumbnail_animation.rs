@@ -6,15 +6,11 @@ use crate::media::thumbnail_demand::ReadyThumbnail;
 
 pub const ANIMATION_TICK_INTERVAL: Duration = Duration::from_millis(16);
 
-/// Floor for a playback frame's delay. Distinct from the GIF decoder's own
-/// minimum: this only has to keep a zero-delay frame from spinning the
-/// animation loop, and applies to every source, not just GIFs.
+/// Clamp zero-delay frames so playback cannot spin, including non-GIF sources.
 const NON_ZERO_FRAME_DELAY: Duration = Duration::from_millis(1);
 
-/// Playback policy chosen by each animated thumbnail use site.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlayPolicy {
-    /// Play only while the visible item is actively hovered, unless the user setting opts in.
     OnHover,
 }
 

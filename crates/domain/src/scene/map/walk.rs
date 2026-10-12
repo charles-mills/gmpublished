@@ -1,10 +1,5 @@
-//! Shared collision used by the preview's walk mode: brush hulls, displacement
-//! triangles and prop hulls, plus the swept-AABB traces over them.
-//!
-//! Brushes are expanded by the player's half-extents rather than the trace
-//! being swept as a box, which is what lets a hit be found by the same
-//! plane-clipping the engine uses. Preview-quality throughout: enough to walk
-//! a map and be stopped by the right surfaces, not a physics engine.
+//! Brushes are expanded by the player's half-extents so traces can use
+//! plane clipping. Displacements and props use triangle and hull tests.
 
 use super::{
     BTreeSet, BrushIndex, BrushSide, HashMap, MapBounds, MapBsp, MapLeaf, MapNode, MapPlane,
@@ -27,8 +22,6 @@ pub struct WaterVolume {
     pub surface_z: f32,
 }
 
-/// A convex collision hull: vertices plus triangle indices into them.
-/// Deliberately independent of `.phy`/IVP parser details.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConvexHull {
     pub vertices: Vec<Vec3>,
@@ -207,9 +200,6 @@ impl MapWalkCollision {
             && self.props.brushes.is_empty()
     }
 
-    /// Test support: a collision set holding a single solid axis-aligned
-    /// box, so downstream crates can exercise walk movement without baking
-    /// a real BSP.
     #[cfg(feature = "test-support")]
     pub fn solid_box_for_tests(min: Vec3, max: Vec3) -> Self {
         let planes = [
@@ -269,17 +259,6 @@ impl MapWalkCollision {
     ) -> Self {
         self.props = MapWalkPropCollision::from_model_placements(props);
         self
-    }
-
-    #[cfg(feature = "test-support")]
-    #[must_use]
-    pub fn without_prop_collisions_for_tests(mut self) -> Self {
-        self.props = MapWalkPropCollision::default();
-        self
-    }
-
-    pub fn brush_count(&self) -> usize {
-        self.brushes.len()
     }
 
     pub fn displacement_count(&self) -> usize {
@@ -394,13 +373,9 @@ impl MapWalkCollision {
             .any(|brush| brush_contains_aabb_center(brush, center, half_extents))
     }
 
-    /// The trace's own notion of a solid start: not strictly outside any
-    /// plane of some brush. Strictly wider than [`Self::aabb_embedded`] —
-    /// it also flags the boundary shell (e.g. a spawn hull at
-    /// mathematically exact floor contact, which is where mappers place
-    /// info_player_start), and `trace_aabb` refuses to move a hull that
-    /// starts there. Unstick logic must use THIS predicate; checking only
-    /// `aabb_embedded` leaves "not embedded yet untraceable" deadlocks.
+    /// Includes exact brush-boundary contact, which [`Self::aabb_embedded`]
+    /// does not. Unstick must use this check or a hull resting on the floor
+    /// can remain unable to move.
     pub fn aabb_trace_solid(&self, center: Vec3, half_extents: Vec3) -> bool {
         self.trace_aabb(center, center, half_extents).start_solid
     }
@@ -499,9 +474,6 @@ pub(super) fn walk_brushes_from_bsp(
     (brushes, water_brushes)
 }
 
-/// Only the box builders above and the tests that exercise them reach this;
-/// a decoded BSP arrives as brush sides and takes
-/// [`walk_brush_from_brush_planes`] instead.
 #[cfg(feature = "test-support")]
 pub(super) fn walk_brush_from_planes(planes: Vec<MapPlane>, flags: i32) -> Option<MapWalkBrush> {
     walk_brush_from_brush_planes(
@@ -1044,11 +1016,8 @@ pub(super) fn trace_brush_aabb(
         let start_dist = start.dot(plane.normal) - expanded_dist;
         let end_dist = end.dot(plane.normal) - expanded_dist;
 
-        // Quake semantics: ANY positive distance counts as starting
-        // outside. Hit traces back the mover off to exactly
-        // TRACE_PLANE_EPSILON from the plane, so resting contact sits AT
-        // epsilon — a strict `> epsilon` here classified every standing
-        // player as start_solid, freezing all movement and ground checks.
+        // Any positive distance is outside. Resting contact sits at the plane
+        // epsilon; requiring more would mark a standing player as stuck.
         if start_dist > 0.0 {
             starts_outside = true;
         }
@@ -1088,10 +1057,8 @@ pub(super) fn trace_brush_aabb(
         });
     }
 
-    // A start within epsilon of a plane yields a slightly negative enter
-    // fraction; clamp it to a fraction-zero hit (Quake does the same) —
-    // rejecting it would let the mover pass through the face it is
-    // touching.
+    // Clamp a slightly negative enter fraction to zero or the mover can pass through a
+    // touching face.
     (enter_fraction > -1.0 && enter_fraction <= 1.0).then_some(TraceCandidate {
         fraction: enter_fraction.max(0.0),
         normal: enter_normal,
@@ -1250,10 +1217,8 @@ pub(super) fn trace_triangle_aabb(
         return None;
     }
 
-    // Back the hit off by the plane epsilon so resting contact stays
-    // strictly separated: an exact-contact endpoint makes the NEXT trace
-    // start overlapping on every axis, which this sweep reports as "no
-    // hit" — the mover would sink through the terrain it is standing on.
+    // Back off by plane epsilon. Exact contact would make the next sweep start overlapping
+    // and miss the ground.
     let backoff = TRACE_PLANE_EPSILON / velocity.length_squared().sqrt();
     Some(TraceCandidate {
         fraction: (enter_fraction - backoff).max(0.0),
@@ -1607,7 +1572,6 @@ pub(super) fn normalized_prop_aabb(bounds_min: Vec3, bounds_max: Vec3) -> Option
     })
 }
 
-/// Which side(s) of a plane an AABB occupies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PlaneSide {
     Front,
@@ -1616,8 +1580,6 @@ pub(super) enum PlaneSide {
 }
 
 impl PlaneSide {
-    /// The child links to descend into, dropping the back child when both
-    /// sides point at the same one.
     pub(super) fn children(self, children: [i32; 2]) -> impl Iterator<Item = i32> {
         let [front, back] = children;
         let (first, second) = match self {

@@ -1,6 +1,3 @@
-//! Swimming: buoyant integration, how deep the hull is in a water brush,
-//! and the boost that carries a player out over a ledge.
-
 use super::super::{SOURCE_UP, normalize_or_up};
 use super::{
     FlyCamera, LAND_BOB_DURATION, WALK_GROUND_SNAP, WALK_STEP_HEIGHT, WALK_SWIM_STOP_SPEED,

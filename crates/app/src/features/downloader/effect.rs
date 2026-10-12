@@ -19,6 +19,5 @@ pub enum Effect {
     DestinationSelectionRequested,
     WorkshopTitleQueryRequested(Vec<PublishedFileId>),
     ActiveJobCountChanged(u32),
-    /// A button on the prerequisite panel hosted in place of the job columns.
     PrerequisiteActivated(crate::features::prerequisites::Action),
 }

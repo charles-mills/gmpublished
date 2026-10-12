@@ -1,13 +1,5 @@
-//! Everything gmpublished does that is not drawing: GMA archives, Steam, the
-//! local addon library, and Source asset decoding.
-//!
-//! [`Backend`] is the composition root. Fallible operations return a typed
-//! error implementing [`HasErrorKey`]; the UI maps that key to localized text,
-//! so nothing here formats an error for display. Most entry points block and
-//! belong off the main thread — `main_thread_forbidden!` asserts that in debug.
-// These two disagree about `pub` in a private module; for a library the true
-// public surface matters more than the shorter spelling.
 #![warn(unreachable_pub)]
+// Keep pub(crate) in private modules to satisfy unreachable_pub.
 #![allow(clippy::redundant_pub_crate)]
 
 mod error_key;
@@ -72,9 +64,6 @@ pub use appdata::{
 };
 
 mod gma;
-/// The GMA vocabulary, flattened so callers never have to know which
-/// submodule a type happens to live in. The operational `gma` module remains
-/// private; callers use these deliberate types and their inherent methods.
 pub use gma::extract::{
     ExtractDestination, ExtractOptions, ExtractionContext, ExtractionOverwriteMode, Whitelist,
 };
@@ -84,7 +73,6 @@ pub use gma::{
     ws_id_from_file_name,
 };
 
-/// Stateless whitelist vocabulary used by app-side preflight presentation.
 pub mod whitelist {
     pub use crate::gma::whitelist::{
         DEFAULT_IGNORE, is_default_ignored, is_ignored, is_whitelisted_in,
@@ -105,7 +93,6 @@ pub use steam::{
     SteamRuntimeUser,
 };
 
-/// Deliberate data-conversion API for app-owned publish requests.
 pub mod publishing {
     pub use crate::steam::publishing::{
         PublishError, PublishSettingsSnapshot, PublishSubmission, PublishSubmissionMode,
@@ -115,14 +102,12 @@ pub mod publishing {
     };
 }
 
-/// Connected Workshop queries used by the app's narrow Workshop service.
 pub mod workshop {
     pub use crate::steam::workshop::{
         query_workshop_item_details, query_workshop_items, query_workshop_items_streaming,
     };
 }
 
-/// Connected Steam-user queries used by the app's narrow Workshop service.
 pub mod steam_users {
     pub use crate::steam::users::{fetch_steam_user, fetch_steam_user_streaming};
 }
@@ -138,13 +123,11 @@ pub use backend::{
     BackgroundStartOutcome,
 };
 
-/// Constructors and service handles needed only by integration fixtures.
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use crate::appdata::{AppData, AppDataPaths};
     pub use crate::events::{BackendEventCollector, NullEventSink};
     pub use crate::gma::whitelist::AddonWhitelist;
-    pub use crate::gma::whitelist::{is_default_ignored, is_ignored, is_whitelisted_in};
     pub use crate::steam::Steam;
     pub use crate::transactions::Transactions;
 }

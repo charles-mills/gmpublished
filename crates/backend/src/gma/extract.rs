@@ -25,7 +25,6 @@ use parking_lot::Mutex;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 
-/// What to do when a GMA's extraction directory already exists.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ExtractionOverwriteMode {
     /// Extracts over the existing directory, replacing files the GMA
@@ -108,10 +107,6 @@ impl ExtractionAppDataContext {
     }
 }
 
-/// Everything an extraction needs after service-backed settings, paths and
-/// whitelist policy have been resolved. Consumed by [`GmaView::extract`], so
-/// the extraction core cannot discover paths or observe a different settings
-/// snapshot halfway through the operation.
 #[derive(Clone, Debug)]
 pub struct ExtractionContext {
     destination: PathBuf,
@@ -163,24 +158,15 @@ impl ExtractionContext {
     }
 }
 
-/// Clears an existing destination so extraction can use it. `false` means the
-/// path could not be made usable and a suffixed sibling should be used instead.
 fn cleanup_existing_destination(path: &Path, overwrite_mode: &ExtractionOverwriteMode) -> bool {
     match overwrite_mode {
-        // Nothing to clear: the point of this mode is that files the GMA does
-        // not contain survive.
         ExtractionOverwriteMode::Overwrite => true,
         ExtractionOverwriteMode::Delete => fs::remove_dir_all(path).is_ok(),
         ExtractionOverwriteMode::Recycle => trash::delete(path).is_ok(),
     }
 }
 
-/// Tries suffixed sibling names (`name (1)`, `name (2)`, ...) until an
-/// unused one turns up. Errors once every suffix up to `(255)` is taken
-/// rather than silently handing back the popped parent directory.
 fn use_suffixed_fallback_destination(path: &mut PathBuf) -> Result<(), GmaError> {
-    // Root/`..`-terminated paths have no file name; fall back to a static one
-    // instead of panicking. Normal destinations are unaffected.
     let dir_name = path.file_name().map_or_else(
         || "gma".to_string(),
         |name| name.to_string_lossy().to_string(),
@@ -198,8 +184,6 @@ fn use_suffixed_fallback_destination(path: &mut PathBuf) -> Result<(), GmaError>
     Err(GmaError::DestinationUnavailable)
 }
 
-/// Tracks compressed bytes handed to the LZMA decoder so decompression
-/// progress can be reported against the on-disk payload size.
 struct CountingReader<R> {
     inner: R,
     bytes_read: u64,
@@ -317,15 +301,10 @@ fn classify_decoder_error(
 }
 
 impl GmaFile {
-    /// Decompressed payloads at most this large are kept in memory for the
-    /// extraction that follows; anything larger (or of unknown size) spills
-    /// to a temp .gma so peak RSS stays bounded regardless of addon size.
+    /// Keep small decompressed payloads in memory; spill large or unknown-sized ones to
+    /// disk to bound peak memory.
     const DECOMPRESS_MEMBUFFER_MAX: u64 = 256 * 1024 * 1024;
 
-    /// Decompresses a legacy Workshop `.bin` payload. Returns the parsed
-    /// identity handle alongside the [`GmaView`] holding its bytes: there is
-    /// no on-disk GMA to re-view later (`path` names the original
-    /// compressed payload), so callers keep the view for extraction.
     pub fn decompress<P: AsRef<Path>>(
         path: P,
         transaction: &Transaction,
@@ -407,8 +386,6 @@ impl GmaFile {
 
         match sink {
             DecompressionSink::Memory(mut output) => {
-                // No-op when the header's unpacked size was exact; only a
-                // truncated-but-valid stream leaves spare capacity behind.
                 output.shrink_to_fit();
 
                 let view = GmaView::from_membuffer(output.into());
@@ -438,11 +415,8 @@ fn write_entry(
 
     let parent = entry_path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
+    // Do not derive this prefix from the entry name; it may already reach the filesystem limit.
     let mut temp = tempfile::Builder::new()
-        // A constant prefix keeps the temporary component safely below the
-        // filesystem limit even when the destination itself is near it.
-        // `tempfile_in(parent)` still gives us the same-filesystem atomic
-        // persist guarantee; including the destination name adds no safety.
         .prefix(".gmpublished-entry.")
         .suffix(".tmp")
         .tempfile_in(parent)?;
@@ -460,11 +434,6 @@ fn write_entry(
     Ok(())
 }
 
-/// Writes `addon.json` for `GmaMetadata::Standard` addons; a no-op for
-/// `Legacy` metadata, which has nothing to serialize. Runs straight-line,
-/// exactly once, after the parallel entry loop has fully joined and before
-/// the transaction is reported finished — a half-extracted addon should
-/// never look "done" while its manifest is still missing.
 fn write_addon_json(handle: &GmaFile, dest_path: &Path) -> std::io::Result<()> {
     let GmaMetadata::Standard { .. } = &handle.metadata else {
         return Ok(());
@@ -475,18 +444,10 @@ fn write_addon_json(handle: &GmaFile, dest_path: &Path) -> std::io::Result<()> {
     fs::write(dest_path.join("addon.json"), json.as_bytes())
 }
 
-/// Confirms no directory from `root` (inclusive) down to `leaf_dir`
-/// (inclusive) is a symlink, so extracting into a destination that already
-/// existed before this run can't be redirected through a symlink planted by
-/// something other than this extraction. `verified` caches directories
-/// already cleared so sibling entries sharing an ancestor don't re-walk it.
-///
-/// This is cheap defense-in-depth, not a hard guarantee: it doesn't close
-/// the window between this check and the write that follows it. GMA entries
-/// themselves can never carry a symlink entry type, so the gap this guards
-/// is purely out-of-band filesystem state (something other than this
-/// extraction placing a symlink in a destination directory reused across
-/// runs).
+/// Rejects symlinks from `root` through `leaf_dir`, caching verified directories.
+/// Protects reused destinations from existing symlinks, but cannot prevent a
+/// filesystem change between this check and the write. GMA entries cannot
+/// themselves encode symlinks.
 fn verify_no_symlink_ancestors(
     root: &Path,
     leaf_dir: &Path,
@@ -521,9 +482,8 @@ fn verify_no_symlink_ancestors(
     Ok(())
 }
 
-/// Whether an extraction bypasses the addon-content whitelist. `Enforce` is
-/// the safety-relevant default; `Ignore` is opt-in (previews, CLI extraction,
-/// downloads of addons Steam already accepted).
+/// Enforce the content whitelist by default; previews, extraction and downloads may explicitly
+/// bypass it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Whitelist {
     Enforce,
@@ -645,9 +605,6 @@ impl GmaView {
                     let rejected = rejected.into_inner();
                     let mut first_error = first_error.into_inner();
 
-                    // A manifest write failure on an otherwise-complete extraction
-                    // still means the addon didn't fully land; fold it into the
-                    // same failed-entry accounting rather than a separate outcome.
                     if failed == 0
                         && extracted > 0
                         && let Err(err) = write_addon_json(handle, &dest_path)
@@ -701,8 +658,6 @@ impl GmaView {
         app_data: &AppData,
         steam: &Steam,
     ) -> Result<PathBuf, GmaError> {
-        // A single entry always lands in the temp dir, so the destination half
-        // of `ExtractOptions` has nothing to choose; only `open_after` applies.
         let ExtractOptions {
             open_after: open_after_extract,
             whitelist: _,
@@ -739,7 +694,6 @@ impl GmaView {
             && !transaction.cancelled()
             && let Ok(path) = &result
         {
-            // Keep optional native integration outside transaction completion.
             let _ = crate::path::open(path);
         }
         result

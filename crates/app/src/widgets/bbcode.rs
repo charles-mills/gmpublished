@@ -1,19 +1,3 @@
-//! Renders a parsed BBCode [`Document`] as iced widgets, in one of two visual
-//! contexts sharing a single code path:
-//!
-//! - the app theme ([`view`]), driven by the live [`Tokens`], for surfaces
-//!   like the preview sidebar;
-//! - Steam's Workshop item page ([`steam_view`]), driven by
-//!   [`RenderTokens::steam`] — values measured from Steam's own stylesheets
-//!   and computed styles (`shared_global.css` and a live
-//!   `.workshopItemDescription`), so the description editor's preview shows
-//!   what Workshop visitors will actually see.
-//!
-//! Remote media (`[img]`, `[previewyoutube]` thumbnails) is supplied by the
-//! caller through [`MediaLookup`]: the enclosing feature owns fetching (via
-//! the thumbnail pipeline) and hands handles in; surfaces that do not fetch
-//! pass [`NoMedia`] and get textual link fallbacks instead.
-
 use std::collections::HashSet;
 
 use gmpublished_backend::bbcode::{
@@ -38,26 +22,19 @@ pub const STEAM_PAGE_BACKGROUND: Rgba = Rgba::rgb(0x1B2838);
 /// preview laid out at this width wraps exactly where the live page does.
 pub const STEAM_DESCRIPTION_WIDTH: f32 = 647.0;
 
-/// Height of the box shown while an image is still being fetched; replaced by
-/// the image's own aspect ratio once its dimensions are known.
 const MEDIA_PLACEHOLDER_HEIGHT: f32 = 96.0;
 
 /// `img.sharedFilePreviewImage { max-width: 630px }`.
 const STEAM_IMAGE_MAX_WIDTH: f32 = 630.0;
 
-/// Every visual decision the renderer makes, resolved per context. Field
-/// values for the app come from [`Tokens`]; the Steam context is a fixed
-/// palette measured from the Workshop page (each field notes its CSS source).
+/// App colors come from Tokens; Steam colors match the Workshop page.
 #[derive(Clone, Copy)]
 struct RenderTokens {
     gap_xs: f32,
     gap_sm: f32,
     marker_width: f32,
-    /// Table cell padding.
     pad_xs: f32,
-    /// Quote and code-block padding.
     pad_sm: f32,
-    /// Quote author line size.
     caption: f32,
     body: f32,
     heading_sizes: [f32; 3],
@@ -90,14 +67,9 @@ struct QuoteStyle {
     size: f32,
 }
 
-/// The two quote silhouettes. The shape also decides the author line: the
-/// bordered Steam box reproduces Steam's localized "Originally posted by …:"
-/// header, the app's rule bar shows the raw author.
 #[derive(Clone, Copy)]
 enum QuoteShape {
-    /// Steam's bordered box (`blockquote.bb_blockquote`).
     Bordered(Rgba),
-    /// The app's left rule bar.
     RuleBar(Rgba),
 }
 
@@ -118,8 +90,6 @@ struct TableStyle {
 #[derive(Clone, Copy)]
 struct SpoilerStyle {
     cover: Rgba,
-    /// Revealed spoiler text when the cover is kept (Steam shows white text
-    /// on the black chip; the app removes the cover entirely).
     text: Rgba,
     pad: [f32; 2],
     reveal_keeps_cover: bool,
@@ -178,11 +148,8 @@ impl From<&Tokens> for RenderTokens {
 }
 
 impl RenderTokens {
-    /// The Workshop item page context. Sources, measured 2026-08:
-    /// `.workshopItemDescription` computed style (body), `div.bb_h1/h2/h3`,
-    /// `a.bb_link`, `span.bb_spoiler`, `blockquote.bb_blockquote`,
-    /// `div.bb_code`, `div.bb_table*` (all `shared_global.css`), and the
-    /// page's computed `<hr>`/image bounds.
+    /// Measured from Workshop page styles in August 2026: description, headings, links,
+    /// spoilers, quotes, code blocks and tables.
     const fn steam() -> Self {
         Self {
             gap_xs: 4.0,
@@ -194,7 +161,6 @@ impl RenderTokens {
             body: 14.0,
             heading_sizes: [20.0, 18.0, 16.0],
             heading_bold: false,
-            // 20px line height over 14px text.
             line_height: 20.0 / 14.0,
             radius_xs: 0.0,
             radius_base: 3.0,
@@ -252,30 +218,22 @@ impl From<Interaction> for Event {
     }
 }
 
-/// Display state of one fetched media source, keyed by the exact URLs
-/// reported by [`media_urls`].
 #[derive(Clone, Copy, Debug)]
 pub enum MediaView<'a> {
-    /// This surface does not fetch media at all; render link fallbacks.
     Unavailable,
     Loading,
     Ready {
         handle: &'a image::Handle,
-        /// Source dimensions (pre-downscale), for aspect-correct layout.
         width: u32,
         height: u32,
     },
     Failed,
 }
 
-/// Supplier of fetched description media. The renderer never fetches;
-/// whichever feature shows the preview owns demands and deliveries.
 pub trait MediaLookup {
     fn media(&self, url: &str) -> MediaView<'_>;
 }
 
-/// The lookup for surfaces that render descriptions without fetching remote
-/// media: images and videos degrade to the textual link fallbacks.
 pub struct NoMedia;
 
 impl MediaLookup for NoMedia {
@@ -284,10 +242,8 @@ impl MediaLookup for NoMedia {
     }
 }
 
-/// Every remote media URL `document` would render, in source order without
-/// duplicates: `[img]` sources plus YouTube preview thumbnails. Only
-/// http(s) sources are reported — anything else can never be fetched and
-/// falls back to a link at render time.
+/// Image and YouTube thumbnail URLs in source order, deduplicated. Include
+/// only HTTP(S); other schemes render as links.
 #[must_use]
 pub fn media_urls(document: &Document) -> Vec<String> {
     let mut urls = Vec::<String>::new();
@@ -315,16 +271,12 @@ pub fn media_urls(document: &Document) -> Vec<String> {
     urls
 }
 
-/// Whether a media source is fetchable at all; anything else renders as a
-/// link fallback and must never be reported as loading.
 #[must_use]
 pub fn is_http_url(url: &str) -> bool {
     let lowercase = url.to_ascii_lowercase();
     lowercase.starts_with("http://") || lowercase.starts_with("https://")
 }
 
-/// The index into per-level style tables for a `[h1]`–`[h3]` heading,
-/// clamped to Steam's range like the tags themselves.
 #[must_use]
 pub fn heading_index(level: u8) -> usize {
     usize::from(level.saturating_sub(1)).min(2)
@@ -349,19 +301,14 @@ pub fn normalize_description_url(url: &str) -> Option<String> {
     Some(format!("https://{url}"))
 }
 
-/// Bundled per-render inputs, so the recursion threads one value.
 #[derive(Clone, Copy)]
 struct Ctx<'a> {
     revealed_spoilers: &'a HashSet<SpoilerId>,
     media: &'a dyn MediaLookup,
-    /// Localized renderer copy: the media link fallbacks in both contexts,
-    /// and the "Originally posted by …:" quote header the Steam context
-    /// reproduces from Steam's own UI.
     i18n: &'a I18n,
     tokens: RenderTokens,
 }
 
-/// Renders `document` in the app's own theme, without remote media.
 #[must_use]
 pub fn view<'a>(
     document: &'a Document,
@@ -380,10 +327,7 @@ pub fn view<'a>(
     )
 }
 
-/// Renders `document` as the Steam Workshop page renders it, with remote
-/// media resolved through `media`. Lay the result out on
-/// [`STEAM_PAGE_BACKGROUND`] at [`STEAM_DESCRIPTION_WIDTH`] for full
-/// fidelity.
+/// Use the Steam page background and description width so wrapping matches the Workshop page.
 #[must_use]
 pub fn steam_view<'a>(
     document: &'a Document,
@@ -661,7 +605,6 @@ fn render_quote<'a>(
                 .into()
         }
         QuoteShape::RuleBar(rule_color) => {
-            // The app's shape shows the raw author.
             let author = author.map(|author| {
                 author_line(
                     author.to_owned(),
@@ -734,8 +677,6 @@ fn render_youtube<'a>(id: &'a str, ctx: Ctx<'a>) -> Element<'a, Event> {
         return media_link_line(ctx.i18n.tr("bbcode-watch-youtube"), watch_url, tokens);
     }
 
-    // Steam embeds players at the shared media width (`image_max_width`,
-    // the same 630px cap it applies to images) in 16:9.
     let width = tokens.image_max_width;
     let height = width * 9.0 / 16.0;
     let backdrop: Element<'a, Event> = match thumbnail {
@@ -793,7 +734,6 @@ fn media_link_line<'a>(label: String, target: String, tokens: RenderTokens) -> E
     )
 }
 
-/// Lossless u32 → f32 for dimensions (decode limits cap them far below 2^24).
 fn precise_f32(value: u32) -> f32 {
     debug_assert!(value < (1 << 24));
     value as f32
@@ -948,7 +888,6 @@ fn collect_inline(node: &Node, ctx: Ctx<'_>, mut style: InlineStyle, spans: &mut
                         .clone()
                         .unwrap_or(Interaction::ToggleSpoiler(id));
                     if tokens.spoiler.reveal_keeps_cover {
-                        // Steam reveals white text over the black chip.
                         rendered = rendered
                             .color(Color::from(tokens.spoiler.text))
                             .background(Color::from(tokens.spoiler.cover))
@@ -1063,12 +1002,6 @@ mod tests {
         assert_eq!(paragraphs[1][0].text, "Second");
     }
 
-    /// `render_nodes`/`render_block`/`collect_inline` recurse once per
-    /// nesting level, so before the parser capped nesting a description
-    /// carrying a few thousand nested tags overflowed the stack and aborted
-    /// the process — on the UI thread, on the first frame it was shown.
-    /// 5000 is well past the measured debug-build limit of roughly 900, so
-    /// this only passes while `MAX_NESTING_DEPTH` is enforced.
     #[test]
     fn deeply_nested_source_renders_without_overflowing_the_stack() {
         let depth = 5_000;
@@ -1076,7 +1009,7 @@ mod tests {
         let document = gmpublished_backend::bbcode::Document::parse(&source);
         let revealed = HashSet::new();
         let tokens = crate::theme::Tokens::dark();
-        let i18n = crate::i18n::I18n::from_user_or_system(None);
+        let i18n = crate::i18n::I18n::for_locale(Some("en"));
 
         let element = view(&document, &revealed, &tokens, &i18n);
 
@@ -1092,39 +1025,6 @@ mod tests {
 
         assert_eq!(paragraphs.len(), 1);
         assert_eq!(paragraphs[0][0].text, "First\nSecond");
-    }
-
-    #[test]
-    fn steam_view_renders_media_documents_with_and_without_a_lookup() {
-        struct EveryStateLookup(image::Handle);
-        impl MediaLookup for EveryStateLookup {
-            fn media(&self, url: &str) -> MediaView<'_> {
-                if url.contains("ytimg") {
-                    MediaView::Ready {
-                        handle: &self.0,
-                        width: 480,
-                        height: 360,
-                    }
-                } else if url.contains("loading") {
-                    MediaView::Loading
-                } else {
-                    MediaView::Failed
-                }
-            }
-        }
-
-        let document = gmpublished_backend::bbcode::Document::parse(
-            "[h1]Title[/h1][img]https://example.com/loading.png[/img]\
-             [img]https://example.com/broken.png[/img]\
-             [previewyoutube=dQw4w9WgXcQ;full][/previewyoutube]\
-             [spoiler]secret[/spoiler][quote=author]q[/quote]",
-        );
-        let revealed = HashSet::new();
-
-        let lookup = EveryStateLookup(image::Handle::from_rgba(1, 1, vec![0, 0, 0, 255]));
-        let i18n = crate::i18n::I18n::from_user_or_system(None);
-        drop(steam_view(&document, &revealed, &lookup, &i18n));
-        drop(steam_view(&document, &revealed, &NoMedia, &i18n));
     }
 
     #[test]

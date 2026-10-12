@@ -1,5 +1,3 @@
-//! BSP mesh assembly.
-
 use super::{
     BTreeMap, BspError, ColorRgbExp, DispInfo, Face, HashMap, MapBsp, MapFaceVisibility,
     MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapVertex, PendingLightmapBlock,
@@ -137,7 +135,6 @@ pub(super) fn append_face(
     if face.edge_count < 3 || !bsp.face_is_visible(face) {
         return Ok(());
     }
-    // `face_is_visible` only returns true when the texinfo lookup hits.
     let Some(texinfo) = bsp.face_texinfo(face) else {
         return Ok(());
     };
@@ -305,11 +302,8 @@ pub(super) fn tessellate_displacement_grid(
     steps: usize,
     side: usize,
 ) -> Vec<DisplacementBuildVertex> {
-    // displacement_grid lays vertices out column-major (column is the outer
-    // loop). Reading it back row-major silently transposes the grid: the
-    // surface shape survives (same vertex set, still a valid tessellation)
-    // but every triangle's winding reverses relative to its base face, so
-    // backface culling removes displacements viewed from the front.
+    // Read the grid column-major, as `displacement_grid` writes it.
+    // Transposing preserves the shape but reverses winding and backface culling.
     let index = |column: usize, row: usize| column * side + row;
 
     let mut vertices = Vec::with_capacity(steps.saturating_mul(steps).saturating_mul(6));

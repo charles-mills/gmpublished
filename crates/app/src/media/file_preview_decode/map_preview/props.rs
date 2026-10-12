@@ -1,5 +1,3 @@
-//! Static props, models, doors, and mesh baking.
-
 #[cfg(test)]
 use super::MapAmbientLighting;
 use super::{
@@ -35,8 +33,6 @@ impl PropBakeResult {
     }
 }
 
-/// Wall-clock split of a prop bake: `load` covers model loading and placement
-/// selection, `bake` covers only the mesh transform.
 #[derive(Clone, Copy, Debug, Default)]
 pub(in super::super) struct PropBakeTiming {
     pub(in super::super) load: Duration,
@@ -323,9 +319,6 @@ pub(in super::super) fn bake_static_props(
     )
 }
 
-/// Builds the model cache itself, for callers that have no other use for one.
-/// The map pipeline builds its cache up front and bakes from it instead —
-/// every placement set is parsed exactly once per preview.
 #[cfg(test)]
 pub(in super::super) fn bake_static_props_with_prop_model_loader(
     placements: &[StaticPropPlacement],
@@ -639,12 +632,6 @@ fn bake_selected_with(
     }
 }
 
-/// The differential oracle for the parallel prop bake.
-///
-/// Shares [`bake_selected_with`] and [`select_static_prop_placements`] with
-/// production; only the bake strategy differs, which is what
-/// `parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges`
-/// compares.
 #[cfg(test)]
 pub(in super::super) fn bake_static_props_with_loader_serial(
     placements: &[StaticPropPlacement],
@@ -839,8 +826,7 @@ pub(in super::super) fn merge_prop_meshes(
         let Some(base) = u32::try_from(target.vertices.len()).ok() else {
             continue;
         };
-        // Visibility range starts are positions in the INDEX buffer, not
-        // vertex ids — shift them by the index length, not the vertex base.
+        // Visibility ranges index the index buffer. Shift by its length, not the vertex count.
         let Some(index_base) = u32::try_from(target.indices.len()).ok() else {
             continue;
         };
@@ -1160,8 +1146,6 @@ pub(in super::super) fn load_prop_physics(
     }
 }
 
-/// A parsed `.phy` flattened to the shape the prop-physics preview
-/// consumes (solid boundaries do not matter to it).
 #[derive(Clone, Debug, PartialEq)]
 pub(in super::super) struct LoadedPhy {
     pub(in super::super) ledges: Vec<ConvexLedge>,

@@ -1,8 +1,3 @@
-//! Render targets sized to the viewport: the MSAA colour and depth
-//! attachments, the single-sample resolve texture the final blit reads, and
-//! the lazily added refraction copy that water frames sample. Recreated
-//! whenever the viewport size or surface format changes.
-
 use super::resources::RenderResources;
 use super::{MSAA_SAMPLE_COUNT, wgpu};
 
@@ -25,9 +20,6 @@ pub struct RefractionTarget {
 }
 
 impl RenderTargets {
-    /// Recreates the attachments when the viewport size or surface format
-    /// changes; otherwise reuses them, adding the refraction copy on the
-    /// first frame that needs it.
     pub fn ensure(
         slot: &mut Option<Self>,
         device: &wgpu::Device,
@@ -44,10 +36,8 @@ impl RenderTargets {
                 if needs_refraction {
                     targets.ensure_refraction(device, resources);
                 } else {
-                    // Shed it when the scene stops needing it. Keyed on size and
-                    // format, this target otherwise survives a switch to a
-                    // waterless preview at the same viewport — a full-screen
-                    // texture held for a pass that no longer runs.
+                    // Drop the refraction texture when switching to a waterless scene, even if
+                    // the viewport size and format are unchanged.
                     targets.refraction = None;
                 }
             }
@@ -142,9 +132,6 @@ impl RenderTargets {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        // The frame group carries the shared uniforms alongside the
-        // refraction inputs; see the `water_frame_layout` rationale in
-        // `RenderResources::new`.
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.water_frame_bind_group"),
             layout: &resources.water_frame_layout,

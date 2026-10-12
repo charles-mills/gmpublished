@@ -1,8 +1,4 @@
-//! Process-owned execution resources shared by backend and app workloads.
-//!
-//! CPU parallelism uses one Rayon pool. Work that may park on filesystem,
-//! Steam, or HTTP I/O uses separately bounded standard-thread executors so it
-//! cannot consume the CPU pool's workers.
+//! Keep blocking I/O off the CPU pool so parked jobs cannot consume its workers.
 
 use parking_lot::Mutex;
 use std::fmt;
@@ -304,7 +300,6 @@ pub enum ExecutionScheduleError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Barrier, time::Instant};
 
     #[test]
     fn machine_config_assigns_each_category_an_independent_positive_budget() {
@@ -340,7 +335,7 @@ mod tests {
             queue_capacity: 1,
         })
         .expect("execution resources");
-        let (release_tx, release_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
         let (started_tx, started_rx) = mpsc::channel();
 
         resources
@@ -372,23 +367,26 @@ mod tests {
             queue_capacity: 1,
         })
         .expect("execution resources");
-        let running = Arc::new(Barrier::new(2));
-        let job_running = Arc::clone(&running);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
         resources
-            .spawn_blocking("slow job", move || {
-                job_running.wait();
-                std::thread::sleep(SHUTDOWN_JOIN_TIMEOUT * 6);
+            .spawn_blocking("blocked job", move || {
+                started_tx.send(()).expect("worker started");
+                let _ = release_rx.recv();
             })
-            .expect("schedule slow job");
-        running.wait();
+            .expect("schedule blocked job");
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker started");
 
-        let before = Instant::now();
-        drop(resources);
-        let elapsed = before.elapsed();
-
-        assert!(
-            elapsed < SHUTDOWN_JOIN_TIMEOUT * 4,
-            "resource drop blocked for {elapsed:?}"
-        );
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            drop(resources);
+            dropped_tx.send(()).expect("drop completed");
+        });
+        let result = dropped_rx.recv_timeout(Duration::from_secs(5));
+        drop(release_tx);
+        dropper.join().expect("dropper thread");
+        result.expect("resource drop must finish while the worker is still blocked");
     }
 }

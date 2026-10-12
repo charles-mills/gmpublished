@@ -1,6 +1,3 @@
-//! Ground movement: the walk state machine, per-substep integration,
-//! wish-direction, step-up and ground snapping.
-
 use super::super::super::state::MovementMode;
 use super::super::{MapPreview, SOURCE_UP, normalize_or_up};
 use super::{
@@ -56,10 +53,6 @@ impl FlyCamera {
         };
 
         self.reset_duck_state();
-        // GMod noclip-off semantics: enter walk mode right where the camera
-        // is and let gravity bring you down — no teleport-to-ground. The
-        // first landing plays the head-bob; the void failsafe covers
-        // toggling over nothing.
         let start = self.unstick_eye(collision, position, WalkHull::Standing);
         if self.aabb_trace_solid(
             collision,
@@ -74,16 +67,6 @@ impl FlyCamera {
         true
     }
 
-    /// Clears every field that only means something while walking.
-    ///
-    /// One definition, because three sites need it and a field missed by one
-    /// of them is silent: leaving `walk_bob_phase` behind carries the previous
-    /// walk's head-bob into the next one, and leaving `move_factor` behind
-    /// carries its speed ramp.
-    ///
-    /// `mode` is deliberately not touched: each caller sets it to the mode it
-    /// is entering, and folding that in here would let a reset silently
-    /// change which mode the camera is in.
     pub(super) fn reset_walk_state(&mut self) {
         self.walk_velocity = Vec3::splat(0.0);
         self.grounded = false;
@@ -128,11 +111,8 @@ impl FlyCamera {
         }
         self.jump_requested = false;
 
-        // Failsafe: a fall that never lands (off the map edge, out of the
-        // world through a leak) has nothing left to collide with — without
-        // this, `!grounded` keeps the redraw loop alive forever and
-        // velocity grows without bound. idle-0% is a hard rule, so hand
-        // the camera back to fly once we're clearly below all geometry.
+        // Return to fly mode below all geometry so an endless fall cannot keep
+        // the redraw loop running or grow velocity without bound.
         if let Some(position) = self.position
             && position[2] - self.walk_hull.eye_height()
                 < scene.scene.bounds_min[2] - WALK_VOID_EXIT_MARGIN
@@ -159,7 +139,6 @@ impl FlyCamera {
         let was_grounded = self.grounded;
         let jumped = self.grounded && self.jump_requested;
 
-        // Shift sprints — same mental model as the fly-mode speed boost.
         let speed = if self.walk_hull.is_ducked() {
             WALK_DUCK_SPEED
         } else if self.held.fast {
@@ -342,10 +321,6 @@ mod tests {
     use super::*;
     use crate::media::preview_model::MapSpawn;
 
-    /// Three sites leave walk mode, and a field missed by one of them is
-    /// silent: dropping `walk_bob_phase` carries the previous walk's head-bob
-    /// into the next one, dropping `move_factor` carries its speed ramp. This
-    /// fails if any single field escapes the shared reset.
     #[test]
     fn leaving_walk_clears_every_walk_only_field() {
         let mut camera = FlyCamera {
@@ -387,10 +362,7 @@ mod tests {
     fn walk_standing_on_the_floor_can_move_and_jump() {
         let scene = floor_scene();
 
-        // Resting contact: hull bottom a hair above the floor plane — the
-        // state every landing converges to (hit traces back the mover off
-        // by the plane epsilon, so a grounded player rests at that
-        // separation, never at mathematically exact contact).
+        // Resting hulls sit TRACE_PLANE_EPSILON above the floor after a hit.
         let mut camera = walk_camera(Vec3::new(512.0, 512.0, 64.1), true);
 
         camera.held.forward = true;
@@ -450,10 +422,7 @@ mod tests {
     fn walk_toggle_at_exact_floor_contact_unsticks_and_walks() {
         let scene = floor_scene();
 
-        // Mappers place info_player_start exactly on the floor, so the
-        // hull starts at mathematically exact contact — the trace calls
-        // that solid even though the embed check does not. Toggling walk
-        // here must unstick and produce a mover that actually moves.
+        // Map spawns can sit exactly on the floor. Unstick before probing ground contact.
         let mut camera = FlyCamera {
             content_id: Some(1),
             position: Some(Vec3::new(512.0, 512.0, 64.0)),
@@ -588,8 +557,7 @@ mod tests {
     #[test]
     fn walk_falling_into_the_void_reverts_to_fly_and_goes_idle() {
         let mut scene = empty_preview(Vec3::splat(0.0), Vec3::splat(1024.0));
-        // Non-empty collision (walk mode refuses to engage otherwise), but
-        // nothing anywhere near the camera — an endless fall.
+        // Collision must be non-empty to enter walk mode, but far away to allow endless falling.
         scene.walk_collision = Some(MapWalkCollision::solid_box_for_tests(
             Vec3::new(4000.0, 4000.0, 0.0),
             Vec3::new(4100.0, 4100.0, 100.0),

@@ -7,11 +7,6 @@ use crate::widgets::route_state::{self, Action as PanelAction, Glyph, RouteState
 
 use super::{Action, Blocker};
 
-/// Renders the panel a blocked route shows instead of its content.
-///
-/// `on_action` lets each caller keep its own message type: the three fully
-/// blocked routes map straight to the root message, while the Downloader
-/// wraps it so its live input row survives above the panel.
 pub fn view<'a, M: Clone + 'a>(
     ctx: ViewCtx<'a>,
     route: Route,
@@ -96,8 +91,6 @@ pub fn view<'a, M: Clone + 'a>(
             i18n.tr("gmod-broken-title"),
             i18n.tr("gmod-broken-body"),
         )
-        // The saved path is the fastest way to recognise what happened —
-        // an unmounted drive reads instantly once you see the prefix.
         .detail(path.display().to_string())
         .action(PanelAction::primary(
             i18n.tr("gmod-missing-locate"),
@@ -112,8 +105,6 @@ pub fn view<'a, M: Clone + 'a>(
     route_state::view(panel, ctx)
 }
 
-/// The Downloader leads with the consequence rather than the cause: its
-/// queue is what the user came for, and it survives the outage.
 const fn steam_offline_title_key(route: Route) -> &'static str {
     match route {
         Route::Downloader => "steam-offline-title-downloads",
@@ -128,7 +119,6 @@ const fn steam_offline_body_key(route: Route) -> &'static str {
     }
 }
 
-/// Only the clause naming what this screen wanted to do changes.
 const fn gmod_missing_body_key(route: Route) -> &'static str {
     match route {
         Route::SizeAnalyzer => "gmod-missing-body-size",

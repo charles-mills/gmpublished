@@ -1,5 +1,3 @@
-//! Render-facing BSP lighting data and assembly.
-
 use crate::math::Vec3;
 use crate::scene::QAngle;
 
@@ -247,8 +245,6 @@ pub(super) fn map_ambient_lighting(bsp: &MapBsp) -> MapAmbientLighting {
     }
 }
 
-/// The pair `MapBsp` holds for one ambient-lighting source (LDR or HDR):
-/// samples plus per-leaf index spans into them.
 pub(super) struct LeafAmbientLightingRef<'a> {
     pub(super) samples: &'a [LeafAmbientSample],
     pub(super) index: &'a [LeafAmbientIndex],
@@ -292,10 +288,7 @@ pub(super) fn ambient_cube(cube: [ColorRgbExp; 6]) -> AmbientCube {
     }
 }
 
-// Ambient cubes convert via the engine's ColorRGBExp32ToVector — which is
-// 255 * TexLightToLinear, i.e. byte * 2^exp WITHOUT the /255 that lightmap
-// samples get. Using the lightmap formula here renders every prop roughly
-// 255x too dark.
+// Ambient cubes use byte * 2^exp, without the /255 applied to lightmaps.
 pub(super) fn decode_ambient_sample_linear(sample: ColorRgbExp) -> Vec3 {
     let scale = 2.0_f32.powi(i32::from(sample.exponent));
     Vec3::new(
@@ -367,9 +360,7 @@ pub(super) fn parse_entity_rgb_intensity_linear(value: &str) -> Option<Vec3> {
     let red = components.next()??;
     let green = components.next()??;
     let blue = components.next()??;
-    // VRAD's LightForString: the intensity scaler is optional (3-component form
-    // means "use the RGB as-is") and is NOT capped at 255 — real maps commonly
-    // use sun intensities of 300-500. The evaluation-time clamp bounds the result.
+    // VRAD LightForString defaults intensity to 255 and permits values above it.
     let intensity = match components.next() {
         Some(value) => value?,
         None => 255.0,
@@ -385,8 +376,7 @@ pub(super) fn parse_entity_rgb_intensity_linear(value: &str) -> Option<Vec3> {
     {
         return None;
     }
-    // VRAD converts the gamma-space RGB keyvalue to linear with pow 2.2 before
-    // scaling — matching it keeps this consistent with the linear color path.
+    // VRAD converts RGB to linear with pow 2.2 before applying intensity.
     let scale = intensity / 255.0;
     Some(Vec3::new(
         (red / 255.0).powf(2.2) * scale,

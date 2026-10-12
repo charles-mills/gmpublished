@@ -1,8 +1,5 @@
-//! Allocation-free rendering projections over live particle storage.
-
 use super::*;
 
-/// Read-only view of one live particle for rendering.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderParticle {
     pub position: Vec3,
@@ -24,15 +21,11 @@ pub struct RenderParticle {
     pub lifetime: f32,
 }
 
-/// Owned rendering snapshot for one live system instance.
 pub struct InstanceRender<'a> {
-    /// Compiled system that owns these particles.
     pub system: &'a CompiledSystem,
-    /// Render-ready particles in current storage order.
     pub particles: Vec<RenderParticle>,
 }
 
-/// Allocation-free iterator over one simulation instance's live particles.
 pub struct RenderParticles<'a> {
     particles: &'a ParticleSet,
     local_time: f32,
@@ -40,7 +33,6 @@ pub struct RenderParticles<'a> {
 }
 
 impl RenderParticles<'_> {
-    /// Whether this instance has no live particles.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -72,7 +64,6 @@ impl Iterator for RenderParticles<'_> {
 }
 
 impl ParticleEngine {
-    /// Snapshot of everything a renderer needs, instance by instance.
     #[must_use]
     pub fn render_instances(&self) -> Vec<InstanceRender<'_>> {
         let mut renders = Vec::with_capacity(self.instances.len());
@@ -85,9 +76,6 @@ impl ParticleEngine {
         renders
     }
 
-    /// Visits renderer views without allocating an intermediate particle
-    /// snapshot. Consumers that immediately project into GPU records can write
-    /// those records directly.
     pub fn visit_render_instances<'a>(
         &'a self,
         mut visit: impl FnMut(&'a CompiledSystem, RenderParticles<'a>),

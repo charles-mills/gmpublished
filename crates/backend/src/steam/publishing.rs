@@ -1,11 +1,3 @@
-//! Publishing an addon to the Workshop: packing the content into a GMA,
-//! preparing the icon, and driving the Steam UGC update handle to completion.
-//!
-//! Every stage reports through a [`Transaction`](crate::transactions::Transaction),
-//! because a publish is the longest operation this crate performs and the UI
-//! has to show where it has got to. steamworks owns the upload once the handle
-//! is submitted, so a cancel here stops *waiting*, not transferring.
-
 use crate::transactions::TransactionStatus;
 use crate::{
     STEAM_GMOD_APP_ID, Transaction,
@@ -26,8 +18,6 @@ use std::{
 use steamworks::SteamError;
 
 use crate::WorkshopId;
-#[cfg(test)]
-use walkdir::WalkDir;
 
 /// Item updates can legitimately spend a long time preparing or committing
 /// without changing the byte counters exposed by Steam. Keep an absolute
@@ -35,27 +25,15 @@ use walkdir::WalkDir;
 /// progress inactivity as proof that the upload stopped.
 const PUBLISH_RESULT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Whether a non-animated Workshop icon can benefit from the supported
-/// square, minimum-edge upscale operation.
 #[must_use]
 pub const fn workshop_icon_can_upscale(width: u32, height: u32, animated: bool) -> bool {
     !animated && (width < 512 || height < 512 || width != height)
 }
 
-#[cfg(test)]
-use crate::gma::GmaEntry;
-#[cfg(test)]
-use std::collections::HashSet;
-
 #[derive(Debug, thiserror::Error)]
-/// Failures produced by validation, packing, or Steam Workshop submission.
 pub enum PublishError {
-    #[error("{} files are not whitelisted for upload", .0.len())]
-    NotWhitelisted(Vec<String>),
     #[error("the addon folder contains no uploadable files")]
     NoEntries,
-    #[error("duplicate entry path: {0}")]
-    DuplicateEntry(String),
     #[error("the content path is not an absolute directory")]
     InvalidContentPath,
     #[error("the addon folder contains more than one GMA")]
@@ -72,12 +50,6 @@ pub enum PublishError {
     DescriptionTooLong,
     #[error("publish I/O failed")]
     IoError(#[source] crate::IoFailure),
-    /// A filesystem operation failed while publishing, and the path it failed
-    /// on is the reportable part.
-    ///
-    /// Carried on the error rather than emitted alongside it, so reporting is
-    /// derived from the error the caller receives instead of reaching the user
-    /// through one route while the error travels another and arrives empty.
     #[error("publishing failed on {}", path.display())]
     PathIo { path: PathBuf },
     #[error("Steam returned an error: {0}")]
@@ -99,9 +71,7 @@ impl crate::error_key::HasErrorKey for PublishError {
     fn error_key(&self) -> crate::error_key::ErrorKey {
         use crate::error_key::keys;
         match self {
-            Self::NotWhitelisted(_) => keys::WHITELIST,
             Self::NoEntries => keys::NO_ENTRIES,
-            Self::DuplicateEntry(_) => keys::DUPLICATE_ENTRIES,
             Self::InvalidContentPath => keys::INVALID_CONTENT_PATH,
             Self::MultipleGMAs => keys::MULTIPLE_GMAS,
             Self::IconTooLarge => keys::ICON_TOO_LARGE,
@@ -122,8 +92,6 @@ impl crate::error_key::HasErrorKey for PublishError {
 
     fn error_detail(&self) -> Option<String> {
         match self {
-            Self::NotWhitelisted(failed) => Some(failed.join("\n")),
-            Self::DuplicateEntry(path) => Some(path.clone()),
             Self::IoError(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::SteamError(error) => Some(error.to_string()),
@@ -210,12 +178,8 @@ impl ContentPath {
 const WORKSHOP_ICON_MAX_SIZE: u64 = 1048576;
 const WORKSHOP_ICON_MIN_SIZE: u64 = 16;
 const WORKSHOP_DEFAULT_ICON: &[u8] = include_bytes!("../../assets/gmpublisher_default_icon.png");
-/// The description a Workshop item is created with when the user never wrote
-/// one. Public so the description editor can recognize it and present an
-/// empty editor instead of literal text to overwrite.
 pub const WORKSHOP_DEFAULT_DESCRIPTION: &str = "No description provided";
 
-/// Recognized as a placeholder when editing items carrying this upload signature.
 pub const WORKSHOP_LEGACY_DEFAULT_DESCRIPTION: &str =
     "Uploaded with [url=https://github.com/charles-mills/gmpublished]gmpublished[/url]";
 
@@ -231,17 +195,12 @@ fn validate_title(title: &str) -> Result<(), PublishError> {
     }
 }
 
-/// The description a newly created item ships with: the user's staged text
-/// when present, the placeholder otherwise, sanitized either way.
 fn creation_description(custom: Option<&str>) -> Result<String, PublishError> {
     let custom = custom.map(str::trim).filter(|text| !text.is_empty());
     Ok(sanitize_description(custom.unwrap_or(WORKSHOP_DEFAULT_DESCRIPTION))?.into_owned())
 }
 
-/// Prepares a description for the Steam API: interior NUL bytes are dropped
-/// (steamworks builds a `CString` from the value and would panic on them),
-/// and oversize input is refused rather than truncated so no part of a
-/// description is ever silently discarded.
+/// Drop NUL bytes before Steam builds a CString. Reject oversize descriptions without truncating.
 pub fn sanitize_description(description: &str) -> Result<std::borrow::Cow<'_, str>, PublishError> {
     let description = if description.contains('\0') {
         std::borrow::Cow::Owned(description.replace('\0', ""))
@@ -254,9 +213,6 @@ pub fn sanitize_description(description: &str) -> Result<std::borrow::Cow<'_, st
     Ok(description)
 }
 
-/// A suffix that's unique across concurrent publishes in this process and
-/// across restarts (a crashed run's temp names never repeat), so per-run
-/// temp files and directories never collide.
 fn unique_temp_suffix() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -267,13 +223,6 @@ fn unique_temp_suffix() -> String {
     format!("{nanos}_{counter}")
 }
 
-/// Directory this operation packs its GMA into, uniquely named and confined
-/// to the configured temp dir (never a parent of it) so a user-configured
-/// temp path is always respected.
-///
-/// The submission's snapshot wins over the stored settings: it was captured
-/// when the user opened the publish flow, and a settings change since then
-/// must not move a submission already in progress.
 fn publish_temp_dir(app_data: &AppData, settings: Option<&PublishSettingsSnapshot>) -> PathBuf {
     let mut dir = settings
         .and_then(|settings| settings.temp.clone())
@@ -283,11 +232,6 @@ fn publish_temp_dir(app_data: &AppData, settings: Option<&PublishSettingsSnapsho
     dir
 }
 
-/// The temp dir a preview icon is materialized into, created if it isn't
-/// there yet. [`Steam::update_icon`] resolves a preview without packing a
-/// GMA first, so nothing else has necessarily created the dir this run. A
-/// failure here needs no reporting of its own: the write that follows fails
-/// and each caller already handles that.
 fn ensure_temp_dir(app_data: &AppData) -> PathBuf {
     let dir = app_data.temp_dir();
     if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -349,17 +293,9 @@ fn publish_update_status(processed: steamworks::UpdateStatus) -> Option<Transact
     })
 }
 
-/// Polls a Steam UGC item-update handle until its submit callback resolves,
-/// reporting progress on `transaction` along the way. Progress resets on
-/// every phase change (or while the total is unknown) since a byte count
-/// from the previous phase would otherwise show; once a phase is underway
-/// its own byte-level progress is reported normally.
-///
-/// A cancel here stops *waiting*, not uploading: steamworks owns the transfer
-/// once the handle is submitted and offers no way to recall it. The user gets
-/// their UI back and the transaction ends; Steam finishes or abandons the
-/// upload on its own. Packing, which happens before this and takes far longer,
-/// is genuinely cancellable.
+/// Polls submit completion and reports per-phase progress, resetting it when
+/// the phase changes or its total is unknown.
+/// Cancellation stops waiting; Steam owns the submitted upload and cannot recall it.
 fn pump_publish_progress(
     update_handle: &steamworks::UpdateWatchHandle,
     transaction: &Transaction,
@@ -400,11 +336,6 @@ fn pump_publish_progress(
     }
 }
 
-/// A Workshop preview icon validated for Steam's size and format rules.
-///
-/// The representation is deliberately opaque: custom icons can only enter
-/// through [`Self::new`], and only formats the image crate can safely write
-/// back may carry an upscale request.
 pub struct WorkshopIcon {
     source: WorkshopIconSource,
 }
@@ -451,8 +382,6 @@ impl Default for WorkshopIcon {
         }
     }
 }
-/// The default icon could not be written to disk; carries the path that was
-/// attempted so the caller can report it.
 #[derive(Debug)]
 struct PreviewIconWriteFailed(PathBuf);
 
@@ -479,8 +408,6 @@ impl PreviewPath {
         }
     }
 
-    /// Keeps an owned preview available to an update whose callback outcome
-    /// is unknown. Borrowed user paths are never managed by this type.
     fn preserve(mut self) {
         self.owned_temp.take();
     }
@@ -499,12 +426,6 @@ impl Drop for PreviewPath {
 }
 
 impl WorkshopIcon {
-    /// Materializes the icon into a preview file path for the Steam upload.
-    ///
-    /// A custom icon never fails here (a failed upscale falls back to the
-    /// original path); only writing the default icon can fail. Every
-    /// materialized temp file is uniquely named, so concurrent publishes and
-    /// crashed prior runs never collide.
     fn into_preview_path(self, app_data: &AppData) -> Result<PreviewPath, PreviewIconWriteFailed> {
         match self.source {
             WorkshopIconSource::Custom { path, upscale } => {
@@ -544,15 +465,12 @@ impl WorkshopIcon {
         }
     }
 
-    /// [`Self::into_preview_path`], with a write failure carrying the path it
-    /// failed on into the [`PublishError`] the publish flow returns.
     fn resolve_preview_path(self, app_data: &AppData) -> Result<PreviewPath, PublishError> {
         self.into_preview_path(app_data)
             .map_err(|PreviewIconWriteFailed(path)| PublishError::PathIo { path })
     }
 }
 impl WorkshopIcon {
-    /// Validates a custom Workshop icon and records an optional upscale plan.
     pub fn new<P: AsRef<Path>>(path: P, upscale: bool) -> Result<Self, PublishError> {
         let path = path.as_ref();
 
@@ -592,8 +510,6 @@ impl WorkshopIcon {
     }
 }
 
-/// The first revision of a newly-created Workshop item. Creation-only fields
-/// are mandatory here and cannot be passed to [`ConnectedSteam::update`].
 struct WorkshopCreation {
     language: crate::WorkshopLanguage,
     title: String,
@@ -605,9 +521,6 @@ struct WorkshopCreation {
     description: String,
 }
 
-/// A revision of an existing Workshop item. Its identity is supplied
-/// separately to [`ConnectedSteam::update`]; title/default-description fields
-/// cannot accidentally be applied through this path.
 struct WorkshopUpdate {
     path: ContentPath,
     tags: Vec<String>,
@@ -622,70 +535,43 @@ enum WorkshopRevision {
 }
 
 #[derive(Clone, Debug)]
-/// Settings captured once for a publish submission.
 pub struct PublishSettingsSnapshot {
-    /// Optional configured temporary directory.
     pub temp: Option<PathBuf>,
-    /// User-configured upload ignore globs.
     pub ignore_globs: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
-/// Fully resolved input to a Workshop create or update operation.
 pub struct PublishSubmission {
     pub language: crate::WorkshopLanguage,
-    /// Directory or GMA to submit.
     pub content_path_src: PathBuf,
-    /// Optional custom preview icon.
     pub icon_path: Option<PathBuf>,
     /// Embedded in the packed GMA's metadata for both modes; the Workshop item
     /// title is only set when creating.
     pub title: String,
-    /// Workshop tags.
     pub tags: Vec<String>,
-    /// Workshop addon-type tag.
     pub addon_type: String,
-    /// Whether a small custom icon may be enlarged.
     pub upscale: bool,
-    /// Initial Workshop description. Creation only — updates never touch the
-    /// description through this path (see [`WorkshopUpdate`]); `None` falls
-    /// back to the default placeholder text.
+    /// Creation only. None uses the default placeholder; updates keep the existing description.
     pub description: Option<String>,
-    /// Create/update-specific fields.
     pub mode: PublishSubmissionMode,
-    /// Optional pre-captured settings; live settings are used when absent.
     pub settings: Option<PublishSettingsSnapshot>,
 }
 
-/// Whether a submission creates a Workshop item or updates one.
-///
-/// A changelog only exists for an update, which is why it lives here rather
-/// than beside an `Option<WorkshopId>` that could disagree with it.
 #[derive(Clone, Debug)]
 pub enum PublishSubmissionMode {
-    /// Create a new Workshop item.
     Create,
-    /// Update an existing Workshop item.
     Update {
-        /// Existing Workshop identity.
         id: WorkshopId,
-        /// Optional public changelog.
         changes: Option<String>,
     },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Stable result returned by the high-level publish submission facade.
 pub struct PublishSubmissionOutcome {
-    /// Created or updated Workshop identity.
     pub published_file_id: WorkshopId,
-    /// Whether Steam requires accepting its legal agreement.
     pub legal_agreement_required: bool,
 }
 
-/// Outcome of creating a new Workshop item (see [`ConnectedSteam::publish`]): the
-/// freshly created id alongside whether Steam requires the legal agreement
-/// to be accepted before the item is visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PublishOutcome {
     id: WorkshopId,
@@ -701,10 +587,8 @@ impl ConnectedSteam<'_> {
         app_data: &AppData,
     ) -> Result<bool, PublishError> {
         let (result_tx, result_rx) = mpsc::channel();
-        // The preview file must outlive the upload itself, not just the
-        // builder call that hands Steam its path, so it's threaded out of
-        // the match and only dropped (deleting an owned temp) after the
-        // upload has finished below.
+        // Keep the preview file alive until Steam finishes reading it, not just until
+        // the builder returns.
         let (update_handle, preview) = match details {
             WorkshopRevision::Creation(WorkshopCreation {
                 language,
@@ -817,12 +701,7 @@ impl ConnectedSteam<'_> {
             },
         );
 
-        // Bounded, unlike the upload progress loop: creating the item is a
-        // single round trip with nothing to report progress on, so a callback
-        // that has not landed by now is not going to.
         let id = match published_rx.recv_timeout(super::CALLBACK_RESULT_TIMEOUT) {
-            // Steam just created this item, so a zero here means Steam
-            // reported success without publishing anything.
             Ok(Ok((id, _))) => {
                 WorkshopId::try_from(id).map_err(|_| PublishError::MissingPublishedFileId)?
             }
@@ -952,14 +831,11 @@ pub(crate) fn submit_with_transaction(
                 settings,
             } = submission;
 
-            // Validate before packing so invalid text does not trigger archive work.
             let description = creation_description(description.as_deref())?;
             if matches!(mode, PublishSubmissionMode::Create) {
                 validate_title(&title)?;
             }
 
-            // The submission carries the globs this publish should honour; falling
-            // back to the stored ones keeps a submission without a snapshot working.
             let ignore_globs = settings.as_ref().map_or_else(
                 || app_data.publish_ignore_globs_snapshot(),
                 |settings| settings.ignore_globs.clone(),
@@ -1000,10 +876,9 @@ pub(crate) fn submit_with_transaction(
                 );
 
                 if let Err(error) = gma.create(&content_path_src, transaction, whitelist, cpu) {
-                    // The pack reports cancellation as its own error, so this reads the
-                    // cause rather than re-observing the transaction and hoping the two
-                    // agree — an I/O failure that happens to coincide with a cancel is
-                    // still an I/O failure worth surfacing.
+                    // Use the packer's cancellation error. Checking
+                    // transaction state again could mislabel a concurrent
+                    // I/O failure.
                     if matches!(error, crate::GmaError::Cancelled) {
                         return Err(PublishError::Cancelled);
                     }
@@ -1078,102 +953,11 @@ pub(crate) fn submit_with_transaction(
     result
 }
 
-/// The submission's temp directory has to exist before packing writes into it.
 fn prepare_publish_temp_dir(settings: &PublishSettingsSnapshot) -> Result<(), PublishError> {
     if let Some(temp) = settings.temp.as_ref() {
         std::fs::create_dir_all(temp)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn verify_whitelist(
-    path: &Path,
-    ignore_globs: &[String],
-    whitelist: &AddonWhitelist,
-) -> Result<(Vec<GmaEntry>, u64), PublishError> {
-    if !path.is_dir() || !path.is_absolute() {
-        return Err(PublishError::InvalidContentPath);
-    }
-
-    let content_root = path.to_path_buf();
-
-    let ignore = ignore_globs.to_vec();
-    let whitelist_snapshot = whitelist.snapshot();
-
-    let mut size = 0;
-    let mut failed_extra = false;
-    let mut failed = Vec::with_capacity(10);
-    let mut files = Vec::new();
-
-    #[cfg(not(target_os = "windows"))]
-    let mut dedup: HashSet<String> = HashSet::new();
-
-    for (entry, relative_path) in WalkDir::new(path)
-        .follow_links(false)
-        .contents_first(true)
-        .into_iter()
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-
-            if entry.path_is_symlink() {
-                return None;
-            }
-
-            if entry.file_type().is_dir() {
-                return None;
-            }
-
-            let relative_path = match entry.path().strip_prefix(&content_root) {
-                Ok(rel_path) => rel_path.to_string_lossy().replace('\\', "/"),
-                Err(_) => return None,
-            };
-
-            Some((entry, relative_path))
-        })
-        .filter(|(_, relative_path)| !crate::gma::whitelist::is_default_ignored(relative_path))
-        .filter(|(_, relative_path)| !crate::gma::whitelist::is_ignored(relative_path, &ignore))
-    {
-        #[cfg(not(target_os = "windows"))]
-        {
-            if !dedup.insert(relative_path.clone()) {
-                return Err(PublishError::DuplicateEntry(relative_path));
-            }
-        }
-
-        if !crate::gma::whitelist::is_whitelisted_in(&whitelist_snapshot, &relative_path) {
-            if failed.len() == 9 {
-                failed_extra = true;
-                break;
-            }
-            failed.push(relative_path);
-        } else if failed.is_empty() {
-            let entry_size = entry.metadata().map_or(0, |metadata| metadata.len());
-            size += entry_size;
-            files.push(GmaEntry {
-                path: relative_path,
-                size: entry_size,
-                crc: 0,
-                index: 0,
-            });
-        }
-    }
-
-    if failed.is_empty() {
-        if files.is_empty() {
-            Err(PublishError::NoEntries)
-        } else {
-            Ok((files, size))
-        }
-    } else {
-        failed.sort_unstable();
-
-        if failed_extra {
-            failed.push("...".to_string());
-        }
-
-        Err(PublishError::NotWhitelisted(failed))
-    }
 }
 
 #[cfg(test)]
@@ -1188,8 +972,6 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    /// "Steam is not running" and "not logged in" are different problems with
-    /// different fixes, and the app surfaces the detail verbatim.
     #[test]
     fn runtime_failures_keep_their_own_detail_through_publish_error() {
         use crate::error_key::HasErrorKey as _;
@@ -1279,23 +1061,7 @@ mod tests {
         }
     }
 
-    fn assert_verify_whitelist_error(fixture: &Fixture, path: &Path, expected: &str) {
-        match verify_whitelist(
-            path,
-            &fixture.app_data.settings().ignore_globs,
-            &fixture.whitelist,
-        ) {
-            Ok(_) => panic!("expected verify whitelist error"),
-            Err(error) => {
-                use crate::error_key::HasErrorKey;
-                assert_eq!(error.error_key().as_str(), expected, "{error}");
-            }
-        }
-    }
-
     #[test]
-    /// The wire contract is `HasErrorKey`, not `Display`: the app builds every
-    /// `UiError` from the key and detail, and never parses the message.
     fn publishing_error_keys_match_upstream_strings() {
         use crate::error_key::HasErrorKey;
 
@@ -1305,13 +1071,7 @@ mod tests {
         };
 
         assert_wire(
-            PublishError::NotWhitelisted(vec!["bad.exe".to_string(), "bad.dll".to_string()]),
-            "ERR_WHITELIST",
-            Some("bad.exe\nbad.dll"),
-        );
-        assert_wire(PublishError::NoEntries, "ERR_NO_ENTRIES", None);
-        assert_wire(
-            PublishError::DuplicateEntry("lua/init.lua".to_string()),
+            PublishError::Gma(crate::GmaError::DuplicateEntry("lua/init.lua".to_string())),
             "ERR_DUPLICATE_ENTRIES",
             Some("lua/init.lua"),
         );
@@ -1396,60 +1156,6 @@ mod tests {
         fs::write(multiple.join("one.gma"), "").expect("first gma marker");
         fs::write(multiple.join("two.gma"), "").expect("second gma marker");
         assert_content_path_error(&multiple, "ERR_MULTIPLE_GMAS");
-    }
-
-    #[test]
-    fn publishing_whitelist_respects_default_and_custom_ignores() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let content = dir.path().join("content");
-        fs::create_dir(&content).expect("content dir");
-        fs::create_dir(content.join("lua")).expect("lua dir");
-        fs::create_dir(content.join("materials")).expect("materials dir");
-        fs::write(content.join("lua/phase6.lua"), "print('phase6')\n").expect("lua file");
-        fs::write(
-            content.join("materials/skipped.png"),
-            "ignored by custom glob",
-        )
-        .expect("material file");
-        fs::write(content.join("addon.json"), "ignored by default glob").expect("addon metadata");
-
-        let fixture =
-            Fixture::with_publishing_settings(dir.path(), &["materials/*.png".to_string()]);
-        let (entries, size) = match verify_whitelist(
-            &content,
-            &fixture.app_data.settings().ignore_globs,
-            &fixture.whitelist,
-        ) {
-            Ok(verified) => verified,
-            Err(error) => panic!("unexpected whitelist error: {error}"),
-        };
-
-        assert_eq!(size, "print('phase6')\n".len() as u64);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, "lua/phase6.lua");
-        assert_eq!(entries[0].size, "print('phase6')\n".len() as u64);
-    }
-
-    #[test]
-    fn publishing_whitelist_reports_invalid_no_entry_and_not_whitelisted_errors() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let fixture = Fixture::with_publishing_settings(dir.path(), &[]);
-
-        assert_verify_whitelist_error(
-            &fixture,
-            &PathBuf::from("relative-content"),
-            "ERR_INVALID_CONTENT_PATH",
-        );
-
-        let ignored_only = dir.path().join("ignored");
-        fs::create_dir(&ignored_only).expect("ignored dir");
-        fs::write(ignored_only.join("addon.json"), "{}").expect("default ignored file");
-        assert_verify_whitelist_error(&fixture, &ignored_only, "ERR_NO_ENTRIES");
-
-        let invalid = dir.path().join("invalid");
-        fs::create_dir(&invalid).expect("invalid dir");
-        fs::write(invalid.join("bad.exe"), "bad").expect("invalid file");
-        assert_verify_whitelist_error(&fixture, &invalid, "ERR_WHITELIST");
     }
 
     #[test]
@@ -1575,14 +1281,11 @@ mod tests {
             "owned default icon temp should be cleaned up on drop"
         );
 
-        // Two resolutions never share a temp name, even for the same icon.
         let another_default = WorkshopIcon::default()
             .into_preview_path(&fixture.app_data)
             .expect("second default icon path");
         assert_ne!(default_path.as_path(), another_default.as_ref());
 
-        // A non-upscaled custom icon isn't owned: the user's own file is
-        // untouched by drop.
         let plain_icon = WorkshopIcon::new(&icon_path, false).expect("plain icon");
         let plain_preview = plain_icon
             .into_preview_path(&fixture.app_data)
@@ -1690,9 +1393,6 @@ mod tests {
         assert_eq!(second.parent(), Some(configured_temp.as_path()));
     }
 
-    /// The submission carries the temp dir the user had configured when the
-    /// publish flow opened. A settings change between then and submit must not
-    /// relocate a pack already in flight.
     #[test]
     fn a_submissions_own_temp_dir_wins_over_the_stored_setting() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1757,8 +1457,6 @@ mod tests {
         );
 
         assert!(matches!(result, Err(PublishError::IconInvalidFormat)));
-        // A submission's temp directory and ignore globs apply to that publish
-        // only; they must not be written back over the user's settings.
         assert_eq!(
             fixture.app_data.settings().temp,
             Some(dir.path().to_owned())

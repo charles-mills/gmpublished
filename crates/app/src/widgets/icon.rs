@@ -1,5 +1,3 @@
-//! Shared presentation for monochrome SVG glyphs.
-
 use iced::widget::{Svg, svg};
 use iced::{Color, ContentFit, Length};
 

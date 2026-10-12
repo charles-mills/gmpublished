@@ -12,12 +12,8 @@ use super::model::{
     SettingsSnapshot,
 };
 
-/// Placeholder shown when the caller supplied no extracted name.
 const FALLBACK_EXTRACTED_NAME: &str = "addon_name";
 
-/// Caller-specific facts threaded through the open message: the confirm
-/// button label, the name appended to previewed paths, and whether the
-/// create-folder behavior is forced on (downloader set-destination).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenContext {
     pub(crate) confirm_label_key: &'static str,
@@ -70,7 +66,7 @@ impl Default for State {
 }
 
 impl State {
-    /// Resets from fresh settings; the chooser always opens UNSELECTED.
+    /// Opening clears the selection even when settings contain a saved destination.
     pub(crate) fn reset_from_snapshot(&mut self, snapshot: SettingsSnapshot) {
         self.invalidate_path_validation();
         self.absorb_snapshot(snapshot);
@@ -118,8 +114,6 @@ impl State {
         self.context.confirm_label_key
     }
 
-    /// The create-folder checkbox renders only for a live Browse/custom
-    /// selection and never when the caller forces folder creation.
     pub(crate) const fn shows_create_folder(&self) -> bool {
         matches!(self.selection, DestinationSelection::Custom(_))
             && !self.context.force_create_folder
@@ -161,8 +155,6 @@ impl State {
         model::selected_base_path(&self.selection, &self.roots)
     }
 
-    /// Composes the path-input placeholder: the live selection's full path,
-    /// else the extracted name.
     pub(crate) fn placeholder(&self) -> String {
         let name = self
             .context
@@ -196,9 +188,6 @@ impl State {
             .unwrap_or_else(fallback_current_dir)
     }
 
-    /// Click-toggles a root tile: selecting when enabled, deselecting when
-    /// already active. Browse toggling is handled by the update loop, which
-    /// routes to the folder picker.
     pub(crate) fn toggle_kind(&mut self, kind: DestinationKind) {
         self.error = None;
         if self.kind_active(kind) {

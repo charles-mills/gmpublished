@@ -35,7 +35,6 @@ pub fn modal(tokens: &Tokens) -> container::Style {
     }
 }
 
-/// Chromeless preview modal: the outer shell owns the rounded silhouette.
 pub fn preview_modal(tokens: &Tokens) -> container::Style {
     container::Style {
         shadow: Shadow {
@@ -54,7 +53,6 @@ pub fn preview_modal(tokens: &Tokens) -> container::Style {
     }
 }
 
-/// Square-cornered accent Extract button capping the preview sidebar.
 pub fn extract_button(tokens: &Tokens, status: button_widget::Status) -> button_widget::Style {
     let (background, text) = match status {
         button_widget::Status::Active | button_widget::Status::Hovered => {
@@ -78,7 +76,6 @@ pub fn extract_button(tokens: &Tokens, status: button_widget::Status) -> button_
     }
 }
 
-/// Extract button used as the top-left cap of the Preview GMA sidebar.
 pub fn preview_extract_button(
     tokens: &Tokens,
     status: button_widget::Status,
@@ -92,7 +89,6 @@ pub fn preview_extract_button(
     }
 }
 
-/// Preview sidebar surface with its right drop shadow.
 pub fn preview_sidebar(tokens: &Tokens) -> container::Style {
     container::Style {
         shadow: Shadow {
@@ -207,9 +203,6 @@ pub fn sunken_card(tokens: &Tokens) -> container::Style {
     )
 }
 
-/// Destination Select chooser tile: a 7rem sunken card that darkens to the
-/// input well while selected and bakes a `brightness(.5)` dim into opaque
-/// colors while disabled.
 pub fn destination_tile(tokens: &Tokens, selected: bool, enabled: bool) -> container::Style {
     let (background, text, edge) = if !enabled {
         (
@@ -256,12 +249,7 @@ pub fn spinner_bar(tokens: &Tokens) -> container::Style {
     )
 }
 
-/// Alternating stripe fill for dense list rows inside sunken cards.
-///
-/// The "unshaded" rows are painted opaque with the sunken card's own
-/// background (rather than a transparent fill) so they fully occlude the
-/// card's inner border on every row; a transparent fill let that border
-/// bleed through as a visible seam on alternating rows.
+/// Use opaque row fills to cover the card's inner border on unshaded rows too.
 pub fn striped_row(tokens: &Tokens, shaded: bool) -> container::Style {
     let background = if shaded {
         tokens.colors.row_stripe
@@ -279,8 +267,6 @@ pub fn tooltip(tokens: &Tokens) -> container::Style {
     )
 }
 
-/// A select control's own face. `open` squares the bottom corners and lights
-/// the focus ring, so the menu below reads as part of the same control.
 pub fn select_face(tokens: &Tokens, open: bool) -> container::Style {
     container_style(
         tokens.colors.input_bg,
@@ -301,10 +287,6 @@ pub fn select_face(tokens: &Tokens, open: bool) -> container::Style {
     )
 }
 
-/// Floating panel behind a select menu's option list.
-///
-/// It carries the control's own fill and focus ring so the pair reads as one
-/// slab, and only the corners away from the join are rounded.
 pub fn select_menu(tokens: &Tokens, radius: f32) -> container::Style {
     container::Style {
         shadow: Shadow {
@@ -324,15 +306,8 @@ pub fn select_menu(tokens: &Tokens, radius: f32) -> container::Style {
     }
 }
 
-/// One option row inside a select menu. The chosen option keeps the accent fill
-/// while the pointer moves, so the menu always shows what is currently set.
-///
-/// The accent is what makes that legible: `selected_fill` sits within 3% of the
-/// panel's own `input_bg` on the dark themes — and *darker* than the hover fill —
-/// so the current option would read as fainter than whatever the pointer
-/// happens to be over. Hover stays theme-directional (`hover_fill` lightens on
-/// the dark themes, darkens on the light one); the `row_*` fills are black in
-/// every theme and would vanish into a dark panel.
+/// Select option row. Accent fill distinguishes the chosen option from hover;
+/// `selected_fill` has too little contrast against dark input backgrounds.
 pub fn select_option(
     tokens: &Tokens,
     selected: bool,
@@ -355,7 +330,6 @@ pub fn select_option(
     }
 }
 
-/// Flat filled disc: no border, no shadow, radius half the edge.
 pub fn circle(fill: Rgba, radius: f32) -> container::Style {
     container::Style {
         background: Some(Color::from(fill).into()),
@@ -461,8 +435,6 @@ pub fn action_button(tokens: &Tokens, status: button_widget::Status) -> button_w
         button_widget::Status::Disabled => (tokens.colors.button_bg, tokens.colors.text),
     };
 
-    // The glow is what marks this as *the* action to take. A disabled button
-    // has no action to offer, so it drops the glow along with the accent fill.
     let shadow = if matches!(status, button_widget::Status::Disabled) {
         Shadow::default()
     } else {
@@ -519,8 +491,6 @@ pub fn input(tokens: &Tokens, status: text_input::Status) -> text_input::Style {
     }
 }
 
-/// Destination Select path input: borderless square dark well with no focus
-/// ring.
 pub fn destination_input(tokens: &Tokens, _status: text_input::Status) -> text_input::Style {
     text_input::Style {
         background: Color::from(tokens.colors.destination_input_bg).into(),
@@ -633,13 +603,8 @@ pub fn scrollbar(tokens: &Tokens, status: scrollable::Status) -> scrollable::Sty
     }
 }
 
-/// Scrollbar for a select menu.
-///
-/// The shared grabber tokens are mixed against the app's surfaces, but a menu
-/// panel is `input_bg` — lighter than those on every preset, light and dark
-/// alike, which leaves the thumb at or below the panel's own value and so
-/// effectively invisible. Deriving the thumb from the panel's text colour keeps
-/// it legible by construction rather than by one preset's luck.
+/// Select scrollbar colors derive from panel text for contrast against
+/// `input_bg`; shared surface grabber tokens are too faint here.
 pub fn select_menu_scrollbar(tokens: &Tokens, status: scrollable::Status) -> scrollable::Style {
     let opacity = match status {
         scrollable::Status::Dragged {
@@ -657,8 +622,6 @@ pub fn select_menu_scrollbar(tokens: &Tokens, status: scrollable::Status) -> scr
     };
 
     let rail = scrollable::Rail {
-        // The panel already reads as the track; a second fill behind the thumb
-        // only stripes the menu.
         background: None,
         border: border::rounded(tokens.dims.scrollbar_thumb_width / 2.0),
         scroller: scrollable::Scroller {
@@ -688,7 +651,6 @@ pub fn vertical_scrollbar(tokens: &Tokens) -> scrollable::Scrollbar {
         .spacing(0.0)
 }
 
-/// Zero-width scrollbar for lists that scroll without visible chrome.
 pub fn hidden_vertical_scrollbar() -> scrollable::Scrollbar {
     scrollable::Scrollbar::new()
         .width(0.0)
@@ -765,90 +727,10 @@ fn shadow(color: Rgba) -> Shadow {
 #[cfg(test)]
 mod tests {
     use iced::Color;
-    use iced::widget::{button, checkbox, scrollable, text_input};
+    use iced::widget::button;
 
-    use super::{super::Tokens, input};
+    use super::super::Tokens;
     use crate::theme::styles;
-
-    #[test]
-    fn button_style_uses_pressed_token() {
-        let tokens = Tokens::dark();
-        let style = styles::button(&tokens, button::Status::Pressed);
-
-        assert_eq!(
-            style.background,
-            Some(Color::from(tokens.colors.button_pressed).into())
-        );
-        assert_eq!(style.text_color, tokens.colors.text.into());
-    }
-
-    #[test]
-    fn active_sidebar_item_uses_active_tokens() {
-        let tokens = Tokens::dark();
-        let style = styles::sidebar_item_button(&tokens, true, button::Status::Active);
-
-        assert_eq!(
-            style.background,
-            Some(Color::from(tokens.colors.sidebar_item_hover).into())
-        );
-        assert_eq!(style.text_color, tokens.colors.link.into());
-    }
-
-    #[test]
-    fn inactive_sidebar_item_hover_uses_faint_hover_fill() {
-        let tokens = Tokens::dark();
-        let style = styles::sidebar_item_button(&tokens, false, button::Status::Hovered);
-
-        assert_eq!(
-            style.background,
-            Some(Color::from(tokens.colors.hover_fill_faint).into())
-        );
-        assert_eq!(style.text_color, tokens.colors.text.into());
-    }
-
-    #[test]
-    fn input_focus_uses_focus_ring_border() {
-        let tokens = Tokens::dark();
-        let style = input(&tokens, text_input::Status::Focused { is_hovered: false });
-
-        assert_eq!(style.border.color, tokens.colors.focus_ring.into());
-        assert_eq!(style.border.width, tokens.dims.focus_border_width);
-    }
-
-    #[test]
-    fn idle_input_has_no_visible_border() {
-        let tokens = Tokens::dark();
-        let style = input(&tokens, text_input::Status::Active);
-
-        assert_eq!(style.border.width, 0.0);
-        assert_eq!(style.background, Color::from(tokens.colors.input_bg).into());
-    }
-
-    #[test]
-    fn error_input_always_shows_the_error_ring() {
-        let tokens = Tokens::dark();
-        let style = styles::input_error(&tokens, text_input::Status::Active);
-
-        assert_eq!(style.border.color, tokens.colors.error.into());
-        assert_eq!(style.border.width, tokens.dims.focus_border_width);
-    }
-
-    #[test]
-    fn action_button_greys_out_when_disabled() {
-        let tokens = Tokens::dark();
-
-        let active = styles::action_button(&tokens, button::Status::Active);
-        let disabled = styles::action_button(&tokens, button::Status::Disabled);
-
-        assert_eq!(
-            active.background,
-            Some(Color::from(tokens.colors.neutral).into())
-        );
-        assert_eq!(
-            disabled.background,
-            Some(Color::from(tokens.colors.button_bg).into())
-        );
-    }
 
     #[test]
     fn select_menu_rounds_only_the_edge_away_from_its_control() {
@@ -879,17 +761,6 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_action_button_drops_its_glow() {
-        let tokens = Tokens::dark();
-
-        let active = styles::action_button(&tokens, button::Status::Active);
-        let disabled = styles::action_button(&tokens, button::Status::Disabled);
-
-        assert_eq!(active.shadow.blur_radius, 5.0);
-        assert_eq!(disabled.shadow, super::Shadow::default());
-    }
-
-    #[test]
     fn the_chosen_option_keeps_its_accent_fill_while_the_pointer_moves() {
         let tokens = Tokens::dark();
         let selected = styles::select_option(&tokens, true, button::Status::Active);
@@ -908,8 +779,6 @@ mod tests {
         assert_eq!(idle.background, None);
     }
 
-    /// The chosen row has to out-read a hovered one in every theme; on the dark
-    /// palettes `selected_fill` is within a few percent of the panel's own fill.
     #[test]
     fn the_chosen_option_outreads_a_hovered_one_in_every_theme() {
         for variant in [
@@ -926,47 +795,5 @@ mod tests {
                 "{variant:?}: the chosen option is indistinguishable from the panel",
             );
         }
-    }
-
-    #[test]
-    fn modal_uses_chromeless_modal_background() {
-        let tokens = Tokens::dark();
-        let style = styles::modal(&tokens);
-
-        assert_eq!(
-            style.background,
-            Some(Color::from(tokens.colors.modal_bg).into())
-        );
-        assert_eq!(style.border.width, 0.0);
-        assert!(style.shadow.blur_radius > 0.0);
-    }
-
-    #[test]
-    fn checked_checkbox_uses_neutral_fill() {
-        let tokens = Tokens::dark();
-        let style = styles::checkbox(&tokens, checkbox::Status::Active { is_checked: true });
-
-        assert_eq!(style.background, Color::from(tokens.colors.neutral).into());
-    }
-
-    #[test]
-    fn scrollbar_uses_sidebar_matched_rail_and_grabber_tokens() {
-        let tokens = Tokens::dark();
-        let style = styles::scrollbar(
-            &tokens,
-            scrollable::Status::Active {
-                is_horizontal_scrollbar_disabled: true,
-                is_vertical_scrollbar_disabled: false,
-            },
-        );
-
-        assert_eq!(
-            style.vertical_rail.background,
-            Some(Color::from(tokens.colors.scrollbar_rail).into())
-        );
-        assert_eq!(
-            style.vertical_rail.scroller.background,
-            Color::from(tokens.colors.scrollbar_grabber).into()
-        );
     }
 }

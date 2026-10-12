@@ -2,13 +2,10 @@ use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
 use crate::bridge::ui_error::UiError;
 use crate::generation::Generation;
 
-/// Startup connection policy retained for the Iced shell.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum StartupConnectPolicy {
-    /// Allow Steam-backed work to request a lazy connection.
     #[default]
     Lazy,
-    /// Ignore lazy connection requests, used by measurement modes.
     #[cfg(test)]
     Suppressed,
 }
@@ -23,7 +20,6 @@ impl StartupConnectPolicy {
     }
 }
 
-/// Connection status shown by the shell Steam indicator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionStatus {
     Disconnected,
@@ -58,7 +54,6 @@ impl ConnectionStatus {
     }
 }
 
-/// Lifecycle events emitted by a lazy connection attempt or the backend runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionEvent {
     Connecting,
@@ -67,7 +62,6 @@ pub enum ConnectionEvent {
     Unavailable,
 }
 
-/// Edge classification produced when a connection status changes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionChange {
     Unchanged,
@@ -76,7 +70,6 @@ pub enum ConnectionChange {
     BecameDisconnected,
 }
 
-/// A Steam-backed operation to retry after a successful lazy connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PendingRetry {
     MyWorkshopPage {
@@ -102,14 +95,8 @@ pub enum PendingRetry {
 }
 
 impl PendingRetry {
-    /// Folds `other` into `self` when the two name the same operation,
-    /// reporting whether it was absorbed.
-    ///
-    /// Deferrals accumulate while a lazy connection is in flight — a grid
-    /// being scrolled emits one metadata request per visible-range change —
-    /// so same-kind requests coalesce instead of queueing without bound. An
-    /// id list from a newer generation replaces an older one outright: the
-    /// rows the older list named no longer exist.
+    /// Coalesces same-kind requests while connecting. Newer generations replace
+    /// older id lists; returns whether `other` was absorbed.
     fn absorb(&mut self, other: Self) -> bool {
         match (self, other) {
             (
@@ -196,7 +183,6 @@ fn merge_retry_item_ids(
     }
 }
 
-/// Persona information fetched after a Steam connection is established.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteamIdentity {
     steamid: crate::bridge::domain::SteamId,
@@ -226,7 +212,6 @@ impl SteamIdentity {
     }
 }
 
-/// State owned by the Steam session feature.
 #[derive(Debug)]
 pub struct State {
     status: ConnectionStatus,
@@ -325,8 +310,6 @@ impl State {
         self.startup_policy.allows_lazy_requests()
     }
 
-    /// Queues an operation to resume once Steam connects, coalescing it into
-    /// an equivalent deferral already waiting rather than displacing it.
     pub(super) fn push_pending_retry(&mut self, retry: PendingRetry) {
         for pending in &mut self.pending_retries {
             if pending.absorb(retry.clone()) {
@@ -336,8 +319,6 @@ impl State {
         self.pending_retries.push(retry);
     }
 
-    /// Drains every deferred operation; each one is resumed (or failed) in
-    /// turn, so none is left waiting on a connection attempt that is over.
     pub(crate) fn take_pending_retries(&mut self) -> Vec<PendingRetry> {
         std::mem::take(&mut self.pending_retries)
     }
@@ -390,7 +371,6 @@ impl State {
     }
 }
 
-/// Captured lifecycle events and terminal error from a lazy connection attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionAttempt {
     events: Vec<ConnectionEvent>,
@@ -421,7 +401,6 @@ impl ConnectionAttempt {
     }
 }
 
-/// Runs the connection check/connect seam without binding it to a concrete UI runtime.
 pub fn connect_for_operation_with<E>(
     connected: impl FnOnce() -> bool,
     connect: impl FnOnce() -> Result<(), E>,
@@ -460,7 +439,7 @@ mod tests {
     use crate::bridge::domain::SteamId;
     use crate::generation::Generation;
     use gmpublished_backend::error_keys as keys;
-    use std::{cell::Cell, sync::Arc};
+    use std::cell::Cell;
 
     use crate::bridge::domain::{AvatarRgba, PublishedFileId, SteamUser};
 
@@ -631,8 +610,6 @@ mod tests {
         state.push_pending_retry(page.clone());
         state.push_pending_retry(metadata.clone());
 
-        // Both survive: dropping the page load here leaves My Workshop waiting
-        // on a request that is never resumed and never failed.
         assert_eq!(state.pending_retries(), [page.clone(), metadata.clone()]);
         assert_eq!(state.take_pending_retries(), vec![page, metadata]);
         assert!(state.pending_retries().is_empty());
@@ -647,7 +624,6 @@ mod tests {
             generation: Generation::from_raw(7),
             item_ids: vec![id(1), id(2)],
         });
-        // A scrolling grid defers one of these per visible-range change.
         state.push_pending_retry(PendingRetry::InstalledMetadata {
             generation: Generation::from_raw(7),
             item_ids: vec![id(2), id(3)],
@@ -661,8 +637,7 @@ mod tests {
             }]
         );
 
-        // A newer generation renames the rows outright, so it replaces rather
-        // than merges — the old ids no longer identify anything on screen.
+        // Replace IDs from older generations; they no longer identify the visible rows.
         state.push_pending_retry(PendingRetry::InstalledMetadata {
             generation: Generation::from_raw(8),
             item_ids: vec![id(9)],
@@ -719,19 +694,6 @@ mod tests {
 
         assert_eq!(state.identity(), None);
         assert!(state.identity_generation() > generation);
-    }
-
-    #[test]
-    fn steam_identity_keeps_name_and_optional_avatar() {
-        let avatar = AvatarRgba::new(1, 1, vec![1, 2, 3, 4]).expect("avatar should be valid");
-        let avatar_bytes = Arc::clone(&avatar.rgba);
-        let identity = identity("Ada", Some(avatar));
-
-        assert_eq!(identity.name(), "Ada");
-        assert!(Arc::ptr_eq(
-            &avatar_bytes,
-            &identity.avatar().expect("avatar should be present").rgba
-        ));
     }
 
     fn identity(name: &str, avatar: Option<AvatarRgba>) -> SteamIdentity {

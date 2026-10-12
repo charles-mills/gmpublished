@@ -6,7 +6,6 @@ use crate::bridge::tasks::{TaskEvent, TaskId, TaskKind, TaskUpdate, TransactionS
 use crate::bridge::ui_error::UiError;
 use crate::theme::{self, motion};
 
-/// How long a settled toast lingers before its exit animation starts.
 const EXPIRE_HOLD: Duration = Duration::from_millis(2500);
 
 pub const TOAST_HEIGHT: f32 = 49.0;
@@ -86,8 +85,6 @@ impl Toast {
         matches!(self.outcome, Outcome::Pending)
     }
 
-    /// A pending toast shows the cancel button; notices finish at birth and
-    /// never had anything to cancel.
     pub(crate) const fn cancellable(&self) -> bool {
         self.pending() && !matches!(self.kind, TaskKind::Notice)
     }
@@ -96,8 +93,6 @@ impl Toast {
         now.saturating_duration_since(self.started_at).as_secs_f32()
     }
 
-    /// Enter/exit progress in `0..=1`; drives opacity and the clip-grow
-    /// height so the stack slides as toasts appear and collapse.
     pub(crate) fn presence(&self, now: Instant) -> f32 {
         self.presence.interpolate(0.0, 1.0, now)
     }
@@ -107,7 +102,6 @@ impl Toast {
             return;
         }
         match update {
-            // A second Started for a live id resets the toast in place.
             TaskUpdate::Started { kind, status } => {
                 self.kind = kind;
                 self.status = status;
@@ -139,8 +133,6 @@ impl Toast {
     }
 }
 
-/// Bottom-center toast stack fed by task events the Downloader page does not
-/// own: publish submissions, quick extractions, and one-shot notices.
 #[derive(Debug, Default)]
 pub struct State {
     toasts: Vec<Toast>,
@@ -155,9 +147,7 @@ impl State {
         self.toasts.is_empty()
     }
 
-    /// The clock stays live while any toast exists: pending toasts animate
-    /// their spinner and settled toasts are waiting out the expiry hold, so
-    /// there is no idle resting state until the stack empties.
+    /// Keep ticking through the expiry hold as well as spinner and exit animations.
     pub(crate) fn needs_ticks(&self) -> bool {
         !self.toasts.is_empty()
     }
@@ -202,8 +192,6 @@ impl State {
         false
     }
 
-    /// Starts exit animations for toasts whose hold elapsed and drops the
-    /// ones whose exit settled, returning whether anything changed.
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         let mut changed = false;
         for toast in &mut self.toasts {
@@ -336,12 +324,9 @@ mod tests {
         ));
         assert!(!state.toasts()[0].cancellable());
 
-        // Still held just before the expiry hold elapses.
         state.tick(now + Duration::from_millis(2400));
         assert_eq!(state.toasts().len(), 1);
 
-        // Hold elapsed: exit starts, and the toast survives until the exit
-        // animation settles.
         state.tick(now + Duration::from_millis(2600));
         assert_eq!(state.toasts().len(), 1);
         assert!(state.needs_ticks());

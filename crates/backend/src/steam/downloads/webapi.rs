@@ -1,10 +1,5 @@
-//! Keyless Steam Web API preflight for Workshop downloads.
-//!
-//! Resolves collections and fetches per-item download facts in a few
-//! batched HTTP calls. Garry's Mod items last updated before the ~2020
-//! SteamPipe migration keep a public CDN `file_url` serving the legacy
-//! LZMA payload; those download over plain HTTPS in parallel instead of
-//! the Steam client's serial download queue.
+//! Older Garry's Mod items have a public CDN `file_url` for their LZMA payload.
+//! Download those over HTTPS; the Steam client's download queue is serial.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -18,10 +13,8 @@ const BATCH_SIZE: usize = 100;
 /// passed to the details call as plain items.
 const MAX_COLLECTION_DEPTH: usize = 8;
 
-/// `EWorkshopFileType` value marking a child row as a nested collection.
 const FILETYPE_COLLECTION: u64 = 2;
 
-/// `EResult` success.
 const RESULT_OK: u64 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,11 +31,9 @@ impl From<ureq::Error> for WebApiError {
     }
 }
 
-/// Per-item facts from `GetPublishedFileDetails`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PublishedFileDetail {
     pub id: WorkshopId,
-    /// Steam reported the item exists (`result == 1`).
     pub found: bool,
     /// Public CDN URL of the legacy LZMA payload; `None` for SteamPipe
     /// items, which only the Steam client can download.
@@ -67,10 +58,7 @@ fn api_agent() -> ureq::Agent {
     )
 }
 
-/// Agent for CDN payload downloads: no global or response-header deadline,
-/// so a healthy stream may take minutes, with bounded connection setup and
-/// body-idle periods. Ureq's response timeout also caps the subsequent body,
-/// so it is deliberately not configured for this streaming transfer.
+/// Use connection and body-idle timeouts only; healthy CDN streams may take minutes.
 pub(super) fn download_agent() -> ureq::Agent {
     crate::net::build_http_agent(
         crate::net::HttpAgentConfig::new()
@@ -150,11 +138,9 @@ fn post_ids(
 
 struct CollectionRow {
     id: WorkshopId,
-    /// `None` for plain items; children as `(id, is_collection)` otherwise.
     children: Option<Vec<(WorkshopId, bool)>>,
 }
 
-/// Frontier-at-a-time collection expansion with global deduplication.
 struct CollectionResolution {
     seen: HashSet<WorkshopId>,
     items: Vec<WorkshopId>,
@@ -177,7 +163,6 @@ impl CollectionResolution {
             rows.iter().map(|row| (row.id, &row.children)).collect();
 
         for id in requested {
-            // Absent rows and non-collection rows both mean "treat as item".
             let Some(Some(children)) = children_by_id.get(id) else {
                 self.items.push(*id);
                 continue;
@@ -212,13 +197,7 @@ fn response_rows<'a>(
         .ok_or(WebApiError::Parse("missing details array"))
 }
 
-/// `Ok(None)` for a row whose id names no item.
-///
-/// A zero is Steam answering about nothing, which is a fact about that row and
-/// not about the response: failing the batch for it would push every item in
-/// the request onto the slower Steamworks path. An *absent* id is different —
-/// the response is not the shape this parser was written against — so that
-/// still fails.
+/// Skip zero IDs. A missing ID is malformed and fails the response.
 fn row_id(row: &serde_json::Value) -> Result<Option<WorkshopId>, WebApiError> {
     let raw = row
         .get("publishedfileid")
@@ -228,7 +207,6 @@ fn row_id(row: &serde_json::Value) -> Result<Option<WorkshopId>, WebApiError> {
     Ok(WorkshopId::new(raw))
 }
 
-/// Drops a row that named no item, keeping a genuine parse failure.
 fn skip_rows_naming_no_item(
     id: Result<Option<WorkshopId>, WebApiError>,
 ) -> Option<Result<WorkshopId, WebApiError>> {
@@ -297,8 +275,6 @@ fn parse_published_file_details(json: &str) -> Result<Vec<PublishedFileDetail>, 
         .collect()
 }
 
-/// Re-keys parsed rows onto the requested id order; ids Steam omitted from
-/// the response come back as not-found.
 fn align_details(
     requested: &[WorkshopId],
     rows: Vec<PublishedFileDetail>,
@@ -321,9 +297,6 @@ mod tests {
 
     use crate::workshop_id::workshop_id as id;
 
-    /// One row naming no item costs that row, not the request. Failing the
-    /// whole response would drop every item in the batch onto the slower
-    /// Steamworks path because of a single anomaly.
     #[test]
     fn a_row_naming_no_item_is_skipped_without_failing_the_batch() {
         let json = r#"{"response":{"publishedfiledetails":[
@@ -337,8 +310,6 @@ mod tests {
         assert_eq!(rows[0].id, id(77));
     }
 
-    /// An absent id is a different fact: the response is not the shape this
-    /// parser was written against, and that still fails.
     #[test]
     fn a_row_with_no_id_field_still_fails_the_batch() {
         let json = r#"{"response":{"publishedfiledetails":[{"result":1}]}}"#;
@@ -421,9 +392,6 @@ mod tests {
     fn collection_resolution_expands_nested_collections_once() {
         let mut resolution = CollectionResolution::new(vec![id(1)], vec![id(20), id(40)]);
 
-        // Level 0: id 20 is a collection containing an item, a nested
-        // collection, and a duplicate of the already-known item 1; id 40
-        // has no row at all (treated as an item).
         let frontier = std::mem::take(&mut resolution.frontier);
         assert_eq!(frontier, vec![id(20), id(40)]);
         resolution.apply_rows(
@@ -436,8 +404,6 @@ mod tests {
         assert_eq!(resolution.frontier, vec![id(22)]);
         assert_eq!(resolution.items, vec![id(1), id(21), id(40)]);
 
-        // Level 1: nested collection resolves to one new item plus a
-        // duplicate of 21, which must not repeat.
         let frontier = std::mem::take(&mut resolution.frontier);
         resolution.apply_rows(
             &frontier,

@@ -1,7 +1,3 @@
-//! Pass encoding: binds the pipelines from [`RenderResources`] and the
-//! buffers of an uploaded model, and issues the draws a plan orders. Holds
-//! no state of its own.
-
 use super::resources::RenderResources;
 use super::upload::{UploadedDetailSprites, UploadedMesh, UploadedModel};
 use super::{DrawItem, DrawPlan, OverlayDrawItem, Rectangle, SkyboxFace, wgpu};

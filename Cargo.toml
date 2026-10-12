@@ -9,8 +9,8 @@ exclude = [
 ]
 resolver = "3"
 
-# request TEXTURE_COMPRESSION_BC when the adapter supports it
 [patch.crates-io]
+# Enable BC textures on supported adapters; see the vendored patch notes.
 iced_wgpu = { path = "crates/vendor/iced_wgpu" }
 
 [workspace.lints.rust]

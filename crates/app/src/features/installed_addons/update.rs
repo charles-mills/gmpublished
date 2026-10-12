@@ -2,7 +2,6 @@ use crate::widgets::{addon_grid, grid_rows};
 
 use super::{Effect, Message, State};
 
-/// Applies an Installed Addons route message and returns outward effects as plain data.
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::WorkshopLanguageChanged => {
