@@ -18,12 +18,10 @@ A Nix flake is available for macOS and Linux. For example, to build and run the 
 nix run github:charles-mills/gmpublished
 ```
 
-Arch Linux users can install through the PKGBUILD:
+Arch Linux users can install from the AUR:
 
 ```
-mkdir gmpublished && cd gmpublished
-curl -O https://raw.githubusercontent.com/charles-mills/gmpublished/main/packaging/arch/PKGBUILD
-makepkg -si
+yay -S gmpublished-bin
 ```
 
 ## Media
