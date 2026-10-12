@@ -27,6 +27,13 @@ impl<'a> WorkshopService<'a> {
         Self { inner }
     }
 
+    pub(crate) fn language(self) -> gmpublished_backend::WorkshopLanguage {
+        self.inner.backend.workshop_language()
+    }
+    pub(crate) fn set_language(self, language: gmpublished_backend::WorkshopLanguage) -> bool {
+        self.inner.backend.set_workshop_language(language)
+    }
+
     pub(crate) fn hydrate_metadata_snapshot(self) {
         let Some(path) = self.inner.metadata_snapshot_file.as_deref() else {
             return;
@@ -75,18 +82,19 @@ impl<'a> WorkshopService<'a> {
         item_ids: &[PublishedFileId],
     ) -> (Vec<WorkshopMetadata>, Vec<PublishedFileId>) {
         let now = metadata_snapshot::now_unix_seconds();
+        let language = self.language();
         let cache = self.inner.workshop_metadata.lock();
         let mut metadata = Vec::new();
         let mut stale = Vec::new();
         for id in item_ids.iter().copied() {
             match cache.get(&id) {
-                Some(cached) => {
+                Some(cached) if cached.language == language => {
                     metadata.push(cached.metadata.clone());
                     if !cached.is_fresh_at(now) {
                         stale.push(id);
                     }
                 }
-                None => stale.push(id),
+                _ => stale.push(id),
             }
         }
         (metadata, stale)
@@ -96,8 +104,9 @@ impl<'a> WorkshopService<'a> {
         self,
         item_ids: &[PublishedFileId],
     ) -> Result<Vec<WorkshopMetadata>, UiError> {
-        let items = self.fetch_items(item_ids)?;
-        let metadata = self.cache_items(&items);
+        let language = self.language();
+        let items = self.fetch_items(item_ids, language)?;
+        let metadata = self.cache_items(&items, language);
         if !metadata.is_empty() {
             self.write_metadata_snapshot_best_effort();
         }
@@ -113,6 +122,7 @@ impl<'a> WorkshopService<'a> {
             return Ok(());
         }
         let steam = self.require_steam_client()?;
+        let language = steam.workshop_language();
         let mut cached_any = false;
         let ids = backend_workshop_ids(item_ids);
         let result = steam_workshop::query_workshop_items_streaming(steam, &ids, |items| {
@@ -120,7 +130,7 @@ impl<'a> WorkshopService<'a> {
                 .into_iter()
                 .map(workshop_item_from_backend)
                 .collect::<Vec<_>>();
-            let metadata = self.cache_items(&items);
+            let metadata = self.cache_items(&items, language);
             if !metadata.is_empty() {
                 cached_any = true;
                 on_batch(metadata);
@@ -133,14 +143,49 @@ impl<'a> WorkshopService<'a> {
     }
 
     pub(crate) fn item_details(self, id: PublishedFileId) -> Result<WorkshopItem, UiError> {
-        let item = steam_workshop::query_workshop_item_details(
-            self.require_steam_client()?,
-            backend_workshop_id(id),
-        )
-        .map(workshop_item_from_backend)
-        .ui_err()?;
-        self.cache_item_details(&item);
+        let steam = self.require_steam_client()?;
+        let language = steam.workshop_language();
+        let mut item = steam_workshop::query_workshop_item_details(steam, backend_workshop_id(id))
+            .map(workshop_item_from_backend)
+            .ui_err()?;
+        if !item.dead
+            && let Ok(user) = self.current_user()
+        {
+            let text = self.inner.text_journal.lock().reconcile(
+                user.steamid,
+                id,
+                language,
+                crate::bridge::workshop_text::WorkshopText {
+                    title: item.title,
+                    description: item.description.unwrap_or_default(),
+                },
+            );
+            item.title = text.title;
+            item.description = Some(text.description);
+        }
+        self.cache_item_details(&item, language);
         Ok(item)
+    }
+
+    pub(crate) fn localized_text(
+        self,
+        id: PublishedFileId,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+    ) -> Result<crate::bridge::workshop_text::WorkshopText, UiError> {
+        let account = self.current_user()?.steamid;
+        let item = self
+            .require_steam_client()?
+            .query_localized_item_details(backend_workshop_id(id), language)
+            .ui_err()?;
+        let text = crate::bridge::workshop_text::WorkshopText {
+            title: item.title,
+            description: item.description.unwrap_or_default(),
+        };
+        Ok(self
+            .inner
+            .text_journal
+            .lock()
+            .reconcile(account, id, language, text))
     }
 
     pub(crate) fn cached_item_details(self, id: PublishedFileId) -> Option<WorkshopMetadata> {
@@ -148,6 +193,7 @@ impl<'a> WorkshopService<'a> {
             .workshop_metadata
             .lock()
             .get(&id)
+            .filter(|cached| cached.language == self.language())
             .map(|cached| cached.metadata.clone())
             .filter(|metadata| metadata.full_description.is_some())
     }
@@ -233,12 +279,17 @@ impl<'a> WorkshopService<'a> {
         self.inner.backend.connected_steam().ui_err()
     }
 
-    fn fetch_items(self, item_ids: &[PublishedFileId]) -> Result<Vec<WorkshopItem>, UiError> {
+    fn fetch_items(
+        self,
+        item_ids: &[PublishedFileId],
+        language: gmpublished_backend::WorkshopLanguage,
+    ) -> Result<Vec<WorkshopItem>, UiError> {
         if item_ids.is_empty() {
             return Ok(Vec::new());
         }
         steam_workshop::query_workshop_items(
-            self.require_steam_client()?,
+            self.require_steam_client()?
+                .with_workshop_language(language),
             &backend_workshop_ids(item_ids),
         )
         .map(|items| items.into_iter().map(workshop_item_from_backend).collect())
@@ -246,24 +297,29 @@ impl<'a> WorkshopService<'a> {
     }
 
     fn fetch_my_page_connected(self, page: u32) -> Result<WorkshopPage, UiError> {
+        let language = self.language();
         let page = self
             .inner
             .backend
-            .browse_my_workshop_page(page)
+            .browse_my_workshop_page(page, language)
             .ok_or_else(|| UiError::new(keys::STEAM_ERROR))?;
         let items = page
             .items
             .into_iter()
             .map(workshop_item_from_backend)
             .collect::<Vec<_>>();
-        self.cache_items(&items);
+        self.cache_items(&items, language);
         Ok(WorkshopPage {
             total: page.total_results,
             items,
         })
     }
 
-    fn cache_items(self, items: &[WorkshopItem]) -> Vec<WorkshopMetadata> {
+    fn cache_items(
+        self,
+        items: &[WorkshopItem],
+        language: gmpublished_backend::WorkshopLanguage,
+    ) -> Vec<WorkshopMetadata> {
         let mut metadata = items
             .iter()
             .filter_map(WorkshopMetadata::from_workshop_item)
@@ -275,7 +331,10 @@ impl<'a> WorkshopService<'a> {
         let fetched_at = metadata_snapshot::now_unix_seconds();
         let mut cache = self.inner.workshop_metadata.lock();
         for item in &mut metadata {
-            if let Some(existing) = cache.get(&item.id) {
+            if let Some(existing) = cache
+                .get(&item.id)
+                .filter(|cached| cached.language == language)
+            {
                 if item.thumbhash.is_none() {
                     item.thumbhash.clone_from(&existing.metadata.thumbhash);
                 }
@@ -290,6 +349,7 @@ impl<'a> WorkshopService<'a> {
             cache.insert(
                 item.id,
                 CachedWorkshopMetadata {
+                    language,
                     metadata: item.clone(),
                     fetched_at,
                 },
@@ -298,7 +358,11 @@ impl<'a> WorkshopService<'a> {
         metadata
     }
 
-    fn cache_item_details(self, item: &WorkshopItem) {
+    fn cache_item_details(
+        self,
+        item: &WorkshopItem,
+        language: gmpublished_backend::WorkshopLanguage,
+    ) {
         let Some(mut metadata) = WorkshopMetadata::from_workshop_item(item) else {
             return;
         };
@@ -314,6 +378,7 @@ impl<'a> WorkshopService<'a> {
         let fetched_at = metadata_snapshot::now_unix_seconds();
         let mut cache = self.inner.workshop_metadata.lock();
         if let Some(existing) = cache.get(&metadata.id)
+            && existing.language == language
             && metadata.thumbhash.is_none()
         {
             metadata.thumbhash.clone_from(&existing.metadata.thumbhash);
@@ -321,6 +386,7 @@ impl<'a> WorkshopService<'a> {
         cache.insert(
             metadata.id,
             CachedWorkshopMetadata {
+                language,
                 metadata,
                 fetched_at,
             },
@@ -342,12 +408,12 @@ impl<'a> WorkshopService<'a> {
 
     #[cfg(test)]
     pub(crate) fn cache_items_for_test(self, items: &[WorkshopItem]) -> Vec<WorkshopMetadata> {
-        self.cache_items(items)
+        self.cache_items(items, self.language())
     }
 
     #[cfg(test)]
     pub(crate) fn cache_item_details_for_test(self, item: &WorkshopItem) {
-        self.cache_item_details(item);
+        self.cache_item_details(item, self.language());
     }
 
     #[cfg(test)]

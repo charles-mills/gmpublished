@@ -170,11 +170,29 @@ pub fn field<'a, Message: Clone + 'a>(
     chevron: Chevron,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
+    field_with_icon(label, rows, metrics, chevron, None, tokens)
+}
+
+pub fn field_with_icon<'a, Message: Clone + 'a>(
+    label: String,
+    rows: Vec<Row<Message>>,
+    metrics: Metrics,
+    chevron: Chevron,
+    icon: Option<svg::Handle>,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
     let geometry = geometry(rows.len(), metrics, tokens);
 
     select(
-        face(label.clone(), Face::Collapsed, metrics, chevron, tokens),
-        face(label, Face::Expanded, metrics, chevron, tokens),
+        face(
+            label.clone(),
+            Face::Collapsed,
+            metrics,
+            chevron,
+            icon.clone(),
+            tokens,
+        ),
+        face(label, Face::Expanded, metrics, chevron, icon, tokens),
         menu(rows, metrics, tokens),
         geometry,
     )
@@ -187,31 +205,40 @@ fn face<'a, Message: 'a>(
     face: Face,
     metrics: Metrics,
     chevron: Chevron,
+    icon: Option<svg::Handle>,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let label = text(label)
-        .size(metrics.text_size)
-        .line_height(LINE_HEIGHT)
-        .wrapping(text::Wrapping::None)
-        .color(iced::Color::from(tokens.colors.text));
-
-    let content: Element<'_, Message> = if chevron == Chevron::Shown {
-        row![
-            label,
-            iced::widget::Space::new().width(Length::Fill),
-            svg(assets::icons::chevron_down())
-                .width(Length::Fixed(tokens.dims.icon_size_sm))
-                .height(Length::Fixed(tokens.dims.icon_size_sm))
+    let mut content = row![].spacing(tokens.spacing.gap_sm).align_y(iced::Center);
+    if let Some(icon) = icon {
+        content = content.push(
+            svg(icon)
+                .width(tokens.dims.icon_size.min(metrics.text_size * LINE_HEIGHT))
+                .height(tokens.dims.icon_size.min(metrics.text_size * LINE_HEIGHT))
                 .style(move |_, _| svg::Style {
                     color: Some(tokens.colors.text.into()),
                 }),
-        ]
-        .align_y(iced::Center)
-        .into()
-    } else {
-        label.into()
-    };
+        );
+    }
+    content = content.push(
+        text(label)
+            .size(metrics.text_size)
+            .line_height(LINE_HEIGHT)
+            .wrapping(text::Wrapping::None)
+            .color(iced::Color::from(tokens.colors.text)),
+    );
+    if chevron == Chevron::Shown {
+        content = content
+            .push(iced::widget::Space::new().width(Length::Fill))
+            .push(
+                svg(assets::icons::chevron_down())
+                    .width(tokens.dims.icon_size_sm)
+                    .height(tokens.dims.icon_size_sm)
+                    .style(move |_, _| svg::Style {
+                        color: Some(tokens.colors.text.into()),
+                    }),
+            );
+    }
 
     container(content)
         .width(Length::Fill)

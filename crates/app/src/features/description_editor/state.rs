@@ -1,7 +1,11 @@
+use crate::bridge::workshop_text::{
+    FieldEdit, LocalizedDrafts, MetadataEdit, WorkshopLanguage, WorkshopText, normalize,
+};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use iced::widget::{image, text_editor};
+use crate::widgets::split_pane;
+use iced::widget::{image, pane_grid, text_editor};
 
 use gmpublished_backend::bbcode::{Document as BbCodeDocument, SpoilerId};
 
@@ -16,10 +20,7 @@ use crate::widgets::bbcode::{self, MediaLookup, MediaView};
 pub(super) const DESCRIPTION_MAX_BYTES: usize =
     gmpublished_backend::publishing::WORKSHOP_DESCRIPTION_MAX_BYTES;
 
-/// The descriptions Steam items carry when nothing real was ever written —
-/// the current backend default plus the one earlier builds wrote — presented
-/// as an empty editor rather than literal text to overwrite. Shared with the
-/// backend constants so the sets can never drift apart.
+/// Placeholder descriptions open as empty text without marking the editor dirty.
 pub(super) const PLACEHOLDER_DESCRIPTIONS: [&str; 2] = [
     gmpublished_backend::publishing::WORKSHOP_DEFAULT_DESCRIPTION,
     gmpublished_backend::publishing::WORKSHOP_LEGACY_DEFAULT_DESCRIPTION,
@@ -36,9 +37,53 @@ const MEDIA_MAX_EDGE: u32 = bbcode::STEAM_DESCRIPTION_WIDTH as u32;
 #[derive(Debug, Default)]
 pub struct SourceContent(text_editor::Content);
 
+#[derive(Clone, Debug)]
+struct SourceSnapshot {
+    text: String,
+    cursor: text_editor::Cursor,
+}
+
 impl SourceContent {
     fn from_text(text: &str) -> Self {
         Self(text_editor::Content::with_text(text))
+    }
+
+    fn snapshot(&self) -> SourceSnapshot {
+        SourceSnapshot {
+            text: self.text(),
+            cursor: self.0.cursor(),
+        }
+    }
+    fn restore(snapshot: &SourceSnapshot) -> Self {
+        use text_editor::{Action, Motion};
+        let mut content = Self::from_text(&snapshot.text);
+        content.perform(Action::Move(Motion::DocumentStart));
+        let anchor = snapshot
+            .cursor
+            .selection
+            .unwrap_or(snapshot.cursor.position);
+        for _ in 0..=snapshot.text.len() {
+            if content.0.cursor().position == anchor {
+                break;
+            }
+            content.perform(Action::Move(Motion::Right));
+        }
+        if snapshot.cursor.selection.is_some() {
+            let position = snapshot.cursor.position;
+            for _ in 0..=snapshot.text.len() {
+                let current = content.0.cursor().position;
+                if current == position {
+                    break;
+                }
+                let motion = if (current.line, current.column) < (position.line, position.column) {
+                    Motion::Right
+                } else {
+                    Motion::Left
+                };
+                content.perform(Action::Select(motion));
+            }
+        }
+        content
     }
 
     pub(crate) const fn content(&self) -> &text_editor::Content {
@@ -68,7 +113,7 @@ impl SourceContent {
 
 impl Clone for SourceContent {
     fn clone(&self) -> Self {
-        Self::from_text(&self.text())
+        Self::restore(&self.snapshot())
     }
 }
 
@@ -112,6 +157,10 @@ enum SessionTarget {
 struct Session {
     target: SessionTarget,
     title: Option<String>,
+    initial_title: String,
+    remote: Option<WorkshopText>,
+    undo: Vec<SourceSnapshot>,
+    redo: Vec<SourceSnapshot>,
     phase: LoadPhase,
     saving: bool,
     source: SourceContent,
@@ -123,26 +172,13 @@ struct Session {
     confirm_discard: bool,
 }
 
-#[derive(Debug, Default)]
-pub struct State {
-    session: Option<Session>,
-    generation: Generation,
-    last_animation_tick: Option<Instant>,
-    window_focused: bool,
-    /// `true` after construction; `Default` is only used before the first
-    /// focus event arrives, and an unfocused start corrects itself.
-    focus_initialized: bool,
-}
-
-impl State {
-    pub(super) fn open(
-        &mut self,
-        workshop_id: PublishedFileId,
-        title: Option<String>,
-    ) -> Generation {
-        self.session = Some(Session {
-            target: SessionTarget::Existing(workshop_id),
+impl Session {
+    fn loading(target: SessionTarget, title: Option<String>) -> Self {
+        Self {
+            target,
             title,
+            initial_title: String::new(),
+            remote: None,
             phase: LoadPhase::Loading,
             saving: false,
             source: SourceContent::default(),
@@ -151,26 +187,115 @@ impl State {
             revealed_spoilers: HashSet::new(),
             media: HashMap::new(),
             confirm_discard: false,
-        });
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+    fn draft(title: String, description: &str) -> Self {
+        let description = normalize(description);
+        Self {
+            initial_title: normalize(&title),
+            phase: LoadPhase::Ready,
+            source: SourceContent::from_text(&description),
+            initial: description.clone(),
+            document: BbCodeDocument::parse(&description),
+            ..Self::loading(SessionTarget::Draft, Some(title))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Pane {
+    Source,
+    Preview,
+}
+
+#[derive(Debug)]
+pub struct State {
+    panes: split_pane::State<Pane>,
+    pane_width: f32,
+    session: Option<Session>,
+    generation: Generation,
+    language: WorkshopLanguage,
+    inactive: HashMap<WorkshopLanguage, Session>,
+    saving_language: Option<WorkshopLanguage>,
+    save_failed: Option<WorkshopLanguage>,
+    last_animation_tick: Option<Instant>,
+    window_focused: bool,
+    /// `true` after construction; `Default` is only used before the first
+    /// focus event arrives, and an unfocused start corrects itself.
+    focus_initialized: bool,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            panes: split_pane::State::vertical(Pane::Source, Pane::Preview, 0.5),
+            pane_width: 0.0,
+            session: None,
+            generation: Generation::INITIAL,
+            language: WorkshopLanguage::default(),
+            inactive: HashMap::new(),
+            saving_language: None,
+            save_failed: None,
+            last_animation_tick: None,
+            window_focused: false,
+            focus_initialized: false,
+        }
+    }
+}
+
+impl State {
+    pub(super) fn panes(&self) -> &pane_grid::State<Pane> {
+        self.panes.grid()
+    }
+    pub(super) fn source_pane_width(&self) -> f32 {
+        (self.pane_width - split_pane::DIVIDER_WIDTH).max(0.0) * self.panes.ratio()
+    }
+    pub(super) fn layout_panes(&mut self, width: f32) {
+        self.pane_width = width;
+        self.panes
+            .set_ratio(self.clamped_pane_ratio(self.panes.ratio()));
+    }
+    pub(super) fn resize_panes(&mut self, split: pane_grid::Split, ratio: f32) {
+        self.panes.resize(split, self.clamped_pane_ratio(ratio));
+    }
+    pub(super) fn reset_panes(&mut self) {
+        self.panes.reset();
+        self.layout_panes(self.pane_width);
+    }
+    fn clamped_pane_ratio(&self, ratio: f32) -> f32 {
+        split_pane::clamp_ratio(
+            ratio,
+            (self.pane_width - split_pane::DIVIDER_WIDTH).max(0.0),
+            240.0,
+            f32::INFINITY,
+            280.0,
+            f32::INFINITY,
+        )
+    }
+    pub(super) fn open(
+        &mut self,
+        workshop_id: PublishedFileId,
+        title: Option<String>,
+    ) -> Generation {
+        self.inactive.clear();
+        self.saving_language = None;
+        self.save_failed = None;
+        self.session = Some(Session::loading(
+            SessionTarget::Existing(workshop_id),
+            title,
+        ));
         self.generation.bump()
     }
 
     /// Opens over a local draft: no fetch, and saving stages the text back to
     /// the caller instead of submitting to Steam.
     pub(super) fn open_draft(&mut self, title: String, initial: &str) -> Generation {
-        let initial = initial.trim();
-        self.session = Some(Session {
-            target: SessionTarget::Draft,
-            title: Some(title),
-            phase: LoadPhase::Ready,
-            saving: false,
-            source: SourceContent::from_text(initial),
-            initial: initial.to_owned(),
-            document: BbCodeDocument::parse(initial),
-            revealed_spoilers: HashSet::new(),
-            media: HashMap::new(),
-            confirm_discard: false,
-        });
+        self.inactive.clear();
+        self.saving_language = None;
+        self.save_failed = None;
+        self.session = Some(Session::draft(title, initial));
         self.generation.bump()
     }
 
@@ -182,6 +307,9 @@ impl State {
 
     pub(super) fn close(&mut self) {
         self.session = None;
+        self.inactive.clear();
+        self.saving_language = None;
+        self.save_failed = None;
         self.last_animation_tick = None;
         // Invalidates any in-flight fetch, save, and thumbnail deliveries.
         self.generation.bump();
@@ -232,14 +360,6 @@ impl State {
         self.session.as_ref().map(|session| &session.source)
     }
 
-    /// The text a save would submit — the same trimmed view [`Self::dirty`]
-    /// compares against, so the two can never disagree.
-    pub(super) fn trimmed_source(&self) -> Option<String> {
-        self.session
-            .as_ref()
-            .map(|session| trimmed_source(&session.source))
-    }
-
     pub(crate) fn document(&self) -> Option<&BbCodeDocument> {
         self.session.as_ref().map(|session| &session.document)
     }
@@ -267,15 +387,190 @@ impl State {
     }
 
     pub(crate) fn dirty(&self) -> bool {
-        self.session.as_ref().is_some_and(|session| {
-            session.phase == LoadPhase::Ready && trimmed_source(&session.source) != session.initial
-        })
+        self.sessions().any(|(_, session)| session_dirty(session))
     }
-
-    /// Saving is possible once the live description has loaded, the text
-    /// actually changed, fits Steam's limit, and no save is in flight.
     pub(crate) fn can_save(&self) -> bool {
-        self.dirty() && !self.saving() && !self.over_limit()
+        self.dirty()
+            && !self.saving()
+            && self
+                .sessions()
+                .all(|(_, session)| !session_dirty(session) || valid_session(session))
+    }
+    fn sessions(&self) -> impl Iterator<Item = (WorkshopLanguage, &Session)> {
+        self.session
+            .iter()
+            .map(|session| (self.language, session))
+            .chain(
+                self.inactive
+                    .iter()
+                    .map(|(language, session)| (*language, session)),
+            )
+    }
+    pub(crate) const fn language(&self) -> WorkshopLanguage {
+        self.language
+    }
+    pub(crate) fn set_initial_language(&mut self, language: WorkshopLanguage) {
+        self.language = language;
+    }
+    pub(super) fn edit_title(&mut self, title: String) {
+        if let Some(session) = self.session.as_mut()
+            && session.phase == LoadPhase::Ready
+            && !session.saving
+        {
+            session.title = Some(title);
+        }
+    }
+    pub(super) fn switch_language(
+        &mut self,
+        language: WorkshopLanguage,
+    ) -> Option<PublishedFileId> {
+        if language == self.language || self.saving() {
+            return None;
+        }
+        let session = self.session.take()?;
+        let target = session.target;
+        self.inactive.insert(self.language, session);
+        self.language = language;
+        self.generation.bump();
+        self.last_animation_tick = None;
+        let mut session = self
+            .inactive
+            .remove(&language)
+            .unwrap_or_else(|| match target {
+                SessionTarget::Draft => Session::draft(String::new(), ""),
+                SessionTarget::Existing(_) => Session::loading(target, None),
+            });
+        let fetch = match target {
+            SessionTarget::Existing(id) if session.phase != LoadPhase::Ready => {
+                session.phase = LoadPhase::Loading;
+                Some(id)
+            }
+            _ => None,
+        };
+        self.session = Some(session);
+        fetch
+    }
+    pub(crate) fn localized_drafts(&self) -> LocalizedDrafts {
+        self.sessions()
+            .filter(|(_, session)| session.phase == LoadPhase::Ready)
+            .map(|(language, session)| {
+                (
+                    language,
+                    WorkshopText {
+                        title: normalize(session.title.as_deref().unwrap_or_default()),
+                        description: trimmed_source(&session.source),
+                    },
+                )
+            })
+            .collect()
+    }
+    pub(super) fn open_localized_draft(
+        &mut self,
+        language: WorkshopLanguage,
+        mut drafts: LocalizedDrafts,
+    ) {
+        let text = drafts.remove(&language).unwrap_or_default();
+        self.language = language;
+        self.open_draft(text.title, &text.description);
+        for (language, text) in drafts {
+            self.inactive
+                .insert(language, Session::draft(text.title, &text.description));
+        }
+    }
+    pub(super) fn open_pending_translations(
+        &mut self,
+        workshop_id: PublishedFileId,
+        drafts: LocalizedDrafts,
+    ) {
+        let language = drafts.keys().next().copied().unwrap_or_default();
+        self.open_localized_draft(language, drafts);
+        self.save_failed = Some(language);
+        if let Some(session) = self.session.as_mut() {
+            session.target = SessionTarget::Existing(workshop_id);
+            session.initial_title.clear();
+            session.initial.clear();
+            session.remote = None;
+        }
+        for session in self.inactive.values_mut() {
+            session.target = SessionTarget::Existing(workshop_id);
+            session.initial_title.clear();
+            session.initial.clear();
+            session.remote = None;
+        }
+    }
+    pub(crate) const fn failed_language(&self) -> Option<WorkshopLanguage> {
+        self.save_failed
+    }
+    pub(crate) fn invalid_language(&self) -> Option<WorkshopLanguage> {
+        self.sessions()
+            .find(|(_, session)| session_dirty(session) && !valid_session(session))
+            .map(|(language, _)| language)
+    }
+    pub(super) fn fail_save(&mut self) {
+        let language = self.saving_language.take().unwrap_or(self.language);
+        self.set_saving(false);
+        self.switch_language(language);
+        self.save_failed = Some(language);
+    }
+    pub(super) fn next_save(&mut self) -> Option<MetadataEdit> {
+        let (language, session) = self
+            .sessions()
+            .find(|(_, session)| session_dirty(session))?;
+        let SessionTarget::Existing(workshop_id) = session.target else {
+            return None;
+        };
+        let title = normalize(session.title.as_deref().unwrap_or_default());
+        let description = trimmed_source(&session.source);
+        let edit = MetadataEdit {
+            workshop_id,
+            language,
+            title: (title != session.initial_title).then(|| FieldEdit {
+                previous: session.remote.as_ref().map(|text| text.title.clone()),
+                value: title,
+            }),
+            description: (description != session.initial).then(|| FieldEdit {
+                previous: session.remote.as_ref().map(|text| text.description.clone()),
+                value: description,
+            }),
+        };
+        self.save_failed = None;
+        self.saving_language = Some(language);
+        self.generation.bump();
+        self.set_saving(true);
+        Some(edit)
+    }
+    pub(super) fn checkpoint(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            let snapshot = session.source.snapshot();
+            if session
+                .undo
+                .last()
+                .is_none_or(|last| last.text != snapshot.text)
+            {
+                session.undo.push(snapshot);
+            }
+            if session.undo.len() > 100 {
+                session.undo.remove(0);
+            }
+            session.redo.clear();
+        }
+    }
+    pub(super) fn undo_redo(&mut self, redo: bool) {
+        if self.saving() || self.loading() || self.load_failed() {
+            return;
+        }
+        if let Some(session) = self.session.as_mut() {
+            let (from, to) = if redo {
+                (&mut session.redo, &mut session.undo)
+            } else {
+                (&mut session.undo, &mut session.redo)
+            };
+            if let Some(text) = from.pop() {
+                to.push(session.source.snapshot());
+                session.source = SourceContent::restore(&text);
+                self.reparse();
+            }
+        }
     }
 
     pub(super) fn set_confirm_discard(&mut self, confirm: bool) {
@@ -291,20 +586,43 @@ impl State {
     }
 
     /// Records a successful save: the current text becomes the new baseline.
-    pub(super) fn mark_saved(&mut self) {
-        if let Some(session) = self.session.as_mut() {
+    pub(super) fn mark_saved(&mut self) -> Option<(WorkshopLanguage, WorkshopText)> {
+        let language = self.saving_language.take().unwrap_or(self.language);
+        let session = if language == self.language {
+            self.session.as_mut()
+        } else {
+            self.inactive.get_mut(&language)
+        };
+        let mut saved = None;
+        if let Some(session) = session {
             session.saving = false;
             session.initial = trimmed_source(&session.source);
+
+            session.initial_title = normalize(session.title.as_deref().unwrap_or_default());
+            let text = WorkshopText {
+                title: session.initial_title.clone(),
+                description: session.initial.clone(),
+            };
+            session.remote = Some(text.clone());
+            saved = Some((language, text));
         }
+        self.set_saving(false);
+        saved
     }
 
     pub(super) fn apply_fetched(&mut self, title: String, description: &str) {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        session.initial_title = normalize(&title);
         session.title = Some(title);
+        session.remote = Some(WorkshopText {
+            title: session.initial_title.clone(),
+            description: normalize(description),
+        });
         session.phase = LoadPhase::Ready;
-        let description = description.trim();
+        let description = normalize(description);
+        let description = description.as_str();
         let source = if PLACEHOLDER_DESCRIPTIONS.contains(&description) {
             ""
         } else {
@@ -314,6 +632,18 @@ impl State {
         session.source = SourceContent::from_text(source);
         session.document = BbCodeDocument::parse(source);
         session.revealed_spoilers.clear();
+    }
+
+    pub(super) fn retry_fetch(&mut self) -> Option<PublishedFileId> {
+        if !self.load_failed() {
+            return None;
+        }
+        let id = self.workshop_id()?;
+        if let Some(session) = self.session.as_mut() {
+            session.phase = LoadPhase::Loading;
+        }
+        self.generation.bump();
+        Some(id)
     }
 
     pub(super) fn apply_fetch_failure(&mut self) {
@@ -326,6 +656,9 @@ impl State {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        if session.phase != LoadPhase::Ready {
+            return;
+        }
         let edited = action.is_edit();
         session.source.perform(action);
         if edited {
@@ -526,5 +859,17 @@ impl MediaLookup for State {
 /// The text a save would submit: surrounding whitespace never survives the
 /// round trip through Steam, so it does not count as a difference either.
 fn trimmed_source(source: &SourceContent) -> String {
-    source.text().trim().to_owned()
+    normalize(&source.text())
+}
+
+fn session_dirty(session: &Session) -> bool {
+    session.phase == LoadPhase::Ready
+        && (trimmed_source(&session.source) != session.initial
+            || normalize(session.title.as_deref().unwrap_or_default()) != session.initial_title)
+}
+fn valid_session(session: &Session) -> bool {
+    let title = normalize(session.title.as_deref().unwrap_or_default());
+    (title == session.initial_title || !title.is_empty())
+        && title.len() < 129
+        && trimmed_source(&session.source).len() <= DESCRIPTION_MAX_BYTES
 }

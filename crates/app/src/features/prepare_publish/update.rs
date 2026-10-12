@@ -245,6 +245,10 @@ fn apply(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
             let _changed = state.go_up();
             Vec::new()
         }
+        Message::LocalizedTextFetched(generation, result) => {
+            state.apply_localized_text(generation, result);
+            Vec::new()
+        }
         Message::TitleEdited(value) => {
             state.edit_title(value);
             Vec::new()
@@ -256,14 +260,15 @@ fn apply(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
         Message::DescriptionEditRequested => {
             vec![Effect::DescriptionEditRequested(
                 super::effect::DescriptionEditRequest {
+                    language: state.language(),
+                    drafts: state.localized_drafts(),
                     workshop_id: state.description_edit_target(),
                     title: state.title().trim().to_owned(),
-                    staged: state.staged_description().map(str::to_owned),
                 },
             )]
         }
-        Message::DescriptionStaged(description) => {
-            state.set_staged_description(&description);
+        Message::LocalizedDraftsStaged { language, drafts } => {
+            state.stage_localized_drafts(language, drafts);
             Vec::new()
         }
         Message::SubmitRequested => vec![Effect::SubmitContextRequested],
@@ -297,10 +302,13 @@ fn apply(state: &mut State, message: Message, now: Instant) -> Vec<Effect> {
         Message::PublishSubmitCompleted(generation, result) => {
             let effects = result.as_ref().map_or_else(
                 |_| Vec::new(),
-                |result| vec![Effect::PublishSuccessUrlsRequested(*result)],
+                |result| vec![Effect::PublishSuccessUrlsRequested(result.clone())],
             );
-            let _changed = state.apply_submit_completion(generation, result);
-            effects
+            if state.apply_submit_completion(generation, result) {
+                effects
+            } else {
+                Vec::new()
+            }
         }
     }
 }

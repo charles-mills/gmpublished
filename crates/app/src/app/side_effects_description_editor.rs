@@ -13,6 +13,11 @@ impl App {
         message: description_editor::Message,
         update: UpdateContext,
     ) -> Task<RootMessage> {
+        if matches!(message, description_editor::Message::OpenRequested { .. }) {
+            self.state.features.description_editor.set_initial_language(
+                gmpublished_backend::WorkshopLanguage::from_locale(self.ports().i18n.locale_id()),
+            );
+        }
         let effects = description_editor::update_at(
             &mut self.state.features.description_editor,
             message,
@@ -36,11 +41,27 @@ impl App {
             description_editor::Effect::SaveRequested(request) => {
                 self.description_save_task(request)
             }
-            description_editor::Effect::DraftStaged(description) => self
+            description_editor::Effect::DraftStaged { language, drafts } => self
                 .apply_prepare_publish_message(
-                    prepare_publish::Message::DescriptionStaged(description),
+                    prepare_publish::Message::LocalizedDraftsStaged { language, drafts },
                     self.update_context,
                 ),
+            description_editor::Effect::MetadataSaved {
+                workshop_id,
+                language,
+                text,
+            } => {
+                self.state.features.prepare_publish.apply_saved_metadata(
+                    workshop_id,
+                    language,
+                    &text,
+                );
+                self.state
+                    .features
+                    .preview_gma
+                    .apply_saved_metadata(workshop_id, language, text);
+                Task::none()
+            }
             description_editor::Effect::OpenUrlRequested(url) => self.open_url_task(url),
             description_editor::Effect::ThumbnailDemandsChanged => {
                 self.description_editor_thumbnail_demands()
@@ -56,10 +77,12 @@ impl App {
         self.environment
             .ctx
             .run_blocking("description-editor-fetch", move |app| {
-                let item = app.workshop().item_details(request.workshop_id)?;
+                let item = app
+                    .workshop()
+                    .localized_text(request.workshop_id, request.language)?;
                 Ok::<_, UiError>(description_editor::FetchedSource {
                     title: item.title,
-                    description: item.description.unwrap_or_default(),
+                    description: item.description,
                 })
             })
             .map(move |result| {
@@ -80,7 +103,7 @@ impl App {
         self.environment
             .ctx
             .run_blocking("description-editor-save", move |app| {
-                run_description_update(&ctx, app.publish(), task, &request)
+                run_metadata_update(&ctx, app.publish(), task, &request)
             })
             .map(move |result| {
                 RootMessage::DescriptionEditor(description_editor::Message::SaveCompleted {
@@ -91,10 +114,9 @@ impl App {
     }
 }
 
-/// Submits a description-only Workshop revision under a correlated
-/// transaction, mirroring the icon-update runner so failures reach the task
-/// overlay through the same path as every other publish operation.
-fn run_description_update(
+/// Submits localized title and description edits under a correlated
+/// transaction so failures reach the task overlay.
+fn run_metadata_update(
     backend_ctx: &BackendContext,
     publish: PublishService<'_>,
     task: TaskHandle,
@@ -104,7 +126,7 @@ fn run_description_update(
     let transaction_id = transaction.id();
     backend_ctx.correlate_backend_transaction(transaction_id, task);
 
-    match publish.update_description(&request.description, request.workshop_id, &transaction) {
+    match publish.update_metadata(&request.edit, &transaction) {
         Ok(legal_agreement_required) => {
             let _effects = backend_ctx.handle_backend_runtime_event(
                 &BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished {

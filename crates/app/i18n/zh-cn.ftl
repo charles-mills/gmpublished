@@ -449,7 +449,7 @@ downloader-set-destination = 设置解压位置
 
 description-editor-editing = 正在编辑描述
 description-editor-loading = 正在加载当前描述…
-description-editor-load-failed = 无法加载当前描述。请关闭编辑器并重试。
+description-editor-load-failed = 无法加载当前描述。
 description-editor-cancel = 取消
 description-editor-save = 保存到创意工坊
 description-editor-saving = 正在保存…
@@ -480,3 +480,8 @@ description-editor-stage = 使用描述
 bbcode-quote-author = 最初由 {$author} 发布：
 bbcode-view-image = 查看图片 ↗
 bbcode-watch-youtube = 在 YouTube 上观看 ↗
+
+workshop-text-retry = 重试
+workshop-text-language = 编辑标题和描述的语言
+workshop-text-invalid = 请检查{ $language }的标题（1–128 个 UTF-8 字节）和描述长度。
+workshop-text-save-failed = 无法保存{ $language }。已保存的更改会保留，请重试其余更改。

@@ -10,7 +10,15 @@ pub enum Effect {
     SourceFetchRequested(SourceRequest),
     SaveRequested(SaveRequest),
     /// A draft session finished: the text goes back to the publish flow.
-    DraftStaged(String),
+    DraftStaged {
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+        drafts: crate::bridge::workshop_text::LocalizedDrafts,
+    },
+    MetadataSaved {
+        workshop_id: PublishedFileId,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+        text: crate::bridge::workshop_text::WorkshopText,
+    },
     OpenUrlRequested(String),
     ThumbnailDemandsChanged,
 }
@@ -18,12 +26,12 @@ pub enum Effect {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceRequest {
     pub workshop_id: PublishedFileId,
+    pub language: crate::bridge::workshop_text::WorkshopLanguage,
     pub generation: Generation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaveRequest {
-    pub workshop_id: PublishedFileId,
-    pub description: String,
+    pub edit: crate::bridge::workshop_text::MetadataEdit,
     pub generation: Generation,
 }

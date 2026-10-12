@@ -42,6 +42,9 @@ pub use transactions::{
 mod rgba_image;
 pub use rgba_image::RgbaImage;
 
+mod workshop_language;
+pub use workshop_language::WorkshopLanguage;
+
 mod workshop_id;
 pub use workshop_id::WorkshopId;
 

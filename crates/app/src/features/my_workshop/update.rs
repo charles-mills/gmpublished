@@ -17,6 +17,11 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
 
 fn update_message(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
+        Message::WorkshopLanguageChanged => {
+            let mut effects = vec![Effect::ThumbnailDemandsChanged];
+            append_page_request_effect(state.workshop_language_changed(), &mut effects);
+            effects
+        }
         Message::RouteEntered => {
             let mut effects = Vec::new();
             append_page_request_effect(state.enter_route(), &mut effects);
@@ -471,5 +476,58 @@ mod tests {
 
         state.set_window_focused(true);
         assert!(state.has_active_animations());
+    }
+    #[test]
+    fn language_change_reloads_visible_pages_and_rejects_previous_language_results() {
+        let mut state = State::default();
+        update(&mut state, Message::RouteEntered);
+        let effects = update(&mut state, Message::WorkshopLanguageChanged);
+        let generation = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PageRequested { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(generation, Generation::from_raw(1));
+        update(
+            &mut state,
+            Message::PageCompleted(
+                Generation::from_raw(1),
+                1,
+                Ok(PageResult {
+                    page: 1,
+                    total: 1,
+                    rows: vec![Row::for_test(42, "Old language", 0)],
+                }),
+            ),
+        );
+        assert_eq!(state.loaded_count(), 0);
+        update(
+            &mut state,
+            Message::PageCompleted(
+                generation,
+                1,
+                Ok(PageResult {
+                    page: 1,
+                    total: 1,
+                    rows: vec![Row::for_test(42, "Selected language", 0)],
+                }),
+            ),
+        );
+        assert_eq!(state.loaded_count(), 1);
+        update(&mut state, Message::RouteExited);
+        let effects = update(&mut state, Message::WorkshopLanguageChanged);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::PageRequested { .. }))
+        );
+        assert_eq!(state.loaded_count(), 0);
+        assert!(
+            update(&mut state, Message::RouteEntered)
+                .iter()
+                .any(|effect| matches!(effect, Effect::PageRequested { .. }))
+        );
     }
 }

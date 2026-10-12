@@ -718,6 +718,9 @@ impl App {
         let mut state = State::default();
         let (settings, paths) = ctx.settings_and_paths_snapshot();
         let _result = state.apply_settings_snapshot(settings, paths);
+        ctx.set_workshop_language(gmpublished_backend::WorkshopLanguage::from_locale(
+            state.i18n.locale_id(),
+        ));
         let app = Self {
             environment: AppEnvironment {
                 ctx,
@@ -1080,6 +1083,14 @@ impl App {
         message: preview_gma::Message,
         update: UpdateContext,
     ) -> Task<RootMessage> {
+        self.state.features.preview_gma.set_viewer(
+            self.state
+                .features
+                .steam_session
+                .identity()
+                .map(steam_session::SteamIdentity::steamid),
+            gmpublished_backend::WorkshopLanguage::from_locale(self.ports().i18n.locale_id()),
+        );
         let effects =
             preview_gma::update_at(&mut self.state.features.preview_gma, message, update.now);
         self.batch_effects(effects, Self::run_preview_gma_effect)
@@ -1474,6 +1485,33 @@ impl App {
 
     fn run_preview_gma_effect(&mut self, effect: preview_gma::Effect) -> Task<RootMessage> {
         match effect {
+            preview_gma::Effect::EditMetadataRequested {
+                workshop_id,
+                language,
+            } => self.apply_description_editor_message(
+                description_editor::Message::OpenLocalizedRequested {
+                    workshop_id,
+                    title: None,
+                    language,
+                },
+                self.update_context,
+            ),
+            preview_gma::Effect::LocalizedTextRequested {
+                request_id,
+                workshop_id,
+                language,
+            } => self
+                .environment
+                .ctx
+                .run_blocking("preview-localized-text", move |app| {
+                    app.workshop().localized_text(workshop_id, language)
+                })
+                .map(move |result| {
+                    RootMessage::PreviewGma(preview_gma::Message::LocalizedTextFetched(
+                        request_id,
+                        flatten_blocking_ui_result(result),
+                    ))
+                }),
             preview_gma::Effect::FilePreview(message) => self.apply_file_preview_message(message),
             preview_gma::Effect::ModalOpenRequested => {
                 self.open_modal_stack_task(modal_stack::ActiveModal::PreviewGma)

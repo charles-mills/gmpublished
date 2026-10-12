@@ -449,7 +449,7 @@ downloader-set-destination = Hedef Belirle
 
 description-editor-editing = Açıklama düzenleniyor
 description-editor-loading = Mevcut açıklama yükleniyor…
-description-editor-load-failed = Mevcut açıklama yüklenemedi. Düzenleyiciyi kapatıp tekrar deneyin.
+description-editor-load-failed = Mevcut açıklama yüklenemedi.
 description-editor-cancel = İptal
 description-editor-save = Atölyeye Kaydet
 description-editor-saving = Kaydediliyor…
@@ -480,3 +480,8 @@ description-editor-stage = Açıklamayı kullan
 bbcode-quote-author = İlk olarak {$author} tarafından gönderildi:
 bbcode-view-image = Görseli görüntüle ↗
 bbcode-watch-youtube = YouTube'da izle ↗
+
+workshop-text-retry = Yeniden dene
+workshop-text-language = Başlık ve açıklama dillerini düzenle
+workshop-text-invalid = { $language } için başlığı (1–128 UTF-8 baytı) ve açıklama uzunluğunu kontrol edin.
+workshop-text-save-failed = { $language } kaydedilemedi. Kaydedilen değişiklikler korundu; kalanları yeniden deneyin.

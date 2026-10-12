@@ -698,6 +698,12 @@ impl Search {
         transaction.finished(TransactionPayload::None);
     }
 
+    pub(crate) fn invalidate_workshop_titles(&self) {
+        self.items
+            .write()
+            .retain(|item| !matches!(item.source, SearchItemSource::MyWorkshop(_)));
+    }
+
     pub fn clear(&self) {
         *self.items.write() = Vec::new();
         *self.installed_addons.write() = BTreeMap::new();

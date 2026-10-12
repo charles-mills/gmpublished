@@ -449,7 +449,7 @@ downloader-set-destination = Set Destination
 
 description-editor-editing = Editing description
 description-editor-loading = Loading the current description…
-description-editor-load-failed = Couldn't load the current description. Close the editor and try again.
+description-editor-load-failed = Couldn't load the current description.
 description-editor-cancel = Cancel
 description-editor-save = Save to Workshop
 description-editor-saving = Saving…
@@ -480,3 +480,8 @@ description-editor-stage = Use Description
 bbcode-quote-author = Originally posted by {$author}:
 bbcode-view-image = View image ↗
 bbcode-watch-youtube = Watch on YouTube ↗
+
+workshop-text-retry = Retry
+workshop-text-language = Edit title and description languages
+workshop-text-invalid = Check the title (1–128 UTF-8 bytes) and description length for { $language }.
+workshop-text-save-failed = Could not save { $language }. Successful saves are kept; retry the remaining changes.

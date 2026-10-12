@@ -40,6 +40,7 @@ pub(super) fn publish_submission_from_app_request(
     };
 
     steam_publishing::PublishSubmission {
+        language: request.language,
         content_path_src: request.content_source_path,
         icon_path,
         title: request.title,

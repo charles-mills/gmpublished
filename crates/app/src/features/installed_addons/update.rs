@@ -5,6 +5,12 @@ use super::{Effect, Message, State};
 /// Applies an Installed Addons route message and returns outward effects as plain data.
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
+        Message::WorkshopLanguageChanged => {
+            state.workshop_language_changed();
+            let mut effects = metadata_request_effects(state);
+            effects.push(Effect::ThumbnailDemandsChanged);
+            effects
+        }
         Message::RouteEntered => {
             state.enter_route();
             // Demands are visibility-gated: exit dropped them to an empty
@@ -434,5 +440,62 @@ mod tests {
 
         state.set_window_focused(true);
         assert!(state.has_active_animations());
+    }
+    #[test]
+    fn language_change_requeries_visible_metadata_with_a_new_generation() {
+        let mut state = State::default();
+        update(&mut state, Message::RouteEntered);
+        addon_grid::apply(
+            state.grid_mut(),
+            addon_grid::Message::ViewportResized(500, 500),
+        );
+        let id = PublishedFileId::fixture(1);
+        update(
+            &mut state,
+            Message::SnapshotPushed(
+                LibraryRefreshReason::Startup,
+                Ok(vec![Row::for_test("/tmp/one.gma", "One", Some(id))]),
+            ),
+        );
+        let effects = update(&mut state, Message::WorkshopLanguageChanged);
+        let generation = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::MetadataRequested {
+                    generation,
+                    item_ids,
+                } if item_ids == &[id] => Some(*generation),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(generation, Generation::from_raw(1));
+        let effects = update(
+            &mut state,
+            Message::MetadataCompleted(
+                Generation::from_raw(1),
+                vec![id],
+                Ok(MetadataResolution {
+                    patches: vec![],
+                    stale_ids: vec![id],
+                }),
+            ),
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::MetadataRefreshRequested { .. }))
+        );
+        let effects = update(
+            &mut state,
+            Message::MetadataCompleted(
+                generation,
+                vec![id],
+                Ok(MetadataResolution {
+                    patches: vec![],
+                    stale_ids: vec![id],
+                }),
+            ),
+        );
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::MetadataRefreshRequested { generation: current, .. } if *current == generation)));
     }
 }

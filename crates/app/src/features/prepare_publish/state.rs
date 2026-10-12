@@ -71,6 +71,7 @@ const SEED_THUMBNAIL_MAX_EDGE: u32 = 512;
 pub struct State {
     open: bool,
     mode: Mode,
+    created_item: Option<PublishedFileId>,
     request_generation: Generation,
     workshop_loads: HashMap<WorkshopSnapshotId, WorkshopContentLoad>,
     active_workshop_request: Option<WorkshopSnapshotId>,
@@ -95,6 +96,9 @@ pub struct State {
     last_icon_animation_tick: Option<Instant>,
     window_focused: bool,
     title: String,
+    language: crate::bridge::workshop_text::WorkshopLanguage,
+    text_generation: Generation,
+    localized_drafts: crate::bridge::workshop_text::LocalizedDrafts,
     addon_type: Option<AddonType>,
     tags: [Option<AddonTag>; 3],
     changelog: ChangelogContent,
@@ -122,6 +126,7 @@ impl Default for State {
         Self {
             open: false,
             mode: Mode::New,
+            created_item: None,
             request_generation: Generation::INITIAL,
             workshop_loads: HashMap::new(),
             active_workshop_request: None,
@@ -146,6 +151,9 @@ impl Default for State {
             last_icon_animation_tick: None,
             window_focused: true,
             title: String::new(),
+            language: crate::bridge::workshop_text::WorkshopLanguage::English,
+            text_generation: Generation::INITIAL,
+            localized_drafts: crate::bridge::workshop_text::LocalizedDrafts::new(),
             addon_type: None,
             tags: [None, None, None],
             changelog: ChangelogContent::default(),
@@ -554,7 +562,7 @@ impl State {
     }
 
     pub(crate) fn can_submit(&self) -> bool {
-        self.open && self.blockers().is_empty()
+        self.open && self.created_item.is_none() && self.blockers().is_empty()
     }
 
     /// The `Publish!` tooltip: the update warning, then whatever is still in
@@ -607,6 +615,7 @@ impl State {
         // Stays monotonic across reopens so a stale thumbnail delivery from a
         // previous target can never seed the new one.
         let thumbnail_generation = self.thumbnail_generation.next();
+        let text_generation = self.text_generation.next();
         let workshop_loads = std::mem::take(&mut self.workshop_loads);
         let mut pending_cleanup = std::mem::take(&mut self.pending_cleanup);
         if let Some(path) = self.workshop_snapshot_path.take() {
@@ -615,6 +624,7 @@ impl State {
         *self = Self::default();
         self.open = true;
         self.thumbnail_generation = thumbnail_generation;
+        self.text_generation = text_generation;
         self.workshop_loads = workshop_loads;
         self.pending_cleanup = pending_cleanup;
         self.ignored_patterns = ignored_patterns;
@@ -644,6 +654,68 @@ impl State {
         }
     }
 
+    pub(crate) const fn text_generation(&self) -> Generation {
+        self.text_generation
+    }
+    pub(super) fn apply_localized_text(
+        &mut self,
+        generation: Generation,
+        result: Result<crate::bridge::workshop_text::WorkshopText, UiError>,
+    ) {
+        if generation == self.text_generation
+            && self.open
+            && self.update_mode()
+            && let Ok(text) = result
+        {
+            self.title = text.title;
+        }
+    }
+    pub(crate) fn apply_saved_metadata(
+        &mut self,
+        id: PublishedFileId,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+        text: &crate::bridge::workshop_text::WorkshopText,
+    ) {
+        if self.description_edit_target() == Some(id) && self.language == language {
+            self.text_generation.bump();
+            self.title.clone_from(&text.title);
+        }
+    }
+    pub(crate) const fn language(&self) -> crate::bridge::workshop_text::WorkshopLanguage {
+        self.language
+    }
+    pub(crate) fn set_initial_language(
+        &mut self,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+    ) {
+        self.language = language;
+    }
+    pub(super) fn localized_drafts(&self) -> crate::bridge::workshop_text::LocalizedDrafts {
+        let mut drafts = self.localized_drafts.clone();
+        drafts.insert(
+            self.language,
+            crate::bridge::workshop_text::WorkshopText {
+                title: self.title.clone(),
+                description: self.staged_description.clone().unwrap_or_default(),
+            },
+        );
+        drafts
+    }
+    pub(super) fn stage_localized_drafts(
+        &mut self,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+        drafts: crate::bridge::workshop_text::LocalizedDrafts,
+    ) {
+        if self.update_mode() {
+            return;
+        }
+        self.language = language;
+        let current = drafts.get(&language).cloned().unwrap_or_default();
+        self.title = current.title;
+        self.set_staged_description(&current.description);
+        self.localized_drafts = drafts;
+    }
+
     pub(crate) fn staged_description(&self) -> Option<&str> {
         self.staged_description.as_deref()
     }
@@ -655,20 +727,24 @@ impl State {
 
     /// The identity an "edit description" request should target: the live
     /// Workshop item when updating, none (a local draft) when creating.
-    pub(super) fn description_edit_target(&self) -> Option<PublishedFileId> {
+    pub(crate) fn description_edit_target(&self) -> Option<PublishedFileId> {
         match &self.mode {
-            Mode::New => None,
+            Mode::New => self.created_item,
             Mode::Update(target) => Some(target.workshop_id),
         }
     }
 
     pub(super) fn close(&mut self) -> Vec<PathBuf> {
+        let text_generation = self.text_generation.next();
+        let thumbnail_generation = self.thumbnail_generation.next();
         let workshop_loads = std::mem::take(&mut self.workshop_loads);
         let mut cleanup = std::mem::take(&mut self.pending_cleanup);
         if let Some(path) = self.workshop_snapshot_path.take() {
             cleanup.push(path);
         }
         *self = Self::default();
+        self.text_generation = text_generation;
+        self.thumbnail_generation = thumbnail_generation;
         self.workshop_loads = workshop_loads;
         cleanup
     }

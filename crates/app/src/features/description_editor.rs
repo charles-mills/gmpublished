@@ -1,6 +1,5 @@
-//! Full-window BBCode description editor for Workshop items: raw source on
-//! the left, a pixel-honest Steam Workshop preview on the right, saved
-//! through a metadata-only UGC revision.
+//! Localized Workshop title and BBCode description editor with source,
+//! Steam preview, per-language drafts, and metadata-only UGC revisions.
 
 mod effect;
 mod markup;

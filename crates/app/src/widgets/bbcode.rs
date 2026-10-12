@@ -52,7 +52,6 @@ const STEAM_IMAGE_MAX_WIDTH: f32 = 630.0;
 struct RenderTokens {
     gap_xs: f32,
     gap_sm: f32,
-    /// List marker column width.
     marker_width: f32,
     /// Table cell padding.
     pad_xs: f32,
@@ -61,7 +60,6 @@ struct RenderTokens {
     /// Quote author line size.
     caption: f32,
     body: f32,
-    /// Sizes for `[h1]`/`[h2]`/`[h3]`.
     heading_sizes: [f32; 3],
     /// Steam headings are regular weight (`div.bb_h1 { font-weight: normal }`).
     heading_bold: bool,
@@ -73,7 +71,6 @@ struct RenderTokens {
     link: Rgba,
     /// Steam's `.bb_link` has no underline.
     link_underline: bool,
-    /// List marker color.
     marker: Rgba,
     divider: Rgba,
     quote: QuoteStyle,
@@ -85,7 +82,6 @@ struct RenderTokens {
     media_placeholder: Rgba,
 }
 
-/// How one context draws `[quote]` blocks.
 #[derive(Clone, Copy)]
 struct QuoteStyle {
     shape: QuoteShape,
@@ -105,7 +101,6 @@ enum QuoteShape {
     RuleBar(Rgba),
 }
 
-/// How one context draws `[code]` blocks.
 #[derive(Clone, Copy)]
 struct CodeStyle {
     border: Rgba,
@@ -113,7 +108,6 @@ struct CodeStyle {
     size: f32,
 }
 
-/// How one context draws `[table]` blocks.
 #[derive(Clone, Copy)]
 struct TableStyle {
     border: Rgba,
@@ -121,7 +115,6 @@ struct TableStyle {
     size: f32,
 }
 
-/// How one context draws `[spoiler]` runs.
 #[derive(Clone, Copy)]
 struct SpoilerStyle {
     cover: Rgba,

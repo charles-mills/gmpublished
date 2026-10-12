@@ -473,7 +473,7 @@ downloader-set-destination = Встановити місце призначен�
 
 description-editor-editing = Редагування опису
 description-editor-loading = Завантаження поточного опису…
-description-editor-load-failed = Не вдалося завантажити поточний опис. Закрийте редактор і спробуйте ще раз.
+description-editor-load-failed = Не вдалося завантажити поточний опис.
 description-editor-cancel = Скасувати
 description-editor-save = Зберегти в Майстерню
 description-editor-saving = Збереження…
@@ -504,3 +504,8 @@ description-editor-stage = Використати опис
 bbcode-quote-author = Первісно опубліковано {$author}:
 bbcode-view-image = Переглянути зображення ↗
 bbcode-watch-youtube = Дивитися на YouTube ↗
+
+workshop-text-retry = Спробувати знову
+workshop-text-language = Редагувати мови назви й опису
+workshop-text-invalid = Перевірте назву (1–128 байтів UTF-8) і довжину опису для { $language }.
+workshop-text-save-failed = Не вдалося зберегти { $language }.Успішні зміни збережено; повторіть решту.

@@ -397,16 +397,33 @@ fn title_input<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         field = field.on_input(Message::TitleEdited);
     }
 
-    if state.update_mode() {
+    let globe = button(
+        row![
+            icon(
+                assets::icons::globe(),
+                tokens.colors.text.into(),
+                tokens.dims.icon_size
+            ),
+            text(state.language().name()).size(tokens.typography.caption),
+        ]
+        .spacing(tokens.spacing.gap_xs)
+        .align_y(Center),
+    )
+    .on_press(Message::DescriptionEditRequested)
+    .padding(tokens.spacing.pad_control)
+    .style(move |_, status| theme::styles::button(&tokens, status));
+    row![
+        field,
         tooltip_widget::below(
-            field,
-            i18n.tr("prepare-publish-title-locked"),
+            globe,
+            i18n.tr("workshop-text-language"),
             &tokens,
-            tokens.dims.tooltip_max_width,
+            tokens.dims.tooltip_max_width
         )
-    } else {
-        field.into()
-    }
+    ]
+    .spacing(tokens.spacing.gap_sm)
+    .align_y(Center)
+    .into()
 }
 
 fn select_metrics(tokens: &Tokens) -> select::Metrics {

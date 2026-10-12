@@ -110,6 +110,7 @@ pub struct Steam {
     /// The slot persona waits ([`Self::fetch_user`]) contend for.
     persona_slot: callback_slot::CallbackSlot,
 
+    workshop_language: RwLock<crate::WorkshopLanguage>,
     workshop_dedup: Mutex<HashSet<WorkshopId>>,
     workshop_queue_tx: mpsc::Sender<Vec<WorkshopId>>,
     workshop_queue_rx: Mutex<mpsc::Receiver<Vec<WorkshopId>>>,
@@ -118,6 +119,21 @@ pub struct Steam {
 }
 
 impl Steam {
+    pub fn workshop_language(&self) -> crate::WorkshopLanguage {
+        *self.workshop_language.read()
+    }
+    pub fn set_workshop_language(&self, language: crate::WorkshopLanguage) -> bool {
+        {
+            let mut current = self.workshop_language.write();
+            if *current == language {
+                return false;
+            }
+            *current = language;
+        }
+        let ids = self.workshop_dedup.lock().drain().collect();
+        self.fetch_workshop_items(ids);
+        true
+    }
     #[must_use]
     pub fn new(transactions: Transactions) -> Self {
         let (workshop_queue_tx, workshop_queue_rx) = mpsc::channel();
@@ -127,6 +143,7 @@ impl Steam {
             interface: OnceLock::new(),
             users: RwLock::new(HashMap::new()),
             persona_slot: callback_slot::CallbackSlot::default(),
+            workshop_language: RwLock::new(crate::WorkshopLanguage::English),
 
             workshop_dedup: Mutex::new(HashSet::new()),
             workshop_queue_tx,
@@ -174,6 +191,7 @@ impl Steam {
         Ok(ConnectedSteam {
             steam: self,
             interface: self.client()?,
+            workshop_language: self.workshop_language(),
         })
     }
 
@@ -218,6 +236,20 @@ mod tests {
 /// operations never re-check either.
 #[derive(Clone, Copy)]
 pub struct ConnectedSteam<'a> {
+    // All chunks of an operation must use the same language across settings changes.
+    workshop_language: crate::WorkshopLanguage,
     pub(crate) steam: &'a Steam,
     pub(crate) interface: &'a Interface,
+}
+
+impl ConnectedSteam<'_> {
+    #[must_use]
+    pub const fn workshop_language(&self) -> crate::WorkshopLanguage {
+        self.workshop_language
+    }
+    #[must_use]
+    pub const fn with_workshop_language(mut self, language: crate::WorkshopLanguage) -> Self {
+        self.workshop_language = language;
+        self
+    }
 }

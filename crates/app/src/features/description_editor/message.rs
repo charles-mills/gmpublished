@@ -17,10 +17,35 @@ pub enum Message {
     },
     /// Open over a local draft (the creation flow): nothing is fetched, and
     /// saving stages the text back to the publish modal instead of Steam.
+    #[cfg(test)]
     OpenDraftRequested {
         title: String,
         initial: String,
     },
+    OpenLocalizedRequested {
+        workshop_id: PublishedFileId,
+        title: Option<String>,
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+    },
+    OpenPendingTranslationsRequested {
+        workshop_id: PublishedFileId,
+        drafts: crate::bridge::workshop_text::LocalizedDrafts,
+    },
+    OpenLocalizedDraftRequested {
+        language: crate::bridge::workshop_text::WorkshopLanguage,
+        drafts: crate::bridge::workshop_text::LocalizedDrafts,
+    },
+    PanesResized {
+        split: iced::widget::pane_grid::Split,
+        ratio: f32,
+    },
+    PanesLayoutChanged(f32),
+    PanesReset,
+    LanguageSelected(crate::bridge::workshop_text::WorkshopLanguage),
+    TitleEdited(String),
+    Undo,
+    Redo,
+    RetryFetchRequested,
     SourceFetched {
         generation: Generation,
         result: Result<FetchedSource, UiError>,
@@ -51,7 +76,6 @@ pub struct FetchedSource {
     pub description: String,
 }
 
-/// What a successful description revision reported back.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SaveOutcome {
     /// Steam accepted the revision but the user has not accepted the

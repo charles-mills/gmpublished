@@ -32,6 +32,12 @@ impl State {
         Some(PublishSubmitRequestEnvelope {
             generation,
             request: PublishSubmitRequest {
+                language: self.language,
+                localized_drafts: if self.update_mode() {
+                    Default::default()
+                } else {
+                    self.localized_drafts()
+                },
                 mode,
                 content_source_path: verified.path,
                 title: self.title.trim().to_owned(),
@@ -54,7 +60,16 @@ impl State {
         generation: Generation,
         result: Result<PublishSubmitResult, UiError>,
     ) -> bool {
-        self.apply_submit_outcome(generation, result.map(|_result| ()))
+        let created = if matches!(self.mode, Mode::New) {
+            result.as_ref().ok().map(|result| result.published_file_id)
+        } else {
+            None
+        };
+        let applied = self.apply_submit_outcome(generation, result.map(|_result| ()));
+        if applied && let Some(id) = created {
+            self.created_item = Some(id);
+        }
+        applied
     }
 
     pub(in super::super) fn begin_publish_icon_at(

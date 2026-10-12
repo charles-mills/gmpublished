@@ -468,7 +468,7 @@ downloader-set-destination = Ustaw Folder Docelowy
 
 description-editor-editing = Edycja opisu
 description-editor-loading = Ładowanie obecnego opisu…
-description-editor-load-failed = Nie udało się załadować obecnego opisu. Zamknij edytor i spróbuj ponownie.
+description-editor-load-failed = Nie udało się załadować obecnego opisu.
 description-editor-cancel = Anuluj
 description-editor-save = Zapisz w Warsztacie
 description-editor-saving = Zapisywanie…
@@ -499,3 +499,8 @@ description-editor-stage = Użyj opisu
 bbcode-quote-author = Pierwotnie opublikowane przez {$author}:
 bbcode-view-image = Zobacz obraz ↗
 bbcode-watch-youtube = Obejrzyj na YouTube ↗
+
+workshop-text-retry = Spróbuj ponownie
+workshop-text-language = Edytuj języki tytułu i opisu
+workshop-text-invalid = Sprawdź tytuł (1–128 bajtów UTF-8) i długość opisu dla języka { $language }.
+workshop-text-save-failed = Nie udało się zapisać języka { $language }. Zapisane zmiany zachowano; ponów pozostałe.

@@ -449,7 +449,7 @@ downloader-set-destination = Bestemming instellen
 
 description-editor-editing = Beschrijving bewerken
 description-editor-loading = Huidige beschrijving laden…
-description-editor-load-failed = Kon de huidige beschrijving niet laden. Sluit de editor en probeer het opnieuw.
+description-editor-load-failed = Kon de huidige beschrijving niet laden.
 description-editor-cancel = Annuleren
 description-editor-save = Opslaan naar Workshop
 description-editor-saving = Opslaan…
@@ -480,3 +480,8 @@ description-editor-stage = Beschrijving gebruiken
 bbcode-quote-author = Oorspronkelijk geplaatst door {$author}:
 bbcode-view-image = Afbeelding bekijken ↗
 bbcode-watch-youtube = Bekijken op YouTube ↗
+
+workshop-text-retry = Opnieuw proberen
+workshop-text-language = Talen voor titel en beschrijving bewerken
+workshop-text-invalid = Controleer de titel (1–128 UTF-8-bytes) en de beschrijvingslengte voor { $language }.
+workshop-text-save-failed = Opslaan van { $language } is mislukt. Opgeslagen wijzigingen blijven behouden; probeer de overige opnieuw.

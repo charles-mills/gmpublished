@@ -1306,6 +1306,8 @@ fn my_workshop_zero_page_stats_refresh_is_noop_without_steam() {
 #[test]
 fn publish_submit_request_maps_default_preview_to_backend_submission() {
     let request = PublishSubmitRequest {
+        language: gmpublished_backend::WorkshopLanguage::English,
+        localized_drafts: Default::default(),
         mode: PublishSubmitMode::New,
         content_source_path: PathBuf::from("/tmp/source-addon"),
         title: "Boundary Proof".to_owned(),
@@ -1347,6 +1349,8 @@ fn publish_submit_request_maps_default_preview_to_backend_submission() {
 #[test]
 fn publish_submit_request_maps_selected_update_preview_to_backend_submission() {
     let request = PublishSubmitRequest {
+        language: gmpublished_backend::WorkshopLanguage::English,
+        localized_drafts: Default::default(),
         mode: PublishSubmitMode::Update {
             workshop_id: PublishedFileId::fixture(987),
         },
@@ -1388,6 +1392,8 @@ fn publish_submit_requires_connected_steam_runtime_and_errors_transaction() {
 
     let result = services.publish().submit(
         PublishSubmitRequest {
+            language: gmpublished_backend::WorkshopLanguage::English,
+            localized_drafts: Default::default(),
             mode: PublishSubmitMode::New,
             content_source_path: PathBuf::from("/tmp/source-addon"),
             title: "Boundary Proof".to_owned(),
@@ -1919,4 +1925,42 @@ fn statuses_used_as_translation_keys_have_catalog_entries() {
             "{status} reaches Fluent as a message id and has no catalog entry"
         );
     }
+}
+
+#[test]
+fn workshop_cache_never_reuses_another_languages_title_or_full_description() {
+    use gmpublished_backend::WorkshopLanguage as Language;
+    let services = BackendServices::for_test();
+    let mut item = live_workshop_item_for_metadata_tests(123);
+    item.title = "English title".into();
+    item.description = Some("English description".into());
+    services.workshop().set_language(Language::English);
+    services.workshop().cache_item_details_for_test(&item);
+    assert!(services.workshop().cached_item_details(item.id).is_some());
+    services.workshop().set_language(Language::French);
+    assert!(services.workshop().cached_item_details(item.id).is_none());
+    assert_eq!(
+        services.workshop().resolve_metadata(&[item.id]),
+        (vec![], vec![item.id])
+    );
+    item.title = "Titre français".into();
+    item.description = Some("Résumé".into());
+    services.workshop().cache_items_for_test(&[item.clone()]);
+    let (metadata, stale) = services.workshop().resolve_metadata(&[item.id]);
+    assert!(stale.is_empty());
+    assert_eq!(metadata[0].title, "Titre français");
+    assert!(metadata[0].full_description.is_none());
+    item.description = Some("Description française".into());
+    services.workshop().cache_item_details_for_test(&item);
+    assert_eq!(
+        services
+            .workshop()
+            .cached_item_details(item.id)
+            .unwrap()
+            .full_description
+            .as_deref(),
+        Some("Description française")
+    );
+    services.workshop().set_language(Language::English);
+    assert!(services.workshop().cached_item_details(item.id).is_none());
 }

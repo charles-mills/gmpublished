@@ -15,6 +15,7 @@ impl App {
             .state
             .apply_settings_snapshot(snapshot.settings.clone(), snapshot.paths.clone());
         self.sync_game_prerequisite();
+        let workshop_language = self.sync_workshop_language_task();
         let library_refresh = if result.gmod_dir_changed {
             Task::done(RootMessage::LibraryRefreshRequested(
                 LibraryRefreshReason::SettingsChanged,
@@ -27,6 +28,7 @@ impl App {
         Task::batch([
             self.chrome_strategy_apply_task(result.previous_chrome),
             library_refresh,
+            workshop_language,
         ])
     }
 
@@ -85,7 +87,28 @@ impl App {
             | settings::SettingsMutation::OverwriteMode(_)
             | settings::SettingsMutation::Path { .. } => {}
         }
-        self.chrome_strategy_apply_task(previous)
+        let workshop_language = self.sync_workshop_language_task();
+        Task::batch([self.chrome_strategy_apply_task(previous), workshop_language])
+    }
+
+    fn sync_workshop_language_task(&mut self) -> Task<RootMessage> {
+        let language =
+            gmpublished_backend::WorkshopLanguage::from_locale(self.state.i18n.locale_id());
+        if !self.environment.ctx.set_workshop_language(language) {
+            return Task::none();
+        }
+        Task::batch([
+            self.apply_my_workshop_message(
+                crate::features::my_workshop::Message::WorkshopLanguageChanged,
+            ),
+            self.apply_installed_addons_message(
+                crate::features::installed_addons::Message::WorkshopLanguageChanged,
+            ),
+            self.apply_preview_gma_message(
+                crate::features::preview_gma::Message::WorkshopLanguageChanged(language),
+                self.update_context,
+            ),
+        ])
     }
 
     #[cfg(target_os = "macos")]

@@ -66,6 +66,8 @@ pub enum PublishError {
     IconTooSmall,
     #[error("the icon is not a format the Workshop accepts")]
     IconInvalidFormat,
+    #[error("the title must contain 1 to 128 UTF-8 bytes and no NUL characters")]
+    InvalidTitle,
     #[error("the description exceeds the Workshop length limit")]
     DescriptionTooLong,
     #[error("publish I/O failed")]
@@ -105,6 +107,7 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::IconTooLarge => keys::ICON_TOO_LARGE,
             Self::IconTooSmall => keys::ICON_TOO_SMALL,
             Self::IconInvalidFormat => keys::ICON_INVALID_FORMAT,
+            Self::InvalidTitle => keys::STEAM_ERROR,
             Self::DescriptionTooLong => keys::DESCRIPTION_TOO_LONG,
             Self::IoError(_) => keys::IO_ERROR,
             Self::PathIo { .. } => keys::PATH_IO_ERROR,
@@ -124,7 +127,9 @@ impl crate::error_key::HasErrorKey for PublishError {
             Self::IoError(source) => Some(source.to_string()),
             Self::PathIo { path } => crate::transactions::detail_from_serialize(path),
             Self::SteamError(error) => Some(error.to_string()),
-            Self::MissingPublishedFileId | Self::CallbackAbandoned => Some(self.to_string()),
+            Self::InvalidTitle | Self::MissingPublishedFileId | Self::CallbackAbandoned => {
+                Some(self.to_string())
+            }
             Self::ImageError(error) => Some(error.to_string()),
             Self::Gma(error) => error.error_detail(),
             Self::Runtime(error) => error.error_detail(),
@@ -210,9 +215,7 @@ const WORKSHOP_DEFAULT_ICON: &[u8] = include_bytes!("../../assets/gmpublisher_de
 /// empty editor instead of literal text to overwrite.
 pub const WORKSHOP_DEFAULT_DESCRIPTION: &str = "No description provided";
 
-/// The default description earlier builds wrote. Never written anymore, but
-/// items created by those builds still carry it, so placeholder detection
-/// must keep recognizing it.
+/// Recognized as a placeholder when editing items carrying this upload signature.
 pub const WORKSHOP_LEGACY_DEFAULT_DESCRIPTION: &str =
     "Uploaded with [url=https://github.com/charles-mills/gmpublished]gmpublished[/url]";
 
@@ -220,8 +223,16 @@ pub const WORKSHOP_LEGACY_DEFAULT_DESCRIPTION: &str =
 /// (`k_cchPublishedDocumentDescriptionMax`).
 pub const WORKSHOP_DESCRIPTION_MAX_BYTES: usize = 8000;
 
+fn validate_title(title: &str) -> Result<(), PublishError> {
+    if title.trim().is_empty() || title.len() > 128 || title.contains('\0') {
+        Err(PublishError::InvalidTitle)
+    } else {
+        Ok(())
+    }
+}
+
 /// The description a newly created item ships with: the user's staged text
-/// when present, the placeholder otherwise — sanitized either way.
+/// when present, the placeholder otherwise, sanitized either way.
 fn creation_description(custom: Option<&str>) -> Result<String, PublishError> {
     let custom = custom.map(str::trim).filter(|text| !text.is_empty());
     Ok(sanitize_description(custom.unwrap_or(WORKSHOP_DEFAULT_DESCRIPTION))?.into_owned())
@@ -584,6 +595,7 @@ impl WorkshopIcon {
 /// The first revision of a newly-created Workshop item. Creation-only fields
 /// are mandatory here and cannot be passed to [`ConnectedSteam::update`].
 struct WorkshopCreation {
+    language: crate::WorkshopLanguage,
     title: String,
     path: ContentPath,
     tags: Vec<String>,
@@ -621,6 +633,7 @@ pub struct PublishSettingsSnapshot {
 #[derive(Clone, Debug)]
 /// Fully resolved input to a Workshop create or update operation.
 pub struct PublishSubmission {
+    pub language: crate::WorkshopLanguage,
     /// Directory or GMA to submit.
     pub content_path_src: PathBuf,
     /// Optional custom preview icon.
@@ -694,6 +707,7 @@ impl ConnectedSteam<'_> {
         // upload has finished below.
         let (update_handle, preview) = match details {
             WorkshopRevision::Creation(WorkshopCreation {
+                language,
                 title,
                 path,
                 tags,
@@ -711,6 +725,7 @@ impl ConnectedSteam<'_> {
                     .ugc()
                     .start_item_update(STEAM_GMOD_APP_ID, id.into())
                     .content_path(path.as_ref())
+                    .language(language.api_code())
                     .title(&title)
                     .preview_path(preview_path.as_ref())
                     .tags(tags, false)
@@ -834,28 +849,34 @@ impl ConnectedSteam<'_> {
         }
     }
 
-    /// Replaces the item's Workshop description without touching its content,
-    /// preview, or tags — the same metadata-only revision shape as
-    /// [`Self::update_icon`].
-    pub(crate) fn update_description(
+    pub(crate) fn update_metadata(
         &self,
         addon_id: WorkshopId,
-        description: &str,
+        language: crate::WorkshopLanguage,
+        title: Option<&str>,
+        description: Option<&str>,
         transaction: &Transaction,
     ) -> Result<bool, PublishError> {
-        let description = sanitize_description(description)?;
-
+        if let Some(title) = title {
+            validate_title(title)?;
+        }
+        let description = description.map(sanitize_description).transpose()?;
         let (result_tx, result_rx) = mpsc::channel();
-        let update_handle = self
+        let mut update = self
             .interface
             .client()
             .ugc()
             .start_item_update(STEAM_GMOD_APP_ID, addon_id.into())
-            .description(&description)
-            .submit(None, move |result| {
-                let _ = result_tx.send(result);
-            });
-
+            .language(language.api_code());
+        if let Some(title) = title {
+            update = update.title(title);
+        }
+        if let Some(description) = description.as_deref() {
+            update = update.description(description);
+        }
+        let update_handle = update.submit(None, move |result| {
+            let _sent = result_tx.send(result);
+        });
         match pump_publish_progress(&update_handle, transaction, &result_rx)? {
             Ok((_, legal_agreement)) => {
                 transaction.progress(1.);
@@ -919,6 +940,7 @@ pub(crate) fn submit_with_transaction(
     let result = transaction.complete(
         || {
             let PublishSubmission {
+                language,
                 content_path_src,
                 icon_path,
                 title,
@@ -930,9 +952,11 @@ pub(crate) fn submit_with_transaction(
                 settings,
             } = submission;
 
-            // Fails before any packing work when the description cannot be
-            // submitted, and stays reachable offline.
+            // Validate before packing so invalid text does not trigger archive work.
             let description = creation_description(description.as_deref())?;
+            if matches!(mode, PublishSubmissionMode::Create) {
+                validate_title(&title)?;
+            }
 
             // The submission carries the globs this publish should honour; falling
             // back to the stored ones keeps a submission without a snapshot working.
@@ -1016,6 +1040,7 @@ pub(crate) fn submit_with_transaction(
             } else {
                 steam.publish(
                     WorkshopCreation {
+                        language,
                         title,
                         path: content_path,
                         tags,
@@ -1707,6 +1732,7 @@ mod tests {
 
         let result = submit_with_transaction(
             PublishSubmission {
+                language: crate::WorkshopLanguage::English,
                 content_path_src: dir.path().join("content"),
                 icon_path: Some(icon_path),
                 title: "Boundary Proof".to_string(),

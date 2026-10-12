@@ -449,7 +449,7 @@ downloader-set-destination = 경로 설정
 
 description-editor-editing = 설명 편집 중
 description-editor-loading = 현재 설명 로드 중…
-description-editor-load-failed = 현재 설명을 불러오지 못했습니다. 편집기를 닫고 다시 시도하세요.
+description-editor-load-failed = 현재 설명을 불러오지 못했습니다.
 description-editor-cancel = 취소
 description-editor-save = 창작마당에 저장
 description-editor-saving = 저장 중…
@@ -480,3 +480,8 @@ description-editor-stage = 설명 사용
 bbcode-quote-author = {$author}님이 처음 게시:
 bbcode-view-image = 이미지 보기 ↗
 bbcode-watch-youtube = YouTube에서 보기 ↗
+
+workshop-text-retry = 다시 시도
+workshop-text-language = 제목 및 설명 언어 편집
+workshop-text-invalid = { $language } 제목(UTF-8 1~128바이트)과 설명 길이를 확인하세요.
+workshop-text-save-failed = { $language } 저장에 실패했습니다. 저장된 변경 사항은 유지됩니다. 나머지를 다시 시도하세요.

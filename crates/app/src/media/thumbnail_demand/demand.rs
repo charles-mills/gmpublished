@@ -9,22 +9,8 @@ use crate::generation::Generation;
 use crate::media::thumbnail_worker::{ThumbnailInput, ThumbnailMode};
 
 const THUMBNAIL_SCALE_BUCKET: f32 = 0.5;
-/// Hi-DPI amplification stops at 2x: past that, the extra pixels are
-/// imperceptible at thumbnail sizes while decode and cache cost grow
-/// quadratically.
 const THUMBNAIL_MAX_SCALE: f32 = 2.0;
-/// Backstop on a single demand's physical edge, not a budget lever.
-///
-/// The budget levers are each owner's `logical_max_edge` (grids 256, detail
-/// surfaces 512, description media 647) and the 2x scale cap above; together
-/// they bound every real demand at 1294 physical. This constant only exists so
-/// a future oversized demand cannot quietly ask for a multi-hundred-megabyte
-/// decode — at 1536 the worst admissible entry is ~9 MiB of RGBA against the
-/// 256 MiB memory cache.
-///
-/// This was 512 (workshop icons never exceed 512 at source), which silently
-/// truncated the description editor's 647-logical media demand even at 1x.
-/// `the_backstop_admits_the_largest_real_demand` ties it to that demand.
+/// Limits an RGBA entry to 9 MiB while allowing the 647px description column at 2x.
 const PHYSICAL_EDGE_BACKSTOP: u32 = 1536;
 
 pub fn bucketed_thumbnail_scale(scale_factor: f32) -> f32 {
@@ -303,11 +289,6 @@ mod tests {
         assert_eq!(physical_thumbnail_edge(256, 9.0), 512);
     }
 
-    /// The description editor renders `[img]` media at the Steam column width,
-    /// so its demand must survive the backstop unclamped: at 1x it gets the
-    /// column width exactly, and at hi-DPI the full 2x bucket. When this
-    /// fails, description media silently renders soft — the backstop must be
-    /// raised alongside any growth in the largest real demand.
     #[test]
     fn the_backstop_admits_the_largest_real_demand() {
         let media_edge = crate::widgets::bbcode::STEAM_DESCRIPTION_WIDTH as u32;

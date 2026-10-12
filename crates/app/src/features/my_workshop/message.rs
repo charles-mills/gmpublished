@@ -11,6 +11,7 @@ use crate::generation::Generation;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     RouteEntered,
+    WorkshopLanguageChanged,
     RouteExited,
     PageCompleted(Generation, u32, Result<PageResult, UiError>),
     StatsRefreshTick,

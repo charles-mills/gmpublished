@@ -14,6 +14,7 @@ use crate::generation::Generation;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     OpenRequested(OpenTarget),
+    WorkshopLanguageChanged(crate::bridge::workshop_text::WorkshopLanguage),
     /// Boxed: `LoadedArchive` carries the full file-browser state inline,
     /// which would otherwise set the size of `RootMessage`.
     ArchiveOpened(Generation, Box<Result<LoadedArchive, UiError>>),
@@ -26,6 +27,11 @@ pub enum Message {
     ),
     AuthorFetchCompleted(Generation, SteamId, Result<AuthorInfo, UiError>),
     AuthorLinkRequested,
+    EditMetadataRequested,
+    LocalizedTextFetched(
+        Generation,
+        Result<crate::bridge::workshop_text::WorkshopText, UiError>,
+    ),
     BrowserScrolled {
         offset: f32,
     },

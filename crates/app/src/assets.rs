@@ -18,12 +18,9 @@ pub mod fonts {
     // `Font::with_name("Inter")` with Semibold/Bold silently rendered
     // Regular; static 400/600/700 faces make those weights real.
     //
-    // Italic and Bold Italic are instanced the same way from
-    // `InterVariable-Italic` (wght pinned at 400/700, opsz at 14, name
-    // table rewritten to family "Inter"). cosmic-text only uses faces whose
-    // style matches the request exactly and never fakes a slant, so without
-    // these two faces every italic run — BBCode `[i]`, `[b][i]` — rendered
-    // silently upright.
+    // Italic and Bold Italic are instanced from `InterVariable-Italic`
+    // (wght pinned at 400/700, opsz at 14, family "Inter"). cosmic-text
+    // requires registered italic faces because it does not synthesize slant.
     include!(concat!(env!("OUT_DIR"), "/font_segments.rs"));
 
     const COMPRESSED_FONTS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bundled_fonts.lzma"));
@@ -127,6 +124,7 @@ pub mod icons {
         };
     }
 
+    svg_icon!(globe, "../ui/images/globe.svg");
     svg_icon!(akar_arrow_left, "../ui/images/akar-arrow-left.svg");
     svg_icon!(akar_download, "../ui/images/akar-download.svg");
     svg_icon!(akar_enlarge, "../ui/images/akar-enlarge.svg");

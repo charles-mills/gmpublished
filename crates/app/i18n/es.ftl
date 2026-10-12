@@ -449,7 +449,7 @@ downloader-set-destination = Establecer destino
 
 description-editor-editing = Editando la descripción
 description-editor-loading = Cargando la descripción actual…
-description-editor-load-failed = No se pudo cargar la descripción actual. Cierra el editor e inténtalo de nuevo.
+description-editor-load-failed = No se pudo cargar la descripción actual.
 description-editor-cancel = Cancelar
 description-editor-save = Guardar en el Workshop
 description-editor-saving = Guardando…
@@ -480,3 +480,8 @@ description-editor-stage = Usar descripción
 bbcode-quote-author = Publicado originalmente por {$author}:
 bbcode-view-image = Ver imagen ↗
 bbcode-watch-youtube = Ver en YouTube ↗
+
+workshop-text-retry = Reintentar
+workshop-text-language = Editar los idiomas del título y la descripción
+workshop-text-invalid = Comprueba el título (1–128 bytes UTF-8) y la longitud de la descripción en { $language }.
+workshop-text-save-failed = No se pudo guardar { $language }. Los cambios guardados se conservan; reintenta los restantes.

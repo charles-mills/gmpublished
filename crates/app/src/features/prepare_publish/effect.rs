@@ -44,9 +44,10 @@ pub enum Effect {
 /// What the description editor should open against.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescriptionEditRequest {
+    pub language: crate::bridge::workshop_text::WorkshopLanguage,
+    pub drafts: crate::bridge::workshop_text::LocalizedDrafts,
     /// `Some` targets the live Workshop item; `None` edits a local draft
     /// staged into the pending creation.
     pub workshop_id: Option<crate::bridge::domain::PublishedFileId>,
     pub title: String,
-    pub staged: Option<String>,
 }
