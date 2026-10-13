@@ -436,7 +436,10 @@ fn account_avatar<'a>(
             .into()
     };
 
-    iced::widget::stack![avatar, ring, presence, update]
+    // The stack forces its base layer to the full badge canvas size. Keep
+    // that layer empty so the avatar background stays the image's size.
+    let base = Space::new().width(canvas).height(canvas);
+    iced::widget::stack![base, avatar, ring, presence, update]
         .width(Length::Fixed(canvas))
         .height(Length::Fixed(canvas))
         .into()
@@ -892,6 +895,47 @@ fn footer_link_style(tokens: &Tokens, status: button::Status, opacity: f32) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_avatar_background_matches_image_and_ring_with_badge_canvas() {
+        use iced::advanced::{layout, widget::Tree};
+        use iced_test::core::renderer::Headless as _;
+
+        let state = State::default();
+        let tokens = Tokens::dark();
+        let renderer = iced_test::futures::futures::executor::block_on(
+            iced_test::renderer::Renderer::new(iced::Font::default(), iced::Pixels(16.0), None),
+        )
+        .expect("headless renderer");
+
+        for show_presence in [false, true] {
+            for hover_ring in [false, true] {
+                let size = tokens.dims.sidebar_account_rail_avatar_size;
+                let mut element = account_avatar(&state, &tokens, size, show_presence, hover_ring);
+                let mut tree = Tree::new(&element);
+                let node =
+                    element
+                        .as_widget_mut()
+                        .layout(&mut tree, &renderer, &layout::Limits::NONE);
+                let [.., avatar, ring, _, _] = node.children() else {
+                    panic!("expected avatar, ring, presence, and update layers");
+                };
+
+                assert_eq!(
+                    node.size(),
+                    iced::Size::new(
+                        account_avatar_canvas_size(&tokens, size, show_presence),
+                        account_avatar_canvas_size(&tokens, size, show_presence),
+                    )
+                );
+                assert_eq!(avatar.size(), iced::Size::new(size, size));
+                assert_eq!(avatar.bounds(), avatar.children()[0].bounds());
+                if hover_ring {
+                    assert_eq!(avatar.bounds(), ring.bounds());
+                }
+            }
+        }
+    }
 
     #[test]
     fn account_menu_anchor_tracks_floating_rail() {
