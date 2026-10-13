@@ -10,11 +10,14 @@ use iced::{
 
 use crate::{
     assets,
-    bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset},
+    bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset, UiDensity},
     features::modal_stack::ResponsiveSize,
     i18n::{self, I18n},
     theme::{self, Tokens, ViewCtx},
-    widgets::{select, tooltip as tooltip_widget},
+    widgets::{
+        keyboard_control::{activate, keyboard_control},
+        select, tooltip as tooltip_widget,
+    },
 };
 
 use super::state::{self, ColorChannel, ColorSetting, PathSetting, ResetAction, Tab};
@@ -24,7 +27,6 @@ const TAB_RAIL_WIDTH: f32 = 200.0;
 const COMPACT_BREAKPOINT: f32 = 900.0;
 const COMPACT_TAB_BAR_HEIGHT: f32 = 48.0;
 const TAB_BUTTON_HEIGHT: f32 = 33.0;
-const FIELD_LABEL_HEIGHT: f32 = 18.0;
 const FIELD_LABEL_GAP: f32 = 12.0;
 const SELECT_HINT_MAX_WIDTH: f32 = 320.0;
 const CONTROL_HEIGHT: f32 = 40.0;
@@ -32,13 +34,8 @@ const CONTROL_HEIGHT: f32 = 40.0;
 /// option row in its menu, so the two line up.
 const SELECT_PAD_Y: f32 = 11.0;
 const PATH_BROWSE_WIDTH: f32 = 112.0;
-const COLOR_FIELD_COLLAPSED_HEIGHT: f32 = FIELD_LABEL_HEIGHT + FIELD_LABEL_GAP + CONTROL_HEIGHT;
-const COLOR_FIELD_SPACING: f32 = 24.0;
-const COLOR_PICKER_POPOVER_GAP: f32 = 8.0;
 const COLOR_PICKER_POPOVER_MAX_WIDTH: f32 = 424.0;
-const COLOR_PICKER_POPOVER_HEIGHT: f32 = 220.0;
 const COLOR_PICKER_BUTTON_HEIGHT: f32 = 34.0;
-const HSV_SLIDER_HEIGHT: f32 = 44.0;
 const HSV_SLIDER_CONTROL_HEIGHT: f32 = 20.0;
 const HSV_SLIDER_RAIL_HEIGHT: f32 = 18.0;
 const HSV_SLIDER_HANDLE_WIDTH: u16 = 10;
@@ -62,6 +59,7 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, viewport_size: Size) -> Elem
         ),
     )
     .resolve(viewport_size, tokens.dims.modal_viewport_ratio);
+    // A text-size drag must not replace the row/column widget tree mid-edit.
     let compact = viewport_size.width < COMPACT_BREAKPOINT;
     let content: Element<'a, Message> = if compact {
         column![
@@ -83,6 +81,7 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, viewport_size: Size) -> Elem
 
     let panel = opaque(
         container(content)
+            .id("settings-modal")
             .width(Length::Fixed(modal_size.width))
             .height(Length::Fixed(modal_size.height))
             .clip(true)
@@ -111,7 +110,7 @@ fn tab_rail<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .spacing(tokens.spacing.gap_sm);
 
     for tab in Tab::ALL {
-        tabs = tabs.push(tab_button(tab, state.active_tab() == tab, ctx));
+        tabs = tabs.push(tab_button(tab, state.active_tab() == tab, ctx, false));
     }
 
     let content = column![
@@ -126,7 +125,7 @@ fn tab_rail<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
                     .size(tokens.typography.caption_xs)
                     .color(tokens.colors.text_dim),
             ]
-            .spacing(2)
+            .spacing(tokens.space(2.0))
         )
         .padding(
             Padding::ZERO
@@ -136,7 +135,7 @@ fn tab_rail<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     ];
 
     container(content)
-        .width(Length::Fixed(TAB_RAIL_WIDTH))
+        .width(Length::Fixed(TAB_RAIL_WIDTH * tokens.text_scale()))
         .height(Length::Fill)
         .style(move |_| desktop_tab_rail_style(&tokens))
         .into()
@@ -145,44 +144,56 @@ fn tab_rail<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
 fn compact_tab_bar<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let mut tabs = row![]
-        .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
-        .spacing(6.0)
-        .height(Length::Fixed(COMPACT_TAB_BAR_HEIGHT));
-
+        .padding(tokens.space(6.0))
+        .spacing(tokens.spacing.gap_sm);
     for tab in Tab::ALL {
-        tabs = tabs.push(tab_button(tab, state.active_tab() == tab, ctx));
+        tabs = tabs.push(tab_button(tab, state.active_tab() == tab, ctx, true));
     }
-
-    container(tabs)
-        .width(Length::Fill)
-        .height(Length::Fixed(COMPACT_TAB_BAR_HEIGHT))
-        .style(move |_| compact_tab_rail_style(&tokens))
-        .into()
+    container(
+        scrollable(tabs).direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::default(),
+        )),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(tokens.row_height(COMPACT_TAB_BAR_HEIGHT)))
+    .style(move |_| compact_tab_rail_style(&tokens))
+    .into()
 }
 
-fn tab_button(tab: Tab, active: bool, ctx: ViewCtx<'_>) -> Element<'_, Message> {
+fn tab_button(tab: Tab, active: bool, ctx: ViewCtx<'_>, compact: bool) -> Element<'_, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let label = text(i18n.tr(tab.label_key()))
         .size(tokens.typography.body)
+        .wrapping(text::Wrapping::None)
         .font(theme::styles::inter_font(font::Weight::Normal))
         .color(if active {
             Color::from(tokens.colors.text)
         } else {
             Color::from(tokens.colors.text_dim)
         })
-        .width(Length::Fill)
-        .height(Length::Fixed(TAB_BUTTON_HEIGHT))
+        .width(if compact {
+            Length::Shrink
+        } else {
+            Length::Fill
+        })
+        .height(Length::Fixed(tokens.row_height(TAB_BUTTON_HEIGHT)))
         .align_x(alignment::Horizontal::Left)
         .align_y(alignment::Vertical::Center);
 
-    button(label)
+    let control = button(label)
         .on_press(Message::TabSelected(tab))
-        .width(Length::Fill)
-        .height(Length::Fixed(TAB_BUTTON_HEIGHT))
-        .padding([0.0, 11.0])
-        .style(move |_, status| tab_button_style(&tokens, active, status))
-        .into()
+        .width(if compact {
+            Length::Shrink
+        } else {
+            Length::Fill
+        })
+        .height(Length::Fixed(tokens.row_height(TAB_BUTTON_HEIGHT)))
+        .padding([0.0, tokens.space(11.0)])
+        .style(move |_, status| tab_button_style(&tokens, active, status));
+    keyboard_control(control, tab.label_key(), &tokens, move |key| {
+        activate(key).then_some(Message::TabSelected(tab))
+    })
 }
 
 fn content_panel<'a>(
@@ -199,10 +210,23 @@ fn content_panel<'a>(
         Tab::Accessibility => accessibility_tab(state, ctx),
         Tab::Resets => resets_tab(state, ctx),
     };
+    let body = crate::widgets::settle::settle(body, state.active_tab() as u64, &tokens);
 
-    let horizontal_padding = if compact { 16.0 } else { tokens.spacing.pad };
-    let top_padding = if compact { 12.0 } else { tokens.spacing.pad };
-    let bottom_padding = if compact { 16.0 } else { tokens.spacing.pad };
+    let horizontal_padding = if compact {
+        tokens.space(16.0)
+    } else {
+        tokens.spacing.pad
+    };
+    let top_padding = if compact {
+        tokens.space(12.0)
+    } else {
+        tokens.spacing.pad
+    };
+    let bottom_padding = if compact {
+        tokens.space(16.0)
+    } else {
+        tokens.spacing.pad
+    };
 
     let scrolling_content = scrollable(
         container(body)
@@ -235,7 +259,7 @@ fn content_panel<'a>(
                         Color::from(tokens.colors.text_dim)
                     }),
             )
-            .height(Length::Fixed(42.0))
+            .height(Length::Shrink)
             .width(Length::Fill)
             .padding([8.0, horizontal_padding])
             .style(move |_| status_rail_style(&tokens, compact)),
@@ -310,7 +334,11 @@ fn general_tab<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Element
     ));
 
     content
-        .spacing(if compact { 12.0 } else { 24.0 })
+        .spacing(if compact {
+            tokens.spacing.gap
+        } else {
+            tokens.space(24.0)
+        })
         .width(Length::Fill)
         .into()
 }
@@ -327,18 +355,44 @@ fn switch_row<'a>(
             .size(tokens.typography.body)
             .font(theme::styles::inter_font(font::Weight::Normal))
             .color(Color::from(tokens.colors.text)),
-        toggler(checked)
-            .on_toggle(on_toggle)
-            .size(20.0)
-            .style(move |_, status| switch_style(&tokens, status)),
+        switch_control(checked, on_toggle, &tokens),
     ]
     .align_y(Center)
-    .spacing(6.0)
+    .spacing(tokens.space(6.0))
     .into()
+}
+
+fn switch_control<'a>(
+    checked: bool,
+    on_toggle: impl Fn(bool) -> Message + 'a,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
+    let tokens = *tokens;
+    toggler(checked)
+        .on_toggle(on_toggle)
+        .size(tokens.dims.switch_height)
+        .style(move |_, status| switch_style(&tokens, status))
+        .into()
 }
 
 fn select_field<'a, T: Clone + Eq>(
     label: String,
+    hint: Option<String>,
+    options: Vec<(T, String)>,
+    selected: &T,
+    on_selected: impl Fn(T) -> Message + 'a,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
+    column![
+        field_label(label, tokens),
+        select_control(hint, options, selected, on_selected, tokens),
+    ]
+    .spacing(tokens.space(FIELD_LABEL_GAP))
+    .width(Length::Fill)
+    .into()
+}
+
+fn select_control<'a, T: Clone + Eq>(
     hint: Option<String>,
     options: Vec<(T, String)>,
     selected: &T,
@@ -364,39 +418,18 @@ fn select_field<'a, T: Clone + Eq>(
         })
         .collect();
 
+    let closed = select_face(current.clone(), select::Face::Collapsed, &tokens);
+    let closed = match hint {
+        Some(hint) => tooltip_widget::below(closed, hint, &tokens, SELECT_HINT_MAX_WIDTH),
+        None => closed,
+    };
     select::select(
-        select_field_face(
-            label.clone(),
-            current.clone(),
-            select::Face::Collapsed,
-            hint,
-            &tokens,
-        ),
-        select_field_face(label, current, select::Face::Expanded, None, &tokens),
+        closed,
+        select_face(current, select::Face::Expanded, &tokens),
         select::menu(rows, metrics, &tokens),
         geometry,
     )
     .into()
-}
-
-fn select_field_face<'a>(
-    label: String,
-    current: String,
-    face: select::Face,
-    hint: Option<String>,
-    tokens: &Tokens,
-) -> Element<'a, Message> {
-    let field = column![
-        field_label(label, tokens),
-        select_face(current, face, tokens),
-    ]
-    .spacing(FIELD_LABEL_GAP)
-    .width(Length::Fill);
-
-    match hint {
-        Some(hint) => tooltip_widget::below(field, hint, tokens, SELECT_HINT_MAX_WIDTH),
-        None => field.into(),
-    }
 }
 
 fn select_face<'a>(label: String, face: select::Face, tokens: &Tokens) -> Element<'a, Message> {
@@ -409,8 +442,8 @@ fn select_face<'a>(label: String, face: select::Face, tokens: &Tokens) -> Elemen
             .align_x(alignment::Horizontal::Center),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(CONTROL_HEIGHT))
-    .center_y(Length::Fixed(CONTROL_HEIGHT))
+    .height(Length::Fixed(control_height(&tokens)))
+    .center_y(Length::Fixed(control_height(&tokens)))
     .padding([0.0, tokens.spacing.pad_sm]);
 
     let arrow = container(
@@ -424,22 +457,24 @@ fn select_face<'a>(label: String, face: select::Face, tokens: &Tokens) -> Elemen
                 }),
         ]
         .align_y(Center)
-        .padding([0.0, 14.0]),
+        .padding([0.0, tokens.space(14.0)]),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(CONTROL_HEIGHT))
-    .center_y(Length::Fixed(CONTROL_HEIGHT));
+    .height(Length::Fixed(control_height(&tokens)))
+    .center_y(Length::Fixed(control_height(&tokens)));
 
     container(stack![label_layer, arrow])
         .width(Length::Fill)
-        .height(Length::Fixed(CONTROL_HEIGHT))
+        .height(Length::Fixed(control_height(&tokens)))
         .clip(true)
         .style(move |_| theme::styles::select_face(&tokens, face.is_expanded()))
         .into()
 }
 
 fn paths_tab<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
-    let mut fields = column![].spacing(24.0).width(Length::Fill);
+    let mut fields = column![]
+        .spacing(ctx.tokens.space(24.0))
+        .width(Length::Fill);
     for kind in PathSetting::ALL {
         fields = fields.push(path_field(state, kind, ctx));
     }
@@ -453,24 +488,24 @@ fn path_field<'a>(state: &'a State, kind: PathSetting, ctx: ViewCtx<'a>) -> Elem
     let input = text_input(&state.path_placeholder(kind), state.path_text(kind))
         .on_input(move |value| Message::PathEdited(kind, value))
         .on_submit(Message::PathAccepted(kind))
-        .padding([11.0, tokens.spacing.pad_sm])
+        .padding([tokens.space(SELECT_PAD_Y), tokens.spacing.pad_sm])
         .size(tokens.typography.body)
         .font(theme::styles::inter_font(font::Weight::Normal))
         .style(move |_, status| input_style(&tokens, invalid, status));
 
     let browse = text_button(i18n.tr("browse"), &tokens)
         .on_press(Message::PathBrowseRequested(kind))
-        .width(Length::Fixed(PATH_BROWSE_WIDTH))
-        .height(Length::Fixed(CONTROL_HEIGHT));
+        .width(Length::Fixed(PATH_BROWSE_WIDTH * tokens.text_scale()))
+        .height(Length::Fixed(control_height(&tokens)));
 
     let mut field = column![
         field_label(i18n.tr(kind.label_key()), &tokens),
         row![input, browse]
             .align_y(Center)
-            .spacing(10.0)
-            .height(Length::Fixed(CONTROL_HEIGHT)),
+            .spacing(tokens.space(10.0))
+            .height(Length::Fixed(control_height(&tokens))),
     ]
-    .spacing(12.0)
+    .spacing(tokens.space(12.0))
     .width(Length::Fill);
 
     if let Some(error_key) = state.path_error_key(kind) {
@@ -486,11 +521,178 @@ fn path_field<'a>(state: &'a State, kind: PathSetting, ctx: ViewCtx<'a>) -> Elem
 }
 
 fn accessibility_tab<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
-    let mut fields = column![].spacing(24.0).width(Length::Fill);
+    let tokens = *ctx.tokens;
+    let mut fields = column![
+        display_preferences(state, ctx),
+        text(ctx.i18n.tr("settings-display-colors"))
+            .size(tokens.typography.title_sm)
+            .color(tokens.colors.text),
+    ]
+    .spacing(tokens.space(24.0))
+    .width(Length::Fill);
     for kind in ColorSetting::ALL {
         fields = fields.push(color_field(state, kind, ctx));
     }
     fields.into()
+}
+
+fn display_preferences<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+    let tokens = *ctx.tokens;
+    let i18n = ctx.i18n;
+    let value = state.settings().ui.text_size_percent;
+    let spacing = select_control(
+        None,
+        vec![
+            (
+                UiDensity::Comfortable,
+                i18n.tr("settings-display-comfortable"),
+            ),
+            (UiDensity::Compact, i18n.tr("settings-display-compact")),
+        ],
+        &state.settings().ui.density,
+        Message::DensitySelected,
+        &tokens,
+    );
+    let density = state.settings().ui.density;
+    let spacing = keyboard_control(spacing, "settings-density", &tokens, move |key| {
+        use iced::keyboard::{Key, key::Named};
+        match key {
+            Key::Named(Named::ArrowLeft | Named::Home) => {
+                Some(Message::DensitySelected(UiDensity::Comfortable))
+            }
+            Key::Named(Named::ArrowRight | Named::End) => {
+                Some(Message::DensitySelected(UiDensity::Compact))
+            }
+            _ if activate(key) => {
+                Some(Message::DensitySelected(if density == UiDensity::Compact {
+                    UiDensity::Comfortable
+                } else {
+                    UiDensity::Compact
+                }))
+            }
+            _ => None,
+        }
+    });
+    let spacing = column![
+        field_label(i18n.tr("settings-display-spacing"), &tokens),
+        spacing
+    ]
+    .spacing(tokens.space(FIELD_LABEL_GAP))
+    .width(Length::Fill);
+    let reset = text_button(i18n.tr("settings-display-reset-text"), &tokens)
+        .on_press(Message::TextSizeReset)
+        .width(Length::Shrink)
+        .height(Length::Fixed(control_height(&tokens)));
+    let reset = keyboard_control(reset, "settings-reset-text", &tokens, |key| {
+        activate(key).then_some(Message::TextSizeReset)
+    });
+    let reset_display = text_button(i18n.tr("settings-display-reset"), &tokens)
+        .on_press(Message::DisplayReset)
+        .height(Length::Fixed(control_height(&tokens)));
+    let reset_display = keyboard_control(reset_display, "settings-reset-display", &tokens, |key| {
+        activate(key).then_some(Message::DisplayReset)
+    });
+    let text_slider = slider(
+        crate::bridge::MIN_TEXT_SIZE_PERCENT..=crate::bridge::MAX_TEXT_SIZE_PERCENT,
+        value,
+        Message::TextSizeChanged,
+    )
+    .step(crate::bridge::TEXT_SIZE_STEP)
+    .default(crate::bridge::DEFAULT_TEXT_SIZE_PERCENT)
+    .on_release(Message::TextSizeCommitted)
+    .height(tokens.row_height(32.0))
+    .style(move |_, status| text_slider_style(&tokens, status));
+    let text_slider = keyboard_control(text_slider, "settings-text-size", &tokens, move |key| {
+        use iced::keyboard::{Key, key::Named};
+        let next = match key {
+            Key::Named(Named::ArrowUp | Named::ArrowRight) => {
+                value.saturating_add(crate::bridge::TEXT_SIZE_STEP)
+            }
+            Key::Named(Named::ArrowDown | Named::ArrowLeft) => {
+                value.saturating_sub(crate::bridge::TEXT_SIZE_STEP)
+            }
+            Key::Named(Named::Home) => crate::bridge::MIN_TEXT_SIZE_PERCENT,
+            Key::Named(Named::End) => crate::bridge::MAX_TEXT_SIZE_PERCENT,
+            _ => return None,
+        };
+        Some(Message::TextSizeChanged(next.clamp(
+            crate::bridge::MIN_TEXT_SIZE_PERCENT,
+            crate::bridge::MAX_TEXT_SIZE_PERCENT,
+        )))
+    });
+    let reduce_motion = state.settings().ui.reduce_motion;
+    let motion_toggle = keyboard_control(
+        switch_control(reduce_motion, Message::ReduceMotionToggled, &tokens),
+        "settings-reduce-motion",
+        &tokens,
+        move |key| activate(key).then_some(Message::ReduceMotionToggled(!reduce_motion)),
+    );
+    let motion_toggle = row![
+        text(i18n.tr("settings-display-reduce-motion"))
+            .size(tokens.typography.body)
+            .color(tokens.colors.text),
+        motion_toggle,
+    ]
+    .align_y(Center)
+    .spacing(tokens.space(6.0));
+    let sample = container(
+        column![
+            text(i18n.tr("settings-display-sample-heading"))
+                .size(tokens.typography.title_sm)
+                .color(tokens.colors.text),
+            text(i18n.tr("settings-display-sample-body"))
+                .size(tokens.typography.body)
+                .color(tokens.colors.text),
+            text(i18n.tr("settings-display-sample-supporting"))
+                .size(tokens.typography.caption)
+                .color(tokens.colors.text_dim),
+            reset_display,
+        ]
+        .spacing(tokens.spacing.gap_sm),
+    )
+    .padding(tokens.spacing.pad_sm)
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(Color::from(tokens.colors.surface).into()),
+        border: Border {
+            radius: tokens.radii.md.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    });
+    column![
+        text(i18n.tr("settings-display-heading"))
+            .size(tokens.typography.title_sm)
+            .color(tokens.colors.text),
+        spacing,
+        column![
+            row![
+                text(i18n.tr("settings-display-text-size"))
+                    .size(tokens.typography.body)
+                    .color(tokens.colors.text)
+                    .width(Length::Fill),
+                text(format!("{value}%"))
+                    .size(tokens.typography.body)
+                    .color(tokens.colors.text),
+            ]
+            .spacing(tokens.spacing.gap_sm)
+            .align_y(Center),
+            text_slider,
+            reset,
+        ]
+        .spacing(tokens.spacing.gap_sm),
+        column![
+            motion_toggle,
+            text(i18n.tr("settings-display-reduce-motion-hint"))
+                .size(tokens.typography.caption)
+                .color(tokens.colors.text_dim),
+        ]
+        .spacing(tokens.spacing.gap_sm),
+        sample,
+    ]
+    .spacing(tokens.space(20.0))
+    .width(Length::Fill)
+    .into()
 }
 
 fn color_field<'a>(state: &'a State, kind: ColorSetting, ctx: ViewCtx<'a>) -> Element<'a, Message> {
@@ -505,8 +707,8 @@ fn color_field<'a>(state: &'a State, kind: ColorSetting, ctx: ViewCtx<'a>) -> El
     let invalid = state.color_invalid(kind);
     let swatch = mouse_area(
         container(Space::new())
-            .width(Length::Fixed(CONTROL_HEIGHT))
-            .height(Length::Fixed(CONTROL_HEIGHT))
+            .width(Length::Fixed(control_height(&tokens)))
+            .height(Length::Fixed(control_height(&tokens)))
             .style(move |_| swatch_style(&tokens, rgb, expanded)),
     )
     .on_press(Message::ColorPickerToggled(kind))
@@ -514,7 +716,7 @@ fn color_field<'a>(state: &'a State, kind: ColorSetting, ctx: ViewCtx<'a>) -> El
 
     let input = text_input("#RRGGBB", state.color_text(kind))
         .on_input(move |value| Message::ColorEdited(kind, value))
-        .padding([11.0, tokens.spacing.pad_sm])
+        .padding([tokens.space(SELECT_PAD_Y), tokens.spacing.pad_sm])
         .size(tokens.typography.body)
         .font(theme::styles::inter_font(font::Weight::Normal))
         .style(move |_, status| input_style(&tokens, invalid, status));
@@ -523,10 +725,10 @@ fn color_field<'a>(state: &'a State, kind: ColorSetting, ctx: ViewCtx<'a>) -> El
         field_label(i18n.tr(kind.label_key()), &tokens),
         row![swatch, input]
             .align_y(Center)
-            .spacing(10.0)
-            .height(Length::Fixed(CONTROL_HEIGHT)),
+            .spacing(tokens.space(10.0))
+            .height(Length::Fixed(control_height(&tokens))),
     ]
-    .spacing(12.0)
+    .spacing(tokens.space(12.0))
     .width(Length::Fill);
 
     if invalid {
@@ -546,7 +748,7 @@ fn color_picker_overlay<'a>(
     kind: ColorSetting,
     ctx: ViewCtx<'a>,
     modal_size: Size,
-    compact: bool,
+    _compact: bool,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let dismiss_layer = opaque(
@@ -557,47 +759,18 @@ fn color_picker_overlay<'a>(
         )
         .on_press(Message::ColorPickerCancelled),
     );
-
-    let content_left = if compact { 0.0 } else { TAB_RAIL_WIDTH };
-    let content_top = if compact { COMPACT_TAB_BAR_HEIGHT } else { 0.0 };
-    let horizontal_padding = if compact { 16.0 } else { tokens.spacing.pad };
-    let content_width = (modal_size.width - content_left).max(1.0);
-    let picker_width =
-        (content_width - horizontal_padding * 2.0).clamp(1.0, COLOR_PICKER_POPOVER_MAX_WIDTH);
-    let top = color_picker_popover_top(kind, content_top, horizontal_padding, modal_size.height);
-
-    let positioned = container(column![
-        Space::new().height(Length::Fixed(top)),
-        row![
-            Space::new().width(Length::Fixed(content_left + horizontal_padding)),
-            opaque(
-                container(color_picker_popover(state, kind, ctx))
-                    .width(Length::Fixed(picker_width))
-            ),
-        ]
-    ])
-    .width(Length::Fixed(modal_size.width))
-    .height(Length::Fixed(modal_size.height));
-
-    stack![dismiss_layer, container(positioned).center(Length::Fill),]
+    // Keep the editor reachable independently of the scrolled color field.
+    let picker_width = (modal_size.width - tokens.spacing.pad * 2.0)
+        .clamp(1.0, COLOR_PICKER_POPOVER_MAX_WIDTH * tokens.text_scale());
+    let picker = opaque(
+        container(scrollable(color_picker_popover(state, kind, ctx)))
+            .width(Length::Fixed(picker_width))
+            .max_height((modal_size.height - tokens.spacing.pad * 2.0).max(1.0)),
+    );
+    stack![dismiss_layer, container(picker).center(Length::Fill)]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
-}
-
-fn color_picker_popover_top(
-    kind: ColorSetting,
-    content_top: f32,
-    content_padding: f32,
-    modal_height: f32,
-) -> f32 {
-    let row_index = kind.index() as f32;
-    let field_top = content_top
-        + content_padding
-        + row_index * (COLOR_FIELD_COLLAPSED_HEIGHT + COLOR_FIELD_SPACING);
-    let desired = field_top + COLOR_FIELD_COLLAPSED_HEIGHT + COLOR_PICKER_POPOVER_GAP;
-    let max_top = modal_height - COLOR_PICKER_POPOVER_HEIGHT - content_padding;
-    desired.min(max_top.max(content_top + content_padding))
 }
 
 fn color_picker_popover<'a>(
@@ -661,25 +834,25 @@ fn color_picker_popover<'a>(
                 Space::new().width(Length::Fill),
                 text_button(i18n.tr("cancel"), &tokens)
                     .on_press(Message::ColorPickerCancelled)
-                    .width(Length::Fixed(88.0))
-                    .height(Length::Fixed(COLOR_PICKER_BUTTON_HEIGHT)),
+                    .width(Length::Shrink)
+                    .height(Length::Fixed(tokens.row_height(COLOR_PICKER_BUTTON_HEIGHT))),
                 primary_button(
                     i18n.tr("settings-accessibility-color-picker-apply"),
                     &tokens,
                     false,
                 )
                 .on_press_maybe(changed.then_some(Message::ColorPickerApplied(kind)))
-                .width(Length::Fixed(88.0))
-                .height(Length::Fixed(COLOR_PICKER_BUTTON_HEIGHT)),
+                .width(Length::Shrink)
+                .height(Length::Fixed(tokens.row_height(COLOR_PICKER_BUTTON_HEIGHT))),
             ]
             .align_y(Center)
-            .spacing(10.0)
-            .height(Length::Fixed(COLOR_PICKER_BUTTON_HEIGHT)),
+            .spacing(tokens.space(10.0))
+            .height(Length::Fixed(tokens.row_height(COLOR_PICKER_BUTTON_HEIGHT))),
         ]
-        .spacing(10.0),
+        .spacing(tokens.space(10.0)),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(COLOR_PICKER_POPOVER_HEIGHT))
+    .height(Length::Shrink)
     .padding(tokens.spacing.pad_sm)
     .style(move |_| color_picker_popover_style(&tokens))
     .into()
@@ -723,19 +896,19 @@ fn hsv_slider<'a>(
                 .font(theme::styles::inter_font(font::Weight::Normal))
                 .color(Color::from(tokens.colors.text_dim))
                 .align_x(alignment::Horizontal::Right)
-                .width(Length::Fixed(46.0)),
+                .width(Length::Fixed(46.0 * tokens.text_scale())),
         ]
         .align_y(Center)
-        .height(Length::Fixed(18.0)),
+        .height(Length::Shrink),
         slider(range, value, move |value| {
             Message::ColorPickerChannelChanged(kind, channel, value)
         })
         .step(step)
-        .height(HSV_SLIDER_CONTROL_HEIGHT)
+        .height(tokens.row_height(HSV_SLIDER_CONTROL_HEIGHT))
         .style(move |_, status| hsv_slider_style(&tokens, rail, status)),
     ]
-    .spacing(6.0)
-    .height(Length::Fixed(HSV_SLIDER_HEIGHT))
+    .spacing(tokens.space(6.0))
+    .height(Length::Shrink)
     .into()
 }
 
@@ -745,7 +918,7 @@ fn resets_tab<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         reset_button(ResetAction::TempFiles, state.reset_busy(), ctx),
         reset_button(ResetAction::UserData, state.reset_busy(), ctx),
     ]
-    .spacing(24.0)
+    .spacing(ctx.tokens.space(24.0))
     .width(Length::Fill)
     .into()
 }
@@ -757,9 +930,9 @@ fn reset_button(action: ResetAction, busy: bool, ctx: ViewCtx<'_>) -> Element<'_
         primary_button(i18n.tr(action.label_key()), &tokens, true)
             .on_press_maybe((!busy).then_some(Message::ResetRequested(action)))
             .width(Length::Fill)
-            .height(Length::Fixed(CONTROL_HEIGHT)),
+            .height(Length::Fixed(control_height(&tokens))),
     )
-    .height(Length::Fixed(46.0))
+    .height(Length::Shrink)
     .width(Length::Fill)
     .into()
 }
@@ -772,11 +945,17 @@ fn confirm_overlay(
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let dialog_size = ResponsiveSize::new(
-        Size::new(RESET_CONFIRM_WIDTH, RESET_CONFIRM_HEIGHT),
-        Size::new(RESET_CONFIRM_WIDTH, RESET_CONFIRM_HEIGHT),
+        Size::new(
+            RESET_CONFIRM_WIDTH * tokens.text_scale(),
+            RESET_CONFIRM_HEIGHT * tokens.text_scale(),
+        ),
+        Size::new(
+            RESET_CONFIRM_WIDTH * tokens.text_scale(),
+            RESET_CONFIRM_HEIGHT * tokens.text_scale(),
+        ),
     )
     .resolve(viewport_size, tokens.dims.modal_viewport_ratio);
-    let dialog = container(
+    let dialog = container(scrollable(
         column![
             text(i18n.tr(action.label_key()))
                 .size(tokens.typography.title_sm)
@@ -791,20 +970,24 @@ fn confirm_overlay(
                 Space::new().width(Length::Fill),
                 text_button(i18n.tr("cancel"), &tokens)
                     .on_press(Message::ResetCancelled)
-                    .height(Length::Fixed(CONTROL_HEIGHT)),
+                    .height(Length::Fixed(control_height(&tokens))),
                 primary_button(i18n.tr(action.label_key()), &tokens, true)
                     .on_press(Message::ResetConfirmed)
-                    .width(Length::Fixed(132.0))
-                    .height(Length::Fixed(CONTROL_HEIGHT)),
+                    .width(Length::Shrink)
+                    .height(Length::Fixed(control_height(&tokens))),
             ]
             .align_y(Center)
-            .spacing(10.0),
+            .spacing(tokens.space(10.0)),
         ]
-        .spacing(14.0)
-        .padding(Padding::ZERO.horizontal(20.0).vertical(18.0))
+        .spacing(tokens.space(14.0))
+        .padding(
+            Padding::ZERO
+                .horizontal(tokens.space(20.0))
+                .vertical(tokens.space(18.0)),
+        )
         .width(Length::Fill)
-        .height(Length::Fill),
-    )
+        .height(Length::Shrink),
+    ))
     .width(Length::Fixed(dialog_size.width))
     .height(Length::Fixed(dialog_size.height))
     .style(move |_| confirm_dialog_style(&tokens));
@@ -821,12 +1004,19 @@ fn confirm_overlay(
     opaque(scrim)
 }
 
+fn control_height(tokens: &Tokens) -> f32 {
+    tokens
+        .row_height(CONTROL_HEIGHT)
+        .max(tokens.typography.body * 1.3 + tokens.space(SELECT_PAD_Y) * 2.0)
+        .ceil()
+}
+
 fn field_label(label: String, tokens: &Tokens) -> Element<'static, Message> {
     text(label)
         .size(tokens.typography.body)
         .font(theme::styles::inter_font(font::Weight::Normal))
         .color(Color::from(tokens.colors.text))
-        .height(Length::Fixed(FIELD_LABEL_HEIGHT))
+        .width(Length::Fill)
         .into()
 }
 
@@ -1059,7 +1249,7 @@ fn switch_style(tokens: &Tokens, status: toggler::Status) -> toggler::Style {
 fn select_metrics(tokens: &Tokens) -> select::Metrics {
     select::Metrics {
         text_size: tokens.typography.body,
-        padding: Padding::from([SELECT_PAD_Y, tokens.spacing.pad_sm]),
+        padding: Padding::from([tokens.space(SELECT_PAD_Y), tokens.spacing.pad_sm]),
         radius: tokens.radii.lg,
         max_rows: select::MAX_ROWS,
     }
@@ -1157,6 +1347,28 @@ fn hsv_slider_style(tokens: &Tokens, rail: Background, _status: slider::Status) 
             background: Color::from(tokens.colors.text).into(),
             border_width: tokens.dims.border_width,
             border_color: tokens.colors.shadow_strong.into(),
+        },
+    }
+}
+
+fn text_slider_style(tokens: &Tokens, status: slider::Status) -> slider::Style {
+    let active = matches!(status, slider::Status::Hovered | slider::Status::Dragged);
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (
+                Color::from(tokens.colors.link).into(),
+                Color::from(tokens.colors.border_subtle).into(),
+            ),
+            width: tokens.space(4.0),
+            border: border::rounded(2.0),
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle {
+                radius: tokens.icon_size(if active { 7.0 } else { 6.0 }),
+            },
+            background: Color::from(tokens.colors.link).into(),
+            border_width: tokens.dims.border_width,
+            border_color: tokens.colors.surface.into(),
         },
     }
 }
@@ -1274,6 +1486,102 @@ mod tests {
     use super::*;
 
     #[test]
+    fn display_focus_bounds_exclude_field_labels() {
+        let state = State::default();
+        let i18n = I18n::for_locale(Some("en"));
+        for (density, percent) in [(UiDensity::Comfortable, 100), (UiDensity::Compact, 150)] {
+            let tokens = Tokens::dark().with_display_preferences(density, percent);
+            let mut simulation = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                Size::new(700.0, 800.0),
+                display_preferences(&state, ViewCtx::new(&tokens, &i18n)),
+            );
+            let dropdown = simulation
+                .find(iced_test::selector::id("settings-density"))
+                .unwrap()
+                .bounds();
+            assert_eq!(dropdown.height, control_height(&tokens));
+            assert!(dropdown.y > tokens.typography.body * 1.3);
+            let toggle = simulation
+                .find(iced_test::selector::id("settings-reduce-motion"))
+                .unwrap()
+                .bounds();
+            assert!(toggle.width <= tokens.dims.switch_height * 3.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "opt-in clicked dropdown screenshot"]
+    fn capture_clicked_dropdown_focus() {
+        let state = State::default();
+        let i18n = I18n::for_locale(Some("en"));
+        let tokens = Tokens::dark().with_display_preferences(UiDensity::Comfortable, 100);
+        let settings = iced::Settings {
+            default_font: assets::fonts::default_font(),
+            fonts: assets::fonts::bundled_fonts()
+                .into_iter()
+                .map(std::borrow::Cow::Borrowed)
+                .collect(),
+            ..Default::default()
+        };
+        let mut simulation = iced_test::Simulator::with_size(
+            settings,
+            Size::new(700.0, 800.0),
+            display_preferences(&state, ViewCtx::new(&tokens, &i18n)),
+        );
+        simulation
+            .click(iced_test::selector::id("settings-density"))
+            .unwrap();
+        let _ = simulation.simulate([iced::Event::Window(iced::window::Event::RedrawRequested(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        ))]);
+        let directory = std::env::var_os("GMPUBLISHED_UI_CAPTURE_DIR").map_or_else(
+            || std::path::PathBuf::from("/tmp/gmpublished-ui-refactor"),
+            std::path::PathBuf::from,
+        );
+        assert!(
+            simulation
+                .snapshot(&iced::Theme::Dark)
+                .unwrap()
+                .matches_image(directory.join("dropdown-clicked-focus"))
+                .unwrap()
+        );
+        let control = simulation
+            .find(iced_test::selector::id("settings-density"))
+            .unwrap()
+            .bounds();
+        let metrics = select_metrics(&tokens);
+        simulation.point_at(iced::Point::new(
+            control.center_x(),
+            control.y + control.height - tokens.dims.focus_border_width
+                + metrics.radius
+                + select::row_height(metrics) * 1.5,
+        ));
+        let _ = simulation.simulate([
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ]);
+        assert!(
+            simulation
+                .snapshot(&iced::Theme::Dark)
+                .unwrap()
+                .matches_image(directory.join("dropdown-after-selection-focus"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn settings_control_faces_accommodate_their_resolved_text_and_padding() {
+        for density in [UiDensity::Comfortable, UiDensity::Compact] {
+            for percent in [90, 100, 125, 150] {
+                let tokens = Tokens::dark().with_display_preferences(density, percent);
+                let menu_row = select::row_height(select_metrics(&tokens));
+                assert!(control_height(&tokens) >= menu_row);
+            }
+        }
+    }
+
+    #[test]
     fn the_language_list_leads_with_the_follow_the_system_row() {
         let i18n = I18n::for_locale(Some("en"));
 
@@ -1290,5 +1598,47 @@ mod tests {
             options.iter().skip(1).all(|(value, _)| value.is_some()),
             "only the leading row clears the setting"
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_settings_display_fixtures() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = crate::bridge::AppPaths {
+        settings_file: root.path().join("settings.json"),
+        default_user_data_dir: root.path().join("user-data"),
+        default_temp_dir: root.path().join("temp"),
+        default_downloads_dir: Some(root.path().join("downloads")),
+        temp_dir: root.path().join("temp"),
+        user_data_dir: root.path().join("user-data"),
+        downloads_dir: Some(root.path().join("downloads")),
+        gmod_dir: None,
+    };
+    let i18n = I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        let mut preferences = crate::bridge::Settings::default();
+        preferences.ui.density = density;
+        preferences.ui.text_size_percent = percent;
+        let mut state = State::default();
+        state.open_with_snapshot(super::SettingsSnapshot::new(
+            preferences,
+            paths.clone(),
+            crate::bridge::SystemColorScheme::Dark,
+        ));
+        for (tab, label) in [
+            (Tab::Accessibility, "display"),
+            (Tab::General, "general"),
+            (Tab::Paths, "paths"),
+        ] {
+            state.select_tab(tab);
+            crate::test_support::capture_ui_surface(
+                &format!("settings-{label}-{name}"),
+                size,
+                view(&state, ViewCtx::new(&tokens, &i18n), size),
+            );
+        }
     }
 }

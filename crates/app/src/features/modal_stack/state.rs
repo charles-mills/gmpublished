@@ -24,12 +24,14 @@ enum Phase {
 struct Layer {
     phase: Phase,
     presence: motion::Presence<bool>,
+    reduce_motion: bool,
 }
 
 impl Default for Layer {
     fn default() -> Self {
         Self {
             phase: Phase::Closed,
+            reduce_motion: false,
             presence: motion::asymmetric(
                 false,
                 theme::invariant().motion.modal_enter_duration(),
@@ -53,7 +55,11 @@ impl Layer {
     }
 
     fn scale(&self, now: Instant) -> f32 {
-        self.opacity(now)
+        if self.reduce_motion && !self.interactive() {
+            0.0
+        } else {
+            self.presence.interpolate(0.985, 1.0, now)
+        }
     }
 
     const fn interactive(&self) -> bool {
@@ -75,7 +81,11 @@ impl Layer {
     fn open(&mut self, modal: ActiveModal, now: Instant) -> Option<ActiveModal> {
         let displaced = self.active().filter(|active| *active != modal);
         self.phase = Phase::Visible(modal);
-        self.presence.go(true, now);
+        if self.reduce_motion {
+            self.presence.snap(true);
+        } else {
+            self.presence.go(true, now);
+        }
         displaced
     }
 
@@ -87,7 +97,12 @@ impl Layer {
     }
 
     fn tick(&mut self, now: Instant) -> Option<ActiveModal> {
-        let settled = self.presence.tick(now);
+        let settled = if self.reduce_motion {
+            self.presence.snap(self.interactive());
+            true
+        } else {
+            self.presence.tick(now)
+        };
         if let Phase::Closing(modal) = self.phase
             && settled
         {
@@ -106,6 +121,26 @@ pub struct State {
 }
 
 impl State {
+    pub(crate) fn set_reduce_motion(&mut self, reduce_motion: bool) -> Vec<ActiveModal> {
+        if self.base.reduce_motion == reduce_motion {
+            return Vec::new();
+        }
+        self.base.reduce_motion = reduce_motion;
+        self.overlay.reduce_motion = reduce_motion;
+        let mut policy = theme::invariant().motion;
+        policy.reduce_motion = reduce_motion;
+        self.base
+            .presence
+            .set_durations(policy.modal_enter_duration(), policy.modal_exit_duration());
+        self.overlay
+            .presence
+            .set_durations(policy.modal_enter_duration(), policy.modal_exit_duration());
+        if reduce_motion {
+            self.tick(Instant::now())
+        } else {
+            Vec::new()
+        }
+    }
     pub(crate) const fn active(&self) -> Option<ActiveModal> {
         self.base.active()
     }
@@ -186,5 +221,48 @@ impl State {
 impl ActiveModal {
     const fn is_overlay(self) -> bool {
         matches!(self, Self::DestinationSelect | Self::DescriptionEditor)
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn modal_motion_preserves_size_and_finalizes_close_once() {
+        let mut state = State::default();
+        let started = Instant::now();
+        state.open(ActiveModal::Settings, started);
+        assert_eq!(state.scale(started), 0.985);
+        let midpoint = state.scale(started + Duration::from_millis(60));
+        assert!(midpoint > 0.985 && midpoint < 1.0);
+        let settled = started + Duration::from_secs(1);
+        state.tick(settled);
+        assert_eq!(state.scale(settled), 1.0);
+        assert!(!state.needs_ticks());
+        state.close(settled);
+        assert_eq!(
+            state.tick(settled + Duration::from_secs(1)),
+            vec![ActiveModal::Settings]
+        );
+        assert_eq!(state.active(), None);
+        assert!(state.tick(settled + Duration::from_secs(2)).is_empty());
+    }
+
+    #[test]
+    fn reducing_motion_settles_open_and_reports_pending_close() {
+        let mut state = State::default();
+        let started = Instant::now();
+        state.open(ActiveModal::Settings, started);
+        assert!(state.set_reduce_motion(true).is_empty());
+        assert_eq!(state.scale(started), 1.0);
+        assert!(!state.needs_ticks());
+        state.close(started);
+        assert_eq!(state.tick(started), vec![ActiveModal::Settings]);
+        state.open(ActiveModal::PreviewGma, started);
+        assert!(!state.needs_ticks());
+        assert_eq!(state.scale(started), 1.0);
     }
 }

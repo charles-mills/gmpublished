@@ -11,6 +11,8 @@ pub enum Effect {
     CopyDebugInfoRequested(crate::generation::Generation, String),
     PathBrowseRequested(PathSetting),
     PathValidationRequested(PathValidationRequest),
+    PreviewApplied(SettingsMutation),
+    FocusMoved(bool),
     MutationApplied(crate::generation::Generation, SettingsMutation),
     SnapshotApplied(Box<SettingsSnapshot>),
     ResetRunRequested(ResetAction),

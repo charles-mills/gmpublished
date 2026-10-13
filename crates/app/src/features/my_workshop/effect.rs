@@ -16,6 +16,7 @@ pub enum Effect {
     PreparePublishRequested(PreparePublishTarget),
     ContextMenuRequested(ContextMenuRequest),
     ThumbnailDemandsChanged,
+    GridScrollAnchored(f32),
     AddonDragPressed {
         card_id: CardId,
         workshop_id: Option<PublishedFileId>,

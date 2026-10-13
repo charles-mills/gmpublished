@@ -23,11 +23,12 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, viewport_size: Size) -> Elem
         viewport_size.width,
         tokens.dims.modal_viewport_ratio,
     );
-    let tile_size = ((modal_width
-        - tokens.spacing.pad * 2.0
-        - tokens.spacing.gap * (DestinationKind::ALL.len() - 1) as f32)
-        / DestinationKind::ALL.len() as f32)
-        .max(1.0);
+    let available_width = (modal_width - tokens.spacing.pad * 2.0).max(1.0);
+    let columns = ((available_width + tokens.spacing.gap)
+        / (tokens.row_height(144.0) + tokens.spacing.gap))
+        .floor()
+        .clamp(1.0, DestinationKind::ALL.len() as f32);
+    let tile_size = ((available_width - tokens.spacing.gap * (columns - 1.0)) / columns).max(1.0);
     let title = text(i18n.tr("destination-where-to"))
         .size(tokens.typography.display)
         .font(theme::styles::inter_font(font::Weight::Bold));
@@ -67,10 +68,18 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, viewport_size: Size) -> Elem
     content = content.push(confirm_button(state, ctx));
 
     let panel = opaque(
-        container(content)
-            .width(Length::Fixed(modal_width))
-            .padding(tokens.spacing.pad)
-            .style(move |_| theme::styles::modal(&tokens)),
+        container(
+            scrollable(content)
+                .height(Length::Shrink)
+                .direction(scrollable::Direction::Vertical(
+                    theme::styles::vertical_scrollbar(&tokens),
+                ))
+                .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
+        )
+        .max_height((viewport_size.height * tokens.dims.modal_viewport_ratio).max(1.0))
+        .width(Length::Fixed(modal_width))
+        .padding(tokens.spacing.pad)
+        .style(move |_| theme::styles::modal(&tokens)),
     );
 
     container(panel).center(Length::Fill).into()
@@ -113,7 +122,7 @@ fn tiles<'a>(state: &'a State, ctx: ViewCtx<'a>, tile_size: f32) -> Element<'a, 
     for kind in DestinationKind::ALL {
         tiles = tiles.push(tile(state, ctx, kind, tile_size));
     }
-    tiles.into()
+    tiles.wrap().into()
 }
 
 fn tile<'a>(
@@ -131,7 +140,8 @@ fn tile<'a>(
 
     let label = text(i18n.tr(kind.label_key()))
         .size(tokens.typography.body)
-        .wrapping(text::Wrapping::None);
+        .align_x(Center)
+        .wrapping(text::Wrapping::WordOrGlyph);
     let body = container(
         column![
             tile_icon(&tokens, kind, enabled, icon_size),
@@ -269,4 +279,20 @@ fn confirm_button<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message
     .style(move |_, status| theme::styles::extract_button(&tokens, status))
     .on_press_maybe(state.can_confirm().then_some(Message::ConfirmRequested))
     .into()
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_destination_display_fixtures() {
+    let state = State::default();
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        crate::test_support::capture_ui_surface(
+            &format!("destination-{name}"),
+            size,
+            view(&state, ViewCtx::new(&tokens, &i18n), size),
+        );
+    }
 }

@@ -505,3 +505,18 @@ settings-about-maintainers = Made by Charles Mills and open-source contributors,
 settings-about-license = License (GNU GPL v3)
 settings-about-notices = Third-party notices
 settings-about-releases = Release notes
+
+settings-display-heading = Display
+settings-display-spacing = Spacing
+settings-display-comfortable = Comfortable
+settings-display-compact = Compact
+settings-display-text-size = Text size
+settings-display-reset-text = Reset text size
+settings-display-reset = Reset display preferences
+settings-display-sample-heading = Make yourself comfortable
+settings-display-sample-body = Text and controls adapt together while your content stays in place.
+settings-display-sample-supporting = Spacing and text size are independent.
+settings-display-colors = Accent colors
+
+settings-display-reduce-motion = Reduce motion
+settings-display-reduce-motion-hint = Use instant transitions for layout changes, menus and dialogs.

@@ -2,11 +2,11 @@ use crate::i18n::Arg;
 use std::time::Instant;
 
 use iced::widget::{
-    Space, button, column, container, image, mouse_area, opaque, row, stack, svg, text,
+    Space, button, column, container, image, mouse_area, opaque, row, scrollable, stack, svg, text,
 };
 use iced::{
-    Alignment, Border, Center, Color, ContentFit, Element, Length, Padding, Shadow, Vector, border,
-    font, mouse,
+    Alignment, Border, Center, Color, ContentFit, Element, Length, Padding, Shadow, Size, Vector,
+    border, font, mouse,
 };
 
 use crate::widgets::icon::svg_icon_with_opacity as svg_icon;
@@ -19,19 +19,60 @@ use crate::{
 
 use super::{ChromeStrategy, Message, Route, State, sidebar_rail_width, sidebar_width};
 
+#[derive(Clone, Copy)]
+struct RailControls {
+    button_size: f32,
+    glyph_size: f32,
+    avatar_size: f32,
+    account_box_size: f32,
+    account_row_height: f32,
+}
+
+impl RailControls {
+    fn new(tokens: &Tokens, viewport_width: f32) -> Self {
+        let dims = tokens.dims;
+        let width = sidebar_rail_width(tokens, ChromeStrategy::SystemDefault, viewport_width);
+        let growth = (width - dims.sidebar_rail_width)
+            / (dims.sidebar_rail_width_wide - dims.sidebar_rail_width);
+        let avatar_growth = growth
+            * (dims.sidebar_account_rail_avatar_size_wide - dims.sidebar_account_rail_avatar_size);
+        Self {
+            button_size: dims.sidebar_rail_icon_button_size
+                + growth
+                    * (dims.sidebar_rail_icon_button_size_wide
+                        - dims.sidebar_rail_icon_button_size),
+            glyph_size: dims.sidebar_rail_icon_glyph
+                + growth * (dims.sidebar_rail_icon_glyph_wide - dims.sidebar_rail_icon_glyph),
+            avatar_size: dims.sidebar_account_rail_avatar_size + avatar_growth,
+            account_box_size: dims.sidebar_account_rail_box_size + avatar_growth,
+            account_row_height: dims.sidebar_account_row_height + avatar_growth,
+        }
+    }
+}
+
 pub fn sidebar<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
     chrome_strategy: ChromeStrategy,
+    viewport_width: f32,
     drag_active: bool,
     now: Instant,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let margin = tokens.dims.sidebar_float_margin;
-    let rail = container(rail_sidebar(state, ctx, chrome_strategy, drag_active, now))
-        .width(Length::Fixed(sidebar_rail_width(&tokens, chrome_strategy)))
-        .height(Length::Fill)
-        .style(move |_| theme::styles::sidebar(&tokens));
+    let rail_width = sidebar_rail_width(&tokens, chrome_strategy, viewport_width);
+    let controls = RailControls::new(&tokens, viewport_width);
+    let rail = container(rail_sidebar(
+        state,
+        ctx,
+        chrome_strategy,
+        controls,
+        drag_active,
+        now,
+    ))
+    .width(Length::Fixed(rail_width))
+    .height(Length::Fill)
+    .style(move |_| theme::styles::sidebar(&tokens));
 
     container(rail)
         .padding(Padding {
@@ -40,7 +81,11 @@ pub fn sidebar<'a>(
             bottom: margin,
             left: margin,
         })
-        .width(Length::Fixed(sidebar_width(&tokens, chrome_strategy)))
+        .width(Length::Fixed(sidebar_width(
+            &tokens,
+            chrome_strategy,
+            viewport_width,
+        )))
         .height(Length::Fill)
         .into()
 }
@@ -49,14 +94,16 @@ fn rail_sidebar<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
     chrome_strategy: ChromeStrategy,
+    controls: RailControls,
     drag_active: bool,
     now: Instant,
 ) -> Element<'a, Message> {
     column![
         rail_top_clearance(ctx.tokens, chrome_strategy),
-        rail_navigation(state, ctx, drag_active, now),
-        Space::new().height(Length::Fill),
-        rail_account_button(state, ctx.tokens, chrome_strategy, drag_active),
+        scrollable(rail_navigation(state, ctx, controls, drag_active, now))
+            .width(Length::Fill)
+            .height(Length::Fill),
+        rail_account_button(state, ctx.tokens, controls, drag_active),
     ]
     .spacing(0.0)
     .align_x(Alignment::Center)
@@ -68,21 +115,33 @@ fn rail_sidebar<'a>(
 fn rail_navigation<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
+    controls: RailControls,
     drag_active: bool,
     now: Instant,
 ) -> Element<'a, Message> {
-    let mut routes = column![rail_search_button(ctx, drag_active)]
+    let mut routes = column![rail_search_button(ctx, controls, drag_active)]
         .spacing(ctx.tokens.dims.sidebar_route_spacing)
         .align_x(Alignment::Center)
         .width(Length::Fill);
     for route in Route::ALL {
-        routes = routes.push(rail_route_item(route, state, ctx, drag_active, now));
+        routes = routes.push(rail_route_item(
+            route,
+            state,
+            ctx,
+            controls,
+            drag_active,
+            now,
+        ));
     }
 
     container(routes).width(Length::Fill).into()
 }
 
-fn rail_search_button(ctx: ViewCtx<'_>, drag_active: bool) -> Element<'_, Message> {
+fn rail_search_button(
+    ctx: ViewCtx<'_>,
+    controls: RailControls,
+    drag_active: bool,
+) -> Element<'_, Message> {
     let tokens = ctx.tokens;
     let i18n = ctx.i18n;
     let search_label = format!("{} {}", i18n.tr("search"), search_shortcut_hint());
@@ -93,8 +152,8 @@ fn rail_search_button(ctx: ViewCtx<'_>, drag_active: bool) -> Element<'_, Messag
         assets::icons::search(),
         search_label,
         (!drag_active).then_some(Message::SearchActivated),
-        tokens.dims.sidebar_rail_icon_button_size,
-        tokens.dims.sidebar_rail_icon_glyph,
+        controls.button_size,
+        controls.glyph_size,
         tokens,
         !drag_active,
     );
@@ -159,6 +218,7 @@ fn drag_region<'a>(width: Length, height: f32) -> Element<'a, Message> {
 pub fn account_menu_overlay<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
+    viewport_size: Size,
     now: Instant,
 ) -> Option<Element<'a, Message>> {
     if !state.account_menu_visible() {
@@ -166,6 +226,22 @@ pub fn account_menu_overlay<'a>(
     }
 
     let tokens = ctx.tokens;
+    let controls = RailControls::new(tokens, viewport_size.width);
+    let menu_width = if viewport_size.width > 0.0 {
+        tokens.dims.account_menu_width.min(
+            (viewport_size.width - account_menu_anchor_x(tokens) - tokens.spacing.pad_sm).max(1.0),
+        )
+    } else {
+        tokens.dims.account_menu_width
+    };
+    let menu_height = if viewport_size.height > 0.0 {
+        (viewport_size.height
+            - account_menu_bottom_offset(tokens, controls)
+            - tokens.spacing.pad_sm)
+            .max(1.0)
+    } else {
+        600.0
+    };
     let interactive = state.account_menu_open();
     let opacity = state.account_menu_opacity(now);
     let dismiss: Element<'a, Message> = if interactive {
@@ -189,14 +265,21 @@ pub fn account_menu_overlay<'a>(
         row![
             Space::new().width(Length::Fixed(account_menu_anchor_x(tokens))),
             widgets::scaled::scaled(
-                opaque(account_menu_panel(state, ctx, interactive, opacity)),
+                opaque(account_menu_panel(
+                    state,
+                    ctx,
+                    interactive,
+                    opacity,
+                    menu_width,
+                    menu_height
+                )),
                 state.account_menu_scale(now),
             )
             .origin(Origin::BottomLeft)
             .interactive(interactive),
             Space::new().width(Length::Fill),
         ],
-        Space::new().height(Length::Fixed(account_menu_bottom_offset(tokens))),
+        Space::new().height(Length::Fixed(account_menu_bottom_offset(tokens, controls))),
     ]
     .width(Length::Fill)
     .height(Length::Fill);
@@ -213,9 +296,9 @@ fn account_menu_anchor_x(tokens: &Tokens) -> f32 {
     tokens.dims.sidebar_float_margin + tokens.dims.account_menu_margin
 }
 
-fn account_menu_bottom_offset(tokens: &Tokens) -> f32 {
+fn account_menu_bottom_offset(tokens: &Tokens, controls: RailControls) -> f32 {
     tokens.dims.sidebar_float_margin
-        + tokens.dims.sidebar_account_row_height
+        + controls.account_row_height
         + tokens.dims.account_menu_bottom_gap
 }
 
@@ -223,6 +306,7 @@ fn rail_route_item<'a>(
     route: Route,
     state: &State,
     ctx: ViewCtx<'a>,
+    controls: RailControls,
     drag_active: bool,
     now: Instant,
 ) -> Element<'a, Message> {
@@ -240,15 +324,15 @@ fn rail_route_item<'a>(
         container(svg_icon(
             route.icon(),
             icon_color.into(),
-            tokens.dims.sidebar_rail_icon_glyph,
+            controls.glyph_size,
             1.0,
         ))
-        .center(Length::Fixed(tokens.dims.sidebar_rail_icon_button_size)),
+        .center(Length::Fixed(controls.button_size)),
     )
     .on_press_maybe((!drag_active).then_some(Message::Navigate(route)))
     .padding(0.0)
-    .width(Length::Fixed(tokens.dims.sidebar_rail_icon_button_size))
-    .height(Length::Fixed(tokens.dims.sidebar_rail_icon_button_size))
+    .width(Length::Fixed(controls.button_size))
+    .height(Length::Fixed(controls.button_size))
     .style(move |_, status| {
         let status = if drop_hovered {
             button::Status::Hovered
@@ -273,8 +357,8 @@ fn rail_route_item<'a>(
                 .align_right(Length::Fill)
                 .height(Length::Fill),
         ]
-        .width(Length::Fixed(tokens.dims.sidebar_rail_icon_button_size))
-        .height(Length::Fixed(tokens.dims.sidebar_rail_icon_button_size))
+        .width(Length::Fixed(controls.button_size))
+        .height(Length::Fixed(controls.button_size))
         .into()
     } else {
         control.into()
@@ -324,7 +408,7 @@ fn job_badge(count: u32, tokens: &Tokens, opacity: f32) -> Element<'static, Mess
 fn rail_account_button<'a>(
     state: &'a State,
     tokens: &Tokens,
-    chrome_strategy: ChromeStrategy,
+    controls: RailControls,
     drag_active: bool,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
@@ -333,19 +417,20 @@ fn rail_account_button<'a>(
         container(account_avatar(
             state,
             &tokens,
-            tokens.dims.sidebar_account_rail_avatar_size,
+            controls.avatar_size,
             true,
             hovered,
         ))
-        .center(Length::Fixed(tokens.dims.sidebar_account_rail_box_size)),
+        .center_y(Length::Fixed(controls.account_box_size))
+        .center_x(Length::Fill),
     )
     // The press is dropped while a drag is in flight so the button reports
     // no interaction of its own; a mouse_area's cursor only shows through
     // over interaction-free content.
     .on_press_maybe((!drag_active).then_some(Message::AccountMenuToggled))
     .padding(0.0)
-    .width(Length::Fixed(sidebar_rail_width(&tokens, chrome_strategy)))
-    .height(Length::Fixed(tokens.dims.sidebar_account_row_height))
+    .width(Length::Fill)
+    .height(Length::Fixed(controls.account_row_height))
     .style(move |_, _| account_row_style(&tokens));
 
     let area = mouse_area(button)
@@ -367,8 +452,8 @@ fn account_avatar<'a>(
     hover_ring: bool,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let badge_offset = tokens.dims.presence_badge_ring;
-    let badge_outer = presence_badge_outer(&tokens);
+    let badge_offset = tokens.dims.presence_badge_ring * avatar_scale(&tokens, size);
+    let badge_outer = presence_badge_outer(&tokens, size);
     let badge_origin = if show_presence {
         size - badge_outer + badge_offset
     } else {
@@ -411,7 +496,7 @@ fn account_avatar<'a>(
 
     let presence = if show_presence {
         avatar_badge_layer(
-            presence_badge(state.steam_status(), &tokens),
+            presence_badge(state.steam_status(), &tokens, size),
             badge_origin,
             badge_origin,
             canvas,
@@ -424,7 +509,7 @@ fn account_avatar<'a>(
     };
     let update = if state.update_available() {
         avatar_badge_layer(
-            avatar_badge(tokens.colors.link, &tokens),
+            avatar_badge(tokens.colors.link, &tokens, size),
             badge_origin,
             0.0,
             canvas,
@@ -445,8 +530,12 @@ fn account_avatar<'a>(
         .into()
 }
 
-fn presence_badge<'a>(status: ConnectionStatus, tokens: &Tokens) -> Element<'a, Message> {
-    avatar_badge(status_color(status, tokens), tokens)
+fn presence_badge<'a>(
+    status: ConnectionStatus,
+    tokens: &Tokens,
+    avatar_size: f32,
+) -> Element<'a, Message> {
+    avatar_badge(status_color(status, tokens), tokens, avatar_size)
 }
 
 fn avatar_badge_layer(
@@ -464,14 +553,15 @@ fn avatar_badge_layer(
     .into()
 }
 
-fn avatar_badge<'a>(fill: Rgba, tokens: &Tokens) -> Element<'a, Message> {
+fn avatar_badge<'a>(fill: Rgba, tokens: &Tokens, avatar_size: f32) -> Element<'a, Message> {
     let tokens = *tokens;
-    let outer = presence_badge_outer(&tokens);
+    let size = tokens.dims.presence_badge_size * avatar_scale(&tokens, avatar_size);
+    let outer = presence_badge_outer(&tokens, avatar_size);
     container(
         container(Space::new())
-            .width(tokens.dims.presence_badge_size)
-            .height(tokens.dims.presence_badge_size)
-            .style(move |_| circle_style(fill, tokens.dims.presence_badge_size / 2.0)),
+            .width(size)
+            .height(size)
+            .style(move |_| circle_style(fill, size / 2.0)),
     )
     .width(outer)
     .height(outer)
@@ -482,14 +572,19 @@ fn avatar_badge<'a>(fill: Rgba, tokens: &Tokens) -> Element<'a, Message> {
 
 fn account_avatar_canvas_size(tokens: &Tokens, avatar_size: f32, show_presence: bool) -> f32 {
     if show_presence {
-        avatar_size + tokens.dims.presence_badge_ring
+        avatar_size + tokens.dims.presence_badge_ring * avatar_scale(tokens, avatar_size)
     } else {
         avatar_size
     }
 }
 
-fn presence_badge_outer(tokens: &Tokens) -> f32 {
-    tokens.dims.presence_badge_size + 2.0 * tokens.dims.presence_badge_ring
+fn avatar_scale(tokens: &Tokens, avatar_size: f32) -> f32 {
+    avatar_size / tokens.dims.sidebar_account_rail_avatar_size
+}
+
+fn presence_badge_outer(tokens: &Tokens, avatar_size: f32) -> f32 {
+    (tokens.dims.presence_badge_size + 2.0 * tokens.dims.presence_badge_ring)
+        * avatar_scale(tokens, avatar_size)
 }
 
 fn sidebar_icon_button<'a>(
@@ -524,6 +619,8 @@ fn account_menu_panel<'a>(
     ctx: ViewCtx<'a>,
     interactive: bool,
     opacity: f32,
+    width: f32,
+    max_height: f32,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let mut content = column![settings_row(ctx, interactive, opacity)]
@@ -544,8 +641,9 @@ fn account_menu_panel<'a>(
             .push(divider(&tokens, opacity))
             .push(footer(state, ctx, interactive, opacity));
 
-    container(content)
-        .width(Length::Fixed(tokens.dims.account_menu_width))
+    container(scrollable(content).height(Length::Shrink))
+        .width(Length::Fixed(width))
+        .max_height(max_height)
         .padding([
             tokens.dims.account_menu_padding_y,
             tokens.dims.account_menu_padding_x,
@@ -784,7 +882,7 @@ fn avatar_ring_style(tokens: &Tokens, avatar_size: f32) -> container::Style {
     container::Style {
         border: Border {
             color: tokens.colors.link.into(),
-            width: tokens.dims.focus_border_width,
+            width: tokens.dims.focus_border_width * avatar_scale(tokens, avatar_size),
             radius: border::Radius::new(avatar_size / 2.0),
         },
         ..container::Style::default()
@@ -901,37 +999,59 @@ mod tests {
         use iced::advanced::{layout, widget::Tree};
         use iced_test::core::renderer::Headless as _;
 
-        let state = State::default();
+        let mut state = State::default();
+        state.apply_update_release(super::super::UpdateRelease::new(
+            "v1.0.0".to_owned(),
+            "https://example.com/release".to_owned(),
+        ));
         let tokens = Tokens::dark();
         let renderer = iced_test::futures::futures::executor::block_on(
             iced_test::renderer::Renderer::new(iced::Font::default(), iced::Pixels(16.0), None),
         )
         .expect("headless renderer");
 
-        for show_presence in [false, true] {
-            for hover_ring in [false, true] {
-                let size = tokens.dims.sidebar_account_rail_avatar_size;
-                let mut element = account_avatar(&state, &tokens, size, show_presence, hover_ring);
-                let mut tree = Tree::new(&element);
-                let node =
-                    element
-                        .as_widget_mut()
-                        .layout(&mut tree, &renderer, &layout::Limits::NONE);
-                let [.., avatar, ring, _, _] = node.children() else {
-                    panic!("expected avatar, ring, presence, and update layers");
-                };
+        for size in [
+            tokens.dims.sidebar_account_rail_avatar_size,
+            tokens.dims.sidebar_account_rail_avatar_size_wide,
+        ] {
+            for show_presence in [false, true] {
+                for hover_ring in [false, true] {
+                    let mut element =
+                        account_avatar(&state, &tokens, size, show_presence, hover_ring);
+                    let mut tree = Tree::new(&element);
+                    let node =
+                        element
+                            .as_widget_mut()
+                            .layout(&mut tree, &renderer, &layout::Limits::NONE);
+                    let [_, avatar, ring, presence, update] = node.children() else {
+                        panic!("expected avatar, ring, presence, and update layers");
+                    };
 
-                assert_eq!(
-                    node.size(),
-                    iced::Size::new(
-                        account_avatar_canvas_size(&tokens, size, show_presence),
-                        account_avatar_canvas_size(&tokens, size, show_presence),
-                    )
-                );
-                assert_eq!(avatar.size(), iced::Size::new(size, size));
-                assert_eq!(avatar.bounds(), avatar.children()[0].bounds());
-                if hover_ring {
-                    assert_eq!(avatar.bounds(), ring.bounds());
+                    assert_eq!(
+                        node.size(),
+                        iced::Size::new(
+                            account_avatar_canvas_size(&tokens, size, show_presence),
+                            account_avatar_canvas_size(&tokens, size, show_presence),
+                        )
+                    );
+                    assert_eq!(avatar.size(), iced::Size::new(size, size));
+                    assert_eq!(avatar.bounds(), avatar.children()[0].bounds());
+                    if hover_ring {
+                        assert_eq!(avatar.bounds(), ring.bounds());
+                    }
+                    for badge_layer in [Some(update), show_presence.then_some(presence)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let badge_row = badge_layer.children().last().expect("badge row");
+                        let badge = badge_row.children().last().expect("badge");
+                        let dot = &badge.children()[0];
+                        let dot_ratio = dot.size().width / avatar.size().width;
+                        let border_ratio =
+                            (badge.size().width - dot.size().width) / (2.0 * avatar.size().width);
+                        assert!((dot_ratio - 9.0 / 40.0).abs() < 0.001);
+                        assert!((border_ratio - 2.0 / 40.0).abs() < 0.001);
+                    }
                 }
             }
         }
@@ -942,11 +1062,11 @@ mod tests {
         let tokens = Tokens::dark();
 
         assert_eq!(
-            sidebar_width(&tokens, ChromeStrategy::SystemDefault),
+            sidebar_width(&tokens, ChromeStrategy::SystemDefault, 800.0),
             tokens.dims.sidebar_rail_width + tokens.dims.sidebar_float_margin * 2.0
         );
         assert_eq!(
-            sidebar_width(&tokens, ChromeStrategy::MacNativeInset),
+            sidebar_width(&tokens, ChromeStrategy::MacNativeInset, 800.0),
             tokens.dims.sidebar_rail_width_inset + tokens.dims.sidebar_float_margin * 2.0
         );
         assert_eq!(
@@ -954,7 +1074,7 @@ mod tests {
             tokens.dims.sidebar_float_margin + tokens.dims.account_menu_margin
         );
         assert_eq!(
-            account_menu_bottom_offset(&tokens),
+            account_menu_bottom_offset(&tokens, RailControls::new(&tokens, 800.0)),
             tokens.dims.sidebar_float_margin
                 + tokens.dims.sidebar_account_row_height
                 + tokens.dims.account_menu_bottom_gap
@@ -979,58 +1099,64 @@ mod tests {
         let i18n = crate::i18n::I18n::for_locale(Some("en"));
         let ctx = ViewCtx::new(&tokens, &i18n);
 
-        let width = sidebar_width(&tokens, ChromeStrategy::SystemDefault);
         let height = 600.0;
         let mut renderer = iced_test::futures::futures::executor::block_on(
             iced_test::renderer::Renderer::new(iced::Font::default(), iced::Pixels(16.0), None),
         )
         .expect("headless renderer");
 
-        let center_x = tokens.dims.sidebar_float_margin + tokens.dims.sidebar_rail_width / 2.0;
-        let search_y = tokens.dims.sidebar_float_margin
-            + rail_first_nav_center_y(&tokens, ChromeStrategy::SystemDefault);
-        let gap = rail_nav_center_gap(&tokens);
-        let account_y = height
-            - tokens.dims.sidebar_float_margin
-            - tokens.dims.sidebar_account_row_height / 2.0;
+        for chrome in [
+            ChromeStrategy::SystemDefault,
+            ChromeStrategy::MacNativeInset,
+        ] {
+            for viewport_width in [800.0, 1920.0, 3840.0] {
+                let width = sidebar_width(&tokens, chrome, viewport_width);
+                let controls = RailControls::new(&tokens, viewport_width);
+                let center_x = tokens.dims.sidebar_float_margin
+                    + sidebar_rail_width(&tokens, chrome, viewport_width) / 2.0;
+                let search_y = tokens.dims.sidebar_float_margin
+                    + rail_top_clearance_height(&tokens, chrome)
+                    + controls.button_size / 2.0;
+                let gap = controls.button_size + tokens.dims.sidebar_route_spacing;
+                let account_y =
+                    height - tokens.dims.sidebar_float_margin - controls.account_row_height / 2.0;
 
-        let mut interaction_at = |y: f32| {
-            let position = iced::Point::new(center_x, y);
-            let element = sidebar(
-                &state,
-                ctx,
-                ChromeStrategy::SystemDefault,
-                true,
-                Instant::now(),
-            );
-            let mut ui = UserInterface::build(
-                element,
-                iced::Size::new(width, height),
-                user_interface::Cache::default(),
-                &mut renderer,
-            );
-            let (ui_state, _statuses) = ui.update(
-                &[iced::Event::Mouse(mouse::Event::CursorMoved { position })],
-                mouse::Cursor::Available(position),
-                &mut renderer,
-                &mut clipboard::Null,
-                &mut Vec::new(),
-            );
-            match ui_state {
-                user_interface::State::Updated {
-                    mouse_interaction, ..
-                } => mouse_interaction,
-                user_interface::State::Outdated => panic!("sidebar interface became outdated"),
+                let mut interaction_at = |y: f32| {
+                    let position = iced::Point::new(center_x, y);
+                    let element =
+                        sidebar(&state, ctx, chrome, viewport_width, true, Instant::now());
+                    let mut ui = UserInterface::build(
+                        element,
+                        iced::Size::new(width, height),
+                        user_interface::Cache::default(),
+                        &mut renderer,
+                    );
+                    let (ui_state, _statuses) = ui.update(
+                        &[iced::Event::Mouse(mouse::Event::CursorMoved { position })],
+                        mouse::Cursor::Available(position),
+                        &mut renderer,
+                        &mut clipboard::Null,
+                        &mut Vec::new(),
+                    );
+                    match ui_state {
+                        user_interface::State::Updated {
+                            mouse_interaction, ..
+                        } => mouse_interaction,
+                        user_interface::State::Outdated => {
+                            panic!("sidebar interface became outdated")
+                        }
+                    }
+                };
+
+                assert_eq!(interaction_at(search_y), mouse::Interaction::NoDrop);
+                assert_eq!(interaction_at(search_y + gap), mouse::Interaction::NoDrop);
+                assert_eq!(
+                    interaction_at(search_y + 3.0 * gap),
+                    mouse::Interaction::Copy
+                );
+                assert_eq!(interaction_at(account_y), mouse::Interaction::NoDrop);
             }
-        };
-
-        assert_eq!(interaction_at(search_y), mouse::Interaction::NoDrop);
-        assert_eq!(interaction_at(search_y + gap), mouse::Interaction::NoDrop);
-        assert_eq!(
-            interaction_at(search_y + 3.0 * gap),
-            mouse::Interaction::Copy
-        );
-        assert_eq!(interaction_at(account_y), mouse::Interaction::NoDrop);
+        }
     }
 
     #[test]

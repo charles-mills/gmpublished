@@ -26,9 +26,7 @@ const HEADER_HEIGHT: f32 = 36.0;
 const BOTTOM_BAR_HEIGHT: f32 = 40.0;
 const TOP_INPUT_ICON_LEFT: f32 = 16.0;
 const TOP_INPUT_ICON_SIZE: f32 = 16.0;
-const TOP_INPUT_LEFT_PADDING: f32 = 40.0;
 const TOP_INPUT_RIGHT_PADDING: f32 = 12.0;
-const TOP_INPUT_VERTICAL_PADDING: f32 = 15.0;
 const TOP_ICON_SIZE: f32 = 22.0;
 const WIDE_LAYOUT_MIN_WIDTH: f32 = 1120.0;
 const COMPACT_TAB_HEIGHT: f32 = 40.0;
@@ -56,10 +54,12 @@ pub fn view<'a>(
     let now = Instant::now();
     let tokens = *ctx.tokens;
     let sections: Element<'a, Message> = blocked.unwrap_or_else(|| {
-        responsive(move |size| match layout_mode(size.width) {
-            LayoutMode::Wide => wide_sections(state, ctx, now),
-            LayoutMode::Compact => compact_sections(state, ctx, now),
-        })
+        responsive(
+            move |size| match layout_mode(size.width / tokens.text_scale()) {
+                LayoutMode::Wide => wide_sections(state, ctx, now),
+                LayoutMode::Compact => compact_sections(state, ctx, now),
+            },
+        )
         .into()
     });
 
@@ -107,9 +107,9 @@ fn compact_tabs<'a>(state: &State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         ]
         .spacing(tokens.spacing.gap_xs),
     )
-    .padding(4.0)
+    .padding(tokens.spacing.pad_xs)
     .width(Length::Fill)
-    .height(COMPACT_TAB_HEIGHT)
+    .height(tokens.row_height(COMPACT_TAB_HEIGHT))
     .style(move |_| compact_tab_bar_style(&tokens))
     .into()
 }
@@ -148,9 +148,15 @@ fn input_row<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .on_submit(Message::InputSubmitted)
         .padding(
             Padding::ZERO
-                .vertical(TOP_INPUT_VERTICAL_PADDING)
-                .left(TOP_INPUT_LEFT_PADDING)
-                .right(TOP_INPUT_RIGHT_PADDING),
+                .vertical(
+                    (tokens.dims.control_height_xl - tokens.typography.body * 1.3).max(0.0) / 2.0,
+                )
+                .left(
+                    tokens.space(TOP_INPUT_ICON_LEFT)
+                        + tokens.icon_size(TOP_INPUT_ICON_SIZE)
+                        + tokens.spacing.gap_sm,
+                )
+                .right(tokens.space(TOP_INPUT_RIGHT_PADDING)),
         )
         .size(tokens.typography.body)
         .width(Length::Fill)
@@ -163,7 +169,7 @@ fn input_row<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         } else {
             tokens.colors.text.into()
         },
-        TOP_INPUT_ICON_SIZE,
+        tokens.icon_size(TOP_INPUT_ICON_SIZE),
         if state.input_error() {
             1.0
         } else {
@@ -172,7 +178,7 @@ fn input_row<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     ))
     .width(Length::Fill)
     .height(Length::Fill)
-    .padding(Padding::ZERO.left(TOP_INPUT_ICON_LEFT))
+    .padding(Padding::ZERO.left(tokens.space(TOP_INPUT_ICON_LEFT)))
     .align_x(alignment::Horizontal::Left)
     .align_y(alignment::Vertical::Center);
 
@@ -218,6 +224,21 @@ fn section_view<'a>(
     now: Instant,
     show_title: bool,
 ) -> iced::widget::Container<'a, Message> {
+    container(responsive(move |size| {
+        section_contents(section, jobs, ctx, now, show_title, size.width).into()
+    }))
+    .width(Length::Fill)
+    .height(Length::Fill)
+}
+
+fn section_contents<'a>(
+    section: Section,
+    jobs: &'a [DownloaderJob],
+    ctx: ViewCtx<'a>,
+    now: Instant,
+    show_title: bool,
+    width: f32,
+) -> iced::widget::Container<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let title = row![
@@ -240,7 +261,7 @@ fn section_view<'a>(
             .iter()
             .enumerate()
             .fold(column![], |rows, (index, job)| {
-                rows.push(job_row(section, job, index % 2 == 0, ctx, now))
+                rows.push(job_row(section, job, index % 2 == 0, ctx, now, width))
             });
         scrollable(rows)
             .height(Length::Fill)
@@ -254,7 +275,7 @@ fn section_view<'a>(
     let panel_content = if jobs.is_empty() {
         column![body].height(Length::Fill)
     } else {
-        column![table_header(ctx.i18n, &tokens), body].height(Length::Fill)
+        column![table_header(ctx.i18n, &tokens, width), body].height(Length::Fill)
     };
 
     let panel = container(panel_content)
@@ -263,11 +284,11 @@ fn section_view<'a>(
         .style(move |_| panel_style(&tokens));
 
     let content = column![panel, section_actions(section, ctx)]
-        .spacing(10.0)
+        .spacing(tokens.spacing.gap)
         .height(Length::Fill);
     let content = if show_title {
         column![container(title).center_x(Length::Fill), content]
-            .spacing(10.0)
+            .spacing(tokens.spacing.gap)
             .height(Length::Fill)
     } else {
         column![content].height(Length::Fill)
@@ -276,47 +297,58 @@ fn section_view<'a>(
     container(content).width(Length::Fill).height(Length::Fill)
 }
 
-fn table_header<'a>(i18n: &I18n, tokens: &Tokens) -> Element<'a, Message> {
+fn table_header<'a>(i18n: &'a I18n, tokens: &Tokens, width: f32) -> Element<'a, Message> {
     let tokens = *tokens;
-    container(
-        row![
-            text("").width(48.0),
-            header_text(
-                i18n.tr("downloader-column-addon"),
-                &tokens,
-                alignment::Horizontal::Left
-            )
-            .width(Length::Fill),
-            header_text(
-                i18n.tr("downloader-column-speed"),
-                &tokens,
-                alignment::Horizontal::Right
-            )
-            .width(84.0),
-            header_text(
-                i18n.tr("downloader-column-total"),
-                &tokens,
-                alignment::Horizontal::Right
-            )
-            .width(84.0),
-            header_text(
-                i18n.tr("downloader-column-progress"),
-                &tokens,
-                alignment::Horizontal::Center,
-            )
-            .width(180.0),
-        ]
-        .align_y(Center)
-        .spacing(tokens.spacing.gap_sm)
-        .padding(
-            Padding::ZERO
-                .left(tokens.spacing.gap_sm)
-                .right(tokens.spacing.gap_md),
-        ),
-    )
-    .height(HEADER_HEIGHT)
-    .align_y(alignment::Vertical::Center)
-    .into()
+    if width < 720.0 * tokens.text_scale() {
+        container(header_text(
+            i18n.tr("downloader-column-addon"),
+            &tokens,
+            alignment::Horizontal::Left,
+        ))
+        .padding([tokens.spacing.gap_xs, tokens.spacing.pad_sm])
+        .height(tokens.row_height(HEADER_HEIGHT))
+        .into()
+    } else {
+        container(
+            row![
+                text("").width(48.0 * tokens.text_scale()),
+                header_text(
+                    i18n.tr("downloader-column-addon"),
+                    &tokens,
+                    alignment::Horizontal::Left
+                )
+                .width(Length::Fill),
+                header_text(
+                    i18n.tr("downloader-column-speed"),
+                    &tokens,
+                    alignment::Horizontal::Right
+                )
+                .width(84.0 * tokens.text_scale()),
+                header_text(
+                    i18n.tr("downloader-column-total"),
+                    &tokens,
+                    alignment::Horizontal::Right
+                )
+                .width(84.0 * tokens.text_scale()),
+                header_text(
+                    i18n.tr("downloader-column-progress"),
+                    &tokens,
+                    alignment::Horizontal::Center,
+                )
+                .width(180.0 * tokens.text_scale()),
+            ]
+            .align_y(Center)
+            .spacing(tokens.spacing.gap_sm)
+            .padding(
+                Padding::ZERO
+                    .left(tokens.spacing.gap_sm)
+                    .right(tokens.spacing.gap_md),
+            ),
+        )
+        .height(tokens.row_height(HEADER_HEIGHT))
+        .align_y(alignment::Vertical::Center)
+        .into()
+    }
 }
 
 fn header_text(
@@ -337,40 +369,75 @@ fn job_row<'a>(
     odd: bool,
     ctx: ViewCtx<'a>,
     now: Instant,
+    width: f32,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    container(
-        row![
-            row_actions(section, job, &tokens),
+    if width < 720.0 * tokens.text_scale() {
+        let title = container(
             text(job.title())
                 .size(tokens.typography.body_sm)
                 .color(job_title_color(job, &tokens))
+                .wrapping(text::Wrapping::None)
                 .width(Length::Fill),
-            text(speed_text(job, i18n, now))
-                .size(tokens.typography.body_sm)
-                .color(Color::from(tokens.colors.text_dim))
-                .width(84.0)
-                .align_x(alignment::Horizontal::Right),
-            text(total_text(job, i18n))
-                .size(tokens.typography.body_sm)
-                .color(Color::from(tokens.colors.text_dim))
-                .width(84.0)
-                .align_x(alignment::Horizontal::Right),
-            progress_cell(section, job, ctx, now).width(180.0),
-        ]
-        .align_y(Center)
-        .spacing(tokens.spacing.gap_sm)
-        .padding(
-            Padding::ZERO
-                .vertical(tokens.spacing.gap_xs)
-                .left(tokens.spacing.gap_sm)
-                .right(tokens.spacing.gap_md),
-        ),
-    )
-    .height(JOB_ROW_HEIGHT)
-    .style(move |_| row_style(&tokens, odd))
-    .into()
+        )
+        .width(Length::Fill)
+        .clip(true);
+        container(
+            column![
+                row![row_actions(section, job, &tokens), title]
+                    .spacing(tokens.spacing.gap_sm)
+                    .align_y(Center),
+                row![
+                    text(speed_text(job, i18n, now))
+                        .size(tokens.typography.caption)
+                        .color(Color::from(tokens.colors.text_dim)),
+                    text(total_text(job, i18n)).size(tokens.typography.caption),
+                    progress_cell(section, job, ctx, now).width(Length::Fill),
+                ]
+                .spacing(tokens.spacing.gap_sm)
+                .align_y(Center),
+            ]
+            .spacing(tokens.spacing.gap_xs)
+            .padding(tokens.spacing.pad_sm),
+        )
+        .width(Length::Fill)
+        .height(tokens.row_height(JOB_ROW_HEIGHT * 2.0))
+        .style(move |_| row_style(&tokens, odd))
+        .into()
+    } else {
+        container(
+            row![
+                row_actions(section, job, &tokens),
+                text(job.title())
+                    .size(tokens.typography.body_sm)
+                    .color(job_title_color(job, &tokens))
+                    .width(Length::Fill),
+                text(speed_text(job, i18n, now))
+                    .size(tokens.typography.body_sm)
+                    .color(Color::from(tokens.colors.text_dim))
+                    .width(84.0 * tokens.text_scale())
+                    .align_x(alignment::Horizontal::Right),
+                text(total_text(job, i18n))
+                    .size(tokens.typography.body_sm)
+                    .color(Color::from(tokens.colors.text_dim))
+                    .width(84.0 * tokens.text_scale())
+                    .align_x(alignment::Horizontal::Right),
+                progress_cell(section, job, ctx, now).width(180.0 * tokens.text_scale()),
+            ]
+            .align_y(Center)
+            .spacing(tokens.spacing.gap_sm)
+            .padding(
+                Padding::ZERO
+                    .vertical(tokens.spacing.gap_xs)
+                    .left(tokens.spacing.gap_sm)
+                    .right(tokens.spacing.gap_md),
+            ),
+        )
+        .height(tokens.row_height(JOB_ROW_HEIGHT))
+        .style(move |_| row_style(&tokens, odd))
+        .into()
+    }
 }
 
 fn row_actions<'a>(section: Section, job: &DownloaderJob, tokens: &Tokens) -> Element<'a, Message> {
@@ -383,7 +450,9 @@ fn row_actions<'a>(section: Section, job: &DownloaderJob, tokens: &Tokens) -> El
         },
     );
 
-    let mut actions = row![cancel].spacing(tokens.spacing.gap_xs).width(48.0);
+    let mut actions = row![cancel]
+        .spacing(tokens.spacing.gap_xs)
+        .width(48.0 * tokens.text_scale());
     if let Some(workshop_id) = job.workshop_id() {
         actions = actions.push(mini_icon_button(
             assets::icons::link_chain(),
@@ -444,7 +513,7 @@ fn progress_cell<'a>(
                 );
             }
 
-            container(actions).height(32.0)
+            container(actions).height(tokens.row_height(32.0))
         }
         JobProgress::Error(error) => container(
             text(i18n.trn(
@@ -454,7 +523,7 @@ fn progress_cell<'a>(
             .size(tokens.typography.body_sm)
             .color(Color::from(tokens.colors.error)),
         )
-        .height(32.0)
+        .height(tokens.row_height(32.0))
         .center_y(Length::Fill),
         _ => container(
             column![
@@ -467,7 +536,7 @@ fn progress_cell<'a>(
             ]
             .spacing(tokens.spacing.gap_xs),
         )
-        .height(36.0)
+        .height(tokens.row_height(36.0))
         .center_y(Length::Fill),
     }
 }
@@ -506,10 +575,12 @@ fn section_actions(section: Section, ctx: ViewCtx<'_>) -> Element<'_, Message> {
         Message::RemoveAllRequested(section),
     )
     .width(Length::Fill)
-    .height(BOTTOM_BAR_HEIGHT);
+    .height(tokens.row_height(BOTTOM_BAR_HEIGHT));
 
     match section {
-        Section::Downloading => row![remove].height(BOTTOM_BAR_HEIGHT).into(),
+        Section::Downloading => row![remove]
+            .height(tokens.row_height(BOTTOM_BAR_HEIGHT))
+            .into(),
         Section::Extracting => row![
             remove,
             text_button(
@@ -518,10 +589,10 @@ fn section_actions(section: Section, ctx: ViewCtx<'_>) -> Element<'_, Message> {
                 Message::OpenAllRequested,
             )
             .width(Length::Fill)
-            .height(BOTTOM_BAR_HEIGHT),
+            .height(tokens.row_height(BOTTOM_BAR_HEIGHT)),
         ]
         .spacing(tokens.spacing.gap_md)
-        .height(BOTTOM_BAR_HEIGHT)
+        .height(tokens.row_height(BOTTOM_BAR_HEIGHT))
         .into(),
     }
 }
@@ -535,7 +606,7 @@ fn top_icon_button<'a>(
     let glyph = icon_with_opacity(
         handle,
         tokens.colors.text.into(),
-        TOP_ICON_SIZE,
+        tokens.icon_size(TOP_ICON_SIZE),
         tokens.dims.icon_rest_opacity,
     );
 
@@ -559,12 +630,19 @@ fn mini_icon_button<'a>(
     message: Message,
 ) -> iced::widget::Button<'a, Message> {
     let tokens = *tokens;
-    button(container(icon(handle, tokens.colors.text_dim.into(), 16.0)).center(Length::Fill))
-        .on_press(message)
-        .padding(0)
-        .width(22.0)
-        .height(36.0)
-        .style(move |_, status| transparent_button_style(&tokens, status))
+    button(
+        container(icon(
+            handle,
+            tokens.colors.text_dim.into(),
+            tokens.icon_size(16.0),
+        ))
+        .center(Length::Fill),
+    )
+    .on_press(message)
+    .padding(0)
+    .width(tokens.row_height(22.0))
+    .height(tokens.row_height(36.0))
+    .style(move |_, status| transparent_button_style(&tokens, status))
 }
 
 fn section_icon<'a>(section: Section, tokens: &Tokens) -> Element<'a, Message> {
@@ -572,7 +650,7 @@ fn section_icon<'a>(section: Section, tokens: &Tokens) -> Element<'a, Message> {
         Section::Downloading => assets::icons::cloud_download(),
         Section::Extracting => assets::icons::folder_add(),
     };
-    icon(handle, tokens.colors.text.into(), 32.0).into()
+    icon(handle, tokens.colors.text.into(), tokens.icon_size(32.0)).into()
 }
 
 fn centered_text<'a>(
@@ -1071,6 +1149,38 @@ mod tests {
                 row_id,
             }),
             "no PreviewRequested dispatched; messages seen: {messages:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_downloader_display_fixtures() {
+    use super::jobs::DownloaderEvent;
+    use crate::bridge::domain::PublishedFileId;
+    use crate::bridge::tasks::{TaskId, WorkshopDownloadTaskKind};
+    let mut state = State::default();
+    for (id, kind) in [
+        (1, WorkshopDownloadTaskKind::Download),
+        (2, WorkshopDownloadTaskKind::Extract),
+    ] {
+        super::update(
+            &mut state,
+            Message::EventReceived(DownloaderEvent::TaskStarted {
+                kind,
+                item_id: PublishedFileId::fixture(id),
+                task_id: TaskId::from_raw(id),
+            }),
+        );
+    }
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        crate::test_support::capture_ui_surface(
+            &format!("downloader-{name}"),
+            size,
+            view(&state, ViewCtx::new(&tokens, &i18n), None),
         );
     }
 }

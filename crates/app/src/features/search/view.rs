@@ -22,18 +22,34 @@ use super::{
     update::SEARCH_INPUT_ID,
 };
 
-const DROPDOWN_MIN_HEIGHT: f32 = 120.0;
 const DROPDOWN_MAX_HEIGHT: f32 = 430.0;
 const SEARCH_ICON_SIZE: f32 = 16.0;
 const SEARCH_ICON_X: f32 = 12.0;
-const SEARCH_TEXT_X: f32 = 38.0;
 const SEARCH_FIELD_HEIGHT: f32 = 44.0;
-const SEARCH_FIELD_VERTICAL_PADDING: f32 = 13.5;
+
 const THUMBNAIL_SIZE: f32 = 38.0;
 const DEAD_GLYPH_SIZE: f32 = 22.0;
 const LOADING_GLYPH_SIZE: f32 = 18.0;
 const SOURCE_LABEL_WIDTH: f32 = 128.0;
 const STATUS_ROW_HEIGHT: f32 = 58.0;
+
+pub fn dropdown_scrollable_id() -> iced::widget::Id {
+    iced::widget::Id::new("search-dropdown-rows")
+}
+
+pub fn result_row_height(tokens: &Tokens) -> f32 {
+    tokens.row_height(RESULT_ROW_HEIGHT).max(
+        (tokens.typography.body + tokens.typography.caption) * 1.3
+            + tokens.spacing.gap_xs
+            + tokens.spacing.gap * 2.0,
+    )
+}
+
+fn field_height(tokens: &Tokens) -> f32 {
+    tokens
+        .row_height(SEARCH_FIELD_HEIGHT)
+        .max(tokens.typography.body * 1.3 + tokens.spacing.pad_sm * 2.0)
+}
 
 pub fn dropdown_overlay<'a>(
     state: &'a State,
@@ -76,6 +92,7 @@ pub fn dropdown_overlay<'a>(
                 )),
                 state.scale(now),
             )
+            .translation(iced::Vector::new(0.0, 6.0 * (1.0 - opacity)))
             .interactive(interactive),
             Space::new().width(Length::Fill),
         ]
@@ -98,7 +115,9 @@ fn shortcut_chip<'a>(mode: SearchMode, tokens: &Tokens, opacity: f32) -> Element
             .size(tokens.typography.caption_xs)
             .color(Color::from(tokens.colors.text_dim).scale_alpha(opacity)),
     )
-    .height(Length::Fixed(tokens.dims.search_keycap_height))
+    .height(Length::Fixed(tokens.dims.search_keycap_height.max(
+        tokens.typography.caption_xs * 1.3 + tokens.spacing.gap_xs,
+    )))
     .padding([0.0, tokens.dims.search_keycap_padding_x])
     .style(move |_| keycap_style(&tokens, opacity))
     .into()
@@ -161,10 +180,12 @@ fn palette_input<'a>(
         .font(assets::fonts::default_font())
         .size(tokens.typography.body)
         .padding(Padding {
-            top: SEARCH_FIELD_VERTICAL_PADDING,
+            top: (field_height(&tokens) - tokens.typography.body * 1.3) / 2.0,
             right: tokens.dims.search_palette_input_right_padding,
-            bottom: SEARCH_FIELD_VERTICAL_PADDING,
-            left: SEARCH_TEXT_X,
+            bottom: (field_height(&tokens) - tokens.typography.body * 1.3) / 2.0,
+            left: tokens.space(SEARCH_ICON_X)
+                + tokens.icon_size(SEARCH_ICON_SIZE)
+                + tokens.spacing.gap,
         })
         .width(Length::Fill)
         .style(move |_, status| search_text_input_style(&tokens, status, connected, opacity));
@@ -175,10 +196,10 @@ fn palette_input<'a>(
         tokens.colors.text_dim
     };
     let icon_overlay = row![
-        Space::new().width(Length::Fixed(SEARCH_ICON_X)),
+        Space::new().width(Length::Fixed(tokens.space(SEARCH_ICON_X))),
         svg(assets::icons::search())
-            .width(Length::Fixed(SEARCH_ICON_SIZE))
-            .height(Length::Fixed(SEARCH_ICON_SIZE))
+            .width(Length::Fixed(tokens.icon_size(SEARCH_ICON_SIZE)))
+            .height(Length::Fixed(tokens.icon_size(SEARCH_ICON_SIZE)))
             .style(move |_, _| svg::Style {
                 color: Some(icon_color.into()),
             })
@@ -187,11 +208,11 @@ fn palette_input<'a>(
     ]
     .align_y(Alignment::Center)
     .width(Length::Fill)
-    .height(Length::Fixed(SEARCH_FIELD_HEIGHT));
+    .height(Length::Fixed(field_height(&tokens)));
 
     let hit_base = container(Space::new().width(Length::Fill).height(Length::Fill))
         .width(Length::Fill)
-        .height(Length::Fixed(SEARCH_FIELD_HEIGHT));
+        .height(Length::Fixed(field_height(&tokens)));
     let hit_overlay: Element<'a, Message> = if interactive {
         mouse_area(hit_base)
             .on_press(Message::FocusRequested)
@@ -203,14 +224,14 @@ fn palette_input<'a>(
     let right_overlay = row![
         Space::new().width(Length::Fill),
         shortcut_chip(state.mode(), &tokens, opacity),
-        Space::new().width(Length::Fixed(SEARCH_ICON_X)),
+        Space::new().width(Length::Fixed(tokens.space(SEARCH_ICON_X))),
     ]
     .align_y(Alignment::Center)
     .width(Length::Fill)
-    .height(Length::Fixed(SEARCH_FIELD_HEIGHT));
+    .height(Length::Fixed(field_height(&tokens)));
 
     iced::widget::stack![input, icon_overlay, hit_overlay, right_overlay]
-        .height(Length::Fixed(SEARCH_FIELD_HEIGHT))
+        .height(Length::Fixed(field_height(&tokens)))
         .width(Length::Fill)
         .clip(true)
         .into()
@@ -249,6 +270,7 @@ fn result_list<'a>(
     }
 
     let list = scrollable(rows)
+        .id(dropdown_scrollable_id())
         .width(Length::Fill)
         .height(Length::Fixed(list_height))
         .direction(scrollable::Direction::Vertical(
@@ -269,35 +291,48 @@ fn result_row<'a>(
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let source = i18n.tr(row_model.source_label_key());
+    let title = container(
+        text(row_model.title())
+            .size(tokens.typography.body)
+            .wrapping(text::Wrapping::None)
+            .color(Color::from(tokens.colors.text).scale_alpha(opacity))
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .clip(true);
+    let association = container(
+        text(row_model.association())
+            .size(tokens.typography.caption)
+            .wrapping(text::Wrapping::None)
+            .color(Color::from(tokens.colors.text_dim).scale_alpha(opacity))
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .clip(true);
     let content = row![
         thumbnail(row_model, &tokens, opacity),
         column![
-            text(row_model.title())
-                .size(tokens.typography.body)
-                .color(Color::from(tokens.colors.text).scale_alpha(opacity))
-                .width(Length::Fill),
-            text(row_model.association())
-                .size(tokens.typography.caption)
-                .color(Color::from(tokens.colors.text_dim).scale_alpha(opacity))
-                .width(Length::Fill),
+            title,
+            row![
+                association,
+                text(source)
+                    .size(tokens.typography.caption)
+                    .wrapping(text::Wrapping::None)
+                    .color(Color::from(tokens.colors.text_dim).scale_alpha(opacity))
+                    .width(Length::Fixed(SOURCE_LABEL_WIDTH * tokens.text_scale()))
+                    .align_x(alignment::Horizontal::Right),
+            ]
+            .spacing(tokens.spacing.gap_sm)
         ]
         .spacing(tokens.spacing.gap_xs)
         .width(Length::Fill),
-        text(source)
-            .size(tokens.typography.caption)
-            .color(Color::from(tokens.colors.text_dim).scale_alpha(opacity))
-            .width(Length::Fixed(SOURCE_LABEL_WIDTH))
-            .height(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
-            .align_y(alignment::Vertical::Center),
     ]
     .spacing(tokens.spacing.gap)
     .align_y(Alignment::Center);
-
     button(content)
         .on_press_maybe(interactive.then_some(Message::ResultActivated(row_model.id())))
         .width(Length::Fill)
-        .height(Length::Fixed(RESULT_ROW_HEIGHT))
+        .height(Length::Fixed(result_row_height(&tokens)))
         .padding([tokens.spacing.gap, tokens.spacing.gap])
         .style(move |_, status| row_button_style(&tokens, status, opacity))
         .into()
@@ -356,7 +391,7 @@ fn status_row<'a>(
     })
     .spacing(10.0)
     .align_y(Alignment::Center)
-    .height(Length::Fixed(STATUS_ROW_HEIGHT))
+    .height(Length::Fixed(tokens.row_height(STATUS_ROW_HEIGHT)))
     .width(Length::Fill)
     .into()
 }
@@ -409,9 +444,10 @@ pub fn dropdown_max_height(viewport_size: Size, tokens: &Tokens) -> f32 {
 
     (viewport_size.height
         - tokens.dims.search_palette_top_offset
-        - SEARCH_FIELD_HEIGHT
+        - field_height(tokens)
         - tokens.dims.search_palette_margin)
-        .clamp(DROPDOWN_MIN_HEIGHT, DROPDOWN_MAX_HEIGHT)
+        .max(0.0)
+        .min(DROPDOWN_MAX_HEIGHT * tokens.text_scale())
 }
 
 pub fn dropdown_list_viewport_height(state: &State, viewport_size: Size, tokens: &Tokens) -> f32 {
@@ -424,19 +460,19 @@ fn dropdown_height(state: &State, viewport_size: Size, tokens: &Tokens) -> f32 {
     }
 
     if state.rows().is_empty() && (state.loading() || state.show_empty()) {
-        return STATUS_ROW_HEIGHT;
+        return tokens.row_height(STATUS_ROW_HEIGHT);
     }
 
     let max_height = dropdown_max_height(viewport_size, tokens);
-    dropdown_list_height_for_count(state.rows().len(), max_height)
+    dropdown_list_height_for_count(state.rows().len(), max_height, tokens)
 }
 
 fn dropdown_list_height(panel_height: f32) -> f32 {
     panel_height.max(0.0)
 }
 
-fn dropdown_list_height_for_count(row_count: usize, max_height: f32) -> f32 {
-    let row_height = row_count as f32 * RESULT_ROW_HEIGHT;
+fn dropdown_list_height_for_count(row_count: usize, max_height: f32, tokens: &Tokens) -> f32 {
+    let row_height = row_count as f32 * result_row_height(tokens);
     row_height.min(max_height.max(0.0))
 }
 
@@ -633,5 +669,46 @@ fn row_button_style(tokens: &Tokens, status: button::Status, opacity: f32) -> bu
         border: Border::default(),
         shadow: Shadow::default(),
         snap: true,
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_search_display_fixtures() {
+    use crate::bridge::domain::{
+        PublishedFileId, SearchHit, SearchItem, SearchItemSource, SearchQuickBatch,
+    };
+    let mut state = State::default();
+    let request = state.edit_query("radio".into()).quick_request.unwrap();
+    let hits = [
+        "rRadio (Boombox and Car Radio)",
+        "An unusually long Workshop result title that must stay inside its allocated result row",
+        "日本語 · 中文 · 한국어",
+        "Boombox (Model Only)",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, title)| SearchHit {
+        score: 1,
+        item: SearchItem::new(
+            SearchItemSource::WorkshopItem(PublishedFileId::fixture(index as u64 + 1)),
+            title,
+        ),
+    })
+    .collect();
+    state.apply_quick_result(
+        request.key(),
+        Ok(SearchQuickBatch::new(request.key().clone(), hits, false)),
+    );
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        state.set_row_height(result_row_height(&tokens));
+        crate::test_support::capture_ui_surface(
+            &format!("search-{name}"),
+            size,
+            dropdown_overlay(&state, ViewCtx::new(&tokens, &i18n), size, Instant::now()).unwrap(),
+        );
     }
 }

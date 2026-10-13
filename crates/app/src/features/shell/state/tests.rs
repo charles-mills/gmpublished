@@ -134,7 +134,7 @@ fn rail_width_uses_rail_width_token() {
     let tokens = Tokens::dark();
 
     assert_eq!(
-        sidebar_rail_width(&tokens, ChromeStrategy::SystemDefault),
+        sidebar_rail_width(&tokens, ChromeStrategy::SystemDefault, 800.0),
         tokens.dims.sidebar_rail_width
     );
 }
@@ -144,7 +144,7 @@ fn rail_width_uses_inset_rail_width_for_mac_native_inset() {
     let tokens = Tokens::dark();
 
     assert_eq!(
-        sidebar_rail_width(&tokens, ChromeStrategy::MacNativeInset),
+        sidebar_rail_width(&tokens, ChromeStrategy::MacNativeInset, 800.0),
         tokens.dims.sidebar_rail_width_inset
     );
 }
@@ -154,11 +154,11 @@ fn sidebar_width_reserves_panel_and_float_margins() {
     let tokens = Tokens::dark();
 
     assert_eq!(
-        sidebar_width(&tokens, ChromeStrategy::SystemDefault),
+        sidebar_width(&tokens, ChromeStrategy::SystemDefault, 800.0),
         tokens.dims.sidebar_rail_width + tokens.dims.sidebar_float_margin * 2.0
     );
     assert_eq!(
-        sidebar_width(&tokens, ChromeStrategy::MacNativeInset),
+        sidebar_width(&tokens, ChromeStrategy::MacNativeInset, 800.0),
         tokens.dims.sidebar_rail_width_inset + tokens.dims.sidebar_float_margin * 2.0
     );
 }

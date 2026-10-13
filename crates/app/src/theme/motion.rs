@@ -8,40 +8,55 @@ use super::tokens::{Motion, Rgba};
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 impl Motion {
+    pub(crate) const fn enabled(self) -> bool {
+        !self.reduce_motion
+    }
+
+    pub(crate) fn layout_duration(self) -> Duration {
+        self.duration(self.layout_ms)
+    }
+
+    fn duration(self, ms: u16) -> Duration {
+        if self.reduce_motion {
+            Duration::ZERO
+        } else {
+            duration_ms(ms)
+        }
+    }
     pub(crate) fn fast_duration(self) -> Duration {
-        duration_ms(self.fast_ms)
+        self.duration(self.fast_ms)
     }
 
     pub(crate) fn hover_in_duration(self) -> Duration {
-        duration_ms(self.hover_in_ms)
+        self.duration(self.hover_in_ms)
     }
 
     pub(crate) fn hover_out_duration(self) -> Duration {
-        duration_ms(self.hover_out_ms)
+        self.duration(self.hover_out_ms)
     }
 
     pub(crate) fn modal_enter_duration(self) -> Duration {
-        duration_ms(self.modal_enter_ms)
+        self.duration(self.modal_enter_ms)
     }
 
     pub(crate) fn modal_exit_duration(self) -> Duration {
-        duration_ms(self.modal_exit_ms)
+        self.duration(self.modal_exit_ms)
     }
 
     pub(crate) fn context_menu_enter_duration(self) -> Duration {
-        duration_ms(self.context_menu_enter_ms)
+        self.duration(self.context_menu_enter_ms)
     }
 
     pub(crate) fn context_menu_exit_duration(self) -> Duration {
-        duration_ms(self.context_menu_exit_ms)
+        self.duration(self.context_menu_exit_ms)
     }
 
     pub(crate) fn thumb_reveal_duration(self) -> Duration {
-        duration_ms(self.thumb_reveal_ms)
+        self.duration(self.thumb_reveal_ms)
     }
 
     pub(crate) fn overlay_toast_duration(self) -> Duration {
-        duration_ms(self.overlay_toast_ms)
+        self.duration(self.overlay_toast_ms)
     }
 }
 
@@ -113,6 +128,11 @@ where
             .duration(self.enter)
             .easing(self.easing);
         self.settled = true;
+    }
+
+    pub(crate) fn set_durations(&mut self, enter: Duration, exit: Duration) {
+        self.enter = enter;
+        self.exit = exit;
     }
 
     pub(crate) fn tick(&mut self, now: Instant) -> bool {

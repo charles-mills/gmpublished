@@ -10,19 +10,19 @@ pub fn tag_chip<'a, M: 'a>(label: &str, tokens: &theme::Tokens) -> Element<'a, M
     let (background, text_color) = theme::tokens::workshop_tag_colors(label);
     let body = container(
         text(label.to_ascii_lowercase())
-            .size(TAG_TEXT_SIZE)
+            .size(tokens.text_size(TAG_TEXT_SIZE))
             .color(Color::from(text_color))
             .line_height(1.0),
     )
     .padding([
-        (tokens.dims.tag_height - TAG_TEXT_SIZE) / 2.0,
+        (tokens.dims.tag_height - tokens.text_size(TAG_TEXT_SIZE)) / 2.0,
         tokens.spacing.pad_xs,
     ])
     .height(Length::Fixed(tokens.dims.tag_height))
     .style(move |_| theme::styles::tag_chip(background, text_color));
 
     let point = svg(assets::icons::tag_point())
-        .width(Length::Fixed(TAG_POINT_WIDTH))
+        .width(Length::Fixed(tokens.icon_size(TAG_POINT_WIDTH)))
         .height(Length::Fixed(tokens.dims.tag_height))
         .style(move |_, _| svg::Style {
             color: Some(background.into()),

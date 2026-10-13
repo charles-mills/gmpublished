@@ -65,6 +65,7 @@ pub struct State {
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
     browser_scroll_offset: f32,
+    browser_row_height: f32,
     details: Details,
     revealed_description_spoilers: HashSet<SpoilerId>,
     workshop_metadata: Option<WorkshopMetadata>,
@@ -103,6 +104,7 @@ impl Default for State {
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
             browser_scroll_offset: 0.0,
+            browser_row_height: crate::widgets::file_browser::ROW_HEIGHT,
             details: Details::default(),
             revealed_description_spoilers: HashSet::new(),
             workshop_metadata: None,
@@ -277,11 +279,22 @@ impl State {
         &self,
         viewport_height: f32,
     ) -> crate::widgets::file_browser::VirtualRows {
-        crate::widgets::file_browser::virtual_rows(
+        crate::widgets::file_browser::virtual_rows_with_height(
             self.browser_snapshot.rows.len(),
             self.browser_scroll_offset,
             viewport_height,
+            self.browser_row_height,
         )
+    }
+
+    pub(crate) fn set_browser_row_height(&mut self, height: f32) -> Option<f32> {
+        if height.is_finite() && height > 0.0 && height != self.browser_row_height {
+            self.browser_scroll_offset *= height / self.browser_row_height;
+            self.browser_row_height = height;
+            Some(self.browser_scroll_offset)
+        } else {
+            None
+        }
     }
 
     pub(super) fn set_browser_scroll_offset(&mut self, offset: f32) {

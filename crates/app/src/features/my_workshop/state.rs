@@ -65,6 +65,11 @@ impl Default for State {
 }
 
 impl State {
+    pub(crate) fn apply_ui_metrics(&mut self, tokens: &crate::theme::Tokens) -> Vec<super::Effect> {
+        let follow_ups = self.pane.grid_mut().set_metrics(&tokens.layout());
+        super::update::apply_ui_metrics(self, follow_ups)
+    }
+
     pub(crate) const fn is_route_visible(&self) -> bool {
         self.route_visible
     }
@@ -378,7 +383,11 @@ impl State {
 
     pub(super) fn tick_visible_card_motion(&mut self, now: Instant) {
         if self.route_visible {
-            self.pane.grid_mut().tick_visible_card_motion(now);
+            for message in self.pane.grid_mut().tick_visible_card_motion(now) {
+                if let addon_grid::Message::CardHoverChanged(id, hovered) = message {
+                    self.set_card_hovered(&id, hovered);
+                }
+            }
         }
     }
 

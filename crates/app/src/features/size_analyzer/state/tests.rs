@@ -955,3 +955,54 @@ fn solid_rgba(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
     }
     pixels
 }
+
+#[test]
+fn changing_text_size_off_route_updates_cached_labels_before_reentry() {
+    let mut state = State::default();
+    state.enter_route();
+    state.note_viewport(Size::new(1920.0, 1080.0));
+    state.apply_snapshot(Ok(Some(fixture_snapshot(1))));
+    let old_handles: Vec<_> = state
+        .labels
+        .iter()
+        .map(|label| label.handle.clone())
+        .collect();
+    state.exit_route();
+    state.set_text_scale(1.5);
+    state.enter_route();
+    assert_ne!(
+        old_handles,
+        state
+            .labels
+            .iter()
+            .map(|label| label.handle.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        state.projection_key_for_test().unwrap().snapshot_epoch,
+        Generation::from_raw(1)
+    );
+}
+
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_analyzer_display_fixtures() {
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = crate::theme::Tokens::dark().with_display_preferences(density, percent);
+        let mut state = State::default();
+        state.enter_route();
+        state.set_text_scale(tokens.text_scale());
+        state.note_viewport(Size::new(
+            size.width - tokens.spacing.pad * 2.0,
+            size.height - tokens.spacing.pad * 2.0,
+        ));
+        state.apply_snapshot(Ok(Some(fixture_snapshot(1))));
+        state.update_hover_at(Point::new(size.width * 0.25, size.height * 0.5));
+        crate::test_support::capture_ui_surface(
+            &format!("analyzer-{name}"),
+            size,
+            super::super::view::view(&state, crate::theme::ViewCtx::new(&tokens, &i18n)),
+        );
+    }
+}

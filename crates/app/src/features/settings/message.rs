@@ -1,5 +1,5 @@
 use crate::bridge::ui_error::UiError;
-use crate::bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset};
+use crate::bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset, UiDensity};
 use crate::generation::Generation;
 use std::path::PathBuf;
 
@@ -27,6 +27,14 @@ pub enum Message {
     LanguageSelected(Option<String>),
     DownloadCountFormatSelected(DownloadCountFormat),
     ThemeSelected(ThemePreset),
+    DensitySelected(UiDensity),
+    ReduceMotionToggled(bool),
+    TextSizeChanged(u16),
+    FocusMoved(bool),
+    TextSizeCommitted,
+    TextSizeIdle(std::time::Instant),
+    TextSizeReset,
+    DisplayReset,
     OverwriteModeSelected(ExtractionOverwriteMode),
     PathEdited(PathSetting, String),
     PathAccepted(PathSetting),

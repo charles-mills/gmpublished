@@ -529,3 +529,18 @@ settings-about-maintainers = Розроблено Charles Mills та учасн�
 settings-about-license = Ліцензія (GNU GPL v3)
 settings-about-notices = Повідомлення про сторонні компоненти
 settings-about-releases = Примітки до випуску
+
+settings-display-heading = Відображення
+settings-display-spacing = Інтервали
+settings-display-comfortable = Вільні
+settings-display-compact = Компактні
+settings-display-text-size = Розмір тексту
+settings-display-reset-text = Скинути розмір тексту
+settings-display-reset = Скинути налаштування відображення
+settings-display-sample-heading = Налаштуйте для зручності
+settings-display-sample-body = Текст і елементи керування адаптуються разом, зберігаючи вміст.
+settings-display-sample-supporting = Інтервали та розмір тексту налаштовуються окремо.
+settings-display-colors = Акцентні кольори
+
+settings-display-reduce-motion = Зменшити анімацію
+settings-display-reduce-motion-hint = Миттєво показувати зміни компонування, меню та діалогові вікна.

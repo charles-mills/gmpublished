@@ -505,3 +505,18 @@ settings-about-maintainers = Gemaakt door Charles Mills en opensourcebijdragers,
 settings-about-license = Licentie (GNU GPL v3)
 settings-about-notices = Vermeldingen van derden
 settings-about-releases = Versieopmerkingen
+
+settings-display-heading = Weergave
+settings-display-spacing = Afstand
+settings-display-comfortable = Ruim
+settings-display-compact = Compacte weergave
+settings-display-text-size = Tekstgrootte
+settings-display-reset-text = Tekstgrootte herstellen
+settings-display-reset = Weergavevoorkeuren herstellen
+settings-display-sample-heading = Maak het uzelf gemakkelijk
+settings-display-sample-body = Tekst en bediening passen zich samen aan terwijl uw inhoud behouden blijft.
+settings-display-sample-supporting = Afstand en tekstgrootte zijn onafhankelijk.
+settings-display-colors = Accentkleuren
+
+settings-display-reduce-motion = Beweging verminderen
+settings-display-reduce-motion-hint = Toon indelingswijzigingen, menu’s en dialoogvensters zonder overgangen.

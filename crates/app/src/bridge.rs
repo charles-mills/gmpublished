@@ -27,12 +27,49 @@ pub use gmpublished_backend::{
 
 const UI_SETTINGS_SCHEMA_VERSION: u64 = 1;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UiDensity {
+    #[default]
+    Comfortable,
+    Compact,
+}
+
+impl UiDensity {
+    pub const fn as_value(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Compact => "compact",
+        }
+    }
+
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "comfortable" => Some(Self::Comfortable),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+}
+
+pub const DEFAULT_TEXT_SIZE_PERCENT: u16 = 100;
+pub const MIN_TEXT_SIZE_PERCENT: u16 = 90;
+pub const MAX_TEXT_SIZE_PERCENT: u16 = 150;
+pub const TEXT_SIZE_STEP: u16 = 5;
+
+pub fn valid_text_size_percent(value: u16) -> bool {
+    (MIN_TEXT_SIZE_PERCENT..=MAX_TEXT_SIZE_PERCENT).contains(&value)
+        && value.is_multiple_of(TEXT_SIZE_STEP)
+}
+
 /// Iced-only preferences that are not part of the shared backend appdata settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiSettings {
     pub(crate) play_gifs_by_default: bool,
     pub(crate) download_count_format: DownloadCountFormat,
     pub(crate) theme_preset: ThemePreset,
+    pub(crate) density: UiDensity,
+    pub(crate) text_size_percent: u16,
+    pub(crate) reduce_motion: bool,
 }
 
 impl Default for UiSettings {
@@ -41,6 +78,9 @@ impl Default for UiSettings {
             play_gifs_by_default: true,
             download_count_format: DownloadCountFormat::default(),
             theme_preset: ThemePreset::default(),
+            density: UiDensity::default(),
+            text_size_percent: DEFAULT_TEXT_SIZE_PERCENT,
+            reduce_motion: false,
         }
     }
 }
@@ -52,6 +92,9 @@ impl UiSettings {
             play_gifs_by_default: settings.ui.play_gifs_by_default,
             download_count_format: settings.ui.download_count_format,
             theme_preset: settings.ui.theme_preset,
+            density: settings.ui.density,
+            text_size_percent: settings.ui.text_size_percent,
+            reduce_motion: settings.ui.reduce_motion,
         }
     }
 
@@ -78,6 +121,16 @@ impl UiSettings {
                 .as_deref()
                 .and_then(ThemePreset::from_value)
                 .unwrap_or(defaults.theme_preset),
+            density: dto
+                .density
+                .as_deref()
+                .and_then(UiDensity::from_value)
+                .unwrap_or_default(),
+            text_size_percent: dto
+                .text_size_percent
+                .filter(|value| valid_text_size_percent(*value))
+                .unwrap_or(DEFAULT_TEXT_SIZE_PERCENT),
+            reduce_motion: dto.reduce_motion.unwrap_or(defaults.reduce_motion),
         }
     }
 
@@ -87,6 +140,9 @@ impl UiSettings {
             play_gifs_by_default: Some(self.play_gifs_by_default),
             download_count_format: Some(self.download_count_format.as_value().to_owned()),
             theme_preset: Some(self.theme_preset.as_value().to_owned()),
+            density: Some(self.density.as_value().to_owned()),
+            text_size_percent: Some(self.text_size_percent),
+            reduce_motion: Some(self.reduce_motion),
         };
         serde_json::to_value(dto).unwrap_or_default()
     }
@@ -103,6 +159,12 @@ struct UiSettingsDto {
     download_count_format: Option<String>,
     #[serde(default, deserialize_with = "lenient_field")]
     theme_preset: Option<String>,
+    #[serde(default, deserialize_with = "lenient_field")]
+    density: Option<String>,
+    #[serde(default, deserialize_with = "lenient_field")]
+    text_size_percent: Option<u16>,
+    #[serde(default, deserialize_with = "lenient_field")]
+    reduce_motion: Option<bool>,
 }
 
 /// Treat a field with the wrong type as absent.
@@ -351,6 +413,7 @@ mod tests {
                 play_gifs_by_default: true,
                 download_count_format: DownloadCountFormat::Space,
                 theme_preset: ThemePreset::Dark,
+                ..UiSettings::default()
             })
         );
 
@@ -380,6 +443,9 @@ mod tests {
             play_gifs_by_default: false,
             download_count_format: DownloadCountFormat::Period,
             theme_preset: ThemePreset::ClassicSource,
+            density: UiDensity::Compact,
+            text_size_percent: 125,
+            reduce_motion: true,
         };
         let value = settings.to_json_value();
         let backend = BackendSettings {
@@ -392,6 +458,63 @@ mod tests {
         assert_eq!(value["play_gifs_by_default"], false);
         assert_eq!(value["download_count_format"], "period");
         assert_eq!(value["theme_preset"], "classic_source");
+        assert_eq!(value["density"], "compact");
+        assert_eq!(value["text_size_percent"], 125);
+        assert_eq!(value["reduce_motion"], true);
+    }
+
+    #[test]
+    fn display_fields_default_independently_of_other_valid_preferences() {
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!("125"),
+            serde_json::json!(89),
+            serde_json::json!(151),
+            serde_json::json!(123),
+            serde_json::json!(-1),
+        ] {
+            let value = serde_json::json!({
+                "version": 1, "density": "unknown", "text_size_percent": invalid,
+                "theme_preset": "light", "download_count_format": "space",
+            });
+            let decoded = UiSettings::from_json_value(&value).expect("supported schema");
+            assert_eq!(decoded.density, UiDensity::Comfortable);
+            assert_eq!(decoded.text_size_percent, 100);
+            assert_eq!(decoded.theme_preset, ThemePreset::Light);
+            assert_eq!(decoded.download_count_format, DownloadCountFormat::Space);
+        }
+        let decoded = UiSettings::from_json_value(&serde_json::json!({
+            "density": 42, "text_size_percent": 150,
+        }))
+        .expect("supported schema");
+        assert_eq!(decoded.density, UiDensity::Comfortable);
+        assert_eq!(decoded.text_size_percent, 150);
+    }
+
+    #[test]
+    fn reduced_motion_defaults_leniently_without_losing_other_fields() {
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+        ] {
+            let decoded = UiSettings::from_json_value(&serde_json::json!({
+                "version": 1, "reduce_motion": invalid, "density": "compact", "text_size_percent": 125,
+            })).expect("supported schema");
+            assert!(!decoded.reduce_motion);
+            assert_eq!(decoded.density, UiDensity::Compact);
+            assert_eq!(decoded.text_size_percent, 125);
+        }
+        assert!(
+            !UiSettings::from_json_value(&serde_json::json!({"version": 1}))
+                .unwrap()
+                .reduce_motion
+        );
+        assert!(
+            UiSettings::from_json_value(&serde_json::json!({"reduce_motion": true}))
+                .unwrap()
+                .reduce_motion
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use iced::widget::{Space, container, mouse_area, opaque};
-use iced::{Color, Element, Length};
+use iced::{Color, Element, Length, Vector};
 
 use std::time::Instant;
 
@@ -63,6 +63,10 @@ where
         container(content).width(Length::Fill).height(Length::Fill),
         scale,
     )
+    .translation(Vector::new(
+        0.0,
+        6.0 * ((1.0 - scale) / 0.015).clamp(0.0, 1.0),
+    ))
     .interactive(interactive)
     .into()
 }

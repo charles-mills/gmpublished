@@ -73,6 +73,7 @@ pub struct State {
     metadata_in_flight: HashSet<PublishedFileId>,
     metadata_finished: HashSet<PublishedFileId>,
     scroll_offset: f32,
+    row_height: f32,
 }
 
 impl Default for State {
@@ -89,6 +90,7 @@ impl Default for State {
             metadata_in_flight: HashSet::new(),
             metadata_finished: HashSet::new(),
             scroll_offset: 0.0,
+            row_height: RESULT_ROW_HEIGHT,
         }
     }
 }
@@ -107,6 +109,7 @@ impl PartialEq for State {
             metadata_in_flight,
             metadata_finished,
             scroll_offset,
+            row_height,
         } = self;
         let Self {
             input: other_input,
@@ -120,6 +123,7 @@ impl PartialEq for State {
             metadata_in_flight: other_metadata_in_flight,
             metadata_finished: other_metadata_finished,
             scroll_offset: other_scroll_offset,
+            row_height: other_row_height,
         } = other;
 
         input == other_input
@@ -133,6 +137,7 @@ impl PartialEq for State {
             && metadata_in_flight == other_metadata_in_flight
             && metadata_finished == other_metadata_finished
             && scroll_offset == other_scroll_offset
+            && row_height == other_row_height
     }
 }
 impl State {
@@ -152,6 +157,17 @@ impl State {
                 action,
             }
         })
+    }
+
+    /// Keep the same logical result anchored when display preferences change.
+    pub(crate) fn set_row_height(&mut self, height: f32) -> Option<f32> {
+        if height.is_finite() && height > 0.0 && height != self.row_height {
+            self.scroll_offset *= height / self.row_height;
+            self.row_height = height;
+            Some(self.scroll_offset)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn set_scroll_offset(&mut self, offset: f32) -> bool {
@@ -356,8 +372,8 @@ impl State {
 
     pub(crate) fn virtual_rows(&self, viewport_height: f32) -> VirtualRows {
         let range = self.row_range(viewport_height, VIRTUAL_ROW_OVERSCAN);
-        let top_padding = range.start as f32 * RESULT_ROW_HEIGHT;
-        let bottom_padding = self.rows.len().saturating_sub(range.end) as f32 * RESULT_ROW_HEIGHT;
+        let top_padding = range.start as f32 * self.row_height;
+        let bottom_padding = self.rows.len().saturating_sub(range.end) as f32 * self.row_height;
 
         VirtualRows {
             range,
@@ -390,8 +406,8 @@ impl State {
 
         let top = finite_nonnegative(self.scroll_offset);
         let bottom = top + finite_nonnegative(viewport_height);
-        let visible_start = (top / RESULT_ROW_HEIGHT).floor() as usize;
-        let visible_end = (bottom / RESULT_ROW_HEIGHT).ceil() as usize;
+        let visible_start = (top / self.row_height).floor() as usize;
+        let visible_end = (bottom / self.row_height).ceil() as usize;
         let start = visible_start.saturating_sub(overscan);
         let end = visible_end.saturating_add(overscan);
         start.min(self.rows.len())..end.min(self.rows.len())
@@ -685,6 +701,22 @@ mod tests {
         assert_eq!(window.range, 6..17);
         assert_eq!(window.top_padding, RESULT_ROW_HEIGHT * 6.0);
         assert_eq!(window.bottom_padding, RESULT_ROW_HEIGHT * 3.0);
+    }
+
+    #[test]
+    fn display_change_preserves_result_anchor_and_updates_virtual_spacers() {
+        let mut state = State::default();
+        let request = state.edit_query("alpha".to_owned()).quick_request.unwrap();
+        let batch = SearchQuickBatch::new(request.key().clone(), hits(20), false);
+        assert!(state.apply_quick_result(request.key(), Ok(batch)));
+        state.set_scroll_offset(RESULT_ROW_HEIGHT * 10.0);
+        assert_eq!(state.set_row_height(100.0), Some(1000.0));
+        let rows = state.virtual_rows(300.0);
+        assert_eq!(rows.range, 6..17);
+        assert_eq!(rows.top_padding, 600.0);
+        assert_eq!(rows.bottom_padding, 300.0);
+        assert_eq!(state.set_row_height(100.0), None);
+        assert_eq!(state.set_row_height(f32::NAN), None);
     }
 
     #[test]

@@ -21,34 +21,42 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
     } else {
         format!("{} · {}", about::os_name(), std::env::consts::ARCH)
     };
-    let hero = row![
-        svg(about::os_art())
-            .width(76)
-            .height(90)
-            .content_fit(ContentFit::Contain),
-        column![
-            text("gmpublished")
-                .size(tokens.typography.display_lg)
-                .font(theme::styles::inter_font(font::Weight::Semibold)),
-            text(i18n.tr("settings-about-description"))
-                .size(tokens.typography.body_sm)
-                .color(tokens.colors.text_dim),
-            text(platform)
-                .size(tokens.typography.caption_xs)
-                .color(tokens.colors.text_dim),
-        ]
-        .spacing(6)
-        .width(Length::Fill),
+    let art = svg(about::os_art())
+        .width(tokens.icon_size(76.0))
+        .height(tokens.icon_size(90.0))
+        .content_fit(ContentFit::Contain);
+    let heading = column![
+        text("gmpublished")
+            .size(if compact {
+                tokens.typography.title_lg
+            } else {
+                tokens.typography.display_lg
+            })
+            .font(theme::styles::inter_font(font::Weight::Semibold)),
+        text(i18n.tr("settings-about-description"))
+            .size(tokens.typography.body_sm)
+            .color(tokens.colors.text_dim),
+        text(platform)
+            .size(tokens.typography.caption_xs)
+            .color(tokens.colors.text_dim),
     ]
-    .spacing(20)
-    .align_y(iced::Center);
+    .spacing(tokens.spacing.gap_sm)
+    .width(Length::Fill);
+    let hero: Element<'a, Message> = if compact {
+        column![art, heading].spacing(tokens.space(20.0)).into()
+    } else {
+        row![art, heading]
+            .spacing(tokens.space(20.0))
+            .align_y(iced::Center)
+            .into()
+    };
 
     let repository = button(
         row![
             svg_icon(
                 svg::Handle::from_memory(include_bytes!("../../../ui/icons/github.svg")),
                 tokens.colors.text.into(),
-                29.0
+                tokens.icon_size(29.0)
             ),
             column![
                 text(i18n.tr("settings-about-github")).size(tokens.typography.body),
@@ -56,19 +64,19 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
                     .size(tokens.typography.caption)
                     .color(tokens.colors.text_dim),
             ]
-            .spacing(3)
+            .spacing(tokens.space(3.0))
             .width(Length::Fill),
             svg_icon(
                 assets::icons::context_link_out(),
                 tokens.colors.text_dim.into(),
-                17.0
+                tokens.icon_size(17.0)
             ),
         ]
-        .spacing(15)
+        .spacing(tokens.space(15.0))
         .align_y(iced::Center),
     )
     .width(Length::Fill)
-    .padding(16)
+    .padding(tokens.space(16.0))
     .on_press(Message::AboutLinkOpened(AboutLink::Repository))
     .style(move |_, status| card_style(&tokens, status));
 
@@ -82,7 +90,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
                     assets::icons::context_copy()
                 },
                 tokens.colors.text.into(),
-                15.0
+                tokens.icon_size(15.0)
             ),
             text(i18n.tr(if state.about.copied {
                 "settings-about-copied"
@@ -91,27 +99,32 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
             }))
             .size(tokens.typography.caption),
         ]
-        .spacing(8)
+        .spacing(tokens.space(8.0))
         .align_y(iced::Center),
     )
-    .padding([9, 12])
+    .padding([tokens.space(9.0), tokens.space(12.0)])
     .on_press_maybe(ready.then_some(Message::CopyDebugInfoRequested))
     .style(move |_, status| super::view::text_button_style(&tokens, status));
 
-    let debug_header = row![
-        column![
-            text(i18n.tr("settings-about-debug-title")).size(tokens.typography.body_sm),
-            text(i18n.tr("settings-about-debug-description"))
-                .size(tokens.typography.caption)
-                .color(tokens.colors.text_dim),
-        ]
-        .spacing(4)
-        .width(Length::Fill),
-        copy,
+    let debug_heading = column![
+        text(i18n.tr("settings-about-debug-title")).size(tokens.typography.body_sm),
+        text(i18n.tr("settings-about-debug-description"))
+            .size(tokens.typography.caption)
+            .color(tokens.colors.text_dim),
     ]
-    .spacing(12)
-    .align_y(iced::Center);
-    let mut debug = column![debug_header].spacing(12);
+    .spacing(tokens.spacing.gap_xs)
+    .width(Length::Fill);
+    let debug_header: Element<'a, Message> = if compact {
+        column![debug_heading, copy]
+            .spacing(tokens.spacing.gap_sm)
+            .into()
+    } else {
+        row![debug_heading, copy]
+            .spacing(tokens.spacing.gap_sm)
+            .align_y(iced::Center)
+            .into()
+    };
+    let mut debug = column![debug_header].spacing(tokens.space(12.0));
     match &state.about.report {
         DebugReport::Ready(report) => {
             debug = debug.push(
@@ -124,7 +137,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
                                 assets::icons::chevron_down()
                             },
                             tokens.colors.text_dim.into(),
-                            12.0
+                            tokens.icon_size(12.0)
                         ),
                         text(i18n.tr(if state.about.expanded {
                             "settings-about-debug-hide"
@@ -133,7 +146,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
                         }))
                         .size(tokens.typography.caption_xs),
                     ]
-                    .spacing(5)
+                    .spacing(tokens.space(5.0))
                     .align_y(iced::Center),
                 )
                 .padding(0)
@@ -150,7 +163,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
                             .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                     )
                     .width(Length::Fill)
-                    .padding(12)
+                    .padding(tokens.space(12.0))
                     .style(move |_| container::Style {
                         background: Some(Color::from(tokens.colors.surface_sunken).into()),
                         border: Border {
@@ -189,75 +202,77 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>, compact: bool) -> Ele
         footer_link(
             i18n.tr("settings-about-license"),
             AboutLink::License,
-            tokens
+            &tokens
         ),
         footer_link(
             i18n.tr("settings-about-notices"),
             AboutLink::ThirdPartyNotices,
-            tokens
+            &tokens
         ),
         footer_link(
             i18n.tr("settings-about-releases"),
             AboutLink::Releases,
-            tokens
+            &tokens
         ),
     ]
-    .spacing(16)
+    .spacing(tokens.space(16.0))
     .wrap();
     let credits = column![
         text(i18n.tr("settings-about-credits")).size(tokens.typography.body_sm),
         linked_copy(
-            i18n.tr("settings-about-upstream"),
+            &i18n.tr("settings-about-upstream"),
             &[
                 ("gmpublisher", AboutLink::Upstream),
                 ("William Venner", AboutLink::OriginalAuthor),
             ],
-            tokens
+            &tokens
         ),
         linked_copy(
-            i18n.tr("settings-about-maintainers"),
+            &i18n.tr("settings-about-maintainers"),
             &[("Charles Mills", AboutLink::Maintainer),],
-            tokens
+            &tokens
         ),
         Space::new().height(4),
         footer,
     ]
-    .spacing(7);
+    .spacing(tokens.space(7.0));
 
     column![
         hero,
         repository,
-        divider(tokens),
+        divider(&tokens),
         debug,
-        divider(tokens),
+        divider(&tokens),
         credits
     ]
-    .spacing(18)
+    .spacing(tokens.space(18.0))
     .width(Length::Fill)
     .into()
 }
 
-fn divider<'a>(tokens: Tokens) -> Element<'a, Message> {
+fn divider<'a>(tokens: &Tokens) -> Element<'a, Message> {
+    let color = tokens.colors.divider;
     container(Space::new().height(1))
         .width(Length::Fill)
         .style(move |_| container::Style {
-            background: Some(Color::from(tokens.colors.divider).into()),
+            background: Some(Color::from(color).into()),
             ..container::Style::default()
         })
         .into()
 }
 
-fn footer_link<'a>(label: String, target: AboutLink, tokens: Tokens) -> Element<'a, Message> {
+fn footer_link<'a>(label: String, target: AboutLink, tokens: &Tokens) -> Element<'a, Message> {
+    let tokens = *tokens;
     button(
         row![
             text(label).size(tokens.typography.caption_xs),
             svg_icon(
                 assets::icons::context_link_out(),
                 tokens.colors.text_dim.into(),
-                12.0
+                tokens.icon_size(12.0)
             ),
         ]
-        .spacing(5)
+        .spacing(tokens.space(5.0))
         .align_y(iced::Center),
     )
     .padding(0)
@@ -268,9 +283,9 @@ fn footer_link<'a>(label: String, target: AboutLink, tokens: Tokens) -> Element<
 
 // Match names after translation so link positions follow each language's word order.
 fn linked_copy<'a>(
-    sentence: String,
+    sentence: &str,
     links: &[(&str, AboutLink)],
-    tokens: Tokens,
+    tokens: &Tokens,
 ) -> Element<'a, Message> {
     let mut positions = links
         .iter()
@@ -364,7 +379,7 @@ mod tests {
             iced::Size::new(640.0, 720.0),
             container(view(&state, ViewCtx::new(&tokens, &i18n), false))
                 .width(472)
-                .padding(24),
+                .padding(tokens.space(24.0)),
         );
         ui.click("gmpublished on GitHub").expect("repository card");
         ui.click("Copy debug info").expect("copy button");

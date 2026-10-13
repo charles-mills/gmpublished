@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,7 +14,7 @@ use iced::{
 };
 
 use crate::bridge::{
-    AppPaths, DownloadCountFormat, Settings, SystemColorScheme, ThemePreset,
+    AppPaths, DownloadCountFormat, Settings, SystemColorScheme, ThemePreset, UiDensity,
     domain::{
         PublishedFileId, SearchFullRequest, SearchMode, SearchQuickRequest, WORKSHOP_LEGAL_URL,
         WorkshopDownloadResult, WorkshopDownloadSuccess, workshop_url,
@@ -47,6 +47,7 @@ const STEAM_WORKSHOP_URL: &str = "https://steamcommunity.com/app/4000/workshop/"
 const MAX_DROPPED_TEXT_BYTES: u64 = 1024 * 1024;
 const WORKSHOP_DRAG_PREFIX: &str = "gmpublished/workshop-id:";
 
+mod display;
 mod drag;
 mod hidden_addons;
 mod routes;
@@ -69,6 +70,8 @@ mod view_support;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ui_tests;
 
 use crate::media::audio_playback::AudioPlayback;
 #[cfg(test)]
@@ -106,6 +109,10 @@ pub struct App {
     /// Only sanitize one snapshot at a time so an older job cannot overwrite newer settings.
     appdata_snapshot_in_flight: bool,
     pending_appdata_snapshot: Option<Box<gmpublished_backend::AppDataSnapshot>>,
+    settings_save_in_flight: Option<(crate::generation::Generation, settings::SettingsMutation)>,
+    settings_save_queue: VecDeque<(crate::generation::Generation, settings::SettingsMutation)>,
+    pending_settings_reset: Option<settings::ResetAction>,
+    settings_reset_in_flight: bool,
 }
 
 #[derive(Debug)]
@@ -150,6 +157,11 @@ pub struct State {
     chrome_strategy: shell::ChromeStrategy,
     theme_preset: ThemePreset,
     download_count_format: DownloadCountFormat,
+    density: UiDensity,
+    density_motion: theme::motion::Presence<f32>,
+    density_progress: f32,
+    reduce_motion: bool,
+    text_size_percent: u16,
     system_scheme: SystemColorScheme,
     accent_inputs: theme::AccentInputs,
     tokens: Tokens,
@@ -192,9 +204,19 @@ impl Default for State {
             chrome_strategy: shell::ChromeStrategy::resolve(Settings::default().backend.titlebar),
             theme_preset,
             download_count_format,
+            density: UiDensity::default(),
+            density_motion: theme::motion::Presence::new(
+                0.0,
+                theme::invariant().motion.layout_duration(),
+                iced::animation::Easing::EaseOut,
+            ),
+            density_progress: 0.0,
+            reduce_motion: false,
+            text_size_percent: 100,
             system_scheme,
             accent_inputs,
-            tokens: resolve_tokens(theme_preset, system_scheme, accent_inputs),
+            tokens: resolve_tokens(theme_preset, system_scheme, accent_inputs)
+                .with_display_preferences(UiDensity::default(), 100),
             addon_drag: AddonDragState::default(),
             context_menu_extraction: ExtractionHandoff::Idle,
             hidden_addons: hidden_addons::HiddenAddons::default(),
@@ -202,6 +224,7 @@ impl Default for State {
             i18n: I18n::from_user_or_system(None),
         };
         state.apply_localized_labels();
+        state.initialize_ui_metrics();
         state
     }
 }
@@ -316,7 +339,14 @@ impl State {
     fn apply_runtime_settings(&mut self, settings: &Settings) {
         self.theme_preset = settings.ui.theme_preset;
         self.accent_inputs = settings::accent_inputs_from_settings(settings);
-        self.tokens = resolve_tokens(self.theme_preset, self.system_scheme, self.accent_inputs);
+        self.reduce_motion = settings.ui.reduce_motion;
+        self.transition_density(
+            settings.ui.density,
+            Instant::now(),
+            self.viewport_size != Size::ZERO,
+        );
+        self.text_size_percent = settings.ui.text_size_percent;
+        self.resolve_ui_tokens();
         self.chrome_strategy = shell::ChromeStrategy::resolve(settings.backend.titlebar);
         self.download_count_format = settings.ui.download_count_format;
         self.apply_runtime_language(settings.backend.language.as_deref());
@@ -365,12 +395,13 @@ impl State {
         self.features.settings.apply_system_scheme(system_scheme);
 
         if self.follows_system_theme() {
-            self.tokens = resolve_tokens(self.theme_preset, self.system_scheme, self.accent_inputs);
+            self.resolve_ui_tokens();
         }
     }
 
     fn needs_motion_ticks(&self) -> bool {
-        self.features.modal_stack.needs_ticks()
+        self.density_motion.needs_ticks()
+            || self.features.modal_stack.needs_ticks()
             || self.features.context_menu.needs_ticks()
             || self.features.shell.needs_motion_ticks()
             || self.features.search.needs_motion_ticks()
@@ -655,6 +686,7 @@ impl App {
         let mut state = State::default();
         let (settings, paths) = ctx.settings_and_paths_snapshot();
         let _result = state.apply_settings_snapshot(settings, paths);
+        state.initialize_ui_metrics();
         ctx.set_workshop_language(gmpublished_backend::WorkshopLanguage::from_locale(
             state.i18n.locale_id(),
         ));
@@ -672,6 +704,10 @@ impl App {
             update_context: UpdateContext::capture(),
             appdata_snapshot_in_flight: false,
             pending_appdata_snapshot: None,
+            settings_save_in_flight: None,
+            settings_save_queue: VecDeque::new(),
+            pending_settings_reset: None,
+            settings_reset_in_flight: false,
         };
         #[cfg(target_os = "macos")]
         app.install_macos_menu();
@@ -794,7 +830,21 @@ impl App {
             RootMessage::DescriptionEditor(message) => {
                 self.apply_description_editor_message(message, update)
             }
-            RootMessage::Settings(message) => self.apply_settings_message(message),
+            RootMessage::Settings(message) => {
+                let completed = matches!(&message, settings::Message::SaveCompleted(generation, _)
+                    if self.settings_save_in_flight.as_ref().is_some_and(|(active, _)| active == generation));
+                let reset_completed = matches!(&message, settings::Message::ResetCompleted(_, _));
+                let task = self.apply_settings_message(message);
+                if reset_completed {
+                    self.settings_reset_in_flight = false;
+                    Task::batch([task, self.start_next_settings_save()])
+                } else if completed {
+                    self.settings_save_in_flight = None;
+                    Task::batch([task, self.start_next_settings_save()])
+                } else {
+                    task
+                }
+            }
             RootMessage::ContextMenu(message) => self.apply_context_menu_message(message, update),
             RootMessage::SteamSession(message) => self.apply_steam_session_message(message),
             RootMessage::Prerequisites(message) => self.apply_prerequisites_message(message),
@@ -828,7 +878,16 @@ impl App {
             RootMessage::AppDataSnapshotApplied(result) => {
                 self.appdata_snapshot_in_flight = false;
                 let applied = match result {
-                    Ok(snapshot) => self.apply_settings_snapshot_runtime(&snapshot),
+                    Ok(_) => {
+                        // A save can publish newer settings before the worker result reaches the UI.
+                        let (settings, paths) = self.environment.ctx.settings_and_paths_snapshot();
+                        let snapshot = settings::SettingsSnapshot::new(
+                            settings,
+                            paths,
+                            self.state.system_scheme,
+                        );
+                        self.apply_settings_snapshot_runtime(&snapshot)
+                    }
                     Err(error) => {
                         log::warn!("failed to apply backend settings snapshot: {error}");
                         Task::none()
@@ -942,6 +1001,9 @@ impl App {
                     .tick_browser_select_hover(now);
                 self.state.features.downloader.tick_progress(now);
                 let mut finish_tasks = Vec::new();
+                if self.state.tick_density_motion(now) {
+                    finish_tasks.push(self.refresh_ui_metrics_task());
+                }
                 if palette_close_settled {
                     // The fading rows kept their thumbnails demanded; release
                     // them after the palette has fully reset.
@@ -1202,6 +1264,10 @@ impl App {
                 self.my_workshop_context_menu_task(menu)
             }
             my_workshop::Effect::ThumbnailDemandsChanged => self.my_workshop_thumbnail_demands(),
+            my_workshop::Effect::GridScrollAnchored(delta) => iced::widget::operation::scroll_by(
+                addon_grid::scrollable_id(my_workshop::GRID_KEY),
+                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: delta },
+            ),
             my_workshop::Effect::AddonDragPressed {
                 card_id,
                 workshop_id,
@@ -1482,13 +1548,28 @@ impl App {
             }
             settings::Effect::MutationApplied(generation, mutation) => {
                 let runtime_task = self.apply_settings_mutation_runtime(&mutation);
-                let save_task = self.settings_save_task(generation, mutation);
+                let save_task = self.enqueue_settings_save(generation, mutation);
                 Task::batch([runtime_task, save_task])
+            }
+            settings::Effect::FocusMoved(reverse) => {
+                use iced::advanced::widget::operation::{focusable, scope};
+                let id = iced::widget::Id::new("settings-modal");
+                if reverse {
+                    iced::advanced::widget::operate(scope(id, focusable::focus_previous()))
+                } else {
+                    iced::advanced::widget::operate(scope(id, focusable::focus_next()))
+                }
+            }
+            settings::Effect::PreviewApplied(mutation) => {
+                self.apply_settings_mutation_runtime(&mutation)
             }
             settings::Effect::SnapshotApplied(snapshot) => {
                 self.apply_settings_snapshot_runtime(&snapshot)
             }
-            settings::Effect::ResetRunRequested(action) => self.settings_reset_task(action),
+            settings::Effect::ResetRunRequested(action) => {
+                self.pending_settings_reset = Some(action);
+                self.start_next_settings_save()
+            }
         }
     }
 
@@ -1508,12 +1589,16 @@ impl App {
         let tokens = self.state.tokens;
         let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
         let now = Instant::now();
-        let route_body: Element<'_, RootMessage> = container(self.active_route_view())
-            .padding(tokens.spacing.pad)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| theme::styles::surface(&tokens))
-            .into();
+        let route_body: Element<'_, RootMessage> = container(crate::widgets::settle::settle(
+            self.active_route_view(),
+            self.state.features.shell.route() as u64,
+            &tokens,
+        ))
+        .padding(tokens.spacing.pad)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| theme::styles::surface(&tokens))
+        .into();
         let body: Element<'_, RootMessage> = if self.state.chrome_strategy.mac_native_inset() {
             column![content_drag_strip(&tokens), route_body]
                 .spacing(0.0)
@@ -1529,6 +1614,7 @@ impl App {
                 &self.state.features.shell,
                 ctx,
                 self.state.chrome_strategy,
+                self.state.viewport_size.width,
                 self.state.addon_drag.is_dragging(),
                 now,
             )
@@ -1563,9 +1649,12 @@ impl App {
             layers = layers.push(dropdown.map(RootMessage::Search));
         }
 
-        if let Some(account_menu) =
-            shell::account_menu_overlay(&self.state.features.shell, ctx, now)
-        {
+        if let Some(account_menu) = shell::account_menu_overlay(
+            &self.state.features.shell,
+            ctx,
+            self.state.viewport_size,
+            now,
+        ) {
             layers = layers.push(account_menu.map(RootMessage::Shell));
         }
 
@@ -2007,7 +2096,7 @@ fn addon_drag_cursor_overlay(
     tokens: &Tokens,
     _now: Instant,
 ) -> Element<'static, RootMessage> {
-    let left = shell::sidebar_width(tokens, state.chrome_strategy);
+    let left = shell::sidebar_width(tokens, state.chrome_strategy, state.viewport_size.width);
 
     container(
         mouse_area(Space::new().width(Length::Fill).height(Length::Fill))

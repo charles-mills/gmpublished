@@ -505,3 +505,18 @@ settings-about-maintainers = Développé par Charles Mills et des contributeurs 
 settings-about-license = Licence (GNU GPL v3)
 settings-about-notices = Mentions de tiers
 settings-about-releases = Notes de version
+
+settings-display-heading = Affichage
+settings-display-spacing = Espacement
+settings-display-comfortable = Confortable
+settings-display-compact = Compacte
+settings-display-text-size = Taille du texte
+settings-display-reset-text = Réinitialiser la taille du texte
+settings-display-reset = Réinitialiser les préférences d’affichage
+settings-display-sample-heading = À votre convenance
+settings-display-sample-body = Le texte et les commandes s’adaptent ensemble tout en conservant votre contenu.
+settings-display-sample-supporting = L’espacement et la taille du texte sont indépendants.
+settings-display-colors = Couleurs d’accentuation
+
+settings-display-reduce-motion = Réduire les animations
+settings-display-reduce-motion-hint = Afficher instantanément les changements de disposition, menus et dialogues.

@@ -505,3 +505,18 @@ settings-about-maintainers = 由 Charles Mills 和开源贡献者使用 Rust 和
 settings-about-license = 许可证 (GNU GPL v3)
 settings-about-notices = 第三方声明
 settings-about-releases = 版本说明
+
+settings-display-heading = 显示
+settings-display-spacing = 间距
+settings-display-comfortable = 舒适
+settings-display-compact = 紧凑
+settings-display-text-size = 文字大小
+settings-display-reset-text = 重置文字大小
+settings-display-reset = 重置显示偏好
+settings-display-sample-heading = 调整到舒适的状态
+settings-display-sample-body = 文字和控件会一起调整，同时保留您的内容。
+settings-display-sample-supporting = 间距和文字大小可独立设置。
+settings-display-colors = 强调色
+
+settings-display-reduce-motion = 减少动态效果
+settings-display-reduce-motion-hint = 布局更改、菜单和对话框立即切换。

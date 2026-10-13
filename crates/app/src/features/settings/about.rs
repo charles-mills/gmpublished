@@ -65,10 +65,7 @@ impl AboutState {
 
     pub fn complete(&mut self, generation: Generation, result: Result<String, UiError>) {
         if generation == self.generation {
-            self.report = match result {
-                Ok(report) => DebugReport::Ready(report),
-                Err(_) => DebugReport::Failed,
-            };
+            self.report = result.map_or(DebugReport::Failed, DebugReport::Ready);
         }
     }
 }
@@ -97,7 +94,7 @@ pub(super) fn os_art() -> iced::widget::svg::Handle {
     iced::widget::svg::Handle::from_memory(bytes)
 }
 
-pub(crate) fn debug_report(
+pub fn debug_report(
     info: &iced::system::Information,
     scale: f32,
     locale: &str,

@@ -505,3 +505,18 @@ settings-about-maintainers = Desenvolvido por Charles Mills e colaboradores de c
 settings-about-license = Licença (GNU GPL v3)
 settings-about-notices = Avisos de terceiros
 settings-about-releases = Notas da versão
+
+settings-display-heading = Exibição
+settings-display-spacing = Espaçamento
+settings-display-comfortable = Confortável
+settings-display-compact = Compacto
+settings-display-text-size = Tamanho do texto
+settings-display-reset-text = Redefinir tamanho do texto
+settings-display-reset = Redefinir preferências de exibição
+settings-display-sample-heading = Fique à vontade
+settings-display-sample-body = O texto e os controles se adaptam juntos enquanto seu conteúdo permanece no lugar.
+settings-display-sample-supporting = O espaçamento e o tamanho do texto são independentes.
+settings-display-colors = Cores de destaque
+
+settings-display-reduce-motion = Reduzir movimento
+settings-display-reduce-motion-hint = Mostrar mudanças de layout, menus e diálogos sem transições.

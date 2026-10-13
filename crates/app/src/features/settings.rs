@@ -7,9 +7,11 @@ mod update;
 mod view;
 
 pub use about::AboutLink;
-pub(crate) use about::debug_report;
+pub use about::debug_report;
 pub use effect::Effect;
 pub use message::Message;
+#[cfg(test)]
+pub use state::Tab;
 pub use state::{
     ColorSetting, PathSetting, PathValidationRequest, ResetAction, SettingsMutation,
     SettingsSnapshot, State, accent_inputs_from_settings, apply_settings_mutation,

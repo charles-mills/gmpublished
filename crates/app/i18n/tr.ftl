@@ -505,3 +505,18 @@ settings-about-maintainers = Charles Mills ve açık kaynak katkıcıları taraf
 settings-about-license = Lisans (GNU GPL v3)
 settings-about-notices = Üçüncü taraf bildirimleri
 settings-about-releases = Sürüm notları
+
+settings-display-heading = Görünüm
+settings-display-spacing = Aralık
+settings-display-comfortable = Rahat
+settings-display-compact = Sıkışık
+settings-display-text-size = Metin boyutu
+settings-display-reset-text = Metin boyutunu sıfırla
+settings-display-reset = Görünüm tercihlerini sıfırla
+settings-display-sample-heading = Rahatınıza göre ayarlayın
+settings-display-sample-body = İçeriğiniz yerinde kalırken metin ve denetimler birlikte uyarlanır.
+settings-display-sample-supporting = Aralık ve metin boyutu birbirinden bağımsızdır.
+settings-display-colors = Vurgu renkleri
+
+settings-display-reduce-motion = Hareketi azalt
+settings-display-reduce-motion-hint = Düzen değişikliklerini, menüleri ve iletişim kutularını geçiş olmadan göster.
