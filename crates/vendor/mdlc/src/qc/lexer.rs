@@ -139,6 +139,7 @@ pub struct Lexer {
     stack: Vec<Frame>,
     /// `qdir` —— **主 QC 所在目录**，`$include` 与网格路径的基准。
     pub qdir: PathBuf,
+    pub search_paths: Vec<PathBuf>,
     /// 已定义宏。
     macros: Vec<Macro>,
     /// 已定义变量。
@@ -157,6 +158,7 @@ impl Lexer {
         Self {
             stack: Vec::new(),
             qdir,
+            search_paths: Vec::new(),
             macros: Vec::new(),
             variables: Vec::new(),
             pending: None,
@@ -546,11 +548,21 @@ impl Lexer {
         }
         let normalized = name.text.replace('\\', "/");
         let rel = Path::new(&normalized);
-        let full = if rel.is_absolute() {
+        let mut full = if rel.is_absolute() {
             rel.to_path_buf()
         } else {
             self.qdir.join(rel)
         };
+        if !rel.is_absolute()
+            && !full.is_file()
+            && let Some(candidate) = self
+                .search_paths
+                .iter()
+                .map(|directory| directory.join(rel))
+                .find(|path| path.is_file())
+        {
+            full = candidate;
+        }
         let bytes = std::fs::read(&full).map_err(|e| {
             // 官方此处**静默跳过**；mdlc 故意报错（见模块文档）。
             QcError::new(

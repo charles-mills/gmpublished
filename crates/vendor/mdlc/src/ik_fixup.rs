@@ -8,6 +8,7 @@ pub(crate) fn apply(
     desc: &ModelDesc,
     parents: &[i32],
     rules: &[IkRule],
+    base_frame0: &[crate::smd::SmdPose],
 ) -> Result<(), String> {
     if parents.len() != desc.bones.len()
         || animation
@@ -21,10 +22,11 @@ pub(crate) fn apply(
         if rule.kind != IkRuleType::Footstep || animation.frames.len() <= 1 {
             continue;
         }
-        if animation.delta || !animation.local_hierarchy.is_empty() {
-            return Err(
-                "ikfixup footstep cannot preserve delta or localhierarchy animations".into(),
-            );
+        if !animation.local_hierarchy.is_empty() {
+            return Err("ikfixup requires localhierarchy to be baked into animation frames".into());
+        }
+        if animation.delta && base_frame0.len() != parents.len() {
+            return Err("ikfixup delta reference does not match the model skeleton".into());
         }
         let chain = desc
             .ikchains
@@ -57,9 +59,11 @@ pub(crate) fn apply(
         }
         if range.iter().any(|frame| *frame < 0)
             || range.windows(2).any(|window| window[0] > window[1])
-            || range[3] > last
+            || (!animation.looping && range[3] > last)
         {
-            return Err("ikfixup requires a nonwrapped range of explicit frame indices".into());
+            return Err(
+                "ikfixup requires an ordered range within the animation or its loop".into(),
+            );
         }
         let contact = rule
             .contact
@@ -75,11 +79,24 @@ pub(crate) fn apply(
                 frame
             } as usize)
         };
-        let world = crate::compile::frame_worlds(desc, parents, &animation.frames[index(contact)?]);
+        let worlds = |animation: &CompiledAnimation, sample: usize| {
+            if animation.delta {
+                crate::compile::delta_frame_worlds_weighted(
+                    desc,
+                    parents,
+                    base_frame0,
+                    &animation.frames[sample],
+                    &animation.weights,
+                )
+            } else {
+                crate::compile::frame_worlds(desc, parents, &animation.frames[sample])
+            }
+        };
+        let world = worlds(animation, index(contact)?);
         let footfall = position(&world[tip]);
         for frame in range[0]..=range[3] {
             let sample = index(frame)?;
-            let mut world = crate::compile::frame_worlds(desc, parents, &animation.frames[sample]);
+            let mut world = worlds(animation, sample);
             let movement = crate::anim_writer::ik_movement(
                 &animation.movements,
                 animation.frames.len(),
@@ -94,14 +111,41 @@ pub(crate) fn apply(
                 } else {
                     math::concat(&math::invert(&world[parents[bone] as usize]), &world[bone])
                 };
-                let pose = &mut animation.frames[sample][bone];
-                pose.position = position(&local);
-                pose.rotation = math::matrix_angles(&local);
-                if parents[bone] < 0 && !desc.model.static_prop {
-                    let local = math::concat(
+                let local = if parents[bone] < 0 && !desc.model.static_prop {
+                    math::concat(
                         &math::angle_matrix([0.0, 0.0, -std::f32::consts::FRAC_PI_2]),
                         &local,
-                    );
+                    )
+                } else {
+                    local
+                };
+                let pose = &mut animation.frames[sample][bone];
+                if animation.delta {
+                    let weight = animation.weights.get(bone).copied().unwrap_or(1.0);
+                    let base = base_frame0[bone];
+                    if weight <= 0.0 {
+                        let expected = math::local_transform(base.position, base.rotation);
+                        if local
+                            .iter()
+                            .zip(expected)
+                            .any(|(actual, expected)| (actual - expected).abs() > 0.0001)
+                        {
+                            return Err(
+                                "ikfixup cannot move a bone with zero animation weight".into()
+                            );
+                        }
+                        continue;
+                    }
+                    pose.position = std::array::from_fn(|axis| {
+                        (local[axis * 4 + 3] - base.position[axis]) / weight
+                    });
+                    let inverse_base =
+                        math::quaternion_scale(math::angle_quaternion(base.rotation), -1.0);
+                    let delta =
+                        math::quaternion_mult(inverse_base, math::matrix_quaternion(&local));
+                    pose.rotation =
+                        math::quaternion_angles(math::quaternion_scale(delta, 1.0 / weight));
+                } else {
                     pose.position = position(&local);
                     pose.rotation = math::matrix_angles(&local);
                 }
@@ -115,7 +159,7 @@ pub(crate) fn apply(
     Ok(())
 }
 
-fn solve(
+pub(crate) fn solve(
     world: &mut [math::Matrix3x4],
     [root, mid, tip]: [usize; 3],
     target: [f32; 3],
@@ -170,7 +214,13 @@ fn solve(
 }
 fn align(matrix: &mut math::Matrix3x4, axis: [f32; 3]) -> Result<(), String> {
     let x = normalized(axis)?;
-    let y = normalized(cross([matrix[2], matrix[6], matrix[10]], x))?;
+    let y = cross([matrix[2], matrix[6], matrix[10]], x);
+    let y = if length(y) < 0.000001 {
+        let previous = [matrix[1], matrix[5], matrix[9]];
+        normalized(sub(previous, scale(x, dot(previous, x))))?
+    } else {
+        normalized(y)?
+    };
     let z = cross(x, y);
     for row in 0..3 {
         matrix[row * 4] = x[row];
@@ -220,6 +270,147 @@ mod tests {
         [[0.0, 0.0, 0.0], [4.0, 3.0, 0.0], [8.0, 0.0, 0.0]]
             .map(|position| math::local_transform(position, [0.0; 3]))
             .to_vec()
+    }
+
+    fn fixture(
+        delta: bool,
+        looping: bool,
+    ) -> (
+        ModelDesc,
+        CompiledAnimation,
+        Vec<crate::smd::SmdPose>,
+        IkRule,
+    ) {
+        let desc: ModelDesc = toml::from_str(
+            r#"
+[model]
+name = "limb"
+[[bones]]
+name = "hip"
+[[bones]]
+name = "knee"
+parent = "hip"
+[[bones]]
+name = "foot"
+parent = "knee"
+[[ikchains]]
+name = "leg"
+bone = "foot"
+"#,
+        )
+        .unwrap();
+        let base = [[0.0; 3], [4.0, 3.0, 0.0], [4.0, -3.0, 0.0]]
+            .into_iter()
+            .enumerate()
+            .map(|(bone, position)| crate::smd::SmdPose {
+                bone: bone as i32,
+                position,
+                rotation: [0.0; 3],
+            })
+            .collect::<Vec<_>>();
+        let frames = [0.0, 1.0, 2.0, 1.0, 0.0]
+            .into_iter()
+            .map(|translation| {
+                let mut frame = base.clone();
+                frame[0].position[1] = translation;
+                if delta {
+                    for (pose, base) in frame.iter_mut().zip(&base) {
+                        pose.position = std::array::from_fn(|axis| {
+                            (pose.position[axis] - base.position[axis]) * 2.0
+                        });
+                    }
+                }
+                frame
+            })
+            .collect();
+        let animation = CompiledAnimation {
+            no_anim_block: false,
+            no_anim_block_stall: false,
+            source_frames: None,
+            local_hierarchy: Vec::new(),
+            weights: vec![if delta { 0.5 } else { 1.0 }; 3],
+            loop_restart: 0,
+            fudge_loop: false,
+            extra_flags: 0,
+            movements: Vec::new(),
+            name: "walk".into(),
+            smd_path: Default::default(),
+            fps: 30.0,
+            looping,
+            frames,
+            delta,
+            ik_rules: Vec::new(),
+            no_auto_ik: false,
+            pre_subtract_frames: None,
+        };
+        let rule: IkRule =
+            toml::from_str("chain = \"leg\"\ntype = \"footstep\"\ncontact = 0\n").unwrap();
+        (desc, animation, base, rule)
+    }
+
+    #[test]
+    fn footstep_fixup_preserves_absolute_and_weighted_delta_footfalls() {
+        for delta in [false, true] {
+            let (desc, mut animation, base, rule) = fixture(delta, false);
+            apply(&mut animation, &desc, &[-1, 0, 1], &[rule], &base).unwrap();
+            for frame in &animation.frames {
+                let world = if delta {
+                    crate::compile::delta_frame_worlds_weighted(
+                        &desc,
+                        &[-1, 0, 1],
+                        &base,
+                        frame,
+                        &animation.weights,
+                    )
+                } else {
+                    crate::compile::frame_worlds(&desc, &[-1, 0, 1], frame)
+                };
+                for (actual, expected) in position(&world[2]).into_iter().zip([0.0, 8.0, 0.0]) {
+                    assert!(
+                        (actual - expected).abs() < 0.0001,
+                        "delta={delta}: {actual} vs {expected}"
+                    );
+                }
+                assert!(
+                    (length(sub(position(&world[1]), position(&world[0]))) - 5.0).abs() < 0.0001
+                );
+                assert!(
+                    (length(sub(position(&world[2]), position(&world[1]))) - 5.0).abs() < 0.0001
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn looping_footstep_fixup_wraps_the_range_and_preserves_loop_closure() {
+        let (desc, mut animation, base, mut rule) = fixture(false, true);
+        rule.range = Some([Some(3), Some(3), Some(1), Some(1)]);
+        rule.contact = Some(3);
+        apply(&mut animation, &desc, &[-1, 0, 1], &[rule], &base).unwrap();
+        assert_eq!(animation.frames.first(), animation.frames.last());
+        for index in [0, 1, 3] {
+            let world = crate::compile::frame_worlds(&desc, &[-1, 0, 1], &animation.frames[index]);
+            for (actual, expected) in position(&world[2]).into_iter().zip([-1.0, 8.0, 0.0]) {
+                assert!((actual - expected).abs() < 0.0001);
+            }
+        }
+    }
+
+    #[test]
+    fn limb_alignment_remains_orthonormal_when_the_new_axis_matches_the_old_up_axis() {
+        let mut matrix = math::IDENTITY;
+        align(&mut matrix, [0.0, 0.0, 10.0]).unwrap();
+        let x = [matrix[0], matrix[4], matrix[8]];
+        let y = [matrix[1], matrix[5], matrix[9]];
+        let z = [matrix[2], matrix[6], matrix[10]];
+        assert_eq!(x, [0.0, 0.0, 1.0]);
+        for axis in [x, y, z] {
+            assert!((length(axis) - 1.0).abs() < 0.000001);
+        }
+        assert!(dot(x, y).abs() < 0.000001);
+        assert!(dot(x, z).abs() < 0.000001);
+        assert!(dot(y, z).abs() < 0.000001);
+        assert!((dot(cross(x, y), z) - 1.0).abs() < 0.000001);
     }
 
     #[test]

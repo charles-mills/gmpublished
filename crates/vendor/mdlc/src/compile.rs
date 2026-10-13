@@ -580,8 +580,11 @@ fn resolve_source_path(
                 });
             }
             let smd = path.with_extension("smd");
+            if !smd.is_file() && path.with_extension("obj").is_file() {
+                return Ok(path.with_extension("obj"));
+            }
             if !smd.is_file() {
-                for ext in ["sma", "phys", "vta", "obj"] {
+                for ext in ["sma", "phys", "vta"] {
                     let candidate = path.with_extension(ext);
                     if candidate.is_file() {
                         return Err(SrcError::UnsupportedImplicitSource {
@@ -613,6 +616,8 @@ fn read_smd(path: &Path, at: &str) -> Result<Smd, CompileError> {
 /// 一个资产引用的**格式**，由扩展名决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
+    Dmx,
+    Obj,
     /// `.smd` —— 文本 SMD。
     Smd,
     /// `.fbx` —— FBX（走 `ufbx`）。
@@ -634,6 +639,8 @@ impl SourceKind {
             .map(str::to_ascii_lowercase);
         match ext.as_deref() {
             Some("smd") => Ok(SourceKind::Smd),
+            Some("obj") => Ok(SourceKind::Obj),
+            Some("dmx") => Ok(SourceKind::Dmx),
             Some("fbx") => Ok(SourceKind::Fbx),
             // `.gltf` 是分离式（JSON + 外部 `.bin`），`.glb` 是单文件容器；
             // 两者走同一条读取路径（`gltf::Gltf::from_slice_without_validation`
@@ -821,25 +828,15 @@ impl SrcOpts {
     }
 }
 
-/// 读取一个源文件（`.smd` 或 `.fbx`），统一成中立的 [`Smd`]。
-///
-/// # 这是**唯一**的格式分派点
-///
-/// `compile.rs` 有一万多行，其余部分只认 [`Smd`]。让泛型或 `dyn` 穿过整条
-/// 管线会把编译期与运行期成本都抬起来，而格式来自**运行期**的路径字符串，
-/// 没有任何可以「延迟到单态化」的东西；读一个源文件在整次编译里也只发生
-/// 四五次。所以这里用一次 `match`，把格式问题**收在一个函数里**
-/// （选型讨论见 `docs/fbx-support.md` §6.2）。
-///
-/// # 默认值全部与官方一致
-///
-/// FBX 侧用的是 [`SrcOpts::default()`]，即「不干预单位与轴向、全部网格合并、
-/// 无材质时合成 `debug/debugempty`」—— 逐条对齐官方实测
-/// （`docs/fbx-support.md` §1）。mdlc 扩展语法（`srcpart` / `srcscale` /
-/// `srcaxis` …）由调用方填进 `opts`。
 pub fn read_source(path: &Path, at: &str, opts: &SrcOpts) -> Result<Smd, CompileError> {
     let mut smd = match SourceKind::of(path).map_err(|msg| e(at, msg))? {
         SourceKind::Smd => read_smd(path, at),
+        SourceKind::Dmx => crate::dmx::read(path, &opts.fbx)
+            .map(|g| g.smd)
+            .map_err(|message| e(at, message)),
+        SourceKind::Obj => {
+            crate::source_support::read_obj_file(path).map_err(|message| e(at, message))
+        }
         SourceKind::Fbx => crate::fbx::read(path, at, &opts.fbx)
             .map(|g| g.smd)
             .map_err(|err| e(at, err.to_string())),
@@ -886,6 +883,7 @@ fn apply_source_scale(smd: &mut Smd, opts: &SrcOpts, at: &str) -> Result<(), Com
 
 /// 一个**几何源**读出来的全部内容。
 pub struct SourceGeometry {
+    pub dmx: Option<crate::dmx::Metadata>,
     /// 中立几何（节点 / 参考姿态 / 三角形）。
     pub smd: Smd,
     /// FBX 的 shape key（**已变换到 Source 空间**）。SMD 源恒为空。
@@ -921,15 +919,32 @@ pub fn read_source_geometry(
     opts: &SrcOpts,
 ) -> Result<SourceGeometry, CompileError> {
     let mut geom = match SourceKind::of(path).map_err(|msg| e(at, msg))? {
-        SourceKind::Smd => read_smd(path, at).map(|smd| SourceGeometry {
+        kind @ (SourceKind::Smd | SourceKind::Obj) => (if kind == SourceKind::Obj {
+            crate::source_support::read_obj_file(path).map_err(|message| e(at, message))
+        } else {
+            read_smd(path, at)
+        })
+        .map(|smd| SourceGeometry {
+            dmx: None,
             smd,
             shape_keys: Vec::new(),
             untextured_meshes: Vec::new(),
             merged_meshes: Vec::new(),
             anim_stacks: Vec::new(),
         }),
+        SourceKind::Dmx => crate::dmx::read(path, &opts.fbx)
+            .map(|g| SourceGeometry {
+                smd: g.smd,
+                dmx: Some(g.metadata),
+                shape_keys: Vec::new(),
+                untextured_meshes: Vec::new(),
+                merged_meshes: Vec::new(),
+                anim_stacks: g.animation_names,
+            })
+            .map_err(|message| e(at, message)),
         SourceKind::Fbx => crate::fbx::read(path, at, &opts.fbx)
             .map(|g| SourceGeometry {
+                dmx: None,
                 smd: g.smd,
                 shape_keys: g.shape_keys,
                 untextured_meshes: g.untextured_meshes,
@@ -939,6 +954,7 @@ pub fn read_source_geometry(
             .map_err(|err| e(at, err.to_string())),
         SourceKind::Gltf => crate::gltf::read(path, at, &opts.fbx)
             .map(|g| SourceGeometry {
+                dmx: None,
                 smd: g.smd,
                 shape_keys: g.shape_keys,
                 untextured_meshes: g.untextured_meshes,
@@ -949,6 +965,13 @@ pub fn read_source_geometry(
     }?;
     apply_source_scale(&mut geom.smd, opts, at)?;
     let scale = opts.input_scale.unwrap_or(1.0);
+    if let Some(metadata) = &mut geom.dmx {
+        for shape in &mut metadata.shapes {
+            for delta in &mut shape.vertices {
+                delta.position = delta.position.map(|v| v * scale);
+            }
+        }
+    }
     if scale != 1.0 {
         for shape in &mut geom.shape_keys {
             for offset in &mut shape.position_offsets {
@@ -1052,8 +1075,12 @@ fn emit_fbx_diagnostics(at: &str, geom: &SourceGeometry, shape_keys: &[crate::fb
 /// ⚠️ 返回的 [`Smd`] 的 `triangles` 是空的 —— 调用方只取 `frames`。
 pub fn read_source_frames(path: &Path, at: &str, opts: &SrcOpts) -> Result<Smd, CompileError> {
     let mut smd = match SourceKind::of(path).map_err(|msg| e(at, msg))? {
-        SourceKind::Smd => {
-            let smd = read_smd(path, at)?;
+        kind @ (SourceKind::Smd | SourceKind::Obj) => {
+            let smd = if kind == SourceKind::Obj {
+                crate::source_support::read_obj_file(path).map_err(|message| e(at, message))?
+            } else {
+                read_smd(path, at)?
+            };
             if let Some((index, frame)) = smd
                 .frames
                 .iter()
@@ -1072,6 +1099,13 @@ pub fn read_source_frames(path: &Path, at: &str, opts: &SrcOpts) -> Result<Smd, 
             }
             Ok(smd)
         }
+        SourceKind::Dmx => crate::dmx::read_frames(
+            path,
+            opts.stack.as_deref(),
+            (opts.fps > 0.0).then_some(opts.fps),
+            &opts.fbx,
+        )
+        .map_err(|message| e(at, message)),
         SourceKind::Fbx => crate::fbx::read_frames(
             path,
             at,
@@ -1482,6 +1516,7 @@ fn build_model_lods(
                     &smd_path,
                     &lpath,
                     m.flip_triangles ^ lod.reverse,
+                    false,
                 ) {
                     Ok((meshes, _)) => meshes,
                     Err(err) => {
@@ -1536,7 +1571,11 @@ fn build_model_lods(
                             bone_map: lod_bone_maps.get(n).cloned().unwrap_or_default(),
                         })
                         .collect();
-                    crate::lod::unify_lods_remapped(&srcs, &mut bone_lod_usage)
+                    crate::lod::unify_lods_remapped_with_smoothing(
+                        &srcs,
+                        &mut bone_lod_usage,
+                        desc.model.zbrush,
+                    )
                 })
                 .collect()
         });
@@ -1689,6 +1728,7 @@ fn build_meshes(
     smd_path: &Path,
     at: &str,
     flip_triangles: bool,
+    preserve_source_indices: bool,
 ) -> Result<(Vec<Mesh>, Vec<Vec<u32>>), CompileError> {
     let names = smd.materials_in_order();
     if names.is_empty() {
@@ -1745,6 +1785,11 @@ fn build_meshes(
     // 非 `NO_SOURCE_INDEX` 的顶点时才建表（见函数文档）。
     let mut src_per_mesh: HashMap<usize, Vec<u32>> = HashMap::new();
     let mut has_src_index = false;
+    let indexed_dmx = preserve_source_indices
+        || smd_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dmx"));
+    let mut dmx_dedup: HashMap<(usize, VertexKey, u32), u32> = HashMap::new();
 
     // 骨骼查找表**只建一次**（原先在 `smd_vertex_to_ir` 里逐顶点重建）。
     let bone_map = VertexBoneMap::new(smd, desc);
@@ -1766,7 +1811,16 @@ fn build_meshes(
         let mut corner = [0u32; 3];
         for (c, sv) in t.vertices.iter().enumerate() {
             let v = smd_vertex_to_ir(sv, desc, &bone_map, smd_path, at)?;
-            let idx = weld_or_push(pool, table, sec, &v);
+            let idx = if indexed_dmx {
+                let key = (mi, vertex_key(&v), sv.src_index);
+                *dmx_dedup.entry(key).or_insert_with(|| {
+                    let index = pool.len() as u32;
+                    pool.push(v);
+                    index
+                })
+            } else {
+                weld_or_push(pool, table, sec, &v)
+            };
             // ⚠️ 只在**新建**顶点时记录源号：焊接会把多个源角并成一个焊接
             // 顶点，此时它们的 `src_index` 必然指向同一个控制点（焊接的判据
             // 里位置/法线/UV 全部相同，而 FBX 的同一控制点的多个角本来就会
@@ -2056,6 +2110,12 @@ fn animation_pool_poses(
         if let Some(original) = original {
             reserve_animation_poses(&mut poses, original.len(), bones)?;
         }
+    }
+    for source in animations
+        .iter()
+        .filter_map(|animation| animation.source_frames.as_ref())
+    {
+        reserve_animation_poses(&mut poses, source.len(), bones)?;
     }
     Ok(poses)
 }
@@ -2656,7 +2716,11 @@ fn lookup_attachment(
     pose_to_bone: &[crate::bone_math::Matrix3x4],
 ) -> Option<(usize, crate::bone_math::Matrix3x4)> {
     let (at, bone) = find_attachment(desc, bone_index, name)?;
-    Some((bone, attachment_local_matrix(desc, at, pose_to_bone, bone)))
+    let local = attachment_local_matrix(desc, at, pose_to_bone, bone);
+    let local = at.resolved.as_ref().map_or(local, |(_, correction)| {
+        crate::bone_math::concat(correction, &local)
+    });
+    Some((bone, local))
 }
 
 /// 按名字查附着点，返回 `(附着点, 绑定的骨骼下标)` —— **不构造** `local` 矩阵。
@@ -2983,17 +3047,6 @@ pub(crate) fn attachment_local_matrix(
     }
 }
 
-/// 取 SMD 参考姿态里某根骨骼的姿态。
-fn pose_for(smd: &Smd, node_index: usize) -> Option<&SmdPose> {
-    let f = smd.reference_frame()?;
-    // skeleton 段的行序与 nodes 顺序一一对应，所以按下标取；
-    // 但也允许文件里显式给出 bone 下标（用 bone 字段匹配）。
-    f.poses
-        .iter()
-        .find(|p| p.bone == node_index as i32)
-        .or_else(|| f.poses.get(node_index))
-}
-
 fn select_source_frames(
     frames: &mut Vec<Vec<crate::smd::SmdPose>>,
     range: Option<[i32; 2]>,
@@ -3070,6 +3123,18 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
 
     let mut errors: Vec<CompileError> = Vec::new();
     let mut bodyparts = Vec::with_capacity(desc.bodyparts.len());
+    let append_target = desc
+        .bodyparts
+        .iter()
+        .enumerate()
+        .find_map(|(bi, bodypart)| {
+            bodypart
+                .models
+                .iter()
+                .enumerate()
+                .find(|(_, model)| !model.smd.is_empty())
+                .map(|(mi, _)| (bi, mi))
+        });
 
     hotpath::measure_block!("bodyparts: 读 SMD + build_meshes + LOD", {
         for (bi, bp) in desc.bodyparts.iter().enumerate() {
@@ -3078,6 +3143,7 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                 let at = format!("bodyparts[{bi}].models[{mi}]");
                 if m.smd.is_empty() && m.name.as_deref() == Some("blank") {
                     models.push(CompiledModel {
+                        dmx: None,
                         smd_path: PathBuf::new(),
                         name: "blank".into(),
                         poses: Vec::new(),
@@ -3119,6 +3185,23 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                 };
                 let geom = match read_source_geometry(&smd_path, &format!("{at}.smd"), &sopts)
                     .and_then(|mut s| {
+                        crate::source_support::sphere_normals(
+                            &mut s.smd,
+                            &m.sphere_normals,
+                            &desc.materials.search_paths,
+                        )
+                        .map_err(|message| e(&at, message))?;
+                        if append_target == Some((bi, mi)) {
+                            for append in &desc.model.append_sources {
+                                let path = resolve_smd_path(base_dir, &append.source)
+                                    .map_err(|message| e(&at, message))?;
+                                let options =
+                                    SrcOpts::default().with_scale(Some(append.input_scale));
+                                let extra = read_source_geometry(&path, &at, &options)?;
+                                crate::source_support::append_geometry(&mut s, extra, append)
+                                    .map_err(|message| e(&at, message))?;
+                            }
+                        }
                         crate::bone_rename::source(&mut s.smd, &desc.model.bone_renames)
                             .map_err(|message| e(&at, message))?;
                         crate::bone_hierarchy::source(&mut s.smd, &desc.model.bone_hierarchy)
@@ -3134,16 +3217,59 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                 // `srcshapekey` / `srcshapekeyorder` / `srcshapekeyignore`
                 // 在**读取层之外**应用：`read_source_geometry` 只管把源里
                 // 有什么读出来，取哪些、按什么顺序是 QC/TOML 层的决定。
-                let shape_keys = match sopts.order_shape_keys(&geom.shape_keys) {
+                let available_shape_keys: Vec<_> = geom
+                    .shape_keys
+                    .iter()
+                    .map(|shape| &shape.name)
+                    .chain(
+                        geom.dmx
+                            .iter()
+                            .flat_map(|metadata| metadata.shapes.iter().map(|shape| &shape.name)),
+                    )
+                    .map(|name| crate::fbx::FbxShapeKey {
+                        name: name.clone(),
+                        position_offsets: Vec::new(),
+                        normal_offsets: Vec::new(),
+                        vertex_index: Vec::new(),
+                    })
+                    .collect();
+                let selected_shape_keys = match sopts.order_shape_keys(&available_shape_keys) {
                     Ok(v) => v,
                     Err(msg) => {
                         errors.push(e(&at, msg));
                         continue;
                     }
                 };
+                let shape_keys: Vec<_> = selected_shape_keys
+                    .iter()
+                    .filter_map(|key| geom.shape_keys.iter().find(|shape| shape.name == key.name))
+                    .cloned()
+                    .collect();
                 // ⚠️ 必须在 `let smd = geom.smd;` **之前**调用 —— 那一步会把
                 // `geom` 部分移走，之后就没法再借它的诊断字段了。
                 emit_fbx_diagnostics(&at, &geom, &shape_keys);
+                let mut dmx = geom.dmx;
+                if let Some(metadata) = &mut dmx {
+                    let shapes = std::mem::take(&mut metadata.shapes);
+                    metadata.shapes = selected_shape_keys
+                        .iter()
+                        .filter_map(|key| {
+                            shapes.iter().find(|shape| shape.name == key.name).cloned()
+                        })
+                        .collect();
+                }
+                if desc.model.static_prop
+                    && let Some(metadata) = &mut dmx
+                {
+                    let transform = static_prop_source_transform(desc);
+                    for shape in &mut metadata.shapes {
+                        for delta in &mut shape.vertices {
+                            delta.position =
+                                transform_source_vector(&transform, delta.position, false);
+                            delta.normal = transform_source_vector(&transform, delta.normal, false);
+                        }
+                    }
+                }
                 let smd = geom.smd;
 
                 // ⚠️ **不要**因为「网格源 SMD 里有 `[[bones]]` 没有的骨骼」而报错。
@@ -3158,7 +3284,8 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                 // 所以这里直接放行。
 
                 let (meshes, mesh_src_index) =
-                    match build_meshes(&smd, desc, &smd_path, &at, m.flip_triangles) {
+                    match build_meshes(&smd, desc, &smd_path, &at, m.flip_triangles, dmx.is_some())
+                    {
                         Ok(v) => v,
                         Err(err) => {
                             errors.push(err);
@@ -3270,9 +3397,9 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                         });
                     }
                 }
-                let _ = pose_for; // 保留该辅助函数供后续「按名取姿态」使用
 
                 models.push(CompiledModel {
+                    dmx,
                     smd_path,
                     name,
                     poses,
@@ -3328,6 +3455,12 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
             },
         }
     };
+    let retain_source_frames = desc.animations.iter().flat_map(|animation| &animation.ik_rules)
+        .chain(desc.sequences.iter().flat_map(|sequence| &sequence.ik_rules))
+        .any(|rule| rule.use_source)
+        || desc.animations.iter().flat_map(|animation| &animation.cmds)
+            .chain(desc.sequences.iter().flat_map(|sequence| &sequence.cmds))
+            .any(|command| matches!(command, crate::model::AnimCmd::IkRule { rule } if rule.use_source));
     let mut anims: Vec<crate::model::CompiledAnimation> = Vec::with_capacity(desc.animations.len());
     // 官方的 FBX「同文件静默 1 帧」陷阱需要知道**哪些文件是几何源**
     // （见 `fbx_geometry_sources`）。⚠️ 只对 `.fbx` 生效。
@@ -3352,6 +3485,9 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
             pending_subtract.push(None);
             anim_weights.push(vec![0.0; n_bones]);
             anims.push(crate::model::CompiledAnimation {
+                no_anim_block: false,
+                no_anim_block_stall: false,
+                source_frames: None,
                 local_hierarchy: Vec::new(),
                 weights: Vec::new(),
                 loop_restart: 0,
@@ -3426,7 +3562,10 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         }
         reserve_animation_poses(
             &mut retained_animation_poses,
-            frames.len(),
+            frames
+                .len()
+                .checked_mul(1 + usize::from(retain_source_frames))
+                .ok_or_else(|| vec![e(&at, "Animation frame count overflows")])?,
             desc.bones.len(),
         )
         .map_err(|message| vec![e(format!("{at}.smd"), message)])?;
@@ -3443,6 +3582,9 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         anim_index.insert(a.name.as_str(), anims.len());
         anim_weights.push(weights_of(a.weight_list.as_deref()));
         anims.push(crate::model::CompiledAnimation {
+            no_anim_block: a.no_anim_block,
+            no_anim_block_stall: a.no_anim_block_stall,
+            source_frames: retain_source_frames.then(|| frames.clone()),
             local_hierarchy: Vec::new(),
             weights: Vec::new(),
             loop_restart: a.loop_restart,
@@ -4037,7 +4179,7 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                         &mut retained_animation_poses,
                         frames
                             .len()
-                            .checked_mul(2)
+                            .checked_mul(2 + usize::from(retain_source_frames))
                             .ok_or_else(|| vec![e(&at, "Animation frame count overflows")])?,
                         desc.bones.len(),
                     )
@@ -4051,6 +4193,9 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                     // `cmds[]` 里的 `CMD_WEIGHTS` 会作用到它）。
                     anim_weights.push(weights_of(s.weight_list.as_deref()));
                     anims.push(crate::model::CompiledAnimation {
+                        no_anim_block: s.no_anim_block,
+                        no_anim_block_stall: s.no_anim_block_stall,
+                        source_frames: retain_source_frames.then(|| frames.clone()),
                         local_hierarchy: Vec::new(),
                         weights: Vec::new(),
                         loop_restart: s.loop_restart,
@@ -4463,6 +4608,101 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         }
     });
 
+    for (sequence, source) in sequences.iter_mut().zip(&desc.sequences) {
+        let inherited = source.inherited_flags.unwrap_or_else(|| {
+            sequence
+                .cells
+                .iter()
+                .filter_map(|&cell| anims.get(cell))
+                .filter_map(|compiled| {
+                    desc.animations
+                        .iter()
+                        .find(|animation| animation.name.eq_ignore_ascii_case(&compiled.name))
+                })
+                .fold(0, |flags, animation| {
+                    flags
+                        | animation.extra_flags
+                        | i32::from(animation.looping)
+                        | if animation.forward_declared { 0x800 } else { 0 }
+                })
+        });
+        sequence.looping |= inherited & 1 != 0;
+        sequence.extra_flags = Some(sequence.extra_flags.unwrap_or(0) | (inherited & 0x0892));
+    }
+    let generates_delta = |command: &crate::model::AnimCmd| {
+        matches!(
+            command,
+            crate::model::AnimCmd::Subtract { .. } | crate::model::AnimCmd::LinearDelta { .. }
+        )
+    };
+    let deferred_delta: Vec<_> = anims
+        .iter()
+        .enumerate()
+        .map(|(index, animation)| {
+            animation.pre_subtract_frames.is_none()
+                && (desc
+                    .animations
+                    .iter()
+                    .filter(|source| source.name.eq_ignore_ascii_case(&animation.name))
+                    .any(|source| source.cmds.iter().any(generates_delta))
+                    || desc
+                        .sequences
+                        .iter()
+                        .zip(&sequences)
+                        .filter(|(_, sequence)| sequence.cells.first() == Some(&index))
+                        .any(|(source, _)| source.cmds.iter().any(generates_delta)))
+        })
+        .collect();
+    for (animation, deferred) in anims.iter_mut().zip(&deferred_delta) {
+        if *deferred {
+            animation.delta = false;
+        }
+    }
+    let sequence_delta: Vec<_> = sequences.iter().map(|sequence| sequence.delta).collect();
+    for sequence in &mut sequences {
+        if sequence
+            .cells
+            .first()
+            .is_some_and(|index| deferred_delta[*index])
+        {
+            sequence.delta = false;
+        }
+    }
+    let early_processed = !desc.model.static_prop;
+    let mut early_realigned = None;
+    if early_processed {
+        let mut prepared = CompiledModelDesc {
+            desc: desc.clone(),
+            bodyparts: std::mem::take(&mut bodyparts),
+            sequences: std::mem::take(&mut sequences),
+            animations: std::mem::take(&mut anims),
+            realigned: None,
+            resolved_flex_rules: Vec::new(),
+            resolved_flex_controller_ui: Vec::new(),
+            resolved_mouths: Vec::new(),
+            resolved_jiggle_bones: Vec::new(),
+            resolved_quat_interp_bones: Vec::new(),
+            physics_bone: None,
+        };
+        for (animation, weights) in prepared.animations.iter_mut().zip(&anim_weights) {
+            animation.weights.clone_from(weights);
+        }
+        prepared.realigned = compute_realigned_poses(&prepared);
+        remap_vertices_to_reference_pose(&mut prepared);
+        crate::bone_optimization::center(&mut prepared)
+            .map_err(|message| vec![e("model.center_bones_on_vertices", message)])?;
+        if prepared.realigned.is_some() {
+            realign_sequence_frames(&mut prepared);
+        }
+        early_realigned = prepared.realigned;
+        bodyparts = prepared.bodyparts;
+        sequences = prepared.sequences;
+        anims = prepared.animations;
+    }
+    for (sequence, delta) in sequences.iter_mut().zip(sequence_delta) {
+        sequence.delta = delta;
+    }
+
     let mut motion_options =
         vec![(0i32, Vec::new(), crate::model::default_motion_rollback()); anims.len()];
     for animation in &desc.animations {
@@ -4490,6 +4730,8 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
             }
             anims[index].looping |= source.looping;
             anims[index].no_auto_ik |= source.no_auto_ik;
+            anims[index].no_anim_block |= source.no_anim_block;
+            anims[index].no_anim_block_stall |= source.no_anim_block_stall;
         }
     }
     let parents: Vec<_> = desc
@@ -4507,6 +4749,16 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         .iter()
         .enumerate()
         .map(|(index, bone)| {
+            if let Some((position, rotation)) = early_realigned
+                .as_ref()
+                .and_then(|realigned| realigned.poses.get(index))
+            {
+                return crate::smd::SmdPose {
+                    bone: index as i32,
+                    position: *position,
+                    rotation: *rotation,
+                };
+            }
             let source = bodyparts
                 .iter()
                 .flat_map(|part| &part.models)
@@ -4577,21 +4829,6 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         reserve_animation_poses(&mut retained, anims[index].frames.len(), parents.len())
             .map_err(|message| vec![e(format!("animations[{index}]"), message)])?;
         let mut working = anims[index].clone();
-        if working.delta
-            && (motion_type != 0
-                || commands.iter().any(|command| {
-                    matches!(
-                        command,
-                        crate::model::AnimCmd::Motion { .. }
-                            | crate::model::AnimCmd::RefMotion { .. }
-                    )
-                }))
-        {
-            return Err(vec![e(
-                format!("animations[{index}].motion"),
-                "Motion extraction on delta animations is not supported",
-            )]);
-        }
         let mut weights = if commands
             .iter()
             .any(|cmd| matches!(cmd, crate::model::AnimCmd::Weights { .. }))
@@ -4673,6 +4910,15 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
             )
             .map(|(frames, _)| frames)
             .ok_or(errors)?;
+            if let Some(realigned) = &early_realigned {
+                for frame in &mut hierarchy_source {
+                    crate::bone_optimization::transform_frame(
+                        frame,
+                        &parents,
+                        &realigned.src_realign,
+                    );
+                }
+            }
             crate::anim_commands::convert(&mut hierarchy_source, &parents, true);
         }
         crate::animation_loops::prepare(&mut working)
@@ -4740,11 +4986,6 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                     crate::model::AnimCmd::IkFixup { .. } => {}
                     crate::model::AnimCmd::Motion { .. }
                     | crate::model::AnimCmd::RefMotion { .. } => {
-                        if working.delta {
-                            return Err(
-                                "Motion extraction on delta animations is not supported".into()
-                            );
-                        }
                         processor.command(&mut working.frames, &parents, command, |name| {
                             resolve_lookup_animation(name, &anims, &anim_index, &sequences)
                                 .map(|reference| anims[reference].frames.clone())
@@ -4753,6 +4994,14 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
                     _ => {
                         working.movements.clone_from(&processor.movements);
                         let context = crate::anim_commands::Context {
+                            reference_engine_space: reference_index == Some(index) && working.delta,
+                            base_frame0: anims
+                                .first()
+                                .and_then(|animation| animation.frames.first())
+                                .map(Vec::as_slice),
+                            reference_weights: reference_index
+                                .map(|reference| anim_weights[reference].as_slice())
+                                .unwrap_or(&[]),
                             motion_root,
                             bones: &desc.bones,
                             parents: &parents,
@@ -4886,7 +5135,7 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         bodyparts,
         sequences,
         animations: anims,
-        realigned: None,
+        realigned: early_realigned,
         resolved_flex_rules: Vec::new(),
         resolved_flex_controller_ui: Vec::new(),
         resolved_mouths: Vec::new(),
@@ -4896,75 +5145,56 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         // 编译前端看不到碰撞几何（那是另一份 SMD）。
         physics_bone: None,
     };
+    crate::bone_optimization::collapse(&mut compiled)
+        .map_err(|message| vec![e("model.collapse_bones", message)])?;
+    crate::bone_optimization::tag_alignments(&mut compiled)
+        .map_err(|message| vec![e("model.screen_alignments", message)])?;
+    let parents = bone_parents(&compiled.desc);
+    let anim_weights: Vec<_> = compiled
+        .animations
+        .iter()
+        .map(|animation| animation.weights.clone())
+        .collect();
+    let bone_lengths: Vec<_> = (0..compiled.desc.bones.len())
+        .map(|index| resolve_bone_pose(&compiled.desc, &compiled, index).0)
+        .collect();
     crate::source_center::apply(&mut compiled)
         .map_err(|message| vec![e("model.autocenter", message)])?;
 
-    // ---- flex 系列 / eyeball / mouth：把名字解析成下标、算骨骼空间量 ----
-    //
-    // 时序：**在 `RealignBones` 之后做**（eyeball 的 `up`/`forward`/`org`
-    // 要用重排后的 `boneToPose` 逆变换，与自动 hitbox 同一份世界矩阵口径）。
-    // 所以这里先占位，真正的解析在 `compiled.realigned` 定稿之后（见下）。
-
-    // ---- 骨骼轴重对齐（`RealignBones`，`simplify.cpp:4224-4425`）----
-    //
-    // 时序：`RealignBones()` 在 `simplify.cpp:7237` 调用，**晚于**
-    // `LinkIKChains()`（7233）—— 所以 `$ikchain` 推出来的 `childbone[]`
-    // 此时已经就绪。它**早于** `SetupHitBoxes()`（7319），所以自动 hitbox
-    // 用的是重排后的 `boneToPose`。
     hotpath::measure_block!("realign + flex/jiggle 收尾", {
-        compiled.realigned = compute_realigned_poses(&compiled);
-
-        // 动画帧也要搬进重排后的空间（`simplify.cpp:1527`）：
-        //
-        // ```cpp
-        // ConcatTransforms( srcBoneToWorld[q], g_bonetable[k].srcRealign, destBoneToWorld[k] );
-        // ```
-        //
-        // 即「源骨架的第 f 帧世界变换」右乘 `srcRealign` 就得到重排后的世界变换，
-        // 再由它反解出新的**局部**姿态。漏掉这一步的症状：骨骼表是对的，
-        // 但动画的骨骼位置整体错位 —— `hull`/`seqdesc` 包围盒、`rotscale`、
-        // 动画链头全都跟着错，而**不会报任何错**。
-        if compiled.realigned.is_some() {
-            realign_sequence_frames(&mut compiled);
+        if !early_processed {
+            compiled.realigned = compute_realigned_poses(&compiled);
         }
 
-        // ---- 顶点搬到最终参考姿态的空间（`RemapVerticesToGlobalBones`）----
-        //
-        // 官方时序：`RealignBones()`（`:7237`）→ **本步**（`:7258`）→
-        // `UnifyLODs()`（`:7262`）。
-        //
-        // ⚠️ mdlc 的 `build_model_lods`（LOD 统一池）是在上面的 bodypart 循环里
-        // 跑的，**早于**这里 —— 但它把 `mesh.vertices` **克隆**进 LOD 0 池
-        // （`compile.rs:244` 的 `per_mesh[ki].push((mesh.vertices.clone(), …))`），
-        // 所以统一池里的 LOD 0 顶点是**当时**的值。若在这里才改
-        // `mesh.vertices`，统一池就与它分叉了。
-        //
-        // 因此本步必须在**读 LOD 之前**做。但 `resolve_bone_pose` 需要
-        // `compiled.bodyparts[].models[].poses`（SMD 第 0 帧），而那是 bodypart
-        // 循环里才填的 —— 循环依赖。
-        //
-        // 解法：本函数**同时**改 `mesh.vertices` 与 `lods.meshes[].vertices`
-        // （两者都要改，各恰好一次）。见 `remap_vertices_to_reference_pose`。
-        hotpath::measure_block!("remap_vertices_to_reference_pose", {
-            let remapped = remap_vertices_to_reference_pose(&mut compiled);
-            let _ = remapped;
-        });
+        if !early_processed {
+            remap_vertices_to_reference_pose(&mut compiled);
+            crate::bone_optimization::center(&mut compiled)
+                .map_err(|message| vec![e("model.center_bones_on_vertices", message)])?;
+            if compiled.realigned.is_some() {
+                realign_sequence_frames(&mut compiled);
+            }
+        }
 
-        // ---- `$ikchain` 的 kneeDir 自动推导 ----
-        //
-        // 官方 `simplify.cpp:2839-2912`：QC 没写 `knee` 时，**从动画里算**出来。
-        // 语料里 272 条链有 **263 条非零**，所以这条不是可选项。
+        crate::bone_optimization::lock_lengths(&mut compiled, &bone_lengths)
+            .map_err(|message| vec![e("model.lock_bone_lengths", message)])?;
         compiled.desc.model.rotation_alignments = crate::bone_alignment::calculate(&compiled);
         derive_ikchain_knee_dirs(&mut compiled);
         for (index, rules) in ik_fixups.iter().enumerate() {
             if rules.is_empty() {
                 continue;
             }
+            let base_frame0 = compiled
+                .animations
+                .first()
+                .and_then(|animation| animation.frames.first())
+                .cloned()
+                .unwrap_or_default();
             crate::ik_fixup::apply(
                 &mut compiled.animations[index],
                 &compiled.desc,
                 &parents,
                 rules,
+                &base_frame0,
             )
             .map_err(|message| vec![e(format!("animations[{index}].ikfixup"), message)])?;
             for sequence in &mut compiled.sequences {
@@ -4976,35 +5206,15 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
             }
         }
 
-        // ---- `CalcPoseParameters`（`simplify.cpp:5448-5596`）----
-        //
-        // 官方在 `ProcessData` 的**末尾**调用（`simplify.cpp:7315`），晚于
-        // `LinkAttachments`（7298）与 `ProcessIKRules`（7311）。这里放在
-        // kneeDir 之后 —— 两者互不影响（kneeDir 只看 `$ikchain` 的骨骼，
-        // calcblend 只看附着点），但保持「序列/动画/附着点全就绪」的前提。
-        //
-        // ⚠️ 这是**硬错误**路径：官方在这里 `MdlError` 直接中止编译。
         apply_calc_blend_axes(&mut compiled, &anim_weights, base_dir)?;
 
-        // ---- flex / eyeball / mouth 解析（在重排定稿后）----
-        // eyeball 的 `up`/`forward`/`org` 用 [`internal_bone_world`] 的世界矩阵
-        // 逆变换 —— 与自动 hitbox / 姿态包围盒**同一份口径**（官方
-        // `g_bonetable[k].boneToPose`，不是骨骼表最终矩阵）。
-        //
-        // ⚠️ flexdesc 的注册必须在这里做（**早于** flexrule/eyeball 的
-        // 名字解析），因为两者都会**追加** flexdesc，而后续所有按名查表
-        // 都依赖最终的下标。所以先注册 desc，再统一解析。
-        //
-        // 顺序：**shape key 在前，`.vta` 在后**。官方在 FBX 导入阶段
-        // （`Load_Source` 里）就把 shape key 注册成 flex，而 QC 的 `flex`
-        // 语句要等 `$model` 块解析时才处理 —— 实测
-        // `oracle_fbx_isolate.js` 的 `W2_morphfbx_vta_flex` 得到
-        // `desc = ["wide", "tall", "v1"]`，shape key 的两条在显式 `flex`
-        // 之前。
+        // Register all descriptors before resolving controller and eyeball references.
+        crate::dmx::register_flexes(&mut compiled).map_err(|message| vec![e("dmx", message)])?;
         resolve_shape_key_flexes(&mut compiled)?;
         resolve_vta_flexes(&mut compiled, base_dir)?;
 
         resolve_flex_eyeball_mouth(&mut compiled)?;
+        crate::dmx::resolve_flexes(&mut compiled).map_err(|message| vec![e("dmx", message)])?;
 
         // ---- jigglebone（`mstudiojigglebone_t`，L4D2 独有的 `$jigglebone`）----
         //
@@ -5033,17 +5243,14 @@ pub fn compile(desc: &ModelDesc, base_dir: &Path) -> Result<CompiledModelDesc, V
         }
     });
 
-    // ---- 顶点超限的 mesh 自动拆分（`split_oversized_meshes`，默认开）----
-    //
-    // 放在**最后**：此时所有几何（含 LOD、flex、权重）都已定稿，
-    // 拆分只是「按三角形重切一刀」，不再动任何数值。
-    //
-    // 不超限时它是 **no-op**（第一行就返回），所以对既有产物零影响。
-    if compiled.desc.model.split_oversized_meshes {
+    // Split only after LOD and flex processing has finalized the vertex references.
+    if compiled.desc.model.split_oversized_meshes || compiled.desc.model.max_vertices.is_some() {
         hotpath::measure_block!("split_oversized_meshes", {
             split_oversized_meshes(&mut compiled)?;
         });
     }
+
+    crate::bone_optimization::split_models(&mut compiled);
 
     // Keep texture indices and skin-family mappings stable while changing labels.
     for texture in &mut compiled.desc.materials.textures {
@@ -5060,54 +5267,11 @@ fn renamed_material(name: &str, replacements: &[[String; 2]]) -> String {
         .map_or_else(|| name.to_owned(), |[_, new]| new.replace('\\', "/"))
 }
 
-/// 把超过 `MAXSTUDIOVERTS_PER_MESH` 的 mesh 按三角形顺序切成多块。
-///
-/// # 为什么需要
-///
-/// VTX 的 `Vertex_t.origMeshVertID` 是 `uint16` ⟹ **一个 mesh 最多 65536 个
-/// 顶点**。一个 mesh 对应一个材质，所以某个材质本身顶点太多时（真实案例：
-/// 305,703 个），官方 `studiomdl` 直接拒绝（`ERROR: too many indices in
-/// source`），本实现原先也会拒绝。
-///
-/// # 拆法
-///
-/// **在同一个 model 内拆成多个 mesh，全部指向同一个材质下标。**
-///
-/// 为什么不拆成新 bodypart（NekoMDL 的 `$maxverts` 那样）：
-/// bodypart 数量一变，引擎的 `$bodygroup` 选择（按下标）就会错位；
-/// 而且 NekoMDL 自己的产物里出现了重名 bodypart。`mesh.material` 只是
-/// `pSkinref[]` 的下标，多个 mesh 共用它是完全合法的。
-///
-/// # 切块规则
-///
-/// 按**三角形顺序**贪心累积：一个三角形是原子的（不会跨块切断），
-/// 累积到再加一个就会超过上限时收尾、开新块。所以每块顶点数 ≤ 上限，
-/// 且**所有块合起来与原来逐三角形等价**（顶点池按需重建，
-/// 只保留该块三角形实际引用的顶点）。
-///
-/// # 多 LOD 的判据是「统一池」而不是 LOD 0
-///
-/// `origMeshVertID` 的上界是 `mstudiomesh_t.numvertices`，即**跨 LOD 去重
-/// 后的统一池**大小，所以超限判据也必须是它（LOD 0 不超限但 LOD 1 引入
-/// 大量新顶点时同样会溢出）。
-///
-/// 切块用 LOD 0 的三角形当种子（LOD 0 最细），其余 LOD 的三角形按
-/// 「与哪一块共享顶点最多」归块；块内池**以原统一池下标为键**，所以跨 LOD
-/// 的同一个顶点在块内仍是同一条 —— LOD 统一语义不变。
-///
-/// 若归块后某块仍超限（多个 LOD 把顶点挤进同一块），**报错**而不是写出
-/// `origMeshVertID` 溢出的产物。
-///
-/// # 同步维护的并行数组
-///
-/// [`CompiledModel`] 里有几个**与 `meshes` 同下标**的数组，拆完必须
-/// 一起重建，否则会静默错位：
-/// - `mesh_flexes`（每个 mesh 的 flex 载荷，按块重编顶点下标）
-/// - `lods.meshes`（每个 mesh 的多 LOD 数据）
+// Limits apply to the unified pool across all LODs. Rebuild flex and LOD indices
+// alongside each mesh chunk so their vertex references remain aligned.
 fn split_oversized_meshes(
     compiled: &mut crate::model::CompiledModelDesc,
 ) -> Result<(), Vec<CompileError>> {
-    use crate::mdl_writer::MAXSTUDIOVERTS_PER_MESH as LIMIT;
     use std::collections::{HashMap, HashSet};
 
     /// 超限判据：单 LOD 看 `mesh.vertices`；多 LOD 看统一池大小。
@@ -5119,15 +5283,17 @@ fn split_oversized_meshes(
     //
     // ⚠️ 这个提前返回**也**要覆盖「lods.meshes 长度不对」的情况 ——
     // 否则长度不对但恰好没超限时会**静默放过**（那个不变式就白查了）。
+    let requested = compiled.desc.model.max_vertices;
     let any = compiled.bodyparts.iter().any(|bp| {
         bp.models.iter().any(|m| {
+            let limit = crate::bone_optimization::vertex_limit(m, requested);
             let mismatch = m
                 .lods
                 .as_ref()
                 .is_some_and(|l| l.meshes.len() != m.meshes.len());
             mismatch
                 || m.meshes.iter().enumerate().any(|(k, mesh)| {
-                    size_of(mesh, m.lods.as_ref().and_then(|l| l.meshes.get(k))) > LIMIT
+                    size_of(mesh, m.lods.as_ref().and_then(|l| l.meshes.get(k))) > limit
                 })
         })
     });
@@ -5140,6 +5306,7 @@ fn split_oversized_meshes(
     for (bi, bp) in compiled.bodyparts.iter_mut().enumerate() {
         for (mi, model) in bp.models.iter_mut().enumerate() {
             let at = format!("bodyparts[{bi}].models[{mi}]");
+            let limit = crate::bone_optimization::vertex_limit(model, requested);
 
             // ⚠️ `lods.meshes` 必须与 `meshes` **等长**（写出器靠下标对应）。
             // 长度不对时「按 mesh 逐项搬」会让结果比原数组短 ⟹ 写出器按下标取
@@ -5161,7 +5328,7 @@ fn split_oversized_meshes(
             }
 
             let oversized = model.meshes.iter().enumerate().any(|(k, mesh)| {
-                size_of(mesh, model.lods.as_ref().and_then(|l| l.meshes.get(k))) > LIMIT
+                size_of(mesh, model.lods.as_ref().and_then(|l| l.meshes.get(k))) > limit
             });
             if !oversized {
                 continue;
@@ -5182,7 +5349,7 @@ fn split_oversized_meshes(
                     old_flexes.get(k).map(Vec::as_slice).unwrap_or(&[]);
 
                 // 没超限 ⟹ 原样搬过去（这是绝大多数 mesh 的路径）。
-                if size_of(mesh, ml) <= LIMIT {
+                if size_of(mesh, ml) <= limit {
                     new_meshes.push(mesh.clone());
                     new_flexes.push(flexes.to_vec());
                     if let Some(l) = ml {
@@ -5193,7 +5360,7 @@ fn split_oversized_meshes(
 
                 let Some(ml) = ml else {
                     // ---- 单 LOD ----
-                    let blocks = greedy_triangle_blocks(&mesh.triangles, LIMIT);
+                    let blocks = greedy_triangle_blocks(&mesh.triangles, limit);
                     if blocks.is_empty() {
                         // 退化网格（有顶点没三角形）：原样保留，交给写出器报错。
                         new_meshes.push(mesh.clone());
@@ -5244,7 +5411,7 @@ fn split_oversized_meshes(
                 // 种子档用贪心切块（它最细，顶点最多）。
                 for b in greedy_triangle_blocks(
                     ml.triangles.get(seed).map(Vec::as_slice).unwrap_or(&[]),
-                    LIMIT,
+                    limit,
                 ) {
                     owned.push(b.iter().flat_map(|t| t.iter().copied()).collect());
                     per_lod[seed].push(b);
@@ -5272,7 +5439,7 @@ fn split_oversized_meshes(
                         for (bi2, set) in owned.iter().enumerate() {
                             let fresh = tri.iter().filter(|v| !set.contains(v)).count();
                             // 判据与贪心切块一致：`>` 而非 `>=`。
-                            if set.len() + fresh > LIMIT {
+                            if set.len() + fresh > limit {
                                 continue;
                             }
                             let hits = 3 - fresh;
@@ -5319,7 +5486,7 @@ fn split_oversized_meshes(
                     .filter(|u| !owned.iter().any(|s| s.contains(u)))
                     .collect();
                 for u in orphans {
-                    match owned.iter().position(|s| s.len() < LIMIT) {
+                    match owned.iter().position(|s| s.len() < limit) {
                         Some(b) => {
                             owned[b].insert(u);
                         }
@@ -5425,7 +5592,7 @@ fn split_oversized_meshes(
                         lod_vertex_index: index_per_lod,
                     });
                 }
-                if worst > LIMIT {
+                if worst > limit {
                     errs.push(e(
                         &at,
                         crate::tr_fmt!(
@@ -5436,7 +5603,7 @@ fn split_oversized_meshes(
                             k = k,
                             mat = mesh.material,
                             worst = worst,
-                            limit = LIMIT
+                            limit = limit
                         ),
                     ));
                 }
@@ -5562,63 +5729,7 @@ fn remap_flexes(
 /// 骨骼表存的是**参考姿态**，动画存的是**每帧相对参考姿态的增量**。
 /// 重排换了局部基，增量也跟着换基 —— 只改一边会让两者不一致。
 fn realign_sequence_frames(compiled: &mut CompiledModelDesc) {
-    let Some(r) = compiled.realigned.clone() else {
-        return;
-    };
-    let desc = &compiled.desc;
-    let n = desc.bones.len();
-    let bone_index = desc.bone_index();
-    let parents: Vec<i32> = desc
-        .bones
-        .iter()
-        .map(|b| match b.parent.as_deref() {
-            Some(p) => bone_index.get(p).map(|v| *v as i32).unwrap_or(-1),
-            None => -1,
-        })
-        .collect();
-
-    for frames in compiled
-        .sequences
-        .iter_mut()
-        .flat_map(|sequence| {
-            (!sequence.delta)
-                .then_some(&mut sequence.frames)
-                .into_iter()
-                .chain(sequence.pre_subtract_frames.iter_mut())
-        })
-        .chain(compiled.animations.iter_mut().flat_map(|animation| {
-            (!animation.delta)
-                .then_some(&mut animation.frames)
-                .into_iter()
-                .chain(animation.pre_subtract_frames.iter_mut())
-        }))
-    {
-        for frame in frames {
-            if frame.len() < n {
-                continue;
-            }
-            // 源骨架在这一帧的世界变换。
-            let src_pos: Vec<[f32; 3]> = (0..n).map(|i| frame[i].position).collect();
-            let src_rot: Vec<[f32; 3]> = (0..n).map(|i| frame[i].rotation).collect();
-            let src_world = crate::bone_math::compute_world(&src_pos, &src_rot, &parents);
-            // 搬到重排后的空间。
-            let new_world: Vec<crate::bone_math::Matrix3x4> = (0..n)
-                .map(|i| crate::bone_math::concat(&src_world[i], &r.src_realign[i]))
-                .collect();
-            // 反解局部姿态。
-            for i in 0..n {
-                let local = match parents[i] {
-                    p if p >= 0 => crate::bone_math::concat(
-                        &crate::bone_math::invert(&new_world[p as usize]),
-                        &new_world[i],
-                    ),
-                    _ => new_world[i],
-                };
-                frame[i].position = [local[3], local[7], local[11]];
-                frame[i].rotation = crate::bone_math::matrix_angles(&local);
-            }
-        }
-    }
+    crate::bone_optimization::realign_frames(compiled);
 }
 
 /// 推导 `$ikchain` 的 `kneeDir`（官方 `simplify.cpp:2839-2912`）。
@@ -6059,6 +6170,7 @@ fn remap_vertices_to_reference_pose(compiled: &mut CompiledModelDesc) -> bool {
             }
             moved = true;
 
+            crate::dmx::remap_flexes(m, &mats);
             for mesh in &mut m.meshes {
                 remap_vertex_slice(&mut mesh.vertices, &mats, n);
             }
@@ -6412,6 +6524,24 @@ fn auto_hitboxes(compiled: &CompiledModelDesc) -> Vec<crate::model::Hitbox> {
         }
     }
 
+    let mut groups = vec![0; n];
+    for (index, bone) in desc.bones.iter().enumerate() {
+        groups[index] = desc
+            .model
+            .hitgroups
+            .iter()
+            .rev()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&bone.name))
+            .map(|(_, group)| *group)
+            .unwrap_or_else(|| {
+                usize::try_from(parents[index])
+                    .ok()
+                    .and_then(|parent| groups.get(parent))
+                    .copied()
+                    .unwrap_or(0)
+            });
+    }
+
     // 过滤：三轴厚度都 > 1。
     let mut out = Vec::new();
     for k in 0..n {
@@ -6421,7 +6551,7 @@ fn auto_hitboxes(compiled: &CompiledModelDesc) -> Vec<crate::model::Hitbox> {
         {
             out.push(crate::model::Hitbox {
                 bone: desc.bones[k].name.clone(),
-                group: Some(0),
+                group: Some(groups[k]),
                 bbmin: bmin[k],
                 bbmax: bmax[k],
                 name: None,
@@ -6959,7 +7089,11 @@ pub fn sequence_pose_bounds(
                 .collect();
 
             // 3) 并入每根骨骼的渲染包围盒（用 `bonetransform`，即 `world`）。
-            for (k, w) in world.iter().enumerate() {
+            for (k, w) in world
+                .iter()
+                .enumerate()
+                .filter(|_| !desc.model.bbox_only_vertices)
+            {
                 let (mn, mx) = render_bounds
                     .get(k)
                     .copied()
@@ -7052,6 +7186,12 @@ pub fn sequence_pose_bounds(
     }
 
     if bmin[0].is_finite() && bmax[0].is_finite() {
+        if let Some([minimum, maximum]) = desc.model.clamp_worldspace {
+            for axis in 0..3 {
+                bmin[axis] = bmin[axis].clamp(minimum[axis], maximum[axis]);
+                bmax[axis] = bmax[axis].clamp(minimum[axis], maximum[axis]);
+            }
+        }
         Some((bmin, bmax))
     } else {
         None
@@ -7558,21 +7698,23 @@ fn resolve_vta_flexes(
                 let vta = match vta_cache.entry((vta_path.clone(), scale.to_bits())) {
                     std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                     std::collections::hash_map::Entry::Vacant(slot) => {
-                        let text = match std::fs::read_to_string(&vta_path) {
-                            Ok(t) => t,
-                            Err(err) => {
-                                errs.push(e(
-                                    &fat,
-                                    crate::tr_fmt!(
-                                        "cannot read %{path}: %{err}",
-                                        path = vta_path.display(),
-                                        err = err
-                                    ),
-                                ));
-                                continue;
-                            }
+                        let virtual_source =
+                            compiled.desc.model.virtual_vtas.iter().find(|source| {
+                                resolve_vta_path(base_dir, &source.name)
+                                    .is_ok_and(|path| path == vta_path)
+                            });
+                        let parsed = if let Some(source) = virtual_source {
+                            crate::source_support::load_virtual_vta(source, base_dir, 1.0)
+                        } else {
+                            std::fs::read_to_string(&vta_path)
+                                .map_err(|error| {
+                                    format!("cannot read {}: {error}", vta_path.display())
+                                })
+                                .and_then(|text| {
+                                    crate::vta::parse_vta(&text).map_err(|error| error.to_string())
+                                })
                         };
-                        match crate::vta::parse_vta(&text) {
+                        match parsed {
                             Ok(mut v) => {
                                 if scale != 1.0 {
                                     for frame in &mut v.frames {
@@ -7848,6 +7990,7 @@ fn resolve_shape_key_flexes(compiled: &mut CompiledModelDesc) -> Result<(), Vec<
                     let delta = k.position_offsets[k2];
                     for &(mesh, local) in hits {
                         grouped[mesh].push(crate::flex::ResolvedVertAnim {
+                            wrinkle: 0.0,
                             index: local,
                             speed: 255,
                             side: 255,
@@ -8097,6 +8240,8 @@ fn resolve_flex_eyeball_mouth(compiled: &mut CompiledModelDesc) -> Result<(), Ve
         match pair_name {
             Some(x) => {
                 uis.push(crate::model::ResolvedFlexControllerUi {
+                    remap_type: 0,
+                    fc2: None,
                     name: x,
                     fc0: (i + 1) as i32, // left（下标更大）
                     fc1: Some(i as i32), // right（下标更小）
@@ -8106,6 +8251,8 @@ fn resolve_flex_eyeball_mouth(compiled: &mut CompiledModelDesc) -> Result<(), Ve
             }
             None => {
                 uis.push(crate::model::ResolvedFlexControllerUi {
+                    remap_type: 0,
+                    fc2: None,
                     name: desc.flex_controllers[i].name.clone(),
                     fc0: i as i32,
                     fc1: None,
@@ -8156,6 +8303,8 @@ fn resolve_flex_eyeball_mouth(compiled: &mut CompiledModelDesc) -> Result<(), Ve
             }
         };
         uis.push(crate::model::ResolvedFlexControllerUi {
+            remap_type: 0,
+            fc2: None,
             name: u.name.clone(),
             fc0,
             fc1,
@@ -10840,6 +10989,7 @@ type = "mouth"
             flexpair: 0,
             vertanimtype: 0,
             vertanims: vec![crate::flex::ResolvedVertAnim {
+                wrinkle: 0.0,
                 index: index as u32,
                 speed: 255,
                 side: 0,
@@ -11009,6 +11159,7 @@ type = "mouth"
     /// 造一个只带诊断字段的 `SourceGeometry`（`smd` 用最小空壳）。
     fn geom_with(untextured: &[&str], merged: &[&str], stacks: &[&str]) -> SourceGeometry {
         SourceGeometry {
+            dmx: None,
             smd: Smd {
                 version: 1,
                 nodes: Vec::new(),
@@ -11235,6 +11386,7 @@ type = "mouth"
     #[test]
     fn of_model_maps_ir_fields_and_validates_axis() {
         let mut m = crate::model::BodyModel {
+            sphere_normals: Vec::new(),
             input_scale: None,
             smd: "x.fbx".into(),
             name: None,
@@ -14181,6 +14333,9 @@ weight = 0.5
         // 官方 `unknown weightlist '%s'`（`studiomdl.cpp:1728`）。
         let mut d = wl_desc("");
         d.sequences.push(crate::model::Sequence {
+            inherited_flags: None,
+            no_anim_block: false,
+            no_anim_block_stall: false,
             loop_restart: 0,
             fudge_loop: false,
             motion_rollback: crate::model::default_motion_rollback(),
@@ -14739,6 +14894,7 @@ forward_declared = true
             vertanimtype: 0,
             vertanims: vec![
                 ResolvedVertAnim {
+                    wrinkle: 0.0,
                     index: v_first as u32,
                     speed: 255,
                     side: 0,
@@ -14746,6 +14902,7 @@ forward_declared = true
                     ndelta: [0.0, 0.0, 0.0],
                 },
                 ResolvedVertAnim {
+                    wrinkle: 0.0,
                     index: v_second as u32,
                     speed: 255,
                     side: 0,
@@ -14900,6 +15057,7 @@ forward_declared = true
             flexpair: 0,
             vertanimtype: 0,
             vertanims: vec![ResolvedVertAnim {
+                wrinkle: 0.0,
                 index: 0,
                 speed: 255,
                 side: 0,

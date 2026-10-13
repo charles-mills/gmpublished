@@ -19,11 +19,18 @@ impl SourceKind {
     pub fn of(path: &Path) -> Option<Self> {
         match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
             "qc" | "toml" => Some(Self::Description),
-            "smd" | "fbx" | "gltf" | "glb" => Some(Self::Mesh),
+            "smd" | "dmx" | "fbx" | "gltf" | "glb" => Some(Self::Mesh),
             "mdl" => Some(Self::Compiled),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ExportTarget {
+    #[default]
+    Source,
+    Blender,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +39,7 @@ impl SourceKind {
     reason = "compile options are independent toggles"
 )]
 pub struct ExportRequest {
+    pub target: ExportTarget,
     pub qc_text: Option<String>,
     pub source: PathBuf,
     pub destination: PathBuf,
@@ -60,6 +68,16 @@ pub struct ExportResult {
     pub bytes: u64,
     pub warnings: Vec<String>,
     pub compiled: bool,
+}
+
+impl ExportResult {
+    pub fn blender_model(&self) -> Option<&Path> {
+        self.files.iter().find_map(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+                .then_some(path.as_path())
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +161,7 @@ pub(super) struct RunningExport {
     pub generation: Generation,
     pub cancel: Arc<AtomicBool>,
     pub cancellation_requested: bool,
+    pub target: ExportTarget,
 }
 
 #[derive(Debug)]
@@ -169,6 +188,7 @@ pub struct State {
     pub(super) running: Option<RunningExport>,
     pub(super) result: Option<ExportResult>,
     pub(super) error: Option<String>,
+    pub(super) blender_launch_error: Option<String>,
     pub(super) cancelled: bool,
     pub(super) inspection: Option<ModelInspection>,
     pub(super) inspection_generation: Option<Generation>,
@@ -218,6 +238,7 @@ impl Default for State {
             running: None,
             result: None,
             error: None,
+            blender_launch_error: None,
             cancelled: false,
             inspection: None,
             inspection_generation: None,
@@ -328,6 +349,7 @@ impl State {
         }
         let mesh = self.kind() == Some(SourceKind::Mesh);
         Some(ExportRequest {
+            target: ExportTarget::Source,
             qc_text: self.qc_editor.text(),
             source: self.source.clone()?,
             destination,

@@ -2061,6 +2061,7 @@ smd = "myprop-ref.smd"
             flexpair: 0,
             vertanimtype: 0,
             vertanims: vec![ResolvedVertAnim {
+                wrinkle: 0.0,
                 index: 0,
                 speed: 255,
                 side: 0,
@@ -2108,6 +2109,7 @@ smd = "myprop-ref.smd"
                 flexpair: 0,
                 vertanimtype: 0,
                 vertanims: vec![ResolvedVertAnim {
+                    wrinkle: 0.0,
                     index: 0,
                     speed: 255,
                     side: 0,

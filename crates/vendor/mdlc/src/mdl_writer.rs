@@ -375,7 +375,7 @@ pub const FLEXOP_SIZE: usize = 8;
 ///
 /// ```text
 /// +0x00 int sznameindex   +0x04 int szindex0   +0x08 int szindex1   +0x0C int szindex2
-/// +0x10 u8 remaptype(恒0) +0x11 u8 stereo      +0x12 u8 unused[2]
+/// +0x10 u8 remaptype +0x11 u8 stereo +0x12 u8 unused[2]
 /// ```
 pub const FLEXCONTROLLERUI_SIZE: usize = 20;
 /// `mstudioeyeball_t` 的字节大小 —— **172**，不是 `studio.h` 注释里看起来的尺寸。
@@ -490,6 +490,7 @@ fn write_mesh_flexes(
     base: usize,
     flexes: &[crate::flex::ResolvedFlex],
     layout: Option<(&crate::lod::LodLayout, usize)>,
+    fixed_point_scale: f32,
 ) -> Result<usize, WriteError> {
     if flexes.is_empty() {
         return Ok(base);
@@ -549,7 +550,10 @@ fn write_mesh_flexes(
                 let bits = f32_to_half_bits(*d);
                 buf[vo + 0x0A + k * 2..vo + 0x0C + k * 2].copy_from_slice(&bits.to_le_bytes());
             }
-            // WRINKLE 的 wrinkledelta 恒 0（本实现不产出该型）。
+            if f.vertanimtype == 1 {
+                let wrinkle = ((a.wrinkle / fixed_point_scale) as i32).clamp(-32767, 32767) as i16;
+                buf[vo + 16..vo + 18].copy_from_slice(&wrinkle.to_le_bytes());
+            }
         }
         cur += align4(f.vertanims.len() * stride);
     }
@@ -1239,6 +1243,16 @@ fn compute_bone_flags(
         }
     }
 
+    for driver in &desc.model.bone_flex_drivers {
+        if let Some(index) = desc
+            .bones
+            .iter()
+            .position(|bone| bone.name.eq_ignore_ascii_case(&driver.bone))
+        {
+            mark(index, 0x0003_fc00, &mut flags);
+        }
+    }
+
     // 2) 被 hitbox 引用。
     for hb in desc.hitbox_sets().flat_map(|set| &set.boxes) {
         if let Some(&i) = bone_index.get(hb.bone.as_str()) {
@@ -1781,9 +1795,43 @@ fn build_string_pool(
     })
 }
 
-/// 把编译结果写成 MDL 字节。
+fn vertanim_fixed_point_scale(compiled: &CompiledModelDesc) -> Result<f32, WriteError> {
+    let mut range = 0.0_f32;
+    for vertex in compiled
+        .bodyparts
+        .iter()
+        .flat_map(|body| &body.models)
+        .flat_map(|model| &model.mesh_flexes)
+        .flatten()
+        .flat_map(|flex| &flex.vertanims)
+    {
+        for value in vertex
+            .delta
+            .into_iter()
+            .chain(vertex.ndelta)
+            .chain([vertex.wrinkle])
+        {
+            if !value.is_finite() {
+                return Err(WriteError::Internal(
+                    "Flex vertex deltas must be finite".into(),
+                ));
+            }
+            range = range.max(value.abs());
+        }
+    }
+    if range > 32767.0 {
+        crate::warning!(
+            "Flex value too large: {range}; fixed point values will be clamped to 32767"
+        );
+        Ok(1.0)
+    } else {
+        Ok((range / 32767.0).max(1.0 / 4096.0))
+    }
+}
+
 pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteError> {
     let desc = &compiled.desc;
+    let fixed_point_scale = vertanim_fixed_point_scale(compiled)?;
     let transitions = crate::transitions::build(compiled).map_err(WriteError::Internal)?;
     let checksum = desc.checksum();
     let version = desc.version();
@@ -2195,7 +2243,15 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
     // ⚠️ **不能改 `output_name()`** —— 它同时是**磁盘输出路径**的构造依据
     // （`v_models/v_smg.mdl`），改成反斜杠会破坏输出布局。
     // 所以这里单独用原文。
-    put_cstr(&mut buf, off::NAME, off::NAME_LEN, &desc.model.name)?;
+    put_cstr(
+        &mut buf,
+        off::NAME,
+        off::NAME_LEN,
+        desc.model
+            .internal_name
+            .as_deref()
+            .unwrap_or(&desc.model.name),
+    )?;
     put_i32(&mut buf, off::LENGTH, total_len as i32);
 
     // 包围盒：显式值优先，否则用**摆好姿势**的序列包围盒
@@ -2286,6 +2342,10 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
     }
     if desc.model.constant_directional_light_dot.is_some() {
         flags |= 1 << 13;
+    }
+    if fixed_point_scale != 1.0 / 4096.0 {
+        flags |= 1 << 21;
+        put_f32(&mut buf, 0x188, fixed_point_scale);
     }
     put_i32(&mut buf, off::FLAGS, flags);
     // `$contents`：**默认就是 `CONTENTS_SOLID`（= 1）**，不是 0。
@@ -2562,7 +2622,8 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
     );
     let mut ani_file: Option<Vec<u8>> = None;
     if !anim.anim_blocks.is_empty() {
-        let (file, table) = anim_writer::build_ani_file(&anim.anim_blocks);
+        let (mut file, table) = anim_writer::build_ani_file(&anim.anim_blocks);
+        file[4..8].copy_from_slice(&desc.version().to_le_bytes());
         put_i32(&mut buf, off::ANIMBLOCK_COUNT, as_i32(table.len()));
         for (i, (start, end)) in table.iter().enumerate() {
             let base = animblock_off + i * ANIMBLOCK_SIZE;
@@ -2743,11 +2804,21 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
         }
         cum_ops += r.ops.len();
     }
-    // flexcontrollerui：`sznameindex` 相对自身；`szindex0/1` 相对自身但
-    // 指向 flexcontroller 数组（故恒负）。`remaptype` 恒 0、`szindex2` 恒 0。
-    //
-    // 段起点 = flexop 区末尾（`flexcontrollerui_off`），已紧密排列好。
     for (i, u) in compiled.resolved_flex_controller_ui.iter().enumerate() {
+        if u.remap_type > 3
+            || std::iter::once(u.fc0)
+                .chain(u.fc1)
+                .chain(u.fc2)
+                .any(|index| {
+                    usize::try_from(index)
+                        .map_or(true, |index| index >= compiled.desc.flex_controllers.len())
+                })
+        {
+            return Err(WriteError::Internal(format!(
+                "Invalid flex controller UI {:?}",
+                u.name
+            )));
+        }
         let base = flexcontrollerui_off + i * FLEXCONTROLLERUI_SIZE;
         let name_rel = abs(pool.fcui_name_offsets[i])? - base as i32;
         put_i32(&mut buf, base, name_rel);
@@ -2763,8 +2834,11 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
             None => 0,
         };
         put_i32(&mut buf, base + 8, sz1);
-        put_i32(&mut buf, base + 12, 0); // szindex2 恒 0
-        buf[base + 16] = 0; // remaptype 恒 0（FLEXCONTROLLER_REMAP_PASSTHRU）
+        let sz2 = u.fc2.map_or(0, |index| {
+            (flexcontroller_off + index as usize * FLEXCONTROLLER_SIZE) as i32 - base as i32
+        });
+        put_i32(&mut buf, base + 12, sz2);
+        buf[base + 16] = u.remap_type;
         buf[base + 17] = u8::from(u.stereo);
         // unused[2] 保持 0。
     }
@@ -2879,6 +2953,7 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
     let bone_index: HashMap<&str, usize> = desc.bone_index();
     // 按用途计算 flags（顶点 / hitbox / 附着点 / bonemerge，且沿父链传播）。
     let computed_flags = compute_bone_flags(desc, compiled, &bone_index);
+    let saved_flags = anim_writer::saved_bone_flags(compiled, &crate::compile::bone_parents(desc));
     let bone_contents = crate::contents::bone_contents(desc).map_err(WriteError::Internal)?;
     let calculated_alignments;
     let alignments = if desc.model.rotation_alignments.len() == desc.bones.len() {
@@ -2963,6 +3038,13 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
         // 写 0 会让骨骼被判定为「未被任何东西使用」，可能被优化掉；
         // 一律写常量则会把未使用的骨骼误标为已使用。
         let bone_flags = b.flags.unwrap_or(computed_flags[i])
+            | saved_flags[i]
+            | desc
+                .model
+                .screen_alignments
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(&b.name))
+                .fold(0, |flags, (_, alignment)| flags | alignment)
             | if alignments[i].is_some() {
                 crate::bone_alignment::FIXED_ALIGNMENT
             } else {
@@ -3537,6 +3619,7 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
                     lod_layout
                         .as_ref()
                         .map(|layout| (layout, flex_mesh_cursor + mesh)),
+                    fixed_point_scale,
                 )?;
             }
 
@@ -3804,6 +3887,13 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
             //
             // 判据见 `anim_writer`：只有 `numframes >= 2` 的动画才进块
             // （实测 `ab_z1`/`zb90z` 单帧 → `animblock = 0` 内联）。
+            if let Some(offset) = anim.zero_frame_offsets.get(ai).copied().flatten() {
+                put_i32(
+                    &mut buf,
+                    ao + 92,
+                    (anim_data_off + offset) as i32 - ao as i32,
+                );
+            }
             let ext_block = anim.anim_block_index.get(ai).copied().unwrap_or(0);
             if ext_block != 0 {
                 put_i32(&mut buf, ao + 0x34, ext_block);
@@ -3916,7 +4006,12 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
             // 「相对 animdesc 自身」。
             if anim.section_frames[ai] > 0 && anim.num_sections[ai] > 0 {
                 put_i32(&mut buf, ao + 0x54, anim.section_frames[ai]);
-                if ext_block != 0 {
+                if anim
+                    .anim_block_section_offsets
+                    .get(ai)
+                    .and_then(Option::as_ref)
+                    .is_some()
+                {
                     // ---- 块形态：段表仍在 `.mdl`，但条目指向块内 ----
                     //
                     // 实测（受控实验 `absec1`）：`sectionindex` **依旧相对
@@ -3942,9 +4037,26 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
                         .and_then(|o| o.as_ref());
                     for k in 0..anim.num_sections[ai] {
                         let e = table_abs + k * 8;
-                        put_i32(&mut buf, e, ext_block);
-                        let v = offs.and_then(|o| o.get(k)).copied().unwrap_or(0);
-                        put_i32(&mut buf, e + 4, v as i32);
+                        let block = anim
+                            .section_block_indices
+                            .get(ai)
+                            .and_then(Option::as_ref)
+                            .and_then(|indices| indices.get(k))
+                            .copied()
+                            .unwrap_or(ext_block);
+                        put_i32(&mut buf, e, block);
+                        let value = if block == 0 {
+                            let raw =
+                                i32::from_le_bytes(buf[e + 4..e + 8].try_into().unwrap()) as usize;
+                            (anim_data_off + raw) as i32 - ao as i32
+                        } else {
+                            anim.anim_block_offset[ai].unwrap_or(0) as i32
+                                + offs
+                                    .and_then(|offsets| offsets.get(k))
+                                    .copied()
+                                    .unwrap_or(0) as i32
+                        };
+                        put_i32(&mut buf, e + 4, value);
                     }
                 } else {
                     let sec_off = anim.section_table_offsets[ai].expect("分段时应有段表偏移");
@@ -4292,6 +4404,9 @@ pub fn write_mdl(compiled: &CompiledModelDesc) -> Result<WriteOutcome, WriteErro
             0
         },
     );
+
+    crate::bone_flex_drivers::append(compiled, &mut buf, studiohdr2_off)
+        .map_err(WriteError::Internal)?;
 
     Ok(WriteOutcome {
         bytes: buf,
@@ -7648,5 +7763,113 @@ fps = 30.0
                 );
             }
         }
+    }
+    #[test]
+    fn wrinkle_vertex_records_use_fixed_point_alongside_half_float_geometry() {
+        let flex = crate::flex::ResolvedFlex {
+            flexdesc: 0,
+            targets: [-1.0, 0.0, 1.0, 2.0],
+            flexpair: 0,
+            vertanimtype: 1,
+            vertanims: vec![crate::flex::ResolvedVertAnim {
+                index: 3,
+                speed: 64,
+                side: 128,
+                delta: [1.0, 0.0, 0.0],
+                ndelta: [0.0, -0.5, 0.0],
+                wrinkle: 0.75,
+            }],
+        };
+        let mut bytes = vec![0; 80];
+        assert_eq!(
+            write_mesh_flexes(&mut bytes, 0, &[flex], None, 1.0 / 4096.0).unwrap(),
+            80
+        );
+        assert_eq!(bytes[32], 1);
+        assert_eq!(&bytes[60..66], &[3, 0, 64, 128, 0, 0x3c]);
+        assert_eq!(&bytes[72..74], &[0, 0xb8]);
+        assert_eq!(&bytes[76..78], &[0, 12]);
+    }
+
+    #[test]
+    fn remapped_flex_ui_preserves_all_controller_pointers_and_remap_types() {
+        let mut compiled = minimal();
+        compiled.desc.flex_controllers = ["left", "right", "multi"]
+            .into_iter()
+            .map(|name| crate::model::FlexController {
+                name: name.into(),
+                kind: "face".into(),
+                min: -1.0,
+                max: 1.0,
+            })
+            .collect();
+        compiled.resolved_flex_controller_ui = (0..=3)
+            .map(|remap_type| crate::model::ResolvedFlexControllerUi {
+                name: format!("control_{remap_type}"),
+                fc0: 0,
+                fc1: Some(1),
+                fc2: (remap_type == 2).then_some(2),
+                stereo: true,
+                remap_type,
+            })
+            .collect();
+        let output = write_mdl(&compiled).unwrap();
+        let bytes = &output.bytes;
+        let integer = |at| i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let controllers = integer(0x110);
+        let uis = integer(0x184) as usize;
+        assert_eq!(integer(0x180), 4);
+        for remap in 0..=3 {
+            let ui = uis + remap * 20;
+            assert_eq!(ui as i32 + integer(ui + 4), controllers);
+            assert_eq!(ui as i32 + integer(ui + 8), controllers + 20);
+            assert_eq!(bytes[ui + 16], remap as u8);
+            assert_eq!(bytes[ui + 17], 1);
+            if remap == 2 {
+                assert_eq!(ui as i32 + integer(ui + 12), controllers + 40);
+            } else {
+                assert_eq!(integer(ui + 12), 0);
+            }
+        }
+        compiled.resolved_flex_controller_ui[0].fc2 = Some(3);
+        assert!(write_mdl(&compiled).is_err());
+    }
+
+    #[test]
+    fn large_wrinkle_deltas_publish_the_shared_fixed_point_scale() {
+        let mut compiled = minimal();
+        compiled
+            .desc
+            .flex_descriptors
+            .push(crate::model::FlexDescriptor {
+                name: "wrinkle".into(),
+            });
+        compiled.bodyparts[0].models[0].mesh_flexes = vec![vec![crate::flex::ResolvedFlex {
+            flexdesc: 0,
+            targets: [-1.0, 0.0, 1.0, 2.0],
+            flexpair: 0,
+            vertanimtype: 1,
+            vertanims: vec![crate::flex::ResolvedVertAnim {
+                index: 0,
+                speed: 255,
+                side: 255,
+                delta: [1.0, 0.0, 0.0],
+                ndelta: [0.0; 3],
+                wrinkle: 32.0,
+            }],
+        }]];
+        let output = write_mdl(&compiled).unwrap();
+        let bytes = &output.bytes;
+        let integer = |at| i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let scale = f32::from_le_bytes(bytes[0x188..0x18c].try_into().unwrap());
+        assert_eq!(scale, 32.0 / 32767.0);
+        assert_ne!(integer(152) & (1 << 21), 0);
+        let body = integer(236) as usize;
+        let model = body + integer(body + 12) as usize;
+        let mesh = model + integer(model + 76) as usize;
+        let flex = mesh + integer(mesh + 20) as usize;
+        let vertex = flex + integer(flex + 24) as usize;
+        let wrinkle = i16::from_le_bytes(bytes[vertex + 16..vertex + 18].try_into().unwrap());
+        assert!((wrinkle as f32 * scale - 32.0).abs() <= scale);
     }
 }

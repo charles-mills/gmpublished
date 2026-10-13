@@ -127,14 +127,18 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
             .sequences
             .iter()
             .any(|sequence| sequence.frames.len() > 1);
-        let portable = !flexes
+        let portable = source_extension != "dmx"
+            && !flexes
             && !animated
             && request.bodygroups.is_empty()
             && !desc
                 .sequences
                 .iter()
                 .any(|sequence| sequence.src_stack.is_some());
-        let bake_groups = request.static_prop && !flexes && !request.bodygroups.is_empty();
+        let bake_groups = source_extension != "dmx"
+            && request.static_prop
+            && !flexes
+            && !request.bodygroups.is_empty();
         let mut converted_sources = false;
         let (mesh, animation, axes, scale) = if bake_groups {
             baked = true;

@@ -62,6 +62,9 @@ fn apply_basic(
 }
 
 pub(crate) struct Context<'a> {
+    pub base_frame0: Option<&'a [SmdPose]>,
+    pub reference_weights: &'a [f32],
+    pub reference_engine_space: bool,
     pub bones: &'a [Bone],
     pub parents: &'a [i32],
     pub motion_type: i32,
@@ -91,7 +94,12 @@ pub(crate) fn apply(
     {
         return Err("Animation commands require frames matching the model skeleton".into());
     }
-    if weights.len() != context.parents.len()
+    if context
+        .base_frame0
+        .is_some_and(|base| base.len() != context.parents.len())
+        || (!context.reference_weights.is_empty()
+            && context.reference_weights.len() != context.parents.len())
+        || weights.len() != context.parents.len()
         || context.motion_root >= context.parents.len()
         || context.pos_weights.len() != context.parents.len()
         || context.reference.is_some_and(|frames| {
@@ -105,17 +113,37 @@ pub(crate) fn apply(
             "Animation command weights or reference do not match the model skeleton".into(),
         );
     }
-    let mut frames = animation.frames.clone();
-    let absolute = !animation.delta;
-    if absolute && !context.engine_space {
+    let world_command = matches!(
+        command,
+        AnimCmd::Align { .. } | AnimCmd::CounterRotate { .. } | AnimCmd::WorldSpaceBlend { .. }
+    );
+    let reconstruct_delta = animation.delta && world_command;
+    let mut frames = if reconstruct_delta {
+        absolute_delta_frames(&animation.frames, weights, context, context.engine_space)
+    } else {
+        animation.frames.clone()
+    };
+    let absolute = !animation.delta || reconstruct_delta;
+    if absolute && !context.engine_space && !reconstruct_delta {
         convert(&mut frames, context.parents, true);
     }
     let reference = context.reference.map(|source| {
-        let mut frames = source.to_vec();
-        if !context.reference_is_delta {
-            convert(&mut frames, context.parents, true);
+        if context.reference_is_delta && world_command {
+            absolute_delta_frames(
+                source,
+                context.reference_weights,
+                context,
+                context.reference_engine_space,
+            )
+        } else {
+            let mut frames = source.to_vec();
+            if !context.reference_is_delta {
+                convert(&mut frames, context.parents, true);
+            } else if !context.reference_engine_space {
+                crate::motion::convert_delta_positions(&mut frames, context.parents, true);
+            }
+            frames
         }
-        frames
     });
     match command {
         AnimCmd::Match { .. } => {
@@ -285,9 +313,6 @@ pub(crate) fn apply(
             bone,
             ..
         } => {
-            if animation.delta || context.reference_is_delta {
-                return Err("align requires an absolute animation".into());
-            }
             let source = reference
                 .as_ref()
                 .ok_or("Unknown alignment reference animation")?;
@@ -332,9 +357,6 @@ pub(crate) fn apply(
             transform_roots(&mut frames, context.parents, &adjustment);
         }
         AnimCmd::CounterRotate { bone, target_angle } => {
-            if animation.delta {
-                return Err("counterrotate requires an absolute animation".into());
-            }
             let bone = context
                 .bones
                 .iter()
@@ -437,9 +459,6 @@ pub(crate) fn apply(
         AnimCmd::WorldSpaceBlend {
             start_frame, loops, ..
         } => {
-            if animation.delta || (context.reference_is_delta && !loops) {
-                return Err("worldspaceblend requires an absolute animation".into());
-            }
             let source = reference
                 .as_ref()
                 .ok_or("Unknown worldspaceblend reference animation")?;
@@ -523,6 +542,15 @@ pub(crate) fn apply(
         }
         _ => return Ok(false),
     }
+    if reconstruct_delta {
+        let mut absolute_frames = frames.clone();
+        convert(&mut absolute_frames, context.parents, false);
+        animation.pre_subtract_frames = Some(absolute_frames);
+        restore_delta_frames(&mut frames, &animation.frames, weights, context)?;
+    }
+    if absolute && animation.delta && !context.engine_space && !reconstruct_delta {
+        crate::motion::convert_delta_positions(&mut frames, context.parents, false);
+    }
     if absolute && !animation.delta && !context.engine_space {
         convert(&mut frames, context.parents, false);
     }
@@ -537,6 +565,70 @@ pub(crate) fn apply(
     }
     animation.frames = frames;
     Ok(true)
+}
+
+fn absolute_delta_frames(
+    source: &[Vec<SmdPose>],
+    weights: &[f32],
+    context: &Context<'_>,
+    engine_positions: bool,
+) -> Vec<Vec<SmdPose>> {
+    let mut canonical = source.to_vec();
+    if engine_positions {
+        crate::motion::convert_delta_positions(&mut canonical, context.parents, false);
+    }
+    let source = canonical.as_slice();
+    let base = context.base_frame0.unwrap_or(context.bind);
+    let mut frames: Vec<_> = source
+        .iter()
+        .map(|frame| {
+            crate::compile::delta_local_matrices_weighted(base, frame, weights)
+                .into_iter()
+                .enumerate()
+                .map(|(bone, matrix)| SmdPose {
+                    bone: bone as i32,
+                    position: position(&matrix),
+                    rotation: math::matrix_angles(&matrix),
+                })
+                .collect()
+        })
+        .collect();
+    convert(&mut frames, context.parents, true);
+    frames
+}
+
+fn restore_delta_frames(
+    frames: &mut [Vec<SmdPose>],
+    original: &[Vec<SmdPose>],
+    weights: &[f32],
+    context: &Context<'_>,
+) -> Result<(), String> {
+    convert(frames, context.parents, false);
+    let base = context.base_frame0.unwrap_or(context.bind);
+    if base.len() != context.parents.len() {
+        return Err("Delta reference does not match the model skeleton".into());
+    }
+    for (frame, original) in frames.iter_mut().zip(original) {
+        for (bone, pose) in frame.iter_mut().enumerate() {
+            let weight = weights[bone];
+            if weight <= 0.0 {
+                *pose = original[bone];
+                continue;
+            }
+            pose.position = std::array::from_fn(|axis| {
+                (pose.position[axis] - base[bone].position[axis]) / weight
+            });
+            let inverse = math::quaternion_scale(quat(base[bone].rotation), -1.0);
+            pose.rotation = math::quaternion_angles(math::quaternion_scale(
+                math::quaternion_mult(inverse, quat(pose.rotation)),
+                1.0 / weight,
+            ));
+        }
+    }
+    if context.engine_space {
+        crate::motion::convert_delta_positions(frames, context.parents, true);
+    }
+    Ok(())
 }
 
 fn original_frames(animation: &CompiledAnimation, context: &Context<'_>) -> Vec<Vec<SmdPose>> {
@@ -702,6 +794,9 @@ mod tests {
 
     fn animation() -> CompiledAnimation {
         CompiledAnimation {
+            no_anim_block: false,
+            no_anim_block_stall: false,
+            source_frames: None,
             local_hierarchy: Vec::new(),
             weights: Vec::new(),
             loop_restart: 0,
@@ -803,6 +898,9 @@ mod tests {
         let bind = animation.frames[0].clone();
         let position_weights = weights.to_vec();
         let context = Context {
+            base_frame0: None,
+            reference_weights: &[],
+            reference_engine_space: false,
             motion_root: 0,
             bones: &bones,
             parents: &parents,
@@ -868,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn linear_and_spline_delta_remove_interpolated_endpoints_in_engine_axes() {
+    fn linear_and_spline_delta_remove_interpolated_endpoints_in_canonical_axes() {
         for flags in [0x10, 0x50] {
             let mut animation = animation();
             animation.frames.truncate(3);
@@ -882,9 +980,9 @@ mod tests {
                 None,
             );
             assert!(animation.delta);
-            close(animation.frames[0][0].position[1], 0.0);
-            close(animation.frames[1][0].position[1], 1.0);
-            close(animation.frames[2][0].position[1], 0.0);
+            close(animation.frames[0][0].position[0], 0.0);
+            close(animation.frames[1][0].position[0], 1.0);
+            close(animation.frames[2][0].position[0], 0.0);
             assert!(
                 animation
                     .frames
@@ -965,6 +1063,136 @@ mod tests {
     }
 
     #[test]
+    fn world_commands_preserve_weighted_delta_representation_and_delta_references() {
+        let base = vec![
+            SmdPose {
+                bone: 0,
+                position: [2.0, 1.0, 0.0],
+                rotation: [0.2, 0.1, 0.3],
+            },
+            SmdPose {
+                bone: 1,
+                position: [1.0, 2.0, 3.0],
+                rotation: [0.1, 0.4, 0.2],
+            },
+        ];
+        let bones: Vec<Bone> = vec![
+            toml::from_str("name='root'").unwrap(),
+            toml::from_str("name='tip'\nparent='root'").unwrap(),
+        ];
+        let encode = |frames: &[Vec<SmdPose>], weights: &[f32]| {
+            frames
+                .iter()
+                .map(|frame| {
+                    frame
+                        .iter()
+                        .enumerate()
+                        .map(|(bone, pose)| SmdPose {
+                            bone: bone as i32,
+                            position: std::array::from_fn(|axis| {
+                                (pose.position[axis] - base[bone].position[axis]) / weights[bone]
+                            }),
+                            rotation: math::quaternion_angles(math::quaternion_scale(
+                                math::quaternion_mult(
+                                    math::quaternion_scale(quat(base[bone].rotation), -1.0),
+                                    quat(pose.rotation),
+                                ),
+                                1.0 / weights[bone],
+                            )),
+                        })
+                        .collect()
+                })
+                .collect::<Vec<Vec<SmdPose>>>()
+        };
+        for command in [
+            AnimCmd::Align {
+                reference: "ref".into(),
+                motion_type: 0x3F,
+                src_frame: 0,
+                dest_frame: 0,
+                bone: Some("tip".into()),
+            },
+            AnimCmd::CounterRotate {
+                bone: "tip".into(),
+                target_angle: Some([20.0, 45.0, 10.0]),
+            },
+            AnimCmd::WorldSpaceBlend {
+                reference: "ref".into(),
+                start_frame: 0,
+                loops: false,
+            },
+        ] {
+            for delta_reference in [false, true] {
+                let mut absolute = animation();
+                absolute.frames = (0..3)
+                    .map(|frame| {
+                        let mut poses = base.clone();
+                        poses[0].position[0] += frame as f32;
+                        poses[1].rotation[2] += frame as f32 * 0.1;
+                        poses
+                    })
+                    .collect();
+                let mut reference = vec![base.clone()];
+                reference[0][0].rotation[2] = 0.8;
+                reference[0][1].position[2] = 10.0;
+                let mut delta = absolute.clone();
+                delta.delta = true;
+                delta.frames = encode(&absolute.frames, &[0.5, 0.75]);
+                let delta_source = encode(&reference, &[0.6, 0.8]);
+                let context = Context {
+                    base_frame0: Some(&base),
+                    reference_weights: &[0.6, 0.8],
+                    reference_engine_space: false,
+                    bones: &bones,
+                    parents: &[-1, 0],
+                    motion_type: 0,
+                    motion_root: 0,
+                    reference: Some(&reference),
+                    engine_space: false,
+                    reference_is_delta: false,
+                    root_rotation: [0.0, 0.0, std::f32::consts::FRAC_PI_2],
+                    bind: &base,
+                    pos_weights: &[0.5, 0.75],
+                };
+                apply(&mut absolute, &mut [0.5, 0.75], &command, &context).unwrap();
+                let context = Context {
+                    reference: Some(if delta_reference {
+                        &delta_source
+                    } else {
+                        &reference
+                    }),
+                    reference_is_delta: delta_reference,
+                    ..context
+                };
+                apply(&mut delta, &mut [0.5, 0.75], &command, &context).unwrap();
+                assert!(delta.delta);
+                for (actual, expected) in delta.frames.iter().zip(&absolute.frames) {
+                    for bone in 0..2 {
+                        for axis in 0..3 {
+                            close(
+                                base[bone].position[axis]
+                                    + actual[bone].position[axis] * [0.5, 0.75][bone],
+                                expected[bone].position[axis],
+                            );
+                        }
+                        let rotation = math::quaternion_ma(
+                            quat(base[bone].rotation),
+                            [0.5, 0.75][bone],
+                            quat(actual[bone].rotation),
+                        );
+                        for (actual, expected) in math::quaternion_matrix(rotation)
+                            .into_iter()
+                            .zip(math::angle_matrix(expected[bone].rotation))
+                        {
+                            close(actual, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn counterrotate_keeps_child_orientation_fixed_in_world_space() {
         let mut animation = animation();
         for (index, frame) in animation.frames.iter_mut().enumerate() {
@@ -1013,6 +1241,9 @@ mod tests {
         ];
         let bind = animation.frames[0].clone();
         let context = Context {
+            base_frame0: None,
+            reference_weights: &[],
+            reference_engine_space: false,
             motion_root: 0,
             bones: &bones,
             parents: &[-1, 0],

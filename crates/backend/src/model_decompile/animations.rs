@@ -41,6 +41,85 @@ pub(super) struct AnimationReport {
     pub first_sequence_pose: Vec<SmdPose>,
 }
 
+pub(super) struct BlenderAnimation {
+    pub name: String,
+    pub fps: f32,
+    pub flags: u32,
+    pub frames: Vec<Vec<SmdPose>>,
+}
+
+pub(super) fn read_for_blender(
+    raw: &[u8],
+    ani: Option<&[u8]>,
+    model: &Mdl,
+    cancelled: &AtomicBool,
+) -> Result<(Vec<BlenderAnimation>, Vec<String>), DecompileError> {
+    let reader = Reader(raw);
+    let records = reader.table(180, 184, 100)?;
+    let mut clips = Vec::new();
+    let mut warnings = Vec::new();
+    let mut poses = 0usize;
+    let root_rotation = mdlc::bone_math::angle_quaternion([0.0, 0.0, std::f32::consts::FRAC_PI_2]);
+    for record in records {
+        check_cancelled(cancelled)?;
+        let name = reader.string(record, record + 4)?.to_owned();
+        let flags = reader.i32(record + 12)? as u32;
+        if flags & 0x0800 != 0 {
+            warnings.push(format!(
+                "Animation {name:?} is declared in another model; its pose data is not available."
+            ));
+            continue;
+        }
+        let count = reader.count(record + 16)?;
+        poses = poses
+            .checked_add(
+                count
+                    .checked_mul(model.bones.len())
+                    .ok_or(DecompileError::SizeLimit)?,
+            )
+            .filter(|count| *count <= MAX_POSES)
+            .ok_or(DecompileError::SizeLimit)?;
+        let mut decoded = match decode::animation(&reader, ani, model, record, cancelled) {
+            Ok(decoded) => decoded,
+            Err(error @ (DecompileError::Cancelled | DecompileError::SizeLimit)) => {
+                return Err(error);
+            }
+            Err(error) => {
+                warnings.push(format!("Animation {name:?} was not exported: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = movement::restore(&reader, model, record, &mut decoded) {
+            warnings.push(format!("Animation {name:?} was not exported: {error}"));
+            continue;
+        }
+        if model.flags & vformats::mdl::FLAG_STATIC_PROP == 0 {
+            for frame in &mut decoded.frames {
+                for (pose, bone) in frame.iter_mut().zip(&model.bones) {
+                    if bone.parent < 0 {
+                        pose.position = [-pose.position[1], pose.position[0], pose.position[2]];
+                        if decoded.flags & 4 == 0 {
+                            pose.rotation = mdlc::bone_math::quaternion_angles(
+                                mdlc::bone_math::quaternion_mult(
+                                    root_rotation,
+                                    mdlc::bone_math::angle_quaternion(pose.rotation),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        clips.push(BlenderAnimation {
+            name,
+            fps: decoded.fps,
+            flags: decoded.flags,
+            frames: decoded.frames,
+        });
+    }
+    Ok((clips, warnings))
+}
+
 pub(super) fn write_animations(
     qc: &mut String,
     export: &mut ExportFiles<'_>,
@@ -115,18 +194,7 @@ pub(super) fn write_animations(
         let movement_options = movement::restore(&reader, model, record, &mut animation)?;
         let hierarchy_options = hierarchy::recover(&reader, ani, model, record, &animation)?;
         let path = format!("animation_{index}.smd");
-        let mut source_frames = animation.frames.clone();
-        if animation.flags & 4 != 0 {
-            for frame in &mut source_frames {
-                for (pose, bone) in frame.iter_mut().zip(&model.bones) {
-                    if bone.parent < 0 {
-                        let [x, y, z] = pose.position;
-                        pose.position = [y, -x, z];
-                    }
-                }
-            }
-        }
-        export.write(&path, smd(model, &source_frames)?.as_bytes())?;
+        export.write(&path, smd(model, &animation.frames)?.as_bytes())?;
         if animation.flags & 4 != 0 && !delta_base_written {
             let frames = vec![
                 model

@@ -7,6 +7,9 @@ use super::QcError;
 use super::lexer::{Lexer, Token};
 use crate::model::*;
 
+#[path = "compat.rs"]
+mod compat;
+
 // ---------------------------------------------------------------------------
 // 头部 flags 位（`studio.h` 的 `STUDIOHDR_FLAGS_*`）
 // ---------------------------------------------------------------------------
@@ -84,7 +87,7 @@ fn lod_source_key(source: &str) -> String {
     let normalized = source.replace('\\', "/").to_ascii_lowercase();
     let path = Path::new(&normalized);
     let without_extension = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("smd" | "fbx" | "gltf" | "glb") => {
+        Some("smd" | "fbx" | "gltf" | "glb" | "obj" | "dmx") => {
             path.with_extension("").to_string_lossy().into_owned()
         }
         _ => normalized,
@@ -232,12 +235,31 @@ impl<'a> Parser<'a> {
             qdir,
             desc: ModelDesc {
                 model: ModelMeta {
+                    center_bones_on_vertices: false,
+                    collapse_bones: false,
+                    collapse_bones_aggressive: false,
+                    always_collapse: Vec::new(),
+                    screen_alignments: Vec::new(),
+                    max_vertices: None,
+                    lock_bone_lengths: false,
+                    internal_name: None,
+                    source_search_paths: Vec::new(),
+                    hitgroups: Vec::new(),
+                    preserve_triangle_order: false,
+                    zbrush: false,
                     rotation_limits: Vec::new(),
                     rotation_alignments: Vec::new(),
                     root_bone: None,
                     allowed_root_lods: 0,
                     constant_directional_light_dot: None,
+                    check_uv: None,
                     source_dependencies: Vec::new(),
+                    append_sources: Vec::new(),
+                    virtual_vtas: Vec::new(),
+                    bone_save_frames: Vec::new(),
+                    clamp_worldspace: None,
+                    bbox_only_vertices: false,
+                    bone_flex_drivers: Vec::new(),
                     minimum_lod: 0,
                     autocenter: false,
                     first_source: None,
@@ -410,8 +432,12 @@ impl<'a> Parser<'a> {
 
     /// 分发一条顶层命令。
     fn dispatch(&mut self, t: &Token) -> Result<(), QcError> {
+        if self.dispatch_compat(t)? {
+            return Ok(());
+        }
         let name = t.text.to_ascii_lowercase();
         match name.as_str() {
+            "$checkuv" => self.cmd_checkuv(),
             "$modelname" => self.cmd_modelname(),
             "$cd" => self.cmd_cd(),
             "$pushd" => self.cmd_pushd(),
@@ -556,17 +582,6 @@ impl<'a> Parser<'a> {
                 self.desc.model.skip_bone_in_bbox = true;
                 Ok(())
             }
-            // ---- mdlc 扩展：两个「优化 / 兜底」开关 ----
-            //
-            // 官方 `studiomdl.exe` 的 105 条分发表里**没有**这两个功能的任何
-            // 关键字（`tmp-qcscan\dispatch_table.tsv` 对 `optimize` / `split` /
-            // `oversized` / `vcache` 全部 0 命中），第三方 NekoMDL 也没有
-            // —— 它把顶点缓存优化做成**命令行**开关 `-nvtristrip`，把超限拆分
-            // 做成 `$maxverts`（拆成新 bodypart，mdlc 故意不学）。
-            //
-            // 所以这两个命令名是 **mdlc 自己的自由扩展**，命名规则是
-            // 「TOML 字段名去掉下划线、前面加 `$`」，与官方风格一致。
-            // 真 studiomdl 对它们报 `bad command`（`oracle_qc_extensions.js` 钉死）。
             "$optimizevtx" => {
                 self.desc.model.optimize_vtx = true;
                 Ok(())
@@ -645,7 +660,6 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             // ---- 已知但**故意不支持**的命令（见各分支注释）----
-            "$fakevta" => Err(self.unsupported(t, "$fakevta")),
             "$nekomodel" => Err(self.lex.error(crate::tr(
                 "$nekomodel points at a DMX source; mdlc does not implement DMX (the official code delegates to dmxconvert.exe as well)",
             ))),
@@ -732,18 +746,69 @@ impl<'a> Parser<'a> {
                 let _ = self.i()?;
                 Ok(())
             }
-            "$zbrush" | "$cliptotextures" | "$externaltextures" | "$obsolete"
-            | "$skinnedlods" | "$subd" | "$addsearchdir" | "$centerbonesonverts" | "$gamma"
-            | "$hgroup" | "$decal" | "$ignorez" | "$vertexcolor"
-            | "$lockbonelengths" | "$jigglebonerealign" | "$bonesaveframe"
-            | "$collapsebones" | "$collapsebonesaggressive" | "$alwayscollapse" | "$screenalign"
-            | "$insertbone" | "$maxverts" | "$maxbones" | "$internalname" | "$qcassert"
-            | "$appendsource" | "$redefineattachment" => Err(self.unsupported(t, &name)),
+            "$decal" | "$ignorez" | "$vertexcolor" | "$jigglebonerealign" | "$maxbones" => {
+                Err(self.unsupported(t, &name))
+            }
             other => Err(self.lex.error(crate::tr_fmt!(
                 "unknown QC command %{cmd} (the official code says bad command)",
                 cmd = format!("{other:?}")
             ))),
         }
+    }
+
+    fn cmd_checkuv(&mut self) -> Result<(), QcError> {
+        let mut checks = crate::uv_checks::UvChecks::default();
+        let mut any = false;
+        while self.avail() {
+            let token = self.tok(false)?;
+            match token.text.to_ascii_lowercase().as_str() {
+                "0to1" => checks.normalized = true,
+                "overlap" => checks.overlap = true,
+                "inverse" => checks.inverse = true,
+                "gutter" => {
+                    let mut values = [512, 5];
+                    for value in &mut values {
+                        if !self.avail() {
+                            break;
+                        }
+                        let number = self.tok(false)?;
+                        if !number
+                            .text
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_digit)
+                        {
+                            self.lex.unget(number);
+                            break;
+                        }
+                        *value = number.text.parse::<u32>().map_err(|_| {
+                            self.lex
+                                .error("$checkuv gutter values must be positive integers")
+                        })?;
+                        if *value == 0 {
+                            return Err(self
+                                .lex
+                                .error("$checkuv gutter values must be positive integers"));
+                        }
+                    }
+                    checks.gutter = Some(values);
+                }
+                _ => {
+                    return Err(QcError::new(
+                        token.file,
+                        token.line,
+                        format!("unknown $checkuv option {:?}", token.text),
+                    ));
+                }
+            }
+            any = true;
+        }
+        self.desc.model.check_uv = Some(if any {
+            checks
+        } else {
+            crate::uv_checks::UvChecks::all()
+        });
+        Ok(())
     }
 
     fn cmd_origin(&mut self) -> Result<(), QcError> {
@@ -1202,6 +1267,7 @@ impl<'a> Parser<'a> {
                 }
                 "blank" => {
                     bp.models.push(BodyModel {
+                        sphere_normals: Vec::new(),
                         smd: String::new(),
                         name: Some("blank".to_string()),
                         flip_triangles: true,
@@ -1385,7 +1451,8 @@ impl<'a> Parser<'a> {
         // 所以「同一个 SMD 既当网格源又当动画源」时按**网格源**算，
         // 这里的集合语义正好一致。
         self.mesh_sources.insert(smd.clone());
-        Ok(BodyModel {
+        let model = BodyModel {
+            sphere_normals: Vec::new(),
             smd,
             name: model_name.take(),
             flip_triangles,
@@ -1400,7 +1467,23 @@ impl<'a> Parser<'a> {
             src_shape_key_order,
             src_shape_key_ignore,
             input_scale: Some(input_scale),
-        })
+        };
+        let path = crate::compile::resolve_smd_path(&self.qdir, &model.smd)
+            .map_err(|message| QcError::new(&t.file, t.line, message.to_string()))?;
+        if crate::compile::SourceKind::of(&path) == Ok(crate::compile::SourceKind::Dmx) {
+            let options = crate::compile::SrcOpts::of_model(&model)
+                .map_err(|message| QcError::new(&t.file, t.line, message.to_string()))?;
+            let geometry = crate::compile::read_source_geometry(&path, &model.smd, &options)
+                .map_err(|message| QcError::new(&t.file, t.line, message.to_string()))?;
+            if let Some(metadata) = geometry.dmx {
+                for attachment in metadata.attachments {
+                    if !self.desc.attachments.contains(&attachment) {
+                        self.desc.attachments.push(attachment);
+                    }
+                }
+            }
+        }
+        Ok(model)
     }
 
     /// 把 QC 里的文件名解析成「相对 qdir 的路径字符串」，并拼上 `cddir` 前缀。
@@ -1414,11 +1497,26 @@ impl<'a> Parser<'a> {
             return name.to_string();
         }
         let prefix = self.cd_prefix();
-        if prefix.is_empty() {
+        let resolved = if prefix.is_empty() {
             name.replace('\\', "/")
         } else {
             format!("{}{}", prefix, name.replace('\\', "/"))
+        };
+        if crate::compile::resolve_smd_path(&self.qdir, &resolved).is_ok_and(|path| path.is_file())
+        {
+            return resolved;
         }
+        for directory in &self.desc.model.source_search_paths {
+            for relative in [&resolved, name] {
+                let candidate = self.qdir.join(directory).join(relative);
+                if crate::compile::resolve_smd_path(&self.qdir, &candidate.to_string_lossy())
+                    .is_ok_and(|path| path.is_file())
+                {
+                    return candidate.to_string_lossy().replace('\\', "/");
+                }
+            }
+        }
+        resolved
     }
 
     /// `$model <name> <smd> [opts] { ...flex/eyeball/mouth... }`（`4228`）。
@@ -1508,9 +1606,14 @@ impl<'a> Parser<'a> {
                 "eyelid" => self.option_eyelid(model)?,
                 "mouth" => self.option_mouth(model)?,
                 "flexcontroller" => self.option_flexcontroller()?,
-                "spherenormals" | "attachment" => {
-                    self.skip_rest_of_line();
+                "spherenormals" => {
+                    let material = self.tok(false)?.text;
+                    let center = self.v3()?;
+                    model
+                        .sphere_normals
+                        .push(crate::source_support::SphereNormals { material, center });
                 }
+                "attachment" => {}
                 // ---- mdlc 扩展：`src*` 的**块内**形式 ----
                 //
                 // 与 `option_studio` 的行内分支同一套语义。两处都要有，因为
@@ -2148,6 +2251,9 @@ impl<'a> Parser<'a> {
         // —— 否则后面一条正常 `$sequence` 会被我们误报为重复，
         // 而官方在那种情况下是 `no animations found`（不同错误）。
         self.desc.sequences.push(Sequence {
+            inherited_flags: None,
+            no_anim_block: false,
+            no_anim_block_stall: false,
             loop_restart: 0,
             fudge_loop: false,
             motion_rollback: self.default_motion_rollback,
@@ -2220,6 +2326,9 @@ impl<'a> Parser<'a> {
         }
 
         let mut seq = Sequence {
+            inherited_flags: None,
+            no_anim_block: false,
+            no_anim_block_stall: false,
             loop_restart: 0,
             fudge_loop: false,
             motion_rollback: self.default_motion_rollback,
@@ -2324,6 +2433,8 @@ impl<'a> Parser<'a> {
         // `pseq->panim[0][0]` 上；mdlc 解析期还不知道第一格是哪个动画，
         // 所以先记在 `holder` 里，块尾并回 `seq`）。
         let mut holder = Animation {
+            no_anim_block: seq.no_anim_block,
+            no_anim_block_stall: seq.no_anim_block_stall,
             forward_declared: false,
             loop_restart: seq.loop_restart,
             fudge_loop: seq.fudge_loop,
@@ -2378,7 +2489,11 @@ impl<'a> Parser<'a> {
             let low = t.text.to_ascii_lowercase();
             match low.as_str() {
                 "fps" => seq.fps = Some(self.f()?),
-                "cyclepose" => seq.cycle_pose = Some(self.tok(false)?.text),
+                "cyclepose" => {
+                    let name = self.tok(false)?.text;
+                    self.poseparam_index(&name);
+                    seq.cycle_pose = Some(name);
+                }
                 "loop" => seq.looping = true,
                 "delta" => seq.delta = true,
                 "predelta" => seq.extra_flags = Some(seq.extra_flags.unwrap_or(0) | 0x0004),
@@ -2394,7 +2509,7 @@ impl<'a> Parser<'a> {
                         "post" => 0x0010,       // STUDIO_POST
                         "realtime" => 0x0080,   // STUDIO_REALTIME
                         "hidden" => 0x0400,     // STUDIO_HIDDEN
-                        "worldspace" => 0x2000, // STUDIO_WORLD
+                        "worldspace" => 0x2010, // STUDIO_WORLD | STUDIO_POST
                         "local" => 0x1000,
                         _ => 0,
                     };
@@ -2805,6 +2920,8 @@ impl<'a> Parser<'a> {
         }
         seq.cmds.extend(holder.cmds);
         seq.motion_type = holder.motion_type;
+        seq.no_anim_block = holder.no_anim_block;
+        seq.no_anim_block_stall = holder.no_anim_block_stall;
         seq.motion_rollback = holder.motion_rollback;
         seq.loop_restart = holder.loop_restart;
         seq.fudge_loop = holder.fudge_loop;
@@ -2872,6 +2989,27 @@ impl<'a> Parser<'a> {
             loop_restart_override,
             fudge_loop_override,
         );
+        let references = if seq.blends.is_empty() {
+            std::slice::from_ref(&seq.smd)
+        } else {
+            &seq.blends
+        };
+        seq.inherited_flags = Some(
+            references
+                .iter()
+                .filter_map(|name| {
+                    self.desc
+                        .animations
+                        .iter()
+                        .find(|animation| animation.name.eq_ignore_ascii_case(name))
+                })
+                .fold(0, |flags, animation| {
+                    flags
+                        | animation.extra_flags
+                        | i32::from(animation.looping)
+                        | if animation.forward_declared { 0x800 } else { 0 }
+                }),
+        );
         // ⚠️ **不 push** —— 调用方负责（`$sequence` 新建后 push，
         // `$continue` 则写回 `self.desc.sequences[si]`）。
         Ok(())
@@ -2920,6 +3058,9 @@ impl<'a> Parser<'a> {
                 anim.frames = Some(frames);
             }
             anim.motion_type |= std::mem::take(&mut seq.motion_type);
+            anim.looping |= seq.looping;
+            anim.no_anim_block |= seq.no_anim_block;
+            anim.no_anim_block_stall |= seq.no_anim_block_stall;
             if let Some(value) = motion_rollback {
                 anim.motion_rollback = value;
             }
@@ -3038,6 +3179,7 @@ impl<'a> Parser<'a> {
             fake_origin: None,
             fake_rotate: None,
             use_source: false,
+            use_sequence: false,
         };
         if kind == IkRuleType::Touch {
             let b = self.tok(false)?;
@@ -3062,14 +3204,26 @@ impl<'a> Parser<'a> {
         while self.avail() {
             let t = self.tok(false)?;
             match t.text.to_ascii_lowercase().as_str() {
-                "usesource" => rule.use_source = true,
-                "usesequence" => rule.use_source = false,
+                "usesource" => {
+                    rule.use_source = true;
+                    rule.use_sequence = false;
+                }
+                "usesequence" => {
+                    rule.use_sequence = true;
+                    rule.use_source = false;
+                }
                 "fakeorigin" => rule.fake_origin = Some(self.v3()?),
                 "fakerotate" => rule.fake_rotate = Some(self.v3()?),
                 "floor" => rule.floor = Some(self.f()?),
                 "height" => rule.height = Some(self.f()?),
-                "radius" => rule.radius = Some(self.f()?),
-                "pad" => rule.pad = Some(self.f()?),
+                "radius" => {
+                    rule.radius = Some(self.f()?);
+                    rule.pad = None;
+                }
+                "pad" => {
+                    rule.pad = Some(self.f()?);
+                    rule.radius = None;
+                }
                 "target" => rule.target = Some(self.i()?),
                 "contact" => rule.contact = Some(self.i()?),
                 "range" => {
@@ -3079,7 +3233,13 @@ impl<'a> Parser<'a> {
                         *slot = if v.text == "." {
                             None
                         } else {
-                            Some(parse_i32(&v.text).unwrap_or(0))
+                            Some(parse_i32(&v.text).ok_or_else(|| {
+                                QcError::new(
+                                    v.file,
+                                    v.line,
+                                    "IK range must contain integer frames or dots",
+                                )
+                            })?)
                         };
                     }
                     rule.range = Some(r);
@@ -3113,6 +3273,8 @@ impl<'a> Parser<'a> {
         }
         self.animation_names.insert(token.text.to_ascii_lowercase());
         self.desc.animations.push(Animation {
+            no_anim_block: false,
+            no_anim_block_stall: false,
             forward_declared: true,
             name: token.text,
             smd: String::new(),
@@ -3161,6 +3323,8 @@ impl<'a> Parser<'a> {
         self.referenced_files.push(smd.clone());
 
         let mut anim = Animation {
+            no_anim_block: false,
+            no_anim_block_stall: false,
             forward_declared: false,
             loop_restart: 0,
             fudge_loop: false,
@@ -3363,6 +3527,10 @@ impl<'a> Parser<'a> {
                 } else if other == "fudgeloop" {
                     anim.fudge_loop = true;
                     anim.looping = true;
+                } else if other == "noanimblock" {
+                    anim.no_anim_block = true;
+                } else if other == "noanimblockstall" {
+                    anim.no_anim_block_stall = true;
                 } else if other == "snap" {
                     anim.extra_flags |= 0x0002;
                 } else if other == "post" {
@@ -3379,9 +3547,6 @@ impl<'a> Parser<'a> {
                     self.append_cmdlist(t, &mut anim.cmds)?;
                 } else if let Some(control) = lookup_control(&t.text) {
                     anim.motion_type |= control;
-                } else if let Some(v) = parse_i32(&t.text) {
-                    // 官方把裸数字当 `cmdlist` 下标 —— 语料 0 次。
-                    let _ = v;
                 } else {
                     // 官方 `return false` —— 由调用方决定报错还是继续
                     // （`$animation` 体报 `Unknown animation option '%s'`，
@@ -4882,7 +5047,10 @@ impl<'a> Parser<'a> {
         // 剥掉 `$`（若在），再比较。
         let key = low.strip_prefix('$').unwrap_or(&low);
         match key {
-            "mass" => self.desc.physics.mass = Some(self.f()?),
+            "mass" => {
+                self.desc.physics.mass = Some(self.f()?);
+                self.desc.physics.auto_mass = false;
+            }
             "concave" => self.desc.physics.concave = true,
             "damping" => self.desc.physics.damping = Some(self.f()?),
             "rotdamping" => self.desc.physics.rot_damping = Some(self.f()?),
@@ -4890,7 +5058,10 @@ impl<'a> Parser<'a> {
             "drag" => self.desc.physics.drag = Some(self.f()?),
             "rootbone" => self.desc.physics.root_bone = Some(self.tok(false)?.text),
             "noselfcollisions" => self.desc.physics.no_self_collisions = true,
-            "automass" => self.desc.physics.auto_mass = true,
+            "automass" => {
+                self.desc.physics.auto_mass = true;
+                self.desc.physics.mass = None;
+            }
             "masscenter" => self.desc.physics.mass_center = Some(self.v3()?),
             "jointmerge" => self.cmd_collision_pair(true)?,
             "jointcollide" => self.cmd_collision_pair(false)?,
@@ -4903,7 +5074,11 @@ impl<'a> Parser<'a> {
             "jointcontents" => self.cmd_jointcontents()?,
             "contents" => self.cmd_contents()?,
             "animatedfriction" => self.cmd_animatedfriction()?,
-            "phyname" => return Err(self.unsupported(t, &t.text)),
+            "phyname" => self.desc.physics.name = Some(self.tok(false)?.text),
+            "weldposition" => self.desc.physics.weld_position = Some(self.f()?),
+            "weldnormal" => self.desc.physics.weld_normal = Some(self.f()?),
+            "remove2d" => self.desc.physics.remove_2d = true,
+            "assumeworldspace" => self.desc.physics.assume_world_space = true,
             "concaveperjoint" => self.desc.physics.concave_per_joint = true,
             "maxconvexpieces" => {
                 let value = self.i()?;
@@ -4921,13 +5096,7 @@ impl<'a> Parser<'a> {
             "rollingdrag" => {
                 let _ = self.f()?;
             }
-            "weldposition"
-            | "weldnormal"
-            | "remove2d"
-            | "polysoup"
-            | "assumeworldspace"
-            | "snapcollisionjoints"
-            | "preservetriangleorder" => {
+            "polysoup" | "snapcollisionjoints" | "preservetriangleorder" => {
                 return Err(self.unsupported(t, &t.text));
             }
             "jointmassbias" | "jointdamping" | "jointrotdamping" | "jointinertia" => {
@@ -5042,18 +5211,31 @@ impl<'a> Parser<'a> {
     /// `$mass` / `$damping` 等**顶层**物理键。
     fn cmd_physics_kv(&mut self, name: &str) -> Result<(), QcError> {
         match name {
-            "$mass" => self.desc.physics.mass = Some(self.f()?),
+            "$mass" => {
+                self.desc.physics.mass = Some(self.f()?);
+                self.desc.physics.auto_mass = false;
+            }
             "$damping" => self.desc.physics.damping = Some(self.f()?),
             "$rotdamping" => self.desc.physics.rot_damping = Some(self.f()?),
             "$inertia" => self.desc.physics.inertia = Some(self.f()?),
             "$drag" => self.desc.physics.drag = Some(self.f()?),
             "$rootbone" => self.desc.physics.root_bone = Some(self.tok(false)?.text),
             "$concave" => self.desc.physics.concave = true,
-            "$automass" => self.desc.physics.auto_mass = true,
-            "$masscenter" => self.desc.physics.mass_center = Some(self.v3()?),
-            "$maxconvexpieces" | "$phyname" => {
-                return Err(self.lex.error(format!("{name} is not supported yet; compilation stopped to avoid exporting a model with ignored settings")));
+            "$automass" => {
+                self.desc.physics.auto_mass = true;
+                self.desc.physics.mass = None;
             }
+            "$masscenter" => self.desc.physics.mass_center = Some(self.v3()?),
+            "$maxconvexpieces" => {
+                let value = self.i()?;
+                if !(1..=1024).contains(&value) {
+                    return Err(self
+                        .lex
+                        .error("Convex piece limit must be between 1 and 1024"));
+                }
+                self.desc.physics.max_convex_pieces = Some(value as usize);
+            }
+            "$phyname" => self.desc.physics.name = Some(self.tok(false)?.text),
             _ => {}
         }
         Ok(())
@@ -5129,13 +5311,6 @@ impl<'a> Parser<'a> {
             if smd_cache.contains_key(f) {
                 continue;
             }
-            // ⚠️ 用 `compile::resolve_smd_path` 而不是手工 `join`：相对路径
-            // 必须以 `qdir` 为基准，且与编译期读帧时的路径**必须一致**。
-            //
-            // ⚠️ 它**不再补扩展名** —— 引用没写扩展名时报错（官方
-            // `Load_Source` 会按 `.vrm`/`.smd`/… 依次试探，
-            // `studiomdl.cpp:1603-1638`，mdlc 有意不实现这套猜测）。
-            // 所以 `referenced_files` 里的每一条都应当是完整文件名。
             let p = match crate::compile::resolve_smd_path(&self.qdir, f) {
                 Ok(p) => p,
                 Err(msg) => {
@@ -5619,15 +5794,15 @@ impl<'a> Parser<'a> {
             let mut out: Vec<Option<(usize, [f32; 12])>> = Vec::new();
             let mut errs: Vec<QcError> = Vec::new();
             for at in &self.desc.attachments {
-                if !at.synthetic {
-                    continue;
-                }
-                let (file, line) = loc
-                    .next()
-                    .cloned()
-                    .unwrap_or_else(|| (self.main_path.display().to_string(), 0));
+                let (file, line) = if at.synthetic {
+                    loc.next()
+                        .cloned()
+                        .unwrap_or_else(|| (self.main_path.display().to_string(), 0))
+                } else {
+                    (self.main_path.display().to_string(), 0)
+                };
                 let want = at.bone.to_ascii_lowercase();
-                if !all_nodes.contains(&want) {
+                if at.synthetic && !all_nodes.contains(&want) {
                     errs.push(QcError::new(
                         file,
                         line,
@@ -5645,7 +5820,11 @@ impl<'a> Parser<'a> {
                 // `bone_index` —— 官方 `findGlobalBone` 用的是 `stricmp`
                 // （大小写不敏感），而 `ModelDesc::bone_index` 是精确匹配。
                 if let Some(&gi) = global_index.get(&want) {
-                    out.push(Some((gi, crate::bone_math::identity())));
+                    out.push(if at.synthetic || at.bone != self.desc.bones[gi].name {
+                        Some((gi, crate::bone_math::identity()))
+                    } else {
+                        None
+                    });
                     continue;
                 }
                 // 阶段 2：找第一个含该骨骼的 source。
@@ -5684,7 +5863,8 @@ impl<'a> Parser<'a> {
                         file,
                         line,
                         crate::tr_fmt!(
-                            "unable to find valid bone for attachment __illumPosition:%{bone} (the official `simplify.cpp:5360`)",
+                            "unable to find valid bone for attachment %{attachment}:%{bone} (the official `simplify.cpp:5360`)",
+                            attachment = at.name,
                             bone = at.bone
                         ),
                     ));
@@ -5699,16 +5879,17 @@ impl<'a> Parser<'a> {
                     &info.parents,
                 );
                 let gi = global_index[&info.nodes[ka].to_ascii_lowercase()];
-                let corr =
-                    crate::bone_math::concat(&crate::bone_math::invert(&world[ka]), &world[k0]);
+                let corr = if at.absolute {
+                    crate::bone_math::identity()
+                } else {
+                    crate::bone_math::concat(&crate::bone_math::invert(&world[ka]), &world[k0])
+                };
                 out.push(Some((gi, corr)));
             }
             self.errors.extend(errs);
             let mut it = out.into_iter();
             for at in &mut self.desc.attachments {
-                if at.synthetic {
-                    at.resolved = it.next().flatten();
-                }
+                at.resolved = it.next().flatten();
             }
         }
 
@@ -5881,16 +6062,28 @@ impl<'a> Parser<'a> {
             }
             let last = count.saturating_sub(1) as f32;
             for event in &mut seq.events {
-                if count == 0 || !event.cycle.is_finite() || event.cycle < 0.0 || event.cycle > last
-                {
+                if count == 0 || !event.cycle.is_finite() {
                     self.errors.push(QcError::new(
                         self.main_path.display().to_string(),
                         0,
                         format!(
-                            "event frame {} is outside sequence {:?} ({} frames)",
+                            "event frame {} is invalid for sequence {:?} ({} frames)",
                             event.cycle, seq.name, count
                         ),
                     ));
+                } else if event.cycle < 0.0 || event.cycle > last {
+                    crate::warning!(
+                        "Event {} (frame {}) is outside sequence {:?} ({} frames); using cycle 0",
+                        if event.name.is_empty() {
+                            event.event.to_string()
+                        } else {
+                            event.name.clone()
+                        },
+                        event.cycle,
+                        seq.name,
+                        count
+                    );
+                    event.cycle = 0.0;
                 } else {
                     event.cycle = if last > 0.0 { event.cycle / last } else { 0.0 };
                 }
@@ -6984,7 +7177,7 @@ end
     }
 
     #[test]
-    fn event_cycles_follow_processed_animation_frame_counts_and_reject_invalid_frames() {
+    fn event_cycles_follow_processed_frame_counts_and_warn_for_out_of_range_frames() {
         let dir = fixture("event_output_frames");
         write_five_frame_animation(&dir);
         for (options, count, frame, cycle) in [
@@ -7006,11 +7199,23 @@ end
             let text = format!(
                 "$body body a.smd\n$sequence action motion.smd {{\n event 5004 {frame} \"sound\"\n}}\n"
             );
-            let errors = crate::qc::parse_qc_str(&text, &dir).unwrap_err();
+            let (result, warnings) =
+                crate::diag::capture_warnings(|| crate::qc::parse_qc_str(&text, &dir));
+            let desc = result.unwrap();
+            assert_eq!(desc.sequences[0].events[0].cycle, 0.0);
             assert!(
-                errors
+                warnings
                     .iter()
-                    .any(|error| error.to_string().contains("event frame"))
+                    .any(|warning| warning.contains("Event 5004") && warning.contains("action"))
+            );
+            let output = crate::pipeline::build(&desc, &dir, Default::default()).unwrap();
+            let sequence = i32::from_le_bytes(output.mdl[0xC0..0xC4].try_into().unwrap()) as usize;
+            let event = sequence
+                + i32::from_le_bytes(output.mdl[sequence + 28..sequence + 32].try_into().unwrap())
+                    as usize;
+            assert_eq!(
+                f32::from_le_bytes(output.mdl[event..event + 4].try_into().unwrap()),
+                0.0
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -7226,28 +7431,6 @@ end
         );
         assert_eq!(desc.materials.textures[0].name, "mat");
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn unsupported_output_directives_report_their_source_location() {
-        for command in [
-            "$fakevta face {}",
-            "$skinnedLODs",
-            "$internalname internal",
-            "$qcassert 1",
-            "$appendsource a.smd",
-            "$redefineattachment name",
-            "$phyname collision",
-            "$maxverts 65536",
-        ] {
-            let errors = crate::qc::parse_qc_str(command, std::path::Path::new(".")).unwrap_err();
-            assert_eq!(errors[0].line, 1);
-            assert_eq!(errors[0].file, "<memory>");
-            assert!(
-                errors[0].message.contains("not supported yet"),
-                "{errors:?}"
-            );
-        }
     }
 
     #[test]
@@ -7534,7 +7717,7 @@ $sequence \"reload_end\" \"al_reload\" subtract \"a_idle\" 0 delta \"ACT_VM_RELO
         let qc = "\
 $modelname \"t.mdl\"
 $body body \"a.smd\"
-$attachment \"cam\" \"tip\" 0 0 0 rotate 0 0 -90
+$attachment \"cam\" \"root\" 0 0 0 rotate 0 0 -90
 $sequence \"idle\" \"a.smd\" fps 30
 ";
         let d = parse(qc, &dir);
@@ -7561,7 +7744,7 @@ $sequence \"idle\" \"a.smd\" fps 30
         let qc = "\
 $modelname \"t.mdl\"
 $body body \"a.smd\"
-$attachment \"cam\" \"tip\" 0 0 0 rotate 11 22 33
+$attachment \"cam\" \"root\" 0 0 0 rotate 11 22 33
 $sequence \"idle\" \"a.smd\" fps 30
 ";
         let d = parse(qc, &dir);
@@ -7596,11 +7779,11 @@ $sequence \"idle\" \"a.smd\" fps 30
         let qc = "\
 $modelname \"t.mdl\"
 $body body \"a.smd\"
-$attachment \"plain\" \"tip\" 0 0 0
-$attachment \"abs\" \"tip\" 0 0 0 absolute
-$attachment \"rig\" \"tip\" 0 0 0 rigid
-$attachment \"wa\" \"tip\" 0 0 0 world_align
-$attachment \"all\" \"tip\" 0 0 0 absolute rigid world_align
+$attachment \"plain\" \"root\" 0 0 0
+$attachment \"abs\" \"root\" 0 0 0 absolute
+$attachment \"rig\" \"root\" 0 0 0 rigid
+$attachment \"wa\" \"root\" 0 0 0 world_align
+$attachment \"all\" \"root\" 0 0 0 absolute rigid world_align
 $sequence \"idle\" \"a.smd\" fps 30
 ";
         let d = parse(qc, &dir);
@@ -7640,9 +7823,9 @@ $sequence \"idle\" \"a.smd\" fps 30
         let qc = "\
 $modelname \"t.mdl\"
 $body body \"a.smd\"
-$attachment \"a\" \"tip\" 0 0 0 absolute
-$attachment \"r\" \"tip\" 0 0 0 rigid
-$attachment \"plain\" \"tip\" 0 0 0
+$attachment \"a\" \"root\" 0 0 0 absolute
+$attachment \"r\" \"root\" 0 0 0 rigid
+$attachment \"plain\" \"root\" 0 0 0
 $sequence \"idle\" \"a.smd\" fps 30
 ";
         let d = parse(qc, &dir);
@@ -7675,9 +7858,9 @@ $sequence \"idle\" \"a.smd\" fps 30
         let qc = "\
 $modelname \"t.mdl\"
 $body body \"a.smd\"
-$attachment \"abs_only\" \"tip\" 0 0 0 absolute
-$attachment \"abs_then_rot\" \"tip\" 0 0 0 absolute rotate 11 22 33
-$attachment \"rot_then_abs\" \"tip\" 0 0 0 rotate 11 22 33 absolute
+$attachment \"abs_only\" \"root\" 0 0 0 absolute
+$attachment \"abs_then_rot\" \"root\" 0 0 0 absolute rotate 11 22 33
+$attachment \"rot_then_abs\" \"root\" 0 0 0 rotate 11 22 33 absolute
 $sequence \"idle\" \"a.smd\" fps 30
 ";
         let d = parse(qc, &dir);
@@ -7724,7 +7907,7 @@ $sequence \"idle\" \"a.smd\" fps 30
         let qc = "\
 $modelname \"t.mdl\"
 $body body \"a.smd\"
-$attachment \"muzzle\" \"tip\" 1 2 3
+$attachment \"muzzle\" \"root\" 1 2 3
 $sequence \"idle\" \"a.smd\" fps 30
 ";
         let d = parse(qc, &dir);
@@ -8115,15 +8298,6 @@ $body body \"a.smd\"
         );
     }
 
-    /// **`$nosplitoversizedmeshes`（mdlc 扩展）关掉超限网格自动拆分。**
-    ///
-    /// ⚠️ 官方**没有**这个命令，第三方 NekoMDL 也没有 —— 它用 `$maxverts`
-    /// 做同一件事（拆成**新 bodypart**，mdlc 故意不学，理由见
-    /// `src/model.rs:2283-2295`）。
-    ///
-    /// 缺省是 **`true`**，所以这条命令是**唯一**能从 QC 关掉它的途径。
-    /// 关掉之后遇到超限 mesh 会直接报错（`src/compile.rs` 的
-    /// `split_oversized_meshes` 提前返回那条路径）。
     #[test]
     fn nosplitoversizedmeshes_extension_turns_the_switch_off() {
         let dir = fixture("qc_ext_nosplit");
@@ -9833,6 +10007,36 @@ $sequence \"idle\" \"a.smd\" fps 30 {
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn sequence_flag_inheritance_uses_authored_flags_at_declaration_time() {
+        let dir = fixture("sequence_flag_order");
+        let mut desc = parse(
+            "$body body a.smd\n$animation source a.smd snap\n$sequence early source predelta\n$continue source post realtime loop\n$sequence late source predelta\n",
+            &dir,
+        );
+        desc.model.version = Some(48);
+        assert_eq!(desc.sequences[0].inherited_flags, Some(2));
+        assert_eq!(desc.sequences[1].inherited_flags, Some(0x93));
+        let built = crate::pipeline::build(&desc, &dir, Default::default()).unwrap();
+        let sequences = i32::from_le_bytes(built.mdl[192..196].try_into().unwrap()) as usize;
+        let flags = |index: usize| {
+            i32::from_le_bytes(
+                built.mdl[sequences + index * 212 + 12..sequences + index * 212 + 16]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(flags(0) & 0x117, 6);
+        assert_eq!(flags(1) & 0x117, 0x117);
+        let desc = parse(
+            "$body body a.smd\n$animation shared a.smd\n$sequence before shared\n$sequence looped shared loop\n$sequence after shared\n",
+            &dir,
+        );
+        assert_eq!(desc.sequences[0].inherited_flags, Some(0));
+        assert_eq!(desc.sequences[2].inherited_flags, Some(1));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn animation_loop_options_and_flags_keep_named_source_scope() {
         let dir = fixture("loop_source_options");

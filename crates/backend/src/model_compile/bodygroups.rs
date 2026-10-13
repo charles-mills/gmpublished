@@ -20,6 +20,19 @@ pub enum BodygroupChoice {
 
 pub(super) fn source_parts(source: &Path) -> Result<Vec<SourcePart>, ModelCompileError> {
     let extension = source.extension().unwrap_or_default().to_string_lossy();
+    if extension.eq_ignore_ascii_case("dmx") {
+        return mdlc::dmx::mesh_names(source)
+            .map(|parts| {
+                parts
+                    .into_iter()
+                    .map(|name| SourcePart {
+                        selector: name.clone(),
+                        name,
+                    })
+                    .collect()
+            })
+            .map_err(ModelCompileError::Description);
+    }
     let result = if extension.eq_ignore_ascii_case("fbx") {
         mdlc::fbx::source_parts(source, "model parts")
     } else if extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb") {
@@ -116,7 +129,7 @@ pub(super) fn apply(
     let available = source_parts(source)?;
     if available.is_empty() {
         return Err(ModelCompileError::InvalidOption(
-            "bodygroup authoring requires an FBX, glTF or GLB source with separate mesh objects"
+            "bodygroup authoring requires a DMX, FBX, glTF or GLB source with separate mesh objects"
                 .into(),
         ));
     }
@@ -282,12 +295,12 @@ mod tests {
         assert!(
             points
                 .iter()
-                .any(|point| point.iter().any(|value| value.abs() > 9.9))
+                .any(|point| point.iter().any(|value| value.abs() > 9.9 / 0.0254))
         );
         assert!(
             points
                 .iter()
-                .all(|point| point.iter().all(|value| value.abs() < 20.0))
+                .all(|point| point.iter().all(|value| value.abs() < 20.0 / 0.0254))
         );
     }
 
@@ -306,7 +319,7 @@ mod tests {
                 .iter()
                 .flat_map(|solid| &solid.ledges)
                 .flat_map(|ledge| &ledge.vertices)
-                .all(|point| point.iter().all(|value| value.abs() < 5.0))
+                .all(|point| point.iter().all(|value| value.abs() < 5.0 / 0.0254))
         );
         let BodygroupChoice::Mesh { parts, .. } = &mut request.bodygroups[0].choices[1] else {
             unreachable!()

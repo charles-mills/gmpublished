@@ -1839,6 +1839,17 @@ fn transformed_normal(value: [f32; 3], inverse: &World) -> [f32; 3] {
     }
 }
 
+fn import_units(opts: &GltfOpts) -> std::borrow::Cow<'_, GltfOpts> {
+    if opts.axis == Some(ForcedAxis::Auto) {
+        let mut options = opts.clone();
+        // glTF uses metres; Source models use inches.
+        options.scale /= 0.0254;
+        std::borrow::Cow::Owned(options)
+    } else {
+        std::borrow::Cow::Borrowed(opts)
+    }
+}
+
 fn option_vector(value: [f32; 3], opts: &GltfOpts, position: bool) -> [f32; 3] {
     let vector = ufbx::Vec3 {
         x: f64::from(value[0]),
@@ -1868,6 +1879,8 @@ fn option_vector(value: [f32; 3], opts: &GltfOpts, position: bool) -> [f32; 3] {
 /// `skin.joints`，没有 FBX 那套「蒙皮簇 + 祖先上溯」的推断，也就没有
 /// 「某个节点被丢掉了」这种需要解释的情形。
 pub fn read(path: &Path, at: &str, opts: &GltfOpts) -> Result<GltfGeometry, GltfError> {
+    let units = import_units(opts);
+    let opts = units.as_ref();
     let (doc, buffers, notes) = load_document(path, at)?;
     for line in notes.lines(at) {
         log::info!("{line}");
@@ -2066,6 +2079,8 @@ pub fn read_frames(
     fps: f32,
     opts: &GltfOpts,
 ) -> Result<Smd, GltfError> {
+    let units = import_units(opts);
+    let opts = units.as_ref();
     let axes = (opts.axis == Some(ForcedAxis::Auto))
         .then(|| automatic_axis_matrix(ufbx::axes_right_handed_y_up()))
         .transpose()?;
@@ -2940,6 +2955,10 @@ mod tests {
         (0..3).all(|i| (a[i] - b[i]).abs() < 1e-5)
     }
 
+    fn near_metres(actual: [f32; 3], expected: [f32; 3]) -> bool {
+        near3(actual.map(|value| value * 0.0254), expected)
+    }
+
     fn near2(a: [f32; 2], b: [f32; 2]) -> bool {
         (0..2).all(|i| (a[i] - b[i]).abs() < 1e-5)
     }
@@ -3318,7 +3337,7 @@ mod tests {
         assert_eq!(geometry.smd.nodes, animation.nodes);
         assert_eq!(geometry.smd.frames[0].poses, animation.frames[0].poses);
         let vertices = &geometry.smd.triangles[0].vertices;
-        assert!(near3(vertices[2].position, [0.0, 0.0, 2.0]));
+        assert!(near_metres(vertices[2].position, [0.0, 0.0, 2.0]));
         assert!(near3(vertices[0].normal, [0.0, -1.0, 0.0]));
         let matrix = crate::bone_math::angle_matrix(animation.frames[30].poses[0].rotation);
         assert!(near3([matrix[0], matrix[4], matrix[8]], [0.0, 0.0, 1.0]));
@@ -3362,15 +3381,15 @@ mod tests {
             ..Default::default()
         };
         let geometry = read(&path, "scaled.gltf", &opts).unwrap();
-        assert!(near3(
+        assert!(near_metres(
             geometry.smd.frames[0].poses[0].position,
             [10.0, -30.0, 20.0]
         ));
-        assert!(near3(
+        assert!(near_metres(
             geometry.smd.triangles[0].vertices[1].position,
             [12.0, -30.0, 20.0]
         ));
-        assert!(near3(
+        assert!(near_metres(
             geometry.smd.triangles[0].vertices[2].position,
             [10.0, -30.0, 23.0]
         ));
@@ -3379,7 +3398,7 @@ mod tests {
             geometry.smd.triangles[0].vertices[0].normal,
             [3.0 / length, 0.0, 2.0 / length]
         ));
-        assert!(near3(
+        assert!(near_metres(
             geometry.shape_keys[0].position_offsets[0],
             [2.0, 0.0, 3.0]
         ));
@@ -3473,7 +3492,7 @@ mod tests {
             ..Default::default()
         };
         let geometry = read(&path, "rotated.gltf", &opts).unwrap();
-        assert!(near3(
+        assert!(near_metres(
             geometry.smd.triangles[0].vertices[2].position,
             [0.0, -1.0, 0.0]
         ));
@@ -3489,7 +3508,7 @@ mod tests {
             triangle.vertices.each_ref().map(|vertex| vertex.src_index),
             [0, 2, 1]
         );
-        assert!(near3(triangle.vertices[2].position, [-1.0, 0.0, 0.0]));
+        assert!(near_metres(triangle.vertices[2].position, [-1.0, 0.0, 0.0]));
     }
 
     #[test]
@@ -3513,11 +3532,11 @@ mod tests {
         .unwrap();
         assert_eq!(geometry.shape_keys[0].vertex_index, [0, 1, 2]);
         assert_eq!(geometry.shape_keys[1].vertex_index, [3, 4, 5]);
-        assert!(near3(
+        assert!(near_metres(
             geometry.shape_keys[0].position_offsets[0],
             [0.0, 0.0, 1.0]
         ));
-        assert!(near3(
+        assert!(near_metres(
             geometry.shape_keys[1].position_offsets[0],
             [0.0, -1.0, 0.0]
         ));
@@ -3548,19 +3567,19 @@ mod tests {
             ..Default::default()
         };
         let geometry = read(&path, "morph.gltf", &opts).unwrap();
-        assert!(near3(
+        assert!(near_metres(
             geometry.smd.frames[0].poses[0].position,
             [0.0, 0.0, 6.0]
         ));
-        assert!(near3(
+        assert!(near_metres(
             geometry.smd.triangles[0].vertices[0].position,
             [0.0, 0.0, 6.0]
         ));
-        assert!(near3(
+        assert!(near_metres(
             geometry.smd.triangles[0].vertices[2].position,
             [0.0, 0.0, 8.0]
         ));
-        assert!(near3(
+        assert!(near_metres(
             geometry.shape_keys[0].position_offsets[0],
             [0.0, 0.0, 2.0]
         ));
@@ -3648,16 +3667,19 @@ mod tests {
             ..Default::default()
         };
         let normalized = read(&p, "ibm.gltf", &opts).unwrap();
-        assert!(near3(
+        assert!(near_metres(
             normalized.smd.frames[0].poses[0].position,
             [0.0, 0.0, 20.0]
         ));
-        assert!(near3(
+        assert!(near_metres(
             normalized.smd.triangles[0].vertices[2].position,
             [0.0, 0.0, 1.0]
         ));
         let frames = read_frames(&p, "ibm.gltf", None, 30.0, &opts).unwrap();
-        assert!(near3(frames.frames[0].poses[0].position, [0.0, 0.0, 10.0]));
+        assert!(near_metres(
+            frames.frames[0].poses[0].position,
+            [0.0, 0.0, 10.0]
+        ));
     }
 
     #[test]
@@ -4273,7 +4295,7 @@ mod tests {
         };
         let initial = read(&path, "instances", &options).unwrap();
         assert_eq!(initial.smd.triangles.len(), 1);
-        assert!(near3(
+        assert!(near_metres(
             initial.smd.triangles[0].vertices[0].position,
             [10.0, 0.0, 0.0]
         ));
@@ -4322,12 +4344,12 @@ mod tests {
             let before = initial.smd.triangles[0].vertices[0].position;
             let after = geometry.smd.triangles[0].vertices[0].position;
             assert!(
-                (after[0] - before[0] - expected_offset).abs() < 0.0001,
+                ((after[0] - before[0]) * 0.0254 - expected_offset).abs() < 0.0001,
                 "{change}: {before:?} -> {after:?}"
             );
             let root_position = geometry.smd.frames[0].poses[0].position;
             assert!(
-                near3(root_position, [10.0 + expected_offset, 0.0, 0.0]),
+                near_metres(root_position, [10.0 + expected_offset, 0.0, 0.0]),
                 "{change}: {root_position:?}"
             );
             let legacy = read(

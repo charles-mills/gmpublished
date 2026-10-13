@@ -2,7 +2,7 @@ use iced::widget::{Space, button, checkbox, column, container, row, scrollable, 
 use iced::{Element, Length};
 
 use super::update::parse_color;
-use super::{Message, SourceKind, State};
+use super::{ExportTarget, Message, SourceKind, State};
 use crate::assets;
 use crate::format::format_bytes;
 use crate::i18n::Arg;
@@ -41,7 +41,7 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             .size(tokens.typography.body)
             .color(tokens.colors.text),
         text(i18n.tr(if compiled {
-            "models-decompile-hint"
+            "models-blender-export-hint"
         } else {
             "models-formats"
         }))
@@ -176,7 +176,7 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
                 .chain(state.lods.iter().map(|lod| &lod.source))
                 .any(|source| {
                     source.extension().is_some_and(|extension| {
-                        ["fbx", "gltf", "glb"]
+                        ["dmx", "fbx", "gltf", "glb"]
                             .iter()
                             .any(|format| extension.eq_ignore_ascii_case(format))
                     })
@@ -261,11 +261,15 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     }
     let mut actions = row![
         button(text(i18n.tr(if compiled {
-            "models-decompile"
+            "models-export-blender"
         } else {
             "models-compile"
         })))
-        .on_press_maybe(state.can_export().then_some(Message::ExportRequested))
+        .on_press_maybe(state.can_export().then_some(if compiled {
+            Message::BlenderExportRequested
+        } else {
+            Message::ExportRequested
+        }))
         .padding(tokens.spacing.pad_control)
         .style(move |_, status| theme::styles::action_button(&tokens, status)),
     ]
@@ -288,6 +292,8 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         actions = row![
             text(i18n.tr(if running.cancellation_requested {
                 "models-cancelling"
+            } else if running.target == ExportTarget::Blender {
+                "models-exporting-blender"
             } else if compiled {
                 "models-decompiling"
             } else {
@@ -359,6 +365,29 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             output_actions,
         ]
         .spacing(tokens.spacing.gap);
+        if result.blender_model().is_some() {
+            output = output
+                .push(
+                    button(text(i18n.tr("models-open-blender")))
+                        .on_press_maybe((!busy).then_some(Message::OpenBlenderRequested))
+                        .padding(tokens.spacing.pad_control)
+                        .style(move |_, status| theme::styles::button(&tokens, status)),
+                )
+                .push(
+                    text(i18n.tr("models-blender-import-hint"))
+                        .size(tokens.typography.body_sm)
+                        .color(tokens.colors.text_dim),
+                );
+            if let Some(error) = &state.blender_launch_error {
+                output = output
+                    .push(
+                        text(error)
+                            .size(tokens.typography.body_sm)
+                            .color(tokens.colors.error),
+                    )
+                    .push(copy_button(ctx));
+            }
+        }
         for path in &result.files {
             let label = path
                 .strip_prefix(&result.directory)
@@ -400,13 +429,18 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     }
 
     let mut project_actions = row![
-        button(text(i18n.tr("models-save-qc")))
-            .on_press_maybe(
-                (!busy && !compiled && state.qc_request().is_some())
-                    .then_some(Message::SaveQcRequested)
-            )
-            .padding(tokens.spacing.pad_control)
-            .style(move |_, status| theme::styles::button(&tokens, status)),
+        button(text(i18n.tr(if compiled {
+            "models-decompile"
+        } else {
+            "models-save-qc"
+        })))
+        .on_press_maybe(if compiled {
+            state.can_export().then_some(Message::ExportRequested)
+        } else {
+            (!busy && state.qc_request().is_some()).then_some(Message::SaveQcRequested)
+        })
+        .padding(tokens.spacing.pad_control)
+        .style(move |_, status| theme::styles::button(&tokens, status)),
     ]
     .spacing(tokens.spacing.gap)
     .align_y(iced::Center);

@@ -26,7 +26,9 @@ impl Processor {
             return Err("Motion reference bone is outside the model skeleton".into());
         }
         validate_type(motion_type)?;
-        if !delta {
+        if delta {
+            convert_delta_positions(frames, parents, true);
+        } else {
             convert(frames, parents, true);
         }
         for (bone, &parent) in parents.iter().enumerate() {
@@ -136,9 +138,6 @@ impl Processor {
         if !rollback.is_finite() || rollback < 0.0 || !(fps * rollback).is_finite() {
             return Err("Motion rollback requires a finite nonnegative duration".into());
         }
-        if delta && (motion_type != 0 || !self.movements.is_empty()) {
-            return Err("Motion extraction on delta animations is not supported".into());
-        }
         if motion_type != 0 {
             let last = frames.len() - 1;
             let end = if looping {
@@ -175,7 +174,9 @@ impl Processor {
                 }
             }
         }
-        if !delta {
+        if delta {
+            convert_delta_positions(frames, parents, false);
+        } else {
             convert(frames, parents, false);
         }
         validate(frames, parents)?;
@@ -275,6 +276,21 @@ fn transform_pose(pose: &mut SmdPose, transform: &math::Matrix3x4) {
     );
     pose.position = [matrix[3], matrix[7], matrix[11]];
     pose.rotation = math::matrix_angles(&matrix);
+}
+
+pub(crate) fn convert_delta_positions(
+    frames: &mut [Vec<SmdPose>],
+    parents: &[i32],
+    to_engine: bool,
+) {
+    for frame in frames {
+        for (pose, parent) in frame.iter_mut().zip(parents) {
+            if *parent < 0 {
+                let [x, y, z] = pose.position;
+                pose.position = if to_engine { [-y, x, z] } else { [y, -x, z] };
+            }
+        }
+    }
 }
 
 fn convert(frames: &mut [Vec<SmdPose>], parents: &[i32], to_engine: bool) {
@@ -517,6 +533,43 @@ mod tests {
             for frame in engine(&frames, &[-1]) {
                 close(frame[0].position[0], 0.0);
                 close(frame[0].position[1], 2.0);
+            }
+        }
+    }
+
+    #[test]
+    fn delta_motion_extracts_engine_displacement_and_restores_canonical_axes() {
+        for implicit in [false, true] {
+            let mut frames: Vec<_> = (0..5)
+                .map(|index| vec![pose(0, [0.0, -index as f32 * 2.0, 0.0], 0.0)])
+                .collect();
+            let flags = if implicit { 0x1040 } else { 0 };
+            let mut processor = Processor::begin(&mut frames, &[-1], flags, true, 0).unwrap();
+            if !implicit {
+                processor
+                    .command(
+                        &mut frames,
+                        &[-1],
+                        &AnimCmd::Motion {
+                            motion_type: 0x1040,
+                            end_frame: 4,
+                        },
+                        |_| None,
+                    )
+                    .unwrap();
+            }
+            let movements = processor
+                .finish(&mut frames, &[-1], flags, true, 30.0, 0.2, true, 0)
+                .unwrap();
+            assert_eq!(movements.len(), 1);
+            close(movements[0].position[0], 8.0);
+            close(movements[0].position[1], 0.0);
+            close(movements[0].v0, 8.0);
+            close(movements[0].v1, 8.0);
+            for frame in frames {
+                for value in frame[0].position.into_iter().chain(frame[0].rotation) {
+                    close(value, 0.0);
+                }
             }
         }
     }

@@ -298,6 +298,20 @@ pub struct OutputPaths {
     pub phy: Option<PathBuf>,
 }
 
+fn physics_output_name(physics: &crate::model::Physics, stem: &str) -> PathBuf {
+    let Some(name) = physics.name.as_deref() else {
+        return PathBuf::from(format!("{stem}.phy"));
+    };
+    let name = name.replace('\\', "/");
+    let mut path = if name.starts_with("models/") {
+        PathBuf::from(name)
+    } else {
+        PathBuf::from("models").join(name)
+    };
+    path.set_extension("phy");
+    path
+}
+
 impl PipelineOutput {
     /// 产物在 `out_root` 下的实际路径。
     pub fn paths(&self, out_root: &Path) -> OutputPaths {
@@ -313,7 +327,7 @@ impl PipelineOutput {
             phy: self
                 .phy
                 .as_ref()
-                .map(|_| out_root.join(format!("{stem}.phy"))),
+                .map(|_| out_root.join(physics_output_name(&self.compiled.desc.physics, &stem))),
         }
     }
 
@@ -394,6 +408,16 @@ pub fn build_compiled(
     base: &Path,
     opts: PipelineOptions,
 ) -> Result<PipelineOutput, PipelineError> {
+    if compiled.desc.version() == 48 {
+        compiled.desc.physics.weld_normal.get_or_insert(0.999);
+        compiled.desc.physics.max_convex_pieces.get_or_insert(40);
+    }
+    crate::uv_checks::validate(&compiled).map_err(|message| {
+        PipelineError::Compile(vec![crate::compile::CompileError::Message {
+            at: "$checkuv".into(),
+            message,
+        }])
+    })?;
     let desc = &compiled.desc;
 
     // ---- ② 碰撞 SMD：**必须在 `write_mdl` 之前**解析 ----
@@ -462,6 +486,38 @@ pub fn build_compiled(
         );
     }
 
+    if let Some(name) = compiled.desc.physics.name.as_deref()
+        && !ModelDesc::valid_output_name(name)
+    {
+        return Err(PipelineError::InvalidOutputPath {
+            path: PathBuf::from(name),
+        });
+    }
+    if let Some(smd) = &collision_smd
+        && compiled.desc.physics.auto_mass
+    {
+        let pose_world = (!compiled.desc.model.static_prop)
+            .then_some(&compiled)
+            .and_then(|compiled| compiled.sequences.first())
+            .and_then(|sequence| sequence.frames.first())
+            .map(|frame| phy::sequence_pose_world(&compiled.desc.bones, frame));
+        let mass = phy::compute_mass_for_model(
+            smd,
+            &compiled.desc.physics,
+            &compiled.desc.bones,
+            compiled
+                .desc
+                .model
+                .surface_prop
+                .as_deref()
+                .unwrap_or("default"),
+            pose_world.as_ref(),
+        )
+        .map_err(PipelineError::BuildPhy)?;
+        compiled.desc.physics.mass = Some(mass);
+    }
+    let desc = &compiled.desc;
+
     // ---- ④ `.mdl` ----
     let out = hotpath::measure_block!("pipeline: write_mdl", {
         write_mdl(&compiled).map_err(PipelineError::WriteMdl)?
@@ -484,7 +540,8 @@ pub fn build_compiled(
         vtx_writer::write_vtx_with(
             &compiled,
             VtxOptions {
-                optimize_vertex_cache: desc.model.optimize_vtx || opts.optimize_vtx,
+                optimize_vertex_cache: (desc.model.optimize_vtx || opts.optimize_vtx)
+                    && !desc.model.preserve_triangle_order,
             },
         )
         .map_err(PipelineError::WriteVtx)?
@@ -622,6 +679,13 @@ fn write_files_with_rename(
             path: PathBuf::from(&out.stem),
         });
     }
+    if let Some(name) = out.compiled.desc.physics.name.as_deref()
+        && !ModelDesc::valid_output_name(name)
+    {
+        return Err(PipelineError::InvalidOutputPath {
+            path: PathBuf::from(name),
+        });
+    }
     let paths = out.paths(out_root);
     std::fs::create_dir_all(out_root).map_err(|source| PipelineError::CreateDir {
         path: out_root.to_path_buf(),
@@ -653,13 +717,53 @@ fn write_files_with_rename(
             return Err(PipelineError::InvalidOutputPath { path: parent });
         }
     }
-    let companions = [
+    let mut companions = vec![
         (paths.mdl.clone(), Some(out.mdl.as_slice())),
         (paths.vvd.clone(), Some(out.vvd.as_slice())),
         (paths.vtx.clone(), Some(out.vtx.as_slice())),
         (paths.mdl.with_extension("ani"), out.ani.as_deref()),
-        (paths.mdl.with_extension("phy"), out.phy.as_deref()),
+        (
+            out_root.join(physics_output_name(&out.compiled.desc.physics, &out.stem)),
+            out.phy.as_deref(),
+        ),
     ];
+    if out.compiled.desc.physics.name.is_some()
+        && companions[4].0 != paths.mdl.with_extension("phy")
+    {
+        companions.push((paths.mdl.with_extension("phy"), None));
+    }
+    for (target, _) in &mut companions {
+        let relative =
+            target
+                .strip_prefix(out_root)
+                .map_err(|_| PipelineError::InvalidOutputPath {
+                    path: target.clone(),
+                })?;
+        let mut target_parent = root.clone();
+        for component in relative
+            .parent()
+            .into_iter()
+            .flat_map(|path| path.components())
+        {
+            target_parent.push(component);
+            std::fs::create_dir_all(&target_parent).map_err(|source| PipelineError::CreateDir {
+                path: target_parent.clone(),
+                source,
+            })?;
+            target_parent = std::fs::canonicalize(&target_parent).map_err(|source| {
+                PipelineError::CreateDir {
+                    path: target_parent.clone(),
+                    source,
+                }
+            })?;
+            if !target_parent.starts_with(&root) {
+                return Err(PipelineError::InvalidOutputPath {
+                    path: target_parent,
+                });
+            }
+        }
+        *target = target_parent.join(target.file_name().unwrap());
+    }
     // Optional companions participate so obsolete .ani/.phy files are removed.
     for (path, _) in &companions {
         match std::fs::symlink_metadata(path) {
@@ -700,7 +804,7 @@ fn write_files_with_rename(
         .into_iter()
         .enumerate()
         .map(|(index, (path, bytes))| ExportFile {
-            target: parent.join(path.file_name().unwrap()),
+            target: path,
             bytes,
             staged: staging.path.join(format!("new-{index}")),
             backup: staging.path.join(format!("old-{index}")),
@@ -1361,6 +1465,71 @@ smd = "a.smd"
         );
 
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn automatic_mass_is_identical_in_mdl_header_and_physics_output() {
+        let dir = tmpdir("automatic-mass");
+        write(&dir, "a.smd", MESH_SMD);
+        write(&dir, "phys.smd", &collision_smd());
+        let mut desc = parse(&desc_toml("phys.smd"));
+        desc.physics.auto_mass = true;
+        desc.physics.surface_properties = vec![crate::model::SurfacePhysics {
+            name: "metal".into(),
+            density: 1000.0,
+            thickness: 0.0,
+        }];
+        let output = build(&desc, &dir, PipelineOptions::default()).unwrap();
+        let mdl_mass = f32::from_le_bytes(output.mdl[0x148..0x14c].try_into().unwrap());
+        let expected = 2000.0 * 0.0254_f32.powi(3) * 1000.0;
+        assert!((mdl_mass - expected).abs() < 1e-4);
+        let physics = output.phy.as_ref().unwrap();
+        let layout = crate::phy::check_invariants(physics).unwrap();
+        let text = std::str::from_utf8(&physics[layout.solids_end..physics.len() - 1]).unwrap();
+        let total: f32 = text
+            .lines()
+            .find_map(|line| line.strip_prefix("\"totalmass\" \""))
+            .unwrap()
+            .trim_end_matches('"')
+            .parse()
+            .unwrap();
+        assert!((total - mdl_mass).abs() < 1e-4);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn physics_name_changes_output_path_and_transaction_preserves_other_products() {
+        let dir = tmpdir("physics-name");
+        write(&dir, "a.smd", MESH_SMD);
+        write(&dir, "phys.smd", &collision_smd());
+        let mut desc = parse(&desc_toml("phys.smd"));
+        desc.physics.name = Some("custom/collision.mdl".into());
+        let output = build(&desc, &dir, PipelineOptions::default()).unwrap();
+        let root = dir.join("out");
+        let paths = write_files(&output, &root).unwrap();
+        assert_eq!(
+            paths.phy.as_deref(),
+            Some(root.join("models/custom/collision.phy").as_path())
+        );
+        assert_eq!(
+            std::fs::read(paths.phy.as_ref().unwrap()).unwrap(),
+            *output.phy.as_ref().unwrap()
+        );
+        assert!(!paths.mdl.with_extension("phy").exists());
+        assert!(paths.mdl.exists());
+        for invalid in [
+            "../escape",
+            "/absolute",
+            "models/../../escape",
+            "C:\\escape",
+        ] {
+            desc.physics.name = Some(invalid.into());
+            assert!(matches!(
+                build(&desc, &dir, PipelineOptions::default()),
+                Err(PipelineError::InvalidOutputPath { .. })
+            ));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn export_fixture(dir: &Path) -> PipelineOutput {

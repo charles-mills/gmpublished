@@ -267,10 +267,14 @@ fn mixed_gltf_and_smd_lods_share_automatic_axes_and_portable_transform() {
     let smd = root.path().join("triangle.smd");
     std::fs::write(&smd,"version 1\nnodes\n0 \"root\" -1\nend\nskeleton\ntime 0\n0 0 0 0 0 0 0\nend\ntriangles\nmaterial\n0 0 0 0 0 -1 0 0 0\n0 2 0 0 0 -1 0 0 0\n0 0 0 3 0 -1 0 0 0\nend\n").unwrap();
     let mut data = Vec::new();
-    for value in [
+    for (index, value) in [
         0.0_f32, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         1.0,
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let value = if index < 9 { value * 0.0254 } else { value };
         data.extend(value.to_le_bytes());
     }
     let gltf = root.path().join("triangle.gltf");
@@ -285,7 +289,7 @@ fn mixed_gltf_and_smd_lods_share_automatic_axes_and_portable_transform() {
             {"buffer": 0, "byteOffset": 36, "byteLength": 36}
         ],
         "accessors": [
-            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [2,3,0]},
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [0.0508,0.0762,0]},
             {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"}
         ],
         "materials": [{"name": "material"}],

@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use super::state::RunningExport;
-use super::{Effect, MapChoice, Message, SourceKind, State};
+use super::{Effect, ExportTarget, MapChoice, Message, SourceKind, State};
 use gmpublished_backend::model_project::{ModelSkin, ModelStage, SkinMaterial};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
@@ -455,10 +455,16 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.overwrite = value;
             clear_outcome(state);
         }
-        Message::ExportRequested => {
-            let Some(request) = state.request() else {
+        Message::ExportRequested | Message::BlenderExportRequested => {
+            let Some(mut request) = state.request() else {
                 return vec![];
             };
+            if matches!(message, Message::BlenderExportRequested) {
+                if request.kind != SourceKind::Compiled {
+                    return vec![];
+                }
+                request.target = ExportTarget::Blender;
+            }
             clear_outcome(state);
             let generation = state.generation.bump();
             let cancel = Arc::new(AtomicBool::new(false));
@@ -466,6 +472,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 generation,
                 cancel: Arc::clone(&cancel),
                 cancellation_requested: false,
+                target: request.target,
             });
             return vec![Effect::Export(generation, request, cancel)];
         }
@@ -489,14 +496,37 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             }
         }
         Message::RevealRequested(path) => return vec![Effect::Reveal(path)],
+        Message::OpenBlenderRequested if !state.busy() => {
+            if let Some(path) = state
+                .result
+                .as_ref()
+                .and_then(super::ExportResult::blender_model)
+            {
+                state.blender_launch_error = None;
+                return vec![Effect::OpenBlender(path.to_path_buf())];
+            }
+        }
+        Message::BlenderOpened(path, result)
+            if state
+                .result
+                .as_ref()
+                .and_then(super::ExportResult::blender_model)
+                == Some(path.as_path()) =>
+        {
+            state.blender_launch_error = result.err();
+        }
         Message::CopyDiagnostics => {
-            let diagnostics = state.error.clone().or_else(|| {
-                state
-                    .result
-                    .as_ref()
-                    .or_else(|| state.preview.as_ref().map(|preview| &preview.result))
-                    .map(|result| result.warnings.join("\n"))
-            });
+            let diagnostics = state
+                .error
+                .clone()
+                .or_else(|| state.blender_launch_error.clone())
+                .or_else(|| {
+                    state
+                        .result
+                        .as_ref()
+                        .or_else(|| state.preview.as_ref().map(|preview| &preview.result))
+                        .map(|result| result.warnings.join("\n"))
+                });
             if let Some(diagnostics) = diagnostics {
                 return vec![Effect::Copy(diagnostics)];
             }
@@ -581,6 +611,7 @@ fn edit_animation(
 pub(super) fn clear_outcome(state: &mut State) {
     state.result = None;
     state.error = None;
+    state.blender_launch_error = None;
     state.cancelled = false;
     state.qc_saved = false;
     state.preview = None;
@@ -720,6 +751,70 @@ mod tests {
         assert!(state.cancelled);
         assert!(state.can_export());
         assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn blender_exports_are_compiled_only_and_cancellable_without_changing_qc_exports() {
+        let mut state = ready();
+        assert!(update(&mut state, Message::BlenderExportRequested).is_empty());
+        update(&mut state, Message::SourceDropped("prop.mdl".into()));
+        let effects = update(&mut state, Message::BlenderExportRequested);
+        let [Effect::Export(generation, request, cancel)] = effects.as_slice() else {
+            panic!("Blender export");
+        };
+        assert_eq!(request.target, ExportTarget::Blender);
+        assert!(update(&mut state, Message::ExportRequested).is_empty());
+        update(&mut state, Message::CancelRequested);
+        assert!(cancel.load(Ordering::Acquire));
+        update(
+            &mut state,
+            Message::ExportCompleted(*generation, Err("cancelled".into())),
+        );
+        assert!(state.cancelled);
+        let effects = update(&mut state, Message::ExportRequested);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Export(_, request, _)] if request.target == ExportTarget::Source
+        ));
+    }
+
+    #[test]
+    fn blender_output_opens_explicitly_and_preview_keeps_using_the_original_mdl() {
+        let mut state = ready();
+        update(&mut state, Message::SourceDropped("prop.mdl".into()));
+        let path = std::path::PathBuf::from("out/prop_blender/model.glb");
+        state.result = Some(super::super::ExportResult {
+            directory: "out/prop_blender".into(),
+            files: vec![path.clone()],
+            bytes: 1024,
+            warnings: vec![],
+            compiled: false,
+        });
+        assert!(matches!(
+            update(&mut state, Message::OpenBlenderRequested).as_slice(),
+            [Effect::OpenBlender(model)] if model == &path
+        ));
+        update(
+            &mut state,
+            Message::BlenderOpened(path.clone(), Err("missing".into())),
+        );
+        assert_eq!(state.blender_launch_error.as_deref(), Some("missing"));
+        assert!(state.error.is_none());
+        assert!(matches!(
+            update(&mut state, Message::PreviewRequested).as_slice(),
+            [Effect::BuildPreview(_, request)]
+                if request.source == std::path::Path::new("prop.mdl")
+                    && request.target == ExportTarget::Source
+        ));
+        state.picker = None;
+        update(&mut state, Message::SourceDropped("other.mdl".into()));
+        update(
+            &mut state,
+            Message::BlenderOpened(path, Err("stale".into())),
+        );
+        assert!(state.error.is_none());
+        assert!(state.blender_launch_error.is_none());
+        assert!(update(&mut state, Message::OpenBlenderRequested).is_empty());
     }
 
     #[test]

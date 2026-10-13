@@ -73,6 +73,41 @@ fn compile_stays_visible_with_mesh_options_in_a_small_viewport() {
 }
 
 #[test]
+fn compiled_models_offer_distinct_blender_and_qc_exports_in_every_locale() {
+    let mut state = State::default();
+    update(&mut state, Message::SourceDropped("prop.mdl".into()));
+    state.destination = Some("export".into());
+    let tokens = Tokens::dark();
+    for locale in [
+        "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
+    ] {
+        let i18n = I18n::for_locale(Some(locale));
+        let mut ui = iced_test::Simulator::with_size(
+            Settings::default(),
+            Size::new(560.0, 560.0),
+            view(&state, ViewCtx::new(&tokens, &i18n)),
+        );
+        for key in ["models-export-blender", "models-decompile"] {
+            let label = i18n.tr(key);
+            let action = ui.find(label.as_str()).unwrap();
+            assert!(
+                action.bounds().x >= 0.0
+                    && action.bounds().x + action.bounds().width <= 560.0
+                    && action.bounds().y >= 0.0
+                    && action.bounds().y + action.bounds().height <= 560.0,
+                "{key} exceeds viewport in {locale}"
+            );
+            ui.click(label.as_str()).unwrap();
+        }
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::BlenderExportRequested, Message::ExportRequested]
+        ));
+    }
+}
+
+#[test]
 fn model_editor_actions_fit_in_every_locale() {
     let mut state = State::default();
     update(&mut state, Message::SourceDropped("Mercedes.fbx".into()));

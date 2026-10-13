@@ -23,6 +23,9 @@
 
 use std::collections::HashMap;
 
+mod surface_properties;
+pub use surface_properties::parse_surface_properties;
+
 use parry3d::mass_properties::MassProperties;
 use parry3d::math::Vector;
 use parry3d::transformation::vhacd::{VHACD, VHACDParameters};
@@ -432,16 +435,6 @@ pub enum PhyError {
         crate::tr_fmt!("the collision geometry of every bone fails to form a convex hull")
     )]
     NoHullFromAnyBone,
-    /// `$automass` 需要材质密度表，mdlc 没有。
-    #[error(
-        "{}",
-        crate::tr_fmt!(
-            "`[physics].auto_mass` (`$automass`) needs the material density table \
-             (`scripts/surfaceproperties_manifest.txt`) to compute the total mass, \
-             and mdlc does not have that table. Please write `mass = <value>` explicitly"
-        )
-    )]
-    AutoMassUnsupported,
     /// `write_phy_multi` 失败。
     #[error(
         "{}",
@@ -1129,7 +1122,6 @@ pub struct PhyParams<'a> {
     ///
     /// 官方走 `CollideSetMassCenter`（`collisionmodel.cpp:361-363`），
     /// 它改的是**二进制** `IVP_Compact_Surface` 的质心，**不写文本段**。
-    /// Forced mass-center overrides are not supported.
     pub mass_center: Option<[f32; 3]>,
     /// `$automass` ⟹ 总质量由**体积 × 密度**算出（`ComputeMass`）。
     ///
@@ -1137,6 +1129,7 @@ pub struct PhyParams<'a> {
     /// `ComputeMass` 首句 `if (m_totalMass >= 0) return;` 于是才会真的算。
     /// 实测 `automass`（3 个 10³ 盒子、metal）：`totalmass = 5.309408`。
     pub auto_mass: bool,
+    pub surface_properties: &'a [crate::model::SurfacePhysics],
 }
 
 impl<'a> PhyParams<'a> {
@@ -1172,6 +1165,7 @@ impl<'a> PhyParams<'a> {
             merge_list: Vec::new(),
             mass_center: None,
             auto_mass: false,
+            surface_properties: &[],
         }
     }
 }
@@ -1460,6 +1454,7 @@ fn world_space_verts(
     smd: &crate::smd::Smd,
     unique: &[[f32; 3]],
     pose_world: Option<&std::collections::HashMap<String, crate::bone_math::Matrix3x4>>,
+    assume_world_space: bool,
 ) -> Vec<[f32; 3]> {
     let all = vertex_bone_weights(smd);
     let rest = RestPose::of(smd);
@@ -1488,9 +1483,32 @@ fn world_space_verts(
                 .and_then(|&i| all.get(i))
                 .map(|w| w.as_slice())
                 .unwrap_or(&[]);
-            world_point(*p, links, &rest, pose_world)
+            if assume_world_space {
+                assumed_world_point(*p, links, &rest)
+            } else {
+                world_point(*p, links, &rest, pose_world)
+            }
         })
         .collect()
+}
+
+fn assumed_world_point(p: [f32; 3], links: &[(String, f32)], rest: &RestPose) -> [f32; 3] {
+    if links.is_empty() {
+        return p;
+    }
+    let mut position = [0.0; 3];
+    for (bone, weight) in links {
+        let world = rest
+            .world
+            .get(bone)
+            .copied()
+            .unwrap_or(crate::bone_math::IDENTITY);
+        let point = transform_point(&world, p);
+        for axis in 0..3 {
+            position[axis] += point[axis] * weight;
+        }
+    }
+    position
 }
 
 /// 用 `matrix3x4_t` 变换一个点。
@@ -1521,6 +1539,137 @@ pub struct PhyIdentity<'a> {
     /// prop 形态下 `GetSurfaceProp` 必然回落到它（solid 名是碰撞 SMD 的
     /// basename，查不到任何骨骼）—— 实测 2498/2498 个 `.phy` 恒等。
     pub surface_prop: &'a str,
+}
+
+pub fn compute_mass_for_model(
+    smd: &crate::smd::Smd,
+    physics: &crate::model::Physics,
+    bones: &[crate::model::Bone],
+    surface_prop: &str,
+    pose_world: Option<&HashMap<String, crate::bone_math::Matrix3x4>>,
+) -> Result<f32, PhyError> {
+    validate_collision_skeleton(smd)?;
+    if !physics.auto_mass {
+        return Ok(physics.effective_mass());
+    }
+    if !physics.joints {
+        let hulls = prop_hulls(smd, physics, pose_world)?;
+        return automatic_mass(
+            std::iter::once((hulls.as_slice(), surface_prop)),
+            &physics.surface_properties,
+        );
+    }
+    let rest = RestPose::of(smd);
+    let mut groups = Vec::new();
+    for group in ragdoll_groups(smd, physics)? {
+        let hulls = ragdoll_hulls(smd, &group, &rest, physics)?;
+        if !hulls.is_empty() {
+            let prop = inherited_surface_prop(bones, &group.name).unwrap_or(surface_prop);
+            groups.push((hulls, prop));
+        }
+    }
+    automatic_mass(
+        groups.iter().map(|(hulls, prop)| (hulls.as_slice(), *prop)),
+        &physics.surface_properties,
+    )
+}
+
+fn automatic_mass<'a>(
+    groups: impl Iterator<Item = (&'a [PhyHull], &'a str)>,
+    properties: &[crate::model::SurfacePhysics],
+) -> Result<f32, PhyError> {
+    let mut total = 0.0_f64;
+    for (solid, (hulls, name)) in groups.enumerate() {
+        let property = properties
+            .iter()
+            .rev()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .or_else(|| {
+                properties
+                    .iter()
+                    .rev()
+                    .find(|p| p.name.eq_ignore_ascii_case("default"))
+            });
+        let density = property.map_or(2000.0, |p| p.density);
+        let thickness = property.map_or(0.0, |p| p.thickness);
+        validate_nonnegative_number("surface density", density)?;
+        if !thickness.is_finite() {
+            return Err(PhyError::BadParameter {
+                what: "surface thickness",
+                detail: "must be finite".into(),
+            });
+        }
+        for hull in hulls {
+            for (point, vertex) in hull.vertices.iter().enumerate() {
+                if vertex.iter().any(|value| !value.is_finite()) {
+                    return Err(PhyError::NonFinitePoint { solid, point });
+                }
+            }
+            for (face, triangle) in hull.faces.iter().enumerate() {
+                if let Some(&index) = triangle
+                    .iter()
+                    .find(|&&index| index as usize >= hull.vertices.len())
+                {
+                    return Err(PhyError::IndexOutOfRange {
+                        solid,
+                        face,
+                        index,
+                        vertex_count: hull.vertices.len(),
+                    });
+                }
+            }
+            if thickness > 0.0 {
+                let area: f64 = hull
+                    .faces
+                    .iter()
+                    .map(|face| {
+                        let [a, b, c] = face.map(|i| hull.vertices[i as usize].map(f64::from));
+                        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                        let cross = [
+                            u[1] * v[2] - u[2] * v[1],
+                            u[2] * v[0] - u[0] * v[2],
+                            u[0] * v[1] - u[1] * v[0],
+                        ];
+                        (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt()
+                            * 0.5
+                    })
+                    .sum();
+                total += area * f64::from(thickness) * 0.0254_f64.powi(3) * f64::from(density);
+            } else {
+                let vertices: Vec<_> = hull.vertices.iter().map(|p| Vector::from(*p)).collect();
+                let volume = MassProperties::from_trimesh(1.0, &vertices, &hull.faces).mass();
+                total += f64::from(volume) * 0.0254_f64.powi(3) * f64::from(density);
+            }
+        }
+    }
+    if !total.is_finite() || total <= 0.0 || total > f64::from(f32::MAX) {
+        return Err(PhyError::BadParameter {
+            what: "automatic mass",
+            detail: "collision geometry and surface density must produce a positive finite mass"
+                .into(),
+        });
+    }
+    Ok(total as f32)
+}
+
+fn prop_hulls(
+    smd: &crate::smd::Smd,
+    phys: &crate::model::Physics,
+    pose_world: Option<&HashMap<String, crate::bone_math::Matrix3x4>>,
+) -> Result<Vec<PhyHull>, PhyError> {
+    if phys.concave {
+        decompose_connected_components_with_limit(smd, pose_world, phys)
+    } else {
+        let (vertices, _faces) = weld_smd_triangles(smd)?;
+        let vertices = world_space_verts(smd, &vertices, pose_world, phys.assume_world_space);
+        Ok(vec![
+            PhyHull::from_points(&vertices)
+                .map_err(|e| PhyError::HullFailed(Box::new(e)))?
+                // 官方 `ConvexFromVerts` 的第二段：`BuildOuterHull(hull, 0.01)`。
+                .compact_outer_hull(),
+        ])
+    }
 }
 
 /// 从**单个 SMD** 直接产出 `.phy` 字节（`$collisionmodel` 的单 solid prop 形态）。
@@ -1561,22 +1710,7 @@ pub fn build_phy_from_smd(
         return Err(PhyError::NoTriangles);
     }
 
-    let hulls: Vec<PhyHull> = if phys.concave {
-        decompose_connected_components_with_limit(
-            smd,
-            pose_world,
-            phys.max_convex_pieces.unwrap_or(MAX_CONVEX_PIECES),
-        )?
-    } else {
-        let (vertices, _faces) = weld_smd_triangles(smd)?;
-        let vertices = world_space_verts(smd, &vertices, pose_world);
-        vec![
-            PhyHull::from_points(&vertices)
-                .map_err(|e| PhyError::HullFailed(Box::new(e)))?
-                // 官方 `ConvexFromVerts` 的第二段：`BuildOuterHull(hull, 0.01)`。
-                .compact_outer_hull(),
-        ]
-    };
+    let hulls = prop_hulls(smd, phys, pose_world)?;
 
     // `joint_overrides` / `constraints` 只对 ragdoll 有意义 —— 单 solid 的 prop
     // 路径没有「joint」概念（官方 `InitCollisionModel` 只在
@@ -1601,18 +1735,11 @@ pub fn build_phy_from_smd(
     if !phys.collision_pairs.is_empty() || phys.no_self_collisions {
         return Err(PhyError::CollisionPairsOnProp);
     }
-    if phys.auto_mass {
-        return Err(PhyError::AutoMassUnsupported);
-    }
-    if phys.mass_center.is_some() {
-        return Err(PhyError::BadParameter {
-            what: "physics.mass_center",
-            detail: "forced physics mass centers are not supported".into(),
-        });
-    }
 
     let mut params = PhyParams::new(model_name, checksum);
     params.collision_text = phys.collision_text.as_deref();
+    params.auto_mass = phys.auto_mass;
+    params.surface_properties = &phys.surface_properties;
     params.total_mass = mass;
     // `surfaceprop` 从**模型头**取（`GetSurfaceProp` 在 prop 形态下必然
     // 回落到 `s_pDefaultSurfaceProp`，也就是 `$surfaceprop`）——
@@ -1620,6 +1747,7 @@ pub fn build_phy_from_smd(
     params.surface_prop = surface_prop;
     // 只有真的走了 `$concave` 才写 `concave "1"`，与实测的 studiomdl 行为一致。
     params.concave = phys.concave;
+    params.mass_center = phys.mass_center;
     // 单 solid 的 prop 路径没有「joint」概念，所以只有全局默认值。
     params.damping = phys.damping.unwrap_or(0.0);
     params.rot_damping = phys.rot_damping.unwrap_or(0.0);
@@ -1652,25 +1780,18 @@ fn normal_blend() -> f32 {
     (2.0f32).to_radians().cos()
 }
 
-/// 官方 `BuildVertWeldTable`（`collisionmodel.cpp:945-966`）。
-///
-/// 对每个顶点 `i`，在 `j < i` 里找**第一个**满足
-/// 「位置**完全相同**（`VectorCompare` 是 `operator==`，逐分量 `==`）
-/// **且** `dot(normal_j, normal_i) > normal_blend`」的 `j`，
-/// 命中则 `weld[i] = j`，否则 `weld[i] = i`。
-///
-/// ⚠️ 位置比较是**精确相等**，不是 epsilon 近似 —— 与
-/// [`weld_smd_triangles`] 的按位去重口径一致。
-fn build_weld_table(verts: &[([f32; 3], [f32; 3])]) -> Vec<u32> {
-    let blend = normal_blend();
+fn build_weld_table(
+    verts: &[([f32; 3], [f32; 3])],
+    position_epsilon: f32,
+    normal_epsilon: f32,
+) -> Vec<u32> {
     let mut weld: Vec<u32> = (0..verts.len() as u32).collect();
     for (i, &(pi, ni)) in verts.iter().enumerate() {
         for (j, &(pj, nj)) in verts.iter().enumerate().take(i) {
-            if pi != pj {
-                continue;
-            }
-            let d = ni[0] * nj[0] + ni[1] * nj[1] + ni[2] * nj[2];
-            if d > blend {
+            let delta = [pi[0] - pj[0], pi[1] - pj[1], pi[2] - pj[2]];
+            let distance = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+            let dot = ni[0] * nj[0] + ni[1] * nj[1] + ni[2] * nj[2];
+            if distance <= position_epsilon && dot > normal_epsilon {
                 weld[i] = j as u32;
                 break;
             }
@@ -2125,7 +2246,9 @@ fn ragdoll_hulls(
     physics: &crate::model::Physics,
 ) -> Result<Vec<PhyHull>, PhyError> {
     if !physics.concave_per_joint {
-        return Ok(ragdoll_hull(smd, group, rest).into_iter().collect());
+        let hull = ragdoll_hull(smd, group, rest)
+            .filter(|hull| !physics.remove_2d || !is_approximately_planar(&hull.vertices, 0.5));
+        return Ok(hull.into_iter().collect());
     }
     let inverse = rest
         .inverse
@@ -2163,11 +2286,7 @@ fn ragdoll_hulls(
         frames: Vec::new(),
         triangles,
     };
-    decompose_connected_components_with_limit(
-        &local,
-        None,
-        physics.max_convex_pieces.unwrap_or(MAX_CONVEX_PIECES),
-    )
+    decompose_connected_components_with_limit(&local, None, physics)
 }
 
 /// 从 SMD 产出 **ragdoll** 形态的 `.phy`（官方 `$collisionjoints`）。
@@ -2336,6 +2455,8 @@ fn build_ragdoll_phy(
 
     let mut params = PhyParams::new(model_name, checksum);
     params.collision_text = phys.collision_text.as_deref();
+    params.auto_mass = phys.auto_mass;
+    params.surface_properties = &phys.surface_properties;
     params.total_mass = mass;
     params.surface_prop = surface_prop;
     params.damping = phys.damping.unwrap_or(0.0);
@@ -2360,11 +2481,6 @@ fn build_ragdoll_phy(
         .collect();
     if let Some(mc) = phys.mass_center {
         params.mass_center = Some(mc);
-    }
-    // `$automass` 需要材质密度表（`scripts/surfaceproperties_manifest.txt`），
-    // mdlc 没有 —— **显式报错**而不是静默写一个错的总质量。
-    if phys.auto_mass {
-        return Err(PhyError::AutoMassUnsupported);
     }
     // ⚠️ **`rootname` 默认是空串**，不要拿根 solid 的名去填。
     //
@@ -2438,10 +2554,12 @@ pub fn physics_bone_table_for_model(
         return Ok(vec![0; bones.len()]);
     }
     let rest = RestPose::of(smd);
-    let groups: Vec<_> = ragdoll_groups(smd, phys)?
-        .into_iter()
-        .filter(|g| ragdoll_hull(smd, g, &rest).is_some())
-        .collect();
+    let mut groups = Vec::new();
+    for group in ragdoll_groups(smd, phys)? {
+        if !ragdoll_hulls(smd, &group, &rest, phys)?.is_empty() {
+            groups.push(group);
+        }
+    }
     let mut direct = vec![None; bones.len()];
     for (solid, group) in groups.iter().enumerate() {
         direct[render_bone_index(bones, &group.name)?] = Some(solid as i32);
@@ -2622,26 +2740,32 @@ pub fn decompose_connected_components(
     smd: &crate::smd::Smd,
     pose_world: Option<&std::collections::HashMap<String, crate::bone_math::Matrix3x4>>,
 ) -> Result<Vec<PhyHull>, PhyError> {
-    decompose_connected_components_with_limit(smd, pose_world, MAX_CONVEX_PIECES)
+    decompose_connected_components_with_limit(smd, pose_world, &crate::model::Physics::default())
 }
 
 fn decompose_connected_components_with_limit(
     smd: &crate::smd::Smd,
     pose_world: Option<&std::collections::HashMap<String, crate::bone_math::Matrix3x4>>,
-    max_pieces: usize,
+    physics: &crate::model::Physics,
 ) -> Result<Vec<PhyHull>, PhyError> {
+    let max_pieces = physics.max_convex_pieces.unwrap_or(MAX_CONVEX_PIECES);
+    let position_epsilon = physics.weld_position.unwrap_or(0.0);
+    let normal_epsilon = physics.weld_normal.unwrap_or_else(normal_blend);
+    validate_nonnegative_number("weld_position", position_epsilon)?;
+    if !normal_epsilon.is_finite() || !(-1.0..=1.0).contains(&normal_epsilon) {
+        return Err(PhyError::BadParameter {
+            what: "weld_normal",
+            detail: "normal dot threshold must be between -1 and 1".into(),
+        });
+    }
     if !(1..=1024).contains(&max_pieces) {
         return Err(PhyError::BadParameter {
             what: "max_convex_pieces",
             detail: "convex piece limit must be between 1 and 1024".into(),
         });
     }
-    // 展平成「逐面顶点」：SMD 的三角形顶点是逐面独立的。
-    //
-    // ⚠️ 位置要先搬到**世界空间**（官方 `ProcessSingleBody:1436`
-    // `ConvertToWorldSpace` 发生在**一切**之前，焊接/连通性判定都在
-    // 世界空间里做）。姿态取自序列第 0 帧。
     let mut verts: Vec<([f32; 3], [f32; 3])> = Vec::with_capacity(smd.triangles.len() * 3);
+    let mut weld_vertices = Vec::with_capacity(smd.triangles.len() * 3);
     let mut faces: Vec<[u32; 3]> = Vec::with_capacity(smd.triangles.len());
     let all_weights = vertex_bone_weights(smd);
     let rest = RestPose::of(smd);
@@ -2651,8 +2775,13 @@ fn decompose_connected_components_with_limit(
         for v in &t.vertices {
             let links = all_weights.get(flat).map(|w| w.as_slice()).unwrap_or(&[]);
             flat += 1;
-            let wp = world_point(v.position, links, &rest, pose_world);
+            let wp = if physics.assume_world_space {
+                assumed_world_point(v.position, links, &rest)
+            } else {
+                world_point(v.position, links, &rest, pose_world)
+            };
             verts.push((wp, v.normal));
+            weld_vertices.push((v.position, v.normal));
         }
         faces.push([base, base + 1, base + 2]);
     }
@@ -2662,7 +2791,7 @@ fn decompose_connected_components_with_limit(
         });
     }
 
-    let weld = build_weld_table(&verts);
+    let weld = build_weld_table(&weld_vertices, position_epsilon, normal_epsilon);
     let vert_id = mark_connected_meshes(&weld, &faces);
 
     // 官方：`for i in 0..numvertices`，跳过 `vertID[i] < 0 || > numfaces`，
@@ -2690,10 +2819,15 @@ fn decompose_connected_components_with_limit(
 
     // 回退规则 1：任一分量是平面 ⟹ 整份退化成单凸包。
     let any_planar = groups.iter().any(|g| is_approximately_planar(g, 0.5));
-    // 回退规则 2：分量数超上限。
+    if physics.remove_2d {
+        groups.retain(|g| !is_approximately_planar(g, 0.5));
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+    }
     let too_many = groups.len() > max_pieces;
 
-    if any_planar || too_many || groups.is_empty() {
+    if (any_planar && !physics.remove_2d) || too_many || groups.is_empty() {
         let all: Vec<[f32; 3]> = verts.iter().map(|v| v.0).collect();
         return Ok(vec![
             PhyHull::from_points(&all)
@@ -2792,14 +2926,14 @@ pub fn write_phy_multi(
     solids: &[PhySolid],
     params: &PhyParams<'_>,
 ) -> Result<Vec<u8>, PhyError> {
-    if params.mass_center.is_some() {
+    if params
+        .mass_center
+        .is_some_and(|center| center.iter().any(|v| !v.is_finite()))
+    {
         return Err(PhyError::BadParameter {
             what: "mass_center",
-            detail: "forced physics mass centers are not supported".into(),
+            detail: "must contain three finite coordinates".into(),
         });
-    }
-    if params.auto_mass {
-        return Err(PhyError::AutoMassUnsupported);
     }
     if hulls.is_empty() {
         return Err(PhyError::BadParameter {
@@ -2817,6 +2951,22 @@ pub fn write_phy_multi(
             ),
         });
     }
+    let mut resolved_params;
+    let params = if params.auto_mass {
+        resolved_params = params.clone();
+        resolved_params.total_mass = automatic_mass(
+            hulls.iter().zip(solids).map(|(hulls, solid)| {
+                (
+                    hulls.as_slice(),
+                    solid.surface_prop.as_deref().unwrap_or(params.surface_prop),
+                )
+            }),
+            params.surface_properties,
+        )?;
+        &resolved_params
+    } else {
+        params
+    };
     if !params.total_mass.is_finite() || params.total_mass <= 0.0 {
         return Err(PhyError::BadParameter {
             what: "total_mass",
@@ -2903,7 +3053,7 @@ pub fn write_phy_multi(
     let prepared: Vec<PreparedSolid> = hulls
         .iter()
         .enumerate()
-        .map(|(i, hs)| prepare_solid(i, hs, params.inertia_scale))
+        .map(|(i, hs)| prepare_solid(i, hs, params.inertia_scale, params.mass_center))
         .collect::<Result<_, _>>()?;
 
     // ---- 1. 逐个 solid 组装 IVP 负载 ----
@@ -3134,6 +3284,7 @@ fn prepare_solid(
     solid: usize,
     hulls: &[PhyHull],
     inertia_scale: f32,
+    forced_center: Option<[f32; 3]>,
 ) -> Result<PreparedSolid, PhyError> {
     if hulls.is_empty() {
         return Err(PhyError::BadParameter {
@@ -3322,7 +3473,10 @@ fn prepare_solid(
         .flat_map(|h| h.tris.iter().copied())
         .collect();
     let solid_props = MassProperties::from_trimesh(1.0, &all_pts, &all_tris);
-    let mass_center_v = solid_props.local_com;
+    let mass_center_v = forced_center.map_or(solid_props.local_com, |center| {
+        let [x, y, z] = to_ivp(center);
+        Vector::new(x, y, z)
+    });
     let inertia_mat = solid_props.reconstruct_inertia_matrix();
     let rotation_inertia = rotation_inertia_of(&inertia_mat, solid_props.mass(), inertia_scale);
 
@@ -5016,7 +5170,7 @@ mod tests {
                     ]
                 })
                 .collect();
-            solids.push((u32_at(ledge + 4) - 1, vertices));
+            solids.push((u32_at(ledge + 4).saturating_sub(1), vertices));
             offset += u32_at(offset) as usize + 4;
         }
         solids
@@ -5205,53 +5359,247 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_mass_center_and_automatic_prop_mass_cannot_succeed_silently() {
-        let smd = posed_ragdoll_source(false);
-        for joints in [false, true] {
-            let phys = crate::model::Physics {
-                mass_center: Some([1.0, 2.0, 3.0]),
-                ..Default::default()
-            };
-            let identity = PhyIdentity {
-                model_name: "unsupported",
-                collision_smd_name: "unsupported",
-                surface_prop: "default",
-            };
-            let result = if joints {
-                build_ragdoll_phy_from_smd(&smd, identity, 0, 100.0, &phys)
-            } else {
-                build_phy_from_smd(&smd, identity, 0, 100.0, &phys, None)
-            };
-            assert!(result.is_err());
+    fn forced_mass_center_changes_binary_center_and_radius_without_moving_geometry() {
+        let original = write_cube();
+        let mut params = PhyParams::new("cube", 0);
+        params.mass_center = Some([2.0, -3.0, 4.0]);
+        let bytes = write_phy(&[cube()], &[PhySolid::prop("cube")], &params).unwrap();
+        let body = 16 + 32;
+        let center = [
+            read_f32(&bytes, body),
+            read_f32(&bytes, body + 4),
+            read_f32(&bytes, body + 8),
+        ];
+        for (actual, expected) in
+            center
+                .into_iter()
+                .zip([3.0 * 0.0254, -4.0 * 0.0254, 2.0 * 0.0254])
+        {
+            assert!((actual - expected).abs() < 1e-7);
         }
-        let phys = crate::model::Physics {
-            auto_mass: true,
+        let expected_radius = (3.0_f32.powi(2) + 4.0_f32.powi(2) + 5.0_f32.powi(2)).sqrt() * 0.0254;
+        assert!((read_f32(&bytes, body + 24) - expected_radius).abs() < 1e-7);
+        assert_eq!(
+            &bytes[body + 12..body + 24],
+            &original[body + 12..body + 24]
+        );
+        assert_eq!(
+            independent_phy_geometry(&bytes),
+            independent_phy_geometry(&original)
+        );
+        for center in [[f32::NAN, 0.0, 0.0], [0.0, f32::INFINITY, 0.0]] {
+            params.mass_center = Some(center);
+            assert!(matches!(
+                write_phy(&[cube()], &[PhySolid::prop("cube")], &params),
+                Err(PhyError::BadParameter {
+                    what: "mass_center",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn automatic_mass_uses_volume_or_shell_area_and_default_surface_fallback() {
+        let mut params = PhyParams::new("cube", 0);
+        params.auto_mass = true;
+        params.surface_prop = "metal";
+        for (thickness, expected) in [
+            (0.0, 8.0_f64 * 0.0254_f64.powi(3) * 1000.0),
+            (0.5, 24.0_f64 * 0.5 * 0.0254_f64.powi(3) * 1000.0),
+        ] {
+            let properties = [crate::model::SurfacePhysics {
+                name: "metal".into(),
+                density: 1000.0,
+                thickness,
+            }];
+            let mut params = params.clone();
+            params.surface_properties = &properties;
+            let bytes = write_phy(&[cube()], &[PhySolid::prop("cube")], &params).unwrap();
+            let layout = check_invariants(&bytes).unwrap();
+            let text = std::str::from_utf8(&bytes[layout.solids_end..bytes.len() - 1]).unwrap();
+            let total: f64 = text
+                .lines()
+                .find_map(|line| line.strip_prefix("\"totalmass\" \""))
+                .unwrap()
+                .trim_end_matches('"')
+                .parse()
+                .unwrap();
+            assert!((total - expected).abs() < 1e-6, "{total} != {expected}");
+        }
+        params.surface_properties = &[];
+        params.surface_prop = "unknown";
+        let bytes = write_phy(&[cube()], &[PhySolid::prop("cube")], &params).unwrap();
+        let layout = check_invariants(&bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[layout.solids_end..bytes.len() - 1]).unwrap();
+        let total: f64 = text
+            .lines()
+            .find_map(|line| line.strip_prefix("\"totalmass\" \""))
+            .unwrap()
+            .trim_end_matches('"')
+            .parse()
+            .unwrap();
+        assert!((total - 8.0 * 0.0254_f64.powi(3) * 2000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collision_welding_uses_distance_and_normal_dot_thresholds() {
+        let vertices = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            ([0.03, 0.04, 0.0], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 0.0], [0.6, 0.0, 0.8]),
+            ([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+        ];
+        assert_eq!(build_weld_table(&vertices, 0.0, 0.9), [0, 1, 2, 3]);
+        assert_eq!(build_weld_table(&vertices, 0.05, 0.9), [0, 0, 2, 3]);
+        assert_eq!(build_weld_table(&vertices, 0.05, 0.7), [0, 0, 0, 3]);
+        assert_eq!(build_weld_table(&vertices, 0.05, -1.0), [0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn removing_planar_components_keeps_disconnected_solid_geometry() {
+        let mut smd = parse_two_cubes();
+        let mut plane = smd.triangles[0].clone();
+        for (vertex, position) in plane.vertices.iter_mut().zip([
+            [200.0, 0.0, 0.0],
+            [210.0, 0.0, 0.0],
+            [200.0, 10.0, 0.0],
+        ]) {
+            vertex.position = position;
+        }
+        smd.triangles.push(plane);
+        let mut physics = crate::model::Physics {
+            concave: true,
             ..Default::default()
         };
-        assert!(matches!(
-            build_phy_from_smd(
-                &smd,
-                PhyIdentity {
-                    model_name: "unsupported",
-                    collision_smd_name: "unsupported",
-                    surface_prop: "default"
-                },
-                0,
-                100.0,
-                &phys,
-                None
-            ),
-            Err(PhyError::AutoMassUnsupported)
-        ));
-        let mut params = PhyParams::new("unsupported", 0);
-        params.mass_center = Some([1.0, 2.0, 3.0]);
-        assert!(matches!(
-            write_phy(&[cube()], &[PhySolid::prop("unsupported")], &params),
-            Err(PhyError::BadParameter {
-                what: "mass_center",
-                ..
-            })
-        ));
+        let fallback = decompose_connected_components_with_limit(&smd, None, &physics).unwrap();
+        assert_eq!(fallback.len(), 1);
+        assert!(fallback[0].vertices.iter().any(|point| point[0] >= 200.0));
+        physics.remove_2d = true;
+        let filtered = decompose_connected_components_with_limit(&smd, None, &physics).unwrap();
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .flat_map(|hull| &hull.vertices)
+                .all(|point| point[0] < 102.0)
+        );
+    }
+
+    #[test]
+    fn removing_thin_ragdoll_solids_updates_the_mdl_bone_mapping() {
+        let mut source = posed_ragdoll_source(false);
+        for vertex in source
+            .triangles
+            .iter_mut()
+            .flat_map(|triangle| &mut triangle.vertices)
+        {
+            if vertex.parent_bone == 0 {
+                vertex.position[2] = 30.0 + (vertex.position[2] - 30.0) * 0.05;
+            }
+        }
+        let physics = crate::model::Physics {
+            joints: true,
+            remove_2d: true,
+            ..Default::default()
+        };
+        let bones = [
+            toml::from_str::<crate::model::Bone>("name='root'").unwrap(),
+            toml::from_str::<crate::model::Bone>("name='child'\nparent='root'").unwrap(),
+        ];
+        let bytes = build_ragdoll_phy_for_model(
+            &source,
+            PhyIdentity {
+                model_name: "thin",
+                collision_smd_name: "thin",
+                surface_prop: "default",
+            },
+            0,
+            100.0,
+            &physics,
+            &bones,
+        )
+        .unwrap();
+        let solids = independent_phy_geometry(&bytes);
+        assert_eq!(solids.len(), 1);
+        assert_eq!(solids[0].0, 1);
+        assert_eq!(
+            physics_bone_table_for_model(&source, &bones, &physics).unwrap(),
+            [0, 0]
+        );
+    }
+
+    #[test]
+    fn collision_welding_is_evaluated_in_source_space_before_animation_transforms() {
+        let mut source = parse_two_cubes();
+        for (index, triangle) in source.triangles.iter_mut().enumerate() {
+            if index % 2 == 1 {
+                for vertex in &mut triangle.vertices {
+                    vertex.position[0] += 0.03;
+                }
+            }
+        }
+        let physics = crate::model::Physics {
+            concave: true,
+            weld_position: Some(0.05),
+            ..Default::default()
+        };
+        let poses = HashMap::from([(
+            "root".into(),
+            [2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+        )]);
+        let hulls =
+            decompose_connected_components_with_limit(&source, Some(&poses), &physics).unwrap();
+        assert_eq!(hulls.len(), 2);
+    }
+
+    #[test]
+    fn assumed_world_space_uses_collision_bind_pose_instead_of_render_pose() {
+        let mut smd = parse_two_cubes();
+        smd.triangles.truncate(12);
+        smd.frames[0].poses[0].position = [10.0, 20.0, 30.0];
+        let render_pose = HashMap::from([(
+            "root".into(),
+            crate::bone_math::local_transform([100.0, 200.0, 300.0], [0.0; 3]),
+        )]);
+        let physics = crate::model::Physics {
+            assume_world_space: true,
+            mass_center: Some([1.0, 2.0, 3.0]),
+            ..Default::default()
+        };
+        let bytes = build_phy_from_smd(
+            &smd,
+            PhyIdentity {
+                model_name: "prop",
+                collision_smd_name: "mesh",
+                surface_prop: "metal",
+            },
+            123,
+            50.0,
+            &physics,
+            Some(&render_pose),
+        )
+        .unwrap();
+        let geometry = independent_phy_geometry(&bytes);
+        for axis in 0..3 {
+            let min = geometry[0]
+                .1
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::INFINITY, f32::min);
+            let max = geometry[0]
+                .1
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let expected = [10.0, 20.0, 30.0][axis];
+            assert!((min - (expected - 1.0)).abs() < 1e-4);
+            assert!((max - (expected + 1.0)).abs() < 1e-4);
+        }
+        let text_start = check_invariants(&bytes).unwrap().solids_end;
+        let text = std::str::from_utf8(&bytes[text_start..bytes.len() - 1]).unwrap();
+        assert!(text.contains("\"name\" \"mesh\""));
+        assert!(text.contains("\"surfaceprop\" \"metal\""));
     }
 
     #[test]

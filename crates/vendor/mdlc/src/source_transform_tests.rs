@@ -359,7 +359,7 @@ fn forced_realign_respects_locked_definebones_and_follows_automatic_realign() {
 }
 
 #[test]
-fn forced_realign_rejects_commands_that_require_an_earlier_reorientation_stage() {
+fn forced_realign_preserves_motion_and_delta_animation_world_transforms() {
     let fixture = fixture();
     for options in [
         "delta",
@@ -367,25 +367,66 @@ fn forced_realign_rejects_commands_that_require_an_earlier_reorientation_stage()
         "subtract base 0",
         "lineardelta",
         "LX",
-        "walkframe 1 LX",
+        "walkframe 1 LX LY LM",
         "rotateto 30",
         "counterrotate mid",
         "localhierarchy mid root range 0 0 1 1",
     ] {
-        let description = qc::parse_qc_str(
-            &format!(
-                "$body body reference.smd\n$animation base animation.smd\n$sequence moving animation.smd {{ {options} }}\n$forcerealign mid rotate 0 0 90\n"
-            ),
-            &fixture.0,
-        )
-        .unwrap();
-        let errors = description.validate().unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.path == "model.forced_realign"),
-            "{options}: {errors:?}"
+        let text = format!(
+            "$body body reference.smd\n$animation base animation.smd\n$sequence moving animation.smd {{ {options} }}\n"
         );
+        let original = build(&fixture, &text);
+        let forced = build(
+            &fixture,
+            &format!("{text}$forcerealign mid rotate 0 0 90\n"),
+        );
+        let realigned = forced.compiled.realigned.as_ref().unwrap();
+        let parents = [-1, 0, 1];
+        let worlds =
+            |compiled: &crate::model::CompiledModelDesc, animation: usize, frame: usize| {
+                let animation = &compiled.animations[animation];
+                if animation.delta {
+                    let locals = crate::compile::delta_local_matrices_weighted(
+                        &compiled.animations[0].frames[0],
+                        &animation.frames[frame],
+                        &animation.weights,
+                    );
+                    let poses: Vec<_> = locals
+                        .iter()
+                        .map(|local| ([local[3], local[7], local[11]], math::matrix_angles(local)))
+                        .collect();
+                    math::compute_world(
+                        &poses.iter().map(|pose| pose.0).collect::<Vec<_>>(),
+                        &poses.iter().map(|pose| pose.1).collect::<Vec<_>>(),
+                        &parents,
+                    )
+                } else {
+                    let frame = &animation.frames[frame];
+                    math::compute_world(
+                        &frame.iter().map(|pose| pose.position).collect::<Vec<_>>(),
+                        &frame.iter().map(|pose| pose.rotation).collect::<Vec<_>>(),
+                        &parents,
+                    )
+                }
+            };
+        for frame in 0..original.compiled.animations[1].frames.len() {
+            let before = worlds(&original.compiled, 1, frame);
+            let after = worlds(&forced.compiled, 1, frame);
+            for bone in 0..3 {
+                close(
+                    after[bone],
+                    math::concat(&before[bone], &realigned.src_realign[bone]),
+                );
+            }
+        }
+        for (before, after) in original.compiled.animations[1]
+            .movements
+            .iter()
+            .zip(&forced.compiled.animations[1].movements)
+        {
+            close(before.position, after.position);
+            close(before.vector, after.vector);
+        }
     }
 }
 
@@ -596,4 +637,116 @@ fn limitrotation_excludes_short_and_delta_animations_and_accumulates_aligned_swe
     }
     let alignment = crate::bone_alignment::calculate(&compiled);
     close(alignment[0].unwrap(), [0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn gmod_bonesaveframe_writes_selected_cache_channels_and_external_rle_animation() {
+    let fixture = fixture();
+    let mut description = qc::parse_qc_str(
+        "$modelname models/tests/saved.mdl\n$body body reference.smd\n$sequence moving animation.smd\n$animblocksize 4096\n$bonesaveframe root position\n$bonesaveframe MID rotation\n$screenalign mid sphere\n",
+        &fixture.0,
+    ).unwrap();
+    description.model.version = Some(48);
+    let output = pipeline::build(&description, &fixture.0, Default::default()).unwrap();
+    let mdl = &output.mdl;
+    let ani = output.ani.as_ref().unwrap();
+    assert_eq!(integer(ani, 4), 48);
+    let animation = integer(mdl, 0xB8);
+    assert_eq!(integer(mdl, animation + 12) & 0x40, 0);
+    assert_eq!(integer(mdl, animation + 52), 1);
+    assert_eq!(
+        i16::from_le_bytes(mdl[animation + 88..animation + 90].try_into().unwrap()),
+        1
+    );
+    assert_eq!(
+        i16::from_le_bytes(mdl[animation + 90..animation + 92].try_into().unwrap()),
+        1
+    );
+    let cache = animation + integer(mdl, animation + 92);
+    assert_eq!(&mdl[cache..cache + 6], &[0; 6]);
+    let identity = (1_u64 << 20) | ((1_u64 << 20) << 21) | ((1_u64 << 20) << 42);
+    assert_eq!(
+        u64::from_le_bytes(mdl[cache + 6..cache + 14].try_into().unwrap()),
+        identity
+    );
+    let bones = integer(mdl, 0xA0);
+    let flags = |bone: usize| integer(mdl, bones + bone * 216 + 160);
+    assert_eq!(flags(0) & 0x00E00000, 0x00200000);
+    assert_eq!(flags(1) & 0x00E00000, 0x00400000);
+    assert_eq!(flags(2) & 0x00E00000, 0);
+    assert_ne!(flags(1) & 0x00000400, 0);
+    assert_ne!(flags(1) & 0x00000008, 0);
+    let blocks = integer(mdl, 0x164);
+    let block = integer(mdl, blocks + 8);
+    let payload = block + integer(mdl, animation + 56);
+    assert_eq!(ani[payload], 0);
+    assert_ne!(ani[payload + 1] & 0x0C, 0);
+}
+
+#[test]
+fn bonesaveframe_keeps_single_frame_animations_demand_loaded() {
+    let fixture = fixture();
+    let mut description = qc::parse_qc_str(
+        "$modelname models/tests/saved_one.mdl\n$body body reference.smd\n$sequence idle reference.smd\n$animblocksize 4096\n$bonesaveframe root position rotation\n",
+        &fixture.0,
+    ).unwrap();
+    description.model.version = Some(48);
+    let output = pipeline::build(&description, &fixture.0, Default::default()).unwrap();
+    let animation = integer(&output.mdl, 0xB8);
+    assert_eq!(integer(&output.mdl, animation + 52), 1);
+    assert_eq!(
+        i16::from_le_bytes(
+            output.mdl[animation + 88..animation + 90]
+                .try_into()
+                .unwrap()
+        ),
+        0
+    );
+    assert_eq!(
+        i16::from_le_bytes(
+            output.mdl[animation + 90..animation + 92]
+                .try_into()
+                .unwrap()
+        ),
+        1
+    );
+    let cache = animation + integer(&output.mdl, animation + 92);
+    assert_eq!(&output.mdl[cache..cache + 6], &[0; 6]);
+    assert!(output.ani.as_ref().unwrap().len() > 416);
+}
+
+#[test]
+fn noanimblock_and_noanimblockstall_allocate_local_and_external_sections_per_animation() {
+    let fixture = fixture();
+    let mut description = qc::parse_qc_str(
+        "$modelname models/tests/blocks.mdl\n$body body reference.smd\n$animblocksize 4096\n$sectionframes 1 1\n$animation resident animation.smd noanimblock\n$animation streamed animation.smd noanimblockstall\n$sequence resident resident\n$sequence streamed streamed\n",
+        &fixture.0,
+    ).unwrap();
+    description.model.version = Some(48);
+    let output = pipeline::build(&description, &fixture.0, Default::default()).unwrap();
+    let mdl = &output.mdl;
+    let ani = output.ani.as_ref().unwrap();
+    let animations = integer(mdl, 0xB8);
+    for (index, resident) in [(0, true), (1, false)] {
+        let animation = animations + index * 100;
+        assert_eq!(integer(mdl, animation + 52), 0);
+        assert_eq!(integer(mdl, animation + 92), 0);
+        let sections = animation + integer(mdl, animation + 80);
+        assert_eq!(integer(mdl, sections), 0);
+        assert!(animation + integer(mdl, sections + 4) < mdl.len());
+        for section in 1..4 {
+            let entry = sections + section * 8;
+            if resident {
+                assert_eq!(integer(mdl, entry), 0);
+                assert!(animation + integer(mdl, entry + 4) < mdl.len());
+            } else {
+                assert_eq!(integer(mdl, entry), 1);
+                let blocks = integer(mdl, 0x164);
+                let begin = integer(mdl, blocks + 8);
+                let end = integer(mdl, blocks + 12);
+                let payload = begin + integer(mdl, entry + 4);
+                assert!(payload < end && end <= ani.len());
+            }
+        }
+    }
 }

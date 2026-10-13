@@ -450,6 +450,14 @@ pub fn build_lod_layout(meshes: &[MeshLods]) -> LodLayout {
 ///
 /// 返回与 `layout.vertices` 等长的切线表。
 pub fn tangents_for_layout(meshes: &[MeshLods], layout: &LodLayout) -> Vec<VvdTangent> {
+    tangents_for_layout_with_smoothing(meshes, layout, false)
+}
+
+pub fn tangents_for_layout_with_smoothing(
+    meshes: &[MeshLods],
+    layout: &LodLayout,
+    smooth: bool,
+) -> Vec<VvdTangent> {
     // 统一池下标 → 累加器下标。排序池里第 k 项对应 (mesh, vert)。
     let mut acc_s = vec![[0.0f32; 3]; layout.vertices.len()];
     let mut acc_t = vec![[0.0f32; 3]; layout.vertices.len()];
@@ -493,6 +501,18 @@ pub fn tangents_for_layout(meshes: &[MeshLods], layout: &LodLayout) -> Vec<VvdTa
                 }
             }
         }
+    }
+
+    if smooth {
+        crate::tangent::smooth_accumulators(
+            layout
+                .order
+                .iter()
+                .zip(&layout.vertices)
+                .map(|(&(mesh, _), vertex)| (mesh, vertex.pos)),
+            &mut acc_s,
+            &mut acc_t,
+        );
     }
 
     layout
@@ -545,7 +565,11 @@ pub fn build_single_lod_vvd(
         for m in &bp.models {
             for mesh in &m.meshes {
                 // 该 mesh 的切线：用它的三角形与顶点算。
-                let t = crate::tangent::tangents_for_mesh(&mesh.vertices, &mesh.triangles);
+                let t = crate::tangent::tangents_for_mesh_with_smoothing(
+                    &mesh.vertices,
+                    &mesh.triangles,
+                    compiled.desc.model.zbrush,
+                );
                 for (v, tan) in mesh.vertices.iter().zip(t) {
                     vertices.push(to_vvd_vertex(v));
                     tangents.push(tan);
@@ -591,7 +615,7 @@ pub fn build_multi_lod_vvd(
     }
 
     let layout = build_lod_layout(&all);
-    let tangents = tangents_for_layout(&all, &layout);
+    let tangents = tangents_for_layout_with_smoothing(&all, &layout, compiled.desc.model.zbrush);
     let vertices: Vec<crate::vvd::VvdVertex> = layout.vertices.iter().map(to_vvd_vertex).collect();
 
     let mut vvd = crate::vvd::Vvd::from_vertices_lods(
@@ -1028,7 +1052,15 @@ impl LodSource {
 /// Unify LOD vertices without changing supplied geometry or bone weights.
 /// Explicit per-LOD bone replacements are applied before exact attribute matching.
 pub fn unify_lods_remapped(lods: &[LodSource], bone_usage: &mut [LodFlags]) -> MeshLods {
-    unify_lods_impl::<true>(lods, bone_usage)
+    unify_lods_impl::<true>(lods, bone_usage, false)
+}
+
+pub fn unify_lods_remapped_with_smoothing(
+    lods: &[LodSource],
+    bone_usage: &mut [LodFlags],
+    smooth: bool,
+) -> MeshLods {
+    unify_lods_impl::<true>(lods, bone_usage, smooth)
 }
 
 #[cfg(test)]
@@ -1036,13 +1068,14 @@ pub(crate) fn unify_lods_remapped_naive(
     lods: &[LodSource],
     bone_usage: &mut [LodFlags],
 ) -> MeshLods {
-    unify_lods_impl::<false>(lods, bone_usage)
+    unify_lods_impl::<false>(lods, bone_usage, false)
 }
 
 /// `USE_INDEX = true` 走位置桶索引，`false` 走原来的线性扫描。
 fn unify_lods_impl<const USE_INDEX: bool>(
     lods: &[LodSource],
     bone_usage: &mut [LodFlags],
+    smooth: bool,
 ) -> MeshLods {
     let num_lods = lods.len().max(1);
     let mut pool: Vec<DictVert> = Vec::new();
@@ -1051,7 +1084,8 @@ fn unify_lods_impl<const USE_INDEX: bool>(
 
     // ---- LOD 0：CopyVerts（**不去重**，逐条追加）----
     let l0 = &lods[0];
-    let l0_tan = crate::tangent::tangents_for_mesh(&l0.vertices, &l0.triangles);
+    let l0_tan =
+        crate::tangent::tangents_for_mesh_with_smoothing(&l0.vertices, &l0.triangles, smooth);
     let root_start = pool.len();
     for (i, v) in l0.vertices.iter().enumerate() {
         let mut nv = v.clone();
@@ -1111,7 +1145,8 @@ fn unify_lods_impl<const USE_INDEX: bool>(
     // ---- LOD 1..N：CreateLODVertsInDictionary ----
     for (n, src) in lods.iter().enumerate().take(num_lods).skip(1) {
         let prev_count = pool.len();
-        let src_tan = crate::tangent::tangents_for_mesh(&src.vertices, &src.triangles);
+        let src_tan =
+            crate::tangent::tangents_for_mesh_with_smoothing(&src.vertices, &src.triangles, smooth);
         let zero_tan = VvdTangent {
             xyz: [0.0; 3],
             w: -1.0,

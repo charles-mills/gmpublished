@@ -9,6 +9,10 @@ use std::{
 
 use vformats::mdl::{self, Mdl, MdlModel, Vvd, VvdVertex};
 
+#[path = "model_decompile/blender.rs"]
+mod blender;
+pub use blender::{BlenderExportReport, export_blender_model, export_blender_model_with_cancel};
+
 #[path = "model_decompile/animations.rs"]
 mod animations;
 #[path = "model_decompile/flexes.rs"]
@@ -95,54 +99,17 @@ pub fn decompile_model_with_cancel(
         .unwrap_or_else(|| Path::new("."));
     let parent = fs::canonicalize(parent).map_err(|error| io_error(parent, error))?;
     let destination = parent.join(name);
-    let raw_mdl = read_input(mdl_path)?;
-    let vvd_path = sibling(mdl_path, "vvd")?;
-    let vtx_path = ["dx90.vtx", "vtx", "dx80.vtx", "sw.vtx"]
-        .into_iter()
-        .find_map(|extension| sibling(mdl_path, extension).ok())
-        .ok_or_else(|| invalid("The matching .dx90.vtx (or .vtx) file is missing"))?;
-    let limits = vformats::Limits {
-        max_input_bytes: MAX_INPUT_BYTES,
-        max_entries: 1_000_000,
-        ..vformats::Limits::default()
-    };
-    check_cancelled(cancelled)?;
-    let mut geometry_header = raw_mdl.clone();
-    // Animation sections and external .ani blocks require a separate decoder.
-    // Do not feed them to the geometry parser's partial animation implementation.
-    geometry_header
-        .get_mut(180..184)
-        .ok_or_else(|| invalid("Truncated MDL header"))?
-        .fill(0);
-    let model =
-        mdl::parse_mdl(&geometry_header, &limits).map_err(|error| invalid(error.to_string()))?;
-    let raw_vvd = read_input(&vvd_path)?;
-    let raw_vtx = read_input(&vtx_path)?;
-    let raw_ani = if u32_at(&raw_mdl, 352).unwrap_or(0) > 1 {
-        sibling(mdl_path, "ani")
-            .ok()
-            .map(|path| read_input(&path))
-            .transpose()?
-    } else {
-        None
-    };
-    if let Some(ani) = &raw_ani
-        && (ani.get(..4) != Some(&mdlc::ani_writer::ANI_ID.to_le_bytes())
-            || !matches!(u32_at(ani, 4), Some(48 | 49))
-            || u32_at(ani, 76) != u32::try_from(ani.len()).ok()
-            || !u32_at(ani, 8)
-                .is_some_and(|checksum| checksum == 0 || checksum == model.checksum as u32))
-    {
-        return Err(invalid("The ANI file does not match the MDL"));
-    }
-    let vertices = mdl::parse_vvd(&raw_vvd, &limits).map_err(|error| invalid(error.to_string()))?;
-    let topology = mdl::parse_vtx(&raw_vtx, &limits).map_err(|error| invalid(error.to_string()))?;
-    if model.checksum != vertices.checksum || model.checksum != topology.checksum {
-        return Err(invalid("The MDL, VVD and VTX checksums do not match"));
-    }
+    let LoadedModel {
+        model,
+        vertices,
+        topology,
+        raw_mdl,
+        raw_vvd,
+        raw_vtx,
+        ani: raw_ani,
+    } = load_model(mdl_path, cancelled)?;
     let lod_metadata =
         lods::Metadata::read(&raw_mdl, &raw_vvd, &raw_vtx, &model, &vertices, &topology)?;
-    validate_skeleton(&model)?;
     if model.body_parts.len() != topology.body_parts.len() {
         return Err(invalid("The MDL and VTX bodygroups do not match"));
     }
@@ -344,6 +311,75 @@ pub fn decompile_model_with_cancel(
         files,
         bytes_written,
         warnings,
+    })
+}
+
+struct LoadedModel {
+    model: Mdl,
+    vertices: Vvd,
+    topology: mdl::Vtx,
+    raw_mdl: Vec<u8>,
+    raw_vvd: Vec<u8>,
+    raw_vtx: Vec<u8>,
+    ani: Option<Vec<u8>>,
+}
+
+fn load_model(mdl_path: &Path, cancelled: &AtomicBool) -> Result<LoadedModel, DecompileError> {
+    check_cancelled(cancelled)?;
+    let raw_mdl = read_input(mdl_path)?;
+    let vvd_path = sibling(mdl_path, "vvd")?;
+    let vtx_path = ["dx90.vtx", "vtx", "dx80.vtx", "sw.vtx"]
+        .into_iter()
+        .find_map(|extension| sibling(mdl_path, extension).ok())
+        .ok_or_else(|| invalid("The matching .dx90.vtx (or .vtx) file is missing"))?;
+    let limits = vformats::Limits {
+        max_input_bytes: MAX_INPUT_BYTES,
+        max_entries: 1_000_000,
+        ..vformats::Limits::default()
+    };
+    check_cancelled(cancelled)?;
+    let mut geometry_header = raw_mdl.clone();
+    // Animation sections and external .ani blocks require a separate decoder.
+    // Do not feed them to the geometry parser's partial animation implementation.
+    geometry_header
+        .get_mut(180..184)
+        .ok_or_else(|| invalid("Truncated MDL header"))?
+        .fill(0);
+    let model =
+        mdl::parse_mdl(&geometry_header, &limits).map_err(|error| invalid(error.to_string()))?;
+    let raw_vvd = read_input(&vvd_path)?;
+    let raw_vtx = read_input(&vtx_path)?;
+    let ani = if u32_at(&raw_mdl, 352).unwrap_or(0) > 1 {
+        sibling(mdl_path, "ani")
+            .ok()
+            .map(|path| read_input(&path))
+            .transpose()?
+    } else {
+        None
+    };
+    if let Some(ani) = &ani
+        && (ani.get(..4) != Some(&mdlc::ani_writer::ANI_ID.to_le_bytes())
+            || !matches!(u32_at(ani, 4), Some(48 | 49))
+            || u32_at(ani, 76) != u32::try_from(ani.len()).ok()
+            || !u32_at(ani, 8)
+                .is_some_and(|checksum| checksum == 0 || checksum == model.checksum as u32))
+    {
+        return Err(invalid("The ANI file does not match the MDL"));
+    }
+    let vertices = mdl::parse_vvd(&raw_vvd, &limits).map_err(|error| invalid(error.to_string()))?;
+    let topology = mdl::parse_vtx(&raw_vtx, &limits).map_err(|error| invalid(error.to_string()))?;
+    if model.checksum != vertices.checksum || model.checksum != topology.checksum {
+        return Err(invalid("The MDL, VVD and VTX checksums do not match"));
+    }
+    validate_skeleton(&model)?;
+    Ok(LoadedModel {
+        model,
+        vertices,
+        topology,
+        raw_mdl,
+        raw_vvd,
+        raw_vtx,
+        ani,
     })
 }
 
@@ -552,7 +588,6 @@ fn skeleton_smd(model: &Mdl) -> Result<String, DecompileError> {
 fn validate_skeleton(model: &Mdl) -> Result<(), DecompileError> {
     let mut names = HashSet::new();
     for (index, bone) in model.bones.iter().enumerate() {
-        quoted(&bone.name)?;
         if bone.name.is_empty() || !names.insert(bone.name.to_lowercase()) {
             return Err(invalid("Skeleton bone names must be nonempty and unique"));
         }
@@ -560,6 +595,8 @@ fn validate_skeleton(model: &Mdl) -> Result<(), DecompileError> {
             .position
             .iter()
             .chain(&bone.rotation)
+            .chain(&bone.quaternion)
+            .chain(bone.pose_to_bone.iter().flatten())
             .all(|value| value.is_finite())
         {
             return Err(invalid("A bone contains nonfinite coordinates"));

@@ -63,7 +63,14 @@ pub(super) fn copy(
     let mapped_base = Path::new(assets).join(base.strip_prefix(&root).unwrap());
     for include in &includes {
         let text = model_compile::read_qc_text(include)?;
-        let text = rewrite(&text, &root, &mapped_base, assets, request)?;
+        let text = rewrite(
+            &text,
+            &root,
+            &mapped_base,
+            assets,
+            request,
+            &desc.model.source_search_paths,
+        )?;
         let target = Path::new(assets).join(include.strip_prefix(&root).unwrap());
         stage_asset(files_root, &target, text.as_bytes(), writes)?;
     }
@@ -75,7 +82,14 @@ pub(super) fn copy(
     protected.insert(source.to_path_buf());
     protected.extend(copier.copied.values().cloned());
     drop(copier);
-    let text = rewrite(&original, &root, &mapped_base, assets, request)?;
+    let text = rewrite(
+        &original,
+        &root,
+        &mapped_base,
+        assets,
+        request,
+        &desc.model.source_search_paths,
+    )?;
     let main = Path::new(assets).join(source.strip_prefix(&root).unwrap());
     stage_asset(files_root, &main, text.as_bytes(), writes)?;
     for relative in writes.iter() {
@@ -96,11 +110,20 @@ pub(super) fn copy(
 fn include_files(text: &str, source: &Path) -> Result<BTreeSet<PathBuf>, ModelCompileError> {
     let mut lexer = mdlc::qc::lexer::Lexer::new(source.parent().unwrap().to_path_buf());
     lexer.load_from_memory(text, &source.display().to_string());
-    while lexer
+    while let Some(token) = lexer
         .next_token(true)
         .map_err(|error| invalid(&error.to_string()))?
-        .is_some()
-    {}
+    {
+        if token.text.eq_ignore_ascii_case("$addsearchdir") {
+            let directory = lexer
+                .next_token(false)
+                .map_err(|error| invalid(&error.to_string()))?
+                .ok_or_else(|| invalid("missing QC search directory"))?;
+            lexer
+                .search_paths
+                .push(lexer.qdir.join(directory.text.replace('\\', "/")));
+        }
+    }
     lexer
         .loaded_files
         .iter()
@@ -113,6 +136,15 @@ fn source_files(
     base: &Path,
 ) -> Result<BTreeSet<PathBuf>, ModelCompileError> {
     let mut sources = BTreeSet::new();
+    let virtual_paths: BTreeSet<_> = desc
+        .model
+        .virtual_vtas
+        .iter()
+        .map(|source| {
+            mdlc::compile::resolve_vta_path(base, &source.name)
+                .map_err(|error| invalid(&error.to_string()))
+        })
+        .collect::<Result<_, _>>()?;
     let mut add = |name: &str, vta: bool| -> Result<(), ModelCompileError> {
         if name.is_empty() {
             return Ok(());
@@ -123,6 +155,9 @@ fn source_files(
             mdlc::compile::resolve_smd_path(base, name)
         }
         .map_err(|error| invalid(&error.to_string()))?;
+        if vta && virtual_paths.contains(&path) {
+            return Ok(());
+        }
         sources.insert(canonical(&path)?);
         Ok(())
     };
@@ -156,10 +191,73 @@ fn source_files(
     if let Some(source) = &desc.physics.smd {
         add(source, false)?;
     }
+    for source in &desc.model.append_sources {
+        add(&source.source, false)?;
+    }
+    for source in &desc.model.virtual_vtas {
+        for frame in &source.frames {
+            add(&frame.source, false)?;
+        }
+    }
     for source in &desc.model.source_dependencies {
         sources.insert(canonical(source)?);
     }
+    let mut pending: Vec<_> = sources.iter().cloned().collect();
+    while let Some(source) = pending.pop() {
+        for dependency in wavefront_dependencies(&source)? {
+            if sources.insert(dependency.clone()) {
+                pending.push(dependency);
+            }
+        }
+    }
     Ok(sources)
+}
+
+fn wavefront_dependencies(source: &Path) -> Result<Vec<PathBuf>, ModelCompileError> {
+    let extension = source.extension().unwrap_or_default();
+    let obj = extension.eq_ignore_ascii_case("obj");
+    let mtl = extension.eq_ignore_ascii_case("mtl");
+    if !obj && !mtl {
+        return Ok(Vec::new());
+    }
+    if fs::metadata(source)
+        .map_err(|error| io_error(source, error))?
+        .len()
+        > 128 * 1024 * 1024
+    {
+        return Err(invalid("source file exceeds the 128 MiB limit"));
+    }
+    let text = fs::read_to_string(source).map_err(|error| io_error(source, error))?;
+    let mut result = Vec::new();
+    for line in text.lines() {
+        let mut words = line.split('#').next().unwrap_or("").split_whitespace();
+        let Some(command) = words.next() else {
+            continue;
+        };
+        let names: Vec<_> = if obj && command == "mtllib" {
+            words.collect()
+        } else if mtl
+            && (command.starts_with("map_")
+                || matches!(command, "bump" | "disp" | "decal" | "refl"))
+        {
+            words.next_back().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        for name in names {
+            let normalized = name.replace('\\', "/");
+            if Path::new(&normalized).is_absolute() {
+                return Err(invalid(
+                    "portable QC requires relative Wavefront material and texture paths",
+                ));
+            }
+            let path = source.parent().unwrap().join(normalized);
+            if path.is_file() {
+                result.push(canonical(&path)?);
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn gltf_dependencies(source: &Path) -> Result<Vec<PathBuf>, ModelCompileError> {
@@ -256,7 +354,13 @@ fn rewrite(
     mapped_base: &Path,
     assets: &str,
     request: &ModelCompileRequest,
+    search_paths: &[String],
 ) -> Result<String, ModelCompileError> {
+    let original_base = root.join(
+        mapped_base
+            .strip_prefix(assets)
+            .map_err(|_| invalid("invalid relocated QC base"))?,
+    );
     let tokens = text_tokens(text)?;
     let mut edits = Vec::new();
     let mut index = 0;
@@ -274,15 +378,38 @@ fn rewrite(
             depth = depth.saturating_sub(1);
         }
         if token.text.eq_ignore_ascii_case("$include")
-            || depth == 0 && token.text.eq_ignore_ascii_case("$cd")
+            || depth == 0
+                && (token.text.eq_ignore_ascii_case("$cd")
+                    || token.text.eq_ignore_ascii_case("$addsearchdir"))
         {
             let next = tokens
                 .get(index + 1)
                 .ok_or_else(|| invalid("missing QC dependency path"))?;
+            let normalized = next.text.replace('\\', "/");
+            let included = if token.text.eq_ignore_ascii_case("$include")
+                && !Path::new(&normalized).is_absolute()
+            {
+                std::iter::once(original_base.join(&normalized))
+                    .chain(
+                        search_paths
+                            .iter()
+                            .map(|directory| original_base.join(directory).join(&normalized)),
+                    )
+                    .find(|path| path.is_file())
+            } else {
+                None
+            };
+            let value = included.as_ref().map(|path| path.to_string_lossy());
             edits.push((
                 next.start,
                 next.end,
-                mapped_path(&next.text, root, mapped_base, assets, next.quoted)?,
+                mapped_path(
+                    value.as_deref().unwrap_or(&next.text),
+                    root,
+                    mapped_base,
+                    assets,
+                    next.quoted,
+                )?,
             ));
             index += 2;
             continue;
@@ -358,7 +485,10 @@ pub(super) fn validate_dependencies(
     desc: &mdlc::model::ModelDesc,
     original: &mdlc::model::ModelDesc,
 ) -> Result<(), ModelCompileError> {
-    if desc.model.source_dependencies.len() != original.model.source_dependencies.len() {
+    if desc.model.source_dependencies.len() != original.model.source_dependencies.len()
+        || desc.model.append_sources.len() != original.model.append_sources.len()
+        || desc.model.virtual_vtas.len() != original.model.virtual_vtas.len()
+    {
         return Err(invalid(
             "a QC procedural source dependency was lost during relocation",
         ));

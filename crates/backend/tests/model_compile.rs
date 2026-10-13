@@ -74,7 +74,7 @@ fn direct_mesh_compiles_matching_source_files_for_gmod() {
 }
 
 #[test]
-fn direct_gltf_corrects_y_up_and_keeps_collision_aligned_without_manual_rotation() {
+fn direct_gltf_converts_metres_corrects_y_up_and_keeps_collision_aligned() {
     let root = tempfile::tempdir().unwrap();
     let mut geometry = Vec::new();
     for value in [
@@ -132,7 +132,7 @@ fn direct_gltf_corrects_y_up_and_keeps_collision_aligned_without_manual_rotation
     };
     let visual = bounds(vvd.vertices.iter().map(|vertex| vertex.position).collect());
     for (axis, extent) in [3.0, 2.0, 7.0].into_iter().enumerate() {
-        assert!((visual.1[axis] - visual.0[axis] - extent).abs() < 0.001);
+        assert!((visual.1[axis] - visual.0[axis] - extent / 0.0254).abs() < 0.001);
     }
     let phy_bytes = bytes(ModelOutputKind::Phy);
     let phy = vformats::phy::parse(&phy_bytes, &vformats::Limits::default()).unwrap();
@@ -1055,4 +1055,128 @@ fn automatic_collision_rejects_multi_bone_rigs_before_publication() {
             .iter()
             .any(|file| file.kind == ModelOutputKind::Phy)
     );
+}
+
+#[test]
+fn qc_automatic_mass_uses_game_density_in_both_model_and_collision_outputs() {
+    let (root, _) = fixture();
+    let source = root.path().join("mass.qc");
+    fs::write(&source, "$modelname props/automatic.mdl\n$body body cube.smd\n$surfaceprop metal\n$collisionmodel cube.smd { $automass }\n").unwrap();
+    let mut request = ModelCompileRequest::new(source, root.path().join("compiled"));
+    request.export_materials = false;
+    gmpublished_backend::model_compile::load_surface_properties(&mut request, |path| {
+        (path == "scripts/surfaceproperties.txt")
+            .then(|| br#""metal" { "density" "7800" "thickness" "0" }"#.to_vec())
+    })
+    .unwrap();
+    let output = compile_model(&request).unwrap();
+    let mdl = fs::read(
+        &output
+            .files
+            .iter()
+            .find(|file| file.kind == ModelOutputKind::Mdl)
+            .unwrap()
+            .path,
+    )
+    .unwrap();
+    let mass = f32::from_le_bytes(mdl[328..332].try_into().unwrap());
+    let expected = 4.0_f32 * 6.0 * 8.0 * 0.0254_f32.powi(3) * 7800.0;
+    assert!((mass - expected).abs() < 0.001);
+    let phy_bytes = fs::read(
+        &output
+            .files
+            .iter()
+            .find(|file| file.kind == ModelOutputKind::Phy)
+            .unwrap()
+            .path,
+    )
+    .unwrap();
+    let phy = vformats::phy::parse(&phy_bytes, &vformats::Limits::default()).unwrap();
+    let text = std::str::from_utf8(phy.text.unwrap().bytes).unwrap();
+    assert!(text.contains(&format!("\"totalmass\" \"{mass:.6}\"")));
+}
+
+#[test]
+fn broken_game_surface_manifest_only_blocks_automatic_mass() {
+    let (root, _) = fixture();
+    let source = root.path().join("mass.qc");
+    for (mass_option, automatic) in [("$mass 20", false), ("$automass", true)] {
+        fs::write(
+            &source,
+            format!("$modelname props/mass.mdl\n$body body cube.smd\n$collisionmodel cube.smd {{ {mass_option} }}\n"),
+        )
+        .unwrap();
+        let mut request = ModelCompileRequest::new(source.clone(), root.path().join("compiled"));
+        request.export_materials = false;
+        let result =
+            gmpublished_backend::model_compile::load_surface_properties(&mut request, |_| {
+                Some(b"invalid manifest".to_vec())
+            });
+        if automatic {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+            assert!(compile_model(&request).is_ok());
+        }
+    }
+}
+
+#[test]
+fn compiler_warnings_are_returned_to_the_app_without_leaking_between_exports() {
+    let (root, _) = fixture();
+    let source = root.path().join("warnings.qc");
+    fs::write(
+        &source,
+        "$modelname props/warnings.mdl\n$body body cube.smd\n$externaltextures\n",
+    )
+    .unwrap();
+    let mut request = ModelCompileRequest::new(source.clone(), root.path().join("first"));
+    request.export_materials = false;
+    let output = compile_model(&request).unwrap();
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("$externaltextures"))
+    );
+    fs::write(
+        &source,
+        "$modelname props/warnings.mdl\n$body body cube.smd\n",
+    )
+    .unwrap();
+    request.destination = root.path().join("second");
+    assert!(compile_model(&request).unwrap().warnings.is_empty());
+}
+
+#[test]
+fn qc_event_outside_the_animation_reports_a_warning_and_writes_cycle_zero() {
+    let (root, _) = fixture();
+    let source = root.path().join("events.qc");
+    fs::write(&source, "$modelname models/tests/events.mdl\n$body body cube.smd\n$sequence idle cube.smd { event 5004 30 \"sound\" }\n").unwrap();
+    let mut request = ModelCompileRequest::new(source, root.path().join("addon"));
+    request.export_materials = false;
+    let output = compile_model(&request).unwrap();
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Event 5004")
+                && warning.contains("idle")
+                && warning.contains("30"))
+    );
+    let model = output
+        .files
+        .iter()
+        .find(|file| file.kind == ModelOutputKind::Mdl)
+        .unwrap();
+    let bytes = fs::read(&model.path).unwrap();
+    let integer = |at| i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let sequence = integer(0xC0);
+    assert_eq!(integer(sequence + 24), 1);
+    let event = sequence + integer(sequence + 28);
+    assert_eq!(
+        f32::from_le_bytes(bytes[event..event + 4].try_into().unwrap()),
+        0.0
+    );
+    assert_eq!(integer(event + 4), 5004);
 }

@@ -1036,7 +1036,6 @@ pub struct IkRule {
     #[serde(default)]
     pub radius: Option<f32>,
     /// `pad <v>`：等价于 `radius <v/2>`（`studiomdl.cpp:1326`）。
-    /// 与 [`Self::radius`] 同时写会报错。
     #[serde(default)]
     pub pad: Option<f32>,
     /// `floor <v>`。
@@ -1058,44 +1057,12 @@ pub struct IkRule {
     /// `fakerotate <pitch> <yaw> <roll>`（**度**）：强制 `q` 并把 `bone` 置 **−1**。
     #[serde(default)]
     pub fake_rotate: Option<[f32; 3]>,
-    /// `usesource`：误差样本取**源 SMD 的原始骨骼变换**，而不是处理后的动画。
-    ///
-    /// # 官方依据（`simplify.cpp:6007-6012` 等四处）
-    ///
-    /// 算 `pError[]` 时有三个互斥来源：
-    ///
-    /// ```c
-    /// if (pRule->usesequence)      CalcSeqTransforms( n, t, boneToWorld );
-    /// else if (pRule->usesource) { BuildRawTransforms( panim->source, ... , srcBoneToWorld );
-    ///                              TranslateAnimations( panim->source, srcBoneToWorld, boneToWorld ); }
-    /// else                         CalcBoneTransforms( panim, t, boneToWorld );
-    /// ```
-    ///
-    /// * **默认**（两者都不写）—— `CalcBoneTransforms`：**处理后的**动画帧
-    ///   （含 `subtract` 减除、`RealignBones` 重排等）。
-    /// * **`usesource`** —— `BuildRawTransforms` 直接读 `psource->rawanim[frame]`，
-    ///   即 SMD 里**原样**的骨骼姿态，**跳过一切后处理**；
-    ///   再经 `TranslateAnimations` 用 `srcRealign` 搬到全局骨骼空间。
-    /// * **`usesequence`** —— 用**整个序列**的变换（本实现未实现，见下）。
-    ///
-    /// # 为什么这个区分重要
-    ///
-    /// 官方 `$sequence` 的 `subtract` 会从每一帧里减掉基准帧，`RealignBones`
-    /// 会重排骨骼轴 —— 两者都改变 `CalcBoneTransforms` 的结果。
-    /// `usesource` 的意义正是**绕开它们**，拿「作者在 SMD 里摆的姿势」算误差。
-    ///
-    /// 真实项目里很常见：miku 的 `v_shotgun_spas.qc` 里 **26 处** `usesource`
-    /// （`ikrule "lhand" touch "body" usesource` 等）。
-    ///
-    /// # `usesequence` 为什么不一起做
-    ///
-    /// 它需要 `CalcSeqTransforms(sequence, frame, …)`（`simplify.cpp:4852`），
-    /// 那会遍历**整条序列**的 blend/分层结构；而 `usesource` 只需一帧。
-    /// L4D2 语料里 `usesequence` 出现 **0 次**，故只做 `usesource`。
-    ///
-    /// 两者在 QC 里互斥（`studiomdl.cpp:1338-1347` 各自把对方置 false）。
+    /// Sample the original source instead of the processed animation.
     #[serde(default)]
     pub use_source: bool,
+    /// Sample the owning sequence, including its layers and bone weights.
+    #[serde(default)]
+    pub use_sequence: bool,
 }
 
 /// 一条 flexdesc（`mstudioflexdesc_t`，**4 字节**）。
@@ -1137,9 +1104,6 @@ pub fn default_flexcontroller_max() -> f32 {
 }
 
 /// 一个 flexrule 的后缀 op（`mstudioflexop_t`，**8 字节**）。
-///
-/// 文件里存的就是**后缀（逆波兰）**序列（`studio.h:1222-1229` +
-/// `write.cpp:1525-1529`），TOML 直接给后缀，不实现 QC 中缀表达式解析器。
 ///
 /// # `d.index` 的语义由 `op` 决定
 ///
@@ -1445,6 +1409,13 @@ impl BoneController {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sequence {
+    /// Animation flags at the point this QC sequence was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_flags: Option<i32>,
+    #[serde(default)]
+    pub no_anim_block: bool,
+    #[serde(default)]
+    pub no_anim_block_stall: bool,
     #[serde(default)]
     pub loop_restart: i32,
     #[serde(default)]
@@ -1606,36 +1577,7 @@ pub struct Sequence {
     /// 空壳就是空壳，填充是**引擎运行时**用 `$includemodel` 的模型做的。
     #[serde(default)]
     pub forward_declared: bool,
-    /// QC 的 `noautoik`（`studiomdl.cpp:2265`，对应 `panim->noAutoIK`）。
-    ///
-    /// 置位时**不**自动补 `IK_RELEASE` 规则（`simplify.cpp:6251`）。
-    ///
-    /// # 为什么必须能表达
-    ///
-    /// 「有 `$ikchain` 的模型里，每个动画都自动多一条 `type = 4` 的规则」
-    /// 这个直觉是**错的**。语料实测（`probe_ikrule_auto.js`，78 个有
-    /// `$ikchain` 的模型 / 15942 个 animdesc）：
-    ///
-    /// ```text
-    /// numikrules == numikchains : 5831
-    /// numikrules <  numikchains : 10111
-    /// numikrules >  numikchains : 0
-    /// ```
-    ///
-    /// 少于链数的那 10111 个 animdesc 分三类
-    /// （`probe_ikrule_flags.js "\infected\anim_boomer.mdl"` 逐条对齐）：
-    ///
-    /// 1. `animdesc.flags & STUDIO_DELTA`（**0x04**）—— `@Melee_01_Delta` 等
-    ///    全部 0 条规则。mdlc 目前没有 delta 动画，所以这条在 TOML 里
-    ///    不可表达（也不需要）。
-    /// 2. **`noautoik`** —— 如 `@Melee_01`、`@Run_Shoot_KNIFE`
-    ///    （`flags = 0x40`，非 DELTA）都是 0 条。**就是本字段。**
-    /// 3. `$weightlist` 把某些骨骼的权重置 0 —— 如 `@Melee_01_Layer` 是
-    ///    **2/4** 条（4 条链只有 2 条被自动补）。mdlc 不实现 `$weightlist`，
-    ///    所以这一条也不可表达。
-    ///
-    /// 也就是说：**TOML 的默认值（false）等价于「无 `$weightlist`、
-    /// 非 delta」的官方行为**，`true` 覆盖第 2 类。
+    /// Suppress automatic IK release rules.
     #[serde(default)]
     pub no_auto_ik: bool,
     /// `$ikrule` 列表（QC 里 `$sequence` 块内的 `ikrule` 命令）。
@@ -2186,10 +2128,51 @@ pub struct BoneRotationLimit {
     pub sequences: Vec<String>,
 }
 
-/// `[model]` 段。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoneSaveFrame {
+    pub bone: String,
+    #[serde(default)]
+    pub position: bool,
+    #[serde(default)]
+    pub rotation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoneFlexDriver {
+    pub bone: String,
+    pub component: u8,
+    pub controller: String,
+    pub min: f32,
+    pub max: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelMeta {
+    #[serde(default)]
+    pub clamp_worldspace: Option<[[f32; 3]; 2]>,
+    #[serde(default)]
+    pub bbox_only_vertices: bool,
+    #[serde(default)]
+    pub bone_flex_drivers: Vec<BoneFlexDriver>,
+    #[serde(default)]
+    pub bone_save_frames: Vec<BoneSaveFrame>,
+    #[serde(default)]
+    pub center_bones_on_vertices: bool,
+    #[serde(default)]
+    pub collapse_bones: bool,
+    #[serde(default)]
+    pub collapse_bones_aggressive: bool,
+    #[serde(default)]
+    pub always_collapse: Vec<String>,
+    #[serde(default)]
+    pub screen_alignments: Vec<(String, i32)>,
+    #[serde(default)]
+    pub max_vertices: Option<[usize; 2]>,
+    #[serde(default)]
+    pub lock_bone_lengths: bool,
     #[serde(default)]
     pub rotation_limits: Vec<BoneRotationLimit>,
     #[serde(skip)]
@@ -2200,8 +2183,14 @@ pub struct ModelMeta {
     pub allowed_root_lods: u8,
     #[serde(default)]
     pub constant_directional_light_dot: Option<u8>,
+    #[serde(default)]
+    pub check_uv: Option<crate::uv_checks::UvChecks>,
     #[serde(skip)]
     pub source_dependencies: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub append_sources: Vec<crate::source_support::AppendSource>,
+    #[serde(default)]
+    pub virtual_vtas: Vec<crate::source_support::VirtualVta>,
     #[serde(default)]
     pub minimum_lod: u32,
     #[serde(default)]
@@ -2230,6 +2219,16 @@ pub struct ModelMeta {
     /// Material substitutions applied to output texture slots after geometry binding.
     #[serde(default)]
     pub material_renames: Vec<[String; 2]>,
+    #[serde(default)]
+    pub internal_name: Option<String>,
+    #[serde(default)]
+    pub source_search_paths: Vec<String>,
+    #[serde(default)]
+    pub hitgroups: Vec<(String, i32)>,
+    #[serde(default)]
+    pub preserve_triangle_order: bool,
+    #[serde(default)]
+    pub zbrush: bool,
     /// 输出路径，相对游戏目录，如 `models/props_c17/canister01a.mdl`。
     /// 反斜杠会被规范化为正斜杠。
     pub name: String,
@@ -2347,92 +2346,11 @@ pub struct ModelMeta {
     /// `static_prop`（多为 `*_chunk*.mdl` 碎片）。
     #[serde(default)]
     pub skip_bone_in_bbox: bool,
-    /// **VTX 顶点缓存优化**（`meshopt_optimizeVertexCache`）。默认 `false`。
-    ///
-    /// 打开后，写 `.dx90.vtx` 时对**每个 strip group**单独重排三角形顺序，
-    /// 以减少顶点着色器的调用次数（提高 GPU post-transform cache 命中率）。
-    ///
-    /// # 默认关闭的理由
-    ///
-    /// 本项目的验收基准是**真 `studiomdl.exe`**（`HANDBOOK.md` 教训 75），
-    /// 而开这个开关会**改变索引顺序**，使产物与真 studiomdl 不再逐字节一致。
-    /// 它是**纯性能优化** —— 三角形集合、绕序、顶点池、
-    /// `origMeshVertID`、几何 / UV / 法线 / 骨骼绑定全部不变。
-    ///
-    /// # 与官方其他实现的关系
-    ///
-    /// * 真 `studiomdl.exe` 的对应开关是 `-nvtristrip`（走 NvTriStrip）；
-    /// * 第三方 `nekomdl` **默认**走 meshoptimizer，`-nvtristrip` 才回退。
-    ///
-    /// 实测（`probe_vtx_three_way.js`）：真 studiomdl 与 nekomdl 的
-    /// `origMeshVertID` **都是非平凡排列**（21/21 个 strip group），
-    /// 说明**两者都会重排**。所以打开本项是**更接近官方行为**的，
-    /// 只是不会逐字节相同 —— meshopt 与 NvTriStrip 是两套不同算法。
-    ///
-    /// # 三个等价入口
-    ///
-    /// | 入口 | 形态 | 方向 |
-    /// |---|---|---|
-    /// | TOML | `[model] optimize_vtx = true` | 双向 |
-    /// | 命令行 | `--optimize-vtx`（见 `main.rs`） | **只能开** |
-    /// | QC | `$optimizevtx` | **只能开** |
-    ///
-    /// 后两者是 `||` 关系（`main.rs` 的
-    /// `desc.model.optimize_vtx || cli_optimize_vtx`），所以一旦在命令行
-    /// 或 QC 里打开就**没法关**（缺省本来就是关的，没有关的需求）。
-    ///
-    /// ⚠️ `$optimizevtx` 是 **mdlc 自己的扩展**，官方与 NekoMDL 都没有
-    /// 这个 QC 命令（官方是 `-nvtristrip` 命令行开关）——
-    /// 真 `studiomdl.exe` 对它报 `bad command`。
+    /// Reorder triangles within each VTX strip group to improve vertex-cache locality.
     #[serde(default)]
     pub optimize_vtx: bool,
-    /// **顶点超限时自动拆分**（默认 **`true`**）。
-    ///
-    /// # 为什么需要它
-    ///
-    /// VTX 的 `Vertex_t.origMeshVertID` 是 `uint16`，所以**一个 mesh 最多
-    /// 65536 个顶点**（见 [`crate::mdl_writer::MAXSTUDIOVERTS_PER_MESH`]）。
-    /// 一个 mesh 对应**一个材质**，所以某个材质如果本身就有几十万顶点
-    /// （真实案例：某改模工程的 `chain` 段有 305,703 顶点），
-    /// 官方 `studiomdl` 会直接拒绝（`ERROR: too many indices in source`）。
-    ///
-    /// 打开本项时，mdlc 会把这种 mesh **按三角形顺序切成多个 mesh**，
-    /// 每块不超过上限，全部放在**同一个 model** 里、**都指向同一个材质**。
-    ///
-    /// # 为什么拆成「同 model 内的多个 mesh」而不是新 bodypart
-    ///
-    /// 第三方 `nekomdl` 的 `$maxverts` 扩展是拆成**新 bodypart**
-    /// （命名 `clamped1`/`clamped2`…，见 `docs/_probe/nekomdl_maxverts_findings.js`）。
-    /// 本实现不那样做，因为：
-    ///
-    /// 1. **bodypart 数量会改变引擎的 bodygroup 语义** ——
-    ///    `$bodygroup` 的选择是按下标走的，凭空多出几个 bodypart 会让
-    ///    原本的 bodygroup 编号错位；
-    /// 2. NekoMDL 自己的产物里出现了**重名 bodypart**（实测两个 `clamped1`），
-    ///    说明那个命名方案本身不够严谨；
-    /// 3. `mesh.material` 只是 `pSkinref[]` 的**下标**，两个 mesh 用同一下标
-    ///    完全合法 —— 引擎渲染结果与拆分前**逐像素相同**。
-    ///
-    /// # 默认打开的理由
-    ///
-    /// 它只在**本来就会编译失败**的情况下生效（mesh 超限），
-    /// 对不超限的模型**完全不碰**（见 `split_oversized_meshes` 的提前返回），
-    /// 所以对既有产物零影响。开着它，用户不必先撞一次墙再去查文档。
-    ///
-    /// 关掉它（`split_oversized_meshes = false`）则遇到超限 mesh 时**直接报错**，
-    /// 报错信息会给出两条可行路径。
-    ///
-    /// # 三个等价入口
-    ///
-    /// | 入口 | 形态 | 方向 |
-    /// |---|---|---|
-    /// | TOML | `[model] split_oversized_meshes = false` | 双向 |
-    /// | QC | `$nosplitoversizedmeshes` | **只能关** |
-    /// | QC | `$splitoversizedmeshes` | **只能开**（把 `$include` 关掉的再开回来） |
-    ///
-    /// 两个 QC 命令都是 **mdlc 自己的扩展** —— 官方与 NekoMDL 都没有
-    /// （NekoMDL 的 `$maxverts` 做的是另一件事：拆成**新 bodypart**）。
-    /// 真 `studiomdl.exe` 对它们报 `bad command`。
+    /// Split oversized meshes while preserving material slots, LODs and flex indices.
+    /// VTX vertex indices are 16-bit; `$maxverts` can impose a smaller limit.
     #[serde(default = "default_true")]
     pub split_oversized_meshes: bool,
     /// `$keyvalues` 块的内容（**不含外层 `mdlkeyvalue` 包装**）。
@@ -2670,6 +2588,21 @@ pub struct Physics {
     pub concave_per_joint: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_convex_pieces: Option<usize>,
+    /// Maximum vertex welding distance in Source inches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weld_position: Option<f32>,
+    /// Minimum normal dot product for vertex welding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weld_normal: Option<f32>,
+    #[serde(default)]
+    pub remove_2d: bool,
+    #[serde(default)]
+    pub assume_world_space: bool,
+    /// `$phyname` output filename, relative to `models/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surface_properties: Vec<SurfacePhysics>,
     /// `$collisionjoints`：把碰撞模型拆成**每根骨骼一个 solid** 的 ragdoll。
     ///
     /// # 与 `$collisionmodel` 的区别
@@ -2880,34 +2813,23 @@ pub struct Physics {
     /// Uniform scale captured when the collision source is declared.
     #[serde(default)]
     pub input_scale: Option<f32>,
-    /// `$masscenter <x> <y> <z>`：**强制**质心位置。
-    ///
-    /// 官方走 `CollideSetMassCenter`（`collisionmodel.cpp:361-363`），
-    /// 改的是二进制 `IVP_Compact_Surface` 的 `mass_center` 与
-    /// `upper_limit_radius`（后者 = 以新质心为中心的最大半径）。
-    ///
-    /// ⚠️ 受控实验里写它会触发 studiomdl 的
-    /// `EXCEPTION_ACCESS_VIOLATION`（`masscenter` 用例），
-    /// 说明该路径在本构建里不稳定；本项**保留表达能力**但默认不写。
-    ///
-    /// 语料：**0 次**。
+    /// Forced center of mass in Source inches, applied to each collision solid.
     #[serde(default)]
     pub mass_center: Option<[f32; 3]>,
-    /// `$automass`：总质量按**体积 × 材质密度**自动算。
-    ///
-    /// 官方 `SetAutoMass` 把 `m_totalMass` 置 `-1` 当哨兵，`ComputeMass`
-    /// 首句 `if (m_totalMass >= 0) return;` 于是才会真的算
-    /// （`collisionmodel.cpp:567-570 / 590-622`）。
-    ///
-    /// 实测（受控实验 `automass`，3 个 10³ 盒子 + `metal`）：
-    /// `totalmass = 5.309408`（而显式 `$mass 100` 时是 `100.000000`）。
-    ///
-    /// ⚠️ 需要**材质密度表**（`scripts/surfaceproperties_manifest.txt`）。
-    /// mdlc 没有该表，所以本项为 true 时**显式报错**而不是静默写错值。
-    ///
-    /// 语料：**0 次**。
+    /// Compute mass from collision volume or shell thickness and surface density.
     #[serde(default)]
     pub auto_mass: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfacePhysics {
+    pub name: String,
+    /// Kilograms per cubic metre.
+    pub density: f32,
+    /// Source inches; nonpositive values use solid volume.
+    #[serde(default)]
+    pub thickness: f32,
 }
 
 /// TOML 里的一条 `$jointconstrain`。
@@ -3372,6 +3294,8 @@ pub struct BodyPart {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BodyModel {
+    #[serde(default)]
+    pub sphere_normals: Vec<crate::source_support::SphereNormals>,
     /// Uniform source scale captured from `$scale` or the studio `scale` option.
     #[serde(default)]
     pub input_scale: Option<f32>,
@@ -3980,6 +3904,7 @@ pub struct Vertex {
 /// 一个 model 的**编译结果**（网格已从 SMD 读出）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledModel {
+    pub dmx: Option<crate::dmx::Metadata>,
     /// 源 SMD 路径（用于报错定位）。
     pub smd_path: std::path::PathBuf,
     /// 写进 `mstudiomodel_t.name` 的名字。
@@ -4399,6 +4324,10 @@ pub struct CompiledAutoLayer {
 #[serde(deny_unknown_fields)]
 pub struct Animation {
     #[serde(default)]
+    pub no_anim_block: bool,
+    #[serde(default)]
+    pub no_anim_block_stall: bool,
+    #[serde(default)]
     pub forward_declared: bool,
     #[serde(default)]
     pub loop_restart: i32,
@@ -4501,6 +4430,9 @@ pub struct CompiledLocalHierarchy {
 /// 一个**已编译的动画**（animdesc 的载荷）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledAnimation {
+    pub no_anim_block: bool,
+    pub no_anim_block_stall: bool,
+    pub source_frames: Option<Vec<Vec<crate::smd::SmdPose>>>,
     pub local_hierarchy: Vec<CompiledLocalHierarchy>,
     pub weights: Vec<f32>,
     pub loop_restart: i32,
@@ -4825,6 +4757,8 @@ pub struct ResolvedFlexRule {
 /// 单声道（`stereo == false`）时 `fc1` 为 `None`（`szindex1` 写 0）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedFlexControllerUi {
+    pub remap_type: u8,
+    pub fc2: Option<i32>,
     /// UI 名（写进字符串池，`sznameindex` 相对自身）。
     pub name: String,
     /// `szindex0` 指向的 fc 下标（stereo 对里是**下标更大**那条）。
@@ -5459,7 +5393,7 @@ smd = "myprop-ref.smd"
 #   "attachment" <- ikrule <链> attachment <名字>  + 可选的 target <槽位>
 #   "release"    <- ikrule <链> release
 #   "unlatch"    <- ikrule <链> unlatch
-#   "footstep"   <- ikrule <链> footstep          **尚未实现**（语料 0 次）
+#   "footstep"   <- ikrule <链> footstep
 #
 # 省略 range 时 tail/end 自动展开成「末帧」（numframes − 1）。
 # range 的四个数是**帧号**；写成 `range = [1, 1, 2, 3]`。
@@ -5802,6 +5736,24 @@ impl ModelDesc {
     pub fn validate(&self) -> Result<(), Vec<DescError>> {
         let mut errs = Vec::new();
 
+        for (index, (name, _)) in self.model.hitgroups.iter().enumerate() {
+            let exists = if self.model.static_prop {
+                name.eq_ignore_ascii_case(STATIC_PROP_BONE)
+            } else {
+                self.bones
+                    .iter()
+                    .any(|bone| bone.name.eq_ignore_ascii_case(name))
+            };
+            if !exists {
+                errs.push(DescError {
+                    path: format!("model.hitgroups[{index}]"),
+                    kind: DescErrorKind::Other {
+                        message: format!("Cannot find bone {name:?} for hitgroup"),
+                    },
+                });
+            }
+        }
+
         for (index, limit) in self.model.rotation_limits.iter().enumerate() {
             if self.model.static_prop
                 || !self
@@ -5827,38 +5779,6 @@ impl ModelDesc {
                         .into(),
                 },
             });
-        }
-        if !self.model.forced_realign.is_empty() {
-            let unsupported_command = |command: &AnimCmd| {
-                !matches!(
-                    command,
-                    AnimCmd::Weights { .. }
-                        | AnimCmd::IkRule { .. }
-                        | AnimCmd::IkFixup { .. }
-                        | AnimCmd::NoAnimation
-                        | AnimCmd::Compress { .. }
-                        | AnimCmd::NumFrames { .. }
-                )
-            };
-            if self.animations.iter().any(|animation| {
-                animation.subtract.is_some()
-                    || animation.extra_flags & 0x0004 != 0
-                    || animation.motion_type != 0
-                    || animation.cmds.iter().any(unsupported_command)
-            }) || self.sequences.iter().any(|sequence| {
-                sequence.delta
-                    || sequence.extra_flags.unwrap_or(0) & 0x0004 != 0
-                    || sequence.subtract.is_some()
-                    || sequence.motion_type != 0
-                    || sequence.cmds.iter().any(unsupported_command)
-            }) {
-                errs.push(DescError {
-                    path: "model.forced_realign".into(),
-                    kind: DescErrorKind::Other {
-                        message: "$forcerealign with delta, root motion, or coordinate-changing animation commands is not supported".into(),
-                    },
-                });
-            }
         }
         for (index, forced) in self.model.forced_realign.iter().enumerate() {
             if !self
@@ -5917,6 +5837,46 @@ impl ModelDesc {
             }
         }
 
+        if self.model.clamp_worldspace.is_some_and(|[min, max]| {
+            !(0..3).all(|axis| {
+                min[axis].is_finite() && max[axis].is_finite() && min[axis] <= max[axis]
+            })
+        }) {
+            errs.push(DescError {
+                path: "model.clamp_worldspace".into(),
+                kind: DescErrorKind::Other {
+                    message: "must contain finite, ordered bounds".into(),
+                },
+            });
+        }
+        for (index, driver) in self.model.bone_flex_drivers.iter().enumerate() {
+            if driver.component > 2
+                || !driver.min.is_finite()
+                || !driver.max.is_finite()
+                || driver.min == driver.max
+            {
+                errs.push(DescError {
+                    path: format!("model.bone_flex_drivers[{index}]"),
+                    kind: DescErrorKind::Other {
+                        message: "requires a translation component and finite, distinct endpoints"
+                            .into(),
+                    },
+                });
+            }
+        }
+        if self
+            .model
+            .internal_name
+            .as_ref()
+            .is_some_and(|name| name.len() >= 64 || name.contains('\0'))
+        {
+            errs.push(DescError {
+                path: "model.internal_name".into(),
+                kind: DescErrorKind::Other {
+                    message: "must fit 63 UTF-8 bytes without NUL characters".into(),
+                },
+            });
+        }
         if self.model.name.trim().is_empty() {
             errs.push(DescError {
                 path: "model.name".into(),
@@ -6247,7 +6207,17 @@ impl ModelDesc {
                     },
                 });
             }
-            if !at.synthetic && !seen.contains_key(at.bone.as_str()) {
+            if let Some((bone, matrix)) = &at.resolved
+                && (*bone >= self.bones.len() || matrix.iter().any(|v| !v.is_finite()))
+            {
+                errs.push(DescError {
+                    path: format!("{path}.resolved"),
+                    kind: DescErrorKind::Other {
+                        message: "attachment resolves to an invalid bone or transform".into(),
+                    },
+                });
+            }
+            if !at.synthetic && at.resolved.is_none() && !seen.contains_key(at.bone.as_str()) {
                 errs.push(DescError {
                     path: format!("{path}.bone"),
                     kind: DescErrorKind::BoneNotFound {

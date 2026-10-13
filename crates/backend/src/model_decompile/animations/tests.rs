@@ -5,6 +5,18 @@ use mdlc::{pipeline, qc};
 use super::*;
 
 pub(super) fn fixture(external: bool, sectioned: bool, delta: bool) -> tempfile::TempDir {
+    fixture_with_delta_options(
+        external,
+        sectioned,
+        if delta { "subtract base 0" } else { "" },
+    )
+}
+
+fn fixture_with_delta_options(
+    external: bool,
+    sectioned: bool,
+    delta_options: &str,
+) -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("rig.smd"),
@@ -33,7 +45,6 @@ pub(super) fn fixture(external: bool, sectioned: bool, delta: bool) -> tempfile:
     }
     frames.push_str("end\n");
     fs::write(project.path().join("walk.smd"), frames).unwrap();
-    let delta_options = if delta { "subtract base 0" } else { "" };
     let sections = if sectioned { "sectionframes 3 3" } else { "" };
     let blocks = if external { "$animblocksize 1\n" } else { "" };
     let source = format!(
@@ -83,16 +94,23 @@ fn assert_pose(left: &SmdPose, right: &SmdPose, context: &str) {
 
 #[test]
 fn animation_roundtrip_preserves_frames_fps_events_activity_weights_and_flags() {
-    for (external, sectioned, delta) in [
-        (false, false, false),
-        (false, true, false),
-        (true, false, false),
-        (true, true, false),
-        (false, false, true),
-        (true, false, true),
-        (true, true, true),
+    for (external, sectioned, delta, pre) in [
+        (false, false, false, false),
+        (false, true, false, false),
+        (true, false, false, false),
+        (true, true, false, false),
+        (false, false, true, false),
+        (true, false, true, false),
+        (true, true, true, false),
+        (false, false, true, true),
+        (true, true, true, true),
     ] {
-        let project = fixture(external, sectioned, delta);
+        let delta_options = match (delta, pre) {
+            (false, _) => "",
+            (true, false) => "subtract base 0",
+            (true, true) => "presubtract base 0",
+        };
+        let project = fixture_with_delta_options(external, sectioned, delta_options);
         let source = project.path().join("models/tests/animated.mdl");
         let original = fs::read(&source).unwrap();
         let ani = fs::read(source.with_extension("ani")).ok();
@@ -125,7 +143,7 @@ fn animation_roundtrip_preserves_frames_fps_events_activity_weights_and_flags() 
                     left,
                     right,
                     &format!(
-                        "external={external} sectioned={sectioned} delta={delta} frame={frame}"
+                        "external={external} sectioned={sectioned} delta={delta} pre={pre} frame={frame}"
                     ),
                 );
             }
@@ -254,7 +272,7 @@ fn gmod_sequence_flags_layers_iklocks_and_keyvalues_survive_recompilation() {
     let project = fixture(false, false, false);
     let path = project.path().join("source.qc");
     let mut source = fs::read_to_string(&path).unwrap();
-    source.push_str("$ikchain limb tip knee 0 1 0\n$poseparameter action 0 1\n$sequence gesture base noautoik\n$sequence layered { walk realtime worldspace hidden predelta cyclepose action blendlayer gesture 0 2 6 8 spline xfade local iklock limb 0.25 0.75 keyvalues { sounds { start ping stop pong } } }\n");
+    source.push_str("$ikchain limb tip knee 0 1 0\n$poseparameter action 0 1\n$sequence gesture base noautoik\n$sequence layered { walk realtime worldspace hidden predelta cyclepose action blendlayer gesture 0 2 6 8 spline xfade local iklock limb 0.25 0.75 keyvalues { sounds { start ping stop pong } } }\n$animation subtracted walk.smd subtract base 0 noautoik\n$sequence predelta_only { subtracted predelta }\n");
     fs::write(&path, source).unwrap();
     let mut desc = qc::parse_qc_file(&path).unwrap();
     desc.model.version = Some(48);
@@ -268,10 +286,12 @@ fn gmod_sequence_flags_layers_iklocks_and_keyvalues_survive_recompilation() {
         flags & (0x100 | 0x200 | 0x400 | 0x4000),
         0x100 | 0x200 | 0x400 | 0x4000
     );
+    assert_eq!(flags & 0x14, 0x14, "worldspace explicitly sets STUDIO_POST");
+    let predelta = reader.table(188, 192, 212).unwrap()[3];
     assert_eq!(
-        flags & 0x14,
-        0x04,
-        "predelta must preserve pre-multiplication without STUDIO_POST"
+        reader.i32(predelta + 12).unwrap() & 0x14,
+        4,
+        "predelta must not inherit subtraction-generated STUDIO_POST"
     );
     let destination = project.path().join("layered_export");
     let report = super::super::decompile_model(
@@ -694,7 +714,7 @@ fn direct_animation_options_execute_in_written_order() {
     let project = fixture(false, false, false);
     let path = project.path().join("source.qc");
     let build = |options: &str| {
-        fs::write(&path, format!("$modelname tests/ordered.mdl\n$body body rig.smd\n$weightlist zero {{ root 0 }}\n$animation base rig.smd noautoik\n$animation walk walk.smd noautoik {options}\n$sequence walking walk\n")).unwrap();
+        fs::write(&path, format!("$modelname tests/ordered.mdl\n$body body rig.smd\n$weightlist zero {{ root 0 }}\n$weightlist live {{ root 1 }}\n$animation base rig.smd noautoik\n$animation walk walk.smd noautoik {options}\n$sequence walking walk\n")).unwrap();
         let mut desc = qc::parse_qc_file(&path).unwrap();
         desc.model.version = Some(48);
         mdlc::compile::compile(&desc, project.path()).unwrap()
@@ -703,11 +723,63 @@ fn direct_animation_options_execute_in_written_order() {
     let after = build("compress 2 numframes 5");
     assert_eq!(before.animations[1].frames.len(), 3);
     assert_eq!(after.animations[1].frames.len(), 5);
-    let before = build("weightlist zero subtract base 0").animations[1].clone();
-    let after = build("subtract base 0 weightlist zero").animations[1].clone();
-    assert!((before.frames[8][0].position[0] + 3.8).abs() < 0.025);
-    assert!((after.frames[8][0].position[0] - 3.2).abs() < 0.025);
-    assert!((after.frames[8][0].position[1] - 2.4).abs() < 0.025);
+    for (options, canonical, engine) in [
+        (
+            "weightlist zero subtract base 0",
+            [5.4, 3.8, 3.6],
+            [-3.8, 5.4, 3.6],
+        ),
+        (
+            "subtract base 0 weightlist zero",
+            [2.4, -3.2, 1.6],
+            [3.2, 2.4, 1.6],
+        ),
+    ] {
+        let compiled = build(options);
+        for (actual, expected) in compiled.animations[1].frames[8][0]
+            .position
+            .into_iter()
+            .zip(canonical)
+        {
+            assert!((actual - expected).abs() < 0.025);
+        }
+        let omitted =
+            pipeline::build_compiled(compiled, project.path(), Default::default()).unwrap();
+        let reader = Reader(&omitted.mdl);
+        let animation = reader.table(180, 184, 100).unwrap()[1];
+        let start = reader.relative(animation, animation + 56).unwrap();
+        assert_eq!(reader.bytes(start, 4).unwrap(), &[255, 0, 0, 0]);
+        let sequence = reader.table(188, 192, 212).unwrap()[0];
+        let weights = reader.relative(sequence, sequence + 156).unwrap();
+        assert_eq!(reader.f32(weights).unwrap(), 0.);
+        assert_eq!(
+            first_animation(&omitted.mdl, None).frames[8][0].position,
+            [0.; 3]
+        );
+        let compiled = build(&format!("{options} weightlist live"));
+        let output =
+            pipeline::build_compiled(compiled, project.path(), Default::default()).unwrap();
+        let reader = Reader(&output.mdl);
+        let animation = reader.table(180, 184, 100).unwrap()[1];
+        let start = reader.relative(animation, animation + 56).unwrap();
+        assert_eq!(reader.u8(start).unwrap(), 0);
+        let flags = reader.u8(start + 1).unwrap();
+        assert_ne!(flags & 0x10, 0);
+        assert_ne!(flags & 4, 0);
+        let position = start + 4 + if flags & 8 != 0 { 6 } else { 0 };
+        let quantized = decode::rle(&reader, position, 8).unwrap();
+        let model = parsed(&output.mdl);
+        for axis in 0..3 {
+            assert!(
+                (quantized[axis] * model.bones[0].position_scale[axis] - engine[axis]).abs()
+                    < 0.025
+            );
+        }
+        let decoded = first_animation(&output.mdl, None);
+        for (actual, expected) in decoded.frames[8][0].position.into_iter().zip(canonical) {
+            assert!((actual - expected).abs() < 0.025);
+        }
+    }
     let self_reference = build("rotateto 0 subtract walk 0").animations[1].clone();
     assert!(
         self_reference.frames[0][0]

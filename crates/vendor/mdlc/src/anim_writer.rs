@@ -1,5 +1,8 @@
 //! 动画写出：`mstudioanimdesc_t` / `mstudioseqdesc_t` / 每骨骼动画链。
 
+#[path = "sequence_pose.rs"]
+mod sequence_pose;
+
 use std::collections::HashMap;
 
 use crate::ani_writer::{align16, write_ani_container};
@@ -976,6 +979,8 @@ pub struct SequenceStat {
 /// 写出结果：动画相关各段的字节与布局信息。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnimWriteOutcome {
+    pub zero_frame_offsets: Vec<Option<usize>>,
+    pub section_block_indices: Vec<Option<Vec<i32>>>,
     pub hierarchy_offsets: Vec<Option<usize>>,
     pub anim_block_hierarchy_offsets: Vec<Option<usize>>,
     /// `mstudioanimdesc_t` 数组（`numlocalanim` 项）。
@@ -1012,13 +1017,7 @@ pub struct AnimWriteOutcome {
     pub section_frames: Vec<i32>,
     /// 每个 animdesc 的段表条目数（`floor(nf/sf) + 2`）。
     pub num_sections: Vec<usize>,
-    /// **外置动画块（`.ani`）**：每条的载荷字节，按块序排列（**不含** `block[0]` 哨兵）。
-    ///
-    /// 只有 `numframes >= 2` 的动画才会进块 —— 实测 `ab_z1`（单帧）与
-    /// `zb90z`（单帧）都是 `animblock = 0`、留在内联，而 `numframes >= 2`
-    /// 的 8 个用例全部 `animblock = 1`。
-    ///
-    /// 块内每段载荷前面要补 `ALIGN16`，拼接规则见 [`pack_anim_blocks`]。
+    /// External ANI payloads, excluding the sentinel block; packed with 16-byte alignment.
     pub anim_blocks: Vec<Vec<u8>>,
     /// 每个 animdesc 的 `animblock`（`+0x34`）：`0` = 内联，`>= 1` = 块下标。
     ///
@@ -1898,44 +1897,13 @@ impl AnimSpec {
             .unwrap_or_else(|| compiled.animations[self.anim_index].frames.as_slice())
     }
 
-    /// `usesource` 要用的帧：**减除之前**的原始 SMD 姿态。
-    ///
-    /// # 官方语义（`simplify.cpp:6007-6012` 等四处）
-    ///
-    /// `usesource` 走 `BuildRawTransforms(panim->source, …)`，读的是
-    /// `psource->rawanim[frame]` —— SMD 里**原样**的姿态，
-    /// **跳过 `subtract` 减除**。
-    ///
-    /// # ⚠️ 它在「权重恒为 1」时是 no-op（已实测定案）
-    ///
-    /// 对 DELTA 动画，`CalcBoneTransforms`（默认路径）会**重建**：
-    ///
-    /// ```c
-    /// q3 = q1 + s * q2;   // q1 = base 动画第 0 帧，q2 = 本帧的增量
-    /// p3 = base.pos[0] + s * panimation->sanim[frame][k].pos;
-    /// ```
-    ///
-    /// `s = panimation->weight[k]` 来自 `$weightlist`（缺省全 1）。
-    /// `s == 1` 时 `base + 1·delta == raw`，**与 `usesource` 完全相同**。
-    ///
-    /// 受控实验（`docs/_probe/ab_iksrc2.js`）：
-    ///
-    /// | 条件 | 官方产物差异 |
-    /// |---|---|
-    /// | 无 `$weightlist`（s=1） | **0 处** |
-    /// | 有 `$weightlist`（s=0.5） | **15 处**（全在压缩误差载荷的 RLE 通道里） |
-    ///
-    /// mdlc 不实现 `$weightlist`（权重恒 1），所以本函数目前**总是**返回
-    /// 与 [`Self::cell_frames`] 等价的内容 —— 即 `use_source` 在本实现里
-    /// 是**语义正确但当前无可观测效果**的字段。留着它是为了：
-    ///
-    /// 1. 让 TOML 能**表达** `usesource`（原先写了会硬报错）；
-    /// 2. `$weightlist` 一旦实现，这里自动生效。
     fn source_frames<'a>(&self, compiled: &'a CompiledModelDesc) -> &'a [Vec<crate::smd::SmdPose>] {
-        let a = &compiled.animations[self.anim_index];
-        // 没有 `subtract` 时 `pre_subtract_frames` 是 `None`，
-        // 此时 `frames` 本身就是源姿态。
-        a.pre_subtract_frames.as_deref().unwrap_or(&a.frames)
+        let animation = &compiled.animations[self.anim_index];
+        animation
+            .source_frames
+            .as_deref()
+            .or(animation.pre_subtract_frames.as_deref())
+            .unwrap_or(&animation.frames)
     }
 
     /// 该动画写进 animdesc 的**名字**（取自动画池）。
@@ -2072,9 +2040,126 @@ struct PendingIkRule {
     /// 实测：miku 的真实 QC 有 28 处 `usesource`，其中 **24 处在 `release`
     /// 上（无效果）**、**4 处在 `touch` 上（有效果）**。
     use_source: bool,
+    use_sequence: bool,
     /// 误差样本。`None` = 自动补的规则（官方 `numerror == 0`，
     /// `CompressIKErrors` 直接 `continue`，`compressedikerrorindex` 留 0）。
     errors: Option<Vec<([f32; 3], [f32; 4])>>,
+}
+
+fn resolve_ik_ranges(rules: &mut [PendingIkRule], frames: i32) -> Result<(), String> {
+    if frames <= 0 {
+        return Err("IK animation contains no frames".into());
+    }
+    let last = i64::from(frames - 1);
+    for index in 0..rules.len() {
+        let current = &mut rules[index];
+        if [current.start, current.peak, current.tail, current.end] == [0; 4] {
+            current.tail = frames - 1;
+            current.end = frames - 1;
+        }
+        let midpoint = |a: i32, b: i32| ((i64::from(a) + i64::from(b)) / 2) as i32;
+        if current.start != -1 && current.peak == -1 && current.tail == -1 && current.end != -1 {
+            current.peak = midpoint(current.start, current.end);
+            current.tail = current.peak;
+        }
+        if current.start != -1 && current.peak == -1 && current.tail != -1 {
+            current.peak = midpoint(current.start, current.tail);
+        }
+        if current.peak != -1 && current.tail == -1 && current.end != -1 {
+            current.tail = midpoint(current.peak, current.end);
+        }
+        if current.peak == -1 {
+            current.start = 0;
+            current.peak = 0;
+        }
+        if current.tail == -1 {
+            current.tail = frames - 1;
+            current.end = frames - 1;
+        }
+        if current.contact == -1 {
+            current.contact = current.peak;
+        }
+        // Neighbor interpolation changes both rules, in declaration order.
+        if rules[index].start == -1 {
+            let previous = (1..rules.len())
+                .map(|offset| (index + rules.len() - offset) % rules.len())
+                .find(|&other| rules[other].chain == rules[index].chain)
+                .unwrap_or(index);
+            let peak = i64::from(rules[index].peak);
+            let tail = i64::from(rules[previous].tail);
+            if rules[index].slot == rules[previous].slot {
+                if last == 0 {
+                    rules[index].start = 0;
+                    rules[previous].end = 0;
+                } else {
+                    let start = peak + (tail - peak + if peak < tail { 0 } else { last }) / 2;
+                    let start = (start + i64::from(frames / 2)) % last;
+                    rules[index].start = start as i32;
+                    rules[previous].end = start as i32;
+                }
+            } else {
+                rules[index].start = rules[previous].tail;
+                rules[previous].end = rules[index].peak;
+            }
+        }
+        if rules[index].end == -1 {
+            let next = (1..rules.len())
+                .map(|offset| (index + offset) % rules.len())
+                .find(|&other| rules[other].chain == rules[index].chain)
+                .unwrap_or(index);
+            let peak = i64::from(rules[next].peak);
+            let tail = i64::from(rules[index].tail);
+            if rules[index].slot == rules[next].slot {
+                if last == 0 {
+                    rules[next].start = 0;
+                    rules[index].end = 0;
+                } else {
+                    let start = peak + (tail - peak + if peak < tail { 0 } else { last }) / 2;
+                    let start = (start + i64::from(frames / 2)) % last;
+                    rules[next].start = start as i32;
+                    rules[index].end = start as i32;
+                }
+            } else {
+                rules[next].start = rules[index].tail;
+                rules[index].end = rules[next].peak;
+            }
+        }
+        let current = &mut rules[index];
+        if current.peak < current.start {
+            current.peak = current
+                .peak
+                .checked_add(frames - 1)
+                .ok_or("IK range overflows")?;
+        }
+        if current.tail < current.peak {
+            current.tail = current
+                .tail
+                .checked_add(frames - 1)
+                .ok_or("IK range overflows")?;
+        }
+        if current.end < current.tail {
+            current.end = current
+                .end
+                .checked_add(frames - 1)
+                .ok_or("IK range overflows")?;
+        }
+        if current.contact < current.start {
+            current.contact = current
+                .contact
+                .checked_add(frames - 1)
+                .ok_or("IK range overflows")?;
+        }
+    }
+    if rules.iter().any(|rule| {
+        rule.start < 0
+            || rule.peak < rule.start
+            || rule.tail < rule.peak
+            || rule.end < rule.tail
+            || rule.contact < 0
+    }) {
+        return Err("IK range does not resolve to an ordered frame interval".into());
+    }
+    Ok(())
 }
 
 /// 构造一条动画的全部 IK 规则（显式 + 自动补的 `IK_RELEASE`）。
@@ -2139,7 +2224,7 @@ fn build_ik_rules(
     for r in &anim.ik_rules {
         let chain = chains
             .iter()
-            .position(|c| c.name == r.chain)
+            .position(|c| c.name.eq_ignore_ascii_case(&r.chain))
             .ok_or_else(|| AnimWriteError::IkRule {
                 sequence: seq.name.clone(),
                 message: crate::tr_fmt!(
@@ -2174,27 +2259,14 @@ fn build_ik_rules(
             contact: -1,
             attachment: r.attachment.clone().unwrap_or_default(),
             use_source: r.use_source,
+            use_sequence: r.use_sequence,
             errors: None,
         };
         if let Some(rg) = r.range {
-            // QC 里写 `.` 的元素 = −1。写成 `None` 才表达得出来。
-            let get = |v: Option<i32>| v.unwrap_or(0);
-            p.start = get(rg[0]);
-            p.peak = get(rg[1]);
-            p.tail = get(rg[2]);
-            p.end = get(rg[3]);
-            if rg[0].is_none() || rg[3].is_none() {
-                // `FindPrevIKRule` / `FindNextIKRule` 的插值（5887-5936）
-                // 会**反向修改邻居规则**，本实现未复刻。宁可报错也不要
-                // 静默写出一条与官方不同的曲线。
-                return Err(AnimWriteError::IkRule {
-                    sequence: seq.name.clone(),
-                    message: crate::tr_fmt!(
-                        "the 1st/4th entry of `range` is `.`, which needs the official FindPrev/NextIKRule interpolation; not implemented yet (chain %{chain})",
-                        chain = format!("{:?}", r.chain)
-                    ),
-                });
-            }
+            p.start = rg[0].unwrap_or(-1);
+            p.peak = rg[1].unwrap_or(-1);
+            p.tail = rg[2].unwrap_or(-1);
+            p.end = rg[3].unwrap_or(-1);
         }
         if let Some(c) = r.contact {
             p.contact = c;
@@ -2204,13 +2276,23 @@ fn build_ik_rules(
                 p.bone = match r.bone.as_deref() {
                     // `strlen(bonename) == 0 → bone = -1`（`simplify.cpp:5987`）。
                     None | Some("") => -1,
-                    Some(name) => *bone_index.get(name).ok_or_else(|| AnimWriteError::IkRule {
-                        sequence: seq.name.clone(),
-                        message: crate::tr_fmt!(
-                            "`touch` references a bone that does not exist: %{bone}",
-                            bone = format!("{name:?}")
-                        ),
-                    })? as i32,
+                    Some(name) => bone_index
+                        .get(name)
+                        .copied()
+                        .or_else(|| {
+                            compiled
+                                .desc
+                                .bones
+                                .iter()
+                                .position(|bone| bone.name.eq_ignore_ascii_case(name))
+                        })
+                        .ok_or_else(|| AnimWriteError::IkRule {
+                            sequence: seq.name.clone(),
+                            message: crate::tr_fmt!(
+                                "`touch` references a bone that does not exist: %{bone}",
+                                bone = format!("{name:?}")
+                            ),
+                        })? as i32,
                 };
             }
             crate::model::IkRuleType::Attachment => {
@@ -2254,49 +2336,14 @@ fn build_ik_rules(
         rules.push(p);
     }
 
-    // ---- 2. `ProcessIKRules` 的展开（`simplify.cpp:5847-5954`）----
-    let nf = num_frames as i32;
-    for p in &mut rules {
-        if p.start == 0 && p.peak == 0 && p.tail == 0 && p.end == 0 {
-            p.tail = nf - 1;
-            p.end = nf - 1;
-        }
-        if p.start != -1 && p.peak == -1 && p.tail == -1 && p.end != -1 {
-            p.peak = (p.start + p.end) / 2;
-            p.tail = (p.start + p.end) / 2;
-        }
-        if p.start != -1 && p.peak == -1 && p.tail != -1 {
-            p.peak = (p.start + p.tail) / 2;
-        }
-        if p.peak != -1 && p.tail == -1 && p.end != -1 {
-            p.tail = (p.peak + p.end) / 2;
-        }
-        if p.peak == -1 {
-            p.start = 0;
-            p.peak = 0;
-        }
-        if p.tail == -1 {
-            p.tail = nf - 1;
-            p.end = nf - 1;
-        }
-        if p.contact == -1 {
-            p.contact = p.peak;
-        }
-        // 回绕修正（C 的整数除法向零截断，Rust 的 `/` 对 i32 同样是向零
-        // 截断，所以上面那几处 `(a + b) / 2` 逐位一致）。
-        if p.peak < p.start {
-            p.peak += nf - 1;
-        }
-        if p.tail < p.peak {
-            p.tail += nf - 1;
-        }
-        if p.end < p.tail {
-            p.end += nf - 1;
-        }
-        if p.contact < p.start {
-            p.contact += nf - 1;
-        }
-    }
+    let nf = i32::try_from(num_frames).map_err(|_| AnimWriteError::IkRule {
+        sequence: seq.name.clone(),
+        message: "IK animation has too many frames".into(),
+    })?;
+    resolve_ik_ranges(&mut rules, nf).map_err(|message| AnimWriteError::IkRule {
+        sequence: seq.name.clone(),
+        message,
+    })?;
 
     // ---- 3. 误差样本（只对显式规则）----
     //
@@ -2304,7 +2351,6 @@ fn build_ik_rules(
     // （`simplify.cpp:6076-6077` 在算误差之前就改了规则本身）。
     let parents = bone_parents;
     for p in &mut rules {
-        let link2 = link2.clone();
         compute_ik_errors(compiled, spec, parents, p, &link2)?;
     }
 
@@ -2331,34 +2377,7 @@ fn build_ik_rules(
             if *c != 0 {
                 continue;
             }
-            // ⚠️ **还要看该链末端骨骼在本动画里的权重 > 0**
-            // （`simplify.cpp:6269`）：
-            //
-            // ```c
-            // if (count[j] == 0 && panim->weight[g_ikchain[j].link[2].bone] > 0.0)
-            // ```
-            //
-            // `link[2]` 是链的**末端骨骼**（`simplify.cpp:6084` 的
-            // `g_ikchain[j].link[2].bone`）。权重来自 `$weightlist`。
-            //
-            // # 为什么这条判据是必需的（实测）
-            //
-            // `vm_test_group` 的 `v_smg_mp5` 等模型里，
-            // `weights_helping_hand_extend` 把**全部 64 根骨骼的权重都设成 0**。
-            // 于是 `helping_hand_*` / `item_*` 这 6 条序列在官方产物里
-            // `numikrules == 0`（**一条自动规则都不补**），而 mdlc 补了 2 条
-            // （`lhand` + `rhand`）。
-            //
-            // 实测对照（`docs/_probe/probe_mdl_diff_detail.js v_smg_mp5`）：
-            // `@helping_hand_extend` 官方 0 / mdlc 2、`@item_retract` 官方 0 / mdlc 2
-            // —— **6 个动画 / 6 个模型**受影响。
-            //
-            // ⚠️ 早先这里的注释写的是「mdlc 不实现 `$weightlist`，所以权重恒为 1」
-            // —— **那句话早已过期**：`resolve_weight_lists` 从 §53 起就实现了，
-            // `Sequence::weights` 也一直写进了 seqdesc 的 `weightlistindex`。
-            // 只有这一处判据没跟上。
-            //
-            // `link2[j]` 就是上面算好的 `g_ikchain[j].link[2].bone` 下标。
+            // Zero-weight IK chains need no automatic release rule.
             let w = link2
                 .get(j)
                 .and_then(|b| usize::try_from(*b).ok())
@@ -2387,6 +2406,7 @@ fn build_ik_rules(
                 // 自动补的规则是 `IK_RELEASE`，而 `usesource` 对它无效
                 // （官方 `simplify.cpp:6245-6247` 直接 break）。
                 use_source: false,
+                use_sequence: false,
                 errors: None,
             });
         }
@@ -2479,11 +2499,17 @@ fn compute_ik_errors(
 ) -> Result<(), AnimWriteError> {
     let seq = &compiled.sequences[spec.seq_index];
     let num_frames = spec.frames;
-    let mut numerror = p.end - p.start + 1;
+    let mut numerror = i64::from(p.end) - i64::from(p.start) + 1;
     if p.end >= num_frames as i32 {
         numerror += 2;
     }
-    let numerror = numerror.max(0) as usize;
+    let numerror = usize::try_from(numerror)
+        .ok()
+        .filter(|count| *count <= num_frames.saturating_mul(2).saturating_add(2))
+        .ok_or_else(|| AnimWriteError::IkRule {
+            sequence: seq.name.clone(),
+            message: "IK error range exceeds two animation cycles".into(),
+        })?;
 
     let mut out = Vec::with_capacity(numerror);
     match p.type_code {
@@ -2491,8 +2517,7 @@ fn compute_ik_errors(
         1 => {
             let lb = link2[p.chain as usize];
             for k in 0..numerror {
-                let world =
-                    frame_worlds_for(compiled, spec, parents, p.start + k as i32, p.use_source)?;
+                let world = ik_rule_worlds(compiled, spec, parents, p.start + k as i32, p)?;
                 let local = if p.bone < 0 {
                     // `bone == -1` → 直接用链末端骨骼的世界矩阵（6026）。
                     world[lb as usize]
@@ -2511,7 +2536,7 @@ fn compute_ik_errors(
                 .center
                 .unwrap_or([0.0; 3]);
             if p.type_code == 3 {
-                let world = frame_worlds_for(compiled, spec, parents, p.contact, p.use_source)?;
+                let world = ik_rule_worlds(compiled, spec, parents, p.contact, p)?;
                 p.pos = ik_transform_point(&world[tip], center);
                 p.pos[2] = p.floor;
                 p.q = [0.0, 0.0, 0.0, 1.0];
@@ -2528,7 +2553,7 @@ fn compute_ik_errors(
                 } else {
                     t
                 };
-                let world = frame_worlds_for(compiled, spec, parents, sample, p.use_source)?;
+                let world = ik_rule_worlds(compiled, spec, parents, sample, p)?;
                 let movement = ik_movement(spec.movements(compiled), num_frames, t, p.contact);
                 let mut position = std::array::from_fn(|axis| p.pos[axis] + movement[axis]);
                 if p.type_code == 3 {
@@ -2563,15 +2588,40 @@ fn compute_ik_errors(
         other => {
             return Err(AnimWriteError::IkRule {
                 sequence: seq.name.clone(),
-                message: crate::tr_fmt!(
-                    "the error computation for type = %{ty} is not implemented yet",
-                    ty = other
-                ),
+                message: crate::tr_fmt!("unknown IK rule type %{ty}", ty = other),
             });
         }
     }
     p.errors = Some(out);
     Ok(())
+}
+
+fn ik_rule_worlds(
+    compiled: &CompiledModelDesc,
+    spec: &AnimSpec,
+    parents: &[i32],
+    frame: i32,
+    rule: &PendingIkRule,
+) -> Result<Vec<crate::bone_math::Matrix3x4>, AnimWriteError> {
+    if rule.use_sequence {
+        let sequence = compiled
+            .sequences
+            .iter()
+            .position(|sequence| sequence.cells.first() == Some(&spec.anim_index))
+            .ok_or_else(|| AnimWriteError::IkRule {
+                sequence: compiled.animations[spec.anim_index].name.clone(),
+                message: "usesequence requires an animation in the first blend cell of a sequence"
+                    .into(),
+            })?;
+        sequence_pose::worlds(compiled, parents, sequence, frame).map_err(|message| {
+            AnimWriteError::IkRule {
+                sequence: compiled.sequences[sequence].name.clone(),
+                message,
+            }
+        })
+    } else {
+        frame_worlds_for(compiled, spec, parents, frame, rule.use_source)
+    }
 }
 
 fn ik_transform_point(matrix: &crate::bone_math::Matrix3x4, point: [f32; 3]) -> [f32; 3] {
@@ -2646,9 +2696,7 @@ fn frame_worlds_for(
     let mut f = frame;
     if spec.looping && num_frames > 1 {
         let period = (num_frames - 1) as i32;
-        while f >= period {
-            f -= period;
-        }
+        f %= period;
     }
     if f < 0 || f as usize >= num_frames {
         return Err(AnimWriteError::IkRule {
@@ -3136,6 +3184,75 @@ pub fn build_ani_file(blocks: &[Vec<u8>]) -> (Vec<u8>, Vec<(i32, i32)>) {
     (file, table)
 }
 
+pub(crate) fn saved_bone_flags(compiled: &CompiledModelDesc, parents: &[i32]) -> Vec<i32> {
+    let mut flags = vec![0; compiled.desc.bones.len()];
+    if compiled.desc.model.anim_block_size.unwrap_or(0) <= 0 {
+        return flags;
+    }
+    for (flags, bone) in flags.iter_mut().zip(&compiled.desc.bones) {
+        *flags = bone.flags.unwrap_or(0) & 0x00600000;
+    }
+    if !compiled.desc.model.bone_save_frames.is_empty() {
+        for saved in &compiled.desc.model.bone_save_frames {
+            if let Some(index) = compiled
+                .desc
+                .bones
+                .iter()
+                .position(|bone| bone.name.eq_ignore_ascii_case(&saved.bone))
+            {
+                flags[index] |= if saved.position { 0x00200000 } else { 0 }
+                    | if saved.rotation { 0x00400000 } else { 0 };
+            }
+        }
+    } else {
+        for (index, flags) in flags.iter_mut().enumerate() {
+            *flags |= 0x00400000;
+            let mut min = [f32::INFINITY; 3];
+            let mut max = [f32::NEG_INFINITY; 3];
+            for pose in compiled
+                .animations
+                .iter()
+                .flat_map(|animation| &animation.frames)
+                .filter_map(|frame| frame.get(index))
+            {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(pose.position[axis]);
+                    max[axis] = max[axis].max(pose.position[axis]);
+                }
+            }
+            let range: f32 = min
+                .into_iter()
+                .zip(max)
+                .map(|(min, max)| (max - min).powi(2))
+                .sum();
+            if parents.get(index).copied().unwrap_or(-1) < 0 || range > 4.0 {
+                *flags |= 0x00200000;
+            }
+        }
+    }
+    flags
+}
+
+fn animation_section_frames(compiled: &CompiledModelDesc, spec: &AnimSpec) -> i32 {
+    if spec.orphan {
+        match compiled.desc.model.section_frames {
+            Some((length, threshold)) if length > 0 && spec.frames as i32 >= threshold => length,
+            _ => 0,
+        }
+    } else {
+        compiled.sequences[spec.seq_index].section_frames
+    }
+}
+
+fn demand_loaded(compiled: &CompiledModelDesc, spec: &AnimSpec) -> bool {
+    let animation = &compiled.animations[spec.anim_index];
+    compiled.desc.model.anim_block_size.unwrap_or(0) > 0
+        && (spec.frames >= 2
+            || spec.frames == 1 && !compiled.desc.model.bone_save_frames.is_empty())
+        && !animation.no_anim_block
+        && (!animation.no_anim_block_stall || animation_section_frames(compiled, spec) > 0)
+}
+
 pub fn write_animations(
     compiled: &CompiledModelDesc,
     bone_parents: &[i32],
@@ -3157,6 +3274,8 @@ pub fn write_animations(
     // 没有任何序列 → 不产出动画段（也避免后面做无用的扫描）。
     if compiled.sequences.is_empty() {
         return Ok(AnimWriteOutcome {
+            zero_frame_offsets: Vec::new(),
+            section_block_indices: Vec::new(),
             hierarchy_offsets: Vec::new(),
             anim_block_hierarchy_offsets: Vec::new(),
             animdescs: Vec::new(),
@@ -3239,7 +3358,15 @@ pub fn write_animations(
                 // 差值，不再减参考姿态、也不加根骨骼 Z 偏置
                 // （见 [`delta_stored_frames`]）。
                 if compiled.animations[spec.anim_index].delta {
-                    delta_stored_frames(spec.cell_frames(compiled), spec.looping, b, n)
+                    let (rotations, mut positions) =
+                        delta_stored_frames(spec.cell_frames(compiled), spec.looping, b, n);
+                    if is_root {
+                        for position in &mut positions {
+                            let [x, y, z] = *position;
+                            *position = [-y, x, z];
+                        }
+                    }
+                    (rotations, positions)
                 } else {
                     delta_frames(
                         spec.cell_frames(compiled),
@@ -3519,14 +3646,7 @@ pub fn write_animations(
         // 官方按**全局** `$sectionframes` 的阈值判，所以孤儿动画要自己算。
         // 实测 `look_neutral`：官方 `sf=0`，而沿用 `seq[0]`（`idle`）
         // 会得到 `sf=30` + 一张 `nEnt=2` 的段表。见 [`AnimSpec::orphan`]。
-        let sf = if spec.orphan {
-            match compiled.desc.model.section_frames {
-                Some((len, thr)) if len > 0 && n as i32 >= thr => len,
-                _ => 0,
-            }
-        } else {
-            seq.section_frames
-        };
+        let sf = animation_section_frames(compiled, spec);
         // ⚠️ 段数取自**本动画自己的帧数**（`n`），不是 `seq.num_sections` ——
         // 后者按引用它的序列算，复用动画时会短写。见 [`section_count`]。
         let n_sec = section_count(n, sf);
@@ -3567,19 +3687,12 @@ pub fn write_animations(
             vec![Some((0, n.saturating_sub(1)))]
         };
 
-        // ⚠️ **块形态下链不进 `.mdl`** —— 它被写进 `.ani`（见下面的块打包），
-        // `.mdl` 里只留**段表**（`sectionindex` 指向它）。
-        //
-        // 早先这里无条件调 `write_one_chain`，于是块形态的每条动画都会
-        // 往 `anim_data` 里多写 4 字节（`bone=255` 占位），
-        // 把**段表整体推后 4 字节** —— 实测 `absec1` 的
-        // `sectionindex` 因此是 104（官方 100），后续段全部错位。
-        //
-        // 判据：该动画的帧数 >= 2（`n < 2` 的单帧动画**留在内联**，
-        // 与块打包的判据一致）。
-        let in_block = compiled.desc.model.anim_block_size.unwrap_or(0) > 0 && n >= 2;
-        if !in_block {
+        let in_block = demand_loaded(compiled, spec);
+        if !in_block || compiled.animations[spec.anim_index].no_anim_block_stall {
             for (seg_i, range) in segments.iter().enumerate() {
+                if in_block && seg_i != 0 {
+                    continue;
+                }
                 let seg_start = anim_data.len();
                 if let Some(off) = sec_table_off {
                     // 回填 `section[seg_i] = (0, 该段链相对 animdesc 自身的偏移)`。
@@ -3757,8 +3870,8 @@ pub fn write_animations(
             flags |= STUDIO_DELTA;
         }
         if compiled.desc.version() >= 49
-            && compiled.desc.model.anim_block_size.unwrap_or(0) > 0
-            && spec.frames >= 2
+            && demand_loaded(compiled, spec)
+            && !compiled.animations[spec.anim_index].no_anim_block_stall
             && !compiled.animations[spec.anim_index].delta
         {
             flags |= 0x40;
@@ -4013,7 +4126,7 @@ pub fn write_animations(
                 .desc
                 .ikchains
                 .iter()
-                .position(|c| c.name == lk.chain)
+                .position(|c| c.name.eq_ignore_ascii_case(&lk.chain))
                 .ok_or_else(|| {
                     AnimWriteError::Internal(crate::tr_fmt!(
                         "iklocks[%{lock}] of the sequence %{sequence} references an ikchain that does not exist: %{chain}",
@@ -4106,41 +4219,6 @@ pub fn write_animations(
         if seq.forward_declared {
             flags |= STUDIO_OVERRIDE;
         }
-        // ⚠️ **再 OR 上每一格动画自己的 `animdesc.flags`**
-        // （`studiomdl.cpp:3026-3038`）：
-        //
-        // ```c
-        // for (i = 0; i < numblends; i++) { ... pseq->flags |= animations[i]->flags; }
-        // ```
-        //
-        // 所以序列的 `loop` 其实**来自动画**，不是序列块自己写的关键字 ——
-        // QC 里 `$animation "a_idle" ... loop` 之后，任何引用它的
-        // `$sequence`（哪怕块里没写 `loop`）都会拿到 `STUDIO_LOOPING`。
-        //
-        // 实测 miku：`seq[1] "idle_raw"`（QC 只有 `$sequence "idle_raw" "a_idle"`）
-        // 官方 `flags == 0x01` —— 而块里没有任何 `loop`。mdlc 早先按
-        // `seq.looping` 单独算，写成 0x00。
-        //
-        // ⚠️ **但这里只能补 `STUDIO_LOOPING`，绝不能补 `STUDIO_DELTA`。**
-        //
-        // 上面那行官方代码跑在**解析期**（`ParseSequence` 尾部），而
-        // `subtract` 在解析期**只往动画的 `cmds[]` 里记一条 `CMD_SUBTRACT`**
-        // （`:1733-1751`），**完全不碰 `panim->flags`**；
-        // `panim->flags |= STUDIO_DELTA` 要到 `simplify.cpp:164`
-        // **执行**那条 cmd 时才发生 —— 那时序列的 flags 早已定稿。
-        //
-        // ⟹ 序列**永远**不会因为 `subtract` 拿到 `DELTA`。
-        // 实测（`docs/_probe/probe_r9_delta_flags.js`）：6 条只有 `subtract`
-        // 而无 `delta` 的 `*_layer` 序列，官方 `0x000` / `0x001`；
-        // 照 `animations[].delta` 补位会写成 `0x004` / `0x005`（6/23 差异）。
-        //
-        // `LOOPING` 之所以**能**在这里补，是因为 `loop` 走的是
-        // `ParseAnimationToken`（`:2226`），**解析期当场**就置位了。
-        for cell in &seq.cells {
-            if specs.get(*cell).is_some_and(|sp| sp.looping) {
-                flags |= STUDIO_LOOPING;
-            }
-        }
         if compiled.desc.version() <= 48 {
             let variant_flags = flags & (0x0080 | 0x1000 | 0x2000);
             flags &= !(0x0080 | 0x1000 | 0x2000);
@@ -4170,7 +4248,7 @@ pub fn write_animations(
                 .model
                 .pose_parameters
                 .iter()
-                .position(|entry| entry.name == *parameter)
+                .position(|entry| entry.name.eq_ignore_ascii_case(parameter))
                 .ok_or_else(|| {
                     AnimWriteError::Internal(format!("Unknown cycle pose parameter {parameter:?}"))
                 })?;
@@ -4330,19 +4408,13 @@ pub fn write_animations(
         seqdescs[o + 0x90..o + 0x94].copy_from_slice(&(seq_rules as i32).to_le_bytes());
     }
 
-    // ---- 外置动画块（`.ani`）：按 `$animblocksize` 打包 ----
-    //
-    // 判据（实测 `ab_z1`/`zb90z` 单帧 → `animblock = 0` 内联；
-    // 其余 8 个 `numframes >= 2` 的用例 → `animblock = 1`）：
-    // **只有 `numframes >= 2` 的动画才进块**。
-    //
-    // 块预算与拼接见 [`pack_anim_blocks`] / [`build_ani_file`]。
     let (
         anim_block_index,
         anim_block_offset,
         anim_block_ikrule_offset,
         anim_block_section_offsets,
         anim_block_hierarchy_offsets,
+        section_block_indices,
         anim_blocks,
     ) = if compiled.desc.model.anim_block_size.unwrap_or(0) > 0 {
         // 逐动画生成「原始样本」载荷，并把 IK rule 块**追加在其后**。
@@ -4365,14 +4437,13 @@ pub fn write_animations(
             Vec::with_capacity(specs.len());
         for (si, spec) in specs.iter().enumerate() {
             let n = spec.frames;
-            if n < 2 {
+            if !demand_loaded(compiled, spec) {
                 block_hierarchy_rel.push(None);
-                payloads.push(None); // 单帧留在内联
+                payloads.push(None);
                 block_ikrule_rel.push(None);
                 block_section_offsets_all.push(None);
                 continue;
             }
-            let seq = &compiled.sequences[spec.seq_index];
             // 本格的帧（blend 的每格是独立动画）。
             let cell = spec.cell_frames(compiled);
             let looping = spec.looping;
@@ -4443,7 +4514,9 @@ pub fn write_animations(
                     }),
                 });
             }
-            let rle = compiled.desc.version() <= 48 || compiled.animations[spec.anim_index].delta;
+            let rle = compiled.desc.version() <= 48
+                || compiled.animations[spec.anim_index].delta
+                || compiled.animations[spec.anim_index].no_anim_block_stall;
             let write_rle = |payload: &mut Vec<u8>, range: Option<(usize, usize)>| {
                 write_one_chain(
                     payload,
@@ -4499,7 +4572,7 @@ pub fn write_animations(
             // 块形态没有段表参与（段表在 `.mdl` 里），所以也不需要。
             //
             // 所以块形态下的载荷不是「一整条动画」，而是**逐段载荷的紧密拼接**。
-            let sf = seq.section_frames;
+            let sf = animation_section_frames(compiled, spec);
             // ⚠️ 与内联形态**同一个函数** —— 段数必须按**本动画**的帧数算。
             let n_sec = section_count(n, sf);
             let mut block_section_offsets: Option<Vec<usize>> = None;
@@ -4508,6 +4581,9 @@ pub fn write_animations(
                 let mut offs: Vec<usize> = Vec::with_capacity(n_sec);
                 for k in 0..n_sec {
                     offs.push(joined.len());
+                    if k == 0 && compiled.animations[spec.anim_index].no_anim_block_stall {
+                        continue;
+                    }
                     // ⚠️ 与内联形态**同一个函数** —— 末帧那一段不一定是空的
                     // （见 [`section_frame_range`]）。两条路径必须一致。
                     if rle {
@@ -4535,7 +4611,11 @@ pub fn write_animations(
             //
             // 位置：`WriteIkErrors` 在 `WriteAnimationData` **之后**被调用
             // （`write.cpp:1061-1062`），所以它在**全部段之后**。
-            let rules = build_ik_rules(compiled, spec, bone_parents)?;
+            let rules = if compiled.animations[spec.anim_index].no_anim_block_stall {
+                Vec::new()
+            } else {
+                build_ik_rules(compiled, spec, bone_parents)?
+            };
             // `WriteIkErrors` 的 `ALIGN4` 无条件执行（`abi8` 实测块长
             // 68 = align4(66)），所以载荷末尾总是补齐到 4 的倍数。
             while !payload.len().is_multiple_of(4) {
@@ -4549,23 +4629,42 @@ pub fn write_animations(
                 block_ikrule_rel.push(Some(rel));
             }
             block_hierarchy_rel.push(
-                crate::local_hierarchy::write(
-                    &mut payload,
-                    &compiled.animations[spec.anim_index].local_hierarchy,
-                )
-                .map_err(AnimWriteError::Internal)?,
+                if compiled.animations[spec.anim_index].no_anim_block_stall {
+                    None
+                } else {
+                    crate::local_hierarchy::write(
+                        &mut payload,
+                        &compiled.animations[spec.anim_index].local_hierarchy,
+                    )
+                    .map_err(AnimWriteError::Internal)?
+                },
             );
             block_section_offsets_all.push(block_section_offsets);
             payloads.push(Some(payload));
         }
-        let (idx, off, blocks) =
+        let (mut idx, off, blocks) =
             pack_anim_blocks(&payloads, compiled.desc.model.anim_block_size.unwrap_or(0));
+        let section_indices = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| {
+                block_section_offsets_all[index].as_ref().map(|sections| {
+                    let mut indices = vec![idx[index]; sections.len()];
+                    if compiled.animations[spec.anim_index].no_anim_block_stall {
+                        indices[0] = 0;
+                        idx[index] = 0;
+                    }
+                    indices
+                })
+            })
+            .collect();
         (
             idx,
             off,
             block_ikrule_rel,
             block_section_offsets_all,
             block_hierarchy_rel,
+            section_indices,
             blocks,
         )
     } else {
@@ -4576,10 +4675,68 @@ pub fn write_animations(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
     };
 
+    let saved_flags = saved_bone_flags(compiled, bone_parents);
+    let mut zero_frame_offsets = vec![None; specs.len()];
+    for (index, spec) in specs.iter().enumerate() {
+        if anim_block_index.get(index).copied().unwrap_or(0) == 0 {
+            continue;
+        }
+        let last = spec.frames.saturating_sub(1);
+        let span = if spec.looping {
+            last.min(9).min(last / 2)
+        } else {
+            last.min(9)
+        };
+        let count = if span > 2 { (last / span).min(3) } else { 1 };
+        zero_frame_offsets[index] = Some(anim_data.len());
+        let offset = index * ANIMDESC_SIZE;
+        animdescs[offset + 88..offset + 90].copy_from_slice(&(span as i16).to_le_bytes());
+        animdescs[offset + 90..offset + 92].copy_from_slice(&(count as i16).to_le_bytes());
+        let samples: Vec<_> = (0..count)
+            .map(|sample| {
+                let mut poses = spec.cell_frames(compiled)[span * sample].clone();
+                if compiled.animations[spec.anim_index].delta {
+                    crate::motion::convert_delta_positions(
+                        std::slice::from_mut(&mut poses),
+                        bone_parents,
+                        true,
+                    );
+                } else if !compiled.is_static_prop() {
+                    crate::anim_commands::convert(
+                        std::slice::from_mut(&mut poses),
+                        bone_parents,
+                        true,
+                    );
+                }
+                poses
+            })
+            .collect();
+        for (bone, flags) in saved_flags.iter().enumerate() {
+            if flags & 0x00200000 != 0 {
+                for sample in &samples {
+                    anim_data.extend_from_slice(&encode_vector48(sample[bone].position));
+                }
+            }
+            if flags & 0x00400000 != 0 {
+                for sample in &samples {
+                    anim_data.extend_from_slice(&encode_quaternion64(
+                        crate::bone_math::angle_quaternion(sample[bone].rotation),
+                    ));
+                }
+            }
+        }
+    }
+    while !(anim_data_abs + anim_data.len()).is_multiple_of(4) {
+        anim_data.push(0);
+    }
+
     Ok(AnimWriteOutcome {
+        zero_frame_offsets,
+        section_block_indices,
         hierarchy_offsets,
         anim_block_hierarchy_offsets,
         animdescs,
@@ -4825,6 +4982,9 @@ mod tests {
         let animations: Vec<crate::model::CompiledAnimation> = seqs
             .iter()
             .map(|s| crate::model::CompiledAnimation {
+                no_anim_block: false,
+                no_anim_block_stall: false,
+                source_frames: None,
                 local_hierarchy: Vec::new(),
                 weights: Vec::new(),
                 loop_restart: 0,
@@ -4845,6 +5005,25 @@ mod tests {
         CompiledModelDesc {
             desc: ModelDesc {
                 model: ModelMeta {
+                    check_uv: None,
+                    center_bones_on_vertices: false,
+                    collapse_bones: false,
+                    collapse_bones_aggressive: false,
+                    always_collapse: Vec::new(),
+                    screen_alignments: Vec::new(),
+                    max_vertices: None,
+                    lock_bone_lengths: false,
+                    internal_name: None,
+                    source_search_paths: Vec::new(),
+                    hitgroups: Vec::new(),
+                    preserve_triangle_order: false,
+                    zbrush: false,
+                    append_sources: Vec::new(),
+                    virtual_vtas: Vec::new(),
+                    bone_save_frames: Vec::new(),
+                    clamp_worldspace: None,
+                    bbox_only_vertices: false,
+                    bone_flex_drivers: Vec::new(),
                     rotation_limits: Vec::new(),
                     rotation_alignments: Vec::new(),
                     root_bone: None,
@@ -4941,6 +5120,81 @@ mod tests {
             resolved_quat_interp_bones: Vec::new(),
             physics_bone: None,
         }
+    }
+
+    #[test]
+    fn delta_root_positions_encode_engine_axes_once_for_constant_and_sampled_tracks() {
+        for values in [[2.0, 2.0, 2.0], [0.0, 2.0, 4.0]] {
+            let frames = values
+                .into_iter()
+                .map(|x| vec![pose([x, 0.0, 0.0], [0.0; 3])])
+                .collect();
+            let mut model = compiled(vec![seq("offset", false, frames)], 1);
+            model.animations[0].delta = true;
+            let output = write_with_f0_refs(&model, &[-1]).unwrap();
+            let at = output.anim_offsets[0];
+            let flags = output.anim_data[at + 1];
+            assert_ne!(flags & STUDIO_ANIM_DELTA, 0);
+            if values[0] == values[2] {
+                assert_ne!(flags & STUDIO_ANIM_RAWPOS, 0);
+                let raw = &output.anim_data[at + 4..at + 10];
+                assert_eq!(
+                    u16::from_le_bytes(raw[0..2].try_into().unwrap()) & 0x7fff,
+                    0
+                );
+                assert_eq!(u16::from_le_bytes(raw[2..4].try_into().unwrap()), 0x4000);
+                assert_eq!(
+                    u16::from_le_bytes(raw[4..6].try_into().unwrap()) & 0x7fff,
+                    0
+                );
+            } else {
+                assert_ne!(flags & STUDIO_ANIM_ANIMPOS, 0);
+                let pointer = at + 4;
+                assert_eq!(&output.anim_data[pointer..pointer + 2], &[0, 0]);
+                assert_eq!(&output.anim_data[pointer + 4..pointer + 6], &[0, 0]);
+                let stream = pointer
+                    + u16::from_le_bytes(
+                        output.anim_data[pointer + 2..pointer + 4]
+                            .try_into()
+                            .unwrap(),
+                    ) as usize;
+                assert_eq!(&output.anim_data[stream..stream + 2], &[3, 3]);
+                let scale = output.bone_scales[0].0[1];
+                for (index, expected) in values.into_iter().enumerate() {
+                    let at = stream + 2 + index * 2;
+                    let sample =
+                        i16::from_le_bytes(output.anim_data[at..at + 2].try_into().unwrap());
+                    assert!((sample as f32 * scale - expected).abs() <= scale);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn demand_loaded_zero_frames_sample_loop_spans_and_default_bone_channels() {
+        let frames: Vec<_> = (0..9)
+            .map(|index| vec![pose([index as f32 * 2.0, 0.0, 0.0], [0.0; 3])])
+            .collect();
+        let mut model = compiled(vec![seq("move", true, frames)], 1);
+        model.desc.model.version = Some(48);
+        model.desc.model.anim_block_size = Some(4096);
+        let output = write_with_f0_refs(&model, &[-1]).unwrap();
+        assert_eq!(
+            i16::from_le_bytes(output.animdescs[88..90].try_into().unwrap()),
+            4
+        );
+        assert_eq!(
+            i16::from_le_bytes(output.animdescs[90..92].try_into().unwrap()),
+            2
+        );
+        assert_eq!(saved_bone_flags(&model, &[-1]), [0x00600000]);
+        let cache = output.zero_frame_offsets[0].unwrap();
+        assert_eq!(&output.anim_data[cache..cache + 6], &[0; 6]);
+        assert_eq!(
+            u16::from_le_bytes(output.anim_data[cache + 8..cache + 10].try_into().unwrap()),
+            0x4800
+        );
+        assert_eq!(output.anim_data.len() - cache, 28);
     }
 
     #[test]
@@ -6830,6 +7084,9 @@ mod tests {
         b.cells = vec![0];
         let mut c = compiled(vec![a, b], 1);
         c.animations = vec![crate::model::CompiledAnimation {
+            no_anim_block: false,
+            no_anim_block_stall: false,
+            source_frames: None,
             local_hierarchy: Vec::new(),
             weights: Vec::new(),
             loop_restart: 0,
@@ -6932,6 +7189,9 @@ mod tests {
         c.animations = ["look_down", "look_mid", "look_up"]
             .iter()
             .map(|n| crate::model::CompiledAnimation {
+                no_anim_block: false,
+                no_anim_block_stall: false,
+                source_frames: None,
                 local_hierarchy: Vec::new(),
                 weights: Vec::new(),
                 loop_restart: 0,
@@ -7016,36 +7276,18 @@ mod tests {
         );
     }
 
-    /// **`seqdesc.flags` 必须 OR 上每一格动画自己的 `flags`。**
-    ///
-    /// `studiomdl.cpp:3026-3038`：
-    /// ```c
-    /// for (i = 0; i < numblends; i++) { ... pseq->flags |= animations[i]->flags; }
-    /// ```
-    ///
-    /// 所以 `$animation "a_idle" ... loop` 之后，任何引用它的 `$sequence`
-    /// （哪怕块里**没写** `loop`）都会拿到 `STUDIO_LOOPING`。
-    ///
-    /// 实测 miku `v_autoshotgun.mdl`：`seq[1] "idle_raw"` 的 QC 只有
-    /// `$sequence "idle_raw" "a_idle"` —— 官方 `flags == 0x01`。
-    /// 早先 mdlc 只看 `seq.looping`，写成 `0x00`。
     #[test]
     fn seq_flags_or_in_cell_animation_flags() {
-        // 序列自己**不** loop，但它引用的动画 loop。
-        let mut s = seq("idle_raw", false, Vec::new());
-        s.cells = vec![0];
-        let mut c = compiled(vec![s], 1);
-        // 动画池里的那一条改成 looping（`$animation ... loop`）。
-        c.animations[0].looping = true;
-        let out = write_with_f0_refs(&c, &[-1]).expect("写出动画");
-        let flags = i32::from_le_bytes(out.seqdescs[0x0C..0x10].try_into().unwrap());
-        assert_eq!(
-            flags, STUDIO_LOOPING,
-            "序列块没写 loop，但引用的动画 loop → 序列也要 LOOPING"
-        );
-        // animdesc 自己的 flags 同样置位（同一条规则的另一半）。
-        let aflags = i32::from_le_bytes(out.animdescs[0x0C..0x10].try_into().unwrap());
-        assert_eq!(aflags, STUDIO_LOOPING, "animdesc.flags");
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut desc = crate::qc::parse_qc_str("$modelname tests/flags.mdl\n$body rig rig.smd\n$animation first rig.smd snap\n$animation second rig.smd post realtime loop\n$poseparameter amount 0 1\n$sequence blend { first second blendwidth 2 blend amount 0 1 }\n", &base).unwrap();
+        desc.model.version = Some(49);
+        let output = crate::pipeline::build(&desc, &base, Default::default()).unwrap();
+        let integer = |at: usize| i32::from_le_bytes(output.mdl[at..at + 4].try_into().unwrap());
+        let sequences = integer(192) as usize;
+        let animations = integer(184) as usize;
+        assert_eq!(integer(sequences + 12) & 0x93, 0x93);
+        assert_eq!(integer(animations + 12) & 0x93, 2);
+        assert_eq!(integer(animations + 100 + 12) & 0x93, 0x91);
     }
 
     /// **`seqdesc.flags` 不得从 `animdesc.flags` 补 `STUDIO_DELTA`**（R11）。
@@ -7068,6 +7310,24 @@ mod tests {
     /// ⚠️ **本测试必须同时断言 `animdesc` 有 `DELTA`** —— 否则把 R9 一起
     /// 改坏（`delta` 不再传播到动画）时它仍会通过，就退化成了「两边都 0」的
     /// 空洞测试。
+    #[test]
+    fn sequence_authored_flags_use_the_version_specific_realtime_bit() {
+        for version in [48, 49] {
+            let mut model = compiled(
+                vec![seq("idle", false, vec![vec![pose([0.0; 3], [0.0; 3])]])],
+                1,
+            );
+            model.desc.model.version = Some(version);
+            model.sequences[0].extra_flags = Some(0x0092);
+            let output = write_with_f0_refs(&model, &[-1]).unwrap();
+            let flags = i32::from_le_bytes(output.seqdescs[12..16].try_into().unwrap());
+            assert_eq!(
+                flags & (0x0002 | 0x0010 | 0x0180),
+                if version == 48 { 0x0112 } else { 0x0092 }
+            );
+        }
+    }
+
     #[test]
     fn seqdesc_flags_do_not_inherit_delta_from_animation() {
         // 序列块**没有** `delta` 关键字 ⟹ `seq.delta == false`。
@@ -7096,31 +7356,21 @@ mod tests {
         );
     }
 
-    /// **`seqdesc.flags` 的 `LOOPING` 却**必须**从动画补**（与 R11 成对）。
-    ///
-    /// 这条与上一条是同一个机制的两面：`loop` 在**解析期当场**置
-    /// `panim->flags`（`studiomdl.cpp:2226`），所以它能赶上 `:3037` 那行；
-    /// 而 `subtract` 赶不上。**两条测试合起来才钉住「时机」这个根因** ——
-    /// 只留一条的话，「整个 OR 循环都删掉」这种过度修复会被漏过。
     #[test]
     fn seqdesc_flags_do_inherit_looping_from_animation() {
-        let mut s = seq("idle_raw", false, Vec::new());
-        s.cells = vec![0];
-        let mut c = compiled(vec![s], 1);
-        c.animations[0].looping = true;
-        c.animations[0].delta = true; // 同时是 delta，验证只有 LOOPING 会传播
-
-        let out = write_with_f0_refs(&c, &[-1]).expect("写出动画");
-        let seq_flags = i32::from_le_bytes(out.seqdescs[0x0C..0x10].try_into().unwrap());
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let desc = crate::qc::parse_qc_str("$modelname tests/loop_flags.mdl\n$body rig rig.smd\n$animation base rig.smd\n$animation offset rig.smd loop subtract base 0\n$sequence idle offset\n", &base).unwrap();
+        let output = crate::pipeline::build(&desc, &base, Default::default()).unwrap();
+        let integer = |at: usize| i32::from_le_bytes(output.mdl[at..at + 4].try_into().unwrap());
+        let sequence = integer(192) as usize;
+        let animation = integer(184) as usize + 100;
         assert_eq!(
-            seq_flags & STUDIO_LOOPING,
-            STUDIO_LOOPING,
-            "loop 在解析期就置位 ⟹ 序列必须拿到 LOOPING"
+            integer(sequence + 12) & (STUDIO_LOOPING | STUDIO_DELTA | STUDIO_POST),
+            STUDIO_LOOPING
         );
         assert_eq!(
-            seq_flags & STUDIO_DELTA,
-            0,
-            "同一条动画的 DELTA 不能跟着一起传过来"
+            integer(animation + 12) & (STUDIO_LOOPING | STUDIO_DELTA),
+            STUDIO_LOOPING | STUDIO_DELTA
         );
     }
 
@@ -7268,6 +7518,25 @@ mod tests {
         CompiledModelDesc {
             desc: ModelDesc {
                 model: ModelMeta {
+                    check_uv: None,
+                    center_bones_on_vertices: false,
+                    collapse_bones: false,
+                    collapse_bones_aggressive: false,
+                    always_collapse: Vec::new(),
+                    screen_alignments: Vec::new(),
+                    max_vertices: None,
+                    lock_bone_lengths: false,
+                    internal_name: None,
+                    source_search_paths: Vec::new(),
+                    hitgroups: Vec::new(),
+                    preserve_triangle_order: false,
+                    zbrush: false,
+                    append_sources: Vec::new(),
+                    virtual_vtas: Vec::new(),
+                    bone_save_frames: Vec::new(),
+                    clamp_worldspace: None,
+                    bbox_only_vertices: false,
+                    bone_flex_drivers: Vec::new(),
                     rotation_limits: Vec::new(),
                     rotation_alignments: Vec::new(),
                     root_bone: None,
@@ -7404,6 +7673,9 @@ mod tests {
             }],
             // 隐含动画（`@idle`），与 `compile.rs` 的单动画序列路径一致。
             animations: vec![crate::model::CompiledAnimation {
+                no_anim_block: false,
+                no_anim_block_stall: false,
+                source_frames: None,
                 local_hierarchy: Vec::new(),
                 weights: Vec::new(),
                 loop_restart: 0,
@@ -7446,6 +7718,7 @@ mod tests {
             fake_origin: None,
             fake_rotate: None,
             use_source: false,
+            use_sequence: false,
         }
     }
 
@@ -8068,6 +8341,180 @@ mod tests {
         assert_eq!(ch2, vec![0, 1279, 2559, 3839], "pos.z = 0/5/10/15");
     }
 
+    #[test]
+    fn ik_usesource_preserves_original_error_samples_after_animation_processing() {
+        let mut rule = touch_rule(Some("knee"));
+        rule.use_source = true;
+        let mut compiled = ikr_compiled(vec![rule], true);
+        compiled.animations[0].source_frames = Some(compiled.animations[0].frames.clone());
+        let spec = anim_specs(&compiled).remove(0);
+        let before = build_ik_rules(&compiled, &spec, &[-1, 0, 1, 2]).unwrap();
+        for frames in [
+            &mut compiled.animations[0].frames,
+            &mut compiled.sequences[0].frames,
+        ] {
+            for frame in frames {
+                frame[3].position[2] += 100.0;
+            }
+        }
+        let after = build_ik_rules(&compiled, &spec, &[-1, 0, 1, 2]).unwrap();
+        assert_eq!(before[0].error, after[0].error);
+        compiled.animations[0].ik_rules[0].use_source = false;
+        let processed = build_ik_rules(&compiled, &spec, &[-1, 0, 1, 2]).unwrap();
+        assert_ne!(before[0].error, processed[0].error);
+    }
+
+    #[test]
+    fn ik_usesequence_samples_layer_weights_and_reports_cycles() {
+        let mut rule = touch_rule(None);
+        rule.use_sequence = true;
+        let mut compiled = ikr_compiled(vec![rule], true);
+        compiled.sequences[0].weights = vec![1.0; 4];
+        let mut layer = compiled.sequences[0].clone();
+        layer.name = "offset".into();
+        layer.delta = true;
+        layer.cells = vec![1];
+        layer.weights = vec![0.0, 0.0, 0.0, 0.25];
+        layer.ik_rules.clear();
+        let mut animation = compiled.animations[0].clone();
+        animation.name = "offset".into();
+        animation.delta = true;
+        animation.ik_rules.clear();
+        for frame in &mut animation.frames {
+            for pose in frame {
+                pose.position = [0.0; 3];
+                pose.rotation = [0.0; 3];
+                if pose.bone == 3 {
+                    pose.position[2] = 8.0;
+                }
+            }
+        }
+        compiled.animations.push(animation);
+        compiled.sequences.push(layer);
+        compiled.sequences[0]
+            .auto_layers
+            .push(crate::model::CompiledAutoLayer {
+                sequence: 1,
+                pose: -1,
+                flags: 0,
+                start: 0.0,
+                peak: 0.0,
+                tail: 0.0,
+                end: 0.0,
+            });
+        let parents = [-1, 0, 1, 2];
+        let world = sequence_pose::worlds(&compiled, &parents, 0, 2).unwrap();
+        assert!((world[3][11] - 12.0).abs() < 0.00001);
+        let layered = write_with_f0_refs(&compiled, &parents).unwrap();
+        compiled.animations[0].ik_rules[0].use_sequence = false;
+        let plain = write_with_f0_refs(&compiled, &parents).unwrap();
+        assert_ne!(layered.anim_data, plain.anim_data);
+        compiled.sequences[1]
+            .auto_layers
+            .push(crate::model::CompiledAutoLayer {
+                sequence: 0,
+                pose: -1,
+                flags: 0,
+                start: 0.0,
+                peak: 0.0,
+                tail: 0.0,
+                end: 0.0,
+            });
+        assert!(
+            sequence_pose::worlds(&compiled, &parents, 0, 2)
+                .unwrap_err()
+                .contains("cyclic")
+        );
+    }
+
+    #[test]
+    fn ik_usesequence_applies_layer_frame_ranges_and_spline_envelopes() {
+        let mut compiled = ikr_compiled(Vec::new(), true);
+        compiled.sequences[0].weights = vec![1.0; 4];
+        let mut layer = compiled.sequences[0].clone();
+        layer.cells = vec![1];
+        layer.delta = true;
+        let mut animation = compiled.animations[0].clone();
+        animation.delta = true;
+        for frame in &mut animation.frames {
+            for pose in frame {
+                pose.position = [0.0; 3];
+                pose.rotation = [0.0; 3];
+                if pose.bone == 3 {
+                    pose.position[2] = 16.0;
+                }
+            }
+        }
+        compiled.animations.push(animation);
+        compiled.sequences.push(layer);
+        compiled.sequences[0]
+            .auto_layers
+            .push(crate::model::CompiledAutoLayer {
+                sequence: 1,
+                pose: -1,
+                flags: 0x40,
+                start: 0.0,
+                peak: 2.0 / 3.0,
+                tail: 2.0 / 3.0,
+                end: 1.0,
+            });
+        for (frame, expected) in [(0, 0.0), (1, 13.0), (2, 26.0), (3, 15.0)] {
+            let world = sequence_pose::worlds(&compiled, &[-1, 0, 1, 2], 0, frame).unwrap();
+            assert!(
+                (world[3][11] - expected).abs() < 0.00001,
+                "frame {frame}: {}",
+                world[3][11]
+            );
+        }
+    }
+
+    #[test]
+    fn ik_range_dots_interpolate_the_middle_frames_in_written_rules() {
+        let mut rule = touch_rule(Some("knee"));
+        rule.range = Some([Some(0), None, None, Some(3)]);
+        let compiled = ikr_compiled(vec![rule], false);
+        let out = write_with_f0_refs(&compiled, &[-1, 0, 1, 2]).unwrap();
+        for (offset, expected) in [
+            (0x4C, 0.0),
+            (0x50, 1.0 / 3.0),
+            (0x54, 1.0 / 3.0),
+            (0x58, 1.0),
+            (0x60, 1.0 / 3.0),
+        ] {
+            assert_eq!(read_f32(&out, 0, 0, offset), expected);
+        }
+    }
+
+    #[test]
+    fn ik_range_dots_crossfade_neighboring_rules_and_target_slots() {
+        for (target, expected) in [
+            (None, [[8, 10, 11, 13, 10], [4, 5, 6, 8, 5]]),
+            (Some(1), [[6, 10, 11, 14, 10], [2, 5, 6, 10, 5]]),
+        ] {
+            let mut first = touch_rule(None);
+            first.kind = crate::model::IkRuleType::Release;
+            first.range = Some([None, Some(1), Some(2), None]);
+            let mut second = touch_rule(None);
+            second.kind = crate::model::IkRuleType::Release;
+            second.range = Some([None, Some(5), Some(6), None]);
+            second.target = target;
+            let mut compiled = ikr_compiled(vec![first, second], true);
+            for frames in [
+                &mut compiled.animations[0].frames,
+                &mut compiled.sequences[0].frames,
+            ] {
+                frames.resize(10, frames[0].clone());
+            }
+            let out = write_with_f0_refs(&compiled, &[-1, 0, 1, 2]).unwrap();
+            for (index, phases) in expected.into_iter().enumerate() {
+                assert_eq!(read_rule(&out, 0, index)[0x44 / 4], phases[0]);
+                for (offset, phase) in [0x4C, 0x50, 0x54, 0x58, 0x60].into_iter().zip(phases) {
+                    assert_eq!(read_f32(&out, 0, index, offset), phase as f32 / 9.0);
+                }
+            }
+        }
+    }
+
     /// **核心判据**：帧号 → cycle 的换算 + `iStart` 写**帧号**。
     ///
     /// 官方 `ikr6.mdl`（`range 1 1 2 3 contact 2`，4 帧）实测：
@@ -8127,6 +8574,7 @@ mod tests {
                 fake_origin: None,
                 fake_rotate: None,
                 use_source: false,
+                use_sequence: false,
             };
             let c = ikr_compiled(vec![r], false);
             let out = write_with_f0_refs(&c, &[-1, 0, 1, 2]).expect("写出动画");
@@ -8155,6 +8603,7 @@ mod tests {
             fake_origin: None,
             fake_rotate: None,
             use_source: false,
+            use_sequence: false,
         };
         let c = ikr_compiled(vec![r], false);
         let out = write_with_f0_refs(&c, &[-1, 0, 1, 2]).expect("写出动画");
@@ -8311,6 +8760,9 @@ mod tests {
         c.desc.model.section_frames = Some((30, 36));
         // 再加一条**没有任何序列引用**的 1 帧动画。
         c.animations.push(crate::model::CompiledAnimation {
+            no_anim_block: false,
+            no_anim_block_stall: false,
+            source_frames: None,
             local_hierarchy: Vec::new(),
             weights: Vec::new(),
             loop_restart: 0,

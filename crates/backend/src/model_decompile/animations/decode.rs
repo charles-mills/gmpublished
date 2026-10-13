@@ -183,8 +183,10 @@ fn chain_frame(
             bone.position
         };
         let mut rotation = rotation;
-        if bone.parent < 0 && !delta && model.flags & vformats::mdl::FLAG_STATIC_PROP == 0 {
-            rotation = undo_root_rotation(rotation);
+        if bone.parent < 0 && model.flags & vformats::mdl::FLAG_STATIC_PROP == 0 {
+            if !delta {
+                rotation = undo_root_rotation(rotation);
+            }
             position = inverse_root(position);
         }
         let rotation = mdlc::bone_math::quaternion_angles(rotation);

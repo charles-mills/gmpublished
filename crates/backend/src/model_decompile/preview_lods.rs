@@ -47,7 +47,9 @@ pub fn load_model_lod_preview(
         }
         for part in &mut topology.body_parts {
             for choice in &mut part.models {
-                choice.lods.swap(0, level);
+                if level < choice.lods.len() {
+                    choice.lods.swap(0, level);
+                }
             }
         }
         // All origMeshVertIDs address the mesh union in the fully fixed-up VVD pool.
@@ -64,7 +66,9 @@ pub fn load_model_lod_preview(
         levels.push(geometry);
         for part in &mut topology.body_parts {
             for choice in &mut part.models {
-                choice.lods.swap(0, level);
+                if level < choice.lods.len() {
+                    choice.lods.swap(0, level);
+                }
             }
         }
     }

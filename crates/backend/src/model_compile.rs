@@ -15,8 +15,11 @@ mod bodygroups;
 pub use bodygroups::{BodygroupChoice, ModelBodygroup, validate_bodygroups};
 #[path = "model_compile/lods.rs"]
 mod lods;
+mod surfaces;
 pub use lods::{ModelLod, validate_lods};
 pub use mdlc::fbx::SourcePart;
+pub use mdlc::model::SurfacePhysics;
+pub use surfaces::load_surface_properties;
 
 pub(crate) static EXPORT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -26,6 +29,7 @@ pub(crate) static EXPORT_LOCK: Mutex<()> = Mutex::new(());
     reason = "compile options are independent toggles"
 )]
 pub struct ModelCompileRequest {
+    pub surface_properties: Vec<SurfacePhysics>,
     pub qc_text: Option<String>,
     pub source: PathBuf,
     pub destination: PathBuf,
@@ -50,6 +54,7 @@ impl ModelCompileRequest {
     #[must_use]
     pub fn new(source: PathBuf, destination: PathBuf) -> Self {
         Self {
+            surface_properties: Vec::new(),
             qc_text: None,
             source,
             destination,
@@ -105,7 +110,7 @@ pub struct ModelCompileOutput {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelCompileError {
-    #[error("unsupported model source {0}; use QC, TOML, SMD, FBX, glTF or GLB")]
+    #[error("unsupported model source {0}; use QC, TOML, SMD, DMX, FBX, glTF or GLB")]
     UnsupportedSource(PathBuf),
     #[error("invalid compile option: {0}")]
     InvalidOption(String),
@@ -162,6 +167,21 @@ pub fn compile_model(
 /// Runs on a worker thread. Cancellation is honored until publication begins;
 /// publication then completes or rolls back all model and material files.
 pub fn compile_model_with_cancel(
+    request: &ModelCompileRequest,
+    cancel: &AtomicBool,
+) -> Result<ModelCompileOutput, ModelCompileError> {
+    let (result, warnings) = mdlc::diag::capture_warnings(|| compile_model_inner(request, cancel));
+    result.map(|mut output| {
+        for warning in warnings {
+            if !output.warnings.contains(&warning) {
+                output.warnings.push(warning);
+            }
+        }
+        output
+    })
+}
+
+fn compile_model_inner(
     request: &ModelCompileRequest,
     cancel: &AtomicBool,
 ) -> Result<ModelCompileOutput, ModelCompileError> {
@@ -745,7 +765,8 @@ fn inspect_source(
                 name: sequence.name.clone(),
                 fps: sequence.fps.unwrap_or(30.0),
                 looping: sequence.looping,
-                frame_count: if matches!(extension.as_str(), "smd" | "fbx" | "gltf" | "glb") {
+                frame_count: if matches!(extension.as_str(), "smd" | "dmx" | "fbx" | "gltf" | "glb")
+                {
                     sampled_animation_frames(sequence, base)?
                 } else {
                     0
@@ -925,7 +946,7 @@ pub(crate) fn apply_orientation(
         return Ok(());
     }
     let direct = source.extension().is_some_and(|extension| {
-        ["smd", "fbx", "gltf", "glb"]
+        ["smd", "dmx", "fbx", "gltf", "glb"]
             .iter()
             .any(|value| extension.eq_ignore_ascii_case(value))
     });
@@ -1050,7 +1071,7 @@ pub(crate) fn load_description(
                 .into(),
         ));
     }
-    match extension.as_str() {
+    let result = match extension.as_str() {
         "qc" | "toml" => {
             if !request.lods.is_empty() {
                 return Err(ModelCompileError::InvalidOption(
@@ -1099,7 +1120,7 @@ pub(crate) fn load_description(
                     .map_err(|error| ModelCompileError::Description(error.to_string()))
             }
         }
-        "smd" | "fbx" | "gltf" | "glb" => {
+        "smd" | "dmx" | "fbx" | "gltf" | "glb" => {
             let filename = source
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1140,6 +1161,8 @@ pub(crate) fn load_description(
                 Vec::new()
             } else {
                 match extension.as_str() {
+                    "dmx" => mdlc::dmx::animation_names(source)
+                        .map_err(ModelCompileError::Description)?,
                     "fbx" => mdlc::fbx::animation_names(source, filename)
                         .map_err(|error| ModelCompileError::Description(error.to_string()))?,
                     "gltf" | "glb" => mdlc::gltf::animation_names(source, filename)
@@ -1183,7 +1206,28 @@ pub(crate) fn load_description(
             Ok(desc)
         }
         _ => Err(ModelCompileError::UnsupportedSource(source.to_path_buf())),
-    }
+    };
+    result.map(|mut description| {
+        if description.physics.auto_mass && !request.surface_properties.is_empty() {
+            let authored = std::mem::replace(
+                &mut description.physics.surface_properties,
+                request.surface_properties.clone(),
+            );
+            for surface in authored {
+                if let Some(existing) = description
+                    .physics
+                    .surface_properties
+                    .iter_mut()
+                    .find(|existing| existing.name.eq_ignore_ascii_case(&surface.name))
+                {
+                    *existing = surface;
+                } else {
+                    description.physics.surface_properties.push(surface);
+                }
+            }
+        }
+        description
+    })
 }
 
 fn imported_sequence_names(actions: &[String]) -> Vec<String> {
@@ -1520,6 +1564,7 @@ mod tests {
             flexpair: 0,
             vertanimtype: 0,
             vertanims: vec![mdlc::flex::ResolvedVertAnim {
+                wrinkle: 0.0,
                 index: 0,
                 speed: 0,
                 side: 0,

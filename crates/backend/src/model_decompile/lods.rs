@@ -58,6 +58,17 @@ impl Metadata {
             let mdl_models = relative(raw_mdl, mdl_body, 12)?;
             let mut choices = Vec::new();
             for (choice, (source, vtx)) in part.models.iter().zip(&vtx_part.models).enumerate() {
+                if source.meshes.is_empty() {
+                    let mdl_model = record(mdl_models, choice, 148)?;
+                    if integer(raw_mdl, mdl_model + 80)? != 0
+                        || vtx.lods.len() > levels
+                        || vtx.lods.iter().any(|lod| !lod.meshes.is_empty())
+                    {
+                        return Err(invalid("A blank bodygroup choice contains geometry"));
+                    }
+                    choices.push(Vec::new());
+                    continue;
+                }
                 if vtx.lods.len() != levels {
                     return Err(invalid("A bodygroup choice has an inconsistent LOD count"));
                 }

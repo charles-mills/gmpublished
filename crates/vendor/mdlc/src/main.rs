@@ -158,9 +158,8 @@ fn run_official(argv: &[String]) -> ExitCode {
 
     let norm = mdlc::cli::normalize_official_args(argv);
 
-    // 用户要求：未知选项**一律警告后继续**（不中断编译）。
     if !norm.unknown.is_empty() {
-        log::warn!(
+        mdlc::warning!(
             "{}",
             mdlc::tr_fmt!(
                 "Warning: ignoring unrecognized option(s) %{names} (not implemented by mdlc, or not an official option)",
@@ -182,7 +181,7 @@ fn run_official(argv: &[String]) -> ExitCode {
     // 用它会把「没传的 flag」也报成「已忽略」。
     for name in ["striplods", "definebones", "printbones"] {
         if m.get_flag(name) {
-            log::warn!(
+            mdlc::warning!(
                 "{}",
                 mdlc::tr_fmt!(
                     "Warning: the official option -%{name} is not implemented yet; ignored",
@@ -193,7 +192,7 @@ fn run_official(argv: &[String]) -> ExitCode {
     }
     for name in ["minlod", "t", "a"] {
         if m.value_source(name).is_some() {
-            log::warn!(
+            mdlc::warning!(
                 "{}",
                 mdlc::tr_fmt!(
                     "Warning: the official option -%{name} is not implemented yet; ignored",

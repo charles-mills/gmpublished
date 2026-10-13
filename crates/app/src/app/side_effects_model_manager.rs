@@ -56,9 +56,10 @@ impl App {
             Effect::PickLodSource(generation, directory) => {
                 let title = self.state.i18n.tr("models-lod-source");
                 Task::future(async move {
-                    let mut dialog = rfd::AsyncFileDialog::new()
-                        .set_title(title)
-                        .add_filter("SMD, FBX, glTF, GLB", &["smd", "fbx", "gltf", "glb"]);
+                    let mut dialog = rfd::AsyncFileDialog::new().set_title(title).add_filter(
+                        "SMD, DMX, FBX, glTF, GLB",
+                        &["smd", "dmx", "fbx", "gltf", "glb"],
+                    );
                     if let Some(directory) = directory {
                         dialog = dialog.set_directory(directory);
                     }
@@ -75,7 +76,10 @@ impl App {
                 Task::future(async move {
                     let path = rfd::AsyncFileDialog::new()
                         .set_title(title)
-                        .add_filter(filter, &["qc", "toml", "smd", "fbx", "gltf", "glb", "mdl"])
+                        .add_filter(
+                            filter,
+                            &["qc", "toml", "smd", "dmx", "fbx", "gltf", "glb", "mdl"],
+                        )
                         .pick_file()
                         .await
                         .map(|file| file.path().to_path_buf());
@@ -101,7 +105,10 @@ impl App {
             Effect::Export(generation, request, cancel) => self
                 .environment
                 .ctx
-                .run_blocking("model-export", move |_| export_model(request, &cancel))
+                .run_blocking("model-export", move |services| {
+                    let game = services.settings_and_paths_snapshot().1.gmod_dir;
+                    export_model(request, &cancel, game.as_deref())
+                })
                 .map(move |result| {
                     RootMessage::ModelManager(Message::ExportCompleted(
                         generation,
@@ -109,6 +116,27 @@ impl App {
                     ))
                 }),
             Effect::Reveal(path) => self.reveal_path_task(path),
+            Effect::OpenBlender(path) => {
+                let missing = self.state.i18n.tr("models-blender-missing");
+                let completed_path = path.clone();
+                self.environment
+                    .ctx
+                    .run_blocking("model-open-blender", move |_| {
+                        open_in_blender(&path).map_err(|error| {
+                            if error.kind() == std::io::ErrorKind::NotFound {
+                                missing
+                            } else {
+                                error.to_string()
+                            }
+                        })
+                    })
+                    .map(move |result| {
+                        RootMessage::ModelManager(Message::BlenderOpened(
+                            completed_path.clone(),
+                            result.unwrap_or_else(|error| Err(error.to_string())),
+                        ))
+                    })
+            }
             Effect::Copy(text) => self.copy_text_task(text),
             Effect::Preview(generation, result) => self
                 .environment
@@ -184,9 +212,13 @@ impl App {
                 let selected = path.clone();
                 self.environment
                     .ctx
-                    .run_blocking("model-qc-save", move |_| {
-                        model_project::save_model_qc(&compile_request(request), &path)
-                            .map_err(|error| error.to_string())
+                    .run_blocking("model-qc-save", move |services| {
+                        let game = services.settings_and_paths_snapshot().1.gmod_dir;
+                        model_project::save_model_qc(
+                            &compile_request(request, game.as_deref())?,
+                            &path,
+                        )
+                        .map_err(|error| error.to_string())
                     })
                     .map(move |result| {
                         RootMessage::ModelManager(Message::QcSaved(
@@ -251,8 +283,9 @@ impl App {
             Effect::BuildPreview(generation, request) => self
                 .environment
                 .ctx
-                .run_blocking("model-preview-build", move |_| {
-                    build_preview(generation, request)
+                .run_blocking("model-preview-build", move |services| {
+                    let game = services.settings_and_paths_snapshot().1.gmod_dir;
+                    build_preview(generation, request, game.as_deref())
                 })
                 .map(move |result| {
                     RootMessage::ModelManager(Message::PreviewBuilt(
@@ -330,9 +363,33 @@ impl App {
 fn export_model(
     request: model_manager::ExportRequest,
     cancel: &AtomicBool,
+    game_directory: Option<&Path>,
 ) -> Result<model_manager::ExportResult, String> {
     if request.kind == model_manager::SourceKind::Compiled {
-        let destination = decompile_destination(&request.source, &request.destination);
+        if request.target == model_manager::ExportTarget::Blender {
+            let destination = export_destination(&request.source, &request.destination, "blender");
+            let resolver = std::cell::LazyCell::new(|| {
+                crate::bridge::materials::MaterialResolver::new(
+                    PreviewArchiveSource::from_folder(Vec::new()),
+                    game_directory.map(Path::to_path_buf),
+                )
+            });
+            let report = model_decompile::export_blender_model_with_cancel(
+                &request.source,
+                &destination,
+                cancel,
+                |path| resolver.entry_bytes(path),
+            )
+            .map_err(|error| error.to_string())?;
+            return Ok(model_manager::ExportResult {
+                directory: report.output_directory,
+                files: report.files,
+                bytes: report.bytes_written,
+                warnings: report.warnings,
+                compiled: false,
+            });
+        }
+        let destination = export_destination(&request.source, &request.destination, "source");
         let report =
             model_decompile::decompile_model_with_cancel(&request.source, &destination, cancel)
                 .map_err(|error| error.to_string())?;
@@ -345,7 +402,7 @@ fn export_model(
         });
     }
     let destination = request.destination.clone();
-    let options = compile_request(request);
+    let options = compile_request(request, game_directory)?;
     let output = model_compile::compile_model_with_cancel(&options, cancel)
         .map_err(|error| error.to_string())?;
     let directory = std::fs::canonicalize(&destination).map_err(|error| error.to_string())?;
@@ -358,7 +415,11 @@ fn export_model(
     })
 }
 
-fn compile_request(request: model_manager::ExportRequest) -> model_compile::ModelCompileRequest {
+fn compile_request(
+    request: model_manager::ExportRequest,
+    game_directory: Option<&Path>,
+) -> Result<model_compile::ModelCompileRequest, String> {
+    let load_surfaces = request.kind == model_manager::SourceKind::Description;
     let mut options = model_compile::ModelCompileRequest::new(request.source, request.destination);
     options.qc_text = request.qc_text;
     options.model_name = request.model_name;
@@ -376,12 +437,23 @@ fn compile_request(request: model_manager::ExportRequest) -> model_compile::Mode
     options.bodygroups = request.bodygroups;
     options.lods = request.lods;
     options.animation_settings = request.animation_settings;
-    options
+    if load_surfaces && let Some(game_directory) = game_directory {
+        let resolver = std::cell::LazyCell::new(|| {
+            crate::bridge::materials::MaterialResolver::new(
+                PreviewArchiveSource::from_folder(Vec::new()),
+                Some(game_directory.to_path_buf()),
+            )
+        });
+        model_compile::load_surface_properties(&mut options, |path| resolver.entry_bytes(path))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(options)
 }
 
 fn build_preview(
     generation: Generation,
     mut request: model_manager::ExportRequest,
+    game_directory: Option<&Path>,
 ) -> Result<model_manager::PreviewBuild, String> {
     let directory = std::sync::Arc::new(tempfile::tempdir().map_err(|error| error.to_string())?);
     if request.kind == model_manager::SourceKind::Compiled {
@@ -395,26 +467,126 @@ fn build_preview(
     request.destination = directory.path().to_path_buf();
     request.overwrite = false;
     request.export_materials = true;
-    let result = export_model(request, &AtomicBool::new(false))?;
+    let result = export_model(request, &AtomicBool::new(false), game_directory)?;
     Ok(model_manager::PreviewBuild {
         result,
         _directory: directory,
     })
 }
 
-fn decompile_destination(source: &Path, root: &Path) -> PathBuf {
+fn export_destination(source: &Path, root: &Path, suffix: &str) -> PathBuf {
     let stem = source.file_stem().unwrap_or_default().to_string_lossy();
-    let base = root.join(format!("{stem}_source"));
+    let base = root.join(format!("{stem}_{suffix}"));
     if !base.exists() {
         return base;
     }
     for index in 2.. {
-        let candidate = root.join(format!("{stem}_source_{index}"));
+        let candidate = root.join(format!("{stem}_{suffix}_{index}"));
         if !candidate.exists() {
             return candidate;
         }
     }
     unreachable!()
+}
+
+const BLENDER_IMPORT_EXPRESSION: &str = r"import bpy, math, sys
+bpy.ops.wm.read_factory_settings(use_empty=True)
+options = {'import_scene_as_collection': True} if 'import_scene_as_collection' in bpy.ops.import_scene.gltf.get_rna_type().properties else {}
+bpy.ops.import_scene.gltf(filepath=sys.argv[-1], **options)
+frame_end = max(1, math.ceil(max((action.frame_range[1] for action in bpy.data.actions), default=1)))
+for scene in bpy.data.scenes:
+    scene.frame_start = 0
+    scene.frame_end = frame_end
+    scene.frame_set(0)
+if not bpy.app.background:
+    for window in bpy.context.window_manager.windows:
+        layer = window.view_layer
+        meshes = [obj for obj in layer.objects if obj.type == 'MESH' and obj.visible_get(view_layer=layer)]
+        if not meshes:
+            continue
+        for obj in layer.objects:
+            obj.select_set(False, view_layer=layer)
+        for obj in meshes:
+            obj.select_set(True, view_layer=layer)
+        layer.objects.active = meshes[0]
+        for area in window.screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            region = next((region for region in area.regions if region.type == 'WINDOW'), None)
+            if region is not None:
+                with bpy.context.temp_override(window=window, area=area, region=region):
+                    if bpy.ops.view3d.view_selected.poll():
+                        bpy.ops.view3d.view_selected(use_all_regions=False)
+";
+
+fn blender_executable() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let mut candidates = Vec::new();
+        let roots: std::collections::BTreeSet<_> =
+            ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
+                .into_iter()
+                .filter_map(std::env::var_os)
+                .map(PathBuf::from)
+                .collect();
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(root.join("Blender Foundation")) else {
+                continue;
+            };
+            let entries: Vec<_> = entries.take(129).collect();
+            if entries.len() > 128 {
+                continue;
+            }
+            for entry in entries.into_iter().flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.to_ascii_lowercase().starts_with("blender") {
+                    continue;
+                }
+                let executable = entry.path().join("blender.exe");
+                if executable.is_file() {
+                    let version: Vec<u32> = name
+                        .split(|character: char| !character.is_ascii_digit())
+                        .filter_map(|component| component.parse().ok())
+                        .collect();
+                    candidates.push((version, executable));
+                }
+            }
+        }
+        if let Some((_, path)) = candidates.into_iter().max() {
+            return path;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let system = PathBuf::from("/Applications/Blender.app/Contents/MacOS/Blender");
+        if system.is_file() {
+            return system;
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let user = PathBuf::from(home).join("Applications/Blender.app/Contents/MacOS/Blender");
+            if user.is_file() {
+                return user;
+            }
+        }
+    }
+    PathBuf::from("blender")
+}
+
+fn blender_import_command(path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(blender_executable());
+    command
+        .args(["--python-expr", BLENDER_IMPORT_EXPRESSION, "--"])
+        .arg(path);
+    command
+}
+
+fn open_in_blender(path: &Path) -> std::io::Result<()> {
+    let mut child = blender_import_command(path).spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn prepare_preview(
@@ -480,11 +652,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blender_filenames_are_arguments_and_never_executable_python() {
+        for filename in [
+            "exports/charles' model.glb",
+            "C:\\Models\\\"quoted\"\\model.glb",
+            "exports/车辆🦊/model.glb",
+            "exports/\"); __import__('os').system('unwanted'); #.glb",
+            "--python-expr=unwanted.glb",
+        ] {
+            let command = blender_import_command(Path::new(filename));
+            let arguments: Vec<_> = command.get_args().collect();
+            assert_eq!(arguments.len(), 4);
+            assert_eq!(arguments[0], "--python-expr");
+            assert_eq!(arguments[2], "--");
+            assert_eq!(arguments[3], filename);
+            assert!(
+                arguments[1]
+                    .to_str()
+                    .unwrap()
+                    .contains("filepath=sys.argv[-1]")
+            );
+            assert!(!arguments[1].to_str().unwrap().contains(filename));
+        }
+    }
+
+    #[test]
     fn repeated_decompiles_select_new_directories() {
         let temp = tempfile::tempdir().expect("directory");
         std::fs::create_dir(temp.path().join("prop_source")).expect("first export");
         assert_eq!(
-            decompile_destination(Path::new("prop.mdl"), temp.path()),
+            export_destination(Path::new("prop.mdl"), temp.path(), "source"),
             temp.path().join("prop_source_2")
         );
     }

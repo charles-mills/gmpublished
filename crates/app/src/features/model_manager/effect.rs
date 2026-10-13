@@ -12,6 +12,7 @@ pub enum Effect {
     PickDestination(Generation, Option<PathBuf>),
     Export(Generation, ExportRequest, Arc<AtomicBool>),
     Reveal(PathBuf),
+    OpenBlender(PathBuf),
     Copy(String),
     Preview(Generation, ExportResult),
     OpenPreview(crate::media::preview_model::PreviewRequest),

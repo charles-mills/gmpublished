@@ -31,6 +31,7 @@ pub const MIN_NDELTA_SQR: f32 = 0.001;
 /// 一条已解析的 vertanim（`mstudiovertanim_t` 的语义值，尚未编码）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedVertAnim {
+    pub wrinkle: f32,
     /// **该 mesh 内**的顶点下标（不是 model 全局下标）。
     pub index: u32,
     /// 0..=255。`255 * speed`（`write.cpp:1790`）。
@@ -53,9 +54,6 @@ pub struct ResolvedFlex {
     /// `mstudioflex_t.flexpair` —— 配对的另一个 desc 下标（0 = 未配对）。
     pub flexpair: i32,
     /// `mstudioflex_t.vertanimtype`（0 = NORMAL 16 字节，1 = WRINKLE 18 字节）。
-    ///
-    /// mdlc 目前只产出 NORMAL —— 语料里 `vertanimtype=1` 只出现在
-    /// `survivor_gambler`，且来自 DMX 工具链（不在本实现范围）。
     pub vertanimtype: u8,
     pub vertanims: Vec<ResolvedVertAnim>,
 }
@@ -520,6 +518,7 @@ pub fn resolve_flex_indexed(
                     (len / (max_len * flex.decay)).clamp(0.0, 1.0)
                 };
                 ResolvedVertAnim {
+                    wrinkle: 0.0,
                     index: p.local,
                     speed: (255.0 * speed) as u8,
                     side: (255.0 * p.side.clamp(0.0, 1.0)) as u8,

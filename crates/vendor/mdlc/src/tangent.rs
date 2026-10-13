@@ -136,6 +136,14 @@ pub fn orthonormalize(acc_s: [f32; 3], acc_t: [f32; 3], normal: [f32; 3]) -> Vvd
 /// `vertices` 的每一项都参与输出（哪怕没有任何入射三角形，输出零切线）。
 /// 这与 studiomdl 一致：它遍历 `0..pMesh->numvertices`，孤立顶点得到零。
 pub fn tangents_for_mesh(vertices: &[Vertex], triangles: &[[u32; 3]]) -> Vec<VvdTangent> {
+    tangents_for_mesh_with_smoothing(vertices, triangles, false)
+}
+
+pub fn tangents_for_mesh_with_smoothing(
+    vertices: &[Vertex],
+    triangles: &[[u32; 3]],
+    smooth: bool,
+) -> Vec<VvdTangent> {
     // 累加器。按顶点分别累加入射三角形的贡献。
     let mut acc_s = vec![[0.0f32; 3]; vertices.len()];
     let mut acc_t = vec![[0.0f32; 3]; vertices.len()];
@@ -164,11 +172,54 @@ pub fn tangents_for_mesh(vertices: &[Vertex], triangles: &[[u32; 3]]) -> Vec<Vvd
         }
     }
 
+    // $zbrush combines coincident positions across UV and normal splits.
+    if smooth {
+        smooth_accumulators(
+            vertices.iter().map(|vertex| (0, vertex.pos)),
+            &mut acc_s,
+            &mut acc_t,
+        );
+    }
+
     vertices
         .iter()
         .enumerate()
         .map(|(i, v)| orthonormalize(acc_s[i], acc_t[i], v.normal))
         .collect()
+}
+
+pub(crate) fn smooth_accumulators(
+    positions: impl IntoIterator<Item = (usize, [f32; 3])>,
+    acc_s: &mut [[f32; 3]],
+    acc_t: &mut [[f32; 3]],
+) {
+    let keys: Vec<_> = positions
+        .into_iter()
+        .enumerate()
+        .map(|(index, (mesh, position))| {
+            let bits = position.map(|value| if value == 0.0 { 0 } else { value.to_bits() });
+            (
+                mesh,
+                bits,
+                if position.iter().any(|value| value.is_nan()) {
+                    index + 1
+                } else {
+                    0
+                },
+            )
+        })
+        .collect();
+    let mut groups = std::collections::HashMap::new();
+    for (index, key) in keys.iter().enumerate() {
+        let (s, t) = groups.entry(*key).or_insert(([0.0; 3], [0.0; 3]));
+        for axis in 0..3 {
+            s[axis] += acc_s[index][axis];
+            t[axis] += acc_t[index][axis];
+        }
+    }
+    for (index, key) in keys.iter().enumerate() {
+        (acc_s[index], acc_t[index]) = groups[key];
+    }
 }
 
 /// 由法线导出一个正交的切线（**不是** studiomdl 的行为）。
@@ -429,5 +480,47 @@ mod tests {
         let down = tangents_for_mesh(&make(-1.0), &[[0u32, 1, 2]]);
         assert_eq!(up[0].w, 1.0);
         assert_eq!(down[0].w, -1.0);
+    }
+    #[test]
+    fn zbrush_smooths_uv_seams_by_position_and_projects_to_each_normal() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let mut vertices: Vec<_> = positions
+            .iter()
+            .zip([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+            .map(|(&position, uv)| v(position, [0.0, 0.0, 1.0], uv))
+            .collect();
+        vertices.extend(
+            positions
+                .iter()
+                .zip([[0.5, 0.5], [0.5, 1.5], [-0.5, 0.5]])
+                .map(|(&position, uv)| v(position, [0.0, 0.0, 1.0], uv)),
+        );
+        vertices.extend(
+            positions
+                .iter()
+                .zip([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+                .map(|(&position, uv)| {
+                    v(
+                        [position[0] + 10.0, position[1], position[2]],
+                        [0.0, 0.0, 1.0],
+                        uv,
+                    )
+                }),
+        );
+        vertices[3].pos[0] = -0.0;
+        let triangles = [[0, 1, 2], [3, 4, 5], [6, 7, 8]];
+        let original = tangents_for_mesh(&vertices, &triangles);
+        let smoothed = tangents_for_mesh_with_smoothing(&vertices, &triangles, true);
+        assert_eq!(original[0].xyz, [1.0, 0.0, 0.0]);
+        assert_eq!(original[3].xyz, [0.0, -1.0, 0.0]);
+        for tangent in &smoothed[..6] {
+            assert!((tangent.xyz[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.00001);
+            assert!((tangent.xyz[1] + std::f32::consts::FRAC_1_SQRT_2).abs() < 0.00001);
+            assert_eq!(tangent.xyz[2], 0.0);
+        }
+        assert_eq!(smoothed[6..], original[6..]);
+        vertices[3].normal = [0.0, 1.0, 0.0];
+        let normal_split = tangents_for_mesh_with_smoothing(&vertices, &triangles, true);
+        assert_eq!(normal_split[3].xyz, [1.0, 0.0, 0.0]);
     }
 }

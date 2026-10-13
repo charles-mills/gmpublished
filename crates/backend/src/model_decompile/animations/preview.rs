@@ -512,6 +512,7 @@ pub fn load_animation_preview(
                     )?;
                     let root_rotation =
                         bone_math::angle_quaternion([0.0, 0.0, std::f32::consts::FRAC_PI_2]);
+                    let delta = decoded.flags & 4 != 0;
                     let frames = decoded
                         .frames
                         .into_iter()
@@ -524,8 +525,10 @@ pub fn load_animation_preview(
                                     let mut position = pose.position;
                                     if bone.parent < 0 {
                                         position = [-position[1], position[0], position[2]];
-                                        rotation =
-                                            bone_math::quaternion_mult(root_rotation, rotation);
+                                        if !delta {
+                                            rotation =
+                                                bone_math::quaternion_mult(root_rotation, rotation);
+                                        }
                                     }
                                     Pose { position, rotation }
                                 })

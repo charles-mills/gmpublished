@@ -29,11 +29,13 @@ pub fn validate_lods(lods: &[ModelLod], bodygroups: bool) -> Result<(), ModelCom
             ));
         }
         if !lod.source.extension().is_some_and(|extension| {
-            ["smd", "fbx", "gltf", "glb"]
+            ["smd", "dmx", "fbx", "gltf", "glb"]
                 .iter()
                 .any(|allowed| extension.eq_ignore_ascii_case(allowed))
         }) {
-            return Err(invalid("LOD meshes must be SMD, FBX, glTF or GLB files"));
+            return Err(invalid(
+                "LOD meshes must be SMD, DMX, FBX, glTF or GLB files",
+            ));
         }
         previous = lod.switch_point;
     }

@@ -1174,3 +1174,177 @@ fn portable_qc_preserves_native_comments_macro_continuations_and_scale_order() {
     assert_eq!(parsed.bodyparts[0].models[0].input_scale, Some(1.0));
     assert_eq!(parsed.bodyparts[1].models[0].input_scale, Some(2.0));
 }
+
+#[test]
+fn portable_qc_preserves_virtual_vta_appended_obj_and_wavefront_dependencies() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("input");
+    fs::create_dir_all(input.join("models")).unwrap();
+    fs::create_dir(root.path().join("textures")).unwrap();
+    let obj =
+        "mtllib paint.mtl\nv 1 2 3\nv 4 2 3\nv 1 5 3\nvn 0 0 1\nusemtl body\nf 1//1 2//1 3//1\n";
+    fs::write(input.join("models/base.obj"), obj).unwrap();
+    fs::write(
+        input.join("models/shape.obj"),
+        obj.replacen("v 1 2 3", "v 1 2 4", 1),
+    )
+    .unwrap();
+    fs::write(input.join("models/extra.obj"), obj).unwrap();
+    fs::write(
+        input.join("models/paint.mtl"),
+        "newmtl body\nmap_Kd ../../textures/paint.png\n",
+    )
+    .unwrap();
+    let texture = root.path().join("textures/paint.png");
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([100, 150, 200, 255]))
+        .save(&texture)
+        .unwrap();
+    let texture_bytes = fs::read(&texture).unwrap();
+    fs::write(input.join("mesh.smd"), "version 1\nnodes\n0 \"default\" -1\nend\nskeleton\ntime 0\n0 0 0 0 0 0 0\nend\ntriangles\npaint\n0 1 -3 2 0 -1 0 0 0 1 0 1\n0 1 -3 5 0 -1 0 0 0 1 0 1\n0 4 -3 2 0 -1 0 0 0 1 0 1\nend\n").unwrap();
+    let source = input.join("original.qc");
+    let original = "$modelname props/source_support.mdl\n$fakevta virtual {\n appendvta models/base.obj 0\n appendvta models/shape.obj 1\n}\n$model body mesh.smd {\n flexfile virtual\n flex moved frame 1\n}\n$appendsource models/extra.obj \"offset pos[ 10 20 30 ] angle[ 0 0 0 ] scale[ 1 ]\"\n";
+    fs::write(&source, original).unwrap();
+    let mut request = ModelCompileRequest::new(source.clone(), root.path().join("original_output"));
+    request.static_prop = false;
+    request.export_materials = false;
+    let expected = compile_model(&request).unwrap();
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("portable.qc")).unwrap();
+    assert_eq!(fs::read_to_string(&source).unwrap(), original);
+    assert_eq!(
+        fs::read(saved.join("portable_sources/textures/paint.png")).unwrap(),
+        texture_bytes
+    );
+    assert_eq!(
+        fs::read_to_string(saved.join("portable_sources/input/models/extra.obj")).unwrap(),
+        obj
+    );
+    assert!(!saved.join("portable_sources/input/virtual.vta").exists());
+    for (dependency, portable, absolute) in [
+        (
+            input.join("models/base.obj"),
+            obj.to_owned(),
+            obj.replace(
+                "mtllib paint.mtl",
+                &format!("mtllib {}", input.join("models/paint.mtl").display()),
+            ),
+        ),
+        (
+            input.join("models/paint.mtl"),
+            "newmtl body\nmap_Kd ../../textures/paint.png\n".to_owned(),
+            format!("newmtl body\nmap_Kd {}\n", texture.display()),
+        ),
+    ] {
+        fs::write(&dependency, absolute).unwrap();
+        let error = save_model_qc(&request, &saved.join("portable.qc")).unwrap_err();
+        assert!(error.to_string().contains("relative Wavefront"));
+        fs::write(dependency, portable).unwrap();
+    }
+    fs::remove_dir_all(&input).unwrap();
+    fs::remove_dir_all(root.path().join("textures")).unwrap();
+    let moved = root.path().join("moved");
+    fs::rename(saved, &moved).unwrap();
+    let mut request =
+        ModelCompileRequest::new(moved.join("portable.qc"), root.path().join("recompiled"));
+    request.static_prop = false;
+    request.export_materials = false;
+    let actual = compile_model(&request).unwrap();
+    assert_eq!(vertices(&expected), vertices(&actual));
+    assert_eq!(
+        bytes(&expected, ModelOutputKind::Mdl),
+        bytes(&actual, ModelOutputKind::Mdl)
+    );
+}
+
+#[test]
+fn portable_qc_relocates_search_directories_and_their_includes() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("input");
+    let shared = root.path().join("shared");
+    fs::create_dir(&input).unwrap();
+    fs::create_dir(&shared).unwrap();
+    fs::write(
+        shared.join("mesh.smd"),
+        include_str!("../../../vendor/mdlc/tests/fixtures/cube.smd"),
+    )
+    .unwrap();
+    fs::write(
+        shared.join("body.qci"),
+        "$body body mesh.smd\n$surfaceprop metal\n",
+    )
+    .unwrap();
+    let source = input.join("original.qc");
+    fs::write(
+        &source,
+        format!(
+            "$modelname props/search.mdl\n$addsearchdir \"{}\"\n$include body.qci\n",
+            shared.display()
+        ),
+    )
+    .unwrap();
+    let mut request = ModelCompileRequest::new(source, root.path().join("original_output"));
+    request.export_materials = false;
+    let expected = compile_model(&request).unwrap();
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("portable.qc")).unwrap();
+    fs::remove_dir_all(&input).unwrap();
+    fs::remove_dir_all(&shared).unwrap();
+    let moved = root.path().join("moved");
+    fs::rename(saved, &moved).unwrap();
+    let mut request =
+        ModelCompileRequest::new(moved.join("portable.qc"), root.path().join("recompiled"));
+    request.export_materials = false;
+    let actual = compile_model(&request).unwrap();
+    assert_eq!(
+        bytes(&expected, ModelOutputKind::Mdl),
+        bytes(&actual, ModelOutputKind::Mdl)
+    );
+    assert_eq!(vertices(&expected), vertices(&actual));
+}
+
+#[test]
+fn direct_dmx_import_and_portable_qc_preserve_mesh_parts_and_morph_output() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("triangle.dmx");
+    fs::write(
+        &source,
+        include_bytes!("../../../vendor/mdlc/tests/fixtures/dmx.dmx"),
+    )
+    .unwrap();
+    let inspection = model_compile::inspect_model(&source).unwrap();
+    assert_eq!(
+        inspection
+            .parts
+            .iter()
+            .map(|part| part.name.as_str())
+            .collect::<Vec<_>>(),
+        ["body"]
+    );
+    assert_eq!(inspection.materials, ["paint"]);
+    assert_eq!(inspection.animations[0].frame_count, 1);
+    let mut request = ModelCompileRequest::new(source.clone(), root.path().join("original_output"));
+    request.model_name = Some("props/dmx.mdl".into());
+    request.static_prop = false;
+    request.export_materials = false;
+    let expected = compile_model(&request).unwrap();
+    let mdl = bytes(&expected, ModelOutputKind::Mdl);
+    assert_eq!(i32::from_le_bytes(mdl[268..272].try_into().unwrap()), 1);
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("portable.qc")).unwrap();
+    fs::remove_file(source).unwrap();
+    let moved = root.path().join("moved");
+    fs::rename(saved, &moved).unwrap();
+    let mut request =
+        ModelCompileRequest::new(moved.join("portable.qc"), root.path().join("recompiled"));
+    request.static_prop = false;
+    request.export_materials = false;
+    let actual = compile_model(&request).unwrap();
+    assert_eq!(vertices(&expected), vertices(&actual));
+    assert_eq!(
+        bytes(&expected, ModelOutputKind::Mdl),
+        bytes(&actual, ModelOutputKind::Mdl)
+    );
+}
