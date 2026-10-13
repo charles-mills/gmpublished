@@ -1,3 +1,4 @@
+use gmpublished_backend::model_decompile::PreviewPose;
 use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 
@@ -50,7 +51,12 @@ impl UploadCache {
         scene: &RenderScene,
         map: Option<&MapPreview>,
     ) {
-        if self.uploads.contains_key(&content_id) {
+        let scene_key = std::ptr::from_ref(scene).addr();
+        if self
+            .uploads
+            .get(&content_id)
+            .is_some_and(|upload| upload.scene_key == scene_key)
+        {
             return;
         }
 
@@ -200,6 +206,8 @@ impl UploadCache {
         self.uploads.insert(
             content_id,
             UploadedModel {
+                scene_key,
+                animation_pose: None,
                 meshes,
                 detail_sprites,
                 map_skybox_detail_sprites,
@@ -219,6 +227,8 @@ impl UploadCache {
 
 #[derive(Debug)]
 pub struct UploadedModel {
+    scene_key: usize,
+    animation_pose: Option<PreviewPose>,
     pub meshes: Vec<UploadedMesh>,
     pub detail_sprites: Option<UploadedDetailSprites>,
     pub map_skybox_detail_sprites: Option<UploadedDetailSprites>,
@@ -234,6 +244,42 @@ pub struct UploadedModel {
 }
 
 impl UploadedModel {
+    pub fn update_animation_vertices(
+        &mut self,
+        queue: &wgpu::Queue,
+        model: &crate::media::preview_model::ModelPreview,
+        pose: Option<&PreviewPose>,
+    ) {
+        if self.animation_pose.as_ref() == pose {
+            return;
+        }
+        let Some(geometry) = model.evaluated_geometry(pose) else {
+            return;
+        };
+        let animated = geometry.vertices.as_ref();
+        for mesh in &mut self.meshes {
+            let Some(original) = model.scene.meshes.get(mesh.scene_mesh_index) else {
+                continue;
+            };
+            let mut vertices = original.vertices.clone();
+            if let Some(animated) = animated {
+                let Some(pose) = animated
+                    .get(mesh.scene_mesh_index)
+                    .filter(|pose| pose.len() == vertices.len())
+                else {
+                    return;
+                };
+                for (vertex, pose) in vertices.iter_mut().zip(pose) {
+                    vertex.position = Vec3::from(pose.position);
+                    vertex.normal = Vec3::from(pose.normal);
+                }
+            }
+            queue.write_buffer(&mesh.vertices, 0, bytemuck::cast_slice(&vertices));
+            mesh.centroid = mesh_centroid(&vertices);
+        }
+        self.animation_pose = pose.cloned();
+    }
+
     pub fn has_map_skybox_content(&self) -> bool {
         self.meshes.iter().any(|mesh| mesh.map_skybox)
             || self.map_skybox_detail_sprites.is_some()

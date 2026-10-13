@@ -16,6 +16,7 @@ mapped_enum_with_all! {
         InstalledAddons => "installed-addons",
         Downloader => "downloader",
         SizeAnalyzer => "size-analyzer",
+        Models => "models",
     }
     label_key -> &'static str
 }
@@ -27,6 +28,7 @@ impl Route {
             Self::InstalledAddons => assets::icons::route_installed_addons(),
             Self::Downloader => assets::icons::route_downloader(),
             Self::SizeAnalyzer => assets::icons::route_size_analyzer(),
+            Self::Models => assets::icons::route_models(),
         }
     }
 }

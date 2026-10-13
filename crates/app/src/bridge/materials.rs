@@ -418,6 +418,12 @@ impl DecodedTextureBudget {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum DecodedTextureCacheKey {
+    Tinted {
+        path: ContentPath,
+        preserve_alpha: bool,
+        max_dimension: Option<u32>,
+        tint: [u32; 3],
+    },
     Rgba {
         path: ContentPath,
         preserve_alpha: bool,
@@ -625,14 +631,13 @@ impl MaterialResolver {
         let texture = material
             .base_texture
             .as_deref()
-            .and_then(|base_texture| {
-                self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-            })
+            .and_then(|base_texture| self.resolve_material_texture(base_texture, &material))
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material));
-        let texture2 = material.base_texture2.as_deref().and_then(|base_texture| {
-            self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-        });
+        let texture2 = material
+            .base_texture2
+            .as_deref()
+            .and_then(|base_texture| self.resolve_material_texture(base_texture, &material));
 
         (texture.is_some() || texture2.is_some()).then_some(ResolvedMaterialTextures {
             texture,
@@ -654,9 +659,7 @@ impl MaterialResolver {
         let texture = material
             .base_texture
             .as_deref()
-            .and_then(|base_texture| {
-                self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-            })
+            .and_then(|base_texture| self.resolve_material_texture(base_texture, &material))
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material))?;
         Some(ResolvedPrimaryMaterial {
@@ -674,10 +677,10 @@ impl MaterialResolver {
         let vmt_text = String::from_utf8_lossy(vmt_bytes);
         let mut visited_includes = vec![material_path.clone()];
         let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
-        let render_mode = material.render_mode();
-        material.base_texture.as_deref().and_then(|base_texture| {
-            self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-        })
+        material
+            .base_texture
+            .as_deref()
+            .and_then(|base_texture| self.resolve_material_texture(base_texture, &material))
     }
 
     fn effective_material(
@@ -725,6 +728,42 @@ impl MaterialResolver {
         });
         visited_includes.pop();
         material
+    }
+
+    fn resolve_material_texture(
+        &self,
+        base_texture: &str,
+        material: &EffectiveMaterial,
+    ) -> Option<Arc<ResolvedTexture>> {
+        let tint = material.tint();
+        let preserve_alpha = material.render_mode().preserves_texture_alpha();
+        if tint == [1.0; 3] {
+            return self.resolve_texture(base_texture, preserve_alpha);
+        }
+        let key = DecodedTextureCacheKey::Tinted {
+            path: texture_path(base_texture)?,
+            preserve_alpha,
+            max_dimension: self.config.decoded_texture_max_dimension,
+            tint: tint.map(f32::to_bits),
+        };
+        if let Some(texture) = self.cached_decoded_texture(&key) {
+            return Some(texture);
+        }
+        // Tint a private RGBA copy; the shared source may still be used compressed by other materials.
+        let source = self
+            .with_bc_textures_disabled()
+            .resolve_texture(base_texture, preserve_alpha)?;
+        let mut texture = source.without_mip_chain();
+        let ResolvedTexturePayload::Rgba { rgba, .. } = &mut texture.payload else {
+            return None;
+        };
+        for pixel in rgba.chunks_exact_mut(4) {
+            for channel in 0..3 {
+                pixel[channel] =
+                    linear_to_srgb_byte(srgb_byte_to_linear(pixel[channel]) * tint[channel]);
+            }
+        }
+        self.cache_decoded_texture(key, with_generated_mip_chain(texture))
     }
 
     fn resolve_texture(
@@ -1155,6 +1194,8 @@ struct EffectiveMaterial {
     base_texture2: Option<String>,
     env_map: Option<String>,
     fog_color: Option<String>,
+    color: Option<String>,
+    color2: Option<String>,
     alpha_test: bool,
     translucent: bool,
     additive: bool,
@@ -1172,10 +1213,26 @@ impl EffectiveMaterial {
                 .and_then(normalize_texture_name),
             env_map: document.value("$envmap").and_then(normalize_texture_name),
             fog_color: document.value("$fogcolor").map(str::to_owned),
+            color: document.value("$color").map(str::to_owned),
+            color2: document.value("$color2").map(str::to_owned),
             alpha_test: vmt_bool(document.value("$alphatest")),
             translucent: vmt_bool(document.value("$translucent")),
             additive: vmt_bool(document.value("$additive")),
         }
+    }
+
+    fn tint(&self) -> [f32; 3] {
+        let color = self
+            .color
+            .as_deref()
+            .and_then(parse_material_color)
+            .unwrap_or([1.0; 3]);
+        let color2 = self
+            .color2
+            .as_deref()
+            .and_then(parse_material_color)
+            .unwrap_or([1.0; 3]);
+        std::array::from_fn(|index| color[index] * color2[index])
     }
 
     fn render_mode(&self) -> RenderMode {
@@ -1228,6 +1285,16 @@ impl EffectiveMaterial {
         if let Some(value) = patch.value("$envmap").and_then(normalize_texture_name) {
             self.env_map = Some(value);
         }
+        for key in ["$color", "$color2"] {
+            if let Some(value) = patch.value(key).or_else(|| document.value(key)) {
+                let target = if key == "$color" {
+                    &mut self.color
+                } else {
+                    &mut self.color2
+                };
+                *target = Some(value.to_owned());
+            }
+        }
         if let Some(value) = document.value("$fogcolor") {
             self.fog_color = Some(value.to_owned());
         }
@@ -1253,6 +1320,25 @@ impl EffectiveMaterial {
             self.additive = vmt_bool(Some(value));
         }
     }
+}
+
+fn parse_material_color(value: &str) -> Option<[f32; 3]> {
+    let value = value.trim();
+    let (inner, scale) = bracketed_value(value, '[', ']')
+        .map(|inner| (inner, 1.0))
+        .or_else(|| bracketed_value(value, '{', '}').map(|inner| (inner, 1.0 / 255.0)))
+        .unwrap_or((value, 1.0));
+    let components = inner
+        .split(|character: char| character.is_ascii_whitespace() || character == ',')
+        .filter(|value| !value.is_empty())
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let color: [f32; 3] = components.try_into().ok()?;
+    color
+        .iter()
+        .all(|component| component.is_finite() && *component >= 0.0)
+        .then(|| color.map(|component| (component * scale).min(16.0)))
 }
 
 fn vmt_bool(value: Option<&str>) -> bool {

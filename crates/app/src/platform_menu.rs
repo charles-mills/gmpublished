@@ -28,6 +28,7 @@ const ID_ROUTE_MY_WORKSHOP: &str = "menu.route.my-workshop";
 const ID_ROUTE_INSTALLED_ADDONS: &str = "menu.route.installed-addons";
 const ID_ROUTE_DOWNLOADER: &str = "menu.route.downloader";
 const ID_ROUTE_SIZE_ANALYZER: &str = "menu.route.size-analyzer";
+const ID_ROUTE_MODELS: &str = "menu.route.models";
 const ID_GITHUB: &str = "menu.github";
 const ID_REPORT_ISSUE: &str = "menu.report-issue";
 const ID_UPSTREAM: &str = "menu.upstream";
@@ -130,6 +131,13 @@ static SIZE_ANALYZER: CommandItem = CommandItem {
     shortcut: Some(Code::Digit4),
 };
 
+static MODELS: CommandItem = CommandItem {
+    id: ID_ROUTE_MODELS,
+    label_key: Route::Models.label_key(),
+    command: Command::Navigate(Route::Models),
+    shortcut: Some(Code::Digit5),
+};
+
 static GITHUB: CommandItem = CommandItem {
     id: ID_GITHUB,
     label_key: "menu-github",
@@ -158,6 +166,7 @@ static COMMAND_ITEMS: &[&CommandItem] = &[
     &INSTALLED_ADDONS,
     &DOWNLOADER,
     &SIZE_ANALYZER,
+    &MODELS,
     &GITHUB,
     &REPORT_ISSUE,
     &UPSTREAM,
@@ -223,10 +232,17 @@ fn go_menu(i18n: &I18n) -> muda::Result<Submenu> {
     let installed_addons = command_menu_item(i18n, &INSTALLED_ADDONS);
     let downloader = command_menu_item(i18n, &DOWNLOADER);
     let size_analyzer = command_menu_item(i18n, &SIZE_ANALYZER);
+    let models = command_menu_item(i18n, &MODELS);
     Submenu::with_items(
         i18n.tr("menu-go"),
         true,
-        &[&my_workshop, &installed_addons, &downloader, &size_analyzer],
+        &[
+            &my_workshop,
+            &installed_addons,
+            &downloader,
+            &size_analyzer,
+            &models,
+        ],
     )
 }
 

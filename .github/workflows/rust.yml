@@ -40,6 +40,28 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  mdlc:
+    name: mdlc / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      RUSTC_WRAPPER: ""
+      MDLC_NO_UPDATE_CHECK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Test model compiler
+        run: cargo test --manifest-path crates/vendor/mdlc/Cargo.toml --locked
+
+      - name: Lint model compiler
+        run: cargo clippy --manifest-path crates/vendor/mdlc/Cargo.toml --all-targets --locked -- -W clippy::all -D warnings
+
+      - name: Build model compiler
+        run: cargo build --manifest-path crates/vendor/mdlc/Cargo.toml --release --locked
+
   rust:
     runs-on: ubuntu-latest
     steps:

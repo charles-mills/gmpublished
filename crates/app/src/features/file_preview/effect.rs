@@ -8,6 +8,11 @@ use std::sync::Arc;
 pub enum Effect {
     ModalCloseRequested,
     LoadRequested(PreviewRequest),
+    LoadStage {
+        generation: Generation,
+        model: PreviewRequest,
+        map: PreviewRequest,
+    },
     ExtractRequested {
         entry_path: String,
     },

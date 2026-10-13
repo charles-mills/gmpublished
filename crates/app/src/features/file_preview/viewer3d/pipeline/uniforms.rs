@@ -129,9 +129,18 @@ impl Uniforms {
         }
     }
 
-    pub fn for_model(model: &ModelPreview, camera: &Camera, bounds: Rectangle) -> Self {
-        let center = mid(model.scene.bounds_min, model.scene.bounds_max);
-        let radius = half_extent(model.scene.bounds_min, model.scene.bounds_max).max(1.0);
+    pub fn for_model(
+        model: &ModelPreview,
+        camera: &Camera,
+        bounds: Rectangle,
+        framing: Option<crate::media::preview_model::ModelBounds>,
+    ) -> Self {
+        let framing = framing.unwrap_or(crate::media::preview_model::ModelBounds {
+            min: model.scene.bounds_min,
+            max: model.scene.bounds_max,
+        });
+        let center = framing.center();
+        let radius = half_extent(framing.min, framing.max).max(1.0);
         let distance = radius * 2.2 * camera.orbit.distance();
 
         let eye = [

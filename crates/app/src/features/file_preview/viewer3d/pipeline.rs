@@ -13,6 +13,7 @@ use super::{
     look_at, mat_mul, mid, perspective, prepare_draw_plans, shader, skybox_eye,
     transform_door_vertices, wgpu, write_bc_texture_level, write_texture_level,
 };
+use gmpublished_backend::model_decompile::PreviewPose;
 use gmpublished_domain::math::Vec3;
 
 mod draw;
@@ -58,12 +59,26 @@ impl PreviewScene {
 }
 
 #[derive(Debug)]
+pub(in super::super) struct StagePrimitive {
+    pub local_bounds: Option<crate::media::preview_model::ModelBounds>,
+    pub model: Arc<ModelPreview>,
+    pub animation_pose: Option<PreviewPose>,
+    pub content_id: u64,
+    pub transform: super::super::state::StageTransform,
+    pub skin_remap: Vec<u16>,
+    pub bodygroup_choices: Vec<usize>,
+    pub phy_debug_visible: bool,
+}
+
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "three independent render toggles plus the camera's water state"
+    reason = "independent render layers and camera water state"
 )]
 pub struct ModelPrimitive {
+    pub(super) stage: Option<StagePrimitive>,
     pub(super) preview: PreviewScene,
+    pub(super) animation_pose: Option<PreviewPose>,
     pub(super) content_id: u64,
     pub(super) skin_remap: Vec<u16>,
     pub(super) bodygroup_choices: Vec<usize>,
@@ -99,6 +114,53 @@ fn frame_layout(plan: Option<&DrawPlan>, refraction_supported: bool) -> FrameLay
     }
 }
 
+impl ModelPrimitive {
+    fn draw_stage<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        pipeline: &'a ModelPipeline,
+        transparent: bool,
+    ) {
+        let Some(stage) = &self.stage else {
+            return;
+        };
+        let Some(upload) = pipeline.stage_uploads.get(stage.content_id) else {
+            return;
+        };
+        let Some(plans) = pipeline
+            .stage_plans
+            .as_ref()
+            .filter(|plans| plans.content_id == stage.content_id)
+        else {
+            return;
+        };
+        let resources = &pipeline.resources;
+        if transparent {
+            pass.set_bind_group(0, &resources.stage_uniform_bind_group, &[]);
+            draw_scene_plan_transparent(
+                pass,
+                resources,
+                upload,
+                &plans.world,
+                &resources.stage_uniform_bind_group,
+                None,
+            );
+            if stage.phy_debug_visible {
+                draw_phy_debug_meshes(pass, resources, upload);
+            }
+        } else {
+            draw_scene_plan_opaque(
+                pass,
+                resources,
+                upload,
+                &plans.world,
+                &resources.stage_uniform_bind_group,
+                None,
+            );
+        }
+    }
+}
+
 impl shader::Primitive for ModelPrimitive {
     type Pipeline = ModelPipeline;
 
@@ -110,6 +172,59 @@ impl shader::Primitive for ModelPrimitive {
         _bounds: &Rectangle,
         viewport: &Viewport,
     ) {
+        if let Some(stage) = &self.stage {
+            pipeline.stage_uploads.ensure_upload(
+                device,
+                queue,
+                &pipeline.resources,
+                stage.content_id,
+                &stage.model.scene,
+                None,
+            );
+            pipeline.stage_uploads.touch(stage.content_id);
+            if let Some(upload) = pipeline.stage_uploads.get_mut(stage.content_id) {
+                upload.update_animation_vertices(
+                    queue,
+                    &stage.model,
+                    stage.animation_pose.as_ref(),
+                );
+                if stage.phy_debug_visible {
+                    upload.ensure_phy_debug_meshes(device, queue, &stage.model.scene);
+                }
+                let mut uniforms = self.uniforms;
+                // Rigid transforms let geometry stay uploaded: express the camera and light
+                // in model space so lighting and fog use the same frame as the vertices.
+                uniforms.view_proj = mat_mul(uniforms.view_proj, stage.transform.matrix());
+                let eye = stage.transform.local_point(Vec3::new(
+                    uniforms.camera_position[0],
+                    uniforms.camera_position[1],
+                    uniforms.camera_position[2],
+                ));
+                uniforms.camera_position = [eye[0], eye[1], eye[2], 0.0];
+                let light = stage.transform.inverse_vector(Vec3::new(
+                    uniforms.light[0],
+                    uniforms.light[1],
+                    uniforms.light[2],
+                ));
+                uniforms.light[..3].copy_from_slice(light.as_array());
+                queue.write_buffer(
+                    &pipeline.resources.stage_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&uniforms),
+                );
+                pipeline.stage_plans = Some(prepare_draw_plans(
+                    stage.content_id,
+                    upload,
+                    &stage.skin_remap,
+                    &stage.bodygroup_choices,
+                    uniforms.camera_position,
+                    false,
+                    None,
+                ));
+            }
+        } else {
+            pipeline.stage_plans = None;
+        }
         let size = viewport.physical_size();
         let scene = self.preview.render_scene();
         let map = self.preview.map();
@@ -123,6 +238,9 @@ impl shader::Primitive for ModelPrimitive {
         );
         pipeline.uploads.touch(self.content_id);
         if let Some(upload) = pipeline.uploads.get_mut(self.content_id) {
+            if let PreviewScene::Model(model) = &self.preview {
+                upload.update_animation_vertices(queue, model, self.animation_pose.as_ref());
+            }
             if self.phy_debug_visible {
                 upload.ensure_phy_debug_meshes(device, queue, scene);
             }
@@ -312,7 +430,7 @@ impl shader::Primitive for ModelPrimitive {
                 draw_sky_background(&mut pass, &pipeline.resources, upload);
             }
             if let Some(plan) = world_plan {
-                draw_scene_plan(
+                draw_scene_plan_opaque(
                     &mut pass,
                     &pipeline.resources,
                     upload,
@@ -320,8 +438,19 @@ impl shader::Primitive for ModelPrimitive {
                     &pipeline.resources.uniform_bind_group,
                     upload.detail_sprites.as_ref(),
                 );
+                self.draw_stage(&mut pass, pipeline, false);
+                draw_scene_plan_transparent(
+                    &mut pass,
+                    &pipeline.resources,
+                    upload,
+                    plan,
+                    &pipeline.resources.uniform_bind_group,
+                    None,
+                );
+                self.draw_stage(&mut pass, pipeline, true);
             }
             if self.phy_debug_visible {
+                pass.set_bind_group(0, &pipeline.resources.uniform_bind_group, &[]);
                 draw_phy_debug_meshes(&mut pass, &pipeline.resources, upload);
             }
             drop(pass);
@@ -362,7 +491,9 @@ impl shader::Primitive for ModelPrimitive {
                     upload.detail_sprites.as_ref(),
                 );
             }
+            self.draw_stage(&mut pass, pipeline, false);
             if self.phy_debug_visible {
+                pass.set_bind_group(0, &pipeline.resources.uniform_bind_group, &[]);
                 draw_phy_debug_meshes(&mut pass, &pipeline.resources, upload);
             }
             drop(pass);
@@ -422,6 +553,7 @@ impl shader::Primitive for ModelPrimitive {
                     Some(&refraction.bind_group),
                 );
             }
+            self.draw_stage(&mut pass, pipeline, true);
             drop(pass);
         }
 
@@ -465,6 +597,8 @@ pub struct ModelPipeline {
     resources: RenderResources,
     targets: Option<RenderTargets>,
     uploads: UploadCache,
+    stage_uploads: UploadCache,
+    stage_plans: Option<DrawPlans>,
     draw_plans: Option<DrawPlans>,
 }
 
@@ -474,18 +608,28 @@ impl shader::Pipeline for ModelPipeline {
             resources: RenderResources::new(device, queue, format),
             targets: None,
             uploads: UploadCache::default(),
+            stage_uploads: UploadCache::default(),
+            stage_plans: None,
             draw_plans: None,
         }
     }
 
     fn trim(&mut self) {
         self.uploads.trim();
+        self.stage_uploads.trim();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawItem, DrawPlan, FrameLayout, frame_layout};
+    use iced::Point;
+
+    use super::super::test_support::empty_model_preview;
+    use super::{
+        Arc, Camera, DrawItem, DrawPlan, FrameLayout, MaterialSlot, MeshData, ModelPipeline,
+        ModelPrimitive, ModelVertex, PreviewPose, PreviewScene, Rectangle, RenderMode, Uniforms,
+        Vec3, Viewport, frame_layout, shader, wgpu,
+    };
 
     #[test]
     fn frame_layout_splits_only_for_world_water() {
@@ -506,5 +650,414 @@ mod tests {
             FrameLayout::RefractiveWater
         );
         assert_eq!(frame_layout(Some(&plan), false), FrameLayout::SinglePass);
+    }
+    #[test]
+    fn staged_model_renders_and_reuses_gpu_geometry_after_transform() {
+        render_uniform_quad(true, false, false);
+    }
+
+    #[test]
+    fn skeletal_animation_reuses_buffers_and_restores_bind_pose() {
+        render_uniform_quad(false, true, false);
+        render_uniform_quad(true, true, false);
+    }
+
+    #[test]
+    fn lod_switch_replaces_geometry_and_keeps_selected_animation_in_both_viewers() {
+        render_uniform_quad(false, true, true);
+        render_uniform_quad(true, true, true);
+    }
+
+    fn render_uniform_quad(staged: bool, animated: bool, lods: bool) {
+        const WIDTH: u32 = 512;
+        const HEIGHT: u32 = 384;
+
+        // Naga's GLSL backend cannot translate depth textureLoad in the water shader.
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..wgpu::InstanceDescriptor::default()
+        });
+        let Ok(adapter) = futures::executor::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        ) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let (device, queue) =
+            futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("test.uniform_shading"),
+                // Match iced_wgpu's shared-device limits.
+                required_limits: wgpu::Limits {
+                    max_bind_groups: 2,
+                    ..wgpu::Limits::default()
+                },
+                ..wgpu::DeviceDescriptor::default()
+            }))
+            .expect("device");
+
+        let vertex = |x: f32, y: f32| ModelVertex {
+            position: Vec3::new(x, y, 20.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            uv: [0.25, 0.25],
+            lightmap_uv: [0.0; 2],
+            color: Vec3::splat(1.0),
+            blend_alpha: 0.0,
+        };
+        let mesh = MeshData {
+            vertices: vec![
+                vertex(-48.0, -24.0),
+                vertex(48.0, -24.0),
+                vertex(48.0, 24.0),
+                vertex(-48.0, 24.0),
+            ],
+            // Keep the fixture visible from either side of the default orbit camera.
+            indices: vec![0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0],
+            material_index: 0,
+            bodygroup: 0,
+            bodygroup_choice: 0,
+        };
+        let mut preview =
+            empty_model_preview(Vec3::new(-48.0, -24.0, 0.0), Vec3::new(48.0, 24.0, 38.0));
+        let scene = Arc::make_mut(&mut preview.scene);
+        scene.meshes = vec![mesh];
+        scene.materials = vec![MaterialSlot {
+            name: "test".to_owned(),
+            texture: None,
+            texture2: None,
+            force_opaque: true,
+            render_mode: RenderMode::Opaque,
+        }];
+        let preview = if lods {
+            crate::model_animation_test_support::lod_blended_model()
+        } else if animated {
+            crate::model_animation_test_support::blended_model()
+        } else {
+            Arc::new(preview)
+        };
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(WIDTH as f32, HEIGHT as f32));
+        let clip_bounds = Rectangle::<u32> {
+            x: 0,
+            y: 0,
+            width: WIDTH,
+            height: HEIGHT,
+        };
+        let viewport = Viewport::with_physical_size(iced::Size::new(WIDTH, HEIGHT), 1.0);
+        let mut camera = Camera::default();
+        camera.ensure_spawn(1, None);
+        if animated {
+            camera.orbit.set_distance(1.6);
+        }
+        let mut primitive = ModelPrimitive {
+            animation_pose: None,
+            stage: staged.then(|| super::StagePrimitive {
+                local_bounds: preview.visible_bounds(None, &[]),
+                animation_pose: None,
+                model: Arc::clone(&preview),
+                content_id: 2,
+                transform: crate::features::file_preview::state::StageTransform::default(),
+                skin_remap: vec![0],
+                bodygroup_choices: Vec::new(),
+                phy_debug_visible: false,
+            }),
+            skin_remap: vec![0],
+            bodygroup_choices: Vec::new(),
+            map_skybox_visible: false,
+            visibility_culling: false,
+            phy_debug_visible: false,
+            uniforms: Uniforms::for_model(&preview, &camera, bounds, None),
+            submerged: false,
+            map_skybox_uniforms: None,
+            sky_uniforms: None,
+            door_poses: Vec::new(),
+            preview: PreviewScene::Model(if staged {
+                Arc::new(empty_model_preview(
+                    preview.scene.bounds_min,
+                    preview.scene.bounds_max,
+                ))
+            } else {
+                Arc::clone(&preview)
+            }),
+            content_id: 1,
+        };
+        let mut pipeline_state = <ModelPipeline as shader::Pipeline>::new(&device, &queue, format);
+        shader::Primitive::prepare(
+            &primitive,
+            &mut pipeline_state,
+            &device,
+            &queue,
+            &bounds,
+            &viewport,
+        );
+
+        if animated {
+            let cache = if staged {
+                &pipeline_state.stage_uploads
+            } else {
+                &pipeline_state.uploads
+            };
+            let id = if staged { 2 } else { 1 };
+            let buffer = cache.get(id).unwrap().meshes[0].vertices.clone();
+            let centroid = cache.get(id).unwrap().meshes[0].centroid;
+            let mut animated_centroid: Option<Vec3> = None;
+            for pose in [Some((1.0, 1.0)), Some((1.0, 0.0)), None, Some((0.5, 1.0))].map(|pose| {
+                pose.map(|(cycle, parameter)| PreviewPose {
+                    sequence: 0,
+                    cycle,
+                    parameters: vec![parameter],
+                })
+            }) {
+                if let Some(stage) = primitive.stage.as_mut() {
+                    stage.animation_pose = pose.clone();
+                } else {
+                    primitive.animation_pose = pose.clone();
+                }
+                shader::Primitive::prepare(
+                    &primitive,
+                    &mut pipeline_state,
+                    &device,
+                    &queue,
+                    &bounds,
+                    &viewport,
+                );
+                let cache = if staged {
+                    &pipeline_state.stage_uploads
+                } else {
+                    &pipeline_state.uploads
+                };
+                let mesh = &cache.get(id).unwrap().meshes[0];
+                assert_eq!(mesh.vertices, buffer);
+                if let Some(pose) = &pose {
+                    assert!((mesh.centroid - centroid).length() > 1.0);
+                    if pose.parameters == [0.0] {
+                        let first = animated_centroid.unwrap();
+                        assert!((mesh.centroid - first).length() > 1.0);
+                        assert!(
+                            (mesh.centroid - centroid - (first - centroid) * 0.5).length() < 0.025
+                        );
+                    } else {
+                        animated_centroid = Some(mesh.centroid);
+                    }
+                } else {
+                    assert!((mesh.centroid - centroid).length() < 0.001);
+                }
+            }
+        }
+
+        if lods {
+            let id = if staged { 2 } else { 1 };
+            let cache = if staged {
+                &pipeline_state.stage_uploads
+            } else {
+                &pipeline_state.uploads
+            };
+            let original_buffer = cache.get(id).unwrap().meshes[0].vertices.clone();
+            let lower = preview.at_lod(1);
+            assert_eq!(lower.scene.meshes[0].indices.len(), 3);
+            if let Some(stage) = primitive.stage.as_mut() {
+                stage.model = Arc::clone(&lower);
+            } else {
+                primitive.preview = PreviewScene::Model(Arc::clone(&lower));
+            }
+            shader::Primitive::prepare(
+                &primitive,
+                &mut pipeline_state,
+                &device,
+                &queue,
+                &bounds,
+                &viewport,
+            );
+            let cache = if staged {
+                &pipeline_state.stage_uploads
+            } else {
+                &pipeline_state.uploads
+            };
+            let mesh = &cache.get(id).unwrap().meshes[0];
+            assert_ne!(mesh.vertices, original_buffer);
+            assert_eq!(mesh.index_count, 3);
+            let expected = lower
+                .animation
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .evaluate_lod(0, 0.5, &[1.0], 1)
+                .unwrap();
+            let centroid = expected[0].iter().fold(Vec3::default(), |sum, vertex| {
+                sum + Vec3::from(vertex.position)
+            }) / expected[0].len() as f32;
+            assert!((mesh.centroid - centroid).length() < 0.001);
+            let lower_buffer = mesh.vertices.clone();
+            shader::Primitive::prepare(
+                &primitive,
+                &mut pipeline_state,
+                &device,
+                &queue,
+                &bounds,
+                &viewport,
+            );
+            let cache = if staged {
+                &pipeline_state.stage_uploads
+            } else {
+                &pipeline_state.uploads
+            };
+            assert_eq!(cache.get(id).unwrap().meshes[0].vertices, lower_buffer);
+            if let Some(stage) = primitive.stage.as_mut() {
+                stage.model = Arc::clone(&preview);
+            } else {
+                primitive.preview = PreviewScene::Model(Arc::clone(&preview));
+            }
+            shader::Primitive::prepare(
+                &primitive,
+                &mut pipeline_state,
+                &device,
+                &queue,
+                &bounds,
+                &viewport,
+            );
+        }
+
+        if staged {
+            let map_vertices = pipeline_state.uploads.get(1).unwrap().meshes.len();
+            let stage_vertices = pipeline_state.stage_uploads.get(2).unwrap().meshes[0]
+                .vertices
+                .clone();
+            primitive.stage.as_mut().unwrap().transform.position = Vec3::new(4.0, 6.0, 2.0);
+            primitive.stage.as_mut().unwrap().transform.angles = Vec3::new(0.0, 15.0, 0.0);
+            shader::Primitive::prepare(
+                &primitive,
+                &mut pipeline_state,
+                &device,
+                &queue,
+                &bounds,
+                &viewport,
+            );
+            assert_eq!(
+                pipeline_state.uploads.get(1).unwrap().meshes.len(),
+                map_vertices
+            );
+            assert_eq!(
+                pipeline_state.stage_uploads.get(2).unwrap().meshes[0].vertices,
+                stage_vertices
+            );
+        }
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test.uniform_shading.target"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("test.uniform_shading.clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        shader::Primitive::render(
+            &primitive,
+            &pipeline_state,
+            &mut encoder,
+            &target_view,
+            &clip_bounds,
+        );
+        let padded_row = (WIDTH * 4).div_ceil(256) * 256;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.uniform_shading.readback"),
+            size: u64::from(padded_row) * u64::from(HEIGHT),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        receiver
+            .recv()
+            .expect("map_async callback")
+            .expect("map readback");
+        let mapped = readback.slice(..).get_mapped_range();
+        let mut pixels = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
+        for y in 0..HEIGHT {
+            let start = (y * padded_row) as usize;
+            pixels.extend_from_slice(&mapped[start..start + (WIDTH * 4) as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+
+        // Exclude the blue background and its antialiased silhouette pixels.
+        let is_quad = |x: u32, y: u32| {
+            let offset = ((y * WIDTH + x) * 4) as usize;
+            let pixel = &pixels[offset..offset + 4];
+            !(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 255)
+        };
+        let mut interior = 0_usize;
+        for y in 1..HEIGHT - 1 {
+            for x in 1..WIDTH - 1 {
+                if !(is_quad(x, y)
+                    && is_quad(x - 1, y)
+                    && is_quad(x + 1, y)
+                    && is_quad(x, y - 1)
+                    && is_quad(x, y + 1))
+                {
+                    continue;
+                }
+                interior += 1;
+            }
+        }
+        assert!(
+            interior > if animated { 100 } else { 1000 },
+            "model geometry was not rendered: {interior} interior pixels"
+        );
     }
 }

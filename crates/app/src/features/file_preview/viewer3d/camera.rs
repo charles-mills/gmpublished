@@ -6,11 +6,14 @@ use super::{
     ModelPrimitive, MovementMode, OrbitPose, Point, Rectangle, SOURCE_UP, Uniforms,
     door_world_bounds, half_extent, initial_door_swing, mid, mouse, shader,
 };
+use gmpublished_backend::model_decompile::PreviewPose;
 use gmpublished_domain::math::QAngle;
 use gmpublished_domain::math::Vec3;
 
 pub struct Viewer3d {
+    pub framing_bounds: Option<crate::media::preview_model::ModelBounds>,
     pub model: Arc<ModelPreview>,
+    pub animation_pose: Option<PreviewPose>,
     pub content_id: u64,
     pub skin_remap: Vec<u16>,
     pub bodygroup_choices: Vec<usize>,
@@ -94,6 +97,8 @@ impl shader::Program<Message> for Viewer3d {
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
+            stage: None,
+            animation_pose: self.animation_pose.clone(),
             preview: PreviewScene::Model(Arc::clone(&self.model)),
             content_id: self.content_id,
             skin_remap: self.skin_remap.clone(),
@@ -101,7 +106,7 @@ impl shader::Program<Message> for Viewer3d {
             map_skybox_visible: true,
             visibility_culling: false,
             phy_debug_visible: self.phy_debug_visible,
-            uniforms: Uniforms::for_model(&self.model, camera, bounds),
+            uniforms: Uniforms::for_model(&self.model, camera, bounds, self.framing_bounds),
             submerged: false,
             map_skybox_uniforms: None,
             sky_uniforms: None,
@@ -142,6 +147,7 @@ pub struct FlyViewer {
     pub pose: Option<FlyPose>,
     pub movement_mode: Option<MovementMode>,
     pub requested_movement_mode: Option<MovementMode>,
+    pub stage: Option<super::pipeline::StagePrimitive>,
 }
 
 pub(super) const FLY_LOOK_SENSITIVITY: f32 = 0.006;
@@ -194,6 +200,7 @@ impl WaterLevel {
 pub struct FlyCamera {
     pub(super) content_id: Option<u64>,
     pub(super) position: Option<Vec3>,
+    pub(super) stage_grab: Option<StageGrab>,
     pub(super) yaw: f32,
     pub(super) pitch: f32,
     /// Multiplier over the map-scaled base speed, adjusted by wheel.
@@ -321,6 +328,9 @@ impl HeldKeys {
     }
 }
 
+mod staging;
+use staging::StageGrab;
+
 mod bob;
 mod duck;
 mod trace;
@@ -341,6 +351,7 @@ impl FlyCamera {
         }
         self.content_id = Some(content_id);
         self.look_from = None;
+        self.stage_grab = None;
         self.held = HeldKeys::default();
         self.last_frame = None;
         self.mode = MovementMode::Fly;
@@ -596,6 +607,9 @@ impl shader::Program<Message> for FlyViewer {
             }
             changed
         });
+        if let Some(action) = self.stage_interaction(camera, event, bounds, cursor) {
+            return Some(action);
+        }
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let position = cursor.position_over(bounds)?;
@@ -609,8 +623,7 @@ impl shader::Program<Message> for FlyViewer {
                 camera.pitch = (camera.pitch - (to.y - from.y) * FLY_LOOK_SENSITIVITY)
                     .clamp(MIN_PITCH, MAX_PITCH);
                 camera.look_from = Some(to);
-                camera
-                    .camera_update_message()
+                self.camera_message(camera, Vec::new())
                     .map(|message| Action::publish(message).and_capture())
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -636,8 +649,8 @@ impl shader::Program<Message> for FlyViewer {
                         camera.held.walk_toggle = true;
                         camera.toggle_walk(&self.scene);
                         camera.last_frame = None;
-                        return camera
-                            .camera_update_message()
+                        return self
+                            .camera_message(camera, Vec::new())
                             .map(|message| Action::publish(message).and_capture());
                     }
                     return Some(Action::capture());
@@ -687,7 +700,7 @@ impl shader::Program<Message> for FlyViewer {
                         camera.last_frame = None;
                         return Action::request_redraw().and_capture();
                     }
-                    camera.camera_update_message().map_or_else(
+                    self.camera_message(camera, Vec::new()).map_or_else(
                         || Action::request_redraw().and_capture(),
                         |message| Action::publish(message).and_capture(),
                     )
@@ -698,25 +711,21 @@ impl shader::Program<Message> for FlyViewer {
                     camera.last_frame = None;
                     camera.move_factor = 0.0;
                     return (initialized || mode_request_seen || mode_request_changed)
-                        .then(|| camera.camera_update_message().map(Action::publish))
+                        .then(|| self.camera_message(camera, Vec::new()).map(Action::publish))
                         .flatten();
                 }
                 if let Some(last) = camera.last_frame {
                     let dt = now.saturating_duration_since(last).as_secs_f32().min(0.1);
                     let audio_events = camera.integrate(&self.scene, self.content_id, dt);
-                    if !audio_events.is_empty()
-                        && let Some(pose) = camera.pose()
-                    {
+                    if !audio_events.is_empty() {
                         camera.last_frame = Some(*now);
-                        return Some(Action::publish(Message::FlyCameraAndDoorAudioChanged {
-                            pose,
-                            mode: camera.mode(),
-                            door_audio_events: audio_events,
-                        }));
+                        return self
+                            .camera_message(camera, audio_events)
+                            .map(Action::publish);
                     }
                 }
                 camera.last_frame = Some(*now);
-                camera.camera_update_message().map_or_else(
+                self.camera_message(camera, Vec::new()).map_or_else(
                     || Some(Action::request_redraw()),
                     |message| Some(Action::publish(message)),
                 )
@@ -732,6 +741,20 @@ impl shader::Program<Message> for FlyViewer {
         bounds: Rectangle,
     ) -> ModelPrimitive {
         ModelPrimitive {
+            stage: self
+                .stage
+                .as_ref()
+                .map(|stage| super::pipeline::StagePrimitive {
+                    model: Arc::clone(&stage.model),
+                    animation_pose: stage.animation_pose.clone(),
+                    local_bounds: stage.local_bounds,
+                    content_id: stage.content_id,
+                    transform: stage.transform,
+                    skin_remap: stage.skin_remap.clone(),
+                    bodygroup_choices: stage.bodygroup_choices.clone(),
+                    phy_debug_visible: stage.phy_debug_visible,
+                }),
+            animation_pose: None,
             preview: PreviewScene::Map(Arc::clone(&self.scene)),
             content_id: self.content_id,
             skin_remap: Vec::new(),
@@ -779,7 +802,7 @@ impl shader::Program<Message> for FlyViewer {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if camera.look_from.is_some() {
+        if camera.look_from.is_some() || camera.stage_grab.is_some() {
             mouse::Interaction::Grabbing
         } else if cursor.position_over(bounds).is_some() {
             mouse::Interaction::Crosshair

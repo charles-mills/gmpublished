@@ -1,0 +1,1435 @@
+_version: 2
+
+"Source engine model compiler (a studiomdl rewrite)":
+  zh-CN: "Source 引擎模型编译器（studiomdl 重写）"
+
+"Compiles a TOML description or a QC script into the Source engine `.mdl` / `.vvd` / `.vtx` / `.phy` set, plus a few read-only inspection and conversion subcommands.":
+  zh-CN: "把 TOML 描述或 QC 脚本编译成 Source 引擎的 `.mdl` / `.vvd` / `.vtx` / `.phy` 四件套，另带若干只读的检查与转换子命令。"
+
+"It also works as the official `studiomdl`: `mdlc -game <gamedir> <model.qc>` writes the output under `<gamedir>\\models\\<$modelname>`, so it can be dropped in as Crowbar's compiler path.":
+  zh-CN: "也能当官方 `studiomdl` 用：`mdlc -game <gamedir> <model.qc>` 会把产物写到 `<gamedir>\\models\\<$modelname>`，可直接替换 Crowbar 的编译器路径。"
+
+"TOML description → .mdl/.vvd/.vtx (main path)":
+  zh-CN: "TOML 描述 → .mdl/.vvd/.vtx（MVP 主线）"
+
+"Validate a description file without writing anything":
+  zh-CN: "只校验描述文件，不写文件"
+
+"SMD triangles → convex hulls → .phy collision file":
+  zh-CN: "SMD 三角形 → 凸包 → .phy 碰撞文件"
+
+"QC script → TOML description (text only, no compile)":
+  zh-CN: "QC 脚本 → TOML 描述（只写文本，不编译）"
+
+"Compile straight from a QC script":
+  zh-CN: "直接从 QC 编译"
+
+"Parse a VVD and print its header and statistics":
+  zh-CN: "解析并打印 VVD 头部与统计"
+
+"Read a VVD and write it back, comparing byte for byte":
+  zh-CN: "VVD 读入再写出，逐字节比对"
+
+"Print a minimal, commented TOML template":
+  zh-CN: "打印一份带注释的最小 TOML 模板"
+
+"(internal) run one update check and write the cache":
+  zh-CN: "（内部）跑一次更新检测并写缓存"
+
+"Print this message or the help of the given subcommand(s)":
+  zh-CN: "打印本信息或给定子命令的帮助"
+
+"TOML description to compile":
+  zh-CN: "要编译的 TOML 描述文件"
+
+"TOML description to validate":
+  zh-CN: "要校验的 TOML 描述文件"
+
+"QC script to convert":
+  zh-CN: "要转换的 QC 脚本"
+
+"QC script to compile":
+  zh-CN: "要编译的 QC 脚本"
+
+"VVD file to parse and print the header and statistics of":
+  zh-CN: "要解析并打印头部与统计的 VVD 文件"
+
+"VVD file to round-trip":
+  zh-CN: "要往返比对的 VVD 文件"
+
+"Root output directory (defaults to the current directory)":
+  zh-CN: "输出根目录（默认当前目录）"
+
+"Output TOML path (defaults to the QC's own directory and name, with a .toml extension)":
+  zh-CN: "输出的 TOML 路径（缺省与 QC 同目录同名，扩展名换成 .toml）"
+
+"mdlc extension: enable the VTX cache optimization":
+  zh-CN: "mdlc 扩展：打开 VTX 缓存优化"
+
+"Input SMD (triangle vertices are already in model-local coordinates; no transform is applied, matching studiomdl)":
+  zh-CN: "输入 SMD（三角形顶点已在模型局部坐标，不做任何变换，与 studiomdl 一致）"
+
+"Output .phy path":
+  zh-CN: "输出 .phy 路径"
+
+"Checksum of the paired .mdl (decimal or 0x hex), default 0":
+  zh-CN: "配对 .mdl 的 checksum（十进制或 0x 十六进制），默认 0"
+
+"$mass equivalent total mass, default 1 (the official default; automatic mass via [physics].auto_mass is not supported)":
+  zh-CN: "$mass 等效总质量，默认 1（官方缺省；[physics].auto_mass 的自动质量不支持）"
+
+"Surface material, default default":
+  zh-CN: "表面材质，默认 default"
+
+"$concave: split into convex pieces by connected component (the official semantics, not a VHACD decomposition)":
+  zh-CN: "$concave：按连通分量拆成多个凸块（官方语义，不是 VHACD 体分解）"
+
+"VHACD approximate convex decomposition. Non-official semantics: concavities are preserved, whereas the official $concave fills them in":
+  zh-CN: "VHACD 近似凸分解。非官方语义：保留凹口，而官方 $concave 是填平"
+
+"$collisionjoints: group by skin-weight bone, one solid per bone":
+  zh-CN: "$collisionjoints：按蒙皮权重骨骼分组，每个骨骼一个 solid"
+
+"dir":
+  zh-CN: "目录"
+
+"value":
+  zh-CN: "值"
+
+"Source engine model compiler (studiomdl compatibility mode)":
+  zh-CN: "Source 引擎模型编译器（studiomdl 兼容模式）"
+
+"mdlc extension: explicit output root directory (takes precedence over the path derived from -game)":
+  zh-CN: "mdlc 扩展：显式输出根目录（优先于 -game 推出的路径）"
+
+"Game directory (the official -game); output goes to <gamedir>/models/":
+  zh-CN: "游戏目录（官方 -game）；产物写到 <gamedir>\\models\\"
+
+"Note: the %{n} meshes of %{at} were merged into one part: %{meshes}. The official tool merges them the same way (part boundaries are lost); to keep them apart, select them one by one with `srcpart`, or split them into several `$body` / `$model` blocks.":
+  zh-CN: "提示：%{at} 的 %{n} 块网格被合并进同一个部件：%{meshes}。官方同样合并（部件边界丢失）；要分开请用 `srcpart` 逐个选，或拆成多条 `$body` / `$model`。"
+
+"Note: the meshes %{meshes} of %{at} have no material, so %{fallback} was synthesized. To use another name, write `srcmaterial \"...\"`.":
+  zh-CN: "提示：%{at} 的网格 %{meshes} 没有材质，已合成 %{fallback}。要改用别的名字写 `srcmaterial \"...\"`。"
+
+"Note: %{at} has %{n} animation stacks %{stacks}; both the official tool and mdlc use only the **first** one by default. To use another, write `srcstack \"name\"` (inside `$sequence` / `$animation`).":
+  zh-CN: "提示：%{at} 有 %{n} 条动画栈 %{stacks}；官方与 mdlc 默认都只用**第一条**。要用别的写 `srcstack \"名\"`（写在 `$sequence` / `$animation` 里）。"
+
+"%{name}(frame %{frame})":
+  zh-CN: "%{name}(帧 %{frame})"
+
+"Note: the %{n} shape keys of %{at} were registered as flexes automatically: %{list}. To control which ones are taken, their order, or to ignore some, use `srcshapekey` / `srcshapekeyorder` / `srcshapekeyignore`.":
+  zh-CN: "提示：%{at} 的 %{n} 个 shape key 已自动注册成 flex：%{list}。要控制取哪些 / 顺序 / 忽略，用 `srcshapekey` / `srcshapekeyorder` / `srcshapekeyignore`。"
+
+"%{path} is used as both the mesh source and the animation source. FBX can hold meshes and animation together, and mdlc read %{n_frames} frames as usual — but the official studiomdl **silently** produces only 1 frame in this combination (measured: exit=0, no warning; see docs/fbx-support.md §4.4). This is a **deliberate deviation**: mdlc does not copy that degenerate behavior. ⚠️ If you are comparing against the official output, a frame-count mismatch here is **expected**. To make the two agree, split the animation into a separate FBX file (both the official tool and mdlc handle that normally).":
+  zh-CN: "%{path} 同时用作网格源与动画源。FBX 可以同时包含网格与动画，mdlc 正常采出了 %{n_frames} 帧 —— 但官方 studiomdl 在这个组合下会**静默地**只产出 1 帧（实测 exit=0、无警告，见 docs/fbx-support.md §4.4）。这是**有意的偏离**：mdlc 不复制这个退化行为。⚠️ 若你在与官方产物对照，这里的帧数不一致是**预期**的。想让两边一致，把动画拆到独立的 FBX 文件（官方与 mdlc 都会正常）。"
+
+"Note: the bone %{bone} of %{at} was not found; skipped, matching the official behavior":
+  zh-CN: "提示：%{at} 骨骼 %{bone} 找不到，按官方行为跳过"
+
+"Note: %{path} has %{n} animation stacks %{names}; only the **first** one is used by default. To use another, write `srcstack \"name\"` (inside `$sequence` / `$animation`).":
+  zh-CN: "提示：%{path} 有 %{n} 条动画栈 %{names}；默认只用**第一条**。要用别的写 `srcstack \"名\"`（写在 `$sequence` / `$animation` 里）。"
+
+"Note: %{path} has %{n} animations %{names}; only the **first** one is used by default. To use another, write `srcstack \"name\"` (inside `$sequence` / `$animation`).":
+  zh-CN: "提示：%{path} 有 %{n} 条动画 %{names}；默认只用**第一条**。要用别的写 `srcstack \"名\"`（写在 `$sequence` / `$animation` 里）。"
+
+"Note: %{at} has %{n} accessors without a `bufferView`; per the glTF spec they mean **all zero**, and they were treated that way (the validation layer of `gltf` 1.4.1 misjudges them as an error; mdlc takes the read path that bypasses validation).":
+  zh-CN: "提示：%{at} 有 %{n} 个 accessor 没有 `bufferView`；按 glTF 规范它们表示**全零**，已照此处理（`gltf` 1.4.1 的校验层会把它误判为错误，mdlc 走的是绕校验的读取路径）。"
+
+"Note: %{at} has %{n} animation channels interpolated with `CubicSpline`; mdlc resamples them **linearly** (the cubic spline's tangent information is ignored). To avoid this note, make the exporter use `LINEAR`.":
+  zh-CN: "提示：%{at} 有 %{n} 个动画通道用 `CubicSpline` 插值；mdlc 按**线性**重采样（三次样条的切线信息被忽略）。要避免这条提示请让导出器改用 `LINEAR`。"
+
+"Note: %{at} has %{n} animation channels driving `MorphTargetWeights` (per-frame morph weights); mdlc does **not** do per-frame morph weights — morphs are controlled only by the QC `flex` statements, and these channels are ignored.":
+  zh-CN: "提示：%{at} 有 %{n} 个动画通道驱动 `MorphTargetWeights`（逐帧表情权重）；mdlc **不做**逐帧表情权重 —— 表情只由 QC 的 `flex` 语句控制，这些通道被忽略。"
+
+"Note: the VRD pointed to by $proceduralbones does not exist; skipped, matching the official behavior: %{path}":
+  zh-CN: "提示：$proceduralbones 指向的 VRD 不存在，按官方行为跳过：%{path}"
+
+"Note: $lod names %{n} bones that do not exist; skipped, matching the official behavior: %{list}":
+  zh-CN: "提示：$lod 里有 %{n} 个不存在的骨骼，已按官方行为跳过：%{list}"
+
+"Note: mdlc %{latest} is available (you have v%{current}) — https://github.com/%{repo}/releases/latest":
+  zh-CN: "提示：mdlc 有新版本 %{latest}（当前 v%{current}）—— https://github.com/%{repo}/releases/latest"
+
+"Compilation failed with %{n} error(s):":
+  zh-CN: "编译失败，%{n} 处错误："
+
+"Error: %{err}":
+  zh-CN: "错误：%{err}"
+
+"Error: cannot read collision SMD %{path}: %{err}":
+  zh-CN: "错误：读不到碰撞 SMD %{path}：%{err}"
+
+"Error: cannot parse collision SMD %{path}: %{err}":
+  zh-CN: "错误：解析碰撞 SMD %{path} 失败：%{err}"
+
+"Error: cannot build VVD: %{err}":
+  zh-CN: "错误：构造 VVD 失败：%{err}"
+
+"Error: cannot encode VVD: %{err}":
+  zh-CN: "错误：写出 VVD 失败：%{err}"
+
+"Error: the VVD we wrote is not self-consistent (bug in mdlc): %{err}":
+  zh-CN: "错误：写出的 VVD 不自洽（本实现的 bug）：%{err}"
+
+"Error: cannot write VTX: %{err}":
+  zh-CN: "错误：写出 VTX 失败：%{err}"
+
+"Error: the VTX we wrote is not self-consistent (bug in mdlc): %{err}":
+  zh-CN: "错误：写出的 VTX 不自洽（本实现的 bug）：%{err}"
+
+"Error: cannot build PHY: %{err}":
+  zh-CN: "错误：构造 PHY 失败：%{err}"
+
+"Error: the PHY we wrote failed self-check (bug in mdlc): %{err}":
+  zh-CN: "错误：写出的 PHY 自检失败（本实现的 bug）：%{err}"
+
+"Error: cannot create directory %{path}: %{err}":
+  zh-CN: "错误：建目录 %{path} 失败：%{err}"
+
+"Error: cannot write %{path}: %{err}":
+  zh-CN: "错误：写 %{path} 失败：%{err}"
+
+"Warning: ignoring unrecognized option(s) %{names} (not implemented by mdlc, or not an official option)":
+  zh-CN: "警告：忽略无法识别的选项 %{names}（mdlc 未实现或非官方选项）"
+
+"Warning: the official option -%{name} is not implemented yet; ignored":
+  zh-CN: "警告：官方选项 -%{name} 尚未实现，已忽略"
+
+"Error: missing the .qc file argument":
+  zh-CN: "错误：缺少 .qc 文件参数"
+
+"Usage: mdlc -game <gamedir> [options] <model.qc>":
+  zh-CN: "用法：mdlc -game <gamedir> [选项] <model.qc>"
+
+"Error: cannot read %{path}: %{err}":
+  zh-CN: "错误：读不到 %{path}：%{err}"
+
+"Error: cannot parse: %{err}":
+  zh-CN: "错误：解析失败：%{err}"
+
+"Error: cannot parse %{path}: %{err}":
+  zh-CN: "错误：解析 %{path} 失败：%{err}"
+
+"Error: %{path} contains no triangles":
+  zh-CN: "错误：%{path} 里没有任何三角形"
+
+"Error: only %{n} distinct vertices after welding; a hull needs at least 4":
+  zh-CN: "错误：焊接后只有 %{n} 个不同顶点，凸包至少要 4 个"
+
+"Error: cannot build the ragdoll: %{err}":
+  zh-CN: "错误：ragdoll 构造失败：%{err}"
+
+"Error: $concave decomposition failed: %{err}":
+  zh-CN: "错误：$concave 分解失败：%{err}"
+
+"convex decomposition failed: %{err}":
+  zh-CN: "凸分解失败：%{err}"
+
+"cannot compute the convex hull: %{err}":
+  zh-CN: "算凸包失败：%{err}"
+
+"Error: cannot write PHY: %{err}":
+  zh-CN: "错误：写出 PHY 失败：%{err}"
+
+"The description file has %{n} error(s):":
+  zh-CN: "描述文件有 %{n} 处错误："
+
+"%{path} has %{n} error(s):":
+  zh-CN: "%{path} 有 %{n} 处错误："
+
+"Cannot parse %{path}: %{n} error(s):":
+  zh-CN: "%{path} 解析失败，%{n} 处错误："
+
+"The parsed description has %{n} error(s):":
+  zh-CN: "解析出的描述有 %{n} 处错误："
+
+"%{path} is valid":
+  zh-CN: "%{path} 合法"
+
+"  bones %{bones}, materials %{materials}, body parts %{bodyparts}, vertices %{vertices}, triangles %{triangles}":
+  zh-CN: "  骨骼 %{bones}，材质 %{materials}，body part %{bodyparts}，顶点 %{vertices}，三角形 %{triangles}"
+
+"    bodyparts[%{bi}].models[%{mi}] %{name} <- %{smd} (%{meshes} mesh(es), %{vertices} vertices)":
+  zh-CN: "    bodyparts[%{bi}].models[%{mi}] %{name} ← %{smd}（%{meshes} mesh，%{vertices} 顶点）"
+
+"  bounds %{min} .. %{max}":
+  zh-CN: "  包围盒 %{min} .. %{max}"
+
+"%{qc} -> %{out}":
+  zh-CN: "%{qc} → %{out}"
+
+"  bones %{bones}, materials %{materials}, body parts %{bodyparts}, sequences %{sequences}, animations %{animations}":
+  zh-CN: "  骨骼 %{bones}，材质 %{materials}，body part %{bodyparts}，序列 %{sequences}，动画 %{animations}"
+
+"file        %{path}":
+  zh-CN: "文件        %{path}"
+
+"length      %{n} bytes":
+  zh-CN: "长度        %{n} 字节"
+
+"checksum    %{checksum}  (paired with .mdl/.vtx/.phy; not a content hash)":
+  zh-CN: "checksum    %{checksum}  （与 .mdl/.vtx/.phy 配对，非内容哈希）"
+
+"numLODs     %{n}":
+  zh-CN: "numLODs     %{n}"
+
+"vertices    %{n}   (numLODVertexes[0]; also the tangent count)":
+  zh-CN: "顶点数      %{n}   （numLODVertexes[0]，也是切线数）"
+
+"numLODVertexes  %{list}":
+  zh-CN: "numLODVertexes  %{list}"
+
+"numFixups   %{n}":
+  zh-CN: "numFixups   %{n}"
+
+"vertex block      @ %{start}  (%{n} x 48 = %{bytes} bytes)":
+  zh-CN: "顶点块      @ %{start}  （%{n} × 48 = %{bytes} 字节）"
+
+"tangent block     @ %{start}  (%{n} x 16 = %{bytes} bytes)":
+  zh-CN: "切线块      @ %{start}  （%{n} × 16 = %{bytes} 字节）"
+
+"expected length   %{n} bytes":
+  zh-CN: "预期总长    %{n} 字节"
+
+"self-consistency  passed (offsets, lengths and block sizes all agree)":
+  zh-CN: "自洽性      通过（偏移、长度、块大小全部一致）"
+
+"self-consistency  **FAILED**: %{err}":
+  zh-CN: "自洽性      **失败**：%{err}"
+
+"first vertex    pos=%{pos} nrm=%{nrm} uv=%{uv}":
+  zh-CN: "首个顶点    pos=%{pos} nrm=%{nrm} uv=%{uv}"
+
+"            weight=%{weight} bone=%{bone} boneCount=%{n}":
+  zh-CN: "            weight=%{weight} bone=%{bone} boneCount=%{n}"
+
+"original    %{n} bytes":
+  zh-CN: "原文件      %{n} 字节"
+
+"rewritten   %{n} bytes":
+  zh-CN: "重写后      %{n} 字节"
+
+"result      **byte-for-byte identical** (all %{n} bytes match)":
+  zh-CN: "结果        **逐字节完全相同**（%{n} 字节全部一致）"
+
+"result      **MISMATCH**: first difference @%{at}, %{n} bytes differ":
+  zh-CN: "结果        **不一致**：首个差异 @%{at}，共 %{n} 字节不同"
+
+"input       %{path}":
+  zh-CN: "输入        %{path}"
+
+"output      %{path}":
+  zh-CN: "输出        %{path}"
+
+"checksum    0x%{checksum}":
+  zh-CN: "checksum    0x%{checksum}"
+
+"triangles   %{tris} (%{verts} distinct vertices after welding)":
+  zh-CN: "三角形      %{tris}（焊接后 %{verts} 个不同顶点）"
+
+"solid       %{n} (ragdoll, one per bone)":
+  zh-CN: "solid       %{n}（ragdoll，每骨骼一个）"
+
+"solid       %{solids} (%{hulls} convex piece(s) in total)":
+  zh-CN: "solid       %{solids}（共 %{hulls} 个凸块）"
+
+"file        %{n} bytes":
+  zh-CN: "文件        %{n} 字节"
+
+"solid       %{n}":
+  zh-CN: "solid       %{n}"
+
+"text block  %{n} bytes  @ %{at}":
+  zh-CN: "text 段     %{n} 字节  @ %{at}"
+
+"  solid[%{i}]  surfaceSize=%{surf}  ledge region=%{ledge}  tree nodes=%{nodes}":
+  zh-CN: "  solid[%{i}]  surfaceSize=%{surf}  ledge 区=%{ledge}  树节点=%{nodes}"
+
+"**write succeeded** (all 13 hard constraints self-checked)":
+  zh-CN: "**写出成功**（13 条硬约束自检全部通过）"
+
+"%{at}: cannot read %{path}: %{err}":
+  zh-CN: "%{at}：读不到 %{path}：%{err}"
+
+"%{at}: failed to parse %{path}: %{err}":
+  zh-CN: "%{at}：%{path} 解析失败：%{err}"
+
+"%{count} bones exceed what an animation record can address (<=255)":
+  zh-CN: "骨骼数 %{count} 超出动画记录能寻址的范围（≤255）"
+
+"%{what} needs %{need} bytes but the file only has %{have}":
+  zh-CN: "%{what} 需要 %{need} 字节，文件只有 %{have} 字节"
+
+"(%{a}, %{b}) of [physics.merge][%{index}] would form a merge cycle":
+  zh-CN: "[physics.merge][%{index}] 的 (%{a}, %{b}) 会形成归并环"
+
+": %{v}":
+  zh-CN: "：%{v}"
+
+"A strip of %{model} uses %{count} bones, over the VTX per-strip limit of %{max}\n`Vertex_t.boneID[]` in VTX is a **signed char** (`optimize.h:51`); hardware slot indices >=128 are read as negative by the engine ==> vertices are skinned to the wrong bones.\n\nThis is a **format** limit, not a choice of this implementation, and you should not normally see it: the writer splits a mesh whose palette is over the limit into **several strips** following the official semantics (each <= `maxBonesPerStrip` = 53 bones, see [`plan_strips`]).\nSeeing it means the mesh has **out-of-range triangle indices** (the input is already broken) -- in that case the writer falls back to \"the whole group as one strip\", so all the bones of the group are squeezed into one strip. Fix the out-of-range vertex indices in the SMD first.":
+  zh-CN: "%{model} 的一个 strip 用了 %{count} 根骨骼，超出 VTX 单 strip 上限 %{max}\n`Vertex_t.boneID[]` 是 **signed char**（`optimize.h:51`），硬件槽位下标 ≥128 会被引擎读成负数 ==> 顶点蒙皮到错误骨骼。\n\n这是**格式**上限，不是本实现的选择，通常不该看到它：写出器会按官方语义把调色板超限的 mesh 拆成**多条 strip**（每条 ≤ `maxBonesPerStrip` = 53 根，见 [`plan_strips`]）。\n看到它说明该 mesh 的**三角形下标越界**（输入本身已坏）—— 此时写出器退化成「整组当一条 strip」，于是该组所有骨骼挤进一条 strip。请先修掉 SMD 里越界的顶点下标。"
+
+"Cannot find the %{what}bone %{bone}%{note}":
+  zh-CN: "找不到%{what}骨骼 %{bone}%{note}"
+
+"Cannot find the weight list %{name}":
+  zh-CN: "找不到权重表 %{name}"
+
+"Duplicate %{what}: %{name}":
+  zh-CN: "%{what}重复：%{name}"
+
+"HTTP %{status} but there is no Location header (the repository may not have a release yet)":
+  zh-CN: "HTTP %{status} 但没有 Location 头（仓库可能还没有 Release）"
+
+"Header fields are inconsistent: %{detail}":
+  zh-CN: "头部字段不一致：%{detail}"
+
+"Internal error (please report): %{err}":
+  zh-CN: "内部错误（请报告）：%{err}"
+
+"Must be a positive finite number, but got %{detail}%{value}":
+  zh-CN: "必须是正有限数，实际 %{detail}%{value}"
+
+"No tag in the Location header: %{location}":
+  zh-CN: "Location 里没有 tag：%{location}"
+
+"Not a finite number%{value}":
+  zh-CN: "不是有限数%{value}"
+
+"Only 44 / 48 / 49 are supported, but the version is %{version}":
+  zh-CN: "只支持 44 / 48 / 49，实际为 %{version}"
+
+"Request failed: %{err}":
+  zh-CN: "请求失败：%{err}"
+
+"Section %{section} offset %{offset} is beyond the file length %{total}":
+  zh-CN: "段 %{section} 偏移 %{offset} 超出文件长度 %{total}"
+
+"Section order is wrong: %{earlier} @%{earlier_at} should come before %{later} @%{later_at}":
+  zh-CN: "段顺序错误：%{earlier} @%{earlier_at} 应在 %{later} @%{later_at} 之前"
+
+"Sequence %{sequence} has %{count} frames, which overflows int32":
+  zh-CN: "序列 %{sequence} 有 %{count} 帧，超出 int32"
+
+"TOML parse failed: %{err}":
+  zh-CN: "TOML 解析失败：%{err}"
+
+"TOML serialization failed: %{err}":
+  zh-CN: "TOML 序列化失败：%{err}"
+
+"The description file has %{count} error(s):\n%{list}":
+  zh-CN: "描述文件有 %{count} 处错误：\n%{list}"
+
+"The file is only %{len} bytes; cannot read the 4-byte magic":
+  zh-CN: "文件只有 %{len} 字节，读不出 4 字节魔数"
+
+"The index count %{count} of a single strip group of %{model} overflows int32":
+  zh-CN: "%{model} 的单个 strip group 索引数 %{count} 超出 int32"
+
+"The magic should be IDSV but is %{found}":
+  zh-CN: "魔数应为 IDSV，实际为 %{found}"
+
+"The material table has %{count} entries, over the format limit of %{max} (indices 0..%{last}) -- the skin table `pSkinref` is a **signed short**":
+  zh-CN: "材质表有 %{count} 项，超出格式上限 %{max}（下标 0..%{last}）—— skin 表 `pSkinref` 是 **signed short**"
+
+"The mesh %{model} has %{count} vertices, over the VTX per-mesh limit of %{max}\n`origMeshVertID` in VTX is `uint16`, which can express indices 0..=65535, so **a mesh can have at most 65536 vertices**.\nNote the granularity is **mesh (= one material)**, not the whole model.\n\nYou should not normally see this: the compiler automatically splits an oversized mesh into several meshes of the same material by triangles (TOML's `[model] split_oversized_meshes`, **default true**).\nSeeing it means that option was explicitly turned off; set it back to `true`.\nYou can also split by material (give several `$cdmaterials`/several textures in the QC, or several `$bodygroup` submodels), **no need to split the SMD file by hand**.":
+  zh-CN: "mesh %{model} 有 %{count} 个顶点，超出 VTX 单 mesh 上限 %{max}\nVTX 的 `origMeshVertID` 是 `uint16`，能表达 0..=65535，所以**一个 mesh 最多 65536 个顶点**。\n注意粒度是**mesh（= 一个材质）**，不是整个 model。\n\n通常不该看到它：编译器会按三角形把超限的 mesh 自动拆成同材质的多个 mesh（TOML 的 `[model] split_oversized_meshes`，**默认 true**）。\n看到它说明那个选项被显式关掉了；把它设回 `true`。\n也可以按材质拆（在 QC 里给多个 `$cdmaterials`／多个纹理，或给多个 `$bodygroup` 子模型），**不必手工切分 SMD 文件**。"
+
+"The mesh %{model} has %{count} vertices, over the format limit of %{max} (`origMeshVertID` in VTX is uint16, indices 0..%{last}) -- please split that mesh into several material slots":
+  zh-CN: "mesh %{model} 有 %{count} 个顶点，超出格式上限 %{max}（VTX 的 `origMeshVertID` 是 uint16，下标 0..%{last}）—— 请把该 mesh 拆成多个材质槽"
+
+"The parent bone %{bone} comes after this bone; parents must come first":
+  zh-CN: "父骨骼 %{bone} 排在本骨骼之后；父骨骼必须先出现"
+
+"The path %{path} has %{count} vertices (deduplicated across LODs), over the format limit of %{max} (`mstudiomodel_t.vertexindex` is an int32 byte offset, %{stride} bytes per vertex) -- please split that model into several `[[bodyparts.models]]`":
+  zh-CN: "%{path} 有 %{count} 个顶点（跨 LOD 去重后），超出格式上限 %{max}（`mstudiomodel_t.vertexindex` 是 int32 字节偏移，每顶点 %{stride} 字节）—— 请把该 model 拆成多个 `[[bodyparts.models]]`"
+
+"The path %{path} is too long: %{len} bytes, limit %{max}":
+  zh-CN: "%{path} 过长：%{len} 字节，上限 %{max}"
+
+"The tag in the Location header does not look like a version: %{tag}":
+  zh-CN: "Location 里的 tag 不像版本号：%{tag}"
+
+"The triangle index count %{count} of %{model} overflows int32":
+  zh-CN: "%{model} 的三角形索引数 %{count} 超出 int32"
+
+"The version should be %{expected} but is %{found}":
+  zh-CN: "版本应为 %{expected}，实际为 %{found}"
+
+"The vertex stride of MDL version %{mdl_version} is 64 bytes; this implementation only supports 48":
+  zh-CN: "MDL 版本 %{mdl_version} 的顶点 stride 是 64 字节，本实现只支持 48"
+
+"[physics.constraints] has %{count} entries, but this is the single-solid prop form (`joints = false`) -- `$jointconstrain` only makes sense for a ragdoll. Either remove it or set `joints` to true":
+  zh-CN: "[physics.constraints] 有 %{count} 项，但这是单 solid 的 prop 形态（`joints = false`）—— `$jointconstrain` 只对 ragdoll 有意义。要么去掉它，要么把 `joints` 设为 true"
+
+"[physics.joint_overrides] has %{count} entries, but this is the single-solid prop form (`joints = false`) -- per-joint parameters only make sense for a ragdoll. Either remove it or set `joints` to true":
+  zh-CN: "[physics.joint_overrides] 有 %{count} 项，但这是单 solid 的 prop 形态（`joints = false`）—— 逐 joint 参数只对 ragdoll 有意义。要么去掉它，要么把 `joints` 设为 true"
+
+"[physics.no_self_collisions] / [physics.collision_pairs] only make sense for a ragdoll (with `joints = false` there is no \"do the multiple solids collide\" question). Either remove it or set `joints` to true":
+  zh-CN: "[physics.no_self_collisions] / [physics.collision_pairs] 只对 ragdoll 有意义（`joints = false` 时没有「多个 solid 之间碰不碰」的问题）。要么去掉它，要么把 `joints` 设为 true"
+
+"`[physics].auto_mass` (`$automass`) needs the material density table (`scripts/surfaceproperties_manifest.txt`) to compute the total mass, and mdlc does not have that table. Please write `mass = <value>` explicitly":
+  zh-CN: "`[physics].auto_mass`（`$automass`）需要材质密度表（`scripts/surfaceproperties_manifest.txt`）才能算出总质量，mdlc 没有该表。请显式写 `mass = <值>`"
+
+"cannot compute the overall convex hull: %{err}":
+  zh-CN: "算整体凸包失败：%{err}"
+
+"cannot read %{path}: %{err}":
+  zh-CN: "读不到 %{path}：%{err}"
+
+"cannot write the PHY: %{err}":
+  zh-CN: "写出 PHY 失败：%{err}"
+
+"face %{face} of solid[%{solid}] references vertex %{index}, but there are only %{vertex_count} vertices":
+  zh-CN: "solid[%{solid}] 第 %{face} 个面引用了顶点 %{index}，但只有 %{vertex_count} 个顶点"
+
+"failed to parse %{path}: %{err}":
+  zh-CN: "%{path} 解析失败：%{err}"
+
+"ikrule of the sequence %{sequence}: %{message}":
+  zh-CN: "序列 %{sequence} 的 ikrule：%{message}"
+
+"invalid parameter %{what}: %{detail}":
+  zh-CN: "参数 %{what} 非法：%{detail}"
+
+"min=%{min} > max=%{max} for [physics.constraints][%{index}] (bone %{bone}, axis %{axis}); the official compiler aborts with \"Invalid joint constraint\"":
+  zh-CN: "[physics.constraints][%{index}]（骨骼 %{bone} 轴 %{axis}）的 min=%{min} > max=%{max}，官方会以 \"Invalid joint constraint\" 中止编译"
+
+"no bone has collision geometry":
+  zh-CN: "没有任何骨骼带碰撞几何"
+
+"only %{points} distinct vertices after welding; a convex hull needs at least 4":
+  zh-CN: "焊接后只有 %{points} 个不同顶点，凸包至少要 4 个"
+
+"only %{points} vertices; not even the overall convex hull can be formed (at least 4 are needed)":
+  zh-CN: "只有 %{points} 个顶点，凸包至少要 4 个"
+
+"solid[%{solid}] has %{points} vertices, over the 16-bit index limit %{max}":
+  zh-CN: "solid[%{solid}] 有 %{points} 个顶点，超过 16 位索引上限 %{max}"
+
+"solid[%{solid}] has %{triangles} triangles, over the per-hull limit %{max} (opposite_index is only 15 bits)":
+  zh-CN: "solid[%{solid}] 有 %{triangles} 个三角形，超过单 hull 上限 %{max}（opposite_index 只有 15 位）"
+
+"solid[%{solid}] has no opposite edge for %{from}->%{to}; the mesh is not closed":
+  zh-CN: "solid[%{solid}] 有向边 %{from}->%{to} 没有反向边，网格不闭合"
+
+"solid[%{solid}] has only %{points} vertices; a convex hull needs at least 4 non-coplanar points":
+  zh-CN: "solid[%{solid}] 只有 %{points} 个顶点，凸包至少要 4 个不共面的点"
+
+"solid[%{solid}] has the directed edge %{from}->%{to} twice; the mesh is not an orientable manifold":
+  zh-CN: "solid[%{solid}] 有向边 %{from}->%{to} 出现两次，网格不是可定向流形"
+
+"src_axis only accepts \"y\" / \"z\" (yup / y-up / zup / z-up are also accepted, case-insensitively), but got %{value}":
+  zh-CN: "src_axis 只认 \"y\" / \"z\"（也接受 yup / y-up / zup / z-up，大小写不敏感），实际 %{value}"
+
+"the %{missing} in srcshapekey do not exist in the source file; the available ones are %{have}":
+  zh-CN: "srcshapekey 里的 %{missing} 在源文件里不存在；现有的是 %{have}"
+
+"the SMD has no triangles":
+  zh-CN: "SMD 里没有任何三角形"
+
+"the asset reference %{smd} has no extension: mdlc requires a full file name (such as %{smd}.smd). The official code probes .vrm/.smd/.sma/.phys/.vta/.obj in order (`Load_Source`); this implementation does not guess":
+  zh-CN: "资产引用 %{smd} 没有扩展名：mdlc 要求写完整文件名（如 %{smd}.smd）。官方会按 .vrm/.smd/.sma/.phys/.vta/.obj 依次试探（`Load_Source`），本实现不做这种猜测"
+
+"the axis=%{axis} of [physics.constraints][%{index}] is invalid: it must be x / y / z (the official code only reads the first letter)":
+  zh-CN: "[physics.constraints][%{index}] 的 axis=%{axis} 非法：必须是 x / y / z（官方只取首字母）"
+
+"the bone %{bone} in [physics.joint_overrides] has no collision geometry. Bones with collision geometry: %{available}":
+  zh-CN: "[physics.joint_overrides] 里的骨骼 %{bone} 没有碰撞几何。有碰撞几何的是：%{available}"
+
+"the bone pair (%{a}, %{b}) of [physics.merge][%{index}] has a name that is not in the nodes of the collision SMD. Available bones: %{available}":
+  zh-CN: "[physics.merge][%{index}] 的骨骼对 (%{a}, %{b}) 里有名字不在碰撞 SMD 的 nodes 里。可用的骨骼：%{available}"
+
+"the bounding box of solid[%{solid}] has radius 0 (all vertices coincide); cannot quantize box_sizes":
+  zh-CN: "solid[%{solid}] 的包围盒半径是 0（所有顶点重合），无法量化 box_sizes"
+
+"the collision geometry of every bone fails to form a convex hull":
+  zh-CN: "所有骨骼的碰撞几何都张不成凸包"
+
+"the convex hull of solid[%{solid}] is degenerate: %{detail}":
+  zh-CN: "solid[%{solid}] 的凸包退化：%{detail}"
+
+"the kind=%{kind} of [physics.constraints][%{index}] is invalid: it must be free / fixed / limit":
+  zh-CN: "[physics.constraints][%{index}] 的 kind=%{kind} 非法：必须是 free / fixed / limit"
+
+"the written PHY failed its self-check (a bug in this implementation): %{err}":
+  zh-CN: "写出的 PHY 自检失败（本实现的 bug）：%{err}"
+
+"unrecognized asset format %{other} (%{path}): only .smd, .fbx and .gltf/.glb are supported":
+  zh-CN: "不认识的资产格式 %{other}（%{path}）：目前支持 .smd、.fbx 与 .gltf/.glb"
+
+"vertex %{point} of solid[%{solid}] contains NaN or infinity":
+  zh-CN: "solid[%{solid}] 第 %{point} 个顶点含 NaN 或无穷"
+
+"parent ":
+  zh-CN: "父"
+
+"bone name":
+  zh-CN: "骨骼名"
+
+"attachment name":
+  zh-CN: "附着点名"
+
+"sequence name":
+  zh-CN: "序列名"
+
+"weight list name":
+  zh-CN: "权重表名"
+
+" -- the official code raises MdlError (`unknown bone reference`) here, not a warning":
+  zh-CN: " —— 官方这里是 MdlError（`unknown bone reference`），不是 warning"
+
+"%{hulls} solid hull groups but %{solids} solid parameters":
+  zh-CN: "%{hulls} 个 solid 凸块组，但只有 %{solids} 个 solid 参数"
+
+"%{name} should be %{want}, but is %{got}":
+  zh-CN: "%{name} 应为 %{want}，实际为 %{got}"
+
+"%{size} overflows i32":
+  zh-CN: "%{size} 超出 i32"
+
+"a triangle of solid[%{solid}] references an out-of-range vertex index":
+  zh-CN: "solid[%{solid}] 的某个三角形引用了越界的顶点下标"
+
+"at least one solid is required":
+  zh-CN: "至少需要一个 solid"
+
+"bone index %{bone} +1 overflows i32":
+  zh-CN: "骨骼下标 %{bone} +1 超出 i32"
+
+"bone index %{bone} +1 overflows u32":
+  zh-CN: "骨骼下标 %{bone} +1 超出 u32"
+
+"fixup[%{i}] has negative values: src=%{src} n=%{n}":
+  zh-CN: "fixup[%{i}] 有负值：src=%{src} n=%{n}"
+
+"fixup[%{i}].lod = %{lod} is out of range (numLODs = %{num_lods})":
+  zh-CN: "fixup[%{i}].lod = %{lod} 越界（numLODs = %{num_lods}）"
+
+"must be a non-negative finite number, but got %{value}":
+  zh-CN: "必须是非负有限数，实际 %{value}"
+
+"must be a positive finite number, but got %{value}":
+  zh-CN: "必须是正的有限数，实际 %{value}"
+
+"numFixups declares %{declared} entries but the table has %{actual}":
+  zh-CN: "numFixups 声明 %{declared} 条但表里有 %{actual} 条"
+
+"numFixups declares %{declared} entries but there are actually %{actual}":
+  zh-CN: "numFixups 声明 %{declared} 条但实际有 %{actual} 条"
+
+"numFixups must not be negative: %{got}":
+  zh-CN: "numFixups 不能为负：%{got}"
+
+"numLODVertexes must be monotonically non-increasing, but [%{prev}]=%{a} < [%{i}]=%{b}":
+  zh-CN: "numLODVertexes 必须单调不增，但 [%{prev}]=%{a} < [%{i}]=%{b}"
+
+"numLODVertexes[%{i}] should ripple to %{last} (the last valid LOD), but is %{got}":
+  zh-CN: "numLODVertexes[%{i}] 应 ripple 为 %{last}（最后一个有效 LOD），实际为 %{got}"
+
+"numLODVertexes[0] declares %{declared} vertices but there are actually %{actual}":
+  zh-CN: "numLODVertexes[0] 声明 %{declared} 个顶点但实际有 %{actual} 个"
+
+"numLODVertexes[0] should be the vertex total %{count}, but is %{got}":
+  zh-CN: "numLODVertexes[0] 应为顶点总数 %{count}，实际为 %{got}"
+
+"numLODs should be in 1..=%{max}, but is %{got}":
+  zh-CN: "numLODs 应在 1..=%{max}，实际为 %{got}"
+
+"only \"y\" / \"z\" are accepted (yup / y-up / zup / z-up are also accepted, case-insensitively), but got %{value}":
+  zh-CN: "只认 \"y\" / \"z\"（也接受 yup / y-up / zup / z-up，大小写不敏感），实际 %{value}"
+
+"overlapping fixup ranges @%{k}":
+  zh-CN: "fixup 区间重叠 @%{k}"
+
+"same as the LOD 0 smd (%{smd}) -- for the same mesh **omit** smd and only write the bone options":
+  zh-CN: "与 LOD 0 的 smd 相同（%{smd}）—— 同一个网格请**省略** smd，只写骨骼选项"
+
+"solid[%{solid}] has no hull at all":
+  zh-CN: "solid[%{solid}] 没有任何 hull"
+
+"the %{what} of solid[%{solid}] contains a NUL byte":
+  zh-CN: "solid[%{solid}] 的 %{what} 含 NUL 字节"
+
+"the face list of hull %{hull} is empty":
+  zh-CN: "第 %{hull} 个凸块的面表是空的"
+
+"the file length should be %{expect}, but is %{got}":
+  zh-CN: "文件长度应为 %{expect}，实际为 %{got}"
+
+"the fixup table does not cover the vertex %{gap} (there is a hole)":
+  zh-CN: "fixup 表没有覆盖顶点 %{gap}（有空洞）"
+
+"the fixup[%{i}] range [%{start},%{end}) goes past the %{count} vertices of LOD %{lod}":
+  zh-CN: "fixup[%{i}] 区间 [%{start},%{end}) 超出 LOD %{lod} 的顶点数 %{count}"
+
+"the fixup[%{i}] range is out of range: %{k} >= %{count}":
+  zh-CN: "fixup[%{i}] 区间越界：%{k} >= %{count}"
+
+"the hull references no vertex at all":
+  zh-CN: "凸包没有引用任何顶点"
+
+"the solid count overflows i32":
+  zh-CN: "solid 数超出 i32"
+
+"the vertex or face list is empty":
+  zh-CN: "顶点或面表是空的"
+
+"there are %{count} vertices but %{tangents} tangents":
+  zh-CN: "顶点 %{count} 条但切线 %{tangents} 条"
+
+"there should be %{count} vertices/tangents, but there are %{vertices}/%{tangents}":
+  zh-CN: "顶点/切线数应为 %{count}，实际为 %{vertices}/%{tangents}"
+
+"too long: %{len} bytes, limit 63":
+  zh-CN: "过长：%{len} 字节，上限 63"
+
+"too many LODs: %{count} levels (LOD 0 included), the engine limit is %{max}":
+  zh-CN: "LOD 过多：%{count} 层（含 LOD 0），引擎上限 %{max}"
+
+"too many entries: %{count}, the official limit is %{max}":
+  zh-CN: "条目过多：%{count} 条，官方上限 %{max}"
+
+"too many tables: %{count}, the official limit is %{max} (the implicit default table 0 is included, so at most %{hand} may be written by hand)":
+  zh-CN: "表过多：%{count} 张，官方上限 %{max}（含隐式默认表 0，所以手写最多 %{hand} 张）"
+
+"unknown `$jigglebone` key %{key} (the official code aborts with `$jigglebone: invalid syntax`)":
+  zh-CN: "未知的 `$jigglebone` 键 %{key}（官方会 abort：`$jigglebone: invalid syntax`）"
+
+"vertex %{vertex} references the bone index %{bone}, over the format limit %{max} -- `mstudioboneweight_t.bone[]` in VVD is a **signed char**, so an index >=128 is read as negative by the engine":
+  zh-CN: "顶点 %{vertex} 引用了骨骼下标 %{bone}，超过格式上限 %{max} —— VVD 的 `mstudioboneweight_t.bone[]` 是**有符号 char**，下标 ≥128 会被引擎读成负数"
+
+"VVD header":
+  zh-CN: "VVD 头部"
+
+"fixup table":
+  zh-CN: "fixup 表"
+
+"vertex block":
+  zh-CN: "顶点块"
+
+"tangent block":
+  zh-CN: "切线块"
+
+"%{path} has a vertex whose skin weights are all 0, or which has no binding at all":
+  zh-CN: "%{path} 有顶点的蒙皮权重全为 0，或根本没有绑定"
+
+"%{path} has no usable triangle left (%{dropped} materials had every triangle degenerate)":
+  zh-CN: "%{path} 已经没有可用的三角形（%{dropped} 个材质的三角形全部退化）"
+
+"**compiled successfully** (every file passed its layout self-check)":
+  zh-CN: "**编译成功**（各文件布局自检均通过）"
+
+"LOD %{lod} has material indices that LOD 0 does not have: %{extra}":
+  zh-CN: "LOD %{lod} 有 LOD 0 没有的材质下标：%{extra}"
+
+"LOD %{lod} has no mesh with the material index %{mat} (mesh[%{ki}] of LOD 0 uses it) -- every LOD must use the same set of materials":
+  zh-CN: "LOD %{lod} 没有材质下标为 %{mat} 的 mesh（LOD 0 的 mesh[%{ki}] 用了它）—— 每个 LOD 必须用同一组材质"
+
+"MDL         %{size} bytes  %{path}":
+  zh-CN: "MDL         %{size} 字节  %{path}"
+
+"PHY         %{size} bytes  %{path}":
+  zh-CN: "PHY         %{size} 字节  %{path}"
+
+"VHACD produced no valid convex hull at all":
+  zh-CN: "VHACD 没有产出任何有效的凸包"
+
+"VTX         %{size} bytes  %{path}":
+  zh-CN: "VTX         %{size} 字节  %{path}"
+
+"VVD         %{size} bytes  %{path}":
+  zh-CN: "VVD         %{size} 字节  %{path}"
+
+"`touch` references a bone that does not exist: %{bone}":
+  zh-CN: "`touch` 引用了不存在的骨骼 %{bone}"
+
+"a stereo ui needs at least one of left/right":
+  zh-CN: "stereo ui 需要 left/right 至少一个"
+
+"a vertex of %{path} references the bone index %{bone}, but the nodes section only has %{nodes} entries":
+  zh-CN: "%{path} 有顶点引用了骨骼下标 %{bone}，但 nodes 段只有 %{nodes} 项"
+
+"an attachment rule must name the attachment":
+  zh-CN: "attachment 规则必须写 attachment 名"
+
+"animations[%{i}].subtract (sequence %{name})":
+  zh-CN: "animations[%{i}].subtract（序列 %{name}）"
+
+"blend_width must be positive, but is %{width}":
+  zh-CN: "blend_width 必须是正数，实际 %{width}"
+
+"body part   %{n}":
+  zh-CN: "body part   %{n}"
+
+"bones       %{n}":
+  zh-CN: "骨骼        %{n}"
+
+"calcblend failed in %{name} (paramstart=%{start} paramend=%{end}, the difference is < 0.01; the official code aborts the compile here)":
+  zh-CN: "%{name} 的 calcblend 失败（paramstart=%{start} paramend=%{end}，差值 < 0.01；官方在这里中止编译）"
+
+"cannot find the animation %{name} (every blend cell must be a name declared in [[animations]]; existing: %{anims})":
+  zh-CN: "找不到动画 %{name}（每个 blend 格必须是 [[animations]] 里声明过的名字；现有：%{anims}）"
+
+"cannot find the bone %{bone}":
+  zh-CN: "找不到骨骼 %{bone}"
+
+"cannot find the control bone %{control} (the target bone is %{bone})":
+  zh-CN: "找不到 control 骨骼 %{control}（目标骨骼 %{bone}）"
+
+"cannot find the pose parameter %{name} ([[model.pose_parameters]] has %{n}: %{list})":
+  zh-CN: "找不到姿势参数 %{name}（[[model.pose_parameters]] 有 %{n} 个：%{list}）"
+
+"cannot find the reference animation %{name} (subtract takes an **animation or sequence name**; existing animations: %{anims}; existing sequences: %{seqs})":
+  zh-CN: "找不到参考动画 %{name}（subtract 接受**动画名或序列名**；现有动画：%{anims}；现有序列：%{seqs}）"
+
+"cannot find the sequence %{name}":
+  zh-CN: "找不到序列 %{name}"
+
+"checksum    %{sum}  (written into every file, they agree)":
+  zh-CN: "checksum    %{sum}  （已写入各文件，配对一致）"
+
+"failed to write the animation: %{err}":
+  zh-CN: "动画写出失败：%{err}"
+
+"fetch1 needs a controller":
+  zh-CN: "fetch1 需要 controller"
+
+"fetch2 needs a flexdesc":
+  zh-CN: "fetch2 需要 flexdesc"
+
+"footstep (IK_GROUND) needs center/height/floor/radius of `$ikchain`, which is not implemented yet; it also appears 0 times in the L4D2 corpus":
+  zh-CN: "footstep（IK_GROUND）需要 $ikchain 的 center/height/floor/radius，尚未实现；而且它在 L4D2 语料里出现 0 次"
+
+"ikautoplaylock references an ikchain that does not exist: %{chain}":
+  zh-CN: "ikautoplaylock 引用了不存在的链 %{chain}"
+
+"iklocks[%{lock}] of the sequence %{sequence} references an ikchain that does not exist: %{chain}":
+  zh-CN: "序列 %{sequence} 的 iklocks[%{lock}] 引用了不存在的链 %{chain}"
+
+"ikrule asked for the out-of-range frame %{frame} (the animation %{name} has %{frames} frames and is not LOOPING)":
+  zh-CN: "ikrule 请求了越界帧 %{frame}（动画 %{name} 有 %{frames} 帧，非 LOOPING）"
+
+"internal error: after the split lods.meshes has %{lods} entries, but meshes has %{meshes}":
+  zh-CN: "内部错误：拆分后 lods.meshes 有 %{lods} 项，但 meshes 有 %{meshes} 项"
+
+"internal error: after the split mesh_flexes has %{flexes} entries, but meshes has %{meshes}":
+  zh-CN: "内部错误：拆分后 mesh_flexes 有 %{flexes} 项，但 meshes 有 %{meshes} 项"
+
+"internal error: lods.meshes has %{lods} entries, but meshes has %{meshes} (the two must correspond one to one) -- the split cannot guarantee index alignment":
+  zh-CN: "内部错误：lods.meshes 有 %{lods} 项，但 meshes 有 %{meshes} 项（两者必须一一对应）—— 拆分无法保证下标对齐"
+
+"internal error: the vertanim index %{index} of mesh %{k} is past the %{n} vertices (the vertex pool does not agree with the writer)":
+  zh-CN: "内部错误：mesh %{k} 的 vertanim 下标 %{index} 超出 %{n} 个顶点（顶点池与写出器不一致）"
+
+"materials   %{n}":
+  zh-CN: "材质        %{n}"
+
+"mesh count mismatch: the VTX has %{vtx}, the MDL has %{mdl}":
+  zh-CN: "mesh 数不符：VTX 有 %{vtx}，MDL 有 %{mdl}"
+
+"mesh[%{k}] (material index %{mat}) still has a block with %{worst} vertices after the split (the limit is %{limit}): several LODs of this mesh share vertices, and the grouping pushed them into the same block. Reduce the number of LOD levels for this material, or split the material into several SMD materials.":
+  zh-CN: "mesh[%{k}]（材质下标 %{mat}）拆分后仍有 %{worst} 个顶点的块（上限 %{limit}）：该 mesh 的多个 LOD 共用顶点，分组把它们挤进了同一个块。请减少该材质的 LOD 层数，或把该材质拆成几个 SMD 材质。"
+
+"meshopt changed the triangle set (it should only reorder them) -- refusing to write":
+  zh-CN: "meshopt 改变了三角形集合（应只重排顺序）—— 拒绝写出"
+
+"meshopt changed the triangle winding (backface culling would be inverted) -- refusing to write":
+  zh-CN: "meshopt 改变了三角形绕序（背面剔除会反过来）—— 拒绝写出"
+
+"meshopt returned %{got} indices but the input has %{want}":
+  zh-CN: "meshopt 返回的索引数 %{got} 与输入 %{want} 不符"
+
+"model       %{name}":
+  zh-CN: "模型        %{name}"
+
+"model[%{k}] is out of range":
+  zh-CN: "model[%{k}] 越界"
+
+"nextoffset overflows i16":
+  zh-CN: "nextoffset 超出 i16"
+
+"no node references hull @%{off}":
+  zh-CN: "没有节点引用 hull @%{off}"
+
+"phyheader.id should be 0, but is %{got}":
+  zh-CN: "phyheader.id 应为 0，实际为 %{got}"
+
+"phyheader.size should be 16, but is %{got}":
+  zh-CN: "phyheader.size 应为 16，实际为 %{got}"
+
+"phyheader.solidCount is negative: %{got}":
+  zh-CN: "phyheader.solidCount 为负：%{got}"
+
+"radius and pad are mutually exclusive (the official pad is radius/2)":
+  zh-CN: "radius 与 pad 互斥（官方 pad 就是 radius/2）"
+
+"solid[%{solid}] %{count} tree nodes were not reached":
+  zh-CN: "solid[%{solid}] 有 %{count} 个树节点没被访问到"
+
+"solid[%{solid}] IVP_Compact_Surface::byte_size != surfaceSize":
+  zh-CN: "solid[%{solid}] IVP_Compact_Surface::byte_size != surfaceSize"
+
+"solid[%{solid}] axisMapSize should be 0, but is %{got}":
+  zh-CN: "solid[%{solid}] axisMapSize 应为 0，实际为 %{got}"
+
+"solid[%{solid}] dummy[0]/dummy[1] should be 0":
+  zh-CN: "solid[%{solid}] dummy[0]/dummy[1] 应为 0"
+
+"solid[%{solid}] dummy[2] should be 'IVPS'":
+  zh-CN: "solid[%{solid}] dummy[2] 应为 'IVPS'"
+
+"solid[%{solid}] goes past the end of the file (needs %{need}, only %{have})":
+  zh-CN: "solid[%{solid}] 超出文件末尾（需要 %{need} 字节，只有 %{have} 字节）"
+
+"solid[%{solid}] hull @%{off} directed edge %{u}->%{v} appears %{c} times":
+  zh-CN: "solid[%{solid}] hull @%{off} 的有向边 %{u}->%{v} 出现了 %{c} 次"
+
+"solid[%{solid}] hull @%{off} directed edge %{u}->%{v} has no opposite edge":
+  zh-CN: "solid[%{solid}] hull @%{off} 的有向边 %{u}->%{v} 没有反向边"
+
+"solid[%{solid}] hull @%{off} falls outside the ledge region":
+  zh-CN: "solid[%{solid}] hull @%{off} 落在 ledge 区之外"
+
+"solid[%{solid}] hull @%{off} has c_point_offset=%{cpo} pointing at %{got}, but the shared array starts at %{want}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 c_point_offset=%{cpo} 指向 %{got}，但共享数组从 %{want} 开始"
+
+"solid[%{solid}] hull @%{off} has c_point_offset=%{cpo}, but the suffix sum says %{want}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 c_point_offset=%{cpo}，但后缀和是 %{want}"
+
+"solid[%{solid}] hull @%{off} has dummy != 0":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 dummy != 0"
+
+"solid[%{solid}] hull @%{off} has for_future_use != 0":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 for_future_use != 0"
+
+"solid[%{solid}] hull @%{off} has has_chilren_flag != 0":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 has_chilren_flag != 0"
+
+"solid[%{solid}] hull @%{off} has is_compact_flag != 1":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 is_compact_flag != 1"
+
+"solid[%{solid}] hull @%{off} has n_triangles=%{n}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 n_triangles=%{n}"
+
+"solid[%{solid}] hull @%{off} has size_div_16=%{got} != 1+%{n_tri}+%{points}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 size_div_16=%{got} != 1+%{n_tri}+%{points}"
+
+"solid[%{solid}] hull @%{off} node box_sizes[%{axis}] should be %{want}, but is %{got}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 node box_sizes[%{axis}] 应为 %{want}，实际为 %{got}"
+
+"solid[%{solid}] hull @%{off} node center[%{axis}] should be %{want}, but is %{got}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 node center[%{axis}] 应为 %{want}，实际为 %{got}"
+
+"solid[%{solid}] hull @%{off} node radius is 0":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 node radius 是 0"
+
+"solid[%{solid}] hull @%{off} node radius should be %{want}, but is %{got}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的 node radius 应为 %{want}，实际为 %{got}"
+
+"solid[%{solid}] hull @%{off} references point %{v}, but the shared array only has %{n} points":
+  zh-CN: "solid[%{solid}] hull @%{off} 引用了点 %{v}，但共享数组只有 %{n} 个点"
+
+"solid[%{solid}] hull @%{off} triangle %{k} edge %{i} should have opposite_index %{want}, but has %{got}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的三角形 %{k} 的第 %{i} 条边 opposite_index 应为 %{want}，实际为 %{got}"
+
+"solid[%{solid}] hull @%{off} triangle %{k} has tri_index != %{k}":
+  zh-CN: "solid[%{solid}] hull @%{off} 的三角形 %{k} 的 tri_index != %{k}"
+
+"solid[%{solid}] max_factor_surface_deviation is 0":
+  zh-CN: "solid[%{solid}] max_factor_surface_deviation 是 0"
+
+"solid[%{solid}] modelType should be 0, but is %{got}":
+  zh-CN: "solid[%{solid}] modelType 应为 0，实际为 %{got}"
+
+"solid[%{solid}] node free_0 != 0":
+  zh-CN: "solid[%{solid}] node free_0 != 0"
+
+"solid[%{solid}] offset_compact_ledge=%{got} should be negative (the ledge lives at a lower address)":
+  zh-CN: "solid[%{solid}] offset_compact_ledge=%{got} 应为负数（ledge 在更低的地址）"
+
+"solid[%{solid}] offset_ledgetree_root=%{offset} falls inside the surface":
+  zh-CN: "solid[%{solid}] offset_ledgetree_root=%{offset} 落在 surface 内部"
+
+"solid[%{solid}] offset_ledgetree_root=%{offset} makes the tree go past the end of the solid":
+  zh-CN: "solid[%{solid}] offset_ledgetree_root=%{offset} 使树越过 solid 末尾"
+
+"solid[%{solid}] offset_right_node=%{right} is not a multiple of 28":
+  zh-CN: "solid[%{solid}] offset_right_node=%{right} 不是 28 的倍数"
+
+"solid[%{solid}] size - surfaceSize should be 28, but is %{size} - %{surface}":
+  zh-CN: "solid[%{solid}] size - surfaceSize 应为 28，实际为 %{size} - %{surface}"
+
+"solid[%{solid}] surfaceSize is too small: %{size}":
+  zh-CN: "solid[%{solid}] surfaceSize 太小：%{size}"
+
+"solid[%{solid}] surfaceSize=%{size} != 48 + %{ledge} + 28×%{nodes}":
+  zh-CN: "solid[%{solid}] surfaceSize=%{size} != 48 + %{ledge} + 28×%{nodes}"
+
+"solid[%{solid}] the ledge has a gap: expected %{want}, got %{got}":
+  zh-CN: "solid[%{solid}] ledge 有空洞：应为 %{want}，实际为 %{got}"
+
+"solid[%{solid}] the ledge region length is 0":
+  zh-CN: "solid[%{solid}] ledge 区长度为 0"
+
+"solid[%{solid}] the offset_compact_ledge of a single-node tree should be %{want}, but is %{got}":
+  zh-CN: "solid[%{solid}] 单节点树的 offset_compact_ledge 应为 %{want}，实际为 %{got}"
+
+"solid[%{solid}] the right child node @%{right} is out of range":
+  zh-CN: "solid[%{solid}] 右子节点 @%{right} 越界"
+
+"solid[%{solid}] the shared point array is empty":
+  zh-CN: "solid[%{solid}] 共享点数组是空的"
+
+"solid[%{solid}] the shared point array is not 16-byte aligned":
+  zh-CN: "solid[%{solid}] 共享点数组没有 16 字节对齐"
+
+"solid[%{solid}] the tree has a cycle @%{off}":
+  zh-CN: "solid[%{solid}] 树在 @%{off} 处有环"
+
+"solid[%{solid}] the tree node @%{off} is out of range":
+  zh-CN: "solid[%{solid}] 树节点 @%{off} 越界"
+
+"solid[%{solid}] the tree region length %{len} is not a multiple of 28":
+  zh-CN: "solid[%{solid}] 树区长度 %{len} 不是 28 的倍数"
+
+"solid[%{solid}] the triangles of hull @%{off} go past the start of the tree":
+  zh-CN: "solid[%{solid}] hull @%{off} 的三角形越过树的起点"
+
+"solid[%{solid}] upper_limit_radius should be %{want}, but is %{got}":
+  zh-CN: "solid[%{solid}] upper_limit_radius 应为 %{want}，实际为 %{got}"
+
+"solid[%{solid}] version should be 0x0100, but is %{got}":
+  zh-CN: "solid[%{solid}] version 应为 0x0100，实际为 %{got}"
+
+"solid[%{solid}] vphysicsID should be 'VPHY', but is %{got}":
+  zh-CN: "solid[%{solid}] vphysicsID 应为 'VPHY'，实际为 %{got}"
+
+"the 1st/4th entry of `range` is `.`, which needs the official FindPrev/NextIKRule interpolation; not implemented yet (chain %{chain})":
+  zh-CN: "range 的第 1/4 项写成 `.` 需要官方 FindPrev/NextIKRule 插值，尚未实现（chain %{chain}）"
+
+"the animation name %{name} is duplicated":
+  zh-CN: "动画名 %{name} 重复"
+
+"the attachment bone %{bone} did not pass validation":
+  zh-CN: "附着点骨骼 %{bone} 未通过校验"
+
+"the attachment name relative offset overflows i32":
+  zh-CN: "附着点名相对偏移超出 i32"
+
+"the blend cell count %{cells} is not a perfect square and no blend_width was given -- the official code raises non-square number of blends (simplify.cpp:3011)":
+  zh-CN: "blend 格数 %{cells} 不是完全平方数且没有给 blend_width —— 官方会抛 non-square number of blends（simplify.cpp:3011）"
+
+"the blend cell count %{cells} is not divisible by blend_width %{width} (groupsize[0]*groupsize[1] must equal the cell count)":
+  zh-CN: "blend 格数 %{cells} 不能被 blend_width %{width} 整除（groupsize[0]*groupsize[1] 必须等于格数）"
+
+"the body part name relative offset overflows i32":
+  zh-CN: "body part 名相对偏移超出 i32"
+
+"the body part table is out of range":
+  zh-CN: "body part 表越界"
+
+"the bone index %{bone} is out of range (there are %{count} bones)":
+  zh-CN: "骨骼下标 %{bone} 越界（共 %{count} 根）"
+
+"the bone index %{bone} of %{path} cannot be mapped to [[bones]] (the bone table is empty)":
+  zh-CN: "%{path} 的骨骼下标 %{bone} 无法映射到 [[bones]]（骨骼表是空的）"
+
+"the bone name did not make it into the string pool":
+  zh-CN: "骨骼名未进字符串池"
+
+"the bone name relative offset overflows i32":
+  zh-CN: "骨骼名相对偏移超出 i32"
+
+"the channel offset overflows i16 (the animation is too large)":
+  zh-CN: "通道偏移超出 i16（动画过大）"
+
+"the checksum does not match the MDL":
+  zh-CN: "checksum 与 MDL 不一致"
+
+"the controller %{name} of fetch1 was not found in [[flex_controllers]]":
+  zh-CN: "fetch1 的 controller %{name} 在 [[flex_controllers]] 里找不到"
+
+"the end frame %{hi} is earlier than the start frame %{lo} (the source only has %{n} frames)":
+  zh-CN: "结束帧 %{hi} 早于起始帧 %{lo}（源只有 %{n} 帧）"
+
+"the error computation for type = %{ty} is not implemented yet":
+  zh-CN: "type = %{ty} 的误差计算尚未实现"
+
+"the event name did not make it into the string pool":
+  zh-CN: "事件名未进字符串池"
+
+"the event name relative offset overflows i32":
+  zh-CN: "事件名相对偏移超出 i32"
+
+"the file is only %{len} bytes; not even the 16-byte header fits":
+  zh-CN: "文件只有 %{len} 字节，连 16 字节头都放不下"
+
+"the flex %{name} was not found in [[flex_descriptors]]":
+  zh-CN: "flex %{name} 在 [[flex_descriptors]] 里找不到"
+
+"the flex vertanim write is out of range (%{vo} + %{stride} > %{len})":
+  zh-CN: "flex vertanim 写出越界（%{vo}+%{stride} > %{len}）"
+
+"the flexcontroller %{name} of %{which} was not found in [[flex_controllers]]":
+  zh-CN: "%{which} 的 flexcontroller %{name} 在 [[flex_controllers]] 里找不到"
+
+"the flexdesc %{name} of fetch2 was not found in [[flex_descriptors]]":
+  zh-CN: "fetch2 的 flexdesc %{name} 在 [[flex_descriptors]] 里找不到"
+
+"the flexdesc %{name} was not found in [[flex_descriptors]]":
+  zh-CN: "flexdesc %{name} 在 [[flex_descriptors]] 里找不到"
+
+"the frame table is empty when ikrule takes frame %{frame} (%{name})":
+  zh-CN: "ikrule 取帧 %{frame} 时帧表为空（%{name}）"
+
+"the header of solid[%{solid}] goes past the end of the file":
+  zh-CN: "solid[%{solid}] 的头部超出文件末尾"
+
+"the hitbox bone %{bone} did not pass validation":
+  zh-CN: "hitbox 骨骼 %{bone} 未通过校验"
+
+"the hitbox name relative offset overflows i32":
+  zh-CN: "hitbox 名相对偏移超出 i32"
+
+"the hitbox set name relative offset overflows i32":
+  zh-CN: "hitbox set 名相对偏移超出 i32"
+
+"the ikchain %{chain} references a bone that does not exist: %{bone}":
+  zh-CN: "ikchain %{chain} 引用了不存在的骨骼 %{bone}"
+
+"the ikchain %{name} is too close to the root bone; there is no hip/shoulder":
+  zh-CN: "ikchain %{name} 太靠近根骨骼，没有胯/肩"
+
+"the ikchain %{name} is too close to the root bone; there is no knee/elbow":
+  zh-CN: "ikchain %{name} 太靠近根骨骼，没有膝/肘"
+
+"the index %{index} must not be negative":
+  zh-CN: "index %{index} 不能为负"
+
+"the index %{index} was written twice":
+  zh-CN: "index %{index} 被写了两次"
+
+"the index array is out of range":
+  zh-CN: "索引数组越界"
+
+"the index must not be negative":
+  zh-CN: "index 不能为负"
+
+"the inherited surfaceprop offset overflows i32":
+  zh-CN: "继承 surfaceprop 偏移超出 i32"
+
+"the inline string at offset %{off}":
+  zh-CN: "偏移 %{off} 的内联字符串"
+
+"the linearbone array (coeff=%{coeff}, elem=%{elem}) has no matching bone field":
+  zh-CN: "linearbone 数组 (coeff=%{coeff}, elem=%{elem}) 无对应骨骼字段"
+
+"the material %{name} was not found among the meshes of this model":
+  zh-CN: "材质 %{name} 在该 model 的 mesh 里找不到"
+
+"the material name %{name} in the SMD was not found in [materials].textures (the lookup key is %{key})":
+  zh-CN: "SMD 里的材质名 %{name} 在 [materials].textures 里找不到（查找键是 %{key}）"
+
+"the material name relative offset overflows i32":
+  zh-CN: "材质名相对偏移超出 i32"
+
+"the name must not be empty":
+  zh-CN: "name 不能为空"
+
+"the name relative offset overflows i32":
+  zh-CN: "名字相对偏移超出 i32"
+
+"the op %{op} needs a value":
+  zh-CN: "op %{op} 需要 value"
+
+"the parent bone %{bone} did not pass validation":
+  zh-CN: "父骨骼 %{bone} 未通过校验"
+
+"the reference animation %{name} only has %{n} frames; frame %{frame} is out of reach":
+  zh-CN: "参考动画 %{name} 只有 %{n} 帧，取不到第 %{frame} 帧"
+
+"the reference pose count %{got} does not match the bone count %{want}":
+  zh-CN: "参考姿态数 %{got} 与骨骼数 %{want} 不一致"
+
+"the section layout self-check failed: %{err}":
+  zh-CN: "段布局自检失败：%{err}"
+
+"the shape key name is empty and cannot be registered as a flexdesc":
+  zh-CN: "shape key 的名字是空的，不能注册成 flexdesc"
+
+"the skeleton section of %{path} has no frame at all":
+  zh-CN: "%{path} 的 skeleton 段没有任何帧"
+
+"the source frame table is empty when ikrule takes frame %{frame} (%{name})":
+  zh-CN: "ikrule 取帧 %{frame} 时源帧表为空（%{name}）"
+
+"the srcbonetransform name offset overflows i32":
+  zh-CN: "srcbonetransform 名字偏移超出 i32"
+
+"the string offset overflows":
+  zh-CN: "字符串偏移溢出"
+
+"the string offset overflows i32":
+  zh-CN: "字符串偏移超出 i32"
+
+"the strip group is out of range":
+  zh-CN: "strip group 越界"
+
+"the surfaceprop relative offset overflows i32":
+  zh-CN: "surfaceprop 相对偏移超出 i32"
+
+"the tangentsindex byte offset %{offset} of bodyparts[%{bi}].models[%{mi}] overflows int32":
+  zh-CN: "bodyparts[%{bi}].models[%{mi}] 的 tangentsindex 字节偏移 %{offset} 超出 int32"
+
+"the text section contains a NUL byte":
+  zh-CN: "text 段含 NUL 字节"
+
+"the text section does not end with \"}\\n\"":
+  zh-CN: "text 段不是以 \"}\\n\" 结尾"
+
+"the text section does not end with a single 0x00":
+  zh-CN: "text 段不是以单个 0x00 结尾"
+
+"the text section does not start with \"solid {\"":
+  zh-CN: "text 段不是以 \"solid {\" 开头"
+
+"the text section has %{blocks} \"solid {\" blocks, but solidCount=%{solid}":
+  zh-CN: "text 段有 %{blocks} 个 \"solid {\" 块，但 solidCount=%{solid}"
+
+"the text section is not UTF-8: %{err}":
+  zh-CN: "text 段不是 UTF-8：%{err}"
+
+"the unified vertex %{u} of mesh %{mesh} is not in the layout (LOD %{lod})":
+  zh-CN: "mesh %{mesh} 的统一顶点 %{u} 不在布局里（LOD %{lod}）"
+
+"the vertex array is out of range":
+  zh-CN: "顶点数组越界"
+
+"the vertexindex byte offset %{offset} of bodyparts[%{bi}].models[%{mi}] overflows int32":
+  zh-CN: "bodyparts[%{bi}].models[%{mi}] 的 vertexindex 字节偏移 %{offset} 超出 int32"
+
+"the written length %{got} does not match the budget %{want}":
+  zh-CN: "写入长度 %{got} 与预算 %{want} 不符"
+
+"there is no text section":
+  zh-CN: "没有 text section"
+
+"there is not a single triangle in %{path}":
+  zh-CN: "%{path} 里没有任何三角形"
+
+"triangles   %{n}":
+  zh-CN: "三角形      %{n}"
+
+"unknown `$jigglebone` key %{key}":
+  zh-CN: "未知的 `$jigglebone` 键 %{key}"
+
+"unknown calcblend attachment point %{name}":
+  zh-CN: "未知的 calcblend 附着点 %{name}"
+
+"unknown calcblend attachment point %{name} (the official code says Unknown calcblend attachment)":
+  zh-CN: "未知的 calcblend 附着点 %{name}（官方报 Unknown calcblend attachment）"
+
+"unknown ikchain name %{chain}":
+  zh-CN: "未知的 IK 链名 %{chain}"
+
+"version     %{version}":
+  zh-CN: "版本        %{version}"
+
+"version is not 7":
+  zh-CN: "version 不是 7"
+
+"vertices    %{n}":
+  zh-CN: "顶点        %{n}"
+
+"$continue cannot find the sequence or animation %{name} (the official code says unknown continue animation %{name2})":
+  zh-CN: "$continue 找不到序列或动画 %{name}（官方报 unknown continue animation %{name2}）"
+
+"$defaultweightlist is not supported yet — it overrides the weights of **all** sequences that do not name a weightlist explicitly, so ignoring it silently would produce a model that looks right but means something else. The command appears 0 times in the corpus ($weightlist appears 9 times). If your QC uses it, switch to `$weightlist \"<name>\"` and reference it explicitly on the sequence.":
+  zh-CN: "$defaultweightlist 尚未支持 —— 它会覆盖**所有**未显式指定 weightlist 的序列的权重，静默忽略会产出看起来对但语义错的模型。语料里该命令出现 0 次（$weightlist 出现 9 次）。若你的 QC 用到它，请改用 `$weightlist \"<name>\"` 并在序列上显式引用。"
+
+"$include cannot find %{name} (%{path}): %{err}":
+  zh-CN: "$include 找不到 %{name}（%{path}）：%{err}"
+
+"$include nesting exceeds %{max} levels":
+  zh-CN: "$include 嵌套超过 %{max} 层"
+
+"$jigglebone %{bone}: a nested `{{` appears inside a block — the official code aborts (`$jigglebone: invalid syntax '{{'`)":
+  zh-CN: "$jigglebone %{bone}：块内出现嵌套的 `{{` —— 官方会 abort（`$jigglebone: invalid syntax '{{'`）"
+
+"$jigglebone %{bone}: a nested `{{` with no block name before it — the official code aborts (`$jigglebone: invalid syntax`)":
+  zh-CN: "$jigglebone %{bone}：嵌套的 `{{` 之前没有块名 —— 官方会 abort（`$jigglebone: invalid syntax`）"
+
+"$jigglebone %{bone}: the %{block} block does not accept the key %{key} — the official code aborts (`$jigglebone: invalid syntax '%{key2}'`)":
+  zh-CN: "$jigglebone %{bone}：%{block} 块不接受键 %{key} —— 官方会 abort（`$jigglebone: invalid syntax '%{key2}'`）"
+
+"$jigglebone %{bone}: the key %{key} appears in an unnamed nested block":
+  zh-CN: "$jigglebone %{bone}：键 %{key} 出现在无名的嵌套块里"
+
+"$jigglebone %{bone}: the key %{key} is written outside any block — the official code aborts (`$jigglebone: invalid syntax '%{key2}'`)":
+  zh-CN: "$jigglebone %{bone}：键 %{key} 写在任何块之外 —— 官方会 abort（`$jigglebone: invalid syntax '%{key2}'`）"
+
+"$nekomodel points at a DMX source; mdlc does not implement DMX (the official code delegates to dmxconvert.exe as well)":
+  zh-CN: "$nekomodel 指向 DMX 源，mdlc 不实现 DMX（官方也委托 dmxconvert.exe）"
+
+"%{what} is missing controls (the official code says missing controls on %{what2})":
+  zh-CN: "%{what} 缺少控制位（官方报 missing controls on %{what2}）"
+
+"`blank` bodygroup member: mdlc's BodyModel requires an SMD, so blank is not supported yet":
+  zh-CN: "`blank` bodygroup 成员：mdlc 的 BodyModel 必须有 SMD，暂不支持 blank"
+
+"`srcshapekeyignore` cannot be given together with `srcshapekey` / `srcshapekeyorder`: the former means \"no morph targets at all\", the latter two mean \"take them by name\"":
+  zh-CN: "`srcshapekeyignore` 与 `srcshapekey` / `srcshapekeyorder` 不能同时给出：前者是「一个形变目标都不要」，后两者是「按名单取」"
+
+"cannot read the QC file: %{err}":
+  zh-CN: "读不到 QC 文件：%{err}"
+
+"cannot read the VRD %{path}: %{err}":
+  zh-CN: "读不到 VRD %{path}：%{err}"
+
+"duplicate $weightlist %{name}":
+  zh-CN: "重复的 $weightlist %{name}"
+
+"duplicate animation name %{name} (the official code says Duplicate animation name)":
+  zh-CN: "重复的动画名 %{name}（官方报 Duplicate animation name）"
+
+"duplicate sequence name %{name} (the official code says Duplicate sequence name)":
+  zh-CN: "重复的序列名 %{name}（官方报 Duplicate sequence name）"
+
+"expected a number, got %{text}":
+  zh-CN: "期望数字，得到 %{text}"
+
+"expected an integer, got %{text}":
+  zh-CN: "期望整数，得到 %{text}"
+
+"eyelid %{name} %{what} out of range (+-%{radius}): the absolute value of the target %{target} exceeds the radius %{r} of eyeball %{eyeball}":
+  zh-CN: "eyelid %{name} %{what} out of range (+-%{radius})：目标值 %{target} 的绝对值超过眼球 %{eyeball} 的半径 %{r}"
+
+"eyelid %{name} is missing one of lowerer/neutral/raiser — the frame numbers and target values of the official's three flexkeys all come from them, and missing one reads an uninitialized stack value":
+  zh-CN: "eyelid %{name} 缺少 lowerer/neutral/raiser 之一 —— 官方三条 flexkey 的帧号与目标值全部来自它们，缺一个就会读到未初始化的栈值"
+
+"eyelid %{name} references a nonexistent eyeball %{want} (the official code skips it silently; mdlc reports an error so the eyelid does not fail silently)":
+  zh-CN: "eyelid %{name} 引用了不存在的眼球 %{want}（官方会静默跳过；mdlc 报错以免眼睑静默失效）"
+
+"incomplete line (missing argument at the end of the line)":
+  zh-CN: "行不完整（行尾缺少参数）"
+
+"incomplete line (the file ended unexpectedly)":
+  zh-CN: "行不完整（文件意外结束）"
+
+"incomplete line (the line ends in a comment)":
+  zh-CN: "行不完整（行尾是注释）"
+
+"macro expansion nesting exceeds %{max} levels":
+  zh-CN: "宏展开嵌套超过 %{max} 层"
+
+"more weight lists than the official limit of %{max} (including the implicit default list, at most %{hand} may be written by hand)":
+  zh-CN: "权重表超过官方上限 %{max} 张（含隐式默认表，手写最多 %{hand} 张）"
+
+"posweight appears before any bone entry (weightlist %{name})":
+  zh-CN: "posweight 出现在任何骨骼条目之前（weightlist %{name}）"
+
+"referenced by the QC":
+  zh-CN: "QC 里引用了它"
+
+"sequence %{name} found no animations (the official code says no animations found)":
+  zh-CN: "序列 %{name} 没有找到任何动画（官方报 no animations found）"
+
+"srcaxis only accepts \"y\" / \"z\" (also yup / y-up / zup / z-up, case-insensitive), got %{text}":
+  zh-CN: "srcaxis 只认 \"y\" / \"z\"（也接受 yup / y-up / zup / z-up，大小写不敏感），实际 %{text}"
+
+"srcfps must be a positive finite number, got %{v}":
+  zh-CN: "srcfps 必须是正有限数，实际 %{v}"
+
+"srcfps needs a number, got %{text}":
+  zh-CN: "srcfps 需要数字，实际 %{text}"
+
+"srcscale must be a positive finite number, got %{v}":
+  zh-CN: "srcscale 必须是正有限数，实际 %{v}"
+
+"srcscale needs a number, got %{text}":
+  zh-CN: "srcscale 需要数字，实际 %{text}"
+
+"the 3rd argument of replacemodel can only be reverse, got %{text}":
+  zh-CN: "replacemodel 第 3 个参数只能是 reverse，得到 %{text}"
+
+"the bone %{bone} has a rotation weight of 0 but a position weight of %{v} — the official code does not allow this":
+  zh-CN: "骨骼 %{bone} 的旋转权重为 0 而位置权重为 %{v} —— 官方不允许"
+
+"the script ended unexpectedly (missing argument)":
+  zh-CN: "脚本意外结束（缺少参数）"
+
+"the weight list %{name} has more entries than the official limit of %{max}":
+  zh-CN: "权重表 %{name} 的条目超过官方上限 %{max}"
+
+"there is no `flexfile` before `flex \"%{name}\"` — the official code uses an **uninitialized** `vtafile` here (UB, not reproducible). Write a `flexfile \"<x.vta>\"` line before `flex`, or use the inline form `$model <name> <smd> flex \"<name>\" \"<vta>\"`.":
+  zh-CN: "`flex \"%{name}\"` 之前没有 `flexfile` —— 官方此处用的是**未初始化**的 `vtafile`（UB，不可复现）。请在 `flex` 前写一行 `flexfile \"<x.vta>\"`，或用 `$model <name> <smd> flex \"<name>\" \"<vta>\"` 的内联形式。"
+
+"token too long (>%{max})":
+  zh-CN: "token 太长（>%{max}）"
+
+"too many commands: over the official limit of %{max} (the official code says Too many cmds in)":
+  zh-CN: "命令过多：超过官方上限 %{max} 条（官方报 Too many cmds in）"
+
+"too many sequences: the official limit is %{max}":
+  zh-CN: "序列过多：官方上限 %{max} 条"
+
+"unable to find valid bone for attachment __illumPosition:%{bone} (the official `simplify.cpp:5360`)":
+  zh-CN: "unable to find valid bone for attachment __illumPosition:%{bone}（官方 `simplify.cpp:5360`）"
+
+"unknown $attachment option %{opt}":
+  zh-CN: "未知的 $attachment 选项 %{opt}"
+
+"unknown $bodygroup option %{opt}":
+  zh-CN: "未知的 $bodygroup 选项 %{opt}"
+
+"unknown $ikchain option %{opt}":
+  zh-CN: "未知的 $ikchain 选项 %{opt}"
+
+"unknown $lod option %{opt}":
+  zh-CN: "未知的 $lod 选项 %{opt}"
+
+"unknown QC command %{cmd} (the official code says bad command)":
+  zh-CN: "未知的 QC 命令 %{cmd}（官方报 bad command）"
+
+"unknown animation option %{opt} (the official code says Unknown animation option'%{opt2}')":
+  zh-CN: "未知的动画选项 %{opt}（官方报 Unknown animation option'%{opt2}'）"
+
+"unknown attachment link %{bone}":
+  zh-CN: "unknown attachment link %{bone}"
+
+"unknown attachment link %{bone} — the 4th argument of `$illumposition` must be one of the SMD bones (the official `simplify.cpp:5375`)":
+  zh-CN: "unknown attachment link %{bone} —— `$illumposition` 的第 4 个参数必须是某根 SMD 骨骼（官方 `simplify.cpp:5375`）"
+
+"unknown cmdlist %{name} (the official code says unknown cmdlist %{name2})":
+  zh-CN: "未知的 cmdlist %{name}（官方报 unknown cmdlist %{name2}）"
+
+"unknown collision block subkey %{key}":
+  zh-CN: "未知的碰撞块子键 %{key}"
+
+"unknown command %{cmd} (the official code says unknown command %{cmd2})":
+  zh-CN: "未知的命令 %{cmd}（官方报 unknown command %{cmd2}）"
+
+"unknown command in $cmdlist: %{cmd} (the official code says unknown command: %{cmd2})":
+  zh-CN: "$cmdlist 里未知的命令 %{cmd}（官方报 unknown command: %{cmd2}）"
+
+"unknown eyelid option %{opt} (the official code says unknown option)":
+  zh-CN: "未知的 eyelid 选项 %{opt}（官方报 unknown option）"
+
+"unknown flex option %{opt} (the official code says unknown option)":
+  zh-CN: "未知的 flex 选项 %{opt}（官方报 unknown option）"
+
+"unknown ikrule type %{kind}":
+  zh-CN: "未知的 ikrule 类型 %{kind}"
+
+"unknown macro parameter \"%{name}\"":
+  zh-CN: "未知的宏参数 \"%{name}\""
+
+"unknown model option %{opt}":
+  zh-CN: "未知的 model 选项 %{opt}"
+
+"unknown studio option %{opt}":
+  zh-CN: "未知的 studio 选项 %{opt}"
+
+"unknown variable \"$%{name}$\"":
+  zh-CN: "未知的变量 \"$%{name}$\""

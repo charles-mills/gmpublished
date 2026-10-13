@@ -1,0 +1,1176 @@
+use super::*;
+use crate::model_compile::{ModelCompileOutput, compile_model};
+
+fn fixture() -> (tempfile::TempDir, ModelCompileRequest) {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("cube.smd");
+    fs::write(
+        &source,
+        include_str!("../../../vendor/mdlc/tests/fixtures/cube.smd")
+            .replace("0 0 1 0 1\n", "0.2 0.7 1 0 1\n"),
+    )
+    .unwrap();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([200, 100, 50, 255]))
+        .save(root.path().join("material.png"))
+        .unwrap();
+    let mut request = ModelCompileRequest::new(source, root.path().join("original"));
+    request.static_prop = true;
+    request.model_name = Some("props/qc_saved.mdl".into());
+    request.material_directory = Some("models/qc_saved".into());
+    (root, request)
+}
+
+fn bytes(output: &ModelCompileOutput, kind: ModelOutputKind) -> Vec<u8> {
+    fs::read(
+        &output
+            .files
+            .iter()
+            .find(|file| file.kind == kind)
+            .unwrap()
+            .path,
+    )
+    .unwrap()
+}
+
+fn vertices(output: &ModelCompileOutput) -> Vec<[f32; 8]> {
+    let vvd = vformats::mdl::parse_vvd(
+        &bytes(output, ModelOutputKind::Vvd),
+        &vformats::Limits::default(),
+    )
+    .unwrap();
+    let mut vertices = vvd
+        .vertices
+        .iter()
+        .map(|vertex| {
+            [
+                vertex.position[0],
+                vertex.position[1],
+                vertex.position[2],
+                vertex.normal[0],
+                vertex.normal[1],
+                vertex.normal[2],
+                vertex.uv[0],
+                vertex.uv[1],
+            ]
+        })
+        .collect::<Vec<_>>();
+    vertices.sort_by(|a, b| {
+        a.iter()
+            .zip(b)
+            .find_map(|(a, b)| (a != b).then(|| a.total_cmp(b)))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    vertices
+}
+
+fn collision_bounds(output: &ModelCompileOutput) -> ([f32; 3], [f32; 3]) {
+    let bytes = bytes(output, ModelOutputKind::Phy);
+    let phy = vformats::phy::parse(&bytes, &vformats::Limits::default()).unwrap();
+    let mut minimum = [f32::INFINITY; 3];
+    let mut maximum = [f32::NEG_INFINITY; 3];
+    for point in phy
+        .solids
+        .iter()
+        .flat_map(|solid| &solid.ledges)
+        .flat_map(|ledge| &ledge.vertices)
+    {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(point[axis]);
+            maximum[axis] = maximum[axis].max(point[axis]);
+        }
+    }
+    (minimum, maximum)
+}
+
+#[test]
+fn saved_qc_recompiles_skins_rotation_scale_and_collision() {
+    let (root, mut request) = fixture();
+    request.scale = 1.75;
+    request.orientation = [17.0, 31.0, -43.0];
+    request.generate_collision = true;
+    request.collision_mass = 1250.5;
+    request.surface_property = Some("metal".into());
+    request.skins.push(ModelSkin {
+        name: "Blue".into(),
+        replacements: BTreeMap::from([(
+            "material".into(),
+            SkinMaterial::Tint {
+                color: [10, 30, 200],
+            },
+        )]),
+    });
+    let original = compile_model(&request).unwrap();
+    let saved = root.path().join("cube.qc");
+    save_model_qc(&request, &saved).unwrap();
+    let text = fs::read_to_string(&saved).unwrap();
+    assert!(text.starts_with("$modelname"));
+    assert!(text.contains("$texturegroup"));
+    assert!(text.contains("$collisionmodel"));
+    let desc = mdlc::qc::parse_qc_file(&saved).unwrap();
+    assert_eq!(desc.physics.mass, Some(1250.5));
+    assert_eq!(desc.model.surface_prop.as_deref(), Some("metal"));
+    assert!(
+        root.path()
+            .join("materials/models/qc_saved/__skins/skin_1/material.vmt")
+            .exists()
+    );
+    let recompiled = compile_model(&ModelCompileRequest::new(
+        saved,
+        root.path().join("recompiled"),
+    ))
+    .unwrap();
+    assert_eq!(original.vertices, recompiled.vertices);
+    assert_eq!(original.triangles, recompiled.triangles);
+    for (a, b) in vertices(&original)
+        .iter()
+        .flatten()
+        .zip(vertices(&recompiled).iter().flatten())
+    {
+        assert!((a - b).abs() < 0.001, "vertex changed: {a} != {b}");
+    }
+    let a = collision_bounds(&original);
+    let b = collision_bounds(&recompiled);
+    for (a, b) in a.0.into_iter().chain(a.1).zip(b.0.into_iter().chain(b.1)) {
+        assert!((a - b).abs() < 0.001, "collision changed: {a} != {b}");
+    }
+    let mdl = vformats::mdl::parse_mdl(
+        &bytes(&recompiled, ModelOutputKind::Mdl),
+        &vformats::Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(mdl.skin_table.len(), mdl.skin_reference_count * 2);
+    let mdl = bytes(&recompiled, ModelOutputKind::Mdl);
+    assert_eq!(
+        f32::from_le_bytes(mdl[328..332].try_into().unwrap()),
+        1250.5
+    );
+    let phy = bytes(&recompiled, ModelOutputKind::Phy);
+    let phy = vformats::phy::parse(&phy, &vformats::Limits::default()).unwrap();
+    let text = std::str::from_utf8(phy.text.unwrap().bytes).unwrap();
+    assert!(text.contains("\"mass\" \"1250.500000\""));
+    assert!(text.contains("\"surfaceprop\" \"metal\""));
+}
+
+#[test]
+fn animated_smd_qc_preserves_source_frames_after_moving() {
+    let (root, mut request) = fixture();
+    request.static_prop = false;
+    request.scale = 1.75;
+    let text = fs::read_to_string(&request.source).unwrap();
+    let text = text.replace(
+        "end\ntriangles\n",
+        "time 1\n0 1 2 3 0.1 0.2 0.3\nend\ntriangles\n",
+    );
+    fs::write(&request.source, &text).unwrap();
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("animated.qc")).unwrap();
+    assert_eq!(
+        fs::read_to_string(saved.join("animated_sources/mesh.smd")).unwrap(),
+        text
+    );
+    fs::remove_file(&request.source).unwrap();
+    fs::remove_file(root.path().join("material.png")).unwrap();
+    let moved = root.path().join("moved");
+    fs::rename(saved, &moved).unwrap();
+    let desc = mdlc::qc::parse_qc_file(&moved.join("animated.qc")).unwrap();
+    let compiled = mdlc::compile::compile(&desc, &moved).unwrap();
+    assert_eq!(compiled.sequences[0].frames.len(), 2);
+    let pose = &compiled.sequences[0].frames[1][0];
+    for (actual, expected) in pose.position.iter().zip([1.75, 3.5, 5.25]) {
+        assert!((actual - expected).abs() < 0.0001);
+    }
+    compile_model(&ModelCompileRequest::new(
+        moved.join("animated.qc"),
+        root.path().join("recompiled"),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn rigid_gltf_qc_is_portable_with_axes_uvs_skins_and_collision() {
+    for static_prop in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("input");
+        let saved = root.path().join("saved");
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&saved).unwrap();
+        let mut geometry = Vec::new();
+        for value in [
+            0.0_f32, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 3.0, 0.2, 0.7, 0.4, 0.6,
+            0.3, 0.8, 0.5, 0.9,
+        ] {
+            geometry.extend_from_slice(&value.to_le_bytes());
+        }
+        for index in [0_u16, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3] {
+            geometry.extend_from_slice(&index.to_le_bytes());
+        }
+        fs::write(input.join("geometry.bin"), &geometry).unwrap();
+        let document = serde_json::json!({
+            "asset": {"version": "2.0"},
+            "buffers": [{"uri": "geometry.bin", "byteLength": geometry.len()}],
+            "bufferViews": [
+                {"buffer": 0, "byteOffset": 0, "byteLength": 48},
+                {"buffer": 0, "byteOffset": 48, "byteLength": 32},
+                {"buffer": 0, "byteOffset": 80, "byteLength": 24}
+            ],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0,0,0], "max": [2,7,3]},
+                {"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2"},
+                {"bufferView": 2, "componentType": 5123, "count": 12, "type": "SCALAR"}
+            ],
+            "materials": [{"name": "material", "pbrMetallicRoughness": {"baseColorFactor": [0.8,0.4,0.2,1.0]}}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0}]}],
+            "nodes": [{"mesh": 0}], "scenes": [{"nodes": [0]}], "scene": 0
+        });
+        let source = input.join("model.gltf");
+        fs::write(&source, serde_json::to_vec(&document).unwrap()).unwrap();
+        let mut request = ModelCompileRequest::new(source, root.path().join("original"));
+        request.static_prop = static_prop;
+        request.scale = 1.75;
+        request.model_name = Some("props/portable.mdl".into());
+        request.material_directory = Some("models/portable".into());
+        request.generate_collision = true;
+        request.surface_property = Some("metal".into());
+        request.collision_mass = 125.0;
+        request.skins.push(ModelSkin {
+            name: "Blue".into(),
+            replacements: BTreeMap::from([(
+                "material".into(),
+                SkinMaterial::Tint {
+                    color: [10, 30, 200],
+                },
+            )]),
+        });
+        let original = compile_model(&request).unwrap();
+        let qc = saved.join("model.qc");
+        save_model_qc(&request, &qc).unwrap();
+        let text = fs::read_to_string(&qc).unwrap();
+        assert!(!text.contains("srcaxis"));
+        assert!(!text.contains(".gltf"));
+        assert!(!text.contains(&input.to_string_lossy().to_string()));
+        assert!(text.contains("$surfaceprop \"metal\""));
+        assert!(text.contains("$mass 125"));
+        fs::remove_dir_all(input).unwrap();
+        let moved = root.path().join("moved");
+        fs::rename(saved, &moved).unwrap();
+        let recompiled = compile_model(&ModelCompileRequest::new(
+            moved.join("model.qc"),
+            root.path().join("recompiled"),
+        ))
+        .unwrap();
+        assert_eq!(original.vertices, recompiled.vertices);
+        assert_eq!(original.triangles, recompiled.triangles);
+        for (a, b) in vertices(&original)
+            .iter()
+            .flatten()
+            .zip(vertices(&recompiled).iter().flatten())
+        {
+            assert!(
+                (a - b).abs() < 0.001,
+                "vertex changed: {a} != {b}; static={static_prop}"
+            );
+        }
+        let a = collision_bounds(&original);
+        let b = collision_bounds(&recompiled);
+        for (a, b) in a.0.into_iter().chain(a.1).zip(b.0.into_iter().chain(b.1)) {
+            assert!(
+                (a - b).abs() < 0.001,
+                "collision changed: {a} != {b}; static={static_prop}"
+            );
+        }
+        let mdl = vformats::mdl::parse_mdl(
+            &bytes(&recompiled, ModelOutputKind::Mdl),
+            &vformats::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(mdl.skin_table.len(), mdl.skin_reference_count * 2);
+    }
+}
+
+#[test]
+fn authored_qc_preserves_comments_includes_sequences_and_custom_commands() {
+    let (root, mut request) = fixture();
+    fs::create_dir(root.path().join("includes")).unwrap();
+    fs::write(
+        root.path().join("includes/nested.qci"),
+        "$sequence second cube.smd fps 12\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("includes/props.qci"), "// collision settings\n$surfaceprop metal\n$include \"includes/nested.qci\"\n$cdmaterials \"old/path\"\n").unwrap();
+    let original = "// hand authored QC\n$cd \".\"\n$modelname props/original.mdl\n$staticprop\n$body body cube.smd\n$sequence idle cube.smd fps 24\n$include \"includes/props.qci\"\n$texturegroup skins { { material } { material } }\n$keyvalues { custom { answer 42 \"$texturegroup\" \"$cdmaterials\" } }\n";
+    let source = root.path().join("original.qc");
+    fs::write(&source, original).unwrap();
+    request.source = source.clone();
+    request.skins.push(ModelSkin {
+        name: "Tint".into(),
+        replacements: BTreeMap::from([(
+            "material".into(),
+            SkinMaterial::Tint {
+                color: [20, 20, 20],
+            },
+        )]),
+    });
+    let saved_dir = root.path().join("saved");
+    fs::create_dir(&saved_dir).unwrap();
+    let saved = saved_dir.join("car.qc");
+    save_model_qc(&request, &saved).unwrap();
+    assert_eq!(fs::read_to_string(source).unwrap(), original);
+    let entry = fs::read_to_string(&saved).unwrap();
+    assert!(entry.contains("$include \"car_sources/original.qc\""));
+    let text = fs::read_to_string(saved_dir.join("car_sources/original.qc")).unwrap();
+    assert!(text.contains("// hand authored QC"));
+    assert!(
+        text.contains("$keyvalues { custom { answer 42 \"$texturegroup\" \"$cdmaterials\" } }")
+    );
+    assert!(text.contains("$sequence idle cube.smd fps 24"));
+    assert!(text.contains("$include \"car_sources/includes/props.qci\""));
+    assert!(
+        fs::read_to_string(saved_dir.join("car_sources/includes/props.qci"))
+            .unwrap()
+            .contains("// collision settings")
+    );
+    let desc = mdlc::qc::parse_qc_file(&saved).unwrap();
+    assert_eq!(desc.model.name, "models/props/qc_saved.mdl");
+    assert_eq!(desc.materials.search_paths, ["models/qc_saved/"]);
+    assert_eq!(desc.sequences.len(), 2);
+    assert_eq!(desc.materials.skin_families.len(), 3);
+    assert_eq!(desc.model.surface_prop.as_deref(), Some("metal"));
+    compile_model(&ModelCompileRequest::new(
+        saved,
+        root.path().join("recompiled"),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn failed_save_keeps_existing_qc_and_materials_intact() {
+    let (root, mut request) = fixture();
+    let saved = root.path().join("cube.qc");
+    save_model_qc(&request, &saved).unwrap();
+    let original = fs::read(&saved).unwrap();
+    let vmt = root.path().join("materials/models/qc_saved/material.vmt");
+    let material = fs::read(&vmt).unwrap();
+    request.skins.push(ModelSkin {
+        name: "Broken".into(),
+        replacements: BTreeMap::from([(
+            "material".into(),
+            SkinMaterial::Texture {
+                path: root.path().join("missing.png"),
+            },
+        )]),
+    });
+    assert!(save_model_qc(&request, &saved).is_err());
+    assert_eq!(fs::read(&saved).unwrap(), original);
+    assert_eq!(fs::read(vmt).unwrap(), material);
+    request.scale = f32::NAN;
+    assert!(save_model_qc(&request, &saved).is_err());
+    assert_eq!(fs::read(saved).unwrap(), original);
+}
+
+#[test]
+fn saving_toml_as_qc_is_rejected_without_overwriting() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.toml");
+    fs::write(&source, "[model]\nname = 'model.mdl'").unwrap();
+    let saved = root.path().join("saved.qc");
+    fs::write(&saved, "original").unwrap();
+    assert!(
+        save_model_qc(
+            &ModelCompileRequest::new(source, root.path().join("out")),
+            &saved
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read_to_string(saved).unwrap(), "original");
+}
+
+#[test]
+fn generated_collision_keeps_alignment_with_a_rotated_source_root() {
+    let (root, mut request) = fixture();
+    let text = fs::read_to_string(&request.source).unwrap();
+    let original_pose = text
+        .lines()
+        .find(|line| line.trim().starts_with("0 0 0 0"))
+        .unwrap();
+    let modified = text.replacen(original_pose, "0 0 0 0 1.5707964 0 0", 1);
+    fs::write(&request.source, modified).unwrap();
+    request.generate_collision = true;
+    let original = compile_model(&request).unwrap();
+    let saved = root.path().join("rotated.qc");
+    save_model_qc(&request, &saved).unwrap();
+    let recompiled = compile_model(&ModelCompileRequest::new(
+        saved,
+        root.path().join("recompiled"),
+    ))
+    .unwrap();
+    let a = collision_bounds(&original);
+    let b = collision_bounds(&recompiled);
+    for (a, b) in a.0.into_iter().chain(a.1).zip(b.0.into_iter().chain(b.1)) {
+        assert!(
+            (a - b).abs() < 0.001,
+            "rotated root shifted collision: {a} != {b}"
+        );
+    }
+}
+
+fn animated_gltf_project(root: &Path) -> ModelCompileRequest {
+    let input = root.join("input");
+    fs::create_dir_all(input.join("buffers")).unwrap();
+    fs::create_dir_all(input.join("Textures")).unwrap();
+    let mut bytes = Vec::new();
+    let mut views = Vec::new();
+    let mut accessors = Vec::new();
+    let mut add = |data: Vec<u8>, component: u32, count: usize, kind: &str| {
+        while !bytes.len().is_multiple_of(4) {
+            bytes.push(0);
+        }
+        let offset = bytes.len();
+        bytes.extend_from_slice(&data);
+        views.push(serde_json::json!({"buffer":0,"byteOffset":offset,"byteLength":data.len()}));
+        let accessor = accessors.len();
+        accessors.push(serde_json::json!({"bufferView":views.len()-1,"componentType":component,"count":count,"type":kind}));
+        accessor
+    };
+    let floats = |values: &[f32]| {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>()
+    };
+    let position = add(
+        floats(&[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0]),
+        5126,
+        3,
+        "VEC3",
+    );
+    let normal = add(
+        floats(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+        5126,
+        3,
+        "VEC3",
+    );
+    let uv = add(floats(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]), 5126, 3, "VEC2");
+    let joints = add(vec![0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 5121, 3, "VEC4");
+    let weights = add(
+        floats(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        5126,
+        3,
+        "VEC4",
+    );
+    let morph = add(
+        floats(&[0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        5126,
+        3,
+        "VEC3",
+    );
+    let time = add(floats(&[0.0, 1.0]), 5126, 2, "SCALAR");
+    let walking = add(floats(&[0.0, 0.0, 0.0, 2.0, 0.0, 0.0]), 5126, 2, "VEC3");
+    let running = add(floats(&[0.0, 0.0, 0.0, 4.0, 0.0, 0.0]), 5126, 2, "VEC3");
+    let indices = add(vec![0, 0, 1, 0, 2, 0], 5123, 3, "SCALAR");
+    fs::write(input.join("buffers/geometry.bin"), &bytes).unwrap();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([100, 80, 60, 255]))
+        .save(input.join("Textures/Face Color.PNG"))
+        .unwrap();
+    let animation = |name, output| serde_json::json!({"name":name,"samplers":[{"input":time,"output":output}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]});
+    let json = serde_json::json!({
+        "asset":{"version":"2.0"},
+        "buffers":[{"uri":"buffers/geometry.bin","byteLength":bytes.len()}],
+        "bufferViews":views,"accessors":accessors,
+        "images":[{"uri":"textures/face%20color.png"}],"textures":[{"source":0}],
+        "materials":[{"name":"face","pbrMetallicRoughness":{"baseColorTexture":{"index":0}}}],
+        "meshes":[{"extras":{"targetNames":["smile"]},"primitives":[{"attributes":{"POSITION":position,"NORMAL":normal,"TEXCOORD_0":uv,"JOINTS_0":joints,"WEIGHTS_0":weights},"indices":indices,"material":0,"targets":[{"POSITION":morph}]}]}],
+        "skins":[{"joints":[0,1]}],
+        "nodes":[{"name":"root","children":[1]},{"name":"tip","translation":[0,0,1]},{"name":"mesh","mesh":0,"skin":0}],
+        "scenes":[{"nodes":[0,2]}],"scene":0,
+        "animations":[animation("walking",walking),animation("running",running)]
+    });
+    let source = input.join("character.gltf");
+    fs::write(&source, serde_json::to_vec(&json).unwrap()).unwrap();
+    ModelCompileRequest::new(source, root.join("compiled"))
+}
+
+#[test]
+fn animated_facial_gltf_qc_remains_portable_with_external_buffers_and_images() {
+    for variant in ["gltf", "glb", "one_frame"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut request = animated_gltf_project(root.path());
+        if variant == "glb" {
+            let mut json = fs::read(&request.source).unwrap();
+            while !json.len().is_multiple_of(4) {
+                json.push(b' ');
+            }
+            let mut glb = b"glTF".to_vec();
+            glb.extend_from_slice(&2_u32.to_le_bytes());
+            glb.extend_from_slice(&(20_u32 + json.len() as u32).to_le_bytes());
+            glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+            glb.extend_from_slice(b"JSON");
+            glb.extend_from_slice(&json);
+            request.source.set_extension("glb");
+            fs::write(&request.source, glb).unwrap();
+        } else if variant == "one_frame" {
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&fs::read(&request.source).unwrap()).unwrap();
+            document.as_object_mut().unwrap().remove("skins");
+            let mesh = &mut document["meshes"][0];
+            mesh.as_object_mut().unwrap().remove("extras");
+            mesh["primitives"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("targets");
+            mesh["primitives"][0]["attributes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("JOINTS_0");
+            mesh["primitives"][0]["attributes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("WEIGHTS_0");
+            document["nodes"] = serde_json::json!([{"name":"mesh","mesh":0}]);
+            document["scenes"][0]["nodes"] = serde_json::json!([0]);
+            for accessor in [6, 7, 8] {
+                document["accessors"][accessor]["count"] = serde_json::json!(1);
+            }
+            fs::write(&request.source, serde_json::to_vec(&document).unwrap()).unwrap();
+        }
+        let source_bytes = fs::read(&request.source).unwrap();
+        let source_desc = model_compile::load_description(
+            &request,
+            &request.source,
+            request.source.parent().unwrap(),
+        )
+        .unwrap();
+        let original =
+            mdlc::compile::compile(&source_desc, request.source.parent().unwrap()).unwrap();
+        let saved = root.path().join("saved");
+        fs::create_dir(&saved).unwrap();
+        save_model_qc(&request, &saved.join("character.qc")).unwrap();
+        assert_eq!(
+            fs::read(
+                saved
+                    .join("character_sources")
+                    .join(request.source.file_name().unwrap())
+            )
+            .unwrap(),
+            source_bytes
+        );
+        assert!(
+            saved
+                .join("character_sources/buffers/geometry.bin")
+                .is_file()
+        );
+        assert!(
+            saved
+                .join("character_sources/textures/face color.png")
+                .is_file()
+        );
+        let qc = fs::read_to_string(saved.join("character.qc")).unwrap();
+        assert!(!qc.contains(request.source.to_str().unwrap()));
+        fs::remove_dir_all(root.path().join("input")).unwrap();
+        let moved = root.path().join("moved");
+        fs::rename(saved, &moved).unwrap();
+        let desc = mdlc::qc::parse_qc_file(&moved.join("character.qc")).unwrap();
+        let rebuilt = mdlc::compile::compile(&desc, &moved).unwrap();
+        assert_eq!(original.sequences.len(), 2);
+        assert!(original.desc.bones.len() >= if variant == "one_frame" { 1 } else { 2 });
+        assert_eq!(original.desc.bones.len(), rebuilt.desc.bones.len());
+        assert_eq!(original.sequences.len(), rebuilt.sequences.len());
+        for (old, new) in original.sequences.iter().zip(&rebuilt.sequences) {
+            assert_eq!(old.name, new.name);
+            assert_eq!(old.frames, new.frames);
+            if variant == "one_frame" {
+                assert_eq!(old.frames.len(), 1);
+            } else {
+                assert!(old.frames.len() > 1);
+            }
+        }
+        let old_flexes = &original.bodyparts[0].models[0].mesh_flexes;
+        let new_flexes = &rebuilt.bodyparts[0].models[0].mesh_flexes;
+        if variant != "one_frame" {
+            assert!(old_flexes.iter().any(|mesh| !mesh.is_empty()));
+        }
+        assert_eq!(format!("{old_flexes:?}"), format!("{new_flexes:?}"));
+        compile_model(&ModelCompileRequest::new(
+            moved.join("character.qc"),
+            root.path().join("recompiled"),
+        ))
+        .unwrap();
+    }
+}
+
+#[test]
+fn portable_source_copy_rejects_escaped_dependencies_without_publishing() {
+    let root = tempfile::tempdir().unwrap();
+    let request = animated_gltf_project(root.path());
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&fs::read(&request.source).unwrap()).unwrap();
+    document["images"] = serde_json::json!([{"uri":"../outside.png"}]);
+    let stage = root.path().join("stage");
+    fs::create_dir(&stage).unwrap();
+    fs::write(&request.source, serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut writes = Vec::new();
+    let mut copier = SourceCopier::new(
+        request.source.parent().unwrap(),
+        &stage,
+        "sources",
+        &mut writes,
+    );
+    assert!(matches!(
+        copier.copy(&request.source),
+        Err(ModelCompileError::UnsafePath(_))
+    ));
+    for uri in [
+        "%2e%2e/outside.png",
+        "file:///etc/passwd",
+        "https://example.com/a.png",
+        "%xx",
+        "a%00b",
+    ] {
+        let relative = decode_source_uri(uri);
+        assert!(relative.is_err() || copier.find(&relative.unwrap()).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn portable_source_copy_cannot_follow_symlinks_outside_the_source_root() {
+    let root = tempfile::tempdir().unwrap();
+    let request = animated_gltf_project(root.path());
+    let outside = root.path().join("outside.bin");
+    fs::write(&outside, b"private").unwrap();
+    std::os::unix::fs::symlink(outside, request.source.parent().unwrap().join("escape.bin"))
+        .unwrap();
+    let stage = root.path().join("stage");
+    fs::create_dir(&stage).unwrap();
+    let mut writes = Vec::new();
+    let copier = SourceCopier::new(
+        request.source.parent().unwrap(),
+        &stage,
+        "sources",
+        &mut writes,
+    );
+    assert!(matches!(
+        copier.find(Path::new("escape.bin")),
+        Err(ModelCompileError::UnsafePath(_))
+    ));
+}
+
+#[test]
+fn fbx_source_copy_retains_bytes_and_resolved_texture_sidecars() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("input");
+    let stage = root.path().join("stage");
+    fs::create_dir_all(input.join("Textures")).unwrap();
+    fs::create_dir(&stage).unwrap();
+    let source = input.join("character.fbx");
+    let fbx = br#"; FBX 7.4.0 project file
+FBXHeaderExtension: {
+    FBXHeaderVersion: 1003
+    FBXVersion: 7400
+}
+Objects: {
+    Texture: 1, "Texture::face", "" {
+        Type: "TextureVideoClip"
+        Version: 202
+        TextureName: "Texture::face"
+        FileName: "C:/artist/model/texture.png"
+        RelativeFilename: "model/texture.png"
+    }
+}
+"#;
+    fs::write(&source, fbx).unwrap();
+    fs::write(input.join("Textures/Texture.PNG"), b"texture payload").unwrap();
+    fs::write(input.join("unrelated.bin"), b"unrelated").unwrap();
+    let scene = ufbx::load_memory(fbx, ufbx::LoadOpts::default()).unwrap();
+    assert_eq!(scene.textures.len(), 1);
+    let mut writes = Vec::new();
+    let mut copier = SourceCopier::new(&input, &stage, "sources", &mut writes);
+    assert_eq!(
+        copier.copy(&source).unwrap(),
+        Path::new("sources/character.fbx")
+    );
+    assert_eq!(fs::read(stage.join("sources/character.fbx")).unwrap(), fbx);
+    assert_eq!(
+        fs::read(stage.join("sources/textures/texture.png")).unwrap(),
+        b"texture payload"
+    );
+    assert!(!stage.join("sources/unrelated.bin").exists());
+}
+
+#[test]
+fn authored_animation_selection_playback_and_looping_survive_saved_qc() {
+    let root = tempfile::tempdir().unwrap();
+    let mut request = animated_gltf_project(root.path());
+    let inspection = model_compile::inspect_model(&request.source).unwrap();
+    assert_eq!(inspection.animations.len(), 2);
+    request.animation_settings = inspection.animations;
+    request.animation_settings[0].included = false;
+    request.animation_settings[1].name = "run_fast".into();
+    request.animation_settings[1].fps = 60.0;
+    let base = request.source.parent().unwrap();
+    let desc = model_compile::load_description(&request, &request.source, base).unwrap();
+    let compiled = mdlc::compile::compile(&desc, base).unwrap();
+    assert_eq!(compiled.sequences.len(), 1);
+    assert_eq!(compiled.sequences[0].name, "run_fast");
+    assert_eq!(compiled.sequences[0].fps, 60.0);
+    assert_eq!(compiled.sequences[0].frames.len(), 31);
+    assert_ne!(
+        compiled.sequences[0].frames[0],
+        compiled.sequences[0].frames[30]
+    );
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("character.qc")).unwrap();
+    let parsed = mdlc::qc::parse_qc_file(&saved.join("character.qc")).unwrap();
+    assert_eq!(parsed.sequences.len(), 1);
+    assert_eq!(parsed.sequences[0].src_stack.as_deref(), Some("running"));
+    assert_eq!(parsed.sequences[0].fps, Some(60.0));
+    assert!(!parsed.sequences[0].looping);
+    let rebuilt = mdlc::compile::compile(&parsed, &saved).unwrap();
+    assert_eq!(compiled.sequences[0].frames, rebuilt.sequences[0].frames);
+    request.animation_settings[1].looping = true;
+    let desc = model_compile::load_description(&request, &request.source, base).unwrap();
+    let looped = mdlc::compile::compile(&desc, base).unwrap();
+    assert_eq!(looped.sequences[0].frames.len(), 31);
+    assert_eq!(
+        looped.sequences[0].frames[0],
+        looped.sequences[0].frames[30]
+    );
+    save_model_qc(&request, &saved.join("character.qc")).unwrap();
+    let parsed = mdlc::qc::parse_qc_file(&saved.join("character.qc")).unwrap();
+    assert!(parsed.sequences[0].looping);
+    assert!(mdlc::compile::compile(&parsed, &saved).unwrap().sequences[0].looping);
+}
+
+#[test]
+fn invalid_or_stale_animation_settings_cannot_publish_qc() {
+    let root = tempfile::tempdir().unwrap();
+    let mut request = animated_gltf_project(root.path());
+    request.animation_settings = model_compile::inspect_model(&request.source)
+        .unwrap()
+        .animations;
+    let original = request.animation_settings.clone();
+    let saved = root.path().join("saved.qc");
+    fs::write(&saved, b"existing QC").unwrap();
+    for bad_fps in [0.0, -1.0, f32::NAN, f32::INFINITY, 1000.1] {
+        request.animation_settings.clone_from(&original);
+        request.animation_settings[0].fps = bad_fps;
+        assert!(save_model_qc(&request, &saved).is_err());
+        assert_eq!(fs::read(&saved).unwrap(), b"existing QC");
+    }
+    for name in ["", "bad name", "bad\"name", "☃", &"a".repeat(64)] {
+        request.animation_settings.clone_from(&original);
+        request.animation_settings[0].name = name.into();
+        assert!(save_model_qc(&request, &saved).is_err());
+    }
+    request.animation_settings.clone_from(&original);
+    request.animation_settings[0].name = request.animation_settings[1].name.to_uppercase();
+    assert!(save_model_qc(&request, &saved).is_err());
+    request.animation_settings.clone_from(&original);
+    for setting in &mut request.animation_settings {
+        setting.included = false;
+    }
+    assert!(save_model_qc(&request, &saved).is_err());
+    request.animation_settings.clone_from(&original);
+    request.animation_settings[0].source = Some("changed source action".into());
+    assert!(save_model_qc(&request, &saved).is_err());
+    request.animation_settings.clone_from(&original);
+    request.animation_settings.pop();
+    assert!(save_model_qc(&request, &saved).is_err());
+    assert_eq!(fs::read(&saved).unwrap(), b"existing QC");
+    request.animation_settings.clone_from(&original);
+    request.animation_settings[0].name = "a".repeat(63);
+    request.animation_settings[0].fps = 1000.0;
+    assert!(
+        model_compile::load_description(
+            &request,
+            &request.source,
+            request.source.parent().unwrap()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn reserved_animation_source_and_saved_project_names_recompile() {
+    let root = tempfile::tempdir().unwrap();
+    let mut request = animated_gltf_project(root.path());
+    let source = request.source.with_file_name("weights.gltf");
+    fs::rename(&request.source, &source).unwrap();
+    request.source = source;
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    let qc = saved.join("weights.qc");
+    save_model_qc(&request, &qc).unwrap();
+    let desc = mdlc::qc::parse_qc_file(&qc).unwrap();
+    assert_eq!(desc.sequences.len(), 2);
+    let compiled = mdlc::compile::compile(&desc, &saved).unwrap();
+    assert_eq!(compiled.sequences.len(), 2);
+    assert!(
+        fs::read_to_string(&qc)
+            .unwrap()
+            .contains("\"./weights_sources/weights.gltf\"")
+    );
+}
+
+#[test]
+fn activity_and_numeric_named_events_survive_portable_qc_and_native_output() {
+    use crate::model_compile::AnimationEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut request = animated_gltf_project(root.path());
+    request.animation_settings = model_compile::inspect_model(&request.source)
+        .unwrap()
+        .animations;
+    assert!(
+        request
+            .animation_settings
+            .iter()
+            .all(|animation| animation.frame_count == 31)
+    );
+    request.animation_settings[0].included = false;
+    let action = &mut request.animation_settings[1];
+    action.fps = 60.0;
+    action.activity = Some("ACT_VM_RELOAD".into());
+    action.activity_weight = 7;
+    action.events = vec![
+        AnimationEvent {
+            frame: 15,
+            event: "5004".into(),
+            options: "Weapon.Reload".into(),
+        },
+        AnimationEvent {
+            frame: 30,
+            event: "AE_CL_PLAYSOUND".into(),
+            options: "finish sound".into(),
+        },
+    ];
+    let original = model_compile::load_description(
+        &request,
+        &request.source,
+        request.source.parent().unwrap(),
+    )
+    .unwrap();
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("character.qc")).unwrap();
+    fs::remove_dir_all(root.path().join("input")).unwrap();
+    let parsed = mdlc::qc::parse_qc_file(&saved.join("character.qc")).unwrap();
+    assert_eq!(parsed.sequences[0].events, original.sequences[0].events);
+    assert_eq!(
+        parsed.sequences[0].activity.as_deref(),
+        Some("ACT_VM_RELOAD")
+    );
+    assert_eq!(parsed.sequences[0].activity_weight, 7);
+    let output =
+        mdlc::pipeline::build(&parsed, &saved, mdlc::pipeline::PipelineOptions::default()).unwrap();
+    let raw = &output.mdl;
+    let integer = |offset: usize| i32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap());
+    let string = |offset: usize| {
+        let bytes = &raw[offset..];
+        std::str::from_utf8(&bytes[..bytes.iter().position(|&byte| byte == 0).unwrap()]).unwrap()
+    };
+    assert_eq!(integer(188), 1);
+    let sequence = integer(192) as usize;
+    assert_eq!(
+        string(sequence + integer(sequence + 8) as usize),
+        "ACT_VM_RELOAD"
+    );
+    assert_eq!(integer(sequence + 20), 7);
+    assert_eq!(integer(sequence + 24), 2);
+    let events = sequence + integer(sequence + 28) as usize;
+    for (index, (cycle, code, kind, options, name)) in [
+        (0.5, 5004, 0, "Weapon.Reload", ""),
+        (1.0, 0, 1024, "finish sound", "AE_CL_PLAYSOUND"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let record = events + index * 80;
+        assert_eq!(
+            f32::from_le_bytes(raw[record..record + 4].try_into().unwrap()),
+            cycle
+        );
+        assert_eq!(integer(record + 4), code);
+        assert_eq!(integer(record + 8), kind);
+        assert_eq!(string(record + 12), options);
+        let name_offset = integer(record + 76);
+        if name.is_empty() {
+            assert_eq!(name_offset, 0);
+        } else {
+            assert_eq!(string(record + name_offset as usize), name);
+        }
+    }
+}
+
+#[test]
+fn activity_event_validation_rejects_unrepresentable_or_stale_source_values() {
+    use crate::model_compile::AnimationEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut request = animated_gltf_project(root.path());
+    request.animation_settings = model_compile::inspect_model(&request.source)
+        .unwrap()
+        .animations;
+    let original = request.animation_settings[0].clone();
+    let saved = root.path().join("invalid.qc");
+    for activity in [
+        "idle",
+        "ACT_",
+        "ACT_BAD\"",
+        "ACT_é",
+        &format!("ACT_{}", "x".repeat(60)),
+    ] {
+        request.animation_settings[0].activity = Some(activity.into());
+        assert!(save_model_qc(&request, &saved).is_err());
+        assert!(!saved.exists());
+    }
+    request.animation_settings[0] = original.clone();
+    for (frame, event, options) in [
+        (31, "5004", ""),
+        (u32::MAX, "5004", ""),
+        (0, "", ""),
+        (0, "5004bad", ""),
+        (0, "2147483648", ""),
+        (0, "-1", ""),
+        (0, "AE_BAD NAME", ""),
+        (0, "5004", "quote\""),
+        (0, "5004", "line\nbreak"),
+        (0, "5004", "}end"),
+        (0, "5004", "\0"),
+        (0, "5004", "éééééééééééééééééééééééééééééééé"),
+    ] {
+        request.animation_settings[0].events = vec![AnimationEvent {
+            frame,
+            event: event.into(),
+            options: options.into(),
+        }];
+        assert!(
+            save_model_qc(&request, &saved).is_err(),
+            "{frame} {event:?} {options:?}"
+        );
+        assert!(!saved.exists());
+    }
+    request.animation_settings[0] = original;
+    request.animation_settings[0].frame_count = 100;
+    request.animation_settings[0].events = vec![AnimationEvent {
+        frame: 99,
+        event: "5004".into(),
+        options: String::new(),
+    }];
+    assert!(save_model_qc(&request, &saved).is_err());
+    assert!(!saved.exists());
+}
+
+#[test]
+fn event_frames_use_the_selected_source_stack_sampling_rate() {
+    let root = tempfile::tempdir().unwrap();
+    let request = animated_gltf_project(root.path());
+    let source = quote_path(&request.source).unwrap();
+    for source_option in [
+        format!(
+            "$sequence action {source} srcstack running srcfps 10 fps 60 {{\n event 5004 5 \"sound\"\n}}\n"
+        ),
+        format!(
+            "$animation shared {source} srcstack running srcfps 10 fps 60\n$sequence action shared {{\n event 5004 5 \"sound\"\n}}\n"
+        ),
+    ] {
+        let text = format!("$body body {source}\n{source_option}");
+        let desc = mdlc::qc::parse_qc_str(&text, root.path()).unwrap();
+        let compiled = mdlc::compile::compile(&desc, root.path()).unwrap();
+        assert_eq!(compiled.sequences[0].frames.len(), 11);
+        assert_eq!(compiled.sequences[0].events[0].cycle, 0.5);
+    }
+}
+
+#[test]
+fn edited_qc_with_spaced_filename_relocates_shared_macros_animation_and_procedural_bones() {
+    let root = tempfile::tempdir().unwrap();
+    let mut request = animated_gltf_project(root.path());
+    let input = request.source.parent().unwrap().to_path_buf();
+    fs::create_dir(input.join("qc")).unwrap();
+    fs::create_dir(input.join("includes")).unwrap();
+    fs::write(
+        input.join("pose.vrd"),
+        "bone tip root\nbasepos 0 0 1\ntrigger 45 0 0 0 0 0 20 0 0 1\n",
+    )
+    .unwrap();
+    fs::write(input.join("includes/body.qci"), "// preserve this include\n$cd \".\"\n$definemacro bind source \\\\\n$body body $source$ srcaxis y\n$bind \"../character.gltf\"\n$sequence run \"../character.gltf\" srcstack running fps 47 noautoik { activity ACT_RUN 4 event 5004 15 \"step\" }\n$keyvalues { custom { $cd \"metadata-directory\" } }\n").unwrap();
+    let source = input.join("qc/original.qc");
+    let original = "$unsupported_original_command\n";
+    fs::write(&source, original).unwrap();
+    let edited = "\u{feff}// edited in the app\n$modelname props/edited.mdl\n$definevariable folder \"../includes\"\n$include $folder$/body.qci\n$proceduralbones \"../pose.vrd\"\n";
+    request.source = source.clone();
+    request.qc_text = Some(edited.into());
+    let inspection = model_compile::inspect_qc_text(&source, edited).unwrap();
+    assert_eq!(inspection.animations[0].name, "run");
+    let desc =
+        model_compile::load_description(&request, &source, source.parent().unwrap()).unwrap();
+    assert_eq!(desc.quat_interp_bones.len(), 1);
+    let expected = mdlc::compile::compile(&desc, source.parent().unwrap()).unwrap();
+    let original_output = compile_model(&request).unwrap();
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("My prop.qc")).unwrap();
+    assert_eq!(fs::read_to_string(&source).unwrap(), original);
+    let retained = fs::read_to_string(saved.join("My~20prop_sources/qc/original.qc")).unwrap();
+    assert!(retained.contains("$definevariable folder \"../includes\""));
+    let retained = fs::read_to_string(saved.join("My~20prop_sources/includes/body.qci")).unwrap();
+    assert!(retained.contains("$definemacro bind source"));
+    assert!(retained.contains("$keyvalues { custom { $cd \"metadata-directory\" } }"));
+    fs::remove_dir_all(&input).unwrap();
+    let moved = root.path().join("moved");
+    fs::rename(saved, &moved).unwrap();
+    let parsed = mdlc::qc::parse_qc_file(&moved.join("My prop.qc")).unwrap();
+    assert_eq!(parsed.quat_interp_bones, desc.quat_interp_bones);
+    assert_eq!(parsed.model.source_dependencies.len(), 1);
+    let actual = mdlc::compile::compile(&parsed, &moved).unwrap();
+    assert_eq!(actual.sequences[0].frames.len(), 31);
+    assert_eq!(actual.sequences[0].fps, 47.0);
+    assert_eq!(actual.sequences[0].activity_name, "ACT_RUN");
+    assert_eq!(actual.sequences[0].events, expected.sequences[0].events);
+    for (expected, actual) in expected.sequences[0]
+        .frames
+        .iter()
+        .flatten()
+        .zip(actual.sequences[0].frames.iter().flatten())
+    {
+        assert_eq!(expected.bone, actual.bone);
+        for (expected, actual) in expected
+            .position
+            .iter()
+            .chain(&expected.rotation)
+            .zip(actual.position.iter().chain(&actual.rotation))
+        {
+            assert!(
+                (expected - actual).abs() < 0.00001,
+                "pose changed: {expected} != {actual}"
+            );
+        }
+    }
+    let recompiled = compile_model(&ModelCompileRequest::new(
+        moved.join("My prop.qc"),
+        root.path().join("recompiled"),
+    ))
+    .unwrap();
+    assert_eq!(vertices(&original_output), vertices(&recompiled));
+    assert_eq!(
+        bytes(&original_output, ModelOutputKind::Mdl),
+        bytes(&recompiled, ModelOutputKind::Mdl)
+    );
+}
+
+#[test]
+fn portable_qc_namespace_escapes_token_delimiters_without_filename_collisions() {
+    assert_eq!(
+        asset_namespace(Path::new("ordinary_name-2.1.qc")),
+        "ordinary_name-2.1_sources"
+    );
+    assert_eq!(
+        asset_namespace(Path::new("My prop.qc")),
+        "My~20prop_sources"
+    );
+    assert_eq!(
+        asset_namespace(Path::new("My~20prop.qc")),
+        "My~7E20prop_sources"
+    );
+    assert_eq!(
+        asset_namespace(Path::new("é;$\"{}.qc")),
+        "~C3~A9~3B~24~22~7B~7D_sources"
+    );
+    let names = ["My prop.qc", "My~20prop.qc", "My_prop.qc", "My~7E20prop.qc"];
+    let namespaces: std::collections::BTreeSet<_> = names
+        .iter()
+        .map(|name| asset_namespace(Path::new(name)))
+        .collect();
+    assert_eq!(namespaces.len(), names.len());
+}
+
+#[test]
+fn edited_qc_reports_original_locations_and_rejects_unsafe_or_non_qc_overrides() {
+    let (root, mut request) = fixture();
+    request.qc_text = Some("$body body cube.smd\n".into());
+    assert!(
+        compile_model(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("requires a QC source")
+    );
+    let source = root.path().join("source.qc");
+    fs::write(&source, "$body body cube.smd\n").unwrap();
+    request.source = source.clone();
+    request.qc_text = Some("\n$unknown\n".into());
+    let error = compile_model(&request).unwrap_err().to_string();
+    assert!(
+        error.contains(&format!("{}:2:", source.display())),
+        "{error}"
+    );
+    request.qc_text = Some(format!(
+        "$modelname props/source.mdl\n$body body {}\n$sequence idle {}\n",
+        quote_path(&root.path().join("cube.smd")).unwrap(),
+        quote_path(&root.path().join("cube.smd")).unwrap()
+    ));
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    assert!(save_model_qc(&request, &saved.join("source.qc")).is_err());
+    assert!(!saved.join("source.qc").exists());
+    assert!(
+        save_model_qc(&request, &source)
+            .unwrap_err()
+            .to_string()
+            .contains("preserve the imported source")
+    );
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        "$body body cube.smd\n"
+    );
+}
+
+#[test]
+fn portable_qc_namespace_never_overwrites_an_imported_source() {
+    let (root, mut request) = fixture();
+    let input = root.path().join("saved_sources");
+    fs::create_dir(&input).unwrap();
+    fs::copy(&request.source, input.join("cube.smd")).unwrap();
+    let original = "$modelname props/original.mdl\n$staticprop\n$body body cube.smd\n$sequence idle cube.smd\n";
+    request.source = input.join("original.qc");
+    request.export_materials = false;
+    fs::write(&request.source, original).unwrap();
+    let error = save_model_qc(&request, &root.path().join("saved.qc")).unwrap_err();
+    assert!(
+        error.to_string().contains("overwrite an imported source"),
+        "{error}"
+    );
+    assert_eq!(fs::read_to_string(&request.source).unwrap(), original);
+    assert!(!root.path().join("saved.qc").exists());
+}
+
+#[test]
+fn portable_qc_preserves_native_comments_macro_continuations_and_scale_order() {
+    let (root, mut request) = fixture();
+    let source = root.path().join("original.qc");
+    let original = "; { this brace is a comment\n# { so is this brace\n$cd \".\"\n$modelname props/original.mdl\n$staticprop\n$definevariable directory old\n$definemacro configure \\\\\n$cdmaterials $directory$/materials \\\\\n$scale 2\n$body first cube.smd\n$configure\n$body second cube.smd\n$sequence idle cube.smd\n";
+    fs::write(&source, original).unwrap();
+    request.source = source.clone();
+    let expected = compile_model(&request).unwrap();
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("portable.qc")).unwrap();
+    let retained = fs::read_to_string(saved.join("portable_sources/original.qc")).unwrap();
+    assert!(retained.starts_with("; { this brace is a comment\n# { so is this brace\n"));
+    assert!(!retained.contains("$cdmaterials"));
+    fs::remove_file(&source).unwrap();
+    fs::remove_file(root.path().join("cube.smd")).unwrap();
+    fs::remove_file(root.path().join("material.png")).unwrap();
+    let actual = compile_model(&ModelCompileRequest::new(
+        saved.join("portable.qc"),
+        root.path().join("recompiled"),
+    ))
+    .unwrap();
+    assert_eq!(vertices(&expected), vertices(&actual));
+    assert_eq!(
+        bytes(&expected, ModelOutputKind::Mdl),
+        bytes(&actual, ModelOutputKind::Mdl)
+    );
+    let parsed = mdlc::qc::parse_qc_file(&saved.join("portable.qc")).unwrap();
+    assert_eq!(parsed.bodyparts[0].models[0].input_scale, Some(1.0));
+    assert_eq!(parsed.bodyparts[1].models[0].input_scale, Some(2.0));
+}

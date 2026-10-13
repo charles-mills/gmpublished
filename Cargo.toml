@@ -6,6 +6,7 @@ members = [
 ]
 exclude = [
     "crates/vendor/iced_wgpu",
+    "crates/vendor/mdlc",
 ]
 resolver = "3"
 

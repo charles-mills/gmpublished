@@ -5,6 +5,7 @@ pub mod downloader;
 pub mod file_preview;
 pub mod installed_addons;
 pub mod modal_stack;
+pub mod model_manager;
 pub mod my_workshop;
 pub mod prepare_publish;
 pub mod prerequisites;

@@ -2,7 +2,7 @@ use crate::i18n::Arg;
 use gmpublished_domain::math::Vec3;
 use iced::widget::{
     Space, button, checkbox, column, container, image, pane_grid, progress_bar, row, scrollable,
-    sensor, stack, text,
+    sensor, stack, text, text_input,
 };
 use iced::{Border, Center, Color, ContentFit, Element, Font, Length, Padding, Shadow, border};
 
@@ -573,6 +573,8 @@ fn model_preview<'a>(
             .unwrap_or_default();
         container(
             iced::widget::shader(super::viewer3d::Viewer3d {
+                framing_bounds: state.model_framing_bounds(),
+                animation_pose: state.model_animation_pose(),
                 model: std::sync::Arc::clone(model),
                 content_id: data.content_id(),
                 skin_remap,
@@ -598,7 +600,7 @@ fn model_preview<'a>(
         container(
             scrollable(
                 column![
-                    model_selectors(state, model, ctx),
+                    model_selectors(state, model, ctx, false),
                     model_inspector_rows(data, model, ctx)
                 ]
                 .spacing(tokens.spacing.gap_sm),
@@ -631,6 +633,7 @@ fn model_selectors<'a>(
     state: &'a State,
     model: &'a ModelPreview,
     ctx: ViewCtx<'a>,
+    stacked: bool,
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
@@ -638,6 +641,26 @@ fn model_selectors<'a>(
 
     if state.phy_debug_control_visible() {
         selectors = selectors.push(phy_debug_checkbox(state, ctx));
+    }
+
+    if model.lod_count() > 1 {
+        let options = indexed_choices(model.lod_count(), |index| {
+            i18n.trn(
+                "file-preview-model-lod-option",
+                &[(
+                    "index",
+                    Arg::Number(count_text(model.root_lod + index).as_str()),
+                )],
+            )
+        });
+        selectors = selectors.push(selector_row_layout(
+            i18n.tr("file-preview-model-lod"),
+            options,
+            Some(state.selected_lod().saturating_sub(model.root_lod)),
+            move |choice| Message::LodSelected(model.root_lod + choice.index),
+            &tokens,
+            stacked,
+        ));
     }
 
     if model.skin_tables.len() > 1 {
@@ -648,12 +671,13 @@ fn model_selectors<'a>(
                 &[("index", Arg::Number(index_text.as_str()))],
             )
         });
-        selectors = selectors.push(selector_row(
+        selectors = selectors.push(selector_row_layout(
             i18n.tr("file-preview-model-skin"),
             options,
             Some(state.selected_skin()),
             |choice| Message::SkinSelected(choice.index),
             &tokens,
+            stacked,
         ));
     }
 
@@ -664,7 +688,7 @@ fn model_selectors<'a>(
         let group_text = count_text(group);
         let options = indexed_choices(choices, count_text);
         let selected = state.bodygroup_choices().get(group).copied();
-        selectors = selectors.push(selector_row(
+        selectors = selectors.push(selector_row_layout(
             i18n.trn(
                 "file-preview-model-bodygroup",
                 &[("index", Arg::Number(group_text.as_str()))],
@@ -676,10 +700,141 @@ fn model_selectors<'a>(
                 choice: choice.index,
             },
             &tokens,
+            stacked,
         ));
     }
 
+    selectors = selectors.push(model_animation_controls(state, model, ctx, stacked));
     selectors.into()
+}
+
+pub(super) fn model_animation_controls<'a>(
+    state: &'a State,
+    model: &'a ModelPreview,
+    ctx: ViewCtx<'a>,
+    stacked: bool,
+) -> Element<'a, Message> {
+    let tokens = *ctx.tokens;
+    let Some(animation) = &model.animation else {
+        return Space::new().into();
+    };
+    if model.scene.stats.sequence_count == 0 || model.scene.stats.bone_count == 0 {
+        return Space::new().into();
+    }
+    let animation = match animation {
+        Ok(animation) => animation,
+        Err(reason) => {
+            return text(ctx.i18n.trn(
+                "file-preview-model-animation-unavailable",
+                &[("reason", Arg::Text(reason))],
+            ))
+            .size(tokens.typography.body_sm)
+            .into();
+        }
+    };
+    let mut choices = vec![IndexedChoice {
+        index: 0,
+        label: ctx.i18n.tr("file-preview-model-bind-pose"),
+    }];
+    choices.extend(
+        animation
+            .sequences
+            .iter()
+            .enumerate()
+            .map(|(index, sequence)| IndexedChoice {
+                index: index + 1,
+                label: sequence.name.clone(),
+            }),
+    );
+    let mut controls = column![selector_row_layout(
+        ctx.i18n.tr("file-preview-model-sequence"),
+        choices,
+        Some(state.model_sequence().map_or(0, |index| index + 1)),
+        |choice| Message::ModelSequenceSelected(choice.index),
+        &tokens,
+        stacked,
+    )]
+    .spacing(tokens.spacing.gap_xs)
+    .width(Length::Fill);
+    if let Some(sequence) = state
+        .model_sequence()
+        .and_then(|index| animation.sequences.get(index))
+    {
+        if let Some(reason) = &sequence.unavailable {
+            controls = controls.push(
+                text(ctx.i18n.trn(
+                    "file-preview-model-animation-unavailable",
+                    &[("reason", Arg::Text(reason))],
+                ))
+                .size(tokens.typography.body_sm),
+            );
+        } else {
+            let sequence_duration = state.model_sequence_duration();
+            let mut play = button(
+                text(ctx.i18n.tr(if state.model_playing() {
+                    "file-preview-model-pause"
+                } else {
+                    "file-preview-model-play"
+                }))
+                .size(tokens.typography.body_sm),
+            )
+            .padding(tokens.spacing.pad_control);
+            if sequence_duration > 0.0 {
+                play = play.on_press(Message::ModelPlaybackToggled);
+            }
+            let position = format!("{:.2}", state.model_cycle() * sequence_duration);
+            let duration = format!("{sequence_duration:.2}");
+            controls = controls.push(
+                row![
+                    play,
+                    text(ctx.i18n.trn(
+                        "file-preview-model-animation-time",
+                        &[
+                            ("position", Arg::Number(&position)),
+                            ("duration", Arg::Number(&duration))
+                        ]
+                    ))
+                    .size(tokens.typography.body_sm)
+                ]
+                .spacing(tokens.spacing.gap_sm)
+                .align_y(Center),
+            );
+            controls = controls.push(
+                iced::widget::slider(
+                    0.0..=1.0,
+                    state.model_cycle(),
+                    Message::ModelAnimationSeeked,
+                )
+                .step(0.001),
+            );
+            for &parameter in &sequence.parameters {
+                let Some(range) = animation.parameters.get(parameter) else {
+                    continue;
+                };
+                let value = state
+                    .model_pose_parameters()
+                    .get(parameter)
+                    .copied()
+                    .unwrap_or_else(|| range.default_value());
+                controls = controls.push(
+                    row![
+                        text(range.name.clone()).size(tokens.typography.body_sm),
+                        iced::widget::slider(
+                            range.start.min(range.end)..=range.start.max(range.end),
+                            value,
+                            move |value| Message::ModelPoseParameterChanged { parameter, value }
+                        )
+                        .step(((range.end - range.start).abs() / 1000.0).max(f32::EPSILON))
+                        .width(Length::Fill),
+                        text(format!("{value:.2}")).size(tokens.typography.body_sm),
+                    ]
+                    .spacing(tokens.spacing.gap_sm)
+                    .align_y(Center),
+                );
+            }
+        }
+    }
+    controls.into()
 }
 
 fn indexed_choices(count: usize, label: impl Fn(usize) -> String) -> Vec<IndexedChoice> {
@@ -698,41 +853,62 @@ fn selector_row<'a>(
     on_selected: impl Fn(IndexedChoice) -> Message + 'a,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
+    selector_row_layout(label, options, selected, on_selected, tokens, false)
+}
+
+fn selector_row_layout<'a>(
+    label: String,
+    options: Vec<IndexedChoice>,
+    selected: Option<usize>,
+    on_selected: impl Fn(IndexedChoice) -> Message + 'a,
+    tokens: &Tokens,
+    stacked: bool,
+) -> Element<'a, Message> {
     let tokens = *tokens;
-    row![
-        text(label)
-            .size(tokens.typography.body_sm)
-            .font(Font {
-                weight: iced::font::Weight::Bold,
-                ..Font::default()
+    let label = text(label)
+        .size(tokens.typography.body_sm)
+        .font(Font {
+            weight: iced::font::Weight::Bold,
+            ..Font::default()
+        })
+        .width(if stacked {
+            Length::Fill
+        } else {
+            Length::Fixed(INFO_LABEL_WIDTH)
+        });
+    let field = select::field(
+        selected
+            .and_then(|index| options.get(index))
+            .map(|choice| choice.label.clone())
+            .unwrap_or_default(),
+        options
+            .into_iter()
+            .map(|choice| select::Row {
+                selected: Some(choice.index) == selected,
+                label: choice.label.clone(),
+                on_select: on_selected(choice),
             })
-            .width(Length::Fixed(INFO_LABEL_WIDTH)),
-        select::field(
-            selected
-                .and_then(|index| options.get(index))
-                .map(|choice| choice.label.clone())
-                .unwrap_or_default(),
-            options
-                .into_iter()
-                .map(|choice| select::Row {
-                    selected: Some(choice.index) == selected,
-                    label: choice.label.clone(),
-                    on_select: on_selected(choice),
-                })
-                .collect(),
-            select::Metrics {
-                text_size: tokens.typography.body_sm,
-                padding: Padding::from([tokens.spacing.pad_xs, tokens.spacing.pad_sm]),
-                radius: tokens.radii.sm,
-                max_rows: select::MAX_ROWS,
-            },
-            select::Chevron::Shown,
-            &tokens,
-        ),
-    ]
-    .align_y(Center)
-    .spacing(tokens.spacing.gap_sm)
-    .into()
+            .collect(),
+        select::Metrics {
+            text_size: tokens.typography.body_sm,
+            padding: Padding::from([tokens.spacing.pad_xs, tokens.spacing.pad_sm]),
+            radius: tokens.radii.sm,
+            max_rows: select::MAX_ROWS,
+        },
+        select::Chevron::Shown,
+        &tokens,
+    );
+    if stacked {
+        column![label, field]
+            .spacing(tokens.spacing.gap_xs)
+            .width(Length::Fill)
+            .into()
+    } else {
+        row![label, field]
+            .align_y(Center)
+            .spacing(tokens.spacing.gap_sm)
+            .into()
+    }
 }
 
 fn model_inspector_rows<'a>(
@@ -1079,7 +1255,23 @@ fn map_preview<'a>(
                 sky_camera: map.sky_camera,
                 map_skybox_visible: state.map_skybox_enabled(),
                 visibility_culling: state.map_visibility_enabled(),
-                phy_debug_visible: state.phy_debug_enabled(),
+                phy_debug_visible: state.stage_model().is_none() && state.phy_debug_enabled(),
+                stage: state
+                    .stage_model()
+                    .map(|model| super::viewer3d::StagePrimitive {
+                        local_bounds: state.model_bounds(),
+                        animation_pose: state.model_animation_pose(),
+                        model: std::sync::Arc::clone(model),
+                        content_id: state.stage_content_id().unwrap_or_default(),
+                        transform: state.stage_transform().unwrap_or_default(),
+                        skin_remap: model
+                            .skin_tables
+                            .get(state.selected_skin())
+                            .cloned()
+                            .unwrap_or_default(),
+                        bodygroup_choices: state.bodygroup_choices().to_vec(),
+                        phy_debug_visible: state.phy_debug_enabled(),
+                    }),
                 spawn: map.spawn,
                 pose: state.fly_pose(),
                 movement_mode: state.fly_movement_mode(),
@@ -1111,10 +1303,16 @@ fn map_preview<'a>(
                             .wrapping(text::Wrapping::WordOrGlyph),
                     )
                     .width(Length::Fill),
+                    stage_inspector(state, ctx),
                     map_inspector_rows(state, data, map.stats, ctx)
                 ]
                 .spacing(tokens.spacing.gap_sm),
             )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .direction(scrollable::Direction::Vertical(
+                theme::styles::vertical_scrollbar(&tokens),
+            ))
             .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
         )
         .width(Length::Fill)
@@ -1125,6 +1323,108 @@ fn map_preview<'a>(
     };
 
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
+}
+
+fn stage_inspector<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+    let Some(model) = state.stage_model() else {
+        return Space::new().into();
+    };
+    let tokens = *ctx.tokens;
+    let i18n = ctx.i18n;
+    let mut controls = column![
+        text(i18n.tr("file-preview-stage-title")).size(tokens.typography.body),
+        text(i18n.tr("file-preview-stage-controls"))
+            .size(tokens.typography.caption)
+            .wrapping(text::Wrapping::WordOrGlyph),
+        model_selectors(state, model, ctx, true)
+    ]
+    .spacing(tokens.spacing.gap_sm)
+    .width(Length::Fill);
+    if let Some((position, angles)) = state.stage_fields() {
+        for (rotation, values, key) in [
+            (false, position, "file-preview-stage-position"),
+            (true, angles, "file-preview-stage-rotation"),
+        ] {
+            let mut fields = row![].spacing(tokens.spacing.gap_xs);
+            for (axis, value) in values.iter().enumerate() {
+                let label = if rotation {
+                    ["P", "Y", "R"][axis]
+                } else {
+                    ["X", "Y", "Z"][axis]
+                };
+                fields = fields.push(
+                    column![
+                        text(label).size(tokens.typography.caption),
+                        text_input("", value)
+                            .on_input(move |value| if rotation {
+                                Message::StageRotationEdited { axis, value }
+                            } else {
+                                Message::StagePositionEdited { axis, value }
+                            })
+                            .size(tokens.typography.caption)
+                            .padding(tokens.spacing.pad_xs)
+                            .style(move |_, status| theme::styles::input(&tokens, status))
+                    ]
+                    .width(Length::Fill),
+                );
+            }
+            controls = controls
+                .push(text(i18n.tr(key)).size(tokens.typography.caption))
+                .push(fields);
+        }
+    }
+    let undo = full_width_action(
+        i18n.tr("file-preview-stage-undo"),
+        Message::StageUndoRequested,
+        tokens.typography.caption,
+        &tokens,
+    );
+    controls = controls
+        .push(full_width_action(
+            i18n.tr("file-preview-stage-place-ahead"),
+            Message::StagePlaceAheadRequested,
+            tokens.typography.caption,
+            &tokens,
+        ))
+        .push(full_width_action(
+            i18n.tr("file-preview-stage-reset"),
+            Message::StageResetRequested,
+            tokens.typography.caption,
+            &tokens,
+        ))
+        .push(
+            undo.on_press_maybe(
+                state
+                    .stage_can_undo()
+                    .then_some(Message::StageUndoRequested),
+            ),
+        );
+    controls = controls.push(
+        full_width_action(
+            i18n.tr("file-preview-stage-drop"),
+            Message::StageDropRequested,
+            tokens.typography.caption,
+            &tokens,
+        )
+        .on_press_maybe(
+            (state.stage_can_drop() && !state.stage_falling())
+                .then_some(Message::StageDropRequested),
+        ),
+    );
+    if model.scene.phy_debug_meshes.is_empty() {
+        controls = controls.push(
+            text(i18n.tr("file-preview-stage-no-collision"))
+                .size(tokens.typography.caption)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+    controls
+        .push(
+            text(i18n.tr("file-preview-stage-placement-only"))
+                .size(tokens.typography.caption)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        )
+        .into()
 }
 
 fn resizable_inspector<'a>(
@@ -1377,7 +1677,7 @@ fn map_inspector_rows<'a>(
                 .style(move |_, status| theme::styles::checkbox(&tokens, status)),
         );
     }
-    if state.phy_debug_control_visible() {
+    if state.stage_model().is_none() && state.phy_debug_control_visible() {
         rows = rows.push(phy_debug_checkbox(state, ctx));
     }
     rows = rows.push(info_row(
@@ -1458,12 +1758,14 @@ fn info_row<'a>(
                 weight: iced::font::Weight::Bold,
                 ..Font::default()
             })
-            .width(Length::Fixed(INFO_LABEL_WIDTH)),
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .width(Length::FillPortion(1)),
         text(value.into())
             .size(tokens.typography.body_sm)
             .wrapping(text::Wrapping::WordOrGlyph)
-            .width(Length::Fill),
+            .width(Length::FillPortion(1)),
     ]
+    .width(Length::Fill)
     .align_y(Center)
     .spacing(tokens.spacing.gap_sm)
     .into()

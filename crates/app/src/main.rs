@@ -75,6 +75,8 @@ mod format;
 mod generation;
 mod i18n;
 mod media;
+#[cfg(test)]
+mod model_animation_test_support;
 mod platform;
 #[cfg(target_os = "macos")]
 mod platform_chrome;
@@ -83,6 +85,9 @@ mod platform_menu;
 #[cfg(target_os = "macos")]
 mod platform_open;
 mod spinner_clock;
+#[cfg(test)]
+#[path = "../build_support/steam_runtime.rs"]
+mod steam_runtime_build;
 #[cfg(test)]
 mod test_support;
 mod theme;

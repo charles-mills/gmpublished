@@ -55,6 +55,10 @@ mod addon;
 pub use addon::Addon;
 
 pub mod bbcode;
+pub mod model_compile;
+pub mod model_decompile;
+pub mod model_materials;
+pub mod model_project;
 
 mod appdata;
 pub use appdata::{

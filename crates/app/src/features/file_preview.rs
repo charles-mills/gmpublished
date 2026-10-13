@@ -19,7 +19,12 @@ pub fn embedded_expanded(state: &State) -> bool {
 }
 
 pub fn subscription(state: &State) -> Subscription<Message> {
-    if state.spinner_visible() || state.audio_playing() || state.fly_speed_readout_visible() {
+    if state.spinner_visible()
+        || state.audio_playing()
+        || state.model_playing()
+        || state.fly_speed_readout_visible()
+        || state.stage_falling()
+    {
         time::every(crate::media::thumbnail_animation::ANIMATION_TICK_INTERVAL)
             .map(Message::AnimationTick)
     } else {

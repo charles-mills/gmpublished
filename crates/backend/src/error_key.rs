@@ -86,6 +86,7 @@ macro_rules! error_key_catalog {
 }
 
 error_key_catalog! {
+    MODEL_COMPILE => "ERR_MODEL_COMPILE",
     IO_ERROR => "ERR_IO_ERROR",
     PATH_IO_ERROR => "ERR_PATH_IO_ERROR",
     CANCELLED => "ERR_CANCELLED",

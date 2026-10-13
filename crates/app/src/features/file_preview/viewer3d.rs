@@ -36,6 +36,7 @@ use doors::{
 };
 use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem, prepare_draw_plans};
 use pipeline::ModelPrimitive;
+pub(super) use pipeline::StagePrimitive;
 use pipeline::Uniforms;
 use texture::{
     TextureUploadLevel, bc_mip_is_valid, bc_texture_format, decode_bc_texture,
@@ -106,7 +107,7 @@ const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_a
     2 => Float32x2,
 ];
 
-fn mid(min: Vec3, max: Vec3) -> Vec3 {
+pub(super) fn mid(min: Vec3, max: Vec3) -> Vec3 {
     Vec3::new(
         (min[0] + max[0]) * 0.5,
         (min[1] + max[1]) * 0.5,

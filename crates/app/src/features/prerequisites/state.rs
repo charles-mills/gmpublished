@@ -7,6 +7,7 @@ use crate::features::steam_session::ConnectionStatus;
 /// Downloader requires Steam; local routes require Garry's Mod. A download destination is optional.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Requirement {
+    None,
     Steam,
     Game,
 }
@@ -14,6 +15,7 @@ pub enum Requirement {
 impl Requirement {
     pub(super) const fn of(route: Route) -> Self {
         match route {
+            Route::Models => Self::None,
             Route::MyWorkshop | Route::Downloader => Self::Steam,
             Route::InstalledAddons | Route::SizeAnalyzer => Self::Game,
         }
@@ -149,6 +151,7 @@ impl State {
 
 pub fn blocker_for(route: Route, steam: ConnectionStatus, state: &State) -> Option<Blocker> {
     match Requirement::of(route) {
+        Requirement::None => None,
         Requirement::Steam => steam_blocker(steam, state),
         Requirement::Game => game_blocker(steam, state),
     }

@@ -67,6 +67,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 raw-window-handle = "0.6.2"
 
 [build-dependencies]
+tempfile.workspace = true
 lzma-rust2 = { workspace = true, features = ["encoder"] }
 
 [dev-dependencies]

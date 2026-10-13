@@ -566,16 +566,83 @@ fn model_preview_data(
         return info_preview_data(request, InfoReason::DecodeFailed);
     };
 
-    let Some(model) = load_model_catching_panic(
-        &format!("model {}", request.entry_path),
-        mdl_bytes,
-        &vvd_bytes,
-        &vtx_bytes,
-    ) else {
+    let lod_preview = match std::panic::catch_unwind(|| {
+        gmpublished_backend::model_decompile::load_model_lod_preview(
+            mdl_bytes, &vvd_bytes, &vtx_bytes,
+        )
+    }) {
+        Ok(Ok(model)) => model,
+        result => {
+            log::debug!(
+                "model LOD preview {} failed: {result:?}",
+                request.entry_path
+            );
+            return info_preview_data(request, InfoReason::DecodeFailed);
+        }
+    };
+    let root_lod = lod_preview.root_lod;
+    let models: Vec<ModelData> = lod_preview
+        .levels
+        .into_iter()
+        .map(ModelData::from)
+        .collect();
+    let Some(model) = models.first() else {
         return info_preview_data(request, InfoReason::DecodeFailed);
     };
-
+    let skin_tables = model.skin_tables.clone();
+    let bodygroups = model.bodygroups.clone();
+    let skeletal = model.bone_count > 0
+        && model.sequence_count > 0
+        && mdl_bytes
+            .get(152..156)
+            .and_then(|flags| <[u8; 4]>::try_from(flags).ok())
+            .is_some_and(|flags| u32::from_le_bytes(flags) & vformats::mdl::FLAG_STATIC_PROP == 0);
+    let animation = skeletal.then(|| {
+        let ani = request.archive.entry_bytes(&format!("{stem}.ani")).ok();
+        gmpublished_backend::model_decompile::load_animation_preview(
+            mdl_bytes,
+            &vvd_bytes,
+            &vtx_bytes,
+            ani.as_deref(),
+        )
+        .and_then(|animation| {
+            if models.iter().enumerate().all(|(index, model)| {
+                animation
+                    .mesh_vertex_counts_lod(root_lod + index)
+                    .eq(model.meshes.iter().map(|mesh| mesh.vertices.len()))
+            }) {
+                Ok(Arc::new(animation))
+            } else {
+                Err(
+                    gmpublished_backend::model_decompile::DecompileError::InvalidModel(
+                        "Animation bindings do not match preview geometry".into(),
+                    ),
+                )
+            }
+        })
+        .map_err(|error| error.to_string())
+    });
     let resolver = MaterialResolver::new(request.archive.clone(), gmod_dir);
+    let lods: Vec<_> = models
+        .into_iter()
+        .map(|model| model_lod_scene(model, stem, &resolver))
+        .collect();
+    PreviewData::from_request(
+        request,
+        PreviewContent::Model(std::sync::Arc::new(ModelPreview {
+            pose_cache: Default::default(),
+            animation,
+            scene: Arc::clone(&lods[0]),
+            root_lod,
+            selected_lod: root_lod,
+            lods,
+            skin_tables,
+            bodygroups,
+        })),
+    )
+}
+
+fn model_lod_scene(model: ModelData, stem: &str, resolver: &MaterialResolver) -> Arc<RenderScene> {
     let mut resolved_material_count = 0_u32;
     let mut materials = model
         .material_names
@@ -601,7 +668,7 @@ fn model_preview_data(
             }
         })
         .collect::<Vec<_>>();
-    let phy_debug_meshes = model_phy_debug_mesh(stem, &resolver, materials.len());
+    let phy_debug_meshes = model_phy_debug_mesh(stem, resolver, materials.len());
     if phy_debug_meshes.is_some() {
         materials.push(MaterialSlot {
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
@@ -612,29 +679,22 @@ fn model_preview_data(
         });
     }
 
-    PreviewData::from_request(
-        request,
-        PreviewContent::Model(std::sync::Arc::new(ModelPreview {
-            scene: std::sync::Arc::new(RenderScene {
-                stats: ModelStats {
-                    bone_count: model.bone_count,
-                    sequence_count: model.sequence_count,
-                    vertex_count: model.vertex_count,
-                    triangle_count: model.triangle_count,
-                    mesh_count: u32::try_from(model.meshes.len()).unwrap_or(u32::MAX),
-                    material_count: u32::try_from(model.material_names.len()).unwrap_or(u32::MAX),
-                    resolved_material_count,
-                },
-                meshes: model.meshes,
-                materials,
-                phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
-                bounds_min: model.bounds_min,
-                bounds_max: model.bounds_max,
-            }),
-            skin_tables: model.skin_tables,
-            bodygroups: model.bodygroups,
-        })),
-    )
+    Arc::new(RenderScene {
+        stats: ModelStats {
+            bone_count: model.bone_count,
+            sequence_count: model.sequence_count,
+            vertex_count: model.vertex_count,
+            triangle_count: model.triangle_count,
+            mesh_count: u32::try_from(model.meshes.len()).unwrap_or(u32::MAX),
+            material_count: u32::try_from(model.material_names.len()).unwrap_or(u32::MAX),
+            resolved_material_count,
+        },
+        meshes: model.meshes,
+        materials,
+        phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
+        bounds_min: model.bounds_min,
+        bounds_max: model.bounds_max,
+    })
 }
 
 fn load_model_companions(

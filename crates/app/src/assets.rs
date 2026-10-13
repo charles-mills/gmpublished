@@ -170,6 +170,7 @@ pub mod icons {
         "../ui/images/route-installed-addons.svg"
     );
     svg_icon!(route_my_workshop, "../ui/images/route-my-workshop.svg");
+    svg_icon!(route_models, "../ui/images/route-models.svg");
     svg_icon!(route_size_analyzer, "../ui/images/route-size-analyzer.svg");
     svg_icon!(search, "../ui/images/search.svg");
     svg_icon!(star_filled, "../ui/images/star-filled.svg");

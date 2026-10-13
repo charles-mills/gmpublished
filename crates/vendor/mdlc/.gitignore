@@ -1,0 +1,16 @@
+/target/
+
+/out/
+/mymod/
+
+/docs/_probe/
+/parity/
+
+/verify_parity.ps1
+/cmp_features.ps1
+
+__pycache__/
+*.pyc
+*.bak
+
+mdlc-prof.txt

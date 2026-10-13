@@ -21,6 +21,8 @@ pub struct RenderResources {
     pub phy_debug_pipeline: wgpu::RenderPipeline,
     pub sky_pipeline: wgpu::RenderPipeline,
     pub blit_pipeline: wgpu::RenderPipeline,
+    pub stage_uniform_buffer: wgpu::Buffer,
+    pub stage_uniform_bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub uniform_bind_group: wgpu::BindGroup,
     pub sky_uniform_buffer: wgpu::Buffer,
@@ -456,6 +458,11 @@ impl RenderResources {
             cache: None,
         });
 
+        let (stage_uniform_buffer, stage_uniform_bind_group) = uniforms(
+            device,
+            &uniform_layout,
+            "file_preview.model_viewer.stage_uniform",
+        );
         let (uniform_buffer, uniform_bind_group) =
             uniforms(device, &uniform_layout, "file_preview.model_viewer.uniform");
         let (sky_uniform_buffer, sky_uniform_bind_group) = uniforms(
@@ -531,6 +538,8 @@ impl RenderResources {
             phy_debug_pipeline,
             sky_pipeline,
             blit_pipeline,
+            stage_uniform_buffer,
+            stage_uniform_bind_group,
             uniform_buffer,
             uniform_bind_group,
             sky_uniform_buffer,

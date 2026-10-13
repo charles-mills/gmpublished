@@ -1,4 +1,8 @@
+mod model_animation;
+mod staging;
 use gmpublished_domain::math::Vec3;
+use staging::StageState;
+pub use staging::StageTransform;
 use std::time::{Duration, Instant};
 
 use iced::widget::pane_grid;
@@ -74,6 +78,8 @@ pub struct State {
     load: LoadState,
     request_id: Generation,
     request: Option<PreviewRequest>,
+    stage: Option<StageState>,
+    stage_request: Option<PreviewRequest>,
     spinner: SpinnerClock,
     content_ui: ContentUiState,
     inspector_panes: split_pane::State<Pane>,
@@ -128,10 +134,34 @@ struct AudioUiState {
 
 #[derive(Debug, Default)]
 struct ModelUiState {
+    framing_bounds: Option<crate::media::preview_model::ModelBounds>,
+    animation: model_animation::Playback,
     selected_skin: usize,
     bodygroup_choices: Vec<usize>,
     orbit_pose: Option<OrbitPose>,
     phy_debug_enabled: bool,
+}
+
+impl ModelUiState {
+    fn for_model(model: &crate::media::preview_model::ModelPreview) -> Self {
+        let animation = model_animation::Playback::for_model(model);
+        let bodygroup_choices = vec![0; model.bodygroups.len()];
+        let pose =
+            animation.sequence.map(
+                |sequence| gmpublished_backend::model_decompile::PreviewPose {
+                    sequence,
+                    cycle: 0.0,
+                    parameters: animation.parameters.clone(),
+                },
+            );
+        let framing_bounds = model.visible_bounds(pose.as_ref(), &bodygroup_choices);
+        Self {
+            animation,
+            bodygroup_choices,
+            framing_bounds,
+            ..Self::default()
+        }
+    }
 }
 
 #[expect(clippy::struct_excessive_bools)]
@@ -217,10 +247,7 @@ impl ContentUiState {
                 duration_secs: *duration_secs,
                 ..AudioUiState::default()
             }),
-            PreviewContent::Model(model) => Self::Model(ModelUiState {
-                bodygroup_choices: vec![0; model.bodygroups.len()],
-                ..ModelUiState::default()
-            }),
+            PreviewContent::Model(model) => Self::Model(ModelUiState::for_model(model)),
             PreviewContent::Map { .. } => Self::Map(MapUiState::default()),
             PreviewContent::Particle(_) => Self::Particle(ParticleUiState::default()),
             PreviewContent::Code { .. }
@@ -236,8 +263,11 @@ impl ContentUiState {
                 audio.duration_secs = *duration_secs;
             }
             (Self::Model(model_ui), PreviewContent::Model(model)) => {
+                let fresh = ModelUiState::for_model(model);
+                model_ui.animation = fresh.animation;
+                model_ui.framing_bounds = fresh.framing_bounds;
                 model_ui.selected_skin = 0;
-                model_ui.bodygroup_choices = vec![0; model.bodygroups.len()];
+                model_ui.bodygroup_choices = fresh.bodygroup_choices;
             }
             (Self::Map(_), PreviewContent::Map { .. })
             | (Self::Particle(_), PreviewContent::Particle(_)) => {}
@@ -254,6 +284,8 @@ impl Default for State {
             load: LoadState::Idle,
             request_id: Generation::INITIAL,
             request: None,
+            stage: None,
+            stage_request: None,
             spinner: SpinnerClock::Idle,
             content_ui: ContentUiState::None,
             inspector_panes: split_pane::State::vertical(
@@ -396,6 +428,8 @@ impl State {
         self.open = true;
         self.expanded = false;
         self.load = LoadState::Loading { stage: None };
+        self.stage = None;
+        self.stage_request = None;
         self.request = Some(request.clone());
         self.spinner.stop();
         self.content_ui = ContentUiState::from_request(&request);
@@ -452,6 +486,8 @@ impl State {
     }
 
     pub(super) fn tick_animation(&mut self, now: Instant) {
+        self.tick_stage(now);
+        self.tick_model_animation(now);
         if self.spinner_visible() {
             self.spinner.advance_or_start(now);
         }
@@ -570,6 +606,9 @@ impl State {
     }
 
     pub(crate) const fn selected_skin(&self) -> usize {
+        if let Some(stage) = &self.stage {
+            return stage.selection.selected_skin;
+        }
         match &self.content_ui {
             ContentUiState::Model(model) => model.selected_skin,
             _ => 0,
@@ -577,6 +616,9 @@ impl State {
     }
 
     pub(crate) fn bodygroup_choices(&self) -> &[usize] {
+        if let Some(stage) = &self.stage {
+            return &stage.selection.bodygroup_choices;
+        }
         match &self.content_ui {
             ContentUiState::Model(model) => &model.bodygroup_choices,
             _ => &[],
@@ -605,6 +647,9 @@ impl State {
     }
 
     pub(crate) const fn phy_debug_enabled(&self) -> bool {
+        if let Some(stage) = &self.stage {
+            return stage.selection.phy_debug_enabled;
+        }
         match &self.content_ui {
             ContentUiState::Model(model) => model.phy_debug_enabled,
             ContentUiState::Map(map) => map.phy_debug_enabled,
@@ -638,6 +683,9 @@ impl State {
     }
 
     pub(crate) fn phy_debug_control_visible(&self) -> bool {
+        if let Some(stage) = &self.stage {
+            return !stage.model.scene.phy_debug_meshes.is_empty();
+        }
         match self.current().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => !model.scene.phy_debug_meshes.is_empty(),
             Some(PreviewContent::Map { scene, .. }) => !scene.scene.phy_debug_meshes.is_empty(),
@@ -664,6 +712,10 @@ impl State {
     }
 
     pub(super) fn set_phy_debug_enabled(&mut self, enabled: bool) {
+        if let Some(stage) = &mut self.stage {
+            stage.selection.phy_debug_enabled = enabled;
+            return;
+        }
         match &mut self.content_ui {
             ContentUiState::Model(model) => model.phy_debug_enabled = enabled,
             ContentUiState::Map(map) => map.phy_debug_enabled = enabled,
@@ -671,14 +723,31 @@ impl State {
         }
     }
 
+    pub(crate) fn selected_lod(&self) -> usize {
+        self.current_model().map_or(0, |model| model.selected_lod)
+    }
+
+    pub(super) fn select_lod(&mut self, lod: usize) {
+        if let Some(stage) = &mut self.stage {
+            stage.model = stage.model.at_lod(lod);
+        } else if let LoadState::Ready(data) = &mut self.load
+            && let PreviewContent::Model(model) = &mut data.content
+        {
+            *model = model.at_lod(lod);
+        }
+        self.refresh_model_framing();
+    }
+
     pub(super) fn select_skin(&mut self, skin: usize) {
         let skin_count = self
             .current_model()
             .map_or(0, |model| model.skin_tables.len());
-        if skin < skin_count
-            && let ContentUiState::Model(model) = &mut self.content_ui
-        {
-            model.selected_skin = skin;
+        if skin < skin_count {
+            if let Some(stage) = &mut self.stage {
+                stage.selection.selected_skin = skin;
+            } else if let ContentUiState::Model(model) = &mut self.content_ui {
+                model.selected_skin = skin;
+            }
         }
     }
 
@@ -689,17 +758,27 @@ impl State {
         else {
             return;
         };
+        let model = if let Some(stage) = &mut self.stage {
+            Some(&mut stage.selection)
+        } else if let ContentUiState::Model(model) = &mut self.content_ui {
+            Some(model)
+        } else {
+            None
+        };
         if choice < choices
-            && let ContentUiState::Model(model) = &mut self.content_ui
-            && let Some(slot) = model.bodygroup_choices.get_mut(group)
+            && let Some(slot) = model.and_then(|model| model.bodygroup_choices.get_mut(group))
         {
             *slot = choice;
+            self.refresh_model_framing();
         }
     }
 
     pub(crate) fn current_model(
         &self,
     ) -> Option<&std::sync::Arc<crate::media::preview_model::ModelPreview>> {
+        if let Some(stage) = &self.stage {
+            return Some(&stage.model);
+        }
         match self.current().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => Some(model),
             _ => None,
@@ -839,6 +918,8 @@ impl State {
         self.expanded = false;
         self.request = None;
         self.load = LoadState::Idle;
+        self.stage = None;
+        self.stage_request = None;
         self.spinner.stop();
         self.content_ui = ContentUiState::None;
     }

@@ -78,7 +78,7 @@ fn task_messages(task: Task<RootMessage>) -> Vec<RootMessage> {
 
 #[test]
 fn gma_file_drop_routes_the_selected_path_to_bulk_extraction() {
-    let app = App::new_for_test();
+    let mut app = App::new_for_test();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("selected.gma");
     std::fs::write(&path, b"GMAD").unwrap();
@@ -2324,6 +2324,96 @@ fn file_preview_request() -> preview_model::PreviewRequest {
         crc32: 0x1234_5678,
         bypass_size_limits: false,
     }
+}
+
+#[test]
+fn model_preview_restores_selection_and_keeps_it_after_closing() {
+    use crate::features::model_manager;
+    use gmpublished_domain::math::Vec3;
+
+    let mut app = App::new_for_test();
+    let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
+        shell::Route::Models,
+    )));
+    let _task = app.update(RootMessage::ModelManager(
+        model_manager::Message::PreviewSelectionCaptured {
+            skin: 1,
+            bodygroups: vec![2],
+        },
+    ));
+    let mut request = file_preview_request();
+    request.entry_path = "models/test.mdl".into();
+    let _task = app.update(RootMessage::FilePreview(
+        file_preview::Message::OpenRequested(request),
+    ));
+    let request = app.state.features.file_preview.request().unwrap().clone();
+    let data = preview_model::PreviewData::from_request(
+        &request,
+        preview_model::PreviewContent::Model(Arc::new(preview_model::ModelPreview {
+            pose_cache: Default::default(),
+            root_lod: 0,
+            selected_lod: 0,
+            lods: vec![],
+            animation: None,
+            scene: Arc::new(preview_model::RenderScene {
+                meshes: vec![],
+                materials: vec![],
+                phy_debug_meshes: vec![],
+                stats: preview_model::ModelStats {
+                    bone_count: 1,
+                    sequence_count: 0,
+                    vertex_count: 0,
+                    triangle_count: 0,
+                    mesh_count: 0,
+                    material_count: 0,
+                    resolved_material_count: 0,
+                },
+                bounds_min: Vec3::splat(0.0),
+                bounds_max: Vec3::splat(1.0),
+            }),
+            skin_tables: vec![vec![0], vec![0]],
+            bodygroups: vec![3],
+        })),
+    );
+    let _task = app.update(RootMessage::FilePreview(file_preview::Message::Loaded(
+        request.request_id,
+        Box::new(Ok(data.clone())),
+    )));
+    assert_eq!(app.state.features.file_preview.selected_skin(), 1);
+    assert_eq!(app.state.features.file_preview.bodygroup_choices(), &[2]);
+    let _task = app.update(RootMessage::FilePreview(
+        file_preview::Message::SkinSelected(0),
+    ));
+    let _task = app.apply_file_preview_message(file_preview::Message::BackRequested);
+    assert_eq!(
+        app.state.features.model_manager.preview_selection(),
+        (0, vec![2])
+    );
+    app.capture_model_stage();
+    assert_eq!(
+        app.state.features.model_manager.preview_selection(),
+        (0, vec![2])
+    );
+
+    let _task = app.update(RootMessage::FilePreview(
+        file_preview::Message::OpenRequested(request),
+    ));
+    let request = app.state.features.file_preview.request().unwrap().clone();
+    let _task = app.update(RootMessage::FilePreview(file_preview::Message::Loaded(
+        request.request_id,
+        Box::new(Ok(data)),
+    )));
+    assert_eq!(app.state.features.file_preview.bodygroup_choices(), &[2]);
+    let _task = app.handle_file_drop("replacement.smd".into());
+    assert!(!app.state.features.file_preview.is_open());
+    let _task = app.update(RootMessage::ModelManager(
+        model_manager::Message::SourceDropped("replacement.smd".into()),
+    ));
+    app.capture_model_stage();
+    assert_eq!(
+        app.state.features.model_manager.preview_selection(),
+        (0, vec![])
+    );
 }
 
 fn installed_preview_target() -> installed_addons::PreviewTarget {

@@ -105,6 +105,23 @@ impl App {
             shell::Route::Downloader => {
                 self.apply_downloader_message(lifecycle.downloader_message(), self.update_context)
             }
+            shell::Route::Models => {
+                if lifecycle == RouteLifecycle::Exited {
+                    self.capture_model_stage();
+                    Task::batch([
+                        self.apply_model_manager_message(
+                            crate::features::model_manager::Message::RouteExited,
+                        ),
+                        self.apply_file_preview_message(
+                            crate::features::file_preview::Message::BackRequested,
+                        ),
+                    ])
+                } else {
+                    self.apply_model_manager_message(
+                        crate::features::model_manager::Message::MapsRequested,
+                    )
+                }
+            }
             shell::Route::SizeAnalyzer => {
                 self.apply_size_analyzer_message(lifecycle.size_analyzer_message())
             }

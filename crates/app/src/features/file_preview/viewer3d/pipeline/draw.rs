@@ -91,6 +91,7 @@ pub fn draw_scene_plan_transparent<'a>(
     uniform_bind_group: &'a wgpu::BindGroup,
     water_frame_bind_group: Option<&'a wgpu::BindGroup>,
 ) {
+    pass.set_bind_group(0, uniform_bind_group, &[]);
     if let (Some(water_frame_bind_group), Some(refractive_water_pipeline)) = (
         water_frame_bind_group,
         resources.refractive_water_pipeline.as_ref(),
