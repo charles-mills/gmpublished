@@ -485,3 +485,23 @@ workshop-text-retry = 重试
 workshop-text-language = 编辑标题和描述的语言
 workshop-text-invalid = 请检查{ $language }的标题（1–128 个 UTF-8 字节）和描述长度。
 workshop-text-save-failed = 无法保存{ $language }。已保存的更改会保留，请重试其余更改。
+
+# About
+settings-tab-about = 关于
+settings-about-description = 发布、管理和预览 Garry’s Mod 插件。
+settings-about-github = 在 GitHub 上查看 gmpublished
+settings-about-debug-title = 诊断信息
+settings-about-debug-description = 应用版本、操作系统、安装方式和图形信息。
+settings-about-copy-debug = 复制诊断信息
+settings-about-copied = 已复制
+settings-about-debug-show = 查看诊断信息
+settings-about-debug-hide = 隐藏诊断信息
+settings-about-debug-loading = 正在收集系统信息…
+settings-about-debug-failed = 无法收集诊断信息。
+settings-about-debug-retry = 重试
+settings-about-credits = 致谢
+settings-about-upstream = 基于 William Venner 开发的 gmpublisher 的原生分支。
+settings-about-maintainers = 由 Charles Mills 和开源贡献者使用 Rust 和 Iced 开发。
+settings-about-license = 许可证 (GNU GPL v3)
+settings-about-notices = 第三方声明
+settings-about-releases = 版本说明

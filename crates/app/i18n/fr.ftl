@@ -485,3 +485,23 @@ workshop-text-retry = Réessayer
 workshop-text-language = Modifier les langues du titre et de la description
 workshop-text-invalid = Vérifiez le titre (1–128 octets UTF-8) et la longueur de la description en { $language }.
 workshop-text-save-failed = Impossible d’enregistrer { $language }. Les modifications enregistrées sont conservées ; réessayez les autres.
+
+# About
+settings-tab-about = À propos
+settings-about-description = Publiez, gérez et prévisualisez vos addons Garry’s Mod.
+settings-about-github = gmpublished sur GitHub
+settings-about-debug-title = Informations de diagnostic
+settings-about-debug-description = Version, système d’exploitation, installation et graphismes.
+settings-about-copy-debug = Copier le diagnostic
+settings-about-copied = Copié
+settings-about-debug-show = Afficher les informations de diagnostic
+settings-about-debug-hide = Masquer les informations de diagnostic
+settings-about-debug-loading = Collecte des informations système…
+settings-about-debug-failed = Impossible de recueillir les informations de diagnostic.
+settings-about-debug-retry = Réessayer
+settings-about-credits = Remerciements
+settings-about-upstream = Une version dérivée native de gmpublisher, créé par William Venner.
+settings-about-maintainers = Développé par Charles Mills et des contributeurs open source, avec Rust et Iced.
+settings-about-license = Licence (GNU GPL v3)
+settings-about-notices = Mentions de tiers
+settings-about-releases = Notes de version

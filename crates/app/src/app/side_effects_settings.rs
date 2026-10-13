@@ -7,6 +7,44 @@ use super::{
 use crate::bridge::ui_error::ResultExt as _;
 
 impl App {
+    pub(super) fn settings_debug_info_task(
+        &self,
+        generation: crate::generation::Generation,
+    ) -> Task<RootMessage> {
+        let ctx = self.environment.ctx.clone();
+        let window_id = self.window_id;
+        let locale = self.state.i18n.locale_id().to_owned();
+        let theme = format!(
+            "{:?} ({:?})",
+            self.state.theme_preset, self.state.system_scheme
+        );
+        let steam = format!("{:?}", self.state.features.shell.steam_status());
+        iced::system::information().then(move |info| {
+            let ctx = ctx.clone();
+            let locale = locale.clone();
+            let theme = theme.clone();
+            let steam = steam.clone();
+            window_id
+                .map_or_else(|| Task::done(1.0), iced::window::scale_factor)
+                .then(move |scale| {
+                    let info = info.clone();
+                    let locale = locale.clone();
+                    let theme = theme.clone();
+                    let steam = steam.clone();
+                    ctx.run_blocking_ui("settings-debug-info", move |_| {
+                        Ok(settings::debug_report(
+                            &info, scale, &locale, &theme, &steam,
+                        ))
+                    })
+                    .map(move |report| {
+                        RootMessage::Settings(settings::Message::DebugInfoLoaded(
+                            generation, report,
+                        ))
+                    })
+                })
+        })
+    }
+
     pub(super) fn apply_settings_snapshot_runtime(
         &mut self,
         snapshot: &settings::SettingsSnapshot,

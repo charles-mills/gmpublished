@@ -485,3 +485,23 @@ workshop-text-retry = 다시 시도
 workshop-text-language = 제목 및 설명 언어 편집
 workshop-text-invalid = { $language } 제목(UTF-8 1~128바이트)과 설명 길이를 확인하세요.
 workshop-text-save-failed = { $language } 저장에 실패했습니다. 저장된 변경 사항은 유지됩니다. 나머지를 다시 시도하세요.
+
+# About
+settings-tab-about = 정보
+settings-about-description = Garry’s Mod 애드온을 게시하고 관리하고 미리 보세요.
+settings-about-github = GitHub에서 gmpublished 보기
+settings-about-debug-title = 진단 정보
+settings-about-debug-description = 앱 버전, 운영 체제, 설치 형식 및 그래픽 정보입니다.
+settings-about-copy-debug = 진단 정보 복사
+settings-about-copied = 복사됨
+settings-about-debug-show = 진단 정보 보기
+settings-about-debug-hide = 진단 정보 숨기기
+settings-about-debug-loading = 시스템 정보를 수집하는 중…
+settings-about-debug-failed = 진단 정보를 수집하지 못했습니다.
+settings-about-debug-retry = 다시 시도
+settings-about-credits = 만든 사람들
+settings-about-upstream = William Venner가 만든 gmpublisher의 네이티브 포크입니다.
+settings-about-maintainers = Charles Mills와 오픈 소스 기여자들이 Rust와 Iced로 만들었습니다.
+settings-about-license = 라이선스 (GNU GPL v3)
+settings-about-notices = 타사 고지 사항
+settings-about-releases = 릴리스 노트

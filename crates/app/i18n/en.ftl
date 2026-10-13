@@ -485,3 +485,23 @@ workshop-text-retry = Retry
 workshop-text-language = Edit title and description languages
 workshop-text-invalid = Check the title (1–128 UTF-8 bytes) and description length for { $language }.
 workshop-text-save-failed = Could not save { $language }. Successful saves are kept; retry the remaining changes.
+
+# About
+settings-tab-about = About
+settings-about-description = Publish, manage, and preview Garry’s Mod addons.
+settings-about-github = gmpublished on GitHub
+settings-about-debug-title = Debug information
+settings-about-debug-description = App version, operating system, installation, and graphics.
+settings-about-copy-debug = Copy debug info
+settings-about-copied = Copied
+settings-about-debug-show = View debug information
+settings-about-debug-hide = Hide debug information
+settings-about-debug-loading = Collecting system information…
+settings-about-debug-failed = Could not collect debug information.
+settings-about-debug-retry = Try again
+settings-about-credits = Credits
+settings-about-upstream = A native fork of gmpublisher by William Venner.
+settings-about-maintainers = Made by Charles Mills and open-source contributors, with Rust and Iced.
+settings-about-license = License (GNU GPL v3)
+settings-about-notices = Third-party notices
+settings-about-releases = Release notes

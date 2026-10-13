@@ -18,6 +18,36 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::TabSelected(tab) => {
             state.select_tab(tab);
+            if tab == super::state::Tab::About {
+                vec![Effect::DebugInfoRequested(state.about.load())]
+            } else {
+                Vec::new()
+            }
+        }
+        Message::AboutLinkOpened(link) => vec![Effect::OpenUrlRequested(link.url())],
+        Message::DebugInfoRequested => vec![Effect::DebugInfoRequested(state.about.load())],
+        Message::DebugInfoLoaded(generation, result) => {
+            state.about.complete(generation, result);
+            Vec::new()
+        }
+        Message::DebugInfoToggled => {
+            state.about.expanded = !state.about.expanded;
+            Vec::new()
+        }
+        Message::CopyDebugInfoRequested => {
+            if let super::about::DebugReport::Ready(report) = &state.about.report {
+                vec![Effect::CopyDebugInfoRequested(
+                    state.about.generation,
+                    report.clone(),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+        Message::DebugInfoCopied(generation) => {
+            if generation == state.about.generation {
+                state.about.copied = true;
+            }
             Vec::new()
         }
         Message::SoundsToggled(enabled) => {
@@ -215,6 +245,67 @@ mod tests {
             ),
             SystemColorScheme::Dark,
         )
+    }
+
+    #[test]
+    fn about_is_first_but_general_opens_on_every_settings_open() {
+        let mut state = State::default();
+        assert_eq!(Tab::ALL[0], Tab::About);
+        assert_eq!(Tab::ALL[1], Tab::General);
+        open_settings(&mut state);
+        assert_eq!(state.active_tab(), Tab::General);
+        let effects = update(&mut state, Message::TabSelected(Tab::About));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::DebugInfoRequested(_)]
+        ));
+        update(&mut state, Message::CloseFinished);
+        open_settings(&mut state);
+        assert_eq!(state.active_tab(), Tab::General);
+        assert!(!state.about.expanded);
+        assert!(!state.about.copied);
+    }
+
+    #[test]
+    fn debug_copy_uses_the_displayed_report_and_waits_for_clipboard_dispatch() {
+        let mut state = State::default();
+        open_settings(&mut state);
+        assert!(update(&mut state, Message::CopyDebugInfoRequested).is_empty());
+        update(&mut state, Message::TabSelected(Tab::About));
+        let generation = state.about.generation;
+        assert!(update(&mut state, Message::CopyDebugInfoRequested).is_empty());
+        let report = "Version: test\nOS: test".to_owned();
+        update(
+            &mut state,
+            Message::DebugInfoLoaded(generation, Ok(report.clone())),
+        );
+        assert_eq!(
+            update(&mut state, Message::CopyDebugInfoRequested),
+            vec![Effect::CopyDebugInfoRequested(generation, report),]
+        );
+        assert!(!state.about.copied);
+        update(&mut state, Message::DebugInfoCopied(generation));
+        assert!(state.about.copied);
+        update(&mut state, Message::DebugInfoRequested);
+        update(&mut state, Message::DebugInfoCopied(generation));
+        assert!(
+            !state.about.copied,
+            "a previous copy must not confirm a newer report"
+        );
+    }
+
+    #[test]
+    fn about_links_open_the_intended_external_target() {
+        let mut state = State::default();
+        assert_eq!(
+            update(
+                &mut state,
+                Message::AboutLinkOpened(super::super::AboutLink::Upstream)
+            ),
+            vec![Effect::OpenUrlRequested(
+                "https://github.com/WilliamVenner/gmpublisher"
+            )]
+        );
     }
 
     #[test]

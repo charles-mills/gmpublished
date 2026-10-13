@@ -114,7 +114,28 @@ fn tab_rail<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         tabs = tabs.push(tab_button(tab, state.active_tab() == tab, ctx));
     }
 
-    container(tabs)
+    let content = column![
+        tabs,
+        Space::new().height(Length::Fill),
+        container(
+            column![
+                text("gmpublished")
+                    .size(tokens.typography.caption_xs)
+                    .color(tokens.colors.text_dim),
+                text(super::about::VERSION)
+                    .size(tokens.typography.caption_xs)
+                    .color(tokens.colors.text_dim),
+            ]
+            .spacing(2)
+        )
+        .padding(
+            Padding::ZERO
+                .left(tokens.spacing.pad + 11.0)
+                .bottom(tokens.spacing.pad)
+        ),
+    ];
+
+    container(content)
         .width(Length::Fixed(TAB_RAIL_WIDTH))
         .height(Length::Fill)
         .style(move |_| desktop_tab_rail_style(&tokens))
@@ -172,6 +193,7 @@ fn content_panel<'a>(
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let body: Element<'a, Message> = match state.active_tab() {
+        Tab::About => super::about_view::view(state, ctx, compact),
         Tab::General => general_tab(state, ctx, compact),
         Tab::Paths => paths_tab(state, ctx),
         Tab::Accessibility => accessibility_tab(state, ctx),
@@ -1139,7 +1161,7 @@ fn hsv_slider_style(tokens: &Tokens, rail: Background, _status: slider::Status) 
     }
 }
 
-fn text_button_style(tokens: &Tokens, status: button::Status) -> button::Style {
+pub(super) fn text_button_style(tokens: &Tokens, status: button::Status) -> button::Style {
     let background = match status {
         button::Status::Active => tokens.colors.button_bg,
         button::Status::Hovered => tokens.colors.control_bg,

@@ -1467,6 +1467,15 @@ impl App {
                 self.open_modal_stack_task(modal_stack::ActiveModal::Settings)
             }
             settings::Effect::ModalCloseRequested => self.close_modal_stack_task(),
+            settings::Effect::OpenUrlRequested(url) => self.open_url_task(url.to_owned()),
+            settings::Effect::DebugInfoRequested(generation) => {
+                self.settings_debug_info_task(generation)
+            }
+            settings::Effect::CopyDebugInfoRequested(generation, report) => self
+                .copy_text_task(report)
+                .chain(Task::done(RootMessage::Settings(
+                    settings::Message::DebugInfoCopied(generation),
+                ))),
             settings::Effect::PathBrowseRequested(kind) => self.settings_folder_picker_task(kind),
             settings::Effect::PathValidationRequested(request) => {
                 self.settings_path_validation_task(request)

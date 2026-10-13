@@ -36,6 +36,7 @@ impl SettingsSnapshot {
 mapped_enum_with_all! {
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum Tab {
+        About => "settings-tab-about",
         #[default]
         General => "settings-tab-general",
         Paths => "settings-tab-paths",
@@ -269,6 +270,7 @@ fn path_setting_value(settings: &Settings, kind: PathSetting) -> Option<&Path> {
 
 #[derive(Debug)]
 pub struct State {
+    pub(super) about: super::about::AboutState,
     open: bool,
     active_tab: Tab,
     settings: Settings,
@@ -290,6 +292,7 @@ impl Default for State {
         let settings = Settings::default();
         let paths = fallback_paths(&settings);
         Self {
+            about: super::about::AboutState::default(),
             open: false,
             active_tab: Tab::default(),
             path_fields: PathFields::from_settings(&settings),
@@ -348,6 +351,8 @@ impl State {
     }
 
     pub(crate) fn open_with_snapshot(&mut self, snapshot: SettingsSnapshot) {
+        self.active_tab = Tab::General;
+        self.about.reset();
         self.open = true;
         self.pending_reset = None;
         self.reset_busy = false;
@@ -356,6 +361,7 @@ impl State {
     }
 
     pub(crate) fn close(&mut self) {
+        self.about.reset();
         self.open = false;
         self.pending_reset = None;
         self.close_color_picker();

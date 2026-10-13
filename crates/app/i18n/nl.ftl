@@ -485,3 +485,23 @@ workshop-text-retry = Opnieuw proberen
 workshop-text-language = Talen voor titel en beschrijving bewerken
 workshop-text-invalid = Controleer de titel (1–128 UTF-8-bytes) en de beschrijvingslengte voor { $language }.
 workshop-text-save-failed = Opslaan van { $language } is mislukt. Opgeslagen wijzigingen blijven behouden; probeer de overige opnieuw.
+
+# About
+settings-tab-about = Over
+settings-about-description = Publiceer, beheer en bekijk Garry’s Mod-addons.
+settings-about-github = gmpublished op GitHub
+settings-about-debug-title = Diagnostische informatie
+settings-about-debug-description = Appversie, besturingssysteem, installatie en grafische gegevens.
+settings-about-copy-debug = Diagnose kopiëren
+settings-about-copied = Gekopieerd
+settings-about-debug-show = Diagnostische informatie bekijken
+settings-about-debug-hide = Diagnostische informatie verbergen
+settings-about-debug-loading = Systeeminformatie verzamelen…
+settings-about-debug-failed = De diagnostische informatie kon niet worden verzameld.
+settings-about-debug-retry = Opnieuw proberen
+settings-about-credits = Bijdragen
+settings-about-upstream = Een native fork van gmpublisher van William Venner.
+settings-about-maintainers = Gemaakt door Charles Mills en opensourcebijdragers, met Rust en Iced.
+settings-about-license = Licentie (GNU GPL v3)
+settings-about-notices = Vermeldingen van derden
+settings-about-releases = Versieopmerkingen

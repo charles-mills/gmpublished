@@ -485,3 +485,23 @@ workshop-text-retry = Yeniden dene
 workshop-text-language = Başlık ve açıklama dillerini düzenle
 workshop-text-invalid = { $language } için başlığı (1–128 UTF-8 baytı) ve açıklama uzunluğunu kontrol edin.
 workshop-text-save-failed = { $language } kaydedilemedi. Kaydedilen değişiklikler korundu; kalanları yeniden deneyin.
+
+# About
+settings-tab-about = Hakkında
+settings-about-description = Garry’s Mod eklentilerini yayımlayın, yönetin ve önizleyin.
+settings-about-github = GitHub’da gmpublished
+settings-about-debug-title = Tanılama bilgileri
+settings-about-debug-description = Uygulama sürümü, işletim sistemi, kurulum ve grafik bilgileri.
+settings-about-copy-debug = Tanılamayı kopyala
+settings-about-copied = Kopyalandı
+settings-about-debug-show = Tanılama bilgilerini göster
+settings-about-debug-hide = Tanılama bilgilerini gizle
+settings-about-debug-loading = Sistem bilgileri toplanıyor…
+settings-about-debug-failed = Tanılama bilgileri toplanamadı.
+settings-about-debug-retry = Yeniden dene
+settings-about-credits = Katkıda bulunanlar
+settings-about-upstream = William Venner tarafından geliştirilen gmpublisher’ın yerel bir çatallaması.
+settings-about-maintainers = Charles Mills ve açık kaynak katkıcıları tarafından Rust ve Iced ile geliştirildi.
+settings-about-license = Lisans (GNU GPL v3)
+settings-about-notices = Üçüncü taraf bildirimleri
+settings-about-releases = Sürüm notları

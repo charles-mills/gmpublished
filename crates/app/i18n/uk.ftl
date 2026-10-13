@@ -509,3 +509,23 @@ workshop-text-retry = Спробувати знову
 workshop-text-language = Редагувати мови назви й опису
 workshop-text-invalid = Перевірте назву (1–128 байтів UTF-8) і довжину опису для { $language }.
 workshop-text-save-failed = Не вдалося зберегти { $language }.Успішні зміни збережено; повторіть решту.
+
+# About
+settings-tab-about = Про програму
+settings-about-description = Публікуйте, переглядайте та керуйте аддонами Garry’s Mod.
+settings-about-github = gmpublished на GitHub
+settings-about-debug-title = Діагностична інформація
+settings-about-debug-description = Версія, операційна система, встановлення та графіка.
+settings-about-copy-debug = Копіювати діагностику
+settings-about-copied = Скопійовано
+settings-about-debug-show = Показати діагностичну інформацію
+settings-about-debug-hide = Приховати діагностичну інформацію
+settings-about-debug-loading = Збирання відомостей про систему…
+settings-about-debug-failed = Не вдалося зібрати діагностичну інформацію.
+settings-about-debug-retry = Спробувати знову
+settings-about-credits = Автори
+settings-about-upstream = Нативне відгалуження gmpublisher, створеного William Venner.
+settings-about-maintainers = Розроблено Charles Mills та учасниками спільноти відкритого ПЗ за допомогою Rust та Iced.
+settings-about-license = Ліцензія (GNU GPL v3)
+settings-about-notices = Повідомлення про сторонні компоненти
+settings-about-releases = Примітки до випуску

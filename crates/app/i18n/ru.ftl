@@ -509,3 +509,23 @@ workshop-text-retry = Повторить
 workshop-text-language = Изменить языки названия и описания
 workshop-text-invalid = Проверьте заголовок (1–128 байт UTF-8) и длину описания для { $language }.
 workshop-text-save-failed = Не удалось сохранить { $language }. Успешные изменения сохранены; повторите оставшиеся.
+
+# About
+settings-tab-about = О программе
+settings-about-description = Публикуйте, просматривайте и управляйте аддонами Garry’s Mod.
+settings-about-github = gmpublished на GitHub
+settings-about-debug-title = Диагностическая информация
+settings-about-debug-description = Версия, операционная система, установка и графика.
+settings-about-copy-debug = Копировать диагностику
+settings-about-copied = Скопировано
+settings-about-debug-show = Показать диагностическую информацию
+settings-about-debug-hide = Скрыть диагностическую информацию
+settings-about-debug-loading = Сбор сведений о системе…
+settings-about-debug-failed = Не удалось собрать диагностическую информацию.
+settings-about-debug-retry = Повторить
+settings-about-credits = Авторы
+settings-about-upstream = Нативный форк gmpublisher, созданного William Venner.
+settings-about-maintainers = Разработано Charles Mills и участниками сообщества открытого ПО с использованием Rust и Iced.
+settings-about-license = Лицензия (GNU GPL v3)
+settings-about-notices = Уведомления о сторонних компонентах
+settings-about-releases = Примечания к выпуску

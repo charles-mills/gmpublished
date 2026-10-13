@@ -1,9 +1,13 @@
+mod about;
+mod about_view;
 mod effect;
 mod message;
 mod state;
 mod update;
 mod view;
 
+pub use about::AboutLink;
+pub(crate) use about::debug_report;
 pub use effect::Effect;
 pub use message::Message;
 pub use state::{

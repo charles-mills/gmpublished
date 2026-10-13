@@ -14,6 +14,12 @@ pub enum Message {
     CloseRequested,
     CloseFinished,
     TabSelected(Tab),
+    AboutLinkOpened(super::AboutLink),
+    DebugInfoRequested,
+    DebugInfoLoaded(Generation, Result<String, UiError>),
+    DebugInfoToggled,
+    CopyDebugInfoRequested,
+    DebugInfoCopied(Generation),
     SoundsToggled(bool),
     PlayGifsByDefaultToggled(bool),
     #[cfg(target_os = "macos")]
