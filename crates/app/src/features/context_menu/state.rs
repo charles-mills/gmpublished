@@ -276,6 +276,7 @@ pub struct State {
     position: Point,
     entries: Vec<Entry>,
     presence: motion::Presence<bool>,
+    reduce_motion: bool,
 }
 
 impl Default for State {
@@ -284,6 +285,7 @@ impl Default for State {
             session: ContextMenuSession::Closed,
             position: Point::ORIGIN,
             entries: Vec::new(),
+            reduce_motion: false,
             presence: motion::asymmetric(
                 false,
                 theme::invariant().motion.context_menu_enter_duration(),
@@ -295,6 +297,26 @@ impl Default for State {
 }
 
 impl State {
+    pub(crate) fn set_reduce_motion(&mut self, reduce_motion: bool) {
+        if self.reduce_motion == reduce_motion {
+            return;
+        }
+        self.reduce_motion = reduce_motion;
+        let mut policy = theme::invariant().motion;
+        policy.reduce_motion = reduce_motion;
+        self.presence.set_durations(
+            policy.context_menu_enter_duration(),
+            policy.context_menu_exit_duration(),
+        );
+        if reduce_motion {
+            self.presence.snap(self.session.open());
+            if matches!(self.session, ContextMenuSession::Closing { .. }) {
+                self.session = ContextMenuSession::Closed;
+                self.entries.clear();
+            }
+        }
+    }
+
     pub(crate) const fn open(&self) -> bool {
         self.session.open()
     }
@@ -336,7 +358,12 @@ impl State {
     }
 
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
-        let settled = self.presence.tick(now);
+        let settled = if self.reduce_motion {
+            self.presence.snap(self.session.open());
+            true
+        } else {
+            self.presence.tick(now)
+        };
         if settled && matches!(self.session, ContextMenuSession::Closing { .. }) {
             self.session = ContextMenuSession::Closed;
             self.entries.clear();
@@ -361,7 +388,11 @@ impl State {
             Entry::simulate_toast(SimulatedToast::Notice),
         ]);
 
-        self.presence.go(true, now);
+        if self.reduce_motion {
+            self.presence.snap(true);
+        } else {
+            self.presence.go(true, now);
+        }
     }
 
     pub(super) fn dismiss(&mut self, now: Instant) {
@@ -412,5 +443,28 @@ mod tests {
         assert!(state.scale(closing_midpoint) > motion::POPOVER_CLOSED_SCALE);
         assert!(state.scale(closing_midpoint) < 1.0);
         assert_eq!(state.scale(closed), motion::POPOVER_CLOSED_SCALE);
+    }
+
+    #[test]
+    fn reducing_motion_settles_and_cleans_up_closing_menu() {
+        let mut state = State::default();
+        let now = Instant::now();
+        state.open_request(
+            OpenRequest::new(Point::ORIGIN, vec![Entry::copy_path()], target()),
+            now,
+        );
+        state.set_reduce_motion(true);
+        assert_eq!(state.opacity(now), 1.0);
+        assert!(!state.needs_ticks());
+        state.dismiss(now);
+        assert!(state.tick(now));
+        assert!(!state.visible());
+        assert!(!state.needs_ticks());
+        state.open_request(
+            OpenRequest::new(Point::ORIGIN, vec![Entry::copy_path()], target()),
+            now,
+        );
+        assert_eq!(state.opacity(now), 1.0);
+        assert!(!state.needs_ticks());
     }
 }

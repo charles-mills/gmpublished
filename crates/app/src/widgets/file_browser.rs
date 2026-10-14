@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::i18n::Arg;
-use iced::widget::{button, container, image, row, text};
+use iced::widget::{button, container, image, responsive, row, text};
 use iced::{Center, Color, Element, Length};
 
 use crate::assets;
@@ -28,7 +28,28 @@ pub struct VirtualRows {
     pub(crate) bottom_padding: f32,
 }
 
+#[cfg(test)]
 pub fn virtual_rows(row_count: usize, offset: f32, viewport_height: f32) -> VirtualRows {
+    virtual_rows_with_height(row_count, offset, viewport_height, ROW_HEIGHT)
+}
+
+pub fn row_height(tokens: &theme::Tokens) -> f32 {
+    tokens
+        .row_height(ROW_HEIGHT)
+        .max(tokens.typography.body_sm * 1.3 + tokens.spacing.gap_sm * 2.0)
+}
+
+pub fn virtual_rows_with_height(
+    row_count: usize,
+    offset: f32,
+    viewport_height: f32,
+    row_height: f32,
+) -> VirtualRows {
+    let row_height = if row_height.is_finite() {
+        row_height.max(1.0)
+    } else {
+        ROW_HEIGHT
+    };
     let viewport_height = if viewport_height.is_finite() {
         viewport_height.max(0.0)
     } else {
@@ -37,20 +58,20 @@ pub fn virtual_rows(row_count: usize, offset: f32, viewport_height: f32) -> Virt
     // The scrollable clamps its own offset to the content extent (e.g. after
     // the window grows); mirror that here so a stale stored offset can never
     // hide the top rows behind the spacer.
-    let max_offset = (row_count as f32 * ROW_HEIGHT - viewport_height).max(0.0);
+    let max_offset = (row_count as f32 * row_height - viewport_height).max(0.0);
     let offset = if offset.is_finite() {
         offset.clamp(0.0, max_offset)
     } else {
         0.0
     };
-    let visible_start = (offset / ROW_HEIGHT).floor() as usize;
-    let visible_end = ((offset + viewport_height) / ROW_HEIGHT).ceil() as usize;
+    let visible_start = (offset / row_height).floor() as usize;
+    let visible_end = ((offset + viewport_height) / row_height).ceil() as usize;
     let start = visible_start.saturating_sub(ROW_OVERSCAN).min(row_count);
     let end = visible_end.saturating_add(ROW_OVERSCAN).min(row_count);
     VirtualRows {
         range: start..end,
-        top_padding: start as f32 * ROW_HEIGHT,
-        bottom_padding: row_count.saturating_sub(end) as f32 * ROW_HEIGHT,
+        top_padding: start as f32 * row_height,
+        bottom_padding: row_count.saturating_sub(end) as f32 * row_height,
     }
 }
 
@@ -115,14 +136,19 @@ pub fn row_view<'a, Message: Clone + 'a>(
                 name = name.push(
                     text(prefix)
                         .size(tokens.typography.body_sm)
+                        .wrapping(text::Wrapping::None)
                         .color(Color::from(tokens.colors.browser_shortcut_dim)),
                 );
             }
-            name = name.push(text(row_data.display_name()).size(tokens.typography.body_sm));
+            name = name.push(
+                text(row_data.display_name())
+                    .size(tokens.typography.body_sm)
+                    .wrapping(text::Wrapping::None),
+            );
 
             row![
                 silk_image(SilkIcon::Folder, i18n.tr("file-type-folder"), &tokens),
-                name,
+                container(name).width(Length::Fill).clip(true),
             ]
             .align_y(Center)
             .spacing(tokens.spacing.gap_sm)
@@ -135,23 +161,47 @@ pub fn row_view<'a, Message: Clone + 'a>(
                 &[("extension", Arg::Text(info.extension.as_ref()))],
             );
 
-            row![
-                silk_image(info.icon, type_label.clone(), &tokens),
-                text(row_data.display_name())
-                    .size(tokens.typography.body_sm)
-                    .width(Length::Fill),
-                text(type_label)
-                    .size(tokens.typography.body_sm)
-                    .color(Color::from(tokens.colors.text_dim))
-                    .align_x(iced::alignment::Horizontal::Right)
-                    .width(Length::Fixed(TYPE_COLUMN_MAX_WIDTH)),
-                text(format_bytes(row_data.size_bytes, i18n))
-                    .size(tokens.typography.body_sm)
-                    .align_x(Center)
-                    .width(Length::Fixed(SIZE_COLUMN_WIDTH)),
-            ]
-            .align_y(Center)
-            .spacing(tokens.spacing.gap_sm)
+            responsive(move |size| {
+                let mut content = row![
+                    silk_image(info.icon, type_label.clone(), &tokens),
+                    tooltip_widget::below(
+                        container(
+                            text(row_data.display_name())
+                                .size(tokens.typography.body_sm)
+                                .wrapping(text::Wrapping::None)
+                                .width(Length::Fill)
+                        )
+                        .width(Length::Fill)
+                        .clip(true),
+                        row_data.display_name().to_owned(),
+                        &tokens,
+                        tokens.dims.tooltip_max_width,
+                    ),
+                ]
+                .align_y(Center)
+                .spacing(tokens.spacing.gap_sm);
+                // The type remains available on the file icon's tooltip when
+                // the browser pane is too narrow for a separate column.
+                if size.width >= 520.0 * tokens.text_scale() {
+                    content = content.push(
+                        text(type_label.clone())
+                            .size(tokens.typography.body_sm)
+                            .wrapping(text::Wrapping::None)
+                            .color(Color::from(tokens.colors.text_dim))
+                            .align_x(iced::alignment::Horizontal::Right)
+                            .width(Length::Fixed(TYPE_COLUMN_MAX_WIDTH * tokens.text_scale())),
+                    );
+                }
+                content
+                    .push(
+                        text(format_bytes(row_data.size_bytes, i18n))
+                            .size(tokens.typography.body_sm)
+                            .wrapping(text::Wrapping::None)
+                            .align_x(Center)
+                            .width(Length::Fixed(SIZE_COLUMN_WIDTH * tokens.text_scale())),
+                    )
+                    .into()
+            })
             .into()
         }
     };
@@ -162,13 +212,13 @@ pub fn row_view<'a, Message: Clone + 'a>(
             .on_press(message)
             .padding(padding)
             .width(Length::Fill)
-            .height(Length::Fixed(ROW_HEIGHT))
+            .height(Length::Fixed(row_height(&tokens)))
             .style(move |_, status| theme::styles::browser_row(&tokens, status))
             .into(),
         None => container(content)
             .padding(padding)
             .width(Length::Fill)
-            .height(Length::Fixed(ROW_HEIGHT))
+            .height(Length::Fixed(row_height(&tokens)))
             .into(),
     }
 }
@@ -180,8 +230,8 @@ fn silk_image<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     tooltip_widget::below(
         image(assets::silkicons::silkicon(icon))
-            .width(Length::Fixed(SILKICON_SIZE))
-            .height(Length::Fixed(SILKICON_SIZE)),
+            .width(Length::Fixed(tokens.icon_size(SILKICON_SIZE)))
+            .height(Length::Fixed(tokens.icon_size(SILKICON_SIZE))),
         tooltip,
         tokens,
         tokens.dims.tooltip_max_width,
@@ -534,6 +584,19 @@ mod tests {
             ArchiveEntryPath::from_validated(path).expect("fixture path should validate"),
             size_bytes,
         )
+    }
+
+    #[test]
+    fn enlarged_rows_use_the_same_geometry_for_spacers_and_visible_rows() {
+        let height = 60.0;
+        let rows = virtual_rows_with_height(100, height * 40.0, height * 10.0, height);
+        assert_eq!(rows.range, 36..54);
+        assert_eq!(rows.top_padding, height * 36.0);
+        assert_eq!(rows.bottom_padding, height * 46.0);
+        assert_eq!(
+            rows.top_padding + rows.range.len() as f32 * height + rows.bottom_padding,
+            height * 100.0
+        );
     }
 
     #[test]

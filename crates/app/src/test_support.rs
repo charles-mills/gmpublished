@@ -263,3 +263,126 @@ impl GmaFixtureBuilder {
         }
     }
 }
+
+pub fn capture_ui_surface<Message>(
+    name: &str,
+    size: iced::Size,
+    element: iced::Element<'_, Message>,
+) {
+    let directory = std::env::var_os("GMPUBLISHED_UI_CAPTURE_DIR")
+        .map_or_else(|| "/tmp/gmpublished-ui-refactor".into(), PathBuf::from);
+    fs::create_dir_all(&directory).expect("capture directory");
+    let settings = iced::Settings {
+        default_font: crate::assets::fonts::default_font(),
+        fonts: crate::assets::fonts::bundled_fonts()
+            .into_iter()
+            .map(std::borrow::Cow::Borrowed)
+            .collect(),
+        ..Default::default()
+    };
+    let mut simulation = iced_test::Simulator::<Message>::with_size(settings, size, element);
+    assert!(
+        simulation
+            .snapshot(&iced::Theme::Dark)
+            .expect("surface render")
+            .matches_image(directory.join(name))
+            .expect("save surface capture")
+    );
+    println!("surface capture: {}", directory.join(name).display());
+}
+
+pub fn capture_display_cases() -> [(crate::bridge::UiDensity, u16, iced::Size, &'static str); 4] {
+    use crate::bridge::UiDensity::{Comfortable, Compact};
+    [
+        (
+            Comfortable,
+            100,
+            iced::Size::new(1920.0, 1080.0),
+            "comfortable-wide",
+        ),
+        (
+            Compact,
+            100,
+            iced::Size::new(1280.0, 800.0),
+            "compact-laptop",
+        ),
+        (
+            Compact,
+            150,
+            iced::Size::new(800.0, 600.0),
+            "compact-large-text-narrow",
+        ),
+        (
+            Comfortable,
+            150,
+            iced::Size::new(1440.0, 900.0),
+            "comfortable-large-text",
+        ),
+    ]
+}
+
+pub fn capture_ui_surface_at_scale<Message>(
+    name: &str,
+    size: iced::Size,
+    scale: f32,
+    theme: &iced::Theme,
+    element: iced::Element<'_, Message>,
+) {
+    use iced_test::core::renderer::Headless as _;
+    use iced_test::runtime::{UserInterface, user_interface};
+
+    for font in crate::assets::fonts::bundled_fonts() {
+        iced_test::renderer::graphics::text::font_system()
+            .write()
+            .expect("font system")
+            .load_font(std::borrow::Cow::Borrowed(font));
+    }
+    let mut renderer = futures::executor::block_on(iced::Renderer::new(
+        crate::assets::fonts::default_font(),
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    ))
+    .expect("headless renderer");
+    let mut ui = UserInterface::build(
+        element,
+        size,
+        user_interface::Cache::default(),
+        &mut renderer,
+    );
+    let base = iced::theme::Base::base(theme);
+    let cursor = iced::mouse::Cursor::Unavailable;
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &[iced::Event::Window(iced::window::Event::RedrawRequested(
+            std::time::Instant::now(),
+        ))],
+        cursor,
+        &mut renderer,
+        &mut iced_test::core::clipboard::Null,
+        &mut messages,
+    );
+    ui.draw(
+        &mut renderer,
+        theme,
+        &iced::advanced::renderer::Style {
+            text_color: base.text_color,
+        },
+        cursor,
+    );
+    let physical_size = iced::Size::new(
+        (size.width * scale).round() as u32,
+        (size.height * scale).round() as u32,
+    );
+    let rgba = renderer.screenshot(physical_size, scale, base.background_color);
+    let directory = std::env::var_os("GMPUBLISHED_UI_CAPTURE_DIR")
+        .map_or_else(|| "/tmp/gmpublished-ui-refactor".into(), PathBuf::from);
+    fs::create_dir_all(&directory).expect("capture directory");
+    image::save_buffer(
+        directory.join(format!("{name}-tiny-skia.png")),
+        &rgba,
+        physical_size.width,
+        physical_size.height,
+        image::ColorType::Rgba8,
+    )
+    .expect("save scaled surface capture");
+}

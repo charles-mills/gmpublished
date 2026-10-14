@@ -77,6 +77,7 @@ pub struct State {
     browser: Option<FileBrowserState>,
     browser_snapshot: BrowserSnapshot,
     browser_scroll_offset: f32,
+    browser_row_height: f32,
     browser_scroll_reset_pending: bool,
     browser_select_hover: BrowserSelectHover,
     thumbnail_generation: Generation,
@@ -132,6 +133,7 @@ impl Default for State {
             browser: None,
             browser_snapshot: BrowserSnapshot::default(),
             browser_scroll_offset: 0.0,
+            browser_row_height: crate::widgets::file_browser::ROW_HEIGHT,
             browser_scroll_reset_pending: false,
             browser_select_hover: BrowserSelectHover::default(),
             thumbnail_generation: Generation::INITIAL,
@@ -236,11 +238,22 @@ impl State {
         &self,
         viewport_height: f32,
     ) -> crate::widgets::file_browser::VirtualRows {
-        crate::widgets::file_browser::virtual_rows(
+        crate::widgets::file_browser::virtual_rows_with_height(
             self.browser_snapshot.rows.len(),
             self.browser_scroll_offset,
             viewport_height,
+            self.browser_row_height,
         )
+    }
+
+    pub(crate) fn set_browser_row_height(&mut self, height: f32) -> Option<f32> {
+        if height.is_finite() && height > 0.0 && height != self.browser_row_height {
+            self.browser_scroll_offset *= height / self.browser_row_height;
+            self.browser_row_height = height;
+            Some(self.browser_scroll_offset)
+        } else {
+            None
+        }
     }
 
     pub(super) fn set_browser_scroll_offset(&mut self, offset: f32) {
@@ -273,6 +286,19 @@ impl State {
 
     pub(crate) fn browser_select_hover_progress(&self, now: Instant) -> f32 {
         self.browser_select_hover.0.interpolate(0.0, 1.0, now)
+    }
+
+    pub(crate) fn set_reduce_motion(&mut self, reduce: bool) {
+        let mut policy = crate::theme::invariant().motion;
+        policy.reduce_motion = reduce;
+        self.browser_select_hover
+            .0
+            .set_durations(policy.hover_in_duration(), policy.hover_out_duration());
+        if reduce {
+            self.browser_select_hover
+                .0
+                .snap(self.browser_select_hover.0.value());
+        }
     }
 
     #[cfg(test)]
@@ -589,7 +615,7 @@ impl State {
         if let Some(path) = self.workshop_snapshot_path.take() {
             pending_cleanup.push(path);
         }
-        *self = Self::default();
+        self.reset_form();
         self.open = true;
         self.thumbnail_generation = thumbnail_generation;
         self.text_generation = text_generation;
@@ -708,11 +734,21 @@ impl State {
         if let Some(path) = self.workshop_snapshot_path.take() {
             cleanup.push(path);
         }
-        *self = Self::default();
+        self.reset_form();
         self.text_generation = text_generation;
         self.thumbnail_generation = thumbnail_generation;
         self.workshop_loads = workshop_loads;
         cleanup
+    }
+
+    fn reset_form(&mut self) {
+        let mut hover = std::mem::take(&mut self.browser_select_hover);
+        hover.0.snap(false);
+        *self = Self {
+            browser_row_height: self.browser_row_height,
+            browser_select_hover: hover,
+            ..Self::default()
+        };
     }
 
     pub(super) fn take_pending_cleanup(&mut self) -> Vec<PathBuf> {

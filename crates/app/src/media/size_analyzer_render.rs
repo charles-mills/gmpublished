@@ -113,16 +113,31 @@ impl SizeAnalyzerLabelContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn rasterize_layout_labels(
         &mut self,
         layout: &TreemapLayout,
         scale: f32,
     ) -> Vec<SizeAnalyzerLabelSprite> {
+        self.rasterize_layout_labels_with_text_scale(layout, scale, 1.0)
+    }
+
+    pub(crate) fn rasterize_layout_labels_with_text_scale(
+        &mut self,
+        layout: &TreemapLayout,
+        scale: f32,
+        text_scale: f32,
+    ) -> Vec<SizeAnalyzerLabelSprite> {
+        let text_scale = if text_scale.is_finite() {
+            text_scale.clamp(0.9, 1.5)
+        } else {
+            1.0
+        };
         let mut font_system = text::shared_font_system().lock();
         tag_labels_for_layout(layout)
             .into_iter()
             .filter_map(|label| {
-                self.rasterize_label(&mut font_system, label, sanitized_scale(scale))
+                self.rasterize_label(&mut font_system, label, sanitized_scale(scale), text_scale)
             })
             .collect()
     }
@@ -132,9 +147,12 @@ impl SizeAnalyzerLabelContext {
         font_system: &mut FontSystem,
         label: SizeAnalyzerTagLabel,
         scale: f32,
+        text_scale: f32,
     ) -> Option<SizeAnalyzerLabelSprite> {
         let rect = label.rect;
-        if rect.width < MIN_LABEL_SIDE || rect.height < MIN_LABEL_SIDE {
+        if rect.width < MIN_LABEL_SIDE * f64::from(text_scale)
+            || rect.height < MIN_LABEL_SIDE * f64::from(text_scale)
+        {
             return None;
         }
 
@@ -147,12 +165,12 @@ impl SizeAnalyzerLabelContext {
             (available_width, available_height)
         };
         let max_font = if vertical {
-            rect.width * LABEL_MAX_FONT_RECT_RATIO
+            rect.width * LABEL_MAX_FONT_RECT_RATIO * f64::from(text_scale)
         } else {
-            rect.height * LABEL_MAX_FONT_RECT_RATIO
+            rect.height * LABEL_MAX_FONT_RECT_RATIO * f64::from(text_scale)
         }
-        .min(MAX_FONT_SIZE)
-        .max(f64::from(MIN_FONT_SIZE));
+        .min(MAX_FONT_SIZE * f64::from(text_scale))
+        .max(f64::from(MIN_FONT_SIZE) * f64::from(text_scale));
 
         let (logical_font, _measured) = select_font_size(
             font_system,
@@ -161,7 +179,7 @@ impl SizeAnalyzerLabelContext {
             max_font,
             fit_width,
             fit_height,
-            MIN_FONT_SIZE,
+            (MIN_FONT_SIZE as f32 * text_scale).ceil() as i32,
         )?;
 
         let raster = self
@@ -787,6 +805,25 @@ mod tests {
             assert!(large.height > small.height);
             assert!((large.scale - 2.0).abs() < f32::EPSILON);
         }
+    }
+
+    #[test]
+    fn user_text_size_changes_logical_labels_without_changing_display_scale() {
+        let layout = analyze_addons(
+            vec![addon("tool.gma", "Tool", "tool", 1)],
+            TreemapBounds::new(1200.0, 800.0),
+        )
+        .unwrap();
+        let mut context = SizeAnalyzerLabelContext::new();
+        let normal = context.rasterize_layout_labels_with_text_scale(&layout, 1.25, 1.0);
+        let enlarged = context.rasterize_layout_labels_with_text_scale(&layout, 1.25, 1.5);
+        assert_eq!(normal.len(), 1);
+        assert_eq!(enlarged.len(), 1);
+        assert_eq!(normal[0].scale, enlarged[0].scale);
+        assert_eq!(normal[0].rect, enlarged[0].rect);
+        assert!(enlarged[0].width > normal[0].width);
+        assert!(enlarged[0].height > normal[0].height);
+        assert_ne!(normal[0].handle, enlarged[0].handle);
     }
 
     #[test]

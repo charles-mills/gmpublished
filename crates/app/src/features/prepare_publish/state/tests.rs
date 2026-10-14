@@ -583,6 +583,26 @@ fn browser_empty_state_hover_fades_between_dim_and_full() {
 }
 
 #[test]
+fn reduced_motion_survives_opening_and_reopening_publish() {
+    let mut state = State::default();
+    state.set_reduce_motion(true);
+    for _ in 0..2 {
+        let _request = open_new(&mut state);
+        let now = std::time::Instant::now();
+        assert_eq!(state.browser_select_hover_progress(now), 0.0);
+        state.set_browser_select_hover(true, now);
+        assert_eq!(state.browser_select_hover_progress(now), 1.0);
+        assert!(!state.browser_select_hover_animating(now));
+        let _cleanup = state.close();
+    }
+    state.set_reduce_motion(false);
+    let _request = open_new(&mut state);
+    let now = std::time::Instant::now();
+    state.set_browser_select_hover(true, now);
+    assert!(state.browser_select_hover_animating(now));
+}
+
+#[test]
 fn spinner_ticks_only_while_a_submit_is_pending() {
     let mut state = ready_new_submit_state();
     let now = std::time::Instant::now();

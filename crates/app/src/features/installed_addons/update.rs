@@ -76,6 +76,15 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     }
 }
 
+pub(super) fn apply_ui_metrics(
+    state: &mut State,
+    follow_ups: Vec<addon_grid::Message>,
+) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    grid_rows::append_grid_follow_up_effects(state, follow_ups, &mut effects, apply_grid_message);
+    effects
+}
+
 fn grid_update(state: &mut State, message: addon_grid::Message) -> Vec<Effect> {
     let mut effects = Vec::new();
     apply_grid_message(state, message, &mut effects);
@@ -107,6 +116,9 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
         addon_grid::Message::VisibleRangeChanged(_, _) => {
             effects.extend(metadata_request_effects(state));
             effects.push(Effect::ThumbnailDemandsChanged);
+        }
+        addon_grid::Message::ScrollAnchored(delta) => {
+            effects.push(Effect::GridScrollAnchored(delta));
         }
         addon_grid::Message::CardHoverChanged(id, hovered) => {
             state.set_card_hovered(&id, hovered);

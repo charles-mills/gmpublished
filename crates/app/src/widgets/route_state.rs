@@ -33,7 +33,7 @@ impl Tone {
             Self::Busy => tokens.colors.account_update_bg,
             Self::Quiet => tokens.colors.surface_2,
         };
-        theme::styles::circle(fill, GLYPH_DISC / 2.0)
+        theme::styles::circle(fill, tokens.icon_size(GLYPH_DISC) / 2.0)
     }
 }
 
@@ -126,18 +126,20 @@ pub fn view<'a, M: Clone + 'a>(state: RouteState<M>, ctx: ViewCtx<'a>) -> Elemen
 
     let inner: Element<'a, M> = match glyph {
         Glyph::Icon(handle) => svg(handle)
-            .width(Length::Fixed(GLYPH_SIZE))
-            .height(Length::Fixed(GLYPH_SIZE))
+            .width(Length::Fixed(tokens.icon_size(GLYPH_SIZE)))
+            .height(Length::Fixed(tokens.icon_size(GLYPH_SIZE)))
             .content_fit(ContentFit::Contain)
             .style(move |_, _| svg::Style {
                 color: Some(tone.glyph_color(&tokens)),
             })
             .into(),
-        Glyph::Spinner(elapsed) => super::spinner::spinner(&tokens, elapsed, GLYPH_SIZE * 0.7),
+        Glyph::Spinner(elapsed) => {
+            super::spinner::spinner(&tokens, elapsed, tokens.icon_size(GLYPH_SIZE) * 0.7)
+        }
     };
 
     let disc = container(inner)
-        .center(Length::Fixed(GLYPH_DISC))
+        .center(Length::Fixed(tokens.icon_size(GLYPH_DISC)))
         .style(move |_| tone.disc_style(&tokens));
 
     let mut panel = column![
@@ -155,7 +157,8 @@ pub fn view<'a, M: Clone + 'a>(state: RouteState<M>, ctx: ViewCtx<'a>) -> Elemen
             .align_x(Center),
     ]
     .align_x(Alignment::Center)
-    .width(Length::Fixed(PANEL_WIDTH));
+    .width(Length::Fill)
+    .max_width(PANEL_WIDTH * tokens.text_scale());
 
     if let Some(detail) = detail {
         panel = panel
@@ -176,7 +179,7 @@ pub fn view<'a, M: Clone + 'a>(state: RouteState<M>, ctx: ViewCtx<'a>) -> Elemen
         }
         panel = panel
             .push(Space::new().height(Length::Fixed(tokens.spacing.gap)))
-            .push(buttons);
+            .push(buttons.wrap());
     }
 
     // Vertical thirds rather than `center`: the panel reads as centred when

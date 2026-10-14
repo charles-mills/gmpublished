@@ -230,6 +230,7 @@ fn cursor_hover_updates_grid_owned_item_state() {
 #[test]
 fn resize_shuffle_reconciles_hover_to_card_under_stationary_cursor() {
     let mut state = State::default();
+    state.metrics.motion.reduce_motion = true;
     let _ = state.set_items(items(&[100.0, 100.0, 100.0, 100.0]));
     let _ = apply(&mut state, Message::ViewportResized(200, 500));
     let cursor = card_center(&state, 1);
@@ -481,12 +482,13 @@ fn title_measure_memo_is_reused_at_the_same_width_and_ignored_at_another() {
     titles.sort();
     assert_eq!(titles, ["Alpha", "Beta"]);
     let alpha_card_height = state.card_heights[0];
-    let alpha_measure = state.title_measures["Alpha"];
+    let alpha_measure = state.title_measures["Alpha"].clone();
     let (width_bits, alpha_title_height) = alpha_measure.measured.expect("measured");
 
     // Seed an incorrect height and remove the watermark. Reusing the memo must
     // preserve that height; measuring again would repair it.
     let poisoned = TitleMeasure {
+        paragraph: None,
         single_line_at: None,
         measured: Some((width_bits, alpha_title_height + 20.0)),
     };
@@ -524,6 +526,7 @@ fn title_measure_watermark_skips_shaping_at_wider_widths() {
     let _ = state.title_measures.insert(
         long_title.to_owned(),
         TitleMeasure {
+            paragraph: None,
             single_line_at: Some(0.0),
             measured: None,
         },
@@ -608,4 +611,539 @@ fn visible_card_motion_reports_hover_transitions() {
     assert!(state.needs_visible_card_ticks());
     state.tick_visible_card_motion(started + std::time::Duration::from_millis(150));
     assert!(!state.needs_visible_card_ticks());
+}
+
+#[test]
+fn density_changes_columns_without_sizing_cards_from_item_count() {
+    let mut state = State::default();
+    let _ = apply(&mut state, Message::ViewportResized(1800, 600));
+    let mut metrics = *theme::invariant();
+    metrics.preferred_card_width = 280.0;
+    metrics.spacing.gap = 24.0;
+    let _ = state.set_metrics(&metrics);
+    let _ = state.set_items(items(&[100.0; 2]));
+    let sparse_width = state.card_width;
+    assert_eq!(state.columns, 5);
+    assert!((280.0..=378.0).contains(&sparse_width));
+    let _ = state.set_items(items(&[100.0; 100]));
+    assert_eq!(state.card_width, sparse_width);
+
+    metrics.preferred_card_width = 220.0;
+    metrics.spacing.gap = 16.0;
+    let _ = state.set_metrics(&metrics);
+    assert_eq!(state.columns, 7);
+    assert!(state.card_width < sparse_width);
+}
+
+#[test]
+fn display_change_preserves_visible_item_and_scroll_inset_across_column_change() {
+    let mut state = State::default();
+    let _ = apply(&mut state, Message::ViewportResized(900, 160));
+    let _ = state.set_items(items(&[100.0; 100]));
+    let _ = apply(&mut state, Message::Scrolled(345));
+    let anchor_item = state.visible_item_range().start;
+    let inset = state.scroll_offset - state.layout.top_offset(state.visible_rows.start);
+    let mut metrics = state.metrics;
+    metrics.preferred_card_width = 280.0;
+    metrics.spacing.gap = 24.0;
+    metrics.dims.card_row_gap = 24.0;
+    let messages = state.set_metrics(&metrics);
+    let row = anchor_item / state.columns;
+    assert!((state.scroll_offset - state.layout.top_offset(row) - inset).abs() < 0.01);
+    assert!(state.visible_item_range().contains(&anchor_item));
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, Message::ScrollAnchored(_)))
+    );
+}
+
+#[test]
+fn changing_typography_invalidates_title_measures_and_noop_changes_are_free() {
+    let mut state = State::default();
+    let _ = apply(&mut state, Message::ViewportResized(900, 500));
+    let _ = state.set_items(vec![Item::new(addon_card::Data::addon(
+        CardId::from("a"),
+        "Alpha",
+    ))]);
+    let original_height = state.card_heights[0];
+    let original_generation = state.layout_cache_generation();
+    let mut metrics = state.metrics;
+    metrics.typography.body *= 1.5;
+    let _ = state.set_metrics(&metrics);
+    assert!(state.card_heights[0] > original_height);
+    assert!(
+        state.title_measures["Alpha"].measured.unwrap().1
+            > addon_card::single_line_title_height(theme::invariant())
+    );
+    assert_ne!(state.layout_cache_generation(), original_generation);
+    let generation = state.layout_cache_generation();
+    assert!(state.set_metrics(&metrics).is_empty());
+    assert_eq!(state.layout_cache_generation(), generation);
+}
+
+#[test]
+fn display_change_reconciles_hover_using_the_new_column_geometry() {
+    let mut state = State::default();
+    state.metrics.motion.reduce_motion = true;
+    let _ = apply(&mut state, Message::ViewportResized(500, 500));
+    let _ = state.set_items(items(&[100.0; 4]));
+    let cursor = card_center(&state, 1);
+    let _ = apply(&mut state, Message::CursorMoved(cursor));
+    assert!(state.items[1].card().is_hovered());
+    let mut metrics = state.metrics;
+    metrics.preferred_card_width = 400.0;
+    let messages = state.set_metrics(&metrics);
+    assert_eq!(state.columns, 1);
+    assert_eq!(
+        hover_messages(messages),
+        vec![
+            Message::CardHoverChanged("id-1".into(), false),
+            Message::CardHoverChanged("id-0".into(), true),
+        ]
+    );
+    assert!(state.items[0].card().is_hovered());
+}
+
+#[test]
+#[ignore = "opt-in visual fixtures; requires a headless graphics backend"]
+fn capture_adaptive_gallery_fixtures() {
+    use crate::bridge::UiDensity;
+    use iced::widget::{column, container, image, row, text};
+    use iced::{Color, Length};
+    use std::borrow::Cow;
+
+    let output = std::env::var_os("GMPUBLISHED_UI_CAPTURE_DIR").map_or_else(
+        || "/tmp/gmpublished-ui-refactor".into(),
+        std::path::PathBuf::from,
+    );
+    std::fs::create_dir_all(&output).expect("capture directory");
+    let settings = || iced_test::core::Settings {
+        default_font: crate::assets::fonts::default_font(),
+        fonts: crate::assets::fonts::bundled_fonts()
+            .into_iter()
+            .map(Cow::Borrowed)
+            .collect(),
+        ..Default::default()
+    };
+    // Register the real bundled fonts before measuring any virtualized titles.
+    let _prime = iced_test::Simulator::<Message>::with_settings(settings(), text("Fonts"));
+    let titles = [
+        "rRadio (Boombox and Car Radio)",
+        "Hedge Networks Custom Content",
+        "PERFOPUS: Performance Metrics",
+        "An unusually long Workshop title that wraps across several lines and remains available in full through addon details",
+        "日本語のアドオン · 中文内容 · 한국어 애드온",
+        "Boombox (Model Only)",
+    ];
+    for (name, density, percent, width, height, count) in [
+        (
+            "comfortable-sparse",
+            UiDensity::Comfortable,
+            100,
+            1920,
+            1080,
+            4,
+        ),
+        (
+            "comfortable-library",
+            UiDensity::Comfortable,
+            100,
+            2560,
+            1440,
+            200,
+        ),
+        (
+            "compact-large-text-sparse",
+            UiDensity::Compact,
+            150,
+            1280,
+            800,
+            4,
+        ),
+        (
+            "compact-large-text-library",
+            UiDensity::Compact,
+            150,
+            1920,
+            1080,
+            200,
+        ),
+        (
+            "compact-large-text-narrow",
+            UiDensity::Compact,
+            150,
+            800,
+            600,
+            24,
+        ),
+    ] {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        let mut state = State::default();
+        let _ = state.set_metrics(&tokens.layout());
+        let gutter = tokens.spacing.pad;
+        let content_height =
+            height as f32 - 2.0 * gutter - tokens.typography.title_lg * 1.3 - tokens.spacing.gap;
+        let _ = apply(
+            &mut state,
+            Message::ViewportResized((width as f32 - 2.0 * gutter) as u32, content_height as u32),
+        );
+        let _ = state.set_items(
+            (0..count)
+                .map(|index| {
+                    let rgb = [
+                        (36 + index * 31 % 130) as u8,
+                        (70 + index * 17 % 120) as u8,
+                        (120 + index * 13 % 120) as u8,
+                    ];
+                    let mut rgba = Vec::with_capacity(64 * 64 * 4);
+                    for y in 0..64 {
+                        for x in 0..64 {
+                            let shade = if (x / 16 + y / 16) % 2 == 0 { 1.0 } else { 0.7 };
+                            rgba.extend([
+                                (rgb[0] as f32 * shade) as u8,
+                                (rgb[1] as f32 * shade) as u8,
+                                (rgb[2] as f32 * shade) as u8,
+                                255,
+                            ]);
+                        }
+                    }
+                    Item::new(
+                        addon_card::Data::addon(
+                            CardId::from(format!("capture-{index}")),
+                            titles[index % titles.len()],
+                        )
+                        .with_subscriptions("77,832", 77832)
+                        .with_score((index % 6) as i32, "100%")
+                        .with_thumbnail(addon_card::Thumbnail::Ready(image::Handle::from_rgba(
+                            64, 64, rgba,
+                        ))),
+                    )
+                })
+                .collect(),
+        );
+        let frame = container(
+            column![
+                row![
+                    text("My Workshop").size(tokens.typography.title_lg),
+                    text(count.to_string())
+                        .size(tokens.typography.body)
+                        .color(Color::from(tokens.colors.text_dim))
+                ]
+                .spacing(tokens.spacing.gap_sm)
+                .align_y(iced::Center),
+                super::view(&state, &tokens, "gallery-capture"),
+            ]
+            .spacing(tokens.spacing.gap)
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .padding(gutter)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Color::from(tokens.colors.bg).into()),
+            ..Default::default()
+        });
+        let mut simulation = iced_test::Simulator::<Message>::with_size(
+            settings(),
+            (width as f32, height as f32),
+            frame,
+        );
+        let snapshot = simulation
+            .snapshot(&iced::Theme::Dark)
+            .expect("gallery render");
+        assert!(
+            snapshot
+                .matches_image(output.join(name))
+                .expect("save capture")
+        );
+        println!("gallery capture: {}", output.join(name).display());
+    }
+}
+
+/// Wall-clock observations use the same fixed 10k-card fixture in legacy and
+/// resolved metrics. This is an opt-in report, avoiding brittle timing limits in CI.
+#[test]
+#[ignore = "opt-in large-library timing report"]
+fn report_large_library_geometry_timing() {
+    use crate::bridge::UiDensity;
+    use std::time::Instant;
+    let fixtures: Vec<_> = (0..10_000)
+        .map(|index| {
+            Item::new(addon_card::Data::addon(
+                CardId::from(format!("perf-{index}")),
+                format!("Workshop addon {} with a representative title", index % 100),
+            ))
+        })
+        .collect();
+    for (name, metrics) in [
+        ("legacy", *theme::invariant()),
+        (
+            "comfortable-100",
+            Tokens::dark()
+                .with_display_preferences(UiDensity::Comfortable, 100)
+                .layout(),
+        ),
+        (
+            "compact-150",
+            Tokens::dark()
+                .with_display_preferences(UiDensity::Compact, 150)
+                .layout(),
+        ),
+    ] {
+        let mut state = State::default();
+        let _ = state.set_metrics(&metrics);
+        let _ = apply(&mut state, Message::ViewportResized(1920, 1080));
+        let started = Instant::now();
+        let _ = state.set_items(fixtures.clone());
+        let build = started.elapsed();
+        let started = Instant::now();
+        for offset in (0..100_000).step_by(100) {
+            let _ = apply(&mut state, Message::Scrolled(offset));
+        }
+        let scroll = started.elapsed();
+        let started = Instant::now();
+        for width in (1280..=2560).step_by(64) {
+            let _ = apply(&mut state, Message::ViewportResized(width, 1080));
+        }
+        let resize = started.elapsed();
+        println!(
+            "{name}: 10k-card build {build:?}, 1000 scrolls {scroll:?}, 21 resizes {resize:?}"
+        );
+    }
+}
+
+#[test]
+fn column_changes_report_new_item_demand_even_when_visible_row_range_is_unchanged() {
+    let mut state = State::default();
+    let _ = apply(&mut state, Message::ViewportResized(1800, 150));
+    let _ = state.set_items(items(&[100.0; 100]));
+    let old_rows = state.visible_rows;
+    let old_items = state.visible_item_range();
+    let mut metrics = state.metrics;
+    metrics.preferred_card_width = 280.0;
+    let messages = state.set_metrics(&metrics);
+    assert_eq!(state.visible_rows, old_rows);
+    assert_ne!(state.visible_item_range(), old_items);
+    assert!(messages.contains(&Message::VisibleRangeChanged(old_rows.start, old_rows.end)));
+}
+
+#[test]
+fn column_reflow_bounds_cross_row_travel_then_settles_and_reconciles_hover() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut state = State::default();
+    let _ = state.set_items(items(&[100.0; 20]));
+    let _ = state.set_viewport_size_at(iced::Size::new(200.0, 500.0), now);
+    let original = state.card_position(1).unwrap();
+    state.cursor = Some(original + iced::Vector::new(20.0, 20.0));
+    let _ = state.reconcile_hover(now);
+    let _ = state.set_viewport_size_at(iced::Size::new(500.0, 500.0), now);
+    let id = state.items[1].id().clone();
+    let animated = state.card_position(1).unwrap() + state.reflow_offset(&id, now);
+    assert_ne!(animated, original);
+    assert_eq!(state.reflow_offset(&id, now), iced::Vector::new(0.0, 6.0));
+    assert!(state.reflow_opacity(&id, now) < 1.0);
+    state.cursor = Some(animated + iced::Vector::new(20.0, 20.0));
+    let _ = state.reconcile_hover(now);
+    assert_eq!(state.hover_target_id_at(now), Some(&id));
+    assert!(state.needs_visible_card_ticks());
+    assert!(state.reflow_offsets.len() < state.items.len());
+    let midpoint = now + Duration::from_millis(90);
+    let halfway = state.reflow_offset(&id, midpoint);
+    assert!(halfway.y.abs() < state.reflow_offset(&id, now).y.abs());
+    state.cursor = Some(iced::Point::new(-1.0, -1.0));
+    let messages = state.tick_visible_card_motion(now + Duration::from_millis(200));
+    assert!(state.reflow_offsets.is_empty());
+    assert!(!state.reflow_motion.needs_ticks());
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, Message::CardHoverChanged(_, false)))
+    );
+}
+
+#[test]
+fn empty_collections_release_shaped_title_cache() {
+    let mut state = State::default();
+    let _ = state.set_items(vec![Item::new(addon_card::Data::addon(
+        "cached".into(),
+        "Cached title",
+    ))]);
+    assert!(!state.title_measures.is_empty());
+    let _ = state.set_items(Vec::new());
+    assert!(state.title_measures.is_empty());
+}
+
+#[test]
+fn reduced_motion_skips_reflow_and_thumbnail_hover_ticks() {
+    let mut state = State::default();
+    let _ = state.set_items(items(&[100.0; 20]));
+    let _ = apply(&mut state, Message::ViewportResized(200, 500));
+    let _ = apply(&mut state, Message::ViewportResized(500, 500));
+    assert!(state.reflow_motion.needs_ticks());
+    let mut metrics = state.metrics;
+    metrics.motion.reduce_motion = true;
+    let _ = state.set_metrics(&metrics);
+    assert!(state.reflow_offsets.is_empty());
+    assert!(!state.needs_visible_card_ticks());
+}
+
+#[test]
+fn single_line_title_cache_survives_narrower_cards_that_still_fit() {
+    let mut measures = std::collections::HashMap::new();
+    let metrics = theme::invariant();
+    let height = super::cached_title_height("Short", 360.0, metrics, &mut measures);
+    let threshold = measures["Short"].single_line_at.unwrap();
+    assert!(threshold < 200.0);
+    assert_eq!(
+        super::cached_title_height("Short", 200.0, metrics, &mut measures),
+        height
+    );
+    assert_eq!(
+        measures["Short"].measured.unwrap().0,
+        (360.0 - metrics.dims.card_padding * 2.0).to_bits()
+    );
+}
+
+#[test]
+fn transitional_offscreen_title_memos_are_remeasured_on_settlement() {
+    let mut state = State::default();
+    let _ = apply(&mut state, Message::ViewportResized(900, 500));
+    let data = (0..500)
+        .map(|index| {
+            Item::new(addon_card::Data::addon(
+                format!("id-{index}").into(),
+                format!(
+                    "A long title that will need several lines when cards become narrower {index}"
+                ),
+            ))
+        })
+        .collect();
+    let _ = state.set_items(data);
+    let title = state.items[400].card.display_title().to_owned();
+    let mut metrics = state.metrics;
+    metrics.motion.layout_animating = true;
+    metrics.preferred_card_width = 280.0;
+    let previous = state.title_measures[&title].measured.unwrap();
+    let _ = state.set_metrics(&metrics);
+    assert_eq!(state.title_measures[&title].measured.unwrap(), previous);
+    for index in state.render_item_range() {
+        assert_eq!(
+            state.card_heights[index],
+            state.items[index].preferred_height(state.card_width, &metrics)
+        );
+    }
+    metrics.motion.layout_animating = false;
+    let _ = state.set_metrics(&metrics);
+    assert_ne!(state.title_measures[&title].measured.unwrap().0, previous.0);
+    assert_eq!(
+        state.card_heights[400],
+        state.items[400].preferred_height(state.card_width, &metrics)
+    );
+}
+
+#[test]
+#[ignore = "opt-in density motion timing report"]
+fn report_large_library_density_motion_timing() {
+    use std::time::Instant;
+    let mut state = State::default();
+    let _ = state.set_metrics(&Tokens::dark().with_density_progress(0.0, 100).layout());
+    let _ = apply(&mut state, Message::ViewportResized(1920, 1080));
+    let _ = state.set_items(
+        (0..10_000)
+            .map(|index| {
+                Item::new(addon_card::Data::addon(
+                    format!("perf-{index}").into(),
+                    format!("Workshop addon {index} with a representative title"),
+                ))
+            })
+            .collect(),
+    );
+    let mut frames = Vec::new();
+    for index in 1..=12 {
+        let mut metrics = Tokens::dark()
+            .with_density_progress(index as f32 / 12.0, 100)
+            .layout();
+        metrics.motion.layout_animating = index < 12;
+        let started = Instant::now();
+        let _ = state.set_metrics(&metrics);
+        frames.push(started.elapsed());
+    }
+    println!("10k distinct-title density layout frames: {frames:?}");
+    println!(
+        "Visible card reflow offsets: {} / {} library items",
+        state.reflow_offsets.len(),
+        state.items.len()
+    );
+}
+
+#[test]
+#[ignore = "opt-in gallery motion frames; requires a headless graphics backend"]
+fn capture_gallery_reflow_motion_frames() {
+    use iced::widget::{column, container, image, text};
+    use iced::{Color, Length, Size};
+    use std::time::{Duration, Instant};
+    for font in crate::assets::fonts::bundled_fonts() {
+        iced_test::renderer::graphics::text::font_system()
+            .write()
+            .unwrap()
+            .load_font(std::borrow::Cow::Borrowed(font));
+    }
+    let tokens = Tokens::dark().with_density_progress(1.0, 100);
+    let mut state = State::default();
+    let _ = state.set_metrics(&tokens.layout());
+    let started = Instant::now();
+    let _ = state.set_viewport_size_at(Size::new(1100.0, 640.0), started);
+    let _ = state.set_items(
+        (0..100)
+            .map(|index| {
+                let rgb = [
+                    70 + (index % 6 * 20) as u8,
+                    85 + (index % 4 * 24) as u8,
+                    110 + (index % 5 * 18) as u8,
+                    255,
+                ];
+                let pixels = rgb.repeat(128 * 128);
+                Item::new(
+                    addon_card::Data::addon(
+                        format!("motion-{index}").into(),
+                        format!("Workshop addon {}", index + 1),
+                    )
+                    .with_thumbnail(addon_card::Thumbnail::Ready(
+                        image::Handle::from_rgba(128, 128, pixels),
+                    )),
+                )
+            })
+            .collect(),
+    );
+    let _ = state.set_viewport_size_at(Size::new(1500.0, 640.0), started);
+    for elapsed in [0, 45, 90, 180, 240] {
+        let time = started + Duration::from_millis(elapsed);
+        let gallery = super::view_at(&state, &tokens, "motion-capture", time);
+        let frame = container(
+            column![
+                text(format!("Library reflow · {elapsed} ms")).size(tokens.typography.title),
+                gallery,
+            ]
+            .spacing(tokens.spacing.gap)
+            .height(Length::Fill),
+        )
+        .padding(tokens.spacing.pad)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(Color::from_rgb8(26, 26, 26).into()),
+            text_color: Some(Color::WHITE),
+            ..Default::default()
+        });
+        crate::test_support::capture_ui_surface_at_scale(
+            &format!("gallery-reflow-{elapsed:03}ms"),
+            Size::new(1556.0, 720.0),
+            1.0,
+            &iced::Theme::Dark,
+            frame.into(),
+        );
+    }
 }

@@ -1,5 +1,5 @@
 use crate::bridge::ui_error::UiError;
-use crate::bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset};
+use crate::bridge::{DownloadCountFormat, ExtractionOverwriteMode, ThemePreset, UiDensity};
 use crate::generation::Generation;
 use std::path::PathBuf;
 
@@ -14,6 +14,12 @@ pub enum Message {
     CloseRequested,
     CloseFinished,
     TabSelected(Tab),
+    AboutLinkOpened(super::AboutLink),
+    DebugInfoRequested,
+    DebugInfoLoaded(Generation, Result<String, UiError>),
+    DebugInfoToggled,
+    CopyDebugInfoRequested,
+    DebugInfoCopied(Generation),
     SoundsToggled(bool),
     PlayGifsByDefaultToggled(bool),
     #[cfg(target_os = "macos")]
@@ -21,6 +27,14 @@ pub enum Message {
     LanguageSelected(Option<String>),
     DownloadCountFormatSelected(DownloadCountFormat),
     ThemeSelected(ThemePreset),
+    DensitySelected(UiDensity),
+    ReduceMotionToggled(bool),
+    TextSizeChanged(u16),
+    FocusMoved(bool),
+    TextSizeCommitted,
+    TextSizeIdle(std::time::Instant),
+    TextSizeReset,
+    DisplayReset,
     OverwriteModeSelected(ExtractionOverwriteMode),
     PathEdited(PathSetting, String),
     PathAccepted(PathSetting),

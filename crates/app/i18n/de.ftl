@@ -480,3 +480,38 @@ workshop-text-retry = Erneut versuchen
 workshop-text-language = Sprachen für Titel und Beschreibung bearbeiten
 workshop-text-invalid = Prüfe den Titel (1–128 UTF-8-Bytes) und die Beschreibungslänge für { $language }.
 workshop-text-save-failed = { $language } konnte nicht gespeichert werden. Erfolgreiche Änderungen bleiben erhalten; versuche die übrigen erneut.
+
+# About
+settings-tab-about = Über
+settings-about-description = Garry’s Mod-Addons veröffentlichen, verwalten und ansehen.
+settings-about-github = gmpublished auf GitHub
+settings-about-debug-title = Diagnoseinformationen
+settings-about-debug-description = App-Version, Betriebssystem, Installation und Grafik.
+settings-about-copy-debug = Diagnoseinfos kopieren
+settings-about-copied = Kopiert
+settings-about-debug-show = Diagnoseinformationen anzeigen
+settings-about-debug-hide = Diagnoseinformationen ausblenden
+settings-about-debug-loading = Systeminformationen werden erfasst…
+settings-about-debug-failed = Diagnoseinformationen konnten nicht erfasst werden.
+settings-about-debug-retry = Erneut versuchen
+settings-about-credits = Mitwirkende
+settings-about-upstream = Ein nativer Fork von gmpublisher von William Venner.
+settings-about-maintainers = Entwickelt von Charles Mills und Open-Source-Mitwirkenden mit Rust und Iced.
+settings-about-license = Lizenz (GNU GPL v3)
+settings-about-notices = Hinweise zu Drittanbietern
+settings-about-releases = Versionshinweise
+
+settings-display-heading = Anzeige
+settings-display-spacing = Abstände
+settings-display-comfortable = Komfortabel
+settings-display-compact = Kompakt
+settings-display-text-size = Textgröße
+settings-display-reset-text = Textgröße zurücksetzen
+settings-display-reset = Anzeigeeinstellungen zurücksetzen
+settings-display-sample-heading = Ganz nach Ihren Wünschen
+settings-display-sample-body = Text und Bedienelemente passen sich gemeinsam an, während Ihre Inhalte erhalten bleiben.
+settings-display-sample-supporting = Abstände und Textgröße sind unabhängig.
+settings-display-colors = Akzentfarben
+
+settings-display-reduce-motion = Bewegung reduzieren
+settings-display-reduce-motion-hint = Layoutänderungen, Menüs und Dialoge ohne Übergänge anzeigen.

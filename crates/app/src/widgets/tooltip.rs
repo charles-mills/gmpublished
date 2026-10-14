@@ -28,12 +28,15 @@ pub fn below<'a, Message: 'a>(
                 .color(Color::from(tokens.colors.tooltip_text))
                 .wrapping(text::Wrapping::WordOrGlyph),
         )
-        .padding([VERTICAL_PADDING, HORIZONTAL_PADDING])
+        .padding([
+            tokens.space(VERTICAL_PADDING),
+            tokens.space(HORIZONTAL_PADDING),
+        ])
         .max_width(max_width)
         .style(move |_| theme::styles::tooltip(&tokens)),
         tooltip::Position::Bottom,
     )
-    .gap(GAP)
+    .gap(tokens.space(GAP))
     .padding(0)
     .into()
 }

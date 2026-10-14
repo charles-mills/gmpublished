@@ -1,19 +1,80 @@
 #[cfg(target_os = "macos")]
 use super::window;
 use super::{
-    App, LibraryRefreshReason, RootMessage, Task, flatten_blocking_ui_result, resolve_tokens,
-    settings, shell, theme,
+    App, LibraryRefreshReason, RootMessage, Task, flatten_blocking_ui_result, settings, shell,
+    theme,
 };
 use crate::bridge::ui_error::ResultExt as _;
 
 impl App {
+    pub(super) fn settings_debug_info_task(
+        &self,
+        generation: crate::generation::Generation,
+    ) -> Task<RootMessage> {
+        let ctx = self.environment.ctx.clone();
+        let window_id = self.window_id;
+        let locale = self.state.i18n.locale_id().to_owned();
+        let theme = format!(
+            "{:?} ({:?})",
+            self.state.theme_preset, self.state.system_scheme
+        );
+        let steam = format!("{:?}", self.state.features.shell.steam_status());
+        iced::system::information().then(move |info| {
+            let ctx = ctx.clone();
+            let locale = locale.clone();
+            let theme = theme.clone();
+            let steam = steam.clone();
+            window_id
+                .map_or_else(|| Task::done(1.0), iced::window::scale_factor)
+                .then(move |scale| {
+                    let info = info.clone();
+                    let locale = locale.clone();
+                    let theme = theme.clone();
+                    let steam = steam.clone();
+                    ctx.run_blocking_ui("settings-debug-info", move |_| {
+                        Ok(settings::debug_report(
+                            &info, scale, &locale, &theme, &steam,
+                        ))
+                    })
+                    .map(move |report| {
+                        RootMessage::Settings(settings::Message::DebugInfoLoaded(
+                            generation, report,
+                        ))
+                    })
+                })
+        })
+    }
+
     pub(super) fn apply_settings_snapshot_runtime(
         &mut self,
         snapshot: &settings::SettingsSnapshot,
     ) -> Task<RootMessage> {
+        if self.settings_save_in_flight.is_none() && self.settings_save_queue.is_empty() {
+            self.state
+                .features
+                .settings
+                .reconcile_display_preferences(&snapshot.settings);
+        }
+        let mut next_settings = snapshot.settings.clone();
+        for (_, mutation) in self
+            .settings_save_in_flight
+            .iter()
+            .chain(self.settings_save_queue.iter())
+        {
+            settings::apply_settings_mutation(&mut next_settings, mutation.clone());
+        }
+        if let Some((density, text_size)) =
+            self.state.features.settings.display_preferences_override()
+        {
+            next_settings.ui.density = density;
+            next_settings.ui.text_size_percent = text_size;
+        }
+        if let Some(reduce_motion) = self.state.features.settings.reduce_motion_override() {
+            next_settings.ui.reduce_motion = reduce_motion;
+        }
         let result = self
             .state
-            .apply_settings_snapshot(snapshot.settings.clone(), snapshot.paths.clone());
+            .apply_settings_snapshot(next_settings, snapshot.paths.clone());
         self.sync_game_prerequisite();
         let workshop_language = self.sync_workshop_language_task();
         let library_refresh = if result.gmod_dir_changed {
@@ -29,6 +90,7 @@ impl App {
             self.chrome_strategy_apply_task(result.previous_chrome),
             library_refresh,
             workshop_language,
+            self.refresh_ui_metrics_task(),
         ])
     }
 
@@ -38,6 +100,21 @@ impl App {
     ) -> Task<RootMessage> {
         let previous = self.state.chrome_strategy;
         match mutation {
+            settings::SettingsMutation::Density(density) => {
+                self.state
+                    .transition_density(*density, self.update_context.now, true);
+            }
+            settings::SettingsMutation::ReduceMotion(reduce_motion) => {
+                self.state.reduce_motion = *reduce_motion;
+                self.state.transition_density(
+                    self.state.density,
+                    self.update_context.now,
+                    !reduce_motion,
+                );
+            }
+            settings::SettingsMutation::TextSize(percent) => {
+                self.state.text_size_percent = *percent;
+            }
             settings::SettingsMutation::PlayGifsByDefault(enabled) => {
                 self.state.set_play_gifs_by_default(*enabled);
             }
@@ -65,30 +142,24 @@ impl App {
                     success: *success,
                     error: *error,
                 };
-                self.state.tokens = resolve_tokens(
-                    self.state.theme_preset,
-                    self.state.system_scheme,
-                    self.state.accent_inputs,
-                );
             }
-            settings::SettingsMutation::Color { kind, rgb } => {
-                match kind {
-                    settings::ColorSetting::Neutral => self.state.accent_inputs.neutral = *rgb,
-                    settings::ColorSetting::Success => self.state.accent_inputs.success = *rgb,
-                    settings::ColorSetting::Error => self.state.accent_inputs.error = *rgb,
-                }
-                self.state.tokens = resolve_tokens(
-                    self.state.theme_preset,
-                    self.state.system_scheme,
-                    self.state.accent_inputs,
-                );
-            }
+            settings::SettingsMutation::Color { kind, rgb } => match kind {
+                settings::ColorSetting::Neutral => self.state.accent_inputs.neutral = *rgb,
+                settings::ColorSetting::Success => self.state.accent_inputs.success = *rgb,
+                settings::ColorSetting::Error => self.state.accent_inputs.error = *rgb,
+            },
             settings::SettingsMutation::Sounds(_)
             | settings::SettingsMutation::OverwriteMode(_)
             | settings::SettingsMutation::Path { .. } => {}
         }
+        self.state.resolve_ui_tokens();
+        let display = self.refresh_ui_metrics_task();
         let workshop_language = self.sync_workshop_language_task();
-        Task::batch([self.chrome_strategy_apply_task(previous), workshop_language])
+        Task::batch([
+            self.chrome_strategy_apply_task(previous),
+            workshop_language,
+            display,
+        ])
     }
 
     fn sync_workshop_language_task(&mut self) -> Task<RootMessage> {
@@ -184,6 +255,34 @@ impl App {
                     Err(error),
                 )),
             })
+    }
+
+    pub(super) fn enqueue_settings_save(
+        &mut self,
+        generation: crate::generation::Generation,
+        mutation: settings::SettingsMutation,
+    ) -> Task<RootMessage> {
+        self.settings_save_queue.push_back((generation, mutation));
+        self.start_next_settings_save()
+    }
+
+    pub(super) fn start_next_settings_save(&mut self) -> Task<RootMessage> {
+        if self.settings_save_in_flight.is_some() || self.settings_reset_in_flight {
+            return Task::none();
+        }
+        match self.settings_save_queue.pop_front() {
+            Some((generation, mutation)) => {
+                self.settings_save_in_flight = Some((generation, mutation.clone()));
+                self.settings_save_task(generation, mutation)
+            }
+            None => match self.pending_settings_reset.take() {
+                Some(action) => {
+                    self.settings_reset_in_flight = true;
+                    self.settings_reset_task(action)
+                }
+                None => Task::none(),
+            },
+        }
     }
 
     pub(super) fn settings_save_task(

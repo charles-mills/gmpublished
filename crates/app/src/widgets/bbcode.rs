@@ -4,7 +4,7 @@ use gmpublished_backend::bbcode::{
     Document, ElementKind, Node, SpoilerId, youtube_thumbnail_url, youtube_watch_url,
 };
 use iced::widget::{
-    Column, Space, container, image, mouse_area, rich_text, row, span, stack, svg, text,
+    Column, Space, container, image, mouse_area, responsive, rich_text, row, span, stack, svg, text,
 };
 use iced::{Background, Border, Color, ContentFit, Element, Font, Length, border, font};
 
@@ -150,16 +150,20 @@ impl From<&Tokens> for RenderTokens {
 impl RenderTokens {
     /// Measured from Workshop page styles in August 2026: description, headings, links,
     /// spoilers, quotes, code blocks and tables.
-    const fn steam() -> Self {
+    fn steam(tokens: &Tokens) -> Self {
         Self {
-            gap_xs: 4.0,
-            gap_sm: 8.0,
-            marker_width: 20.0,
-            pad_xs: 4.0,
-            pad_sm: 12.0,
-            caption: 12.9,
-            body: 14.0,
-            heading_sizes: [20.0, 18.0, 16.0],
+            gap_xs: tokens.space(4.0),
+            gap_sm: tokens.space(8.0),
+            marker_width: tokens.space(20.0),
+            pad_xs: tokens.space(4.0),
+            pad_sm: tokens.space(12.0),
+            caption: tokens.text_size(12.9),
+            body: tokens.text_size(14.0),
+            heading_sizes: [
+                tokens.text_size(20.0),
+                tokens.text_size(18.0),
+                tokens.text_size(16.0),
+            ],
             heading_bold: false,
             line_height: 20.0 / 14.0,
             radius_xs: 0.0,
@@ -173,17 +177,17 @@ impl RenderTokens {
             quote: QuoteStyle {
                 shape: QuoteShape::Bordered(Rgba::rgb(0x56707F)),
                 bg: None,
-                size: 12.9,
+                size: tokens.text_size(12.9),
             },
             code: CodeStyle {
                 border: Rgba::rgb(0x535354),
                 bg: None,
-                size: 11.0,
+                size: tokens.text_size(11.0),
             },
             table: TableStyle {
                 border: Rgba::rgb(0x4D4D4D),
                 th_bg: None,
-                size: 12.0,
+                size: tokens.text_size(12.0),
             },
             spoiler: SpoilerStyle {
                 cover: Rgba::rgb(0x000000),
@@ -334,6 +338,7 @@ pub fn steam_view<'a>(
     revealed_spoilers: &'a HashSet<SpoilerId>,
     media: &'a dyn MediaLookup,
     i18n: &'a I18n,
+    tokens: &Tokens,
 ) -> Element<'a, Event> {
     render_nodes(
         document.nodes(),
@@ -341,7 +346,7 @@ pub fn steam_view<'a>(
             revealed_spoilers,
             media,
             i18n,
-            tokens: RenderTokens::steam(),
+            tokens: RenderTokens::steam(tokens),
         },
     )
 }
@@ -640,21 +645,27 @@ fn render_image<'a>(source: &'a str, ctx: Ctx<'a>) -> Element<'a, Event> {
             handle,
             width,
             height,
-        } if width > 0 && height > 0 => {
-            let display_width = precise_f32(width).min(tokens.image_max_width);
+        } if width > 0 && height > 0 => responsive(move |size| {
+            let display_width = precise_f32(width)
+                .min(tokens.image_max_width)
+                .min(size.width)
+                .max(1.0);
             let display_height = precise_f32(height) * display_width / precise_f32(width);
             mouse_area(
                 image(handle.clone())
-                    .content_fit(ContentFit::Fill)
+                    .content_fit(ContentFit::Contain)
                     .width(Length::Fixed(display_width))
                     .height(Length::Fixed(display_height)),
             )
             .interaction(iced::mouse::Interaction::Pointer)
             .on_press(Event::OpenLink(source.to_owned()))
             .into()
-        }
+        })
+        .height(Length::Shrink)
+        .into(),
         MediaView::Loading => container(Space::new())
-            .width(Length::Fixed(tokens.image_max_width))
+            .width(Length::Fill)
+            .max_width(tokens.image_max_width)
             .height(Length::Fixed(MEDIA_PLACEHOLDER_HEIGHT))
             .style(move |_| container::Style {
                 background: Some(Background::Color(tokens.media_placeholder.into())),
@@ -669,6 +680,14 @@ fn render_image<'a>(source: &'a str, ctx: Ctx<'a>) -> Element<'a, Event> {
 }
 
 fn render_youtube<'a>(id: &'a str, ctx: Ctx<'a>) -> Element<'a, Event> {
+    responsive(move |size| {
+        render_youtube_sized(id, ctx, ctx.tokens.image_max_width.min(size.width).max(1.0))
+    })
+    .height(Length::Shrink)
+    .into()
+}
+
+fn render_youtube_sized<'a>(id: &'a str, ctx: Ctx<'a>, width: f32) -> Element<'a, Event> {
     let tokens = ctx.tokens;
     let watch_url = youtube_watch_url(id);
     let thumbnail_url = youtube_thumbnail_url(id);
@@ -677,7 +696,6 @@ fn render_youtube<'a>(id: &'a str, ctx: Ctx<'a>) -> Element<'a, Event> {
         return media_link_line(ctx.i18n.tr("bbcode-watch-youtube"), watch_url, tokens);
     }
 
-    let width = tokens.image_max_width;
     let height = width * 9.0 / 16.0;
     let backdrop: Element<'a, Event> = match thumbnail {
         MediaView::Ready { handle, .. } => image(handle.clone())

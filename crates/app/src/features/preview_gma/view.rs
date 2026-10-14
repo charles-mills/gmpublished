@@ -129,7 +129,7 @@ fn embedded_preview_body<'a>(
         } else {
             let grid = pane_grid(state.panes(), |_, pane_kind, _| {
                 pane_grid::Content::new(match pane_kind {
-                    super::state::Pane::Sidebar => sidebar(state, ctx, sidebar_width),
+                    super::state::Pane::Sidebar => sidebar(state, ctx, sidebar_width, false),
                     super::state::Pane::Content => file_preview::pane(
                         file_preview_state,
                         ctx,
@@ -166,11 +166,20 @@ fn embedded_preview_body<'a>(
 
 fn archive_body<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
+    if width < (SIDEBAR_MIN_WIDTH + CONTENT_MIN_WIDTH) * tokens.text_scale() {
+        return column![
+            container(sidebar(state, ctx, width, true)).height(Length::FillPortion(2)),
+            container(browser(state, ctx)).height(Length::FillPortion(3)),
+        ]
+        .spacing(tokens.spacing.gap_sm)
+        .height(Length::Fill)
+        .into();
+    }
     let ratio = effective_sidebar_ratio(state.sidebar_ratio(), width);
     let sidebar_width = first_pane_width(width, ratio);
     let grid = pane_grid(state.panes(), |_, pane_kind, _| {
         pane_grid::Content::new(match pane_kind {
-            super::state::Pane::Sidebar => sidebar(state, ctx, sidebar_width),
+            super::state::Pane::Sidebar => sidebar(state, ctx, sidebar_width, false),
             super::state::Pane::Content => browser(state, ctx),
         })
     })
@@ -213,7 +222,12 @@ fn first_pane_width(width: f32, ratio: f32) -> f32 {
         .max(SIDEBAR_MIN_WIDTH)
 }
 
-fn sidebar<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Message> {
+fn sidebar<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+    width: f32,
+    compact: bool,
+) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let extract = button(
@@ -234,7 +248,7 @@ fn sidebar<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Me
     .height(Length::Fixed(tokens.dims.control_height))
     .style(move |_, status| theme::styles::preview_extract_button(&tokens, status));
 
-    let card = scrollable(sidebar_card(state, ctx, width))
+    let card = scrollable(sidebar_card(state, ctx, width, compact))
         .width(Length::Fill)
         .height(Length::Fill)
         .direction(scrollable::Direction::Vertical(
@@ -249,7 +263,12 @@ fn sidebar<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Me
         .into()
 }
 
-fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Message> {
+fn sidebar_card<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+    width: f32,
+    compact: bool,
+) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let details = state.details();
     let mut content = column![].padding(tokens.spacing.pad).spacing(0.0);
@@ -257,7 +276,9 @@ fn sidebar_card<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'
     content = content.push(stats_row(details, &tokens));
     content = content.push(Space::new().height(tokens.spacing.gap_md));
 
-    content = content.push(preview_image(state, &tokens, width));
+    if !compact {
+        content = content.push(preview_image(state, &tokens, width));
+    }
 
     if !details.title.trim().is_empty() {
         content = content.push(Space::new().height(tokens.spacing.gap_md));
@@ -483,7 +504,7 @@ fn info_row<'a>(
                 weight: iced::font::Weight::Bold,
                 ..iced::Font::default()
             })
-            .width(Length::Fixed(INFO_LABEL_WIDTH)),
+            .width(Length::Fixed(INFO_LABEL_WIDTH * tokens.text_scale())),
         container(value).width(Length::Fill),
     ]
     .align_y(Center)
@@ -503,8 +524,8 @@ fn author_value<'a>(
     let mut value = row![
         container(
             image(avatar)
-                .width(Length::Fixed(AVATAR_SIZE))
-                .height(Length::Fixed(AVATAR_SIZE)),
+                .width(Length::Fixed(tokens.icon_size(AVATAR_SIZE)))
+                .height(Length::Fixed(tokens.icon_size(AVATAR_SIZE))),
         )
         .clip(true)
         .style(|_| iced::widget::container::Style {
@@ -779,5 +800,42 @@ mod tests {
         assert_eq!(active.text_color, tokens.colors.text.into());
         assert_eq!(hovered.background, None);
         assert_eq!(hovered.text_color, tokens.colors.link.into());
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_archive_display_fixtures() {
+    let fixture = crate::test_support::GmaFixtureBuilder::new("rRadio · Workshop archive")
+        .entry("lua/radio/client.lua", b"print('radio')".to_vec())
+        .entry(
+            "lua/radio/a_very_long_filename_that_must_not_overlap_metadata.lua",
+            Vec::new(),
+        )
+        .entry("lua/radio/日本語.lua", Vec::new())
+        .entry("materials/icon.vmt", Vec::new())
+        .build();
+    let archive = crate::bridge::gma::PreviewArchive::from_gma(fixture).unwrap();
+    let mut state = State::default();
+    let request = state.begin_open_at(
+        super::OpenTarget::new("radio.gma".into(), "rRadio · Workshop archive", None),
+        std::time::Instant::now(),
+    );
+    state.apply_archive_opened(
+        request.request_id,
+        Ok(super::LoadedArchive::from_archive(archive)),
+    );
+    state.open_directory("lua/radio");
+    let preview = file_preview::State::default();
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        state.set_browser_row_height(crate::widgets::file_browser::row_height(&tokens));
+        crate::test_support::capture_ui_surface(
+            &format!("archive-{name}"),
+            size,
+            view(&state, &preview, ViewCtx::new(&tokens, &i18n), size, 0.0),
+        );
     }
 }

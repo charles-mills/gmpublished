@@ -4,7 +4,7 @@ use crate::bridge::ExtractionOverwriteMode;
 use crate::bridge::ui_error::UiError;
 use crate::bridge::{
     AppPaths, DownloadCountFormat, EffectiveThemePreset, Settings, SystemColorScheme, ThemePreset,
-    TitlebarPreference, effective_theme_preset, validate_gmod,
+    TitlebarPreference, UiDensity, effective_theme_preset, validate_gmod,
 };
 use crate::generation::Generation;
 
@@ -36,6 +36,7 @@ impl SettingsSnapshot {
 mapped_enum_with_all! {
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum Tab {
+        About => "settings-tab-about",
         #[default]
         General => "settings-tab-general",
         Paths => "settings-tab-paths",
@@ -68,6 +69,7 @@ mapped_enum_with_all! {
 }
 
 impl ColorSetting {
+    #[cfg(test)]
     pub(crate) const fn index(self) -> usize {
         self as usize
     }
@@ -185,6 +187,9 @@ pub enum SettingsMutation {
     Titlebar(TitlebarPreference),
     Language(Option<String>),
     DownloadCountFormat(DownloadCountFormat),
+    Density(UiDensity),
+    TextSize(u16),
+    ReduceMotion(bool),
     Theme {
         preset: ThemePreset,
         neutral: u32,
@@ -211,6 +216,13 @@ pub fn apply_settings_mutation(settings: &mut Settings, mutation: SettingsMutati
         SettingsMutation::Titlebar(preference) => settings.backend.titlebar = preference,
         SettingsMutation::Language(language) => settings.backend.language = language,
         SettingsMutation::DownloadCountFormat(format) => settings.ui.download_count_format = format,
+        SettingsMutation::Density(density) => settings.ui.density = density,
+        SettingsMutation::ReduceMotion(enabled) => settings.ui.reduce_motion = enabled,
+        SettingsMutation::TextSize(value) => {
+            if crate::bridge::valid_text_size_percent(value) {
+                settings.ui.text_size_percent = value;
+            }
+        }
         SettingsMutation::Theme {
             preset,
             neutral,
@@ -238,6 +250,12 @@ fn mutation_changes(settings: &Settings, mutation: &SettingsMutation) -> bool {
         SettingsMutation::Language(language) => &settings.backend.language != language,
         SettingsMutation::DownloadCountFormat(format) => {
             settings.ui.download_count_format != *format
+        }
+        SettingsMutation::Density(density) => settings.ui.density != *density,
+        SettingsMutation::ReduceMotion(enabled) => settings.ui.reduce_motion != *enabled,
+        SettingsMutation::TextSize(value) => {
+            crate::bridge::valid_text_size_percent(*value)
+                && settings.ui.text_size_percent != *value
         }
         SettingsMutation::Theme {
             preset,
@@ -268,7 +286,12 @@ fn path_setting_value(settings: &Settings, kind: PathSetting) -> Option<&Path> {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "modal visibility, persistence, and optimistic display acknowledgements have independent lifecycles"
+)]
 pub struct State {
+    pub(super) about: super::about::AboutState,
     open: bool,
     active_tab: Tab,
     settings: Settings,
@@ -281,6 +304,11 @@ pub struct State {
     status: SettingsStatus,
     /// Stamps each issued save so an out-of-order completion is discarded.
     save_generation: Generation,
+    /// A slider preview is applied live but saved only when the edit completes.
+    pending_text_size: Option<u16>,
+    display_save_pending: bool,
+    reduce_motion_save_pending: bool,
+    last_text_preview: Option<std::time::Instant>,
     reset_busy: bool,
     pending_reset: Option<ResetAction>,
 }
@@ -290,6 +318,7 @@ impl Default for State {
         let settings = Settings::default();
         let paths = fallback_paths(&settings);
         Self {
+            about: super::about::AboutState::default(),
             open: false,
             active_tab: Tab::default(),
             path_fields: PathFields::from_settings(&settings),
@@ -301,6 +330,10 @@ impl Default for State {
             system_scheme: SystemColorScheme::Dark,
             status: SettingsStatus::None,
             save_generation: Generation::INITIAL,
+            pending_text_size: None,
+            display_save_pending: false,
+            reduce_motion_save_pending: false,
+            last_text_preview: None,
             reset_busy: false,
             pending_reset: None,
         }
@@ -347,15 +380,27 @@ impl State {
         )
     }
 
-    pub(crate) fn open_with_snapshot(&mut self, snapshot: SettingsSnapshot) {
+    pub(crate) fn open_with_snapshot(&mut self, mut snapshot: SettingsSnapshot) {
+        if let Some((density, text_size)) = self.display_preferences_override() {
+            snapshot.settings.ui.density = density;
+            snapshot.settings.ui.text_size_percent = text_size;
+        }
+        if let Some(reduce_motion) = self.reduce_motion_override() {
+            snapshot.settings.ui.reduce_motion = reduce_motion;
+        }
+        self.active_tab = Tab::General;
+        self.about.reset();
         self.open = true;
         self.pending_reset = None;
         self.reset_busy = false;
         self.status = SettingsStatus::None;
+        self.pending_text_size = None;
+        self.last_text_preview = None;
         self.apply_snapshot(snapshot);
     }
 
     pub(crate) fn close(&mut self) {
+        self.about.reset();
         self.open = false;
         self.pending_reset = None;
         self.close_color_picker();
@@ -592,6 +637,10 @@ impl State {
         self.reset_busy = false;
         match result {
             Ok(Some(snapshot)) => {
+                self.display_save_pending = false;
+                self.reduce_motion_save_pending = false;
+                self.pending_text_size = None;
+                self.last_text_preview = None;
                 self.apply_snapshot(snapshot);
                 self.status = SettingsStatus::ResetComplete(action);
                 Some(self.current_snapshot())
@@ -633,16 +682,91 @@ impl State {
                 None
             }
             Ok(snapshot) => {
-                self.apply_snapshot(snapshot);
+                self.reconcile_display_preferences(&snapshot.settings);
+                // Saves issued before a slider drag can complete during it.
+                // Retain the latest preview when adopting their durable snapshot.
+                let mut snapshot = snapshot;
+                if self.display_save_pending {
+                    snapshot.settings.ui.density = self.settings.ui.density;
+                    snapshot.settings.ui.text_size_percent = self.settings.ui.text_size_percent;
+                }
+                if let Some(reduce_motion) = self.reduce_motion_override() {
+                    snapshot.settings.ui.reduce_motion = reduce_motion;
+                }
+                if let Some(value) = self.pending_text_size {
+                    snapshot.settings.ui.text_size_percent = value;
+                }
+                self.apply_saved_snapshot(snapshot);
                 self.status = SettingsStatus::Saved;
                 Some(self.current_snapshot())
             }
+            Err(_) if generation != self.save_generation => None,
             Err(error) => {
                 log::warn!("Settings save failed: {error}");
                 self.status = SettingsStatus::SaveFailed;
                 None
             }
         }
+    }
+
+    pub(crate) fn preview_text_size(&mut self, value: u16) -> Option<SettingsMutation> {
+        let mutation = SettingsMutation::TextSize(value);
+        if !self.apply_mutation(&mutation) {
+            return None;
+        }
+        self.pending_text_size = Some(value);
+        self.last_text_preview = Some(std::time::Instant::now());
+        Some(mutation)
+    }
+
+    /// Keep live display values across backend snapshots until a durable
+    /// snapshot contains them. Draft editing must not clear this protection.
+    pub(crate) fn display_preferences_override(&self) -> Option<(UiDensity, u16)> {
+        (self.pending_text_size.is_some() || self.display_save_pending)
+            .then_some((self.settings.ui.density, self.settings.ui.text_size_percent))
+    }
+
+    pub(crate) fn reduce_motion_override(&self) -> Option<bool> {
+        self.reduce_motion_save_pending
+            .then_some(self.settings.ui.reduce_motion)
+    }
+
+    pub(crate) fn reconcile_display_preferences(&mut self, durable: &Settings) {
+        if durable.ui.reduce_motion == self.settings.ui.reduce_motion {
+            self.reduce_motion_save_pending = false;
+        }
+        if durable.ui.density == self.settings.ui.density
+            && durable.ui.text_size_percent == self.settings.ui.text_size_percent
+        {
+            self.display_save_pending = false;
+        }
+    }
+
+    pub(crate) const fn has_text_preview(&self) -> bool {
+        self.pending_text_size.is_some()
+    }
+
+    pub(crate) fn commit_text_size_if_idle(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<SettingsMutation> {
+        if self.last_text_preview.is_some_and(|last| {
+            now.saturating_duration_since(last) >= std::time::Duration::from_millis(250)
+        }) {
+            self.commit_text_size()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn commit_text_size(&mut self) -> Option<SettingsMutation> {
+        self.last_text_preview = None;
+        if self.pending_text_size.is_some() {
+            self.display_save_pending = true;
+        }
+        self.pending_text_size
+            .take()
+            .map(SettingsMutation::TextSize)
     }
 
     pub(crate) fn scalar_mutation(
@@ -707,11 +831,37 @@ impl State {
         self.system_scheme = system_scheme;
     }
 
+    fn apply_saved_snapshot(&mut self, snapshot: SettingsSnapshot) {
+        let path_defaults = PathFields::from_settings(&self.settings);
+        let color_defaults = ColorFields::from_settings(&self.settings);
+        let paths = self.path_fields.clone();
+        let colors = self.color_fields.clone();
+        let picker = (self.active_color_picker, self.color_picker_draft);
+        self.apply_snapshot(snapshot);
+        for kind in PathSetting::ALL {
+            if paths.text(kind) != path_defaults.text(kind) || paths.error(kind).is_some() {
+                *self.path_fields.get_mut(kind) = paths.get(kind).clone();
+            }
+        }
+        for kind in ColorSetting::ALL {
+            if colors.text(kind) != color_defaults.text(kind) || colors.invalid(kind) {
+                *self.color_fields.get_mut(kind) = colors.get(kind).clone();
+            }
+        }
+        (self.active_color_picker, self.color_picker_draft) = picker;
+    }
+
     fn apply_mutation(&mut self, mutation: &SettingsMutation) -> bool {
         if !mutation_changes(&self.settings, mutation) {
             return false;
         }
         apply_settings_mutation(&mut self.settings, mutation.clone());
+        if matches!(mutation, SettingsMutation::ReduceMotion(_)) {
+            self.reduce_motion_save_pending = true;
+        }
+        if matches!(mutation, SettingsMutation::Density(_)) {
+            self.display_save_pending = true;
+        }
 
         match mutation {
             SettingsMutation::Path { .. } => {
@@ -730,6 +880,9 @@ impl State {
             | SettingsMutation::Titlebar(_)
             | SettingsMutation::Language(_)
             | SettingsMutation::DownloadCountFormat(_)
+            | SettingsMutation::Density(_)
+            | SettingsMutation::TextSize(_)
+            | SettingsMutation::ReduceMotion(_)
             | SettingsMutation::OverwriteMode(_) => {}
         }
         self.status = SettingsStatus::None;

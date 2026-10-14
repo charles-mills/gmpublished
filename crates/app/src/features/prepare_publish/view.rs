@@ -64,14 +64,40 @@ pub fn view<'a>(
     let preview = embedded_preview_body(state, file_preview_state, ctx, expanded, modal_size.width);
     let preview_open = preview.is_some();
     let body: Element<'a, Message> = preview.unwrap_or_else(|| {
-        row![
-            left_pane(state, ctx),
-            middle_column(state, ctx, now).width(Length::Fill),
-            right_column(state, ctx).width(Length::Fixed(tokens.dims.publish_right_column_width)),
-        ]
-        .spacing(tokens.spacing.gap_lg)
-        .height(Length::Fill)
-        .into()
+        let usable_width = modal_size.width - tokens.spacing.pad * 2.0;
+        let minimum_columns = tokens.dims.publish_left_column_width
+            + tokens.dims.publish_right_column_width
+            + 360.0 * tokens.text_scale()
+            + tokens.spacing.gap_lg * 2.0;
+        if usable_width < minimum_columns {
+            // A single scrolling form keeps submission, validation and ignore
+            // settings reachable in narrow windows and with enlarged text.
+            let form = column![
+                left_column(state, ctx),
+                container(middle_column(state, ctx, now)).height(tokens.row_height(420.0)),
+                container(right_column(state, ctx)).height(tokens.row_height(280.0)),
+            ]
+            .spacing(tokens.spacing.gap_lg)
+            .width(Length::Fill)
+            .max_width(760.0 * tokens.text_scale());
+            scrollable(container(form).center_x(Length::Fill))
+                .height(Length::Fill)
+                .direction(scrollable::Direction::Vertical(
+                    theme::styles::vertical_scrollbar(&tokens),
+                ))
+                .style(move |_, status| theme::styles::scrollbar(&tokens, status))
+                .into()
+        } else {
+            row![
+                left_pane(state, ctx),
+                middle_column(state, ctx, now).width(Length::Fill),
+                right_column(state, ctx)
+                    .width(Length::Fixed(tokens.dims.publish_right_column_width)),
+            ]
+            .spacing(tokens.spacing.gap_lg)
+            .height(Length::Fill)
+            .into()
+        }
     });
 
     let panel = container(body)
@@ -220,7 +246,7 @@ fn icon_preview<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
 
     let preview = mouse_area(
         container(layers)
-            .width(Length::Fill)
+            .width(Length::Fixed(tokens.dims.publish_icon_preview_height))
             .height(Length::Fixed(tokens.dims.publish_icon_preview_height))
             .clip(true)
             .style(move |_| theme::styles::icon_preview_well(&tokens)),
@@ -235,7 +261,7 @@ fn icon_preview<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
             &tokens,
             tokens.dims.tooltip_max_width,
         ),
-        None => preview.into(),
+        None => container(preview).center_x(Length::Fill).into(),
     }
 }
 
@@ -870,5 +896,31 @@ fn ignored_pattern_row(
             .on_press(Message::IgnorePatternRemoveRequested(pattern))
             .interaction(iced::mouse::Interaction::Pointer)
             .into()
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_publish_display_fixtures() {
+    let mut state = State::default();
+    state.open_target(super::OpenTarget::New, Vec::new(), false);
+    let preview = file_preview::State::default();
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        state.set_browser_row_height(file_browser::row_height(&tokens));
+        crate::test_support::capture_ui_surface(
+            &format!("publish-{name}"),
+            size,
+            view(
+                &state,
+                &preview,
+                ViewCtx::new(&tokens, &i18n),
+                size,
+                0.0,
+                Instant::now(),
+            ),
+        );
     }
 }

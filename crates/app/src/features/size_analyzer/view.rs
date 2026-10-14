@@ -52,7 +52,7 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     container(viewport)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(PAGE_PADDING)
+        .padding(tokens.space(PAGE_PADDING))
         .style(move |_| theme::styles::surface(&tokens))
         .into()
 }
@@ -401,7 +401,7 @@ fn place_tooltip(square: Rectangle, panel: Size, surface: Size) -> TooltipPlacem
 
     TooltipPlacement {
         x,
-        y,
+        y: y.clamp(0.0, (surface.height - panel.height).max(0.0)),
         width: panel.width,
         height: panel.height,
         below,
@@ -429,8 +429,15 @@ fn hover_tooltip<'a>(
     let type_label = i18n.tr("size-analyzer-type");
     let size_label = i18n.tr("size-analyzer-size");
 
-    let label_w = label_column_width(&name_label, &type_label, &size_label);
-    let panel_size = tooltip_panel_size(title, tag, &size_text, label_w, &tokens);
+    let label_w = label_column_width(&name_label, &type_label, &size_label, &tokens);
+    let panel_size = tooltip_panel_size(
+        title,
+        tag,
+        &size_text,
+        label_w,
+        &tokens,
+        (surface.width - TOOLTIP_MARGIN * 2.0).max(1.0),
+    );
 
     let square = Rectangle {
         x: hover.rect_x(),
@@ -441,20 +448,25 @@ fn hover_tooltip<'a>(
     let placement = place_tooltip(square, panel_size, surface);
     let arrow_x = tooltip_arrow_x(square, placement);
 
-    let value_width = value_column_width(panel_size.width, label_w);
+    let value_width = value_column_width(panel_size.width, label_w, &tokens);
 
     let grid = column![
         tooltip_row(
             &name_label,
-            tooltip_title_value(title, value_width, &tokens)
+            tooltip_title_value(title, value_width, &tokens),
+            &tokens
         ),
-        tooltip_row(&type_label, tag_chip::<Message>(tag, &tokens)),
-        tooltip_row(&size_label, tooltip_plain_value(size_text, &tokens)),
+        tooltip_row(&type_label, tag_chip::<Message>(tag, &tokens), &tokens),
+        tooltip_row(
+            &size_label,
+            tooltip_plain_value(size_text, &tokens),
+            &tokens
+        ),
     ]
-    .spacing(TOOLTIP_GRID_GAP);
+    .spacing(tokens.space(TOOLTIP_GRID_GAP));
 
     let panel = container(grid)
-        .padding([TOOLTIP_PAD_Y, TOOLTIP_PAD_X])
+        .padding([tokens.space(TOOLTIP_PAD_Y), tokens.space(TOOLTIP_PAD_X)])
         .width(Length::Fixed(panel_size.width))
         .style(move |_| theme::styles::tooltip(&tokens));
 
@@ -501,14 +513,18 @@ fn positioned_row<'a>(x: f32, child: impl Into<Element<'a, Message>>) -> Element
         .into()
 }
 
-fn tooltip_row<'a>(label: &str, value: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+fn tooltip_row<'a>(
+    label: &str,
+    value: impl Into<Element<'a, Message>>,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
     row![
         text(label.to_owned())
-            .size(TOOLTIP_TEXT_SIZE)
+            .size(tokens.text_size(TOOLTIP_TEXT_SIZE))
             .font(bold_font()),
         value.into(),
     ]
-    .spacing(TOOLTIP_GRID_GAP)
+    .spacing(tokens.space(TOOLTIP_GRID_GAP))
     .align_y(iced::Alignment::Center)
     .into()
 }
@@ -519,7 +535,7 @@ fn tooltip_title_value<'a>(
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     text(title)
-        .size(TOOLTIP_TEXT_SIZE)
+        .size(tokens.text_size(TOOLTIP_TEXT_SIZE))
         .color(Color::from(tokens.colors.tooltip_text))
         .wrapping(text::Wrapping::WordOrGlyph)
         .width(Length::Fixed(value_width))
@@ -528,7 +544,7 @@ fn tooltip_title_value<'a>(
 
 fn tooltip_plain_value<'a>(value: String, tokens: &Tokens) -> Element<'a, Message> {
     text(value)
-        .size(TOOLTIP_TEXT_SIZE)
+        .size(tokens.text_size(TOOLTIP_TEXT_SIZE))
         .color(Color::from(tokens.colors.tooltip_text))
         .into()
 }
@@ -540,22 +556,31 @@ fn bold_font() -> Font {
     }
 }
 
-fn label_column_width(name_label: &str, type_label: &str, size_label: &str) -> f32 {
+fn label_column_width(
+    name_label: &str,
+    type_label: &str,
+    size_label: &str,
+    tokens: &Tokens,
+) -> f32 {
     [name_label, type_label, size_label]
         .into_iter()
-        .map(|label| text_measure::measure_width(label, TOOLTIP_TEXT_SIZE) * TOOLTIP_BOLD_FUDGE)
+        .map(|label| {
+            text_measure::measure_width(label, tokens.text_size(TOOLTIP_TEXT_SIZE))
+                * TOOLTIP_BOLD_FUDGE
+        })
         .fold(0.0, f32::max)
 }
 
 fn chip_value_width(tag: &str, tokens: &Tokens) -> f32 {
     let label = tag.to_ascii_lowercase();
-    text_measure::measure_width(&label, TAG_TEXT_SIZE)
+    text_measure::measure_width(&label, tokens.text_size(TAG_TEXT_SIZE))
         + tokens.spacing.pad_xs * 2.0
-        + TAG_POINT_WIDTH
+        + tokens.icon_size(TAG_POINT_WIDTH)
 }
 
-fn value_column_width(panel_width: f32, label_w: f32) -> f32 {
-    (panel_width - TOOLTIP_PAD_X * 2.0 - label_w - TOOLTIP_GRID_GAP).max(1.0)
+fn value_column_width(panel_width: f32, label_w: f32, tokens: &Tokens) -> f32 {
+    (panel_width - tokens.space(TOOLTIP_PAD_X) * 2.0 - label_w - tokens.space(TOOLTIP_GRID_GAP))
+        .max(1.0)
 }
 
 fn tooltip_panel_size(
@@ -564,25 +589,33 @@ fn tooltip_panel_size(
     size_text: &str,
     label_w: f32,
     tokens: &Tokens,
+    available_width: f32,
 ) -> Size {
-    let title_w = text_measure::measure_width(title, TOOLTIP_TEXT_SIZE);
+    let title_w = text_measure::measure_width(title, tokens.text_size(TOOLTIP_TEXT_SIZE));
     let type_w = chip_value_width(tag, tokens);
-    let size_w = text_measure::measure_width(size_text, TOOLTIP_TEXT_SIZE);
-    let widest_value = title_w.max(type_w).max(size_w);
+    let size_w = text_measure::measure_width(size_text, tokens.text_size(TOOLTIP_TEXT_SIZE));
+    let widest_value = title_w.max(type_w).max(size_w).ceil() + 2.0;
 
-    let content_w = label_w + TOOLTIP_GRID_GAP + widest_value;
-    let width = (content_w + TOOLTIP_PAD_X * 2.0).min(TOOLTIP_MAX_WIDTH);
+    let content_w = label_w + tokens.space(TOOLTIP_GRID_GAP) + widest_value;
+    let width = (content_w + tokens.space(TOOLTIP_PAD_X) * 2.0)
+        .min(TOOLTIP_MAX_WIDTH * tokens.text_scale())
+        .min(available_width);
 
-    let value_col_w = value_column_width(width, label_w);
+    let value_col_w = value_column_width(width, label_w, tokens);
     let title_lines =
-        text_measure::wrapped_line_count(title, TOOLTIP_TEXT_SIZE, value_col_w).max(1);
+        text_measure::wrapped_line_count(title, tokens.text_size(TOOLTIP_TEXT_SIZE), value_col_w)
+            .max(1);
 
-    let row_h = TOOLTIP_TEXT_SIZE * TOOLTIP_LINE_HEIGHT;
+    let row_h = tokens.text_size(TOOLTIP_TEXT_SIZE) * TOOLTIP_LINE_HEIGHT;
     let title_row_h = row_h * title_lines as f32;
     // The type row renders at the chip's fixed height, which exceeds one
     // text line; underestimating it pushes the arrow into the square.
     let type_row_h = row_h.max(tokens.dims.tag_height);
-    let height = TOOLTIP_PAD_Y * 2.0 + title_row_h + type_row_h + row_h + TOOLTIP_GRID_GAP * 2.0;
+    let height = tokens.space(TOOLTIP_PAD_Y) * 2.0
+        + title_row_h
+        + type_row_h
+        + row_h
+        + tokens.space(TOOLTIP_GRID_GAP) * 2.0;
 
     Size::new(width, height)
 }
