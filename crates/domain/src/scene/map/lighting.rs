@@ -807,9 +807,11 @@ pub(super) fn displacement_lightmap_uv(
     face: &Face,
 ) -> [f32; 2] {
     let steps = steps.max(1) as f32;
+    // Source's rotated base corners are (0,0), (0,V), (U,V), (U,0).
+    // The outer grid index follows corner 0 -> 1, so it advances V.
     [
-        displacement_lightmap_axis_uv(column as f32 / steps, face.lightmap_size[0]),
-        displacement_lightmap_axis_uv(row as f32 / steps, face.lightmap_size[1]),
+        displacement_lightmap_axis_uv(row as f32 / steps, face.lightmap_size[0]),
+        displacement_lightmap_axis_uv(column as f32 / steps, face.lightmap_size[1]),
     ]
 }
 
@@ -1047,6 +1049,23 @@ mod lightmap_tests {
             g,
             b,
             exponent: 0,
+        }
+    }
+
+    #[test]
+    fn displacement_lightmap_follows_rotated_base_corners_on_rectangular_atlas() {
+        let mut face = face([0, 255, 255, 255]);
+        face.lightmap_size = [8, 4];
+        // Grid order is 0 -> 1 along columns, then 0 -> 3 along rows.
+        // Distinct extents and an off-diagonal interior point catch transposes.
+        for (column, row, expected) in [
+            (0, 0, [0.5 / 9.0, 0.5 / 5.0]),
+            (4, 0, [0.5 / 9.0, 4.5 / 5.0]),
+            (4, 4, [8.5 / 9.0, 4.5 / 5.0]),
+            (0, 4, [8.5 / 9.0, 0.5 / 5.0]),
+            (1, 3, [6.5 / 9.0, 1.5 / 5.0]),
+        ] {
+            assert_eq!(displacement_lightmap_uv(column, row, 4, &face), expected);
         }
     }
 
