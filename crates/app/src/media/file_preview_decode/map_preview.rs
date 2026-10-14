@@ -239,7 +239,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .sum::<usize>();
     let material_slot_count = table.len();
     let resolved_material_count = table.resolved_count();
-    let water_fallback_material_count = table.water_fallback_count();
+    let water_material_count = table.water_material_count();
     let material_count = u32::try_from(material_slot_count).unwrap_or(u32::MAX);
     let (bounds_min, bounds_max) =
         bounds_from_model_meshes(&meshes).unwrap_or((bounds_min, bounds_max));
@@ -264,12 +264,13 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         );
     }
     log_unresolved_materials(table.slots());
-    let water_status = water_fallback_log_suffix(water_fallback_material_count);
+    let water_status = water_fallback_log_suffix(water_material_count);
     let texture_mib = format_mib(texture_budget.decoded_bytes());
     let texture_payloads = texture_payload_log_suffix(table.slots());
     let render_mode_status = render_mode_log_suffix(table.slots());
     if !phy_debug_meshes.is_empty() {
         table.push_unindexed(MaterialSlot {
+            shader: Default::default(),
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,

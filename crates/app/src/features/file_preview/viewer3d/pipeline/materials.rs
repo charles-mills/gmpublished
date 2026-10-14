@@ -13,15 +13,76 @@ pub struct MaterialTextureViews<'a> {
     pub base: &'a wgpu::TextureView,
     pub base2: &'a wgpu::TextureView,
     pub lightmap: &'a wgpu::TextureView,
+    pub normal: &'a wgpu::TextureView,
 }
 
 #[derive(Clone, Copy)]
-pub struct MaterialUploadMode {
+pub struct MaterialUploadMode<'a> {
     pub force_opaque: bool,
     pub render_mode: RenderMode,
+    pub water: Option<&'a crate::bridge::materials::WaterMaterial>,
 }
 
 impl RenderResources {
+    pub fn create_water_normal_view(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        normal: Option<&crate::bridge::materials::WaterNormalMap>,
+    ) -> wgpu::TextureView {
+        let fallback = vec![vec![crate::bridge::materials::ResolvedTextureMip {
+            rgba: vec![128, 128, 255, 255],
+            width: 1,
+            height: 1,
+        }]];
+        let frames = normal.map_or(fallback.as_slice(), |normal| normal.frames.as_slice());
+        let base = &frames[0][0];
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("file_preview.water.normal_frames"),
+            size: wgpu::Extent3d {
+                width: base.width,
+                height: base.height,
+                depth_or_array_layers: frames.len() as u32,
+            },
+            mip_level_count: frames[0].len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (layer, mips) in frames.iter().enumerate() {
+            for (mip, image) in mips.iter().enumerate() {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: mip as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &image.rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(image.width * 4),
+                        rows_per_image: Some(image.height),
+                    },
+                    wgpu::Extent3d {
+                        width: image.width,
+                        height: image.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
+    }
     pub fn create_texture_view(
         &self,
         device: &wgpu::Device,
@@ -226,7 +287,7 @@ impl RenderResources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         views: MaterialTextureViews<'_>,
-        mode: MaterialUploadMode,
+        mode: MaterialUploadMode<'_>,
     ) -> (wgpu::BindGroup, wgpu::Buffer) {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("file_preview.model_viewer.material_uniform"),
@@ -234,7 +295,8 @@ impl RenderResources {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let material_uniform = MaterialUniform::new(mode.force_opaque, mode.render_mode);
+        let material_uniform =
+            MaterialUniform::new(mode.force_opaque, mode.render_mode).with_water(mode.water);
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.material_bind_group"),
@@ -263,6 +325,10 @@ impl RenderResources {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(views.normal),
                 },
             ],
         });

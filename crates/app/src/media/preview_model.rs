@@ -251,6 +251,7 @@ pub struct MapPreview {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DoorInstance {
+    pub(crate) brush_collision: Option<gmpublished_domain::scene::map::MapBrushCollision>,
     pub(crate) class: MapDoorClass,
     pub(crate) origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
@@ -455,8 +456,9 @@ fn bucket_visible(bucket: MapVisibilityBucket, visible_clusters: &[bool]) -> boo
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MaterialSlot {
+    pub(crate) shader: crate::bridge::materials::MaterialShader,
     pub(crate) name: String,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) texture2: Option<Arc<ResolvedTexture>>,
@@ -683,6 +685,7 @@ mod tests {
                 meshes: vec![mesh(0), mesh(1)],
                 materials: vec![
                     MaterialSlot {
+                        shader: Default::default(),
                         name: "a".to_owned(),
                         texture: None,
                         texture2: None,
@@ -690,6 +693,7 @@ mod tests {
                         render_mode: RenderMode::Opaque,
                     },
                     MaterialSlot {
+                        shader: Default::default(),
                         name: "b".to_owned(),
                         texture: None,
                         texture2: None,

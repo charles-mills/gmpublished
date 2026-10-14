@@ -117,6 +117,7 @@ pub(super) struct DisplacementGridVertex {
 }
 
 pub(super) struct FaceAppendContext<'a> {
+    pub(super) transform: super::brushes::BrushTransform,
     pub(super) meshes: &'a mut BuildMeshes,
     pub(super) material_names: &'a mut Vec<String>,
     pub(super) material_indexes: &'a mut HashMap<String, usize>,
@@ -170,6 +171,7 @@ pub(super) fn append_face(
     });
     let mesh = context.meshes.get_or_insert(material_index, partition);
     let index_start = mesh.indices.len();
+    let vertex_start = mesh.vertices.len();
     if let Some(displacement) = bsp.face_displacement(face) {
         append_displacement(
             bsp,
@@ -182,6 +184,18 @@ pub(super) fn append_face(
         )?;
     } else {
         append_brush_face(bsp, face, texinfo, normal, mesh, lightmap_block)?;
+    }
+    // Evaluate texinfo and lightmap transforms in compiled model space first.
+    // Moving the position before UV evaluation makes textures slide with origin.
+    for vertex in &mut mesh.vertices[vertex_start..] {
+        vertex.vertex.texture_size = bsp.texinfo_texdata(texinfo).map_or([0; 2], |data| {
+            [
+                u32::try_from(data.width).unwrap_or(0),
+                u32::try_from(data.height).unwrap_or(0),
+            ]
+        });
+        vertex.vertex.position = context.transform.point(vertex.vertex.position);
+        vertex.vertex.normal = context.transform.vector(vertex.vertex.normal);
     }
     let index_count = mesh.indices.len().saturating_sub(index_start);
     if index_count > 0
@@ -268,6 +282,7 @@ pub(super) fn map_vertex(
         normal,
         tex_s: texture_coord(position, texinfo.texture_vecs[0]),
         tex_t: texture_coord(position, texinfo.texture_vecs[1]),
+        texture_size: [0; 2],
         lightmap_uv,
         blend_alpha,
     }

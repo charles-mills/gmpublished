@@ -35,6 +35,7 @@ pub enum MapDoorOpenDirection {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapDoor {
+    pub brush_collision: Option<super::MapBrushCollision>,
     pub class: MapDoorClass,
     pub origin: Vec3,
     /// Source QAngle order: pitch, yaw, roll.
@@ -115,6 +116,8 @@ impl PendingMapDoor {
 
 #[derive(Debug)]
 pub(super) struct PendingDoorBuild {
+    pub(super) bounds: Option<MapBounds>,
+    pub(super) collision: Option<super::MapBrushCollision>,
     pub(super) door: PendingMapDoor,
     pub(super) meshes: Vec<BuildMesh>,
 }
@@ -126,13 +129,14 @@ impl PendingDoorBuild {
                 let meshes = self
                     .meshes
                     .into_iter()
-                    .map(|mesh| build_mesh_to_map_mesh_local(mesh, self.door.origin))
+                    .map(build_mesh_to_map_mesh_local)
                     .collect::<Vec<_>>();
                 let MapBounds {
                     min: local_bounds_min,
                     max: local_bounds_max,
-                } = bounds_from_map_meshes(&meshes)?;
+                } = bounds_from_map_meshes(&meshes).or(self.bounds)?;
                 Some(MapDoor {
+                    brush_collision: self.collision,
                     class: self.door.class,
                     origin: self.door.origin,
                     angles: self.door.angles,
@@ -150,6 +154,7 @@ impl PendingDoorBuild {
                 })
             }
             PendingDoorGeometry::Prop { placement } => Some(MapDoor {
+                brush_collision: None,
                 class: self.door.class,
                 origin: self.door.origin,
                 angles: self.door.angles,
@@ -166,15 +171,12 @@ impl PendingDoorBuild {
     }
 }
 
-fn build_mesh_to_map_mesh_local(mesh: BuildMesh, origin: Vec3) -> MapMesh {
+fn build_mesh_to_map_mesh_local(mesh: BuildMesh) -> MapMesh {
     MapMesh {
         vertices: mesh
             .vertices
             .into_iter()
-            .map(|mut vertex| {
-                vertex.vertex.position -= origin;
-                vertex.vertex
-            })
+            .map(|vertex| vertex.vertex)
             .collect(),
         indices: mesh.indices,
         material_index: mesh.material_index,
@@ -219,7 +221,7 @@ fn pending_map_door(
 fn pending_linear_brush_door(
     entity: &MapEntity,
     bsp: &MapBsp,
-    cluster_count: u32,
+    _cluster_count: u32,
     class: MapDoorClass,
 ) -> Option<PendingMapDoor> {
     let model_index = parse_bmodel_index(entity.prop("model")?)?;
@@ -259,8 +261,11 @@ fn pending_linear_brush_door(
     Some(PendingMapDoor {
         class,
         origin,
-        angles: Vec3::splat(0.0),
-        visibility: point_visibility_bucket(bsp, origin, cluster_count),
+        angles: entity
+            .prop("angles")
+            .and_then(parse_entity_vec3)
+            .unwrap_or(Vec3::ZERO),
+        visibility: MapVisibilityBucket::Always,
         auto_close_after: door_auto_close_after(entity, class),
         initial_progress,
         motion: MapDoorMotion::Linear {
@@ -276,7 +281,7 @@ fn pending_linear_brush_door(
 fn pending_rotating_brush_door(
     entity: &MapEntity,
     bsp: &MapBsp,
-    cluster_count: u32,
+    _cluster_count: u32,
 ) -> Option<PendingMapDoor> {
     let class = MapDoorClass::FuncDoorRotating;
     let model_index = parse_bmodel_index(entity.prop("model")?)?;
@@ -301,7 +306,7 @@ fn pending_rotating_brush_door(
         class,
         origin,
         angles,
-        visibility: point_visibility_bucket(bsp, origin, cluster_count),
+        visibility: MapVisibilityBucket::Always,
         auto_close_after: door_auto_close_after(entity, class),
         initial_progress: if door_spawn_starts_open(entity) {
             1.0
@@ -419,6 +424,8 @@ pub(super) fn extract_pending_door_meshes(
         PendingDoorGeometry::Brush { model_index } => model_index,
         PendingDoorGeometry::Prop { .. } => {
             return Ok(PendingDoorBuild {
+                bounds: None,
+                collision: None,
                 door: pending,
                 meshes: Vec::new(),
             });
@@ -427,6 +434,8 @@ pub(super) fn extract_pending_door_meshes(
     let mut meshes = BuildMeshes::default();
     let Some(model) = bsp.models.get(model_index.get()) else {
         return Ok(PendingDoorBuild {
+            bounds: None,
+            collision: None,
             door: pending,
             meshes: Vec::new(),
         });
@@ -434,6 +443,7 @@ pub(super) fn extract_pending_door_meshes(
     if let Some(face_range) = model_face_range(model, bsp.faces.len()) {
         let visibility = MapFaceVisibility::from_bucket(pending.visibility);
         let mut door_context = FaceAppendContext {
+            transform: super::brushes::BrushTransform::default(),
             meshes: &mut meshes,
             material_names: context.material_names,
             material_indexes: context.material_indexes,
@@ -455,14 +465,17 @@ pub(super) fn extract_pending_door_meshes(
         }
     }
     Ok(PendingDoorBuild {
+        bounds: bounds_from_points_iter(
+            [Vec3::from(model.mins), Vec3::from(model.maxs)].into_iter(),
+        ),
+        collision: Some(super::MapBrushCollision::from_bsp_model(bsp, model_index)),
         door: pending,
         meshes: meshes.into_inner(),
     })
 }
 
 fn parse_bmodel_index(model: &str) -> Option<ModelIndex> {
-    let index = model.strip_prefix('*')?.parse::<usize>().ok()?;
-    (index > 0).then(|| ModelIndex::new(index))
+    super::brushes::parse_bmodel_index(model)
 }
 
 fn entity_origin_or_model_origin(

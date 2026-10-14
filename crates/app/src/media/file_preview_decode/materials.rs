@@ -48,6 +48,9 @@ pub(super) fn map_material_resolution_from_results(
         table.push(
             name,
             MaterialSlot {
+                shader: resolved
+                    .as_ref()
+                    .map_or_else(Default::default, |material| material.shader.clone()),
                 name: name.clone(),
                 texture,
                 texture2,
@@ -233,6 +236,7 @@ pub(super) fn push_map_material_slot(
     let texture = resolved.and_then(|material| material.texture.as_ref().map(Arc::clone));
     let texture2 = resolved.and_then(|material| material.texture2.as_ref().map(Arc::clone));
     table.push_unindexed(MaterialSlot {
+        shader: resolved.map_or_else(Default::default, |material| material.shader.clone()),
         name: name.to_owned(),
         texture,
         texture2,

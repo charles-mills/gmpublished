@@ -421,7 +421,15 @@ fn seed_completion_bounds(
     sky_reachable: &[bool],
 ) -> Option<MapBounds> {
     let mut bounds = BoundsBuilder::default();
-    for face_index in 0..bsp.faces.len() {
+    // Skybox seed geometry belongs to model zero. Entity models have local
+    // vertices and cannot contribute raw bounds to this world-space volume.
+    for face_index in bsp
+        .models
+        .first()
+        .and_then(|model| model_face_range(model, bsp.faces.len()))
+        .into_iter()
+        .flatten()
+    {
         if face_attributions.partition(face_index) != GeometryPartition::Skybox {
             continue;
         }

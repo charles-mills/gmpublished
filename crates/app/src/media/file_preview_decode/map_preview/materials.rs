@@ -52,12 +52,12 @@ impl MaterialTable {
         count_of(self.slots.iter().filter(|slot| slot.texture.is_some()))
     }
 
-    pub(in super::super) fn water_fallback_count(&self) -> u32 {
-        count_of(self.slots.iter().filter(|slot| {
-            slot.texture
-                .as_ref()
-                .is_some_and(|texture| texture.is_water_fallback())
-        }))
+    pub(in super::super) fn water_material_count(&self) -> u32 {
+        count_of(
+            self.slots
+                .iter()
+                .filter(|slot| slot.shader.water().is_some()),
+        )
     }
 
     pub(in super::super) fn into_slots(self) -> Vec<MaterialSlot> {

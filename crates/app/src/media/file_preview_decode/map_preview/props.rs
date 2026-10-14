@@ -383,6 +383,7 @@ pub(in super::super) fn bake_map_doors_with_prop_model_loader(
                     .map(|mesh| map_mesh_to_model_mesh(mesh, context.table.slots()))
                     .collect::<Vec<_>>();
                 baked.doors.push(DoorInstance {
+                    brush_collision: door.brush_collision.clone(),
                     class: door.class,
                     origin: door.origin,
                     angles: door.angles,
@@ -421,6 +422,7 @@ pub(in super::super) fn bake_map_doors_with_prop_model_loader(
                     continue;
                 };
                 baked.doors.push(DoorInstance {
+                    brush_collision: None,
                     class: door.class,
                     origin: door.origin,
                     angles: door.angles,
@@ -1224,6 +1226,9 @@ pub(in super::super) fn prop_material_index(
     context.table.push(
         &key,
         MaterialSlot {
+            shader: resolved
+                .as_ref()
+                .map_or_else(Default::default, |material| material.shader.clone()),
             name: name.to_owned(),
             texture,
             texture2: None,

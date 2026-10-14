@@ -2,8 +2,8 @@
 //! plane clipping. Displacements and props use triangle and hull tests.
 
 use super::{
-    BTreeSet, BrushIndex, BrushSide, HashMap, MapBounds, MapBsp, MapLeaf, MapNode, MapPlane,
-    MapPropVisibility, NodeChild, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT, PROP_AABB_MAX_LEAVES,
+    BTreeSet, BrushSide, HashMap, MapBounds, MapBsp, MapLeaf, MapNode, MapPlane, MapPropVisibility,
+    ModelIndex, NodeChild, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT, PROP_AABB_MAX_LEAVES,
     cluster_in_range, contents_flags, displacement_vertices, texture_flags,
     vector_is_finite_nonzero, walk_to_leaf,
 };
@@ -12,9 +12,77 @@ use crate::math::Vec3;
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapWalkCollision {
     pub(super) brushes: Vec<MapWalkBrush>,
+    pub(super) physics_brushes: Vec<MapWalkBrush>,
+    pub(super) physics_ray_brushes: Vec<MapWalkBrush>,
     pub(super) water_brushes: Vec<MapWalkBrush>,
     pub(super) displacements: Vec<MapWalkDisplacement>,
     pub(super) props: MapWalkPropCollision,
+}
+
+/// Convex brush hulls, kept in model space for moving brush entities.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapBrushCollision(MapWalkCollision);
+
+impl MapBrushCollision {
+    pub(super) fn from_bsp_model(bsp: &MapBsp, model_index: ModelIndex) -> Self {
+        let Some(mut instance) = super::brushes::brush_instances(bsp)
+            .into_iter()
+            .find(|i| i.model_index == model_index)
+        else {
+            return Self(MapWalkCollision::empty());
+        };
+        instance.transform = super::brushes::BrushTransform::default();
+        Self(walk_brushes_from_bsp(bsp, &[instance], &BTreeSet::new()))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn solid_box_for_tests(min: Vec3, max: Vec3) -> Self {
+        Self(MapWalkCollision::solid_box_for_tests(min, max))
+    }
+
+    #[must_use]
+    pub fn placed(&self, origin: Vec3, angles: Vec3) -> Self {
+        let transform = super::brushes::BrushTransform { origin, angles };
+        Self(MapWalkCollision {
+            brushes: self
+                .0
+                .brushes
+                .iter()
+                .cloned()
+                .filter_map(|brush| transform_brush(brush, transform))
+                .collect(),
+            water_brushes: self
+                .0
+                .water_brushes
+                .iter()
+                .cloned()
+                .filter_map(|brush| transform_brush(brush, transform))
+                .collect(),
+            physics_brushes: self
+                .0
+                .physics_brushes
+                .iter()
+                .cloned()
+                .filter_map(|brush| transform_brush(brush, transform))
+                .collect(),
+            physics_ray_brushes: self
+                .0
+                .physics_ray_brushes
+                .iter()
+                .cloned()
+                .filter_map(|brush| transform_brush(brush, transform))
+                .collect(),
+            ..MapWalkCollision::empty()
+        })
+    }
+
+    pub fn trace_aabb(&self, start: Vec3, end: Vec3, half_extents: Vec3) -> MapTrace {
+        self.0.trace_aabb(start, end, half_extents)
+    }
+
+    pub fn aabb_trace_solid(&self, center: Vec3, half_extents: Vec3) -> bool {
+        self.0.aabb_trace_solid(center, half_extents)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,30 +239,28 @@ impl MapWalkCollision {
     pub fn empty() -> Self {
         Self {
             brushes: Vec::new(),
+            physics_brushes: Vec::new(),
+            physics_ray_brushes: Vec::new(),
             water_brushes: Vec::new(),
             displacements: Vec::new(),
             props: MapWalkPropCollision::default(),
         }
     }
 
-    pub(super) fn from_bsp_excluding(
+    pub(super) fn from_bsp_instances(
         bsp: &MapBsp,
-        excluded_brushes: &BTreeSet<BrushIndex>,
+        instances: &[super::brushes::BrushInstance],
+        excluded_models: &BTreeSet<ModelIndex>,
     ) -> Option<Self> {
-        let (brushes, water_brushes) = walk_brushes_from_bsp(bsp, excluded_brushes);
-        let displacements = walk_displacements_from_bsp(bsp);
-        (!brushes.is_empty() || !water_brushes.is_empty() || !displacements.is_empty()).then_some(
-            Self {
-                brushes,
-                water_brushes,
-                displacements,
-                props: MapWalkPropCollision::default(),
-            },
-        )
+        let mut collision = walk_brushes_from_bsp(bsp, instances, excluded_models);
+        collision.displacements = walk_displacements_from_bsp(bsp);
+        (!collision.is_empty()).then_some(collision)
     }
 
     pub fn is_empty(&self) -> bool {
         self.brushes.is_empty()
+            && self.physics_brushes.is_empty()
+            && self.physics_ray_brushes.is_empty()
             && self.water_brushes.is_empty()
             && self.displacements.is_empty()
             && self.props.brushes.is_empty()
@@ -224,6 +290,8 @@ impl MapWalkCollision {
             water_brushes: Vec::new(),
             displacements: Vec::new(),
             props: MapWalkPropCollision::default(),
+            physics_brushes: Vec::new(),
+            physics_ray_brushes: Vec::new(),
         }
     }
 
@@ -290,7 +358,7 @@ impl MapWalkCollision {
         });
         let mut best: Option<MapRayHit> = None;
 
-        for brush in &self.brushes {
+        for brush in self.brushes.iter().chain(&self.physics_ray_brushes) {
             if !bounds_intersect(ray_bounds, brush.bounds()) {
                 continue;
             }
@@ -320,7 +388,14 @@ impl MapWalkCollision {
         };
         let sweep = swept_bounds(start, end, half_extents);
 
-        for brush in &self.brushes {
+        // Source traces rays against the original brush model, and player
+        // hulls against the model's compiled VPhysics representation.
+        let entity_brushes = if half_extents == Vec3::ZERO {
+            &self.physics_ray_brushes
+        } else {
+            &self.physics_brushes
+        };
+        for brush in self.brushes.iter().chain(entity_brushes) {
             let expanded = expand_bounds(brush.bounds(), half_extents);
             if !bounds_intersect(sweep, expanded) {
                 continue;
@@ -423,55 +498,172 @@ pub(super) fn merge_trace_candidate(left: TraceCandidate, right: TraceCandidate)
 
 pub(super) fn walk_brushes_from_bsp(
     bsp: &MapBsp,
-    excluded_brushes: &BTreeSet<BrushIndex>,
-) -> (Vec<MapWalkBrush>, Vec<MapWalkBrush>) {
+    instances: &[super::brushes::BrushInstance],
+    excluded_models: &BTreeSet<ModelIndex>,
+) -> MapWalkCollision {
     let mut brushes = Vec::new();
     let mut water_brushes = Vec::new();
-    for (brush_index, brush) in bsp.brushes.iter().enumerate() {
-        if excluded_brushes.contains(&BrushIndex::new(brush_index)) {
+    let mut physics_brushes = Vec::new();
+    let mut physics_ray_brushes = Vec::new();
+    for instance in instances {
+        if !instance.solid || excluded_models.contains(&instance.model_index) {
             continue;
         }
-        let solid = brush.contents & (contents_flags::SOLID | contents_flags::PLAYERCLIP) != 0;
-        let water = brush.contents & (contents_flags::WATER | contents_flags::SLIME) != 0;
-        if !solid && !water {
-            continue;
+        let mut compiled = Vec::new();
+        if instance.use_vphysics
+            && let Some(hulls) = super::physics::model_hulls(&bsp.physics, instance.model_index)
+        {
+            for hull in &hulls {
+                let Some(local) = local_prop_brush_from_hull(hull, true) else {
+                    continue;
+                };
+                let brush = MapWalkBrush {
+                    planes: local
+                        .planes
+                        .into_iter()
+                        .map(|plane| MapWalkBrushPlane {
+                            plane,
+                            is_sky: false,
+                        })
+                        .collect(),
+                    bounds_min: local.bounds_min,
+                    bounds_max: local.bounds_max,
+                };
+                if let Some(brush) = transform_brush(brush, instance.transform) {
+                    compiled.push(brush);
+                }
+            }
         }
-        let Some(side_start) = usize::try_from(brush.first_side).ok() else {
-            continue;
-        };
-        let Some(side_count) = usize::try_from(brush.side_count).ok() else {
-            continue;
-        };
-        let Some(side_end) = side_start.checked_add(side_count) else {
-            continue;
-        };
-        let Some(sides) = bsp.brush_sides.get(side_start..side_end) else {
-            continue;
-        };
-        let planes = sides
-            .iter()
-            .filter_map(|side| {
-                let plane = bsp.planes.get(usize::from(side.plane))?;
-                let normal = Vec3::from(plane.normal).normalize_or_zero();
-                vector_is_finite_nonzero(normal).then_some(MapWalkBrushPlane {
-                    plane: MapPlane {
-                        normal,
-                        dist: plane.dist,
-                    },
-                    is_sky: brush_side_is_sky(side, bsp),
+        if instance.use_vphysics && compiled.is_empty() {
+            log::warn!(
+                "bsp model {} has no usable compiled VPhysics hull; using BSP brush collision",
+                instance.model_index
+            );
+        }
+        for brush_index in super::brush_indices_for_model(bsp, instance.model_index) {
+            let Some(brush) = bsp.brushes.get(brush_index.get()) else {
+                continue;
+            };
+            let solid = brush.contents & (contents_flags::SOLID | contents_flags::PLAYERCLIP) != 0;
+            let water = brush.contents & (contents_flags::WATER | contents_flags::SLIME) != 0;
+            if !solid && !water {
+                continue;
+            }
+            let Some(side_start) = usize::try_from(brush.first_side).ok() else {
+                continue;
+            };
+            let Some(side_count) = usize::try_from(brush.side_count).ok() else {
+                continue;
+            };
+            let Some(side_end) = side_start.checked_add(side_count) else {
+                continue;
+            };
+            let Some(sides) = bsp.brush_sides.get(side_start..side_end) else {
+                continue;
+            };
+            let planes = sides
+                .iter()
+                .filter_map(|side| {
+                    let plane = bsp.planes.get(usize::from(side.plane))?;
+                    let normal = Vec3::from(plane.normal).normalize_or_zero();
+                    vector_is_finite_nonzero(normal).then_some(MapWalkBrushPlane {
+                        plane: MapPlane {
+                            normal,
+                            dist: plane.dist,
+                        },
+                        is_sky: brush_side_is_sky(side, bsp),
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        let Some(brush) = walk_brush_from_brush_planes(planes, brush.contents) else {
-            continue;
+                .collect::<Vec<_>>();
+            let Some(brush) = walk_brush_from_brush_planes(planes, brush.contents) else {
+                continue;
+            };
+            let Some(brush) = transform_brush(brush, instance.transform) else {
+                continue;
+            };
+            if water {
+                water_brushes.push(brush);
+            } else if !compiled.is_empty() {
+                physics_ray_brushes.push(brush);
+            } else {
+                brushes.push(brush);
+            }
+        }
+        physics_brushes.extend(compiled);
+    }
+    MapWalkCollision {
+        brushes,
+        water_brushes,
+        physics_brushes,
+        physics_ray_brushes,
+        ..MapWalkCollision::empty()
+    }
+}
+
+fn transform_brush(
+    mut brush: MapWalkBrush,
+    transform: super::brushes::BrushTransform,
+) -> Option<MapWalkBrush> {
+    let local_planes = brush
+        .planes
+        .iter()
+        .map(|side| side.plane)
+        .collect::<Vec<_>>();
+    let local_vertices =
+        (transform.angles != Vec3::ZERO).then(|| brush_vertices_from_planes(&local_planes));
+    let bounds = if let Some(vertices) = &local_vertices {
+        bounds_from_points_iter(vertices.iter().map(|point| transform.point(*point)))?
+    } else {
+        transform.bounds(MapBounds {
+            min: brush.bounds_min,
+            max: brush.bounds_max,
+        })?
+    };
+    for side in &mut brush.planes {
+        side.plane.normal = transform.vector(side.plane.normal);
+        side.plane.dist += transform.origin.dot(side.plane.normal);
+    }
+    brush.bounds_min = bounds.min;
+    brush.bounds_max = bounds.max;
+    if let Some(vertices) = local_vertices {
+        // Local axial bevels rotate with the model. Swept world-aligned player
+        // hulls also need WORLD axial and edge-cross-axis support planes.
+        let mut triangles = Vec::new();
+        for first in 0..vertices.len() {
+            for second in first + 1..vertices.len() {
+                let shared_planes = local_planes
+                    .iter()
+                    .filter(|plane| {
+                        (vertices[first].dot(plane.normal) - plane.dist).abs()
+                            <= TRACE_INSIDE_EPSILON
+                            && (vertices[second].dot(plane.normal) - plane.dist).abs()
+                                <= TRACE_INSIDE_EPSILON
+                    })
+                    .count();
+                if shared_planes >= 2 {
+                    triangles.push([first, second, second]);
+                }
+            }
+        }
+        let hull = ConvexHull {
+            vertices: vertices.into_iter().map(|p| transform.point(p)).collect(),
+            triangles,
         };
-        if water {
-            water_brushes.push(brush);
-        } else {
-            brushes.push(brush);
+        let mut bevels = Vec::new();
+        add_prop_bevel_planes(&hull, &mut bevels);
+        for plane in bevels {
+            if !brush.planes.iter().any(|side| {
+                (side.plane.normal - plane.normal).length_squared() < 1.0e-8
+                    && (side.plane.dist - plane.dist).abs() < PROP_PLANE_DIST_EPSILON
+            }) {
+                brush.planes.push(MapWalkBrushPlane {
+                    plane,
+                    is_sky: false,
+                });
+            }
         }
     }
-    (brushes, water_brushes)
+    Some(brush)
 }
 
 #[cfg(feature = "test-support")]
@@ -1228,6 +1420,10 @@ pub(super) fn trace_triangle_aabb(
 }
 
 pub(super) fn brush_bounds_from_planes(planes: &[MapPlane]) -> Option<MapBounds> {
+    bounds_from_points_iter(brush_vertices_from_planes(planes).into_iter())
+}
+
+fn brush_vertices_from_planes(planes: &[MapPlane]) -> Vec<Vec3> {
     let mut points = Vec::new();
     for first in 0..planes.len() {
         for second in first + 1..planes.len() {
@@ -1241,13 +1437,16 @@ pub(super) fn brush_bounds_from_planes(planes: &[MapPlane]) -> Option<MapBounds>
                 if planes
                     .iter()
                     .all(|plane| point.dot(plane.normal) - plane.dist <= TRACE_INSIDE_EPSILON)
+                    && !points
+                        .iter()
+                        .any(|existing: &Vec3| (*existing - point).length_squared() < 1.0e-6)
                 {
                     points.push(point);
                 }
             }
         }
     }
-    bounds_from_points_iter(points.into_iter())
+    points
 }
 
 pub(super) fn plane_intersection(

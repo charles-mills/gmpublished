@@ -43,7 +43,20 @@ pub(in super::super) fn map_mesh_to_model_mesh(
             .map(|vertex| ModelVertex {
                 position: vertex.position,
                 normal: vertex.normal,
-                uv: normalize_map_uv(vertex.tex_s, vertex.tex_t, width, height),
+                uv: normalize_map_uv(
+                    vertex.tex_s,
+                    vertex.tex_t,
+                    if vertex.texture_size[0] > 0 {
+                        vertex.texture_size[0]
+                    } else {
+                        width
+                    },
+                    if vertex.texture_size[1] > 0 {
+                        vertex.texture_size[1]
+                    } else {
+                        height
+                    },
+                ),
                 lightmap_uv: vertex.lightmap_uv,
                 color: Vec3::splat(1.0),
                 blend_alpha: vertex.blend_alpha,

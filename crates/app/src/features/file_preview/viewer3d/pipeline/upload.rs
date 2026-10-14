@@ -11,8 +11,7 @@ use super::visibility::{
 use super::{
     DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance, DoorRenderPose, MapPreview,
     MapVisibilityBucket, MeshData, ModelVertex, OverlayPrimitive, RenderMode, RenderScene,
-    ResolvedTexture, SKYBOX_FACE_COUNT, WorldVisibilityPlan, initial_door_swing,
-    transform_door_vertices, wgpu,
+    SKYBOX_FACE_COUNT, WorldVisibilityPlan, initial_door_swing, transform_door_vertices, wgpu,
 };
 
 #[derive(Debug, Default)]
@@ -72,6 +71,7 @@ impl UploadCache {
             lightmap_height,
         );
 
+        let flat_normal = resources.create_water_normal_view(device, queue, None);
         let material_uploads = scene
             .materials
             .iter()
@@ -92,6 +92,10 @@ impl UploadCache {
                         Some(texture),
                     )
                 });
+                let water = slot.shader.water();
+                let normal = water
+                    .and_then(|water| water.normal_map.as_deref())
+                    .map(|normal| resources.create_water_normal_view(device, queue, Some(normal)));
                 resources.create_material(
                     device,
                     queue,
@@ -99,10 +103,12 @@ impl UploadCache {
                         base: &base_view,
                         base2: base2_view.as_ref().unwrap_or(&base_view),
                         lightmap: &lightmap_view,
+                        normal: normal.as_ref().unwrap_or(&flat_normal),
                     },
                     MaterialUploadMode {
                         force_opaque: slot.force_opaque,
                         render_mode: slot.render_mode,
+                        water,
                     },
                 )
             })
@@ -116,17 +122,13 @@ impl UploadCache {
                 .map(|slot| slot.render_mode)
                 .collect::<Vec<_>>()
         };
-        let material_water_fallbacks = if scene.materials.is_empty() {
+        let material_water_materials = if scene.materials.is_empty() {
             vec![false]
         } else {
             scene
                 .materials
                 .iter()
-                .map(|slot| {
-                    slot.texture
-                        .as_deref()
-                        .is_some_and(ResolvedTexture::is_water_fallback)
-                })
+                .map(|slot| slot.shader.water().is_some())
                 .collect::<Vec<_>>()
         };
         let (material_bind_groups, material_uniforms): (Vec<_>, Vec<_>) =
@@ -144,10 +146,12 @@ impl UploadCache {
                         base: &base_view,
                         base2: &base_view,
                         lightmap: &lightmap_view,
+                        normal: &flat_normal,
                     },
                     MaterialUploadMode {
                         force_opaque: true,
                         render_mode: RenderMode::Opaque,
+                        water: None,
                     },
                 );
                 (vec![bind_group], vec![uniform])
@@ -207,7 +211,7 @@ impl UploadCache {
                 phy_debug_meshes: None,
                 material_bind_groups,
                 material_render_modes,
-                material_water_fallbacks,
+                material_water_materials,
                 _material_uniforms: material_uniforms,
                 skybox,
                 sky_tint,
@@ -226,7 +230,7 @@ pub struct UploadedModel {
     pub phy_debug_meshes: Option<Vec<UploadedMesh>>,
     pub material_bind_groups: Vec<wgpu::BindGroup>,
     pub material_render_modes: Vec<RenderMode>,
-    pub material_water_fallbacks: Vec<bool>,
+    pub material_water_materials: Vec<bool>,
     pub _material_uniforms: Vec<wgpu::Buffer>,
     pub skybox: Option<UploadedSkybox>,
     pub sky_tint: Vec3,

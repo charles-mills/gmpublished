@@ -967,6 +967,13 @@ impl renderer::Headless for Renderer {
             Shell::headless(),
         );
 
+        log::info!(
+            "Headless renderer: adapter {:?}, target {:?}, device features {:?}",
+            adapter.get_info(),
+            engine.format,
+            engine.device.features(),
+        );
+
         Some(Self::new(engine, default_font, default_text_size))
     }
 

@@ -61,6 +61,7 @@ pub(super) struct MapBsp {
     pub(super) texdata_strings: Vec<String>,
     pub(super) models: Vec<BspModel>,
     pub(super) brushes: Vec<Brush>,
+    pub(super) physics: Vec<u8>,
     pub(super) brush_sides: Vec<BrushSide>,
     pub(super) nodes: Vec<Node>,
     pub(super) leaves: Vec<Leaf>,
@@ -130,6 +131,7 @@ impl MapBsp {
             texdata_strings = bsp.texdata_strings(limits);
             models = bsp.models(limits);
             brushes = bsp.brushes(limits);
+            physics = bsp.lump_data(29, limits).map(Cow::into_owned);
             brush_sides = bsp.brush_sides(limits);
             nodes = bsp.nodes(limits);
             leaves = bsp.leafs(limits);
@@ -174,6 +176,7 @@ impl MapBsp {
                 .collect(),
             models: models.map_err(decode_error)?,
             brushes: brushes.map_err(decode_error)?,
+            physics: physics.map_err(decode_error)?,
             brush_sides: brush_sides.map_err(decode_error)?,
             nodes: nodes.map_err(decode_error)?,
             leaves: leaves.map_err(decode_error)?,

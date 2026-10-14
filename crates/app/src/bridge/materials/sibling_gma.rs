@@ -10,7 +10,6 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use rayon::prelude::*;
 
 use gmpublished_backend::GmaView;
 
@@ -195,10 +194,11 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
         );
     }
 
-    // Index in parallel, then merge in path order to preserve first-match priority.
+    // This runs inside OnceLock initialization. Nested Rayon work could execute
+    // another material request that waits on the same lock before this returns.
     type IndexedArchive = (SiblingGmaArchive, Vec<(String, SiblingGmaEntryLocation)>);
     let indexed: Vec<Option<IndexedArchive>> = paths[..paths.len().min(MAX_SIBLING_GMA_ARCHIVES)]
-        .par_iter()
+        .iter()
         .map(|path| match path.kind {
             SiblingGmaPathKind::Plain => {
                 // Close after indexing so idle archives hold no file descriptors.

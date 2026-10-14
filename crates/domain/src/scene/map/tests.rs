@@ -372,6 +372,8 @@ fn walk_trace_playerclip_brush_blocks() {
         water_brushes: Vec::new(),
         displacements: Vec::new(),
         props: MapWalkPropCollision::default(),
+        physics_brushes: Vec::new(),
+        physics_ray_brushes: Vec::new(),
     };
 
     let hit = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::splat(1.0));
@@ -392,6 +394,8 @@ fn walk_trace_water_only_brush_does_not_block() {
         water_brushes: vec![water],
         displacements: Vec::new(),
         props: MapWalkPropCollision::default(),
+        physics_brushes: Vec::new(),
+        physics_ray_brushes: Vec::new(),
     };
 
     let hit = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::splat(1.0));
@@ -472,6 +476,8 @@ fn point_ray_reports_sky_only_for_first_sky_side_or_sky_escape() {
         water_brushes: Vec::new(),
         displacements: Vec::new(),
         props: MapWalkPropCollision::default(),
+        physics_brushes: Vec::new(),
+        physics_ray_brushes: Vec::new(),
     };
     assert!(sky_ceiling.ray_hits_sky(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
     assert!(sky_ceiling.ray_hits_sky(Vec3::new(64.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
@@ -485,6 +491,8 @@ fn point_ray_reports_sky_only_for_first_sky_side_or_sky_escape() {
         water_brushes: Vec::new(),
         displacements: Vec::new(),
         props: MapWalkPropCollision::default(),
+        physics_brushes: Vec::new(),
+        physics_ray_brushes: Vec::new(),
     };
     assert!(!plain_ceiling.ray_hits_sky(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
     assert!(!plain_ceiling.ray_hits_sky(Vec3::new(64.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
@@ -507,6 +515,8 @@ fn walk_trace_displacement_triangle_hits_from_above() {
             bounds_max: triangle.bounds_max,
         }],
         props: MapWalkPropCollision::default(),
+        physics_brushes: Vec::new(),
+        physics_ray_brushes: Vec::new(),
     };
 
     let hit = collision.trace_aabb(
@@ -1325,13 +1335,13 @@ fn door_extraction_removes_bmodel_faces_without_shifting_downstream_ranges() {
 }
 
 #[test]
-fn no_door_fixture_keeps_all_bmodel_faces_in_static_world_mesh() {
+fn unowned_bmodel_is_not_instantiated_as_world_geometry() {
     let map = load_map(&door_bmodel_bsp_fixture(""))
         .expect("fixture bsp without door entities should load");
 
     assert!(map.doors.is_empty());
     let world = map.meshes.first().expect("static mesh");
-    assert_eq!(world.indices.len(), 9);
+    assert_eq!(world.indices.len(), 6);
     assert_eq!(
         world
             .visibility
@@ -1339,8 +1349,292 @@ fn no_door_fixture_keeps_all_bmodel_faces_in_static_world_mesh() {
             .iter()
             .map(|range| (range.face, range.start, range.count))
             .collect::<Vec<_>>(),
-        vec![(0, 0, 3), (1, 3, 3), (2, 6, 3)]
+        vec![(0, 0, 3), (2, 3, 3)]
     );
+}
+
+#[test]
+fn brush_placement_rotates_positions_and_normals_without_changing_authored_uvs() {
+    let lit_fixture = |entities: &str| {
+        let mut bytes = door_bmodel_bsp_fixture(entities);
+        let offset = |bytes: &[u8], lump: usize| {
+            i32::from_le_bytes(bytes[8 + lump * 16..12 + lump * 16].try_into().unwrap()) as usize
+        };
+        let face = offset(&bytes, FACES_LUMP_INDEX) + 56;
+        bytes[face + 16..face + 20].copy_from_slice(&[0, 255, 255, 255]);
+        bytes[face + 20..face + 24].copy_from_slice(&0_i32.to_le_bytes());
+        bytes[face + 28..face + 32].copy_from_slice(&2_i32.to_le_bytes());
+        bytes[face + 36..face + 40].copy_from_slice(&1_i32.to_le_bytes());
+        bytes[face + 40..face + 44].copy_from_slice(&1_i32.to_le_bytes());
+        let texinfo = offset(&bytes, TEXTURE_INFO_LUMP_INDEX);
+        for index in [32, 52] {
+            bytes[texinfo + index..texinfo + index + 4]
+                .copy_from_slice(&(1.0_f32 / 16.0).to_le_bytes());
+        }
+        append_lump(
+            &mut bytes,
+            8,
+            &[
+                128, 80, 40, 0, 80, 128, 40, 0, 40, 80, 128, 0, 128, 128, 128, 0,
+            ],
+            0,
+        );
+        bytes
+    };
+    let local = load_map(&lit_fixture(
+        r#"{ "classname" "func_brush" "model" "*1" "origin" "0 0 0" }"#,
+    ))
+    .unwrap();
+    let placed = load_map(&lit_fixture(r#"{ "classname" "func_brush" "model" "*1" "origin" "300 40 120" "angles" "90 0 0" "parentname" "parent" } { "classname" "info_target" "targetname" "parent" "origin" "4000 2000 6000" "angles" "0 60 0" }"#)).unwrap();
+    assert!(local.lightmap.is_some());
+    assert_eq!(local.lightmap, placed.lightmap);
+    let vertices_for_face = |map: &MapData| {
+        let mesh = &map.meshes[0];
+        let range = mesh
+            .visibility
+            .always_visible
+            .iter()
+            .find(|r| r.face == 1)
+            .unwrap();
+        mesh.indices[range.start as usize..(range.start + range.count) as usize]
+            .iter()
+            .map(|index| mesh.vertices[*index as usize])
+            .collect::<Vec<_>>()
+    };
+    for (local, placed) in vertices_for_face(&local)
+        .iter()
+        .zip(vertices_for_face(&placed))
+    {
+        let expected = Vec3::new(
+            300.0 + local.position[2],
+            40.0 + local.position[1],
+            120.0 - local.position[0],
+        );
+        assert!((placed.position - expected).length_squared() < 1.0e-8);
+        assert!((placed.normal - Vec3::new(1.0, 0.0, 0.0)).length_squared() < 1.0e-8);
+        assert_eq!(
+            (placed.tex_s, placed.tex_t, placed.lightmap_uv),
+            (local.tex_s, local.tex_t, local.lightmap_uv)
+        );
+    }
+}
+
+#[test]
+fn door_meshes_retain_compiled_model_space_instead_of_subtracting_origin_twice() {
+    let map = load_map(&door_bmodel_bsp_fixture(r#"{ "classname" "func_door_rotating" "model" "*1" "origin" "300 40 120" "angles" "0 35 0" }"#)).unwrap();
+    let MapDoorGeometry::Brush { meshes, .. } = &map.doors[0].geometry else {
+        panic!("brush door")
+    };
+    assert_eq!(meshes[0].vertices[0].position, Vec3::new(32.0, 0.0, 0.0));
+    assert_eq!(map.doors[0].angles, Vec3::new(0.0, 35.0, 0.0));
+}
+
+fn brush_collision_bsp(extra_entities: &str) -> MapBsp {
+    let mut bsp = read_fixture_bsp(&door_bmodel_bsp_fixture(extra_entities));
+    let mut leaf = bsp.leaves[0];
+    leaf.first_leaf_brush = 0;
+    leaf.leaf_brush_count = 1;
+    bsp.leaves.push(leaf);
+    bsp.models[1].head_node = -2;
+    bsp.leaf_brushes = vec![0];
+    for (normal, dist) in [
+        ([1.0, 0.0, 0.0], 48.0),
+        ([-1.0, 0.0, 0.0], -32.0),
+        ([0.0, 1.0, 0.0], 40.0),
+        ([0.0, -1.0, 0.0], 0.0),
+        ([0.0, 0.0, 1.0], 80.0),
+        ([0.0, 0.0, -1.0], 0.0),
+    ] {
+        bsp.brush_sides.push(BrushSide {
+            plane: bsp.planes.len() as u16,
+            texinfo: 0,
+            displacement: -1,
+            bevel: 0,
+        });
+        bsp.planes.push(Plane {
+            normal,
+            dist,
+            axis_type: 0,
+        });
+    }
+    bsp.brushes.push(Brush {
+        first_side: 0,
+        side_count: 6,
+        contents: contents_flags::SOLID,
+    });
+    bsp
+}
+
+#[test]
+fn brush_collision_follows_entity_ownership_translation_and_rotation() {
+    let bsp = brush_collision_bsp(
+        r#"{ "classname" "func_brush" "model" "*1" "origin" "300 40 120" "angles" "0 90 0" }"#,
+    );
+    let collision = MapWalkCollision::from_bsp_instances(
+        &bsp,
+        &brushes::brush_instances(&bsp),
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    let hit = collision.trace_aabb(
+        Vec3::new(240.0, 80.0, 160.0),
+        Vec3::new(320.0, 80.0, 160.0),
+        Vec3::splat(2.0),
+    );
+    assert!((hit.end_position[0] - 257.96875).abs() < 1.0e-4, "{hit:?}");
+    assert!((hit.normal - Vec3::new(-1.0, 0.0, 0.0)).length_squared() < 1.0e-8);
+    assert!(!collision.aabb_trace_solid(Vec3::new(40.0, 20.0, 40.0), Vec3::ZERO));
+    // A hidden collision-only model has no render faces to infer its position from.
+    let mut bsp = bsp;
+    bsp.models[1].face_count = 0;
+    let invisible = MapWalkCollision::from_bsp_instances(
+        &bsp,
+        &brushes::brush_instances(&bsp),
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert_eq!(collision, invisible);
+}
+
+#[test]
+fn brush_initial_solidity_and_visibility_follow_entity_semantics() {
+    for (keys, visible, solid) in [
+        (
+            r#""classname" "func_brush" "StartDisabled" "0""#,
+            true,
+            true,
+        ),
+        (
+            r#""classname" "func_brush" "StartDisabled" "1""#,
+            false,
+            false,
+        ),
+        (
+            r#""classname" "func_brush" "StartDisabled" "1" "Solidity" "2""#,
+            false,
+            true,
+        ),
+        (r#""classname" "func_brush" "Solidity" "1""#, true, false),
+        (r#""classname" "func_illusionary""#, true, false),
+        (
+            r#""classname" "func_wall_toggle" "spawnflags" "1""#,
+            false,
+            false,
+        ),
+        (r#""classname" "trigger_multiple""#, false, false),
+        (r#""classname" "func_vehicleclip""#, false, false),
+    ] {
+        let entities = format!(r#"{{ {keys} "model" "*1" "origin" "0 0 0" }}"#);
+        let bsp = brush_collision_bsp(&entities);
+        let instances = brushes::brush_instances(&bsp);
+        let instance = instances
+            .iter()
+            .find(|i| i.model_index == ModelIndex::new(1))
+            .unwrap();
+        assert_eq!(
+            (instance.visible, instance.solid),
+            (visible, solid),
+            "{keys}"
+        );
+        let collision = MapWalkCollision::from_bsp_instances(&bsp, &instances, &BTreeSet::new());
+        assert_eq!(collision.is_some(), solid, "{keys}");
+        let map = load_map(&door_bmodel_bsp_fixture(&entities)).unwrap();
+        assert_eq!(
+            map.meshes[0].indices.len(),
+            if visible { 9 } else { 6 },
+            "{keys}"
+        );
+    }
+}
+
+#[test]
+fn brush_visibility_uses_placed_bounds_and_preserves_multiple_clusters() {
+    let mut bsp = read_fixture_bsp(&skybox_partition_bsp_fixture(true, true));
+    let mut model = bsp.models[0];
+    model.mins = [-4.0; 3];
+    model.maxs = [4.0; 3];
+    bsp.models.push(model);
+    let sky = SkyboxPartition::from_bsp(
+        &bsp,
+        info_player_start(&bsp.entities).as_ref(),
+        map_sky_camera(&bsp.entities),
+    )
+    .unwrap();
+    let locator = MapLeafLocator::from_bsp(&bsp);
+    let mut instance = brushes::BrushInstance {
+        use_vphysics: false,
+        model_index: ModelIndex::new(1),
+        transform: brushes::BrushTransform {
+            origin: Vec3::new(32.0, 0.0, 0.0),
+            angles: Vec3::ZERO,
+        },
+        visible: true,
+        solid: true,
+    };
+    let (partition, visibility) = instance.attribution(&bsp, &locator, &sky);
+    assert_eq!(partition, GeometryPartition::Skybox);
+    assert_eq!(visibility.clusters, vec![1]);
+    instance.transform.origin = Vec3::new(-32.0, 0.0, 0.0);
+    assert_eq!(
+        instance.attribution(&bsp, &locator, &sky).0,
+        GeometryPartition::Visible
+    );
+    instance.transform.origin = Vec3::ZERO;
+    assert_eq!(
+        instance.attribution(&bsp, &locator, &sky).0,
+        GeometryPartition::Visible
+    );
+    assert_eq!(
+        instance.attribution(&bsp, &locator, &sky).1.clusters,
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn native_brush_rays_and_player_hulls_use_their_distinct_compiled_shapes() {
+    let make_box =
+        |min, max| walk_brush_from_planes(box_planes(min, max), contents_flags::SOLID).unwrap();
+    let collision = MapWalkCollision {
+        physics_ray_brushes: vec![make_box(
+            Vec3::new(10.0, -20.0, -20.0),
+            Vec3::new(20.0, 20.0, 20.0),
+        )],
+        physics_brushes: vec![make_box(
+            Vec3::new(10.5, -19.5, -19.5),
+            Vec3::new(19.5, 19.5, 19.5),
+        )],
+        ..MapWalkCollision::empty()
+    };
+    let ray = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::ZERO);
+    let hull = collision.trace_aabb(Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::splat(1.0));
+    assert!((ray.end_position[0] - 9.96875).abs() < 1.0e-5, "{ray:?}");
+    assert!((hull.end_position[0] - 9.46875).abs() < 1.0e-5, "{hull:?}");
+}
+
+#[test]
+fn legacy_wall_spawn_clears_angles_and_rotating_door_passable_flag_removes_collision() {
+    for class in [
+        "func_illusionary",
+        "func_wall",
+        "func_wall_toggle",
+        "func_conveyor",
+    ] {
+        let bsp = brush_collision_bsp(&format!(
+            r#"{{ "classname" "{class}" "model" "*1" "angles" "20 35 15" "origin" "100 200 300" }}"#
+        ));
+        let instances = brushes::brush_instances(&bsp);
+        let instance = instances
+            .iter()
+            .find(|i| i.model_index == ModelIndex::new(1))
+            .unwrap();
+        assert_eq!(instance.transform.angles, Vec3::ZERO, "{class}");
+        assert_eq!(instance.transform.origin, Vec3::new(100.0, 200.0, 300.0));
+    }
+    let bsp = brush_collision_bsp(
+        r#"{ "classname" "func_door_rotating" "model" "*1" "spawnflags" "8" }"#,
+    );
+    let collision = MapBrushCollision::from_bsp_model(&bsp, ModelIndex::new(1));
+    assert!(!collision.aabb_trace_solid(Vec3::new(40.0, 20.0, 40.0), Vec3::splat(1.0)));
 }
 
 #[test]
@@ -1556,6 +1850,12 @@ fn load_map_skips_down_facing_warp_faces_only() {
     let water = &map.meshes[0];
     assert_eq!(water.material_index, 0);
     assert!(water.vertices.iter().all(|vertex| vertex.normal[2] > 0.0));
+    assert!(
+        water
+            .vertices
+            .iter()
+            .all(|vertex| vertex.texture_size == [512, 512])
+    );
 
     let brick = &map.meshes[1];
     assert_eq!(brick.material_index, 1);
@@ -1592,6 +1892,8 @@ fn empty_walk_collision() -> MapWalkCollision {
         water_brushes: Vec::new(),
         displacements: Vec::new(),
         props: MapWalkPropCollision::default(),
+        physics_brushes: Vec::new(),
+        physics_ray_brushes: Vec::new(),
     }
 }
 
@@ -2140,6 +2442,7 @@ fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
     let entities = format!(
         r#"
         {{ "classname" "worldspawn" }}
+        {{ "classname" "func_brush" "model" "*2" "origin" "0 0 0" }}
         {extra_entities}
         "#
     );
@@ -2742,6 +3045,7 @@ fn node_children_decode_by_sign() {
 #[test]
 fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
     let vertex = |position| MapVertex {
+        texture_size: [0; 2],
         position,
         normal: Vec3::new(0.0, 0.0, 1.0),
         tex_s: 0.0,

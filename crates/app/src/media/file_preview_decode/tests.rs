@@ -655,6 +655,51 @@ fn map_uv_normalization_divides_raw_texels_by_resolved_dimensions() {
 }
 
 #[test]
+fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
+    use gmpublished_domain::scene::map::{MapMesh, MapMeshVisibility, MapVertex};
+    let mesh = MapMesh {
+        vertices: vec![MapVertex {
+            position: Vec3::ZERO,
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            tex_s: 256.0,
+            tex_t: 128.0,
+            texture_size: [128, 64],
+            lightmap_uv: [0.0; 2],
+            blend_alpha: 0.0,
+        }],
+        indices: vec![0],
+        material_index: 0,
+        visibility: MapMeshVisibility::default(),
+    };
+    // No resolved material: the face's compiled coordinates still have scale.
+    let converted = map_preview::map_mesh_to_model_mesh(&mesh, &[]);
+    assert_eq!(converted.vertices[0].uv, [2.0, 2.0]);
+    // Texture resolution and fallbacks must not change geometry coordinates.
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Water UV")
+            .entry("materials/water.vmt", b"Water { }".to_vec())
+            .build(),
+    )
+    .unwrap();
+    let resolved = MaterialResolver::new(Arc::new(archive), None)
+        .resolve_primary(&[], "water")
+        .unwrap();
+    assert_eq!([resolved.texture.width, resolved.texture.height], [1, 1]);
+    let material = MaterialSlot {
+        name: "water".into(),
+        shader: resolved.shader,
+        texture: Some(resolved.texture),
+        texture2: None,
+        force_opaque: true,
+        render_mode: RenderMode::Opaque,
+    };
+    assert_eq!(
+        map_preview::map_mesh_to_model_mesh(&mesh, &[material]).vertices[0].uv,
+        [2.0, 2.0]
+    );
+}
+
+#[test]
 fn skybox_face_paths_follow_source_suffixes() {
     assert_eq!(
         SkyboxFace::ALL.map(|face| skybox_face_material_path("sky_day01_01", face)),
@@ -834,8 +879,8 @@ fn parallel_material_resolution_matches_serial_slots_in_order() {
     );
     assert_eq!(parallel.resolved_count(), serial.resolved_count());
     assert_eq!(
-        parallel.water_fallback_count(),
-        serial.water_fallback_count()
+        parallel.water_material_count(),
+        serial.water_material_count()
     );
 }
 
@@ -1066,6 +1111,7 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     materials.push(
         "door_skin",
         MaterialSlot {
+            shader: Default::default(),
             name: "door_skin".to_owned(),
             texture: None,
             texture2: None,
@@ -1074,6 +1120,7 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
         },
     );
     let door = gmpublished_domain::scene::map::MapDoor {
+        brush_collision: None,
         class: gmpublished_domain::scene::map::MapDoorClass::PropDoorRotating,
         origin: Vec3::splat(0.0),
         angles: Vec3::splat(0.0),
@@ -1466,8 +1513,8 @@ fn pre_resolved_prop_materials_match_direct_prop_resolution() {
         direct_materials.resolved_count()
     );
     assert_eq!(
-        pre_resolved_materials.water_fallback_count(),
-        direct_materials.water_fallback_count()
+        pre_resolved_materials.water_material_count(),
+        direct_materials.water_material_count()
     );
     assert_eq!(
         direct_materials
@@ -1636,6 +1683,7 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
     let mut materials = (0..25)
         .rev()
         .map(|index| MaterialSlot {
+            shader: Default::default(),
             name: format!("missing_{index:02}"),
             texture: None,
             texture2: None,
@@ -1644,6 +1692,7 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
         })
         .collect::<Vec<_>>();
     materials.push(MaterialSlot {
+        shader: Default::default(),
         name: "missing_03".to_owned(),
         texture: None,
         texture2: None,

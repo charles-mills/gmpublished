@@ -202,6 +202,9 @@ pub struct FlyCamera {
     pub(super) held: HeldKeys,
     pub(super) look_from: Option<Point>,
     pub(super) last_frame: Option<std::time::Instant>,
+    /// Visual time is independent of movement and its bounded physics steps.
+    pub(super) animation_started_at: Option<std::time::Instant>,
+    pub(super) animated_water: bool,
     pub(super) water_time: f32,
     pub(super) mode: MovementMode,
     pub(super) walk_velocity: Vec3,
@@ -343,6 +346,13 @@ impl FlyCamera {
         self.look_from = None;
         self.held = HeldKeys::default();
         self.last_frame = None;
+        self.animation_started_at = None;
+        self.water_time = 0.0;
+        self.animated_water = scene.scene.materials.iter().any(|slot| {
+            slot.shader
+                .water()
+                .is_some_and(crate::bridge::materials::WaterMaterial::is_animated)
+        });
         self.mode = MovementMode::Fly;
         self.reset_walk_state();
         self.doors = scene
@@ -353,6 +363,7 @@ impl FlyCamera {
                 let swing = initial_door_swing(door.motion);
                 let (bounds_min, bounds_max) = door_world_bounds(door, progress, swing);
                 DoorRuntime {
+                    brush_collision: super::doors::door_brush_collision(door, progress, swing),
                     progress,
                     target: if progress >= 1.0 - DOOR_PROGRESS_EPSILON {
                         DoorTarget::Open
@@ -461,7 +472,6 @@ impl FlyCamera {
         content_id: u64,
         dt: f32,
     ) -> Vec<DoorAudioEvent> {
-        self.water_time += dt;
         let mut audio_events = self.integrate_doors(scene, content_id, dt);
         match self.mode {
             MovementMode::Fly => self.integrate_fly(scene, dt),
@@ -694,12 +704,17 @@ impl shader::Program<Message> for FlyViewer {
                 })
             }
             Event::Window(iced::window::Event::RedrawRequested(now)) => {
+                let started = camera.animation_started_at.get_or_insert(*now);
+                camera.water_time = now.saturating_duration_since(*started).as_secs_f32();
                 if !camera.needs_movement_tick() {
                     camera.last_frame = None;
                     camera.move_factor = 0.0;
-                    return (initialized || mode_request_seen || mode_request_changed)
-                        .then(|| camera.camera_update_message().map(Action::publish))
-                        .flatten();
+                    if initialized || mode_request_seen || mode_request_changed {
+                        return camera.camera_update_message().map(Action::publish);
+                    }
+                    // Surface animation drives its own redraw chain without
+                    // publishing unchanged camera poses to application state.
+                    return camera.animated_water.then(Action::request_redraw);
                 }
                 if let Some(last) = camera.last_frame {
                     let dt = now.saturating_duration_since(last).as_secs_f32().min(0.1);
@@ -793,6 +808,121 @@ impl shader::Program<Message> for FlyViewer {
 mod tests {
     use super::super::test_support::{empty_preview, floor_scene};
     use super::*;
+    use shader::Program as _;
+
+    fn animated_water_viewer() -> FlyViewer {
+        use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
+        use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
+        let normal = [128, 144, 250, 255].repeat(4);
+        let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Animated Water")
+            .entry("materials/water.vmt", br#"Water {
+                "$normalmap" "normal" "$scroll1" "[.01 .01 .05]"
+                Proxies { TextureScroll { texturescrollvar "$bumptransform" texturescrollrate ".02" } }
+            }"#.to_vec())
+            .entry("materials/normal.vtf", fixture_vtf_bytes(2, 2, vformats::vtf::VtfFormat::Rgba8888, &[&normal]))
+            .build()).unwrap();
+        let resolved = MaterialResolver::new(Arc::new(archive), None)
+            .resolve_primary(&[], "water")
+            .unwrap();
+        let mut scene = empty_preview(Vec3::ZERO, Vec3::splat(1024.0));
+        Arc::get_mut(&mut scene.scene)
+            .unwrap()
+            .materials
+            .push(super::super::MaterialSlot {
+                name: "water".into(),
+                shader: resolved.shader,
+                texture: Some(resolved.texture),
+                texture2: None,
+                force_opaque: resolved.force_opaque,
+                render_mode: resolved.render_mode,
+            });
+        FlyViewer {
+            scene: Arc::new(scene),
+            content_id: 1,
+            fog: None,
+            fog_enabled: true,
+            sky_camera: None,
+            map_skybox_visible: true,
+            visibility_culling: true,
+            phy_debug_visible: false,
+            spawn: None,
+            pose: None,
+            movement_mode: Some(MovementMode::Fly),
+            requested_movement_mode: None,
+        }
+    }
+
+    #[test]
+    fn animated_water_drives_redraws_without_input_or_camera_messages() {
+        let viewer = animated_water_viewer();
+        let mut camera = FlyCamera::default();
+        let now = std::time::Instant::now();
+        let bounds = Rectangle::with_size(iced::Size::new(1280.0, 720.0));
+        let redraw = |camera: &mut FlyCamera, elapsed| {
+            viewer.update(
+                camera,
+                &Event::Window(iced::window::Event::RedrawRequested(
+                    now + std::time::Duration::from_millis(elapsed),
+                )),
+                bounds,
+                mouse::Cursor::Unavailable,
+            )
+        };
+        redraw(&mut camera, 0).expect("initial camera state");
+        let position = camera.position;
+        let angles = [camera.yaw, camera.pitch];
+        for elapsed in [16, 32, 1000, 5000] {
+            let (message, request, _) = redraw(&mut camera, elapsed)
+                .expect("water must schedule another frame")
+                .into_inner();
+            assert!(
+                message.is_none(),
+                "animation must not publish unchanged camera state"
+            );
+            assert_eq!(request, iced::window::RedrawRequest::NextFrame);
+            assert_eq!(camera.water_time, elapsed as f32 / 1000.0);
+            assert_eq!(camera.position, position);
+            assert_eq!([camera.yaw, camera.pitch], angles);
+            assert!(!camera.needs_movement_tick());
+        }
+    }
+
+    #[test]
+    fn water_clock_survives_movement_stopping_and_resets_for_a_new_map() {
+        let mut viewer = animated_water_viewer();
+        let mut camera = FlyCamera::default();
+        let now = std::time::Instant::now();
+        let bounds = Rectangle::with_size(iced::Size::new(1280.0, 720.0));
+        let redraw = |viewer: &FlyViewer, camera: &mut FlyCamera, elapsed| {
+            viewer.update(
+                camera,
+                &Event::Window(iced::window::Event::RedrawRequested(
+                    now + std::time::Duration::from_secs(elapsed),
+                )),
+                bounds,
+                mouse::Cursor::Unavailable,
+            )
+        };
+        redraw(&viewer, &mut camera, 0);
+        camera.held.forward = true;
+        redraw(&viewer, &mut camera, 1);
+        redraw(&viewer, &mut camera, 2);
+        assert_eq!(
+            camera.water_time, 2.0,
+            "visual time must not use the 0.1-second physics clamp"
+        );
+        camera.held.forward = false;
+        let position = camera.position;
+        redraw(&viewer, &mut camera, 3);
+        redraw(&viewer, &mut camera, 5);
+        assert_eq!(camera.water_time, 5.0);
+        assert_eq!(camera.position, position);
+        viewer.content_id = 2;
+        redraw(&viewer, &mut camera, 10);
+        assert_eq!(camera.water_time, 0.0);
+        redraw(&viewer, &mut camera, 11);
+        assert_eq!(camera.water_time, 1.0);
+    }
 
     #[test]
     fn restored_fly_mode_keeps_fly_pose() {

@@ -21,6 +21,8 @@ use crate::media::preview_model::{
 };
 
 mod camera;
+#[cfg(feature = "map-capture")]
+pub(super) mod capture;
 mod doors;
 mod draw_plan;
 mod pipeline;

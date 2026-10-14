@@ -128,6 +128,20 @@ fn run() -> Result<(), RunError> {
     // Install before initialization so startup panics are logged too.
     install_panic_log_hook();
 
+    #[cfg(feature = "map-capture")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--capture-maps")
+    {
+        assert_eq!(
+            std::env::args_os().len(),
+            2,
+            "capture configuration uses environment variables"
+        );
+        features::file_preview::capture_map_reference_frames();
+        return Ok(());
+    }
+
     if let Some(outcome) = cli::run() {
         return Ok(outcome?);
     }

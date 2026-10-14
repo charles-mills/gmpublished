@@ -103,6 +103,8 @@ pub struct MapVertex {
     pub tex_s: f32,
     /// Raw Source texel-space T coordinate: position.dot(t_axis) + t_offset.
     pub tex_t: f32,
+    /// Compiled texdata dimensions, independent of replacement/fallback textures.
+    pub texture_size: [u32; 2],
     pub lightmap_uv: [f32; 2],
     pub blend_alpha: f32,
 }

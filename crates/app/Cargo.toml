@@ -18,6 +18,8 @@ path = "src/main.rs"
 # Developer-only context-menu actions for simulating subscriber changes and
 # hiding addons from the current in-memory session.
 debug = []
+# Opt-in fixed-camera map screenshots through the production GPU and asset paths.
+map-capture = ["dep:iced_runtime"]
 
 [dependencies]
 arc-swap.workspace = true
@@ -34,6 +36,7 @@ gif.workspace = true
 gmpublished-backend = { path = "../backend" }
 gmpublished-domain = { path = "../domain" }
 iced.workspace = true
+iced_runtime = { version = "0.14.0", optional = true }
 image.workspace = true
 jiff.workspace = true
 log.workspace = true

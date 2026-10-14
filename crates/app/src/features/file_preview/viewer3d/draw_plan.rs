@@ -58,7 +58,7 @@ pub(super) struct OverlayPlanSource {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DrawPlanMaterials<'a> {
     pub(super) render_modes: &'a [RenderMode],
-    pub(super) water_fallbacks: &'a [bool],
+    pub(super) water_materials: &'a [bool],
     pub(super) material_count: usize,
 }
 
@@ -184,7 +184,7 @@ pub(super) fn prepare_partition_draw_plan(
         PartitionPlanContext {
             materials: DrawPlanMaterials {
                 render_modes: upload.material_render_modes.as_slice(),
-                water_fallbacks: upload.material_water_fallbacks.as_slice(),
+                water_materials: upload.material_water_materials.as_slice(),
                 material_count: upload.material_bind_groups.len(),
             },
             selection: DrawPlanSelection {
@@ -297,7 +297,7 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         };
         if context
             .materials
-            .water_fallbacks
+            .water_materials
             .get(material_slot)
             .copied()
             .unwrap_or(false)
@@ -433,7 +433,7 @@ mod tests {
             RenderMode::Translucent,
             RenderMode::Translucent,
         ];
-        let water_fallbacks = [false, true, false];
+        let water_materials = [false, true, false];
 
         let plans = prepare_draw_plans_from_sources(
             DrawPlanSourceSlices {
@@ -441,7 +441,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_fallbacks: &water_fallbacks,
+                    water_materials: &water_materials,
                     material_count: 3,
                 },
             },
@@ -502,7 +502,7 @@ mod tests {
                 overlays: &overlays,
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_fallbacks: &[],
+                    water_materials: &[],
                     material_count: 1,
                 },
             },
@@ -544,7 +544,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_fallbacks: &[],
+                    water_materials: &[],
                     material_count: 1,
                 },
             },
@@ -576,7 +576,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_fallbacks: &[],
+                    water_materials: &[],
                     material_count: 1,
                 },
             },
@@ -619,7 +619,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_fallbacks: &[],
+                    water_materials: &[],
                     material_count: 1,
                 },
             },
@@ -642,7 +642,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_fallbacks: &[],
+                    water_materials: &[],
                     material_count: 1,
                 },
             },
@@ -713,7 +713,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_fallbacks: &[],
+                    water_materials: &[],
                     material_count: 1,
                 },
             },
@@ -778,7 +778,7 @@ mod tests {
                     overlays: &[],
                     materials: DrawPlanMaterials {
                         render_modes: &render_modes,
-                        water_fallbacks: &[],
+                        water_materials: &[],
                         material_count: 1,
                     },
                 },

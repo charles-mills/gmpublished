@@ -1,6 +1,6 @@
 use gmpublished_domain::math::Vec3;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -12,6 +12,8 @@ use std::{
 mod discovery;
 mod sibling_gma;
 mod texture;
+mod water;
+pub use water::{MaterialShader, WaterMaterial, WaterNormalMap};
 
 pub use texture::decode_vtf_rgba;
 use texture::{
@@ -229,16 +231,18 @@ impl ResolvedTexture {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedMaterialTextures {
+    pub(crate) shader: MaterialShader,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) texture2: Option<Arc<ResolvedTexture>>,
     pub(crate) force_opaque: bool,
     pub(crate) render_mode: RenderMode,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedPrimaryMaterial {
+    pub(crate) shader: MaterialShader,
     pub(crate) texture: Arc<ResolvedTexture>,
     pub(crate) force_opaque: bool,
     pub(crate) render_mode: RenderMode,
@@ -279,6 +283,7 @@ struct ResolverShared {
     sibling_gmas: OnceLock<SiblingGmaIndex>,
     game_vpks: OnceLock<Vec<VpkArchive>>,
     decoded_texture_cache: Mutex<HashMap<DecodedTextureCacheKey, Arc<ResolvedTexture>>>,
+    normal_map_cache: Mutex<HashMap<water::WaterNormalKey, Arc<WaterNormalMap>>>,
     sound_scripts: OnceLock<SoundScriptLibrary>,
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
 }
@@ -486,6 +491,7 @@ impl MaterialResolver {
                 sibling_gmas: OnceLock::new(),
                 game_vpks: OnceLock::new(),
                 decoded_texture_cache: Mutex::new(HashMap::new()),
+                normal_map_cache: Mutex::new(HashMap::new()),
                 sound_scripts: OnceLock::new(),
                 resolved_sound_cache: Mutex::new(HashMap::new()),
             }),
@@ -623,18 +629,31 @@ impl MaterialResolver {
         let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
         let render_mode = material.render_mode();
         let texture = material
-            .base_texture
-            .as_deref()
+            .parameter("$basetexture")
             .and_then(|base_texture| {
-                self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
+                self.resolve_texture(
+                    base_texture,
+                    render_mode.preserves_texture_alpha() || is_water_shader(&material.shader),
+                )
             })
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material));
-        let texture2 = material.base_texture2.as_deref().and_then(|base_texture| {
-            self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-        });
+        let texture2 = material
+            .parameter("$basetexture2")
+            .and_then(|base_texture| {
+                self.resolve_texture(
+                    base_texture,
+                    render_mode.preserves_texture_alpha() || is_water_shader(&material.shader),
+                )
+            });
 
         (texture.is_some() || texture2.is_some()).then_some(ResolvedMaterialTextures {
+            shader: self.resolve_shader(
+                &material,
+                texture
+                    .as_ref()
+                    .is_some_and(|texture| !texture.is_water_fallback()),
+            ),
             texture,
             texture2,
             force_opaque: render_mode.force_opaque(),
@@ -652,14 +671,17 @@ impl MaterialResolver {
         let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
         let render_mode = material.render_mode();
         let texture = material
-            .base_texture
-            .as_deref()
+            .parameter("$basetexture")
             .and_then(|base_texture| {
-                self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
+                self.resolve_texture(
+                    base_texture,
+                    render_mode.preserves_texture_alpha() || is_water_shader(&material.shader),
+                )
             })
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material))?;
         Some(ResolvedPrimaryMaterial {
+            shader: self.resolve_shader(&material, !texture.is_water_fallback()),
             texture,
             force_opaque: render_mode.force_opaque(),
             render_mode,
@@ -675,8 +697,11 @@ impl MaterialResolver {
         let mut visited_includes = vec![material_path.clone()];
         let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
         let render_mode = material.render_mode();
-        material.base_texture.as_deref().and_then(|base_texture| {
-            self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
+        material.parameter("$basetexture").and_then(|base_texture| {
+            self.resolve_texture(
+                base_texture,
+                render_mode.preserves_texture_alpha() || is_water_shader(&material.shader),
+            )
         })
     }
 
@@ -822,12 +847,14 @@ impl MaterialResolver {
         &self,
         material: &EffectiveMaterial,
     ) -> Option<Arc<ResolvedTexture>> {
-        if material.base_texture.is_some() {
+        if material.parameter("$basetexture").is_some() {
             return None;
         }
-        let env_map = material.env_map.as_deref()?;
+        let env_map = material
+            .parameter("$envmap")
+            .and_then(normalize_texture_name)?;
         if env_map != "env_cubemap"
-            && let Some(texture) = self.resolve_texture(env_map, false)
+            && let Some(texture) = self.resolve_texture(&env_map, false)
         {
             return Some(texture);
         }
@@ -844,7 +871,7 @@ impl MaterialResolver {
     fn water_fallback_texture(&self, material: &EffectiveMaterial) -> Option<Arc<ResolvedTexture>> {
         is_water_shader(&material.shader).then(|| {
             Arc::new(ResolvedTexture::rgba(
-                water_fog_rgba(material.fog_color.as_deref()).to_vec(),
+                water_fog_rgba(material.parameter("$fogcolor")).to_vec(),
                 1,
                 1,
                 1,
@@ -1151,45 +1178,35 @@ impl SourceRef<'_> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EffectiveMaterial {
     shader: String,
-    base_texture: Option<String>,
-    base_texture2: Option<String>,
-    env_map: Option<String>,
-    fog_color: Option<String>,
-    alpha_test: bool,
-    translucent: bool,
-    additive: bool,
+    parameters: BTreeMap<String, String>,
+    proxies: Vec<water::MaterialProxy>,
 }
 
 impl EffectiveMaterial {
     fn from_document(document: &vformats::vmt::VmtDocument<'_>) -> Self {
         Self {
             shader: document.shader.to_string(),
-            base_texture: document
-                .value("$basetexture")
-                .and_then(normalize_texture_name),
-            base_texture2: document
-                .value("$basetexture2")
-                .and_then(normalize_texture_name),
-            env_map: document.value("$envmap").and_then(normalize_texture_name),
-            fog_color: document.value("$fogcolor").map(str::to_owned),
-            alpha_test: vmt_bool(document.value("$alphatest")),
-            translucent: vmt_bool(document.value("$translucent")),
-            additive: vmt_bool(document.value("$additive")),
+            parameters: water::string_values(&document.kv),
+            proxies: water::proxies(&document.kv),
         }
+    }
+
+    fn parameter(&self, key: &str) -> Option<&str> {
+        self.parameters.get(key).map(String::as_str)
     }
 
     fn render_mode(&self) -> RenderMode {
         if is_water_shader(&self.shader) {
-            if self.alpha_test {
+            if vmt_bool(self.parameter("$alphatest")) {
                 RenderMode::Cutout
             } else {
                 RenderMode::Opaque
             }
-        } else if self.additive {
+        } else if vmt_bool(self.parameter("$additive")) {
             RenderMode::Additive
-        } else if self.translucent {
+        } else if vmt_bool(self.parameter("$translucent")) {
             RenderMode::Translucent
-        } else if self.alpha_test {
+        } else if vmt_bool(self.parameter("$alphatest")) {
             RenderMode::Cutout
         } else {
             RenderMode::Opaque
@@ -1199,58 +1216,27 @@ impl EffectiveMaterial {
     fn apply_patch_values(
         &mut self,
         document: &vformats::vmt::VmtDocument<'_>,
-        patch: &vformats::vmt::VmtPatch<'_>,
+        _patch: &vformats::vmt::VmtPatch<'_>,
     ) {
-        if let Some(value) = document
-            .value("$basetexture")
-            .and_then(normalize_texture_name)
-        {
-            self.base_texture = Some(value);
-        }
-        if let Some(value) = patch.value("$basetexture").and_then(normalize_texture_name) {
-            self.base_texture = Some(value);
-        }
-        if let Some(value) = document
-            .value("$basetexture2")
-            .and_then(normalize_texture_name)
-        {
-            self.base_texture2 = Some(value);
-        }
-        if let Some(value) = patch
-            .value("$basetexture2")
-            .and_then(normalize_texture_name)
-        {
-            self.base_texture2 = Some(value);
-        }
-        if let Some(value) = document.value("$envmap").and_then(normalize_texture_name) {
-            self.env_map = Some(value);
-        }
-        if let Some(value) = patch.value("$envmap").and_then(normalize_texture_name) {
-            self.env_map = Some(value);
-        }
-        if let Some(value) = document.value("$fogcolor") {
-            self.fog_color = Some(value.to_owned());
-        }
-        if let Some(value) = patch.value("$fogcolor") {
-            self.fog_color = Some(value.to_owned());
-        }
-        if let Some(value) = document.value("$alphatest") {
-            self.alpha_test = vmt_bool(Some(value));
-        }
-        if let Some(value) = patch.value("$alphatest") {
-            self.alpha_test = vmt_bool(Some(value));
-        }
-        if let Some(value) = document.value("$translucent") {
-            self.translucent = vmt_bool(Some(value));
-        }
-        if let Some(value) = patch.value("$translucent") {
-            self.translucent = vmt_bool(Some(value));
-        }
-        if let Some(value) = document.value("$additive") {
-            self.additive = vmt_bool(Some(value));
-        }
-        if let Some(value) = patch.value("$additive") {
-            self.additive = vmt_bool(Some(value));
+        self.parameters.extend(water::string_values(&document.kv));
+        water::merge_proxies(
+            &mut self.proxies,
+            water::proxies(&document.kv),
+            water::PatchMode::Override,
+        );
+        for (name, mode) in [
+            ("insert", water::PatchMode::Insert),
+            ("replace", water::PatchMode::Replace),
+        ] {
+            for block in document.kv.blocks(name) {
+                for (key, value) in water::string_values(block) {
+                    let exists = self.parameters.contains_key(&key);
+                    if (name == "insert" && !exists) || name == "replace" {
+                        self.parameters.insert(key, value);
+                    }
+                }
+                water::merge_proxies(&mut self.proxies, water::proxies(block), mode);
+            }
         }
     }
 }

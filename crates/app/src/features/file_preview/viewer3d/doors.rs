@@ -42,12 +42,49 @@ impl DoorMotion {
 
 #[derive(Clone, Debug)]
 pub(super) struct DoorRuntime {
+    pub(super) brush_collision: Option<gmpublished_domain::scene::map::MapBrushCollision>,
     pub(super) progress: f32,
     pub(super) target: DoorTarget,
     pub(super) motion: DoorMotion,
     pub(super) swing: DoorSwing,
     pub(super) bounds_min: Vec3,
     pub(super) bounds_max: Vec3,
+}
+
+impl DoorRuntime {
+    fn update_pose(&mut self, door: &DoorInstance) {
+        (self.bounds_min, self.bounds_max) = door_world_bounds(door, self.progress, self.swing);
+        self.brush_collision = door_brush_collision(door, self.progress, self.swing);
+    }
+}
+
+pub(super) fn door_brush_collision(
+    door: &DoorInstance,
+    progress: f32,
+    swing: DoorSwing,
+) -> Option<gmpublished_domain::scene::map::MapBrushCollision> {
+    let origin = transform_door_point(door, Vec3::ZERO, progress, swing);
+    let angles = match door.motion {
+        MapDoorMotion::Linear { .. } => door.angles,
+        MapDoorMotion::Rotating { angle_delta, .. } => {
+            door.angles + angle_delta * (progress.clamp(0.0, 1.0) * swing.sign())
+        }
+    };
+    door.brush_collision
+        .as_ref()
+        .map(|collision| collision.placed(origin, angles))
+}
+
+fn door_intersects_hull(
+    door: &DoorInstance,
+    progress: f32,
+    swing: DoorSwing,
+    hull: (Vec3, Vec3),
+) -> bool {
+    door_brush_collision(door, progress, swing).map_or_else(
+        || bounds_intersect(door_world_bounds(door, progress, swing), hull),
+        |collision| collision.aabb_trace_solid((hull.0 + hull.1) * 0.5, (hull.1 - hull.0) * 0.5),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -244,14 +281,10 @@ pub(super) fn transform_door_point(
             direction,
             distance,
             ..
-        } => (door.origin + local) + (direction * (distance * progress)),
+        } => door.origin + local.rotate_source(door.angles) + direction * (distance * progress),
         MapDoorMotion::Rotating { angle_delta, .. } => {
             let delta = angle_delta * (progress * swing.sign());
-            let angles = if door.class == MapDoorClass::PropDoorRotating {
-                door.angles + delta
-            } else {
-                delta
-            };
+            let angles = door.angles + delta;
             door.origin + (local.rotate_source(angles))
         }
     }
@@ -265,20 +298,10 @@ pub(super) fn transform_door_normal(
 ) -> Vec3 {
     let progress = progress.clamp(0.0, 1.0);
     match door.motion {
-        MapDoorMotion::Linear { .. } => {
-            if door.class == MapDoorClass::PropDoorRotating {
-                normalize_or_up(normal.rotate_source(door.angles))
-            } else {
-                normal
-            }
-        }
+        MapDoorMotion::Linear { .. } => normalize_or_up(normal.rotate_source(door.angles)),
         MapDoorMotion::Rotating { angle_delta, .. } => {
             let delta = angle_delta * (progress * swing.sign());
-            let angles = if door.class == MapDoorClass::PropDoorRotating {
-                door.angles + delta
-            } else {
-                delta
-            };
+            let angles = door.angles + delta;
             normalize_or_up(normal.rotate_source(angles))
         }
     }
@@ -443,8 +466,7 @@ impl FlyCamera {
             };
             if runtime.target == DoorTarget::Closed
                 && player_hull.is_some_and(|hull| {
-                    let bounds = door_world_bounds(door, next_progress, runtime.swing);
-                    bounds_intersect(bounds, hull)
+                    door_intersects_hull(door, next_progress, runtime.swing, hull)
                 })
             {
                 runtime.motion = DoorMotion::BlockedClosing;
@@ -457,8 +479,7 @@ impl FlyCamera {
                 continue;
             }
             runtime.progress = next_progress;
-            (runtime.bounds_min, runtime.bounds_max) =
-                door_world_bounds(door, runtime.progress, runtime.swing);
+            runtime.update_pose(door);
             if (runtime.target == DoorTarget::Open
                 && runtime.progress >= 1.0 - DOOR_PROGRESS_EPSILON)
                 || (runtime.target == DoorTarget::Closed
@@ -468,8 +489,7 @@ impl FlyCamera {
                     DoorTarget::Open => 1.0,
                     DoorTarget::Closed => 0.0,
                 };
-                (runtime.bounds_min, runtime.bounds_max) =
-                    door_world_bounds(door, runtime.progress, runtime.swing);
+                runtime.update_pose(door);
                 let open = runtime.target == DoorTarget::Open;
                 runtime.motion = door
                     .auto_close_after
@@ -519,8 +539,9 @@ impl FlyCamera {
                 continue;
             };
             let next_progress = (runtime.progress - DOOR_PROGRESS_EPSILON).max(0.0);
-            let bounds = door_world_bounds(door, next_progress, runtime.swing);
-            if player_hull.is_none_or(|hull| !bounds_intersect(bounds, hull)) {
+            if player_hull
+                .is_none_or(|hull| !door_intersects_hull(door, next_progress, runtime.swing, hull))
+            {
                 runtime.motion = DoorMotion::Moving;
                 runtime.target = DoorTarget::Closed;
                 let gain = door_sound_gain(
@@ -554,9 +575,16 @@ impl FlyCamera {
             if !self.door_visible_from_current_cluster(scene, door) {
                 continue;
             }
-            let Some(distance) =
-                ray_aabb_distance(start, direction, (runtime.bounds_min, runtime.bounds_max))
-            else {
+            let distance = runtime.brush_collision.as_ref().map_or_else(
+                || ray_aabb_distance(start, direction, (runtime.bounds_min, runtime.bounds_max)),
+                |collision| {
+                    let trace =
+                        collision.trace_aabb(start, start + direction * DOOR_USE_REACH, Vec3::ZERO);
+                    (trace.start_solid || trace.fraction < 1.0)
+                        .then_some(trace.fraction * DOOR_USE_REACH)
+                },
+            );
+            let Some(distance) = distance else {
                 continue;
             };
             if distance <= DOOR_USE_REACH && best.is_none_or(|(_, best)| distance < best) {
@@ -635,6 +663,7 @@ mod tests {
 
     fn test_linear_door(origin: Vec3, distance: f32) -> DoorInstance {
         DoorInstance {
+            brush_collision: None,
             class: MapDoorClass::FuncDoor,
             origin,
             angles: Vec3::splat(0.0),
@@ -651,6 +680,80 @@ mod tests {
             sounds: DoorSounds::default(),
             meshes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn brush_door_collision_leaves_rotated_bounds_corners_free_and_follows_motion() {
+        use gmpublished_domain::scene::map::MapBrushCollision;
+        let mut door = test_linear_door(Vec3::new(300.0, 200.0, 64.0), 40.0);
+        door.local_bounds_min = Vec3::new(0.0, -32.0, -32.0);
+        door.local_bounds_max = Vec3::new(4.0, 32.0, 32.0);
+        door.angles = Vec3::new(0.0, 45.0, 0.0);
+        door.brush_collision = Some(MapBrushCollision::solid_box_for_tests(
+            door.local_bounds_min,
+            door.local_bounds_max,
+        ));
+        let scene = door_scene(vec![door]);
+        let mut camera = walk_camera_for_scene(&scene, Vec3::new(0.0, 0.0, 64.0), 0.0);
+        let collision = scene.walk_collision.as_ref().unwrap();
+        let corner = Vec3::new(320.0, 220.0, 64.0);
+        assert!(bounds_contains_point(
+            (camera.doors[0].bounds_min, camera.doors[0].bounds_max),
+            corner
+        ));
+        assert!(
+            !camera
+                .trace_aabb(collision, corner, corner, Vec3::splat(1.0))
+                .start_solid
+        );
+        let hit = camera.trace_aabb(
+            collision,
+            corner + Vec3::new(0.0, 0.0, 64.0),
+            corner,
+            Vec3::splat(1.0),
+        );
+        assert_eq!(
+            hit.fraction, 1.0,
+            "empty corner must not inherit the enclosing box's collision"
+        );
+        let inside = Vec3::new(301.4142, 201.4142, 64.0);
+        assert!(
+            camera
+                .trace_aabb(collision, inside, inside, Vec3::splat(1.0))
+                .start_solid
+        );
+        camera.doors[0].progress = 1.0;
+        camera.doors[0].update_pose(&scene.doors[0]);
+        assert!(
+            !camera
+                .trace_aabb(collision, inside, inside, Vec3::splat(1.0))
+                .start_solid
+        );
+        let moved_inside = inside + Vec3::new(40.0, 0.0, 0.0);
+        assert!(
+            camera
+                .trace_aabb(collision, moved_inside, moved_inside, Vec3::splat(1.0))
+                .start_solid
+        );
+    }
+
+    #[test]
+    fn rotating_brush_door_adds_authored_angles_to_the_motion_pose() {
+        let mut door = test_linear_door(Vec3::new(100.0, 200.0, 300.0), 0.0);
+        door.class = MapDoorClass::FuncDoorRotating;
+        door.angles = Vec3::new(0.0, 30.0, 0.0);
+        door.motion = MapDoorMotion::Rotating {
+            angle_delta: Vec3::new(0.0, 90.0, 0.0),
+            degrees: 90.0,
+            speed: 90.0,
+            open_direction: MapDoorOpenDirection::Forward,
+        };
+        let point =
+            transform_door_point(&door, Vec3::new(10.0, 0.0, 0.0), 1.0, DoorSwing::Positive);
+        assert!((point - Vec3::new(95.0, 208.66025, 300.0)).length_squared() < 1.0e-7);
+        let normal =
+            transform_door_normal(&door, Vec3::new(1.0, 0.0, 0.0), 1.0, DoorSwing::Positive);
+        assert!((normal - Vec3::new(-0.5, 0.8660254, 0.0)).length_squared() < 1.0e-8);
     }
 
     fn test_door_sound(reference: &str) -> DoorSound {

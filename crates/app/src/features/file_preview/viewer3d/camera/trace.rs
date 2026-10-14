@@ -45,12 +45,19 @@ impl FlyCamera {
     ) -> MapTrace {
         let mut best = collision.trace_aabb(start, end, half_extents);
         for door in &self.doors {
-            if let Some(hit) = trace_aabb_against_aabb(
-                start,
-                end,
-                half_extents,
-                (door.bounds_min, door.bounds_max),
-            ) && (hit.start_solid && !best.start_solid || hit.fraction < best.fraction)
+            let hit = door.brush_collision.as_ref().map_or_else(
+                || {
+                    trace_aabb_against_aabb(
+                        start,
+                        end,
+                        half_extents,
+                        (door.bounds_min, door.bounds_max),
+                    )
+                },
+                |collision| Some(collision.trace_aabb(start, end, half_extents)),
+            );
+            if let Some(hit) = hit
+                && (hit.start_solid && !best.start_solid || hit.fraction < best.fraction)
             {
                 best = hit;
             }
@@ -66,9 +73,14 @@ impl FlyCamera {
     ) -> bool {
         collision.aabb_trace_solid(center, half_extents)
             || self.doors.iter().any(|door| {
-                bounds_intersect(
-                    expand_bounds((center, center), half_extents),
-                    (door.bounds_min, door.bounds_max),
+                door.brush_collision.as_ref().map_or_else(
+                    || {
+                        bounds_intersect(
+                            expand_bounds((center, center), half_extents),
+                            (door.bounds_min, door.bounds_max),
+                        )
+                    },
+                    |collision| collision.aabb_trace_solid(center, half_extents),
                 )
             })
     }

@@ -136,6 +136,26 @@ fn load_preview_data(
     ))
 }
 
+#[cfg(feature = "map-capture")]
+pub fn load_map_for_capture(
+    request: &PreviewRequest,
+    gmod_dir: std::path::PathBuf,
+    pool: &rayon::ThreadPool,
+) -> Result<PreviewData, PreviewLoadError> {
+    pool.install(|| {
+        load_preview_data(
+            request.clone(),
+            &Tokens::with_accent_inputs(
+                crate::theme::ThemeVariant::Dark,
+                crate::theme::AccentInputs::for_preset(crate::bridge::ThemePreset::Dark),
+            ),
+            Some(gmod_dir),
+            Some(pool),
+            &mut |stage| println!("map capture: {stage:?}"),
+        )
+    })
+}
+
 const fn initial_load_stage(entry_class: PreviewClass) -> PreviewLoadStage {
     match entry_class {
         PreviewClass::Map => PreviewLoadStage::ReadingBsp,
@@ -589,6 +609,9 @@ fn model_preview_data(
                 resolved_material_count = resolved_material_count.saturating_add(1);
             }
             MaterialSlot {
+                shader: resolved
+                    .as_ref()
+                    .map_or_else(Default::default, |material| material.shader.clone()),
                 name: name.clone(),
                 texture,
                 texture2: None,
@@ -604,6 +627,7 @@ fn model_preview_data(
     let phy_debug_meshes = model_phy_debug_mesh(stem, &resolver, materials.len());
     if phy_debug_meshes.is_some() {
         materials.push(MaterialSlot {
+            shader: Default::default(),
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,

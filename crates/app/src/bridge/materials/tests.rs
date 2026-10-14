@@ -19,6 +19,55 @@ const VPK_DIR_ARCHIVE_INDEX: u16 = 0x7fff;
 const VPK_ENTRY_TERMINATOR: u16 = 0xffff;
 
 #[test]
+fn concurrent_sibling_index_initialization_finishes_and_preserves_priority() {
+    use rayon::prelude::*;
+    use std::{sync::mpsc, time::Duration};
+
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name("sibling-index-regression".to_owned())
+        .spawn(move || {
+            let root = tempfile::TempDir::new().expect("temporary game");
+            let addons = root.path().join("garrysmod/addons");
+            for index in 0..32 {
+                write_gma_fixture(
+                    addons.join(format!("{index:03}.gma")),
+                    &GmaFixtureBuilder::new("Sibling")
+                        .entry("materials/shared.vmt", format!("archive {index}").into_bytes())
+                        .entry(format!("materials/unique_{index}.vmt"), format!("archive {index}").into_bytes())
+                        .build(),
+                );
+            }
+            #[allow(deprecated, reason = "FIFO worker scheduling exposes reentrant OnceLock initialization while nested Rayon jobs wait")]
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .breadth_first()
+                .build()
+                .expect("constrained FIFO pool");
+            let resolver = MaterialResolver::new(
+                Arc::new(empty_archive()),
+                Some(root.path().to_owned()),
+            );
+            let results = pool.install(|| {
+                (0..128)
+                    .into_par_iter()
+                    .map(|_| resolver.entry_bytes("materials/shared.vmt"))
+                    .collect::<Vec<_>>()
+            });
+            assert!(results.iter().all(|bytes| bytes.as_deref() == Some(b"archive 0")));
+            for index in 0..32 {
+                assert_eq!(resolver.entry_bytes(&format!("materials/unique_{index}.vmt")), Some(format!("archive {index}").into_bytes()));
+            }
+            done_tx.send(()).expect("report index completion");
+        })
+        .expect("regression worker");
+    done_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("concurrent first access must finish without a reentrant initialization deadlock");
+    worker.join().expect("regression worker must succeed");
+}
+
+#[test]
 fn resolves_addon_material_vmt_to_decoded_vtf() {
     let rgba = vec![
         255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
@@ -1806,4 +1855,164 @@ fn a_loose_dir_distinguishes_a_read_error_from_an_absent_file() {
         ),
         "an unreadable file must not report as absent"
     );
+}
+
+#[test]
+fn water_patch_preserves_normal_animation_and_shader_with_a_base_texture() {
+    let normal0 = [128, 160, 240, 37].repeat(4);
+    let normal1 = [140, 128, 250, 91].repeat(4);
+    let mip0 = [127, 128, 255, 17];
+    let mip1 = [129, 128, 255, 23];
+    // VTF stores smallest mip first, then each frame at that mip.
+    let mut normal = fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&mip0, &normal0]);
+    normal[24..26].copy_from_slice(&2_u16.to_le_bytes());
+    normal.truncate(64);
+    for bytes in [&mip0[..], &mip1[..], &normal0[..], &normal1[..]] {
+        normal.extend_from_slice(bytes);
+    }
+    let base = [230, 210, 190, 57].repeat(4);
+    let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Authored Water")
+        .entry("materials/water/base.vmt", br#"Water_DX90 {
+            "$basetexture" "water/base" "$normalmap" "water/normal"
+            "$fogcolor" "{1 2 3}" "srgb?$fogcolor" "{7 58 66}" "!srgb?$fogcolor" "{255 0 0}" "hdr?$fogcolor" "{0 255 0}" "$fogstart" "12" "$fogend" "1024"
+            "$reflecttexture" "_rt_WaterReflection" "$refracttexture" "_rt_WaterRefraction"
+            "$reflectamount" "0.4" "$refractamount" "1"
+            "$scroll1" "[.01 .02 .03]" "$scroll2" "[-.025 .025 .075]"
+            "$bottommaterial" "water/below"
+            Proxies {
+                TextureScroll { texturescrollvar "$bumptransform" texturescrollrate ".02" texturescrollangle "25" texturescale "2" }
+                AnimatedTexture { animatedtexturevar "$normalmap" animatedtextureframenumvar "$bumpframe" animatedtextureframerate "8" }
+            }
+        }"#.to_vec())
+        .entry("materials/water/patch.vmt", br#"patch {
+            include "materials/water/base.vmt" replace { "$fogstart" "20" "$envmap" "maps/example/cubemap" Proxies {} }
+            insert { "$fogend" "999" "$waterdepth" "800" }
+        }"#.to_vec())
+        .entry("materials/water/normal.vtf", normal)
+        .entry("materials/water/base.vtf", fixture_vtf_bytes(2,2,VtfFormat::Rgba8888,&[&base]))
+        .build()).expect("archive");
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let resolved = resolver
+        .resolve_with_base2(&[], "water/patch")
+        .expect("water");
+    let water = resolved
+        .shader
+        .water()
+        .expect("shader identity survives valid base texture");
+    assert!(water.has_base_texture);
+    assert!(!resolved.texture.as_ref().unwrap().is_water_fallback());
+    assert_eq!(
+        texture_rgba(resolved.texture.as_ref().unwrap())[3],
+        57,
+        "water base alpha controls reflectivity"
+    );
+    assert_eq!(water.fog_start, 20.0);
+    assert_eq!(water.fog_end, 1024.0);
+    assert_eq!(water.parameters["$waterdepth"], "800");
+    assert_eq!(water.parameters["$envmap"], "maps/example/cubemap");
+    assert_eq!(water.below_material.as_deref(), Some("water/below"));
+    assert_eq!(
+        water.bump_transform,
+        [[2.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]]
+    );
+    assert!((water.proxy_scroll[0] - 25_f32.to_radians().cos() * 0.02).abs() < 1e-7);
+    assert!((water.proxy_scroll[1] - 25_f32.to_radians().sin() * 0.02).abs() < 1e-7);
+    assert_eq!(water.scroll1, [0.01, 0.02]);
+    assert_eq!(water.scroll2, [-0.025, 0.025]);
+    assert_eq!(water.frame_rate, 8.0);
+    assert_eq!(water.reflect_amount, 0.4);
+    assert_eq!(water.refract_amount, 1.0);
+    assert!((water.fog_color_linear[1] - (58_f32 / 255.0).powf(2.2)).abs() < 1e-7);
+    let normal = water.normal_map.as_ref().expect("normal map");
+    assert_eq!(normal.frames.len(), 2);
+    assert_eq!(normal.frames[0].len(), 2);
+    assert_eq!(normal.frames[0][0].rgba, normal0);
+    assert_eq!(normal.frames[1][0].rgba, normal1);
+    assert_eq!(normal.frames[0][1].rgba, mip0);
+    assert_eq!(normal.frames[1][1].rgba, mip1);
+    let again = resolver.resolve_primary(&[], "water/patch").unwrap();
+    assert!(Arc::ptr_eq(
+        normal,
+        again.shader.water().unwrap().normal_map.as_ref().unwrap()
+    ));
+}
+
+#[test]
+fn missing_water_textures_keep_shader_and_use_single_flat_normal_fallback() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Missing Water")
+            .entry(
+                "materials/water/missing.vmt",
+                br#"Water { "$basetexture" "missing/base" "$normalmap" "missing/normal" }"#
+                    .to_vec(),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolved = MaterialResolver::new(Arc::new(archive), None)
+        .resolve_primary(&[], "water/missing")
+        .unwrap();
+    let water = resolved.shader.water().unwrap();
+    assert!(!water.has_base_texture);
+    assert!(water.normal_map.is_none());
+    assert!(resolved.texture.is_water_fallback());
+}
+
+#[test]
+fn water_normals_use_stored_linear_mips_and_share_the_texture_budget() {
+    let high = [128, 160, 240, 37].repeat(4);
+    let low = [127, 128, 255, 17];
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Water Limits")
+            .entry(
+                "materials/water.vmt",
+                br#"Water { "$normalmap" "normal" }"#.to_vec(),
+            )
+            .entry(
+                "materials/normal.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&low, &high]),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let budget = Arc::new(DecodedTextureBudget::new(4));
+    let limited = resolver
+        .with_decoded_texture_max_dimension(1)
+        .with_decoded_texture_budget(Arc::clone(&budget));
+    let material = limited.resolve_primary(&[], "water").unwrap();
+    let normal = material
+        .shader
+        .water()
+        .unwrap()
+        .normal_map
+        .as_ref()
+        .unwrap();
+    assert_eq!(normal.frames[0].len(), 1);
+    assert_eq!(normal.frames[0][0].rgba, low);
+    assert_eq!(budget.decoded_bytes(), 4);
+    assert!(
+        limited
+            .resolve_primary(&[], "water")
+            .unwrap()
+            .shader
+            .water()
+            .unwrap()
+            .normal_map
+            .is_some()
+    );
+    assert_eq!(
+        budget.decoded_bytes(),
+        4,
+        "cache hits must not reserve memory twice"
+    );
+    // The dimension participates in the cache key: an uncapped load cannot
+    // accidentally receive the already cached 1x1 normal or bypass its budget.
+    let full = resolver
+        .with_decoded_texture_budget(Arc::clone(&budget))
+        .resolve_primary(&[], "water")
+        .unwrap();
+    assert!(full.shader.water().unwrap().normal_map.is_none());
+    assert_eq!(budget.rejected_textures(), 1);
+    assert_eq!(budget.decoded_bytes(), 4);
 }

@@ -22,6 +22,7 @@ use vformats::{
 
 use crate::scene::QAngle;
 
+mod brushes;
 mod data;
 mod doors;
 mod entities;
@@ -30,6 +31,7 @@ mod lumps;
 mod mesh;
 mod pakfile;
 mod paths;
+mod physics;
 mod placements;
 mod visibility;
 mod walk;
@@ -105,8 +107,8 @@ use walk::{
     bounds_volume, bsp_world_bounds, expand_bounds,
 };
 pub use walk::{
-    ConvexHull, MapTrace, MapWalkCollision, MapWalkPropCollisionSource, MapWalkPropModel,
-    MapWalkPropModelPlacement, WaterVolume,
+    ConvexHull, MapBrushCollision, MapTrace, MapWalkCollision, MapWalkPropCollisionSource,
+    MapWalkPropModel, MapWalkPropModelPlacement, WaterVolume,
 };
 #[cfg(test)]
 use walk::{
@@ -190,7 +192,9 @@ fn load_map_impl(
             player_start.as_ref(),
         );
     }
-    let face_attributions = FaceAttributions::from_bsp(&bsp, &skybox_partition);
+    let mut face_attributions = FaceAttributions::from_bsp(&bsp, &skybox_partition);
+    let brush_instances = brushes::brush_instances(&bsp);
+    let brush_locator = MapLeafLocator::from_bsp(&bsp);
     let pending_doors = pending_map_doors(&bsp);
     let door_model_indices = pending_doors
         .iter()
@@ -206,16 +210,21 @@ fn load_map_impl(
 
     {
         let mut face_context = FaceAppendContext {
+            transform: brushes::BrushTransform::default(),
             meshes: &mut meshes,
             material_names: &mut material_names,
             material_indexes: &mut material_indexes,
             lightmap_samples,
             lightmap_blocks: &mut lightmap_blocks,
         };
-        for (model_index, model) in bsp.models.iter().enumerate() {
-            if door_model_indices.contains(&ModelIndex::new(model_index)) {
+        for instance in &brush_instances {
+            if !instance.visible || door_model_indices.contains(&instance.model_index) {
                 continue;
             }
+            let model = &bsp.models[instance.model_index.get()];
+            face_context.transform = instance.transform;
+            let attribution = (instance.model_index.get() != 0)
+                .then(|| instance.attribution(&bsp, &brush_locator, &skybox_partition));
             let Some(face_range) = model_face_range(model, bsp.faces.len()) else {
                 continue;
             };
@@ -223,12 +232,22 @@ fn load_map_impl(
                 let Some(face) = bsp.face(face_index) else {
                     continue;
                 };
+                let (partition, visibility) = attribution.clone().unwrap_or_else(|| {
+                    (
+                        face_attributions.partition(face_index),
+                        face_attributions.visibility(face_index),
+                    )
+                });
+                if attribution.is_some() {
+                    face_attributions.partitions[face_index] = partition;
+                    face_attributions.visibility[face_index] = visibility.clone();
+                }
                 append_face(
                     &bsp,
                     face,
                     face_index,
-                    face_attributions.partition(face_index),
-                    &face_attributions.visibility(face_index),
+                    partition,
+                    &visibility,
                     &mut face_context,
                 )?;
             }
@@ -308,11 +327,8 @@ fn load_map_impl(
         max: bounds_max,
     } = bounds_from_meshes(&meshes);
     let visibility = MapVisibility::from_bsp(&bsp);
-    let door_brush_indices = door_model_indices
-        .iter()
-        .flat_map(|model_index| brush_indices_for_model(&bsp, *model_index))
-        .collect::<BTreeSet<_>>();
-    let walk_collision = MapWalkCollision::from_bsp_excluding(&bsp, &door_brush_indices);
+    let walk_collision =
+        MapWalkCollision::from_bsp_instances(&bsp, &brush_instances, &door_model_indices);
     let pakfile = MapPakFile::from_pak_bytes(bsp.pakfile_bytes);
     let skybox_completion_bounds = skybox_partition.completion_bounds();
     let skybox_partition = MapSkyboxPartitionStats {

@@ -22,11 +22,29 @@ pub struct Uniforms {
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialUniform {
     pub flags: [u32; 4],
+    pub water_fog: [f32; 4],
+    pub water_optics: [f32; 4],
+    pub water_reflect: [f32; 4],
+    pub water_refract: [f32; 4],
+    pub water_bump_s: [f32; 4],
+    pub water_bump_t: [f32; 4],
+    pub water_scroll: [f32; 4],
+    pub water_animation: [f32; 4],
+    pub water_state: [f32; 4],
 }
 
 impl MaterialUniform {
     pub const fn new(force_opaque: bool, render_mode: RenderMode) -> Self {
         Self {
+            water_fog: [0.0; 4],
+            water_optics: [0.0; 4],
+            water_reflect: [0.0; 4],
+            water_refract: [0.0; 4],
+            water_bump_s: [0.0; 4],
+            water_bump_t: [0.0; 4],
+            water_scroll: [0.0; 4],
+            water_animation: [0.0; 4],
+            water_state: [0.0; 4],
             flags: [
                 (force_opaque && matches!(render_mode, RenderMode::Opaque)) as u32,
                 matches!(render_mode, RenderMode::Cutout) as u32,
@@ -34,6 +52,60 @@ impl MaterialUniform {
                 0,
             ],
         }
+    }
+
+    pub fn with_water(mut self, water: Option<&crate::bridge::materials::WaterMaterial>) -> Self {
+        if let Some(water) = water {
+            self.flags[2] = u32::from(!water.animation_wrap);
+            self.water_fog = [
+                water.fog_color_linear[0],
+                water.fog_color_linear[1],
+                water.fog_color_linear[2],
+                f32::from(water.fog_enabled),
+            ];
+            self.water_optics = [
+                water.reflect_amount,
+                water.refract_amount,
+                water.fog_start,
+                water.fog_end,
+            ];
+            self.water_reflect = [
+                water.reflect_tint_linear[0],
+                water.reflect_tint_linear[1],
+                water.reflect_tint_linear[2],
+                f32::from(water.reflect_enabled),
+            ];
+            self.water_refract = [
+                water.refract_tint_linear[0],
+                water.refract_tint_linear[1],
+                water.refract_tint_linear[2],
+                f32::from(water.refract_enabled),
+            ];
+            self.water_bump_s = water.bump_transform[0];
+            self.water_bump_t = water.bump_transform[1];
+            self.water_scroll = [
+                water.scroll1[0],
+                water.scroll1[1],
+                water.scroll2[0],
+                water.scroll2[1],
+            ];
+            self.water_animation = [
+                water.proxy_scroll[0],
+                water.proxy_scroll[1],
+                water.bump_frame,
+                water.frame_rate,
+            ];
+            self.water_state = [
+                water
+                    .normal_map
+                    .as_ref()
+                    .map_or(1.0, |map| map.frames.len() as f32),
+                f32::from(water.scroll1[0].abs() > 0.0 && !water.has_base_texture),
+                f32::from(water.above_water),
+                f32::from(water.no_fresnel),
+            ];
+        }
+        self
     }
 }
 
@@ -270,7 +342,7 @@ mod uniform_layout_tests {
     use iced::wgpu::naga::{self, TypeInner};
     use std::mem::{offset_of, size_of};
 
-    use super::Uniforms;
+    use super::{MaterialUniform, Uniforms};
 
     #[test]
     fn shaders_validate_and_match_the_uploaded_uniform_layout() {
@@ -316,6 +388,37 @@ mod uniform_layout_tests {
             for (member, (field, offset)) in members.iter().zip(fields) {
                 assert_eq!(member.name.as_deref(), Some(field), "{name}: field name");
                 assert_eq!(member.offset as usize, offset, "{name}: {field} offset");
+            }
+            if name == "water" {
+                let material = module
+                    .types
+                    .iter()
+                    .find_map(|(_, ty)| {
+                        (ty.name.as_deref() == Some("Material")).then_some(&ty.inner)
+                    })
+                    .unwrap();
+                let TypeInner::Struct { members, span } = material else {
+                    panic!("Material must be a struct")
+                };
+                assert_eq!(*span as usize, size_of::<MaterialUniform>());
+                for (member, (field, offset)) in members.iter().zip([
+                    ("flags", offset_of!(MaterialUniform, flags)),
+                    ("water_fog", offset_of!(MaterialUniform, water_fog)),
+                    ("water_optics", offset_of!(MaterialUniform, water_optics)),
+                    ("water_reflect", offset_of!(MaterialUniform, water_reflect)),
+                    ("water_refract", offset_of!(MaterialUniform, water_refract)),
+                    ("water_bump_s", offset_of!(MaterialUniform, water_bump_s)),
+                    ("water_bump_t", offset_of!(MaterialUniform, water_bump_t)),
+                    ("water_scroll", offset_of!(MaterialUniform, water_scroll)),
+                    (
+                        "water_animation",
+                        offset_of!(MaterialUniform, water_animation),
+                    ),
+                    ("water_state", offset_of!(MaterialUniform, water_state)),
+                ]) {
+                    assert_eq!(member.name.as_deref(), Some(field));
+                    assert_eq!(member.offset as usize, offset, "{field} offset");
+                }
             }
         }
     }
