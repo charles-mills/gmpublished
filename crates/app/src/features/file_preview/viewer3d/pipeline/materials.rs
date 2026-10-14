@@ -18,6 +18,7 @@ pub struct MaterialTextureViews<'a> {
 
 #[derive(Clone, Copy)]
 pub struct MaterialUploadMode<'a> {
+    pub unlit: Option<&'a crate::bridge::materials::UnlitMaterial>,
     pub surface: Option<&'a crate::bridge::materials::LightmappedMaterial>,
     pub force_opaque: bool,
     pub render_mode: RenderMode,
@@ -299,6 +300,7 @@ impl RenderResources {
         });
         let material_uniform = MaterialUniform::new(mode.force_opaque, mode.render_mode)
             .with_surface(mode.surface)
+            .with_unlit(mode.unlit)
             .with_water(mode.water)
             .with_mirror(mode.mirror);
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));

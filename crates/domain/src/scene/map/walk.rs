@@ -482,18 +482,13 @@ impl MapWalkCollision {
 }
 
 pub(super) fn merge_trace_candidate(left: TraceCandidate, right: TraceCandidate) -> TraceCandidate {
-    if right.start_solid && !left.start_solid {
-        return TraceCandidate {
-            fraction: left.fraction.min(right.fraction),
-            normal: right.normal,
-            start_solid: true,
-        };
-    }
-    if right.fraction < left.fraction {
+    let mut result = if right.fraction < left.fraction {
         right
     } else {
         left
-    }
+    };
+    result.start_solid = left.start_solid || right.start_solid;
+    result
 }
 
 pub(super) fn walk_brushes_from_bsp(
@@ -761,7 +756,16 @@ pub(super) fn walk_displacements_from_bsp(bsp: &MapBsp) -> Vec<MapWalkDisplaceme
         let triangles = vertices
             .chunks_exact(3)
             .filter_map(|chunk| {
-                let vertices = [chunk[0].position, chunk[1].position, chunk[2].position];
+                let mut vertices = [chunk[0].position, chunk[1].position, chunk[2].position];
+                // BSP render winding can oppose the oriented face plane.
+                // Collision backface rejection follows the authored solid side.
+                if (vertices[1] - vertices[0])
+                    .cross(vertices[2] - vertices[0])
+                    .dot(bsp.face_plane_normal(face))
+                    < 0.0
+                {
+                    vertices.swap(1, 2);
+                }
                 MapWalkTriangle::new(vertices)
             })
             .collect::<Vec<_>>();
@@ -1201,12 +1205,14 @@ pub(super) fn trace_brush_aabb(
     let mut leave_fraction = 1.0_f32;
     let mut enter_normal = Vec3::ZERO;
     let mut starts_outside = false;
+    let mut ends_outside = false;
 
     for side in &brush.planes {
         let plane = side.plane;
         let expanded_dist = plane.dist + plane.normal.dot_abs(half_extents);
         let start_dist = start.dot(plane.normal) - expanded_dist;
         let end_dist = end.dot(plane.normal) - expanded_dist;
+        ends_outside |= end_dist > 0.0;
 
         // Any positive distance is outside. Resting contact sits at the plane
         // epsilon; requiring more would mark a standing player as stuck.
@@ -1243,7 +1249,7 @@ pub(super) fn trace_brush_aabb(
 
     if !starts_outside {
         return Some(TraceCandidate {
-            fraction: 0.0,
+            fraction: if ends_outside { 1.0 } else { 0.0 },
             normal: Vec3::splat(0.0),
             start_solid: true,
         });
@@ -1332,7 +1338,7 @@ pub(super) fn trace_triangle_aabb(
     half_extents: Vec3,
 ) -> Option<TraceCandidate> {
     let velocity = end - start;
-    if velocity.length_squared() <= TRACE_AXIS_EPSILON {
+    if velocity.length_squared() <= TRACE_AXIS_EPSILON && half_extents == Vec3::ZERO {
         return None;
     }
 
@@ -1405,13 +1411,30 @@ pub(super) fn trace_triangle_aabb(
         }
     }
 
-    if start_overlaps || !(0.0..=1.0).contains(&enter_fraction) {
+    if start_overlaps {
+        if velocity.length_squared() > TRACE_AXIS_EPSILON {
+            return None;
+        }
+        return Some(TraceCandidate {
+            fraction: 0.0,
+            normal: Vec3::ZERO,
+            start_solid: true,
+        });
+    }
+    if velocity.dot(triangle.normal) >= 0.0 {
+        return None;
+    }
+    if !(0.0..=1.0).contains(&enter_fraction) {
         return None;
     }
 
-    // Back off by plane epsilon. Exact contact would make the next sweep start overlapping
-    // and miss the ground.
-    let backoff = TRACE_PLANE_EPSILON / velocity.length_squared().sqrt();
+    // Point rays report the surface itself. Hull sweeps retain the plane's
+    // contact tolerance, measured perpendicular to the separating plane.
+    let backoff = if half_extents == Vec3::ZERO {
+        0.0
+    } else {
+        TRACE_PLANE_EPSILON / velocity.dot(hit_normal).abs().max(TRACE_AXIS_EPSILON)
+    };
     Some(TraceCandidate {
         fraction: (enter_fraction - backoff).max(0.0),
         normal: hit_normal,

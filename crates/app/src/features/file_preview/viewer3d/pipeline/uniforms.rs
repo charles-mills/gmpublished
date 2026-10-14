@@ -28,6 +28,8 @@ pub struct Uniforms {
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialUniform {
     pub flags: [u32; 4],
+    /// x: unlit, y: authored vertex color, z: authored vertex alpha.
+    pub surface_flags: [u32; 4],
     pub water_fog: [f32; 4],
     pub water_optics: [f32; 4],
     pub water_reflect: [f32; 4],
@@ -40,6 +42,21 @@ pub struct MaterialUniform {
 }
 
 impl MaterialUniform {
+    pub fn with_unlit(
+        mut self,
+        material: Option<&crate::bridge::materials::UnlitMaterial>,
+    ) -> Self {
+        if let Some(material) = material {
+            self.surface_flags = [
+                1,
+                u32::from(material.vertex_color),
+                u32::from(material.vertex_alpha),
+                0,
+            ];
+        }
+        self
+    }
+
     pub fn with_surface(
         mut self,
         surface: Option<&crate::bridge::materials::LightmappedMaterial>,
@@ -97,6 +114,7 @@ impl MaterialUniform {
     }
     pub const fn new(force_opaque: bool, render_mode: RenderMode) -> Self {
         Self {
+            surface_flags: [0; 4],
             water_fog: [0.0; 4],
             water_optics: [0.0; 4],
             water_reflect: [0.0; 4],
@@ -462,6 +480,45 @@ mod uniform_layout_tests {
     use super::{MaterialUniform, Uniforms};
 
     #[test]
+    fn unlit_flags_are_separate_from_water_and_bumped_lighting_flags() {
+        use crate::bridge::materials::{RenderMode, UnlitMaterial};
+        let unlit = UnlitMaterial {
+            shader: "UnlitGeneric".into(),
+            vertex_color: true,
+            vertex_alpha: true,
+        };
+        let mut original = MaterialUniform::new(false, RenderMode::Translucent);
+        original.flags[2] = 2;
+        original.flags[3] = 1;
+        let result = original.with_unlit(Some(&unlit));
+        assert_eq!(result.flags, original.flags);
+        assert_eq!(result.surface_flags, [1, 1, 1, 0]);
+        assert_eq!(
+            MaterialUniform::new(true, RenderMode::Opaque).surface_flags,
+            [0; 4]
+        );
+    }
+
+    #[test]
+    fn vertex_opacity_has_its_own_gpu_attribute() {
+        use crate::media::preview_model::ModelVertex;
+        let attribute = super::super::super::MODEL_VERTEX_ATTRIBUTES
+            .iter()
+            .find(|v| v.shader_location == 7)
+            .unwrap();
+        assert_eq!(attribute.offset as usize, offset_of!(ModelVertex, opacity));
+        assert_eq!(attribute.format, iced::wgpu::VertexFormat::Float32);
+        assert_ne!(
+            offset_of!(ModelVertex, opacity),
+            offset_of!(ModelVertex, blend_alpha)
+        );
+        assert_eq!(
+            size_of::<ModelVertex>(),
+            attribute.offset as usize + size_of::<f32>()
+        );
+    }
+
+    #[test]
     fn shaders_validate_and_match_the_uploaded_uniform_layout() {
         let fields = [
             ("view_proj", offset_of!(Uniforms, view_proj)),
@@ -509,7 +566,7 @@ mod uniform_layout_tests {
                 assert_eq!(member.name.as_deref(), Some(field), "{name}: field name");
                 assert_eq!(member.offset as usize, offset, "{name}: {field} offset");
             }
-            if name == "water" {
+            if name == "water" || name == "model_viewer" {
                 let material = module
                     .types
                     .iter()
@@ -521,8 +578,10 @@ mod uniform_layout_tests {
                     panic!("Material must be a struct")
                 };
                 assert_eq!(*span as usize, size_of::<MaterialUniform>());
+                assert_eq!(members.len(), 11, "{name}: material field count");
                 for (member, (field, offset)) in members.iter().zip([
                     ("flags", offset_of!(MaterialUniform, flags)),
+                    ("surface_flags", offset_of!(MaterialUniform, surface_flags)),
                     ("water_fog", offset_of!(MaterialUniform, water_fog)),
                     ("water_optics", offset_of!(MaterialUniform, water_optics)),
                     ("water_reflect", offset_of!(MaterialUniform, water_reflect)),

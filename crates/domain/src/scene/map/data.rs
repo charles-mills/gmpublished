@@ -112,6 +112,8 @@ pub struct MapVertex {
     /// Horizontal atlas stride to each of the three directional lighting planes.
     pub lightmap_bump_step: f32,
     pub blend_alpha: f32,
+    /// Source vertex opacity: ordinary brushes use one; displacements retain authored alpha.
+    pub opacity: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]

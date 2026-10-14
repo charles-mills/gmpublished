@@ -92,6 +92,7 @@ impl UploadCache {
                         normal2: normal2.as_ref().or(normal.as_ref()).unwrap_or(&flat_normal),
                     },
                     MaterialUploadMode {
+                        unlit: slot.shader.unlit(),
                         surface,
                         force_opaque: slot.force_opaque,
                         render_mode: slot.render_mode,
@@ -137,6 +138,7 @@ impl UploadCache {
                         normal2: &flat_normal,
                     },
                     MaterialUploadMode {
+                        unlit: None,
                         surface: None,
                         force_opaque: true,
                         render_mode: RenderMode::Opaque,
@@ -577,6 +579,7 @@ pub fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
             lightmap_bump_step: 0.0,
             color: Vec3::new(1.0, 1.0, 1.0),
             blend_alpha: 0.0,
+            opacity: 1.0,
         }
     })
 }

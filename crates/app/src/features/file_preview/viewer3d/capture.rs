@@ -274,11 +274,13 @@ fn material_info(slot: &MaterialSlot) -> Value {
         "shader": match &slot.shader {
             crate::bridge::materials::MaterialShader::Unknown => "unknown",
             crate::bridge::materials::MaterialShader::Surface(name) => name,
+            crate::bridge::materials::MaterialShader::Unlit(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Lightmapped(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Mirror(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Water(material) => &material.shader,
         },
         "water": water,
+        "unlit": slot.shader.unlit().map(|material|json!({"vertex_color":material.vertex_color,"vertex_alpha":material.vertex_alpha})),
         "mirror": slot.shader.mirror().map(|mirror| json!({"shader":mirror.shader,"parameters":mirror.parameters,"fresnel_power":mirror.fresnel_power,"min_reflectivity":mirror.min_reflectivity,"max_reflectivity":mirror.max_reflectivity,"normal_map_path":mirror.normal_map_path,"unsupported_features":mirror.unsupported_features})),
         "render_mode": format!("{:?}", slot.render_mode),
         "force_opaque": slot.force_opaque,

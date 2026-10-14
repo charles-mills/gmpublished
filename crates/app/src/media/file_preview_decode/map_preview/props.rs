@@ -964,6 +964,7 @@ pub(in super::super) fn bake_prop_door_meshes(
                         lightmap_bump_step: 0.0,
                         color: lighting.evaluate(closed_normal),
                         blend_alpha: 0.0,
+                        opacity: 1.0,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1306,6 +1307,7 @@ pub(in super::super) fn bake_prop_placement(
                 lightmap_bump_step: 0.0,
                 color: lighting.evaluate(normal),
                 blend_alpha: 0.0,
+                opacity: 1.0,
             }
         }));
         let index_start = target.indices.len();

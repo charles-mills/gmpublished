@@ -84,6 +84,21 @@ pub fn parts(
     parts
 }
 
+fn skybox_parts(vertices: &[super::ModelVertex], indices: &[u32]) -> Vec<Part> {
+    parts(
+        vertices,
+        indices,
+        &MapMeshVisibility {
+            always_visible: vec![gmpublished_domain::scene::map::MapMeshIndexRange {
+                face: 0,
+                start: 0,
+                count: indices.len() as u32,
+            }],
+            clusters: Vec::new(),
+        },
+    )
+}
+
 pub fn build_parts(
     upload: &mut UploadedModel,
     scene: &super::RenderScene,
@@ -93,7 +108,7 @@ pub fn build_parts(
         return;
     };
     for mesh in &mut upload.meshes {
-        if mesh.door_index.is_some() || mesh.map_skybox {
+        if mesh.door_index.is_some() {
             continue;
         }
         if !matches!(
@@ -102,13 +117,21 @@ pub fn build_parts(
         ) {
             continue;
         }
-        let Some(source) = scene.meshes.get(mesh.scene_mesh_index) else {
+        let source = if mesh.map_skybox {
+            map.map_skybox_meshes.get(mesh.scene_mesh_index)
+        } else {
+            scene.meshes.get(mesh.scene_mesh_index)
+        };
+        let Some(source) = source else {
             continue;
         };
-        let Some(visibility) = map.mesh_visibility.get(mesh.scene_mesh_index) else {
-            continue;
-        };
-        mesh.transparent_parts = parts(&source.vertices, &source.indices, visibility);
+        if mesh.map_skybox {
+            // Skybox meshes are material batches outside world PVS. Sort their
+            // individual triangles in the sky camera just like world cards.
+            mesh.transparent_parts = skybox_parts(&source.vertices, &source.indices);
+        } else if let Some(visibility) = map.mesh_visibility.get(mesh.scene_mesh_index) {
+            mesh.transparent_parts = parts(&source.vertices, &source.indices, visibility);
+        }
     }
 }
 
@@ -249,9 +272,13 @@ fn queue(
             });
         }
     }
+    sort_draws(&mut draws);
+    draws
+}
+
+fn sort_draws(draws: &mut [Draw]) {
     // Stable ordering preserves authored order for coplanar/tied primitives.
     draws.sort_by(|a, b| b.depth.total_cmp(&a.depth));
-    draws
 }
 
 #[cfg(test)]
@@ -268,6 +295,7 @@ mod tests {
             lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
+            opacity: 1.0,
         };
         let vertices = vec![
             make(300.0),
@@ -308,6 +336,7 @@ mod tests {
             lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
+            opacity: 1.0,
         };
         let vertices = vec![
             make(300.0),
@@ -346,5 +375,63 @@ mod tests {
         assert_eq!(selected[1].indices, 3..6);
         assert_eq!(selected[1].centre[2], 100.0);
         assert_eq!(selected[1].clusters.as_deref(), Some([2, 9].as_slice()));
+    }
+
+    #[test]
+    fn skybox_material_batches_sort_individual_triangles_in_each_camera() {
+        let make = |y| super::super::ModelVertex {
+            position: Vec3::new(0.0, y, 0.0),
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            uv: [0.0; 2],
+            lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
+            color: Vec3::splat(1.0),
+            blend_alpha: 0.0,
+            opacity: 1.0,
+        };
+        let vertices = [
+            make(100.0),
+            make(100.0),
+            make(100.0),
+            make(300.0),
+            make(300.0),
+            make(300.0),
+        ];
+        let selected = skybox_parts(&vertices, &[0, 1, 2, 3, 4, 5]);
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|part| part.clusters.is_none()));
+        for direction in [1.0, -1.0] {
+            let mut uniforms = Uniforms {
+                view_proj: [[0.0; 4]; 4],
+                light: [0.0; 4],
+                camera_position: [0.0; 4],
+                fog_color: [0.0; 4],
+                fog_params: [0.0; 4],
+                water_time_sky_tint: [0.0; 4],
+                water_depth_params: [0.0; 4],
+                clip_plane: [0.0; 4],
+                medium_plane: [0.0; 4],
+                viewport: [0.0; 4],
+            };
+            uniforms.view_proj[1][3] = direction;
+            let item = DrawItem {
+                mesh_index: 0,
+                material_slot: 0,
+                distance_squared: 0.0,
+            };
+            let mut draws = selected
+                .iter()
+                .map(|part| Draw {
+                    primitive: Primitive::Mesh(item, Some(part.indices.clone())),
+                    depth: depth(uniforms, part.centre),
+                    additive: false,
+                })
+                .collect::<Vec<_>>();
+            sort_draws(&mut draws);
+            let Primitive::Mesh(_, Some(first)) = &draws[0].primitive else {
+                panic!("triangle part");
+            };
+            assert_eq!(first.start, if direction > 0.0 { 3 } else { 0 });
+        }
     }
 }

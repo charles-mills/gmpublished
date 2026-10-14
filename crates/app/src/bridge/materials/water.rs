@@ -11,9 +11,18 @@ pub enum MaterialShader {
     #[default]
     Unknown,
     Surface(String),
+    Unlit(Arc<UnlitMaterial>),
     Lightmapped(Arc<LightmappedMaterial>),
     Water(Arc<WaterMaterial>),
     Mirror(Arc<super::MirrorMaterial>),
+}
+
+/// UnlitGeneric's authored vertex modulation is independent of baked lighting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnlitMaterial {
+    pub shader: String,
+    pub vertex_color: bool,
+    pub vertex_alpha: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +35,14 @@ pub struct LightmappedMaterial {
     pub transform: [[f32; 4]; 2],
 }
 impl MaterialShader {
+    pub(crate) fn unlit(&self) -> Option<&UnlitMaterial> {
+        if let Self::Unlit(material) = self {
+            Some(material)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn lightmapped(&self) -> Option<&LightmappedMaterial> {
         if let Self::Lightmapped(material) = self {
             Some(material)
@@ -370,6 +387,16 @@ impl MaterialResolver {
             return MaterialShader::Mirror(Arc::new(self.resolve_mirror(material)));
         }
         if !is_water_shader(&material.shader) {
+            if ["UnlitGeneric", "UnlitGeneric_DX9", "UnlitGeneric_DX8"]
+                .iter()
+                .any(|name| material.shader.eq_ignore_ascii_case(name))
+            {
+                return MaterialShader::Unlit(Arc::new(UnlitMaterial {
+                    shader: material.shader.clone(),
+                    vertex_color: vmt_bool(material.parameter("$vertexcolor")),
+                    vertex_alpha: vmt_bool(material.parameter("$vertexalpha")),
+                }));
+            }
             if [
                 "LightmappedGeneric",
                 "LightmappedGeneric_DX9",

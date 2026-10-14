@@ -29,6 +29,8 @@ pub struct ModelVertex {
     pub lightmap_bump_step: f32,
     pub color: Vec3,
     pub blend_alpha: f32,
+    /// Authored vertex opacity, separate from WorldVertexTransition blending.
+    pub opacity: f32,
 }
 
 impl From<&vformats::mdl::ModelVertex> for ModelVertex {
@@ -41,6 +43,7 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
             lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
+            opacity: 1.0,
         }
     }
 }
@@ -685,6 +688,7 @@ mod tests {
             lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
+            opacity: 1.0,
         }
     }
 

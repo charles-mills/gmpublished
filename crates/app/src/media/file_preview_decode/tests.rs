@@ -668,6 +668,7 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
             lightmap_uv: [0.0; 2],
             lightmap_bump_step: 0.0,
             blend_alpha: 0.0,
+            opacity: 1.0,
         }],
         indices: vec![0],
         material_index: 0,
@@ -1048,6 +1049,7 @@ fn prop_bake_applies_skin_table_to_material_slot() {
     assert_vec3_close(mesh.vertices[0].position, Vec3::new(10.0, 21.0, 30.0));
     assert_eq!(mesh.vertices[0].lightmap_uv, [0.0; 2]);
     assert_eq!(mesh.vertices[0].blend_alpha, 0.0);
+    assert_eq!(mesh.vertices[0].opacity, 1.0);
 }
 
 #[test]
@@ -1824,6 +1826,7 @@ fn model_vertex(position: Vec3) -> ModelVertex {
         lightmap_bump_step: 0.0,
         color: Vec3::splat(1.0),
         blend_alpha: 1.0,
+        opacity: 1.0,
     }
 }
 

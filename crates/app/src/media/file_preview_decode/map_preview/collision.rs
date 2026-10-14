@@ -160,6 +160,7 @@ impl PhyDebugMeshBuilder {
                 lightmap_bump_step: 0.0,
                 color: PHY_DEBUG_VERTEX_COLOR,
                 blend_alpha: 0.0,
+                opacity: 1.0,
             }));
         self.indices
             .extend_from_slice(&[base, base.saturating_add(1), base.saturating_add(2)]);

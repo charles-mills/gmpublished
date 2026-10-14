@@ -15,7 +15,9 @@ mod sibling_gma;
 mod texture;
 mod water;
 pub use mirror::MirrorMaterial;
-pub use water::{LightmappedMaterial, MaterialShader, WaterMaterial, WaterNormalMap};
+pub use water::{
+    LightmappedMaterial, MaterialShader, UnlitMaterial, WaterMaterial, WaterNormalMap,
+};
 
 pub use texture::decode_vtf_rgba;
 use texture::{
@@ -650,18 +652,23 @@ impl MaterialResolver {
                 )
             });
 
-        (texture.is_some() || texture2.is_some()).then_some(ResolvedMaterialTextures {
-            shader: self.resolve_shader(
-                &material,
-                texture
-                    .as_ref()
-                    .is_some_and(|texture| !texture.is_water_fallback()),
-            ),
-            texture,
-            texture2,
-            force_opaque: render_mode.force_opaque(),
-            render_mode,
-        })
+        let shader = self.resolve_shader(
+            &material,
+            texture
+                .as_ref()
+                .is_some_and(|texture| !texture.is_water_fallback()),
+        );
+        // A missing bitmap changes the fallback image, not UnlitGeneric's
+        // authored shading and blend identity.
+        (texture.is_some() || texture2.is_some() || shader.unlit().is_some()).then_some(
+            ResolvedMaterialTextures {
+                shader,
+                texture,
+                texture2,
+                force_opaque: render_mode.force_opaque(),
+                render_mode,
+            },
+        )
     }
 
     fn resolve_primary_material_bytes(
@@ -1216,7 +1223,9 @@ impl EffectiveMaterial {
             }
         } else if vmt_bool(self.parameter("$additive")) {
             RenderMode::Additive
-        } else if vmt_bool(self.parameter("$translucent")) {
+        } else if vmt_bool(self.parameter("$translucent"))
+            || vmt_bool(self.parameter("$vertexalpha"))
+        {
             RenderMode::Translucent
         } else if vmt_bool(self.parameter("$alphatest")) {
             RenderMode::Cutout

@@ -1087,6 +1087,7 @@ mod lightmap_tests {
                     lightmap_uv: [0.25, 0.75],
                     lightmap_bump_step: 0.0,
                     blend_alpha: 0.0,
+                    opacity: 1.0,
                 },
                 lightmap_block: Some(0),
             }],

@@ -25,6 +25,7 @@ struct Uniforms {
 
 struct Material {
     flags: vec4<u32>,
+    surface_flags: vec4<u32>,
     water_fog: vec4<f32>,
     water_optics: vec4<f32>,
     water_reflect: vec4<f32>,

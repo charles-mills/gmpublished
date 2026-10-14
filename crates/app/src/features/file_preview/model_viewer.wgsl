@@ -17,6 +17,7 @@ struct Uniforms {
 
 struct Material {
     flags: vec4<u32>,
+    surface_flags: vec4<u32>,
     water_fog: vec4<f32>,
     water_optics: vec4<f32>,
     water_reflect: vec4<f32>,
@@ -46,6 +47,7 @@ struct VertexInput {
     @location(4) color: vec3<f32>,
     @location(5) blend_alpha: f32,
     @location(6) lightmap_bump_step:f32,
+    @location(7) opacity:f32,
 }
 
 struct VertexOutput {
@@ -57,6 +59,7 @@ struct VertexOutput {
     @location(4) blend_alpha: f32,
     @location(5) world_position: vec3<f32>,
     @location(6) lightmap_bump_step:f32,
+    @location(7) opacity:f32,
 }
 
 @vertex
@@ -69,23 +72,28 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.lightmap_bump_step=input.lightmap_bump_step;
     out.color = input.color;
     out.blend_alpha = input.blend_alpha;
+    out.opacity = input.opacity;
     out.world_position = input.position;
     return out;
 }
 
 fn shade(input: VertexOutput) -> vec4<f32> {
     var albedo = textureSample(base_texture, base_sampler, input.uv);
-    if input.blend_alpha > 0.0 {
+    if material.surface_flags.x == 0u && input.blend_alpha > 0.0 {
         let albedo2 = textureSample(base_texture2, base_sampler, input.uv);
         albedo = mix(albedo, albedo2, clamp(input.blend_alpha, 0.0, 1.0));
     }
+    if material.surface_flags.z != 0u { albedo.a *= clamp(input.opacity,0.0,1.0); }
     if material.flags.x != 0u {
         albedo.a = 1.0;
     } else if material.flags.y != 0u && albedo.a < 0.5 {
         discard;
     }
     var lit: vec3<f32>;
-    if input.lightmap_uv.x != 0.0 || input.lightmap_uv.y != 0.0 {
+    if material.surface_flags.x != 0u {
+        lit = albedo.rgb;
+        if material.surface_flags.y != 0u { lit *= input.color; }
+    } else if input.lightmap_uv.x != 0.0 || input.lightmap_uv.y != 0.0 {
         var lightmap = textureSample(lightmap_texture, lightmap_sampler, input.lightmap_uv).rgb * lightmap_scale();
         if material.flags.z != 0u && input.lightmap_bump_step > 0.0 {
             let uv = vec2<f32>(dot(vec4<f32>(input.uv,0.0,1.0),material.water_bump_s),dot(vec4<f32>(input.uv,0.0,1.0),material.water_bump_t));
@@ -108,7 +116,7 @@ fn shade(input: VertexOutput) -> vec4<f32> {
     } else {
         lit = albedo.rgb * input.color * 2.0;
     }
-    if uniforms.light.w < 0.0 { lit = albedo.rgb; }
+    if uniforms.light.w < 0.0 && material.surface_flags.x == 0u { lit = albedo.rgb; }
     lit = mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position,1.0/input.clip_position.w));
     if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
     return vec4<f32>(lit, albedo.a);

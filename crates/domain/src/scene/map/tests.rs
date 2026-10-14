@@ -211,6 +211,7 @@ fn displacement_tessellation_matches_base_face_fan_winding() {
         for row in 0..side {
             grid.push(DisplacementGridVertex {
                 position: Vec3::new(column as f32, row as f32, 0.0),
+                base_position: Vec3::new(column as f32, row as f32, 0.0),
                 alpha: 0.0,
             });
         }
@@ -228,6 +229,193 @@ fn displacement_tessellation_matches_base_face_fan_winding() {
             triangle.iter().map(|v| v.position).collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+fn displacement_textures_follow_base_quad_under_lateral_and_vertical_offsets() {
+    let corners = [
+        Vec3::new(16.0, -32.0, 8.0),
+        Vec3::new(208.0, 16.0, 32.0),
+        Vec3::new(176.0, 112.0, 80.0),
+        Vec3::new(-16.0, 64.0, 56.0),
+    ];
+    for start_corner in 0..4 {
+        let mut bsp = displacement_test_bsp(2, corners, start_corner);
+        let texinfo = TexInfo {
+            texture_vecs: [[0.5, -0.25, 0.75, 19.0], [-0.125, 0.625, -0.5, -7.0]],
+            lightmap_vecs: [[0.0; 4]; 2],
+            flags: 0,
+            texdata: -1,
+        };
+        for (index, vertex) in bsp.displacement_verts.iter_mut().enumerate() {
+            vertex.vector = [0.6, 0.0, 0.8];
+            vertex.dist = (index + 1) as f32 * 3.0;
+            vertex.alpha = index as f32 * 10.0;
+        }
+        let displacement = &bsp.displacements[0];
+        let vertices = displacement_vertices(&bsp, &bsp.faces[0], displacement).unwrap();
+        let mut meshes = BuildMeshes::default();
+        let mesh = meshes.get_or_insert(0, GeometryPartition::Visible, false);
+        super::mesh::append_displacement(
+            &bsp,
+            &bsp.faces[0],
+            displacement,
+            &texinfo,
+            Vec3::new(0.0, 0.0, 1.0),
+            mesh,
+            None,
+        )
+        .unwrap();
+        assert_eq!(mesh.vertices.len(), 4 * 4 * 6);
+        for (built, grid_vertex) in mesh.vertices.iter().zip(&vertices) {
+            let u = grid_vertex.column as f32 / 4.0;
+            let v = grid_vertex.row as f32 / 4.0;
+            let corner = |index| corners[(start_corner + index) % 4];
+            let base = corner(0) * ((1.0 - u) * (1.0 - v))
+                + corner(1) * (u * (1.0 - v))
+                + corner(2) * (u * v)
+                + corner(3) * ((1.0 - u) * v);
+            let disp_index = grid_vertex.column * 5 + grid_vertex.row;
+            let offset = Vec3::new(0.6, 0.0, 0.8) * ((disp_index + 1) as f32 * 3.0);
+            assert!((built.vertex.position - base - offset).length_squared() < 1.0e-8);
+            for (actual, transform) in [built.vertex.tex_s, built.vertex.tex_t]
+                .into_iter()
+                .zip(texinfo.texture_vecs)
+            {
+                let expected = base[0] * transform[0]
+                    + base[1] * transform[1]
+                    + base[2] * transform[2]
+                    + transform[3];
+                assert!(
+                    (actual - expected).abs() < 1.0e-5,
+                    "{start_corner}: {actual} vs {expected}"
+                );
+            }
+            assert_eq!(built.vertex.blend_alpha, disp_index as f32 * 10.0 / 255.0);
+        }
+    }
+}
+
+#[test]
+fn displacement_triangles_match_source_checkerboard_for_all_supported_powers() {
+    for power in 2..=4 {
+        let steps = 1 << power;
+        let bsp = displacement_test_bsp(
+            power,
+            [
+                Vec3::ZERO,
+                Vec3::new(steps as f32, 0.0, 0.0),
+                Vec3::new(steps as f32, steps as f32, 0.0),
+                Vec3::new(0.0, steps as f32, 0.0),
+            ],
+            0,
+        );
+        let vertices = displacement_vertices(&bsp, &bsp.faces[0], &bsp.displacements[0]).unwrap();
+        let mut actual = vertices
+            .chunks_exact(3)
+            .map(|triangle| {
+                let mut indices = triangle
+                    .iter()
+                    .map(|vertex| vertex.row * (steps + 1) + vertex.column)
+                    .collect::<Vec<_>>();
+                indices.sort_unstable();
+                indices
+            })
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        // Source indexes its grid across rows. Compare unordered triangles so
+        // traversal order and cyclic rotations cannot disguise a diagonal error.
+        for y in 0..steps {
+            for x in 0..steps {
+                let a = y * (steps + 1) + x;
+                let b = a + 1;
+                let c = a + steps + 1;
+                let d = c + 1;
+                let triangles = if (x + y) % 2 == 0 {
+                    [[a, b, d], [a, d, c]]
+                } else {
+                    [[a, b, c], [b, d, c]]
+                };
+                for mut triangle in triangles {
+                    triangle.sort_unstable();
+                    expected.push(triangle.to_vec());
+                }
+            }
+        }
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "displacement power {power}");
+    }
+}
+
+#[test]
+fn displacement_walk_collision_uses_the_rendered_checkerboard_surface() {
+    let mut bsp = displacement_test_bsp(
+        2,
+        [
+            Vec3::ZERO,
+            Vec3::new(256.0, 0.0, 0.0),
+            Vec3::new(256.0, 256.0, 0.0),
+            Vec3::new(0.0, 256.0, 0.0),
+        ],
+        0,
+    );
+    bsp.displacement_verts[6].dist = 64.0;
+    let mut collision = empty_walk_collision();
+    collision.displacements = super::walk::walk_displacements_from_bsp(&bsp);
+    assert_eq!(collision.displacements.len(), 1);
+    for (x, y, expected_height) in [(48.0, 16.0, 16.0), (32.0, 96.0, 32.0)] {
+        let hit = collision.trace_aabb(Vec3::new(x, y, 128.0), Vec3::new(x, y, -64.0), Vec3::ZERO);
+        assert!(!hit.start_solid && hit.fraction < 1.0, "{hit:?}");
+        assert!(
+            (hit.end_position[2] - expected_height).abs() < 1.0e-4,
+            "at {x},{y}: expected ground {expected_height}, got {hit:?}"
+        );
+    }
+}
+
+fn displacement_test_bsp(power: i32, corners: [Vec3; 4], start_corner: usize) -> MapBsp {
+    let mut bsp = read_fixture_bsp(&bsp_fixture(None));
+    bsp.vertices = corners.to_vec();
+    bsp.edges = vec![[0, 1], [1, 2], [2, 3], [3, 0]];
+    bsp.surfedges = vec![0, 1, 2, 3];
+    bsp.faces = vec![Face {
+        plane: 0,
+        side: 0,
+        on_node: 0,
+        first_edge: 0,
+        edge_count: 4,
+        texinfo: -1,
+        displacement: 0,
+        styles: [255; 4],
+        light_offset: -1,
+        area: 0.0,
+        lightmap_mins: [0; 2],
+        lightmap_size: [0; 2],
+        original_face: -1,
+    }];
+    bsp.displacements = vec![DispInfo {
+        start_position: corners[start_corner].into(),
+        vert_start: 0,
+        tri_start: 0,
+        power,
+        min_tess: 0,
+        smoothing_angle: 0.0,
+        contents: contents_flags::SOLID,
+        map_face: 0,
+        lightmap_alpha_start: 0,
+        lightmap_sample_position_start: 0,
+    }];
+    let side = (1 << power) + 1;
+    bsp.displacement_verts = vec![
+        DispVert {
+            vector: [0.0, 0.0, 1.0],
+            dist: 0.0,
+            alpha: 0.0,
+        };
+        side * side
+    ];
+    bsp
 }
 
 #[test]
@@ -529,6 +717,133 @@ fn walk_trace_displacement_triangle_hits_from_above() {
     assert!(hit.fraction > 0.53 && hit.fraction < 0.54, "{hit:?}");
     assert!(hit.normal[2] > 0.99, "{hit:?}");
     assert!((hit.end_position[2] - 36.0).abs() < 0.1, "{hit:?}");
+}
+
+#[test]
+fn sloped_displacement_rays_touch_exactly_and_hulls_back_off_along_the_plane_normal() {
+    let triangle = MapWalkTriangle::new([
+        Vec3::new(-1024.0, -1024.0, -512.0),
+        Vec3::new(1024.0, -1024.0, 512.0),
+        Vec3::new(0.0, 1024.0, 0.0),
+    ])
+    .unwrap();
+    let mut collision = empty_walk_collision();
+    collision.displacements.push(MapWalkDisplacement {
+        triangles: vec![triangle],
+        bounds_min: triangle.bounds_min,
+        bounds_max: triangle.bounds_max,
+    });
+    let normal = Vec3::new(-1.0, 0.0, 2.0).normalize().unwrap();
+    let extents = Vec3::new(16.0, 12.0, 36.0);
+    let radius = 88.0 / 5.0_f32.sqrt();
+    // A large tangential component distinguishes distance along the sweep
+    // from the perpendicular plane tolerance. Backface approaches pass through.
+    for (start, end, facing) in [
+        (
+            Vec3::new(0.0, 0.0, 256.0),
+            Vec3::new(128.0, 512.0, -128.0),
+            1.0,
+        ),
+        (
+            Vec3::new(0.0, 0.0, -256.0),
+            Vec3::new(128.0, 512.0, 128.0),
+            -1.0,
+        ),
+    ] {
+        let ray = collision.trace_aabb(start, end, Vec3::ZERO);
+        let hull = collision.trace_aabb(start, end, extents);
+        if facing < 0.0 {
+            for trace in [ray, hull] {
+                assert!(!trace.start_solid, "{trace:?}");
+                assert_eq!(trace.fraction, 1.0, "{trace:?}");
+                assert_eq!(trace.end_position, end, "{trace:?}");
+            }
+            continue;
+        }
+        let expected_fraction = -start.dot(normal) / (end - start).dot(normal);
+        assert!(!ray.start_solid && ray.fraction < 1.0, "{ray:?}");
+        assert!((ray.fraction - expected_fraction).abs() < 1.0e-6, "{ray:?}");
+        assert!(ray.end_position.dot(normal).abs() < 3.0e-5, "{ray:?}");
+        assert!(ray.normal.dot(normal * facing) > 0.9999, "{ray:?}");
+
+        let gap = hull.end_position.dot(normal) * facing - radius;
+        assert!(
+            !hull.start_solid && hull.fraction < ray.fraction,
+            "{hull:?}"
+        );
+        assert!(
+            (gap - TRACE_PLANE_EPSILON).abs() < 3.0e-5,
+            "expected normal gap {TRACE_PLANE_EPSILON}, got {gap}: {hull:?}"
+        );
+        assert!(hull.normal.dot(normal * facing) > 0.9999, "{hull:?}");
+    }
+}
+
+#[test]
+fn displacement_static_hull_overlap_is_solid_but_initial_swept_overlap_is_ignored() {
+    let triangle = MapWalkTriangle::new([
+        Vec3::new(-128.0, -128.0, 0.0),
+        Vec3::new(128.0, -128.0, 0.0),
+        Vec3::new(0.0, 128.0, 0.0),
+    ])
+    .unwrap();
+    let mut collision = empty_walk_collision();
+    collision.displacements.push(MapWalkDisplacement {
+        triangles: vec![triangle],
+        bounds_min: triangle.bounds_min,
+        bounds_max: triangle.bounds_max,
+    });
+    let center = Vec3::new(0.0, 0.0, 4.0);
+    let extents = Vec3::splat(8.0);
+    let stationary = collision.trace_aabb(center, center, extents);
+    assert!(stationary.start_solid, "{stationary:?}");
+    assert_eq!(stationary.fraction, 0.0);
+
+    for end in [Vec3::new(0.0, 0.0, -24.0), Vec3::new(0.0, 0.0, 24.0)] {
+        let swept = collision.trace_aabb(center, end, extents);
+        assert!(!swept.start_solid, "{swept:?}");
+        assert_eq!(swept.fraction, 1.0, "{swept:?}");
+        assert_eq!(swept.end_position, end);
+    }
+    let stationary_ray = collision.trace_aabb(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
+    assert!(!stationary_ray.start_solid);
+    assert_eq!(stationary_ray.fraction, 1.0);
+
+    // Inside the triangle's bounds, but outside the triangle itself.
+    let outside = Vec3::new(100.0, 100.0, 4.0);
+    let stationary_outside = collision.trace_aabb(outside, outside, extents);
+    assert!(!stationary_outside.start_solid, "{stationary_outside:?}");
+    assert_eq!(stationary_outside.fraction, 1.0);
+}
+
+#[test]
+fn brush_start_solid_preserves_exit_and_nearest_collision_independent_of_brush_order() {
+    let start = Vec3::ZERO;
+    let end = Vec3::new(20.0, 0.0, 0.0);
+    let extents = Vec3::splat(1.0);
+    let mut collision = box_collision(Vec3::splat(-4.0), Vec3::splat(4.0));
+    let exiting = collision.trace_aabb(start, end, extents);
+    assert!(exiting.start_solid);
+    assert_eq!(exiting.fraction, 1.0);
+    assert_eq!(exiting.end_position, end);
+    let contained = collision.trace_aabb(start, Vec3::new(1.0, 0.0, 0.0), extents);
+    assert!(contained.start_solid);
+    assert_eq!(contained.fraction, 0.0);
+    assert_eq!(contained.end_position, start);
+
+    collision
+        .brushes
+        .extend(box_collision(Vec3::new(10.0, -16.0, -16.0), Vec3::new(12.0, 16.0, 16.0)).brushes);
+    for _ in 0..2 {
+        let hit = collision.trace_aabb(start, end, extents);
+        assert!(hit.start_solid, "{hit:?}");
+        assert!(
+            (hit.end_position[0] - (9.0 - TRACE_PLANE_EPSILON)).abs() < 1.0e-5,
+            "{hit:?}"
+        );
+        assert_eq!(hit.normal, Vec3::new(-1.0, 0.0, 0.0));
+        collision.brushes.reverse();
+    }
 }
 
 #[test]
@@ -3068,6 +3383,7 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
         lightmap_uv: [0.0; 2],
         lightmap_bump_step: 0.0,
         blend_alpha: 0.0,
+        opacity: 1.0,
     };
     let mesh = MapMesh {
         entity: false,

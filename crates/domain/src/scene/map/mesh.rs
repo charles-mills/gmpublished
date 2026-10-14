@@ -109,6 +109,7 @@ pub(super) struct BuildVertex {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DisplacementBuildVertex {
     pub(super) position: Vec3,
+    pub(super) base_position: Vec3,
     pub(super) column: usize,
     pub(super) row: usize,
     pub(super) steps: usize,
@@ -118,6 +119,7 @@ pub(super) struct DisplacementBuildVertex {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DisplacementGridVertex {
     pub(super) position: Vec3,
+    pub(super) base_position: Vec3,
     pub(super) alpha: f32,
 }
 
@@ -267,15 +269,19 @@ pub(super) fn append_displacement(
         let index = u32::try_from(mesh.vertices.len())
             .map_err(|_| BspError::TooLarge { item: "vertices" })?;
         mesh.vertices.push(BuildVertex {
-            vertex: map_vertex(
-                vertex.position,
-                normal,
-                texinfo,
-                lightmap_block.map_or([0.0; 2], |_| {
-                    displacement_lightmap_uv(vertex.column, vertex.row, vertex.steps, face)
-                }),
-                vertex.alpha,
-            ),
+            vertex: MapVertex {
+                position: vertex.position,
+                opacity: vertex.alpha,
+                ..map_vertex(
+                    vertex.base_position,
+                    normal,
+                    texinfo,
+                    lightmap_block.map_or([0.0; 2], |_| {
+                        displacement_lightmap_uv(vertex.column, vertex.row, vertex.steps, face)
+                    }),
+                    vertex.alpha,
+                )
+            },
             lightmap_block,
         });
         mesh.indices.push(index);
@@ -299,6 +305,7 @@ pub(super) fn map_vertex(
         lightmap_uv,
         lightmap_bump_step: 0.0,
         blend_alpha,
+        opacity: 1.0,
     }
 }
 
@@ -338,10 +345,19 @@ pub(super) fn tessellate_displacement_grid(
     let mut vertices = Vec::with_capacity(steps.saturating_mul(steps).saturating_mul(6));
     for column in 0..steps {
         for row in 0..steps {
-            for triangle in [
-                [(column, row), (column + 1, row), (column, row + 1)],
-                [(column + 1, row), (column + 1, row + 1), (column, row + 1)],
-            ] {
+            // Source's full-resolution mesh fans around each 2x2-cell centre.
+            let triangles = if (column + row) % 2 == 0 {
+                [
+                    [(column, row), (column + 1, row), (column + 1, row + 1)],
+                    [(column, row), (column + 1, row + 1), (column, row + 1)],
+                ]
+            } else {
+                [
+                    [(column, row), (column + 1, row), (column, row + 1)],
+                    [(column + 1, row), (column + 1, row + 1), (column, row + 1)],
+                ]
+            };
+            for triangle in triangles {
                 let mut triangle_vertices = Vec::with_capacity(3);
                 for (vertex_column, vertex_row) in triangle {
                     let Some(vertex) = grid.get(index(vertex_column, vertex_row)).copied() else {
@@ -356,6 +372,7 @@ pub(super) fn tessellate_displacement_grid(
                 for (vertex_column, vertex_row, vertex) in triangle_vertices {
                     vertices.push(DisplacementBuildVertex {
                         position: vertex.position,
+                        base_position: vertex.base_position,
                         column: vertex_column,
                         row: vertex_row,
                         steps,
@@ -398,6 +415,7 @@ pub(super) fn displacement_grid(
             let offset = Vec3::from(displacement_vertex.vector) * displacement_vertex.dist;
             DisplacementGridVertex {
                 position: (base_position + offset),
+                base_position,
                 alpha: displacement_blend_alpha(displacement_vertex.alpha),
             }
         })

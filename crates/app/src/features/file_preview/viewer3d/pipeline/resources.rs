@@ -1120,6 +1120,19 @@ pub fn skybox_face_corners(face: SkyboxFace) -> [Vec3; 4] {
     }
 }
 
+fn lightmap_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SkyboxFace, Vec3, skybox_face_corners};
@@ -1169,18 +1182,5 @@ mod tests {
                 ],
             ]
         );
-    }
-}
-
-fn lightmap_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
     }
 }

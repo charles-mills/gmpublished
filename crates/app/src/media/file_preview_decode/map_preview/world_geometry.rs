@@ -62,6 +62,7 @@ pub(in super::super) fn map_mesh_to_model_mesh(
                 lightmap_bump_step: vertex.lightmap_bump_step,
                 color: Vec3::splat(1.0),
                 blend_alpha: vertex.blend_alpha,
+                opacity: vertex.opacity,
             })
             .collect(),
         indices: mesh.indices.clone(),

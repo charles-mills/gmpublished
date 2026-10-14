@@ -2157,3 +2157,69 @@ fn lightmapped_patch_preserves_linear_bumps_and_diffuse_controls() {
         lit.normal.as_ref().unwrap()
     ));
 }
+
+#[test]
+fn unlit_vertex_alpha_blends_partial_texture_alpha_without_changing_opaque_materials() {
+    let rgba = vec![
+        25, 50, 75, 0, 25, 50, 75, 105, 25, 50, 75, 64, 25, 50, 75, 255,
+    ];
+    let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Unlit Alpha")
+        .entry("materials/unlit/base.vmt", br#"UnlitGeneric { "$basetexture" "unlit/shared" "$vertexalpha" "1" "$vertexcolor" "1" }"#.to_vec())
+        .entry("materials/unlit/opaque.vmt", br#"UnlitGeneric { "$basetexture" "unlit/shared" "$vertexalpha" "0" }"#.to_vec())
+        .entry("materials/unlit/shared.vtf",create_vtf_bytes(&rgba)).build()).unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let blended = resolver.resolve_primary(&[], "unlit/base").unwrap();
+    let opaque = resolver.resolve_primary(&[], "unlit/opaque").unwrap();
+    let with_base2 = resolver.resolve_with_base2(&[], "unlit/base").unwrap();
+    assert_eq!(blended.render_mode, RenderMode::Translucent);
+    assert!(!blended.force_opaque);
+    assert_eq!(texture_rgba(&blended.texture), rgba);
+    assert_eq!(texture_rgba(with_base2.texture.as_ref().unwrap()), rgba);
+    let unlit = blended.shader.unlit().unwrap();
+    assert!(unlit.vertex_alpha && unlit.vertex_color);
+    assert_eq!(opaque.render_mode, RenderMode::Opaque);
+    assert!(opaque.force_opaque);
+    assert!(
+        texture_rgba(&opaque.texture)
+            .chunks_exact(4)
+            .all(|p| p[3] == 255)
+    );
+    assert!(!Arc::ptr_eq(&opaque.texture, &blended.texture));
+}
+
+#[test]
+fn unlit_patch_inherits_identity_and_overrides_vertex_flags() {
+    let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Unlit Patch")
+        .entry("materials/unlit/base.vmt",br#"uNlItGeNeRiC_DX9 { "$basetexture" "unlit/shared" "$vertexalpha" "1" "$vertexcolor" "0" }"#.to_vec())
+        .entry("materials/unlit/inherited.vmt",br#"patch { include "materials/unlit/base.vmt" insert { "$vertexalpha" "0" "$vertexcolor" "1" } }"#.to_vec())
+        .entry("materials/unlit/replaced.vmt",br#"patch { include "materials/unlit/base.vmt" replace { "$vertexalpha" "0" "$vertexcolor" "1" } }"#.to_vec())
+        .entry("materials/unlit/shared.vtf",create_vtf_bytes(&[25,50,75,105].repeat(4))).build()).unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let inherited = resolver.resolve_with_base2(&[], "unlit/inherited").unwrap();
+    assert_eq!(inherited.render_mode, RenderMode::Translucent);
+    let unlit = inherited.shader.unlit().unwrap();
+    assert!(unlit.vertex_alpha && !unlit.vertex_color);
+    assert_eq!(unlit.shader, "uNlItGeNeRiC_DX9");
+    let replaced = resolver.resolve_with_base2(&[], "unlit/replaced").unwrap();
+    assert_eq!(replaced.render_mode, RenderMode::Opaque);
+    let unlit = replaced.shader.unlit().unwrap();
+    assert!(!unlit.vertex_alpha && unlit.vertex_color);
+}
+
+#[test]
+fn missing_unlit_texture_retains_authored_shading_and_blending_identity() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Missing Unlit")
+            .entry(
+                "materials/unlit/missing.vmt",
+                br#"UnlitGeneric { "$basetexture" "does_not_exist" "$vertexalpha" "1" }"#.to_vec(),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let material = resolver.resolve_with_base2(&[], "unlit/missing").unwrap();
+    assert!(material.shader.unlit().unwrap().vertex_alpha);
+    assert_eq!(material.render_mode, RenderMode::Translucent);
+    assert!(material.texture.is_none());
+}

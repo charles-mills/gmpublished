@@ -221,6 +221,7 @@ mod tests {
             lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
+            opacity: 1.0,
         };
         let mut vertices = vec![make(-160.0); 3];
         vertices[1].position[0] = 64.0;
