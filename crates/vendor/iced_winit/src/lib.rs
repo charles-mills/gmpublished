@@ -243,7 +243,10 @@ where
         ) {
             self.process_event(
                 event_loop,
-                Event::EventLoopAwakened(winit::event::Event::DeviceEvent { device_id, event }),
+                Event::EventLoopAwakened(winit::event::Event::DeviceEvent {
+                    device_id,
+                    event,
+                }),
             );
         }
 
@@ -761,8 +764,14 @@ async fn run_instance<P>(
                         ..
                     } => {
                         for (id, window) in window_manager.iter_mut() {
-                            if window.cursor_captured && window.raw.has_focus() {
-                                events.push((id, core::Event::Mouse(core::mouse::Event::Motion { delta })));
+                            if window.cursor_captured && window.raw.has_focus()
+                            {
+                                events.push((
+                                    id,
+                                    core::Event::Mouse(
+                                        core::mouse::Event::Motion { delta },
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -1085,18 +1094,26 @@ async fn run_instance<P>(
 
                         // Keep the GUI pointer at its pre-capture position. Relative
                         // device motion, not absolute cursor events, drives the camera.
-                        if window.cursor_captured && matches!(window_event,
-                            winit::event::WindowEvent::CursorMoved { .. }
-                            | winit::event::WindowEvent::CursorEntered { .. }
-                            | winit::event::WindowEvent::CursorLeft { .. }) {
+                        if window.cursor_captured
+                            && matches!(
+                                window_event,
+                                winit::event::WindowEvent::CursorMoved { .. }
+                                    | winit::event::WindowEvent::CursorEntered { .. }
+                                    | winit::event::WindowEvent::CursorLeft { .. }
+                            )
+                        {
                             continue;
                         }
 
                         match window_event {
                             winit::event::WindowEvent::Focused(false) => {
                                 if window.cursor_captured {
-                                    if let Err(error) = window.capture_cursor(false) {
-                                        log::warn!("Failed to release cursor on focus loss: {error}");
+                                    if let Err(error) =
+                                        window.capture_cursor(false)
+                                    {
+                                        log::warn!(
+                                            "Failed to release cursor on focus loss: {error}"
+                                        );
                                     }
                                 }
                             }
@@ -1673,7 +1690,8 @@ fn run_action<'a, P, C>(
                 }
             }
             window::Action::CaptureCursor(id, captured, channel) => {
-                let result = window_manager.get_mut(id)
+                let result = window_manager
+                    .get_mut(id)
                     .ok_or_else(|| "Window is closed".to_owned())
                     .and_then(|window| window.capture_cursor(captured));
                 let _ = channel.send(result);

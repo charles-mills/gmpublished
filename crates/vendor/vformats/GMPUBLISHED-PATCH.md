@@ -10,3 +10,5 @@ The remaining package source is the published 0.1.0 code. Keep this patch local 
 
 
 The renderer also needs the SDK's 12-byte `dleafwaterdata_t` records (lump 36). The added typed accessor preserves surface/minimum height and the signed surface texinfo ID, using the existing bounded/decompressed record reader. A two-record regression covers stride and negative material IDs. The domain layer retains leaf-to-volume association; material resolution and fog remain outside this wire-format crate.
+
+The BSP adapter also exposes typed HDR faces (lump 58), sharing the normal face decoder so HDR light offsets are selected with the corresponding lighting lump. Regression coverage uses different LDR/HDR offsets and style lists.

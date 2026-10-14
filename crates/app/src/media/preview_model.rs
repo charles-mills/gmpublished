@@ -26,6 +26,7 @@ pub struct ModelVertex {
     pub normal: Vec3,
     pub uv: [f32; 2],
     pub lightmap_uv: [f32; 2],
+    pub lightmap_bump_step: f32,
     pub color: Vec3,
     pub blend_alpha: f32,
 }
@@ -37,6 +38,7 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
             normal: Vec3::from(vertex.normal),
             uv: vertex.uv,
             lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         }
@@ -497,12 +499,7 @@ pub struct MaterialSlot {
     pub(crate) render_mode: RenderMode,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LightmapSlot {
-    pub(crate) rgba: Vec<u8>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-}
+pub type LightmapSlot = gmpublished_domain::scene::map::LightmapAtlas;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetailSprite {
@@ -606,6 +603,7 @@ pub struct MapFog {
     pub(crate) start: f32,
     pub(crate) end: f32,
     pub(crate) max_density: f32,
+    pub(crate) radial: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -684,6 +682,7 @@ mod tests {
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         }

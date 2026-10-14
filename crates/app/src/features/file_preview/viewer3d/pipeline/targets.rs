@@ -100,6 +100,7 @@ pub fn water_bind_group(
     refraction: &wgpu::TextureView,
     depth: &wgpu::TextureView,
     reflection: &wgpu::TextureView,
+    lightmap: &super::lightmaps::Frame,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("file_preview.planar_frame"),
@@ -124,6 +125,14 @@ pub fn water_bind_group(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::TextureView(reflection),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&lightmap.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&lightmap.raw_view),
             },
         ],
     })

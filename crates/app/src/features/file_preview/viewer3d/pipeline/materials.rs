@@ -12,12 +12,13 @@ use super::{
 pub struct MaterialTextureViews<'a> {
     pub base: &'a wgpu::TextureView,
     pub base2: &'a wgpu::TextureView,
-    pub lightmap: &'a wgpu::TextureView,
     pub normal: &'a wgpu::TextureView,
+    pub normal2: &'a wgpu::TextureView,
 }
 
 #[derive(Clone, Copy)]
 pub struct MaterialUploadMode<'a> {
+    pub surface: Option<&'a crate::bridge::materials::LightmappedMaterial>,
     pub force_opaque: bool,
     pub render_mode: RenderMode,
     pub water: Option<&'a crate::bridge::materials::WaterMaterial>,
@@ -297,6 +298,7 @@ impl RenderResources {
             mapped_at_creation: false,
         });
         let material_uniform = MaterialUniform::new(mode.force_opaque, mode.render_mode)
+            .with_surface(mode.surface)
             .with_water(mode.water)
             .with_mirror(mode.mirror);
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
@@ -313,10 +315,6 @@ impl RenderResources {
                     resource: wgpu::BindingResource::TextureView(views.base2),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(views.lightmap),
-                },
-                wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&self.material_sampler),
                 },
@@ -331,6 +329,10 @@ impl RenderResources {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(views.normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(views.normal2),
                 },
             ],
         });

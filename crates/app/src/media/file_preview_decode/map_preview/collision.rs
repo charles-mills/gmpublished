@@ -157,6 +157,7 @@ impl PhyDebugMeshBuilder {
                 normal,
                 uv: [0.0; 2],
                 lightmap_uv: [0.0; 2],
+                lightmap_bump_step: 0.0,
                 color: PHY_DEBUG_VERTEX_COLOR,
                 blend_alpha: 0.0,
             }));

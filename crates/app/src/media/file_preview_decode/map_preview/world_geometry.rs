@@ -9,6 +9,7 @@ pub(in super::super) fn map_fog_to_preview(fog: gmpublished_domain::scene::map::
         start: fog.start,
         end: fog.end,
         max_density: fog.max_density,
+        radial: fog.radial,
     }
 }
 
@@ -58,6 +59,7 @@ pub(in super::super) fn map_mesh_to_model_mesh(
                     },
                 ),
                 lightmap_uv: vertex.lightmap_uv,
+                lightmap_bump_step: vertex.lightmap_bump_step,
                 color: Vec3::splat(1.0),
                 blend_alpha: vertex.blend_alpha,
             })

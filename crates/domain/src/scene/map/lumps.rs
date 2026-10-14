@@ -98,7 +98,16 @@ impl MapBsp {
 
         let raw_len = |id: usize| bsp.lump(id).map_or(0, <[u8]>::len);
         let use_ldr_lightmap = raw_len(ids::LIGHTING) > 0;
-        let want_lighting_hdr = !use_ldr_lightmap && raw_len(ids::LIGHTING_HDR) > 0;
+        let hdr_faces = raw_len(ids::FACES_HDR) > 0;
+        let want_lighting_hdr = !use_ldr_lightmap && raw_len(ids::LIGHTING_HDR) > 0 && hdr_faces;
+        if !use_ldr_lightmap && raw_len(ids::LIGHTING_HDR) > 0 && !hdr_faces {
+            log::warn!("map HDR lighting ignored: matching HDR face records are missing");
+        }
+        if want_lighting_hdr {
+            log::warn!(
+                "map HDR-only lightmaps use a display fallback until HDR exposure and targets are supported"
+            );
+        }
         let ldr_ambient =
             raw_len(ids::LEAF_AMBIENT_LIGHTING) > 0 && raw_len(ids::LEAF_AMBIENT_INDEX) > 0;
         let want_ambient_hdr = !ldr_ambient
@@ -122,7 +131,7 @@ impl MapBsp {
         decode_lumps! {
             entities = bsp.entities(limits);
             visibility = bsp.visibility(limits);
-            faces = bsp.faces(limits);
+            faces = if want_lighting_hdr { bsp.faces_hdr(limits) } else { bsp.faces(limits) };
             edges = bsp.edges(limits);
             surfedges = bsp.surfedges(limits);
             vertices = bsp.vertices(limits);

@@ -65,7 +65,7 @@ fn raw_texture_coords_are_texel_space() {
 }
 
 #[test]
-fn color_rgb_exp32_decodes_to_srgb_bytes() {
+fn color_rgb_exp32_decodes_to_source_ldr_lightmap_bytes() {
     assert_eq!(
         decode_light_sample(ColorRgbExp {
             r: 255,
@@ -73,7 +73,7 @@ fn color_rgb_exp32_decodes_to_srgb_bytes() {
             b: 0,
             exponent: 0,
         }),
-        [255, 188, 0, 255]
+        [128, 93, 0, 255]
     );
     assert_eq!(
         decode_light_sample(ColorRgbExp {
@@ -82,7 +82,7 @@ fn color_rgb_exp32_decodes_to_srgb_bytes() {
             b: 32,
             exponent: -1,
         }),
-        [137, 99, 71, 255]
+        [68, 50, 36, 255]
     );
 }
 
@@ -809,6 +809,7 @@ fn load_map_extracts_first_enabled_env_fog_controller() {
             start: 256.5,
             end: 2048.0,
             max_density: 0.75,
+            radial: false,
         })
     );
 }
@@ -930,6 +931,7 @@ fn load_map_extracts_sky_camera_origin_scale_and_fog() {
                 start: 100.0,
                 end: 900.0,
                 max_density: 0.5,
+                radial: false,
             }),
         })
     );
@@ -1887,6 +1889,11 @@ fn block(width: usize, height: usize) -> PendingLightmapBlock {
         rgba: vec![255; width * height * 4],
         width,
         height,
+        face_width: width.saturating_sub(2),
+        face_height: height.saturating_sub(2),
+        styles: Vec::new(),
+        samples: Vec::new(),
+        basis_count: 1,
     }
 }
 
@@ -3059,6 +3066,7 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
         tex_s: 0.0,
         tex_t: 0.0,
         lightmap_uv: [0.0; 2],
+        lightmap_bump_step: 0.0,
         blend_alpha: 0.0,
     };
     let mesh = MapMesh {
@@ -3163,4 +3171,66 @@ fn compiled_water_lookup_distinguishes_stacked_liquids_and_air_gap() {
         volumes.at(Vec3::new(0.0, 0.0, -64.0)).unwrap().body_index,
         1
     );
+}
+
+#[test]
+fn baked_lightstyle_entity_start_state_follows_named_light_precedence() {
+    let entities = parse_test_entities(
+        r#"
+        { "classname" "light" "style" "32" "targetname" "off" "spawnflags" "1" "pattern" "z" }
+        { "classname" "light_spot" "style" "33" "targetname" "pattern" "pattern" "az" "defaultstyle" "4" }
+        { "classname" "light" "style" "34" "targetname" "preset" "defaultstyle" "4" }
+        { "classname" "light" "style" "35" "pattern" "a" }
+    "#,
+    );
+    let atlas = lighting::bake_lightmap_atlas(
+        std::iter::empty(),
+        &[block(4, 4)],
+        Some(LightmapSource::Ldr),
+        &entities,
+    )
+    .unwrap();
+    let first = atlas.style_values(0.0);
+    let second = atlas.style_values(0.1);
+    assert_eq!(first[0], 1.0);
+    assert_eq!(first[32], 0.0);
+    assert_eq!(first[33], 0.0);
+    assert!(second[33] > 1.0);
+    assert_eq!(first[34], 1.0);
+    assert_eq!(second[34], 0.0);
+    assert_eq!(first[35], 1.0);
+    assert_eq!(first[63], 0.0);
+}
+
+#[test]
+fn hdr_lightmaps_require_and_select_matching_hdr_face_records() {
+    let mut bytes = bsp_fixture(None);
+    let mut ldr_faces = Vec::new();
+    push_face(&mut ldr_faces, 0, 0, 0, 7);
+    append_lump(&mut bytes, FACES_LUMP_INDEX, &ldr_faces, 0);
+    append_lump(&mut bytes, 53, &[255, 128, 0, 0], 0);
+    let missing = read_fixture_bsp(&bytes);
+    assert!(missing.lighting_hdr.is_empty());
+    assert_eq!(missing.faces[0].original_face, 7);
+    let mut hdr_faces = Vec::new();
+    push_face(&mut hdr_faces, 0, 0, 0, 9);
+    append_lump(&mut bytes, 58, &hdr_faces, 0);
+    let hdr = read_fixture_bsp(&bytes);
+    assert_eq!(hdr.faces[0].original_face, 9);
+    assert_eq!(hdr.lighting_hdr.len(), 1);
+    append_lump(&mut bytes, 8, &[128, 255, 0, 0], 0);
+    let ldr = read_fixture_bsp(&bytes);
+    assert_eq!(ldr.faces[0].original_face, 7);
+    assert_eq!(ldr.lighting.len(), 1);
+    assert!(ldr.lighting_hdr.is_empty());
+}
+
+#[test]
+fn radial_fog_is_preserved_for_world_and_sky_camera() {
+    let map=load_map(&bsp_fixture_with_entities(r#"
+        { "classname" "env_fog_controller" "fogenable" "1" "fogradial" "1" "fogcolor" "24 48 72" "fogstart" "10" "fogend" "200" }
+        { "classname" "sky_camera" "origin" "0 0 0" "fogenable" "1" "fogradial" "1" "fogcolor" "24 48 72" "fogstart" "10" "fogend" "200" }
+    "#)).unwrap();
+    assert!(map.fog.unwrap().radial);
+    assert!(map.sky_camera.unwrap().fog.unwrap().radial);
 }

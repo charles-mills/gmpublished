@@ -265,6 +265,7 @@ mod tests {
             normal: Vec3::new(0.0, 1.0, 0.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         };
@@ -304,6 +305,7 @@ mod tests {
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         };

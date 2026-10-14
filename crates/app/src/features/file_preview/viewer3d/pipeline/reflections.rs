@@ -115,11 +115,17 @@ pub struct ViewUniforms {
     pub bind_group: wgpu::BindGroup,
 }
 impl ViewUniforms {
-    pub fn new(device: &wgpu::Device, resources: &RenderResources) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        resources: &RenderResources,
+        lightmap: &super::lightmaps::Frame,
+    ) -> Self {
         let (buffer, bind_group) = super::resources::uniforms(
             device,
             &resources.uniform_layout,
             "file_preview.scene_view",
+            &lightmap.view,
+            &lightmap.raw_view,
         );
         Self { buffer, bind_group }
     }
@@ -141,11 +147,15 @@ pub struct SceneView {
     pub skybox_transparency: Vec<super::transparency::Draw>,
 }
 impl SceneView {
-    pub fn new(device: &wgpu::Device, resources: &RenderResources) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        resources: &RenderResources,
+        lightmap: &super::lightmaps::Frame,
+    ) -> Self {
         Self {
-            world: ViewUniforms::new(device, resources),
-            sky: ViewUniforms::new(device, resources),
-            skybox: ViewUniforms::new(device, resources),
+            world: ViewUniforms::new(device, resources, lightmap),
+            sky: ViewUniforms::new(device, resources, lightmap),
+            skybox: ViewUniforms::new(device, resources, lightmap),
             visibility: UploadedVisibility::default(),
             skybox_visibility: UploadedVisibility::default(),
             plans: None,
@@ -594,6 +604,7 @@ mod tests {
             normal,
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         };

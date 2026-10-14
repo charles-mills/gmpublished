@@ -274,6 +274,7 @@ fn material_info(slot: &MaterialSlot) -> Value {
         "shader": match &slot.shader {
             crate::bridge::materials::MaterialShader::Unknown => "unknown",
             crate::bridge::materials::MaterialShader::Surface(name) => name,
+            crate::bridge::materials::MaterialShader::Lightmapped(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Mirror(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Water(material) => &material.shader,
         },
@@ -426,7 +427,10 @@ pub fn capture_map_reference_frames() {
     });
     fs::write(
         output.join("source.patch"),
-        git_output(&["diff", "--no-ext-diff", "HEAD"]).unwrap_or_default(),
+        format!(
+            "{}\n",
+            git_output(&["diff", "--no-ext-diff", "HEAD"]).unwrap_or_default()
+        ),
     )
     .expect("record tracked source changes");
     write_manifest(&output, &manifest);
@@ -502,6 +506,7 @@ pub fn capture_map_reference_frames() {
             "fog": format!("{fog:?}"),
             "world_meshes": scene.scene.meshes.len(),
             "skybox_meshes": scene.map_skybox_meshes.len(),
+            "baked_lighting": scene.lightmap.as_ref().map(|atlas| serde_json::json!({"source":format!("{:?}",atlas.source),"dimensions":[atlas.width,atlas.height],"animated":atlas.is_animated(),"active_styles":atlas.active_styles(),"initial_weights":atlas.active_styles().into_iter().map(|index|(index.to_string(),atlas.style_values(0.0)[usize::from(index)])).collect::<std::collections::BTreeMap<_,_>>()})),
             "lightmap_crc32": scene.lightmap.as_ref().map(|atlas| format!("{:08x}", crc32fast::hash(&atlas.rgba))),
             "captures": [],
         });

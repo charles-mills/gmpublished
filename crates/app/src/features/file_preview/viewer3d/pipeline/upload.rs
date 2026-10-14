@@ -50,24 +50,6 @@ impl UploadCache {
             return;
         }
 
-        let (lightmap_rgba, lightmap_width, lightmap_height) = map
-            .and_then(|map| map.lightmap.as_ref())
-            .map_or((WHITE_RGBA.as_slice(), 1, 1), |lightmap| {
-                (
-                    lightmap.rgba.as_slice(),
-                    lightmap.width.max(1),
-                    lightmap.height.max(1),
-                )
-            });
-        let lightmap_view = resources.create_texture_view(
-            device,
-            queue,
-            "file_preview.model_viewer.lightmap",
-            lightmap_rgba,
-            lightmap_width,
-            lightmap_height,
-        );
-
         let flat_normal = resources.create_water_normal_view(device, queue, None);
         let material_uploads = scene
             .materials
@@ -89,11 +71,16 @@ impl UploadCache {
                         Some(texture),
                     )
                 });
+                let surface = slot.shader.lightmapped();
                 let water = slot.shader.water();
                 let mirror = slot.shader.mirror();
                 let normal = water
                     .and_then(|water| water.normal_map.as_deref())
                     .or_else(|| mirror.and_then(|mirror| mirror.normal_map.as_deref()))
+                    .or_else(|| surface.and_then(|surface| surface.normal.as_deref()))
+                    .map(|normal| resources.create_water_normal_view(device, queue, Some(normal)));
+                let normal2 = surface
+                    .and_then(|surface| surface.normal2.as_deref())
                     .map(|normal| resources.create_water_normal_view(device, queue, Some(normal)));
                 resources.create_material(
                     device,
@@ -101,10 +88,11 @@ impl UploadCache {
                     MaterialTextureViews {
                         base: &base_view,
                         base2: base2_view.as_ref().unwrap_or(&base_view),
-                        lightmap: &lightmap_view,
                         normal: normal.as_ref().unwrap_or(&flat_normal),
+                        normal2: normal2.as_ref().or(normal.as_ref()).unwrap_or(&flat_normal),
                     },
                     MaterialUploadMode {
+                        surface,
                         force_opaque: slot.force_opaque,
                         render_mode: slot.render_mode,
                         water,
@@ -145,10 +133,11 @@ impl UploadCache {
                     MaterialTextureViews {
                         base: &base_view,
                         base2: &base_view,
-                        lightmap: &lightmap_view,
                         normal: &flat_normal,
+                        normal2: &flat_normal,
                     },
                     MaterialUploadMode {
+                        surface: None,
                         force_opaque: true,
                         render_mode: RenderMode::Opaque,
                         water: None,
@@ -585,6 +574,7 @@ pub fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
             normal: vertex.normal,
             uv: vertex.uv,
             lightmap_uv: [0.0, 0.0],
+            lightmap_bump_step: 0.0,
             color: Vec3::new(1.0, 1.0, 1.0),
             blend_alpha: 0.0,
         }

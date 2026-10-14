@@ -6,6 +6,11 @@ use super::targets::RenderTargets;
 use super::visibility::upload_visible_indices;
 use super::{ModelPrimitive, RenderResources, UploadedModel, Vec3, wgpu};
 
+#[derive(Clone, Copy)]
+pub struct OpticalInputs<'a> {
+    pub size: (u32, u32),
+    pub lightmap: &'a super::lightmaps::Frame,
+}
 impl PlanarView {
     pub fn prepare_optics(
         &mut self,
@@ -14,8 +19,9 @@ impl PlanarView {
         resources: &RenderResources,
         primitive: &ModelPrimitive,
         upload: &UploadedModel,
-        size: (u32, u32),
+        inputs: OpticalInputs<'_>,
     ) {
+        let OpticalInputs { size, lightmap } = inputs;
         let source = &upload.reflectors[self.surface_index];
         let shader = &primitive.preview.render_scene().materials[source.material_slot].shader;
         let (reflect, refract) = super::reflections::optical_passes(shader);
@@ -32,7 +38,7 @@ impl PlanarView {
         }
         let view = self
             .refraction
-            .get_or_insert_with(|| SceneView::new(device, resources));
+            .get_or_insert_with(|| SceneView::new(device, resources, lightmap));
         let mut uniforms = primitive.uniforms;
         uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
         let plane = source.plane;
@@ -72,7 +78,12 @@ impl PlanarView {
                 ]
             });
             uniforms.fog_params = primitive.air_fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
-                [fog.start, fog.end, fog.max_density, 1.0]
+                [
+                    fog.start,
+                    fog.end,
+                    fog.max_density,
+                    if fog.radial { 4.0 } else { 1.0 },
+                ]
             });
         } else if let Some(water) = shader.water() {
             uniforms.fog_color = [
@@ -207,6 +218,7 @@ mod tests {
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
         };

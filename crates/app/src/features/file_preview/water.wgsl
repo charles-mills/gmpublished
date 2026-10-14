@@ -20,6 +20,8 @@ struct Uniforms {
 @group(0) @binding(4) var reflection_texture: texture_2d<f32>;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
+@group(1) @binding(4) var lightmap_sampler: sampler;
+@group(0) @binding(6) var lightmap_texture:texture_2d<f32>;
 
 struct Material {
     flags: vec4<u32>,
@@ -40,6 +42,8 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) lightmap_uv:vec2<f32>,
+    @location(6) lightmap_bump_step:f32,
 }
 
 struct VertexOutput {
@@ -47,6 +51,8 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) lightmap_uv:vec2<f32>,
+    @location(4) lightmap_bump_step:f32,
 }
 
 fn transform_water_vertex(input: VertexInput) -> VertexOutput {
@@ -55,6 +61,8 @@ fn transform_water_vertex(input: VertexInput) -> VertexOutput {
     out.world_position = input.position;
     out.normal = input.normal;
     out.uv = input.uv;
+    out.lightmap_uv=input.lightmap_uv;
+    out.lightmap_bump_step=input.lightmap_bump_step;
     return out;
 }
 
@@ -84,7 +92,7 @@ fn surface_lighting(input: VertexOutput) -> SurfaceLighting {
         encoded = (encoded + normal_a + normal_b) * 0.33;
     }
     var tangent_normal = vec4<f32>(encoded.xyz * 2.0 - 1.0, encoded.a);
-    if material.flags.w != 0u { tangent_normal = vec4<f32>(normalize(tangent_normal.xyz), tangent_normal.a); }
+    if material.flags.w == 1u { tangent_normal = vec4<f32>(normalize(tangent_normal.xyz), tangent_normal.a); }
     let px = dpdx(input.world_position);
     let py = dpdy(input.world_position);
     let determinant = du.x * dv.y - du.y * dv.x;
@@ -105,6 +113,10 @@ fn apply_fog(color:vec3<f32>,position:vec3<f32>,projected_depth:f32) -> vec3<f32
 // radial distance from the camera. The clipping bias is deliberately separate.
 fn view_fog_factor(position:vec3<f32>, projected_depth:f32) -> f32 {
     if uniforms.fog_params.y <= uniforms.fog_params.x { return 0.0; }
+    if uniforms.fog_params.w > 3.5 {
+        return clamp((distance(position,uniforms.camera_position.xyz)-uniforms.fog_params.x)
+            /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
+    }
     if uniforms.fog_params.w > 2.5 {
         return clamp((projected_depth-uniforms.fog_params.x)
             /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
@@ -116,7 +128,7 @@ fn view_fog_factor(position:vec3<f32>, projected_depth:f32) -> f32 {
         return clamp(fraction*projected_depth/(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
     }
     if uniforms.fog_params.w < 0.5 { return 0.0; }
-    return clamp((distance(position,uniforms.camera_position.xyz)-uniforms.fog_params.x)
+    return clamp((projected_depth-uniforms.fog_params.x)
         /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
 }
 
@@ -127,7 +139,7 @@ fn fs_main(input: VertexOutput, @builtin(sample_index) sample_index:u32) -> @loc
     let dimensions = vec2<f32>(dimensions_u);
     let half_texel = vec2<f32>(0.5) / dimensions;
     let unperturbed_uv = clamp(input.clip_position.xy / uniforms.viewport.xy, half_texel, vec2<f32>(1.0) - half_texel);
-    if material.flags.w != 0u {
+    if material.flags.w == 1u {
         let reflected_uv = clamp(unperturbed_uv + vec2<f32>(-lighting.tangent_normal.x, lighting.tangent_normal.y) * lighting.tangent_normal.a * material.water_optics.x, half_texel, vec2<f32>(1.0) - half_texel);
         let refracted_uv = clamp(unperturbed_uv + lighting.tangent_normal.xy * lighting.tangent_normal.a * material.water_optics.y, half_texel, vec2<f32>(1.0) - half_texel);
         let reflected = textureSampleLevel(reflection_texture, refraction_sampler, reflected_uv, 0.0).rgb * material.water_reflect.rgb;
@@ -141,7 +153,7 @@ fn fs_main(input: VertexOutput, @builtin(sample_index) sample_index:u32) -> @loc
     }
     let water_depth = input.clip_position.z;
     let original_sample=textureSampleLevel(refraction_texture,refraction_sampler,unperturbed_uv,0.0);
-    let original_fog=select(1.0,original_sample.a,uniforms.water_depth_params.w>0.5 && material.water_state.z>0.5);
+    let original_fog=select(1.0,original_sample.a,uniforms.water_depth_params.w>0.5 && material.water_state.z>0.5 && material.flags.w!=2u);
     let distortion=lighting.tangent_normal.xy*lighting.tangent_normal.a*material.water_optics.y*original_fog;
     var sample_uv=clamp(unperturbed_uv+distortion,half_texel,vec2<f32>(1.0)-half_texel);
     let sample_pixel=clamp(vec2<i32>(sample_uv*dimensions),vec2<i32>(0),vec2<i32>(dimensions_u)-vec2<i32>(1));
@@ -157,7 +169,7 @@ fn fs_main(input: VertexOutput, @builtin(sample_index) sample_index:u32) -> @loc
             /max(material.water_optics.w-material.water_optics.z,0.0001),0.0,1.0)*material.water_fog.a;
     }
     let absorbed=mix(refracted,material.water_fog.rgb,absorption);
-    let fresnel=lighting.fresnel*clamp((sampled.a-0.05)*20.0,0.0,1.0);
+    let fresnel=lighting.fresnel*select(clamp((sampled.a-0.05)*20.0,0.0,1.0),1.0,material.flags.w==2u);
     var reflection=uniforms.water_time_sky_tint.yzw;
     if uniforms.water_depth_params.z>0.5 {
         let reflection_offset=vec2<f32>(lighting.tangent_normal.x,-lighting.tangent_normal.y)
@@ -171,6 +183,12 @@ fn fs_main(input: VertexOutput, @builtin(sample_index) sample_index:u32) -> @loc
     if material.water_reflect.a > 0.5 {
         color = mix(color, reflected, select(1.0, fresnel, material.water_refract.a > 0.5));
     }
+    if material.flags.w==2u && material.water_reflect.a>0.5 && material.water_refract.a<0.5 {
+        let uv=vec2<f32>(dot(vec4<f32>(input.uv,0.0,1.0),material.water_bump_s),dot(vec4<f32>(input.uv,0.0,1.0),material.water_bump_t))+material.water_animation.xy*uniforms.water_time_sky_tint.x;
+        let base=textureSample(base_texture,base_sampler,uv);
+        let diffuse=bumped_lightmap(input.lightmap_uv,input.lightmap_bump_step,lighting.tangent_normal.xyz,false);
+        color=base.rgb*diffuse+reflected*fresnel*base.a;
+    }
     return vec4<f32>(apply_fog(color, input.world_position,1.0/input.clip_position.w), 1.0);
 }
 
@@ -179,7 +197,13 @@ fn fs_skybox(input: VertexOutput) -> @location(0) vec4<f32> {
     let lighting = surface_lighting(input);
     if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
     var color = mix(material.water_fog.rgb, uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb, lighting.fresnel * material.water_reflect.a);
-    if material.flags.w != 0u { color = uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb; }
+    if material.flags.w == 1u { color = uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb; }
+    if material.flags.w==2u && material.water_reflect.a>0.5 && material.water_refract.a<0.5 {
+        let uv=vec2<f32>(dot(vec4<f32>(input.uv,0.0,1.0),material.water_bump_s),dot(vec4<f32>(input.uv,0.0,1.0),material.water_bump_t))+material.water_animation.xy*uniforms.water_time_sky_tint.x;
+        let base=textureSample(base_texture,base_sampler,uv);
+        color=base.rgb*bumped_lightmap(input.lightmap_uv,input.lightmap_bump_step,lighting.tangent_normal.xyz,false)
+            +uniforms.water_time_sky_tint.yzw*material.water_reflect.rgb*lighting.fresnel*base.a;
+    }
     return vec4<f32>(apply_fog(color, input.world_position,1.0/input.clip_position.w),select(1.0,view_fog_factor(input.world_position,1.0/input.clip_position.w),uniforms.fog_params.w>1.5));
 }
 
@@ -187,8 +211,8 @@ fn view_fog_color_factor(position:vec3<f32>,projected_depth:f32) -> f32 {
     let factor = view_fog_factor(position,projected_depth);
     // Source's ps2b+ range-fog blend squares opacity to match hardware fog.
     // Height-fog depth metadata and the water shader's own absorption stay linear.
-    let opacity = select(factor, factor*factor, uniforms.fog_params.w>2.5);
-    return opacity*select(1.0,uniforms.fog_color.a,uniforms.fog_params.w>1.5);
+    let opacity = select(factor*factor, factor, uniforms.fog_params.w>1.5 && uniforms.fog_params.w<2.5);
+    return opacity*select(1.0,uniforms.fog_color.a,uniforms.fog_params.w>1.5 && uniforms.fog_params.w<3.5);
 }
 
 
@@ -230,3 +254,23 @@ fn fs_near_intersection(input: VertexOutput) -> @location(0) vec4<f32> {
 fn vs_main(input: VertexInput) -> VertexOutput {
     return transform_water_vertex(input);
 }
+
+fn bumped_lightmap(uv:vec2<f32>, step:f32, tangent_normal:vec3<f32>, ssbump:bool) -> vec3<f32> {
+    if step <= 0.0 { return textureSample(lightmap_texture, lightmap_sampler, uv).rgb * lightmap_scale(); }
+    var weights = tangent_normal;
+    if !ssbump {
+        weights = clamp(vec3<f32>(dot(tangent_normal,vec3<f32>(0.81649658,0.0,0.57735027)),
+            dot(tangent_normal,vec3<f32>(-0.40824829,0.70710678,0.57735027)),
+            dot(tangent_normal,vec3<f32>(-0.40824829,-0.70710678,0.57735027))),vec3<f32>(0.0),vec3<f32>(1.0));
+        weights *= weights;
+        weights /= max(dot(weights,vec3<f32>(1.0)),0.000001);
+    }
+    let a=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step,0.0)).rgb;
+    let b=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step*2.0,0.0)).rgb;
+    let c=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step*3.0,0.0)).rgb;
+    return (a*weights.x+b*weights.y+c*weights.z)*lightmap_scale();
+}
+
+// LDR lightmap bytes include half-strength gamma encoding before sRGB reads.
+// The native 0..4 luxel sweep establishes the inverse scale 2^2.2.
+fn lightmap_scale() -> f32 { return select(4.5947934,2.0,uniforms.viewport.z>0.5); }

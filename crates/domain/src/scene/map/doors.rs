@@ -451,6 +451,7 @@ pub(super) fn extract_pending_door_meshes(
             material_names: context.material_names,
             material_indexes: context.material_indexes,
             lightmap_samples: context.lightmap_samples,
+            lightmap_sample_ends: context.lightmap_sample_ends,
             lightmap_blocks: context.lightmap_blocks,
         };
         for face_index in face_range {

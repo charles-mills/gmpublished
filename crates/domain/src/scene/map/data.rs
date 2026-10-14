@@ -109,6 +109,8 @@ pub struct MapVertex {
     /// Compiled texdata dimensions, independent of replacement/fallback textures.
     pub texture_size: [u32; 2],
     pub lightmap_uv: [f32; 2],
+    /// Horizontal atlas stride to each of the three directional lighting planes.
+    pub lightmap_bump_step: f32,
     pub blend_alpha: f32,
 }
 

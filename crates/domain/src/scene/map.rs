@@ -55,8 +55,8 @@ use entities::{
     parse_entity_i32, parse_entity_vec3, worldspawn_detail_material_name, worldspawn_skyname,
 };
 pub use lighting::{
-    AmbientCube, AmbientLightSource, LightmapAtlas, LightmapSource, MapAmbientLighting,
-    MapEnvironmentLighting, MapSunLighting,
+    AmbientCube, AmbientLightSource, LightmapAtlas, LightmapSource, LightmapUpdate,
+    MapAmbientLighting, MapEnvironmentLighting, MapSunLighting,
 };
 #[cfg(test)]
 use lighting::{
@@ -209,6 +209,10 @@ fn load_map_impl(
     let mut door_builds = Vec::<PendingDoorBuild>::new();
     let mut lightmap_blocks = Vec::<PendingLightmapBlock>::new();
     let (lightmap_samples, lightmap_source) = selected_lightmap_samples(&bsp);
+    let lightmap_sample_ends = lighting::lightmap_sample_ends(
+        &bsp.faces,
+        lightmap_samples.map_or(0, <[ColorRgbExp]>::len),
+    );
 
     {
         let mut face_context = FaceAppendContext {
@@ -218,6 +222,7 @@ fn load_map_impl(
             material_names: &mut material_names,
             material_indexes: &mut material_indexes,
             lightmap_samples,
+            lightmap_sample_ends: &lightmap_sample_ends,
             lightmap_blocks: &mut lightmap_blocks,
         };
         for instance in &brush_instances {
@@ -294,6 +299,7 @@ fn load_map_impl(
         ),
         &lightmap_blocks,
         lightmap_source,
+        &bsp.entities,
     );
     let doors = door_builds
         .into_iter()

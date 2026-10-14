@@ -16,6 +16,7 @@ use super::{
 use gmpublished_domain::math::Vec3;
 
 mod draw;
+mod lightmaps;
 mod materials;
 mod passes;
 mod reflections;
@@ -94,6 +95,7 @@ pub struct ModelPrimitive {
 
 #[derive(Debug)]
 pub struct PreparedFrame {
+    pub lightmap: lightmaps::Frame,
     pub screen_overlay: Option<screen_refraction::Frame>,
     pub main: SceneView,
     pub planar_views: Vec<PlanarView>,
@@ -129,9 +131,16 @@ impl shader::Primitive for ModelPrimitive {
             .position(|frame| !frame.live)
             .unwrap_or(pipeline.frames.len());
         if slot == pipeline.frames.len() {
+            let lightmap = lightmaps::Frame::new(
+                device,
+                queue,
+                &pipeline.resources,
+                map.and_then(|map| map.lightmap.as_ref()),
+            );
             pipeline.frames.push(PreparedFrame {
                 screen_overlay: None,
-                main: SceneView::new(device, &pipeline.resources),
+                main: SceneView::new(device, &pipeline.resources, &lightmap),
+                lightmap,
                 planar_views: Vec::new(),
                 content_id: self.content_id,
                 bounds: *bounds,
@@ -143,8 +152,19 @@ impl shader::Primitive for ModelPrimitive {
         if frame.content_id != self.content_id {
             frame.planar_views.clear();
             frame.screen_overlay = None;
-            frame.main.visibility = Default::default();
+            frame.lightmap = lightmaps::Frame::new(
+                device,
+                queue,
+                &pipeline.resources,
+                map.and_then(|map| map.lightmap.as_ref()),
+            );
+            frame.main = SceneView::new(device, &pipeline.resources, &frame.lightmap);
         }
+        frame.lightmap.update(
+            queue,
+            map.and_then(|map| map.lightmap.as_ref()),
+            self.uniforms.water_time_sky_tint[0],
+        );
         frame.content_id = self.content_id;
         frame.live = true;
         let scale = viewport.scale_factor();
@@ -181,7 +201,7 @@ impl shader::Primitive for ModelPrimitive {
             );
         }
         let with_time = |mut uniforms: Uniforms| {
-            uniforms.viewport = [size.0 as f32, size.1 as f32, 0.0, 0.0];
+            uniforms.viewport = [size.0 as f32, size.1 as f32, self.uniforms.viewport[2], 0.0];
             uniforms.water_time_sky_tint[0] = self.uniforms.water_time_sky_tint[0];
             uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
             uniforms
@@ -276,12 +296,16 @@ impl shader::Primitive for ModelPrimitive {
                     surface_index,
                     surface_indices: Vec::new(),
                     surface_buffer: visibility::upload_visible_indices(device, queue, &[]),
-                    view: SceneView::new(device, &pipeline.resources),
+                    view: SceneView::new(device, &pipeline.resources, &frame.lightmap),
                     reflect_enabled: false,
                     refraction: None,
                     refraction_clear: wgpu::Color::BLACK,
                     water_bind_group: None,
-                    surface_uniforms: ViewUniforms::new(device, &pipeline.resources),
+                    surface_uniforms: ViewUniforms::new(
+                        device,
+                        &pipeline.resources,
+                        &frame.lightmap,
+                    ),
                 });
             }
             let view = frame
@@ -301,7 +325,10 @@ impl shader::Primitive for ModelPrimitive {
                 &pipeline.resources,
                 self,
                 upload,
-                reflection_size,
+                refraction::OpticalInputs {
+                    size: reflection_size,
+                    lightmap: &frame.lightmap,
+                },
             );
             let mut uniforms = with_time(self.uniforms);
             uniforms.water_depth_params[2] = f32::from(surface.reflect_enabled);
@@ -334,6 +361,7 @@ impl shader::Primitive for ModelPrimitive {
                 &refracted.resolve_view,
                 &refracted.depth,
                 &reflected.resolve_view,
+                &frame.lightmap,
             ));
         }
         screen_refraction::prepare(

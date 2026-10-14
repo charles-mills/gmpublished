@@ -411,7 +411,16 @@ impl<'a> Bsp<'a> {
 
     /// `LUMP_FACES`.
     pub fn faces(&self, limits: &Limits) -> Result<Vec<Face>, BspError> {
-        self.records(lump_ids::FACES, 56, "faces", limits, |r| Face {
+        self.faces_in_lump(lump_ids::FACES, limits)
+    }
+
+    /// HDR faces have their own sample offsets into the HDR lighting lump.
+    pub fn faces_hdr(&self, limits: &Limits) -> Result<Vec<Face>, BspError> {
+        self.faces_in_lump(lump_ids::FACES_HDR, limits)
+    }
+
+    fn faces_in_lump(&self, lump: usize, limits: &Limits) -> Result<Vec<Face>, BspError> {
+        self.records(lump, 56, "faces", limits, |r| Face {
             plane: u16_at(r, 0),
             side: r[2],
             on_node: r[3],

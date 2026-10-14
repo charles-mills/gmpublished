@@ -11,11 +11,29 @@ pub enum MaterialShader {
     #[default]
     Unknown,
     Surface(String),
+    Lightmapped(Arc<LightmappedMaterial>),
     Water(Arc<WaterMaterial>),
     Mirror(Arc<super::MirrorMaterial>),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightmappedMaterial {
+    pub shader: String,
+    pub normal: Option<Arc<WaterNormalMap>>,
+    pub normal2: Option<Arc<WaterNormalMap>>,
+    pub ssbump: bool,
+    pub diffuse_bump: bool,
+    pub transform: [[f32; 4]; 2],
+}
 impl MaterialShader {
+    pub(crate) fn lightmapped(&self) -> Option<&LightmappedMaterial> {
+        if let Self::Lightmapped(material) = self {
+            Some(material)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn is_planar(&self) -> bool {
         matches!(self, Self::Water(_) | Self::Mirror(_))
     }
@@ -352,6 +370,31 @@ impl MaterialResolver {
             return MaterialShader::Mirror(Arc::new(self.resolve_mirror(material)));
         }
         if !is_water_shader(&material.shader) {
+            if [
+                "LightmappedGeneric",
+                "LightmappedGeneric_DX9",
+                "WorldVertexTransition",
+                "WorldVertexTransition_DX9",
+            ]
+            .iter()
+            .any(|name| material.shader.eq_ignore_ascii_case(name))
+            {
+                let get = |key| material.parameter(key);
+                let normal = get("$bumpmap")
+                    .and_then(normalize_texture_name)
+                    .and_then(|name| self.resolve_water_normal(&name));
+                let normal2 = get("$bumpmap2")
+                    .and_then(normalize_texture_name)
+                    .and_then(|name| self.resolve_water_normal(&name));
+                return MaterialShader::Lightmapped(Arc::new(LightmappedMaterial {
+                    shader: material.shader.clone(),
+                    normal,
+                    normal2,
+                    ssbump: vmt_bool(get("$ssbump")),
+                    diffuse_bump: !vmt_bool(get("$nodiffusebumplighting")),
+                    transform: texture_transform(get("$bumptransform")),
+                }));
+            }
             return MaterialShader::Surface(material.shader.clone());
         }
         let get = |key| material.parameter(key);
@@ -401,10 +444,6 @@ impl MaterialResolver {
         }
         let mut unsupported_features = Vec::new();
         for (active, feature) in [
-            (
-                has_base_texture,
-                "base-textured water needs bumped lightmap shading",
-            ),
             (
                 vmt_bool(get("$forcecheap")),
                 "cheap water needs cubemap reflections",

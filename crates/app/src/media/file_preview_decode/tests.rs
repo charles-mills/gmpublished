@@ -666,6 +666,7 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
             tex_t: 128.0,
             texture_size: [128, 64],
             lightmap_uv: [0.0; 2],
+            lightmap_bump_step: 0.0,
             blend_alpha: 0.0,
         }],
         indices: vec![0],
@@ -1820,6 +1821,7 @@ fn model_vertex(position: Vec3) -> ModelVertex {
         normal: Vec3::new(1.0, 0.0, 0.0),
         uv: [0.25, 0.75],
         lightmap_uv: [0.5, 0.5],
+        lightmap_bump_step: 0.0,
         color: Vec3::splat(1.0),
         blend_alpha: 1.0,
     }

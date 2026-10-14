@@ -363,6 +363,7 @@ fn loading_a_map_with_fog_exposes_only_the_available_controls() {
                 start: 256.0,
                 end: 2048.0,
                 max_density: 0.75,
+                radial: false,
             }),
             sky_camera: None,
             stats: MapStats {

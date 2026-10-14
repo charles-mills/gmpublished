@@ -63,6 +63,7 @@ pub mod lump_ids {
     pub const NODES: usize = 5;
     pub const TEXINFO: usize = 6;
     pub const FACES: usize = 7;
+    pub const FACES_HDR: usize = 58;
     pub const LIGHTING: usize = 8;
     pub const LEAFS: usize = 10;
     pub const EDGES: usize = 12;

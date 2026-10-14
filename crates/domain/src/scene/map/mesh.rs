@@ -128,6 +128,7 @@ pub(super) struct FaceAppendContext<'a> {
     pub(super) material_names: &'a mut Vec<String>,
     pub(super) material_indexes: &'a mut HashMap<String, usize>,
     pub(super) lightmap_samples: Option<&'a [ColorRgbExp]>,
+    pub(super) lightmap_sample_ends: &'a HashMap<i32, usize>,
     pub(super) lightmap_blocks: &'a mut Vec<PendingLightmapBlock>,
 }
 
@@ -170,7 +171,11 @@ pub(super) fn append_face(
     };
 
     let lightmap_block = context.lightmap_samples.and_then(|samples| {
-        let block = extract_face_lightmap(face, samples)?;
+        let end = context
+            .lightmap_sample_ends
+            .get(&face.light_offset)
+            .copied()?;
+        let block = extract_face_lightmap(face, samples.get(..end)?, texinfo.flags & 0x0800 != 0)?;
         let index = context.lightmap_blocks.len();
         context.lightmap_blocks.push(block);
         Some(index)
@@ -292,6 +297,7 @@ pub(super) fn map_vertex(
         tex_t: texture_coord(position, texinfo.texture_vecs[1]),
         texture_size: [0; 2],
         lightmap_uv,
+        lightmap_bump_step: 0.0,
         blend_alpha,
     }
 }

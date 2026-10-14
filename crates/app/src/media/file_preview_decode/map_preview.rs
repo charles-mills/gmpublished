@@ -13,10 +13,10 @@ use crate::bridge::materials::{
     ResolvedSoundReference, srgb_byte_to_linear,
 };
 use crate::media::preview_model::{
-    DoorInstance, DoorSound, DoorSoundSourceTier, DoorSoundWave, DoorSounds, InfoReason,
-    LightmapSlot, MapFog, MapPreview, MapSkyCamera, MapSpawn, MapStats, MaterialSlot, MeshData,
-    ModelData, ModelStats, ModelVertex, PHY_DEBUG_MATERIAL_NAME, PreviewContent, PreviewData,
-    PreviewLoadStage, PreviewRequest, RenderScene,
+    DoorInstance, DoorSound, DoorSoundSourceTier, DoorSoundWave, DoorSounds, InfoReason, MapFog,
+    MapPreview, MapSkyCamera, MapSpawn, MapStats, MaterialSlot, MeshData, ModelData, ModelStats,
+    ModelVertex, PHY_DEBUG_MATERIAL_NAME, PreviewContent, PreviewData, PreviewLoadStage,
+    PreviewRequest, RenderScene,
 };
 use gmpublished_domain::math::Vec3;
 use gmpublished_domain::scene::map::{
@@ -247,11 +247,6 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     emit_stage(PreviewLoadStage::BakingLightmap);
     let lightmap_started = Instant::now();
     let lightmap_status = lightmap_status(lightmap.as_ref());
-    let lightmap = lightmap.map(|atlas| LightmapSlot {
-        rgba: atlas.rgba,
-        width: atlas.width,
-        height: atlas.height,
-    });
     let lightmap_timing = lightmap_started.elapsed();
     let skybox = skyname
         .as_deref()

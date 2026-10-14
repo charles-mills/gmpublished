@@ -215,7 +215,7 @@ pub struct FlyCamera {
     pub(super) last_frame: Option<std::time::Instant>,
     /// Visual time is independent of movement and its bounded physics steps.
     pub(super) animation_started_at: Option<std::time::Instant>,
-    pub(super) animated_water: bool,
+    pub(super) animated_scene: bool,
     pub(super) water_time: f32,
     pub(super) mode: MovementMode,
     pub(super) walk_velocity: Vec3,
@@ -372,11 +372,15 @@ impl FlyCamera {
         self.last_frame = None;
         self.animation_started_at = None;
         self.water_time = 0.0;
-        self.animated_water = scene.scene.materials.iter().any(|slot| {
-            slot.shader
-                .water()
-                .is_some_and(crate::bridge::materials::WaterMaterial::is_animated)
-        });
+        self.animated_scene = scene
+            .lightmap
+            .as_ref()
+            .is_some_and(gmpublished_domain::scene::map::LightmapAtlas::is_animated)
+            || scene.scene.materials.iter().any(|slot| {
+                slot.shader
+                    .water()
+                    .is_some_and(crate::bridge::materials::WaterMaterial::is_animated)
+            });
         self.mode = MovementMode::Fly;
         self.reset_walk_state();
         self.doors = scene
@@ -648,7 +652,9 @@ impl shader::Program<Message> for FlyViewer {
                 if !delta.0.is_finite() || !delta.1.is_finite() {
                     return None;
                 }
-                camera.yaw += delta.0 as f32 * FLY_LOOK_SENSITIVITY;
+                // Source is Z-up: increasing yaw turns left, so mouse-right
+                // must decrease yaw. Positive pitch looks upward.
+                camera.yaw -= delta.0 as f32 * FLY_LOOK_SENSITIVITY;
                 camera.pitch = (camera.pitch - delta.1 as f32 * FLY_LOOK_SENSITIVITY)
                     .clamp(MIN_PITCH, MAX_PITCH);
                 camera
@@ -761,7 +767,7 @@ impl shader::Program<Message> for FlyViewer {
                     }
                     // Surface animation drives its own redraw chain without
                     // publishing unchanged camera poses to application state.
-                    return camera.animated_water.then(Action::request_redraw);
+                    return camera.animated_scene.then(Action::request_redraw);
                 }
                 if let Some(last) = camera.last_frame {
                     let dt = now.saturating_duration_since(last).as_secs_f32().min(0.1);
@@ -960,7 +966,7 @@ mod tests {
                 Some(Message::FlyCameraChanged { .. })
             ));
         }
-        assert!((camera.yaw - initial.yaw - 2400.0 * FLY_LOOK_SENSITIVITY).abs() < 1e-5);
+        assert!((camera.yaw - initial.yaw + 2400.0 * FLY_LOOK_SENSITIVITY).abs() < 1e-5);
         assert!((camera.pitch - initial.pitch - 60.0 * FLY_LOOK_SENSITIVITY).abs() < 1e-5);
         let pose = camera.pose();
         let absolute = Event::Mouse(mouse::Event::CursorMoved {
@@ -977,6 +983,42 @@ mod tests {
         });
         viewer.update(&mut camera, &huge, bounds, mouse::Cursor::Unavailable);
         assert_eq!(camera.pitch, MAX_PITCH);
+    }
+
+    #[test]
+    fn mouse_look_follows_horizontal_and_vertical_mouse_direction() {
+        let mut viewer = input_viewer(true);
+        viewer.pose = Some(FlyPose {
+            position: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            speed: 1.0,
+        });
+        let mut camera = FlyCamera::default();
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(640.0, 480.0));
+        let right_and_up = Event::Mouse(mouse::Event::Motion {
+            delta: (10.0, -10.0),
+        });
+        viewer.update(
+            &mut camera,
+            &right_and_up,
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        // Looking along +X, screen-right is -Y and screen-up is +Z.
+        assert!(camera.forward()[1] < 0.0, "mouse-right must look right");
+        assert!(camera.forward()[2] > 0.0, "mouse-up must look up");
+        let left_and_down = Event::Mouse(mouse::Event::Motion {
+            delta: (-20.0, 20.0),
+        });
+        viewer.update(
+            &mut camera,
+            &left_and_down,
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert!(camera.forward()[1] > 0.0, "mouse-left must look left");
+        assert!(camera.forward()[2] < 0.0, "mouse-down must look down");
     }
 
     #[test]
@@ -1030,7 +1072,7 @@ mod tests {
         assert!(!camera.held.forward);
     }
 
-    fn animated_water_viewer() -> FlyViewer {
+    fn animated_scene_viewer() -> FlyViewer {
         use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
         use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
         let normal = [128, 144, 250, 255].repeat(4);
@@ -1074,8 +1116,8 @@ mod tests {
     }
 
     #[test]
-    fn animated_water_drives_redraws_without_input_or_camera_messages() {
-        let viewer = animated_water_viewer();
+    fn animated_scene_drives_redraws_without_input_or_camera_messages() {
+        let viewer = animated_scene_viewer();
         let mut camera = FlyCamera::default();
         let now = std::time::Instant::now();
         let bounds = Rectangle::with_size(iced::Size::new(1280.0, 720.0));
@@ -1110,7 +1152,7 @@ mod tests {
 
     #[test]
     fn water_clock_survives_movement_stopping_and_resets_for_a_new_map() {
-        let mut viewer = animated_water_viewer();
+        let mut viewer = animated_scene_viewer();
         let mut camera = FlyCamera::default();
         let now = std::time::Instant::now();
         let bounds = Rectangle::with_size(iced::Size::new(1280.0, 720.0));

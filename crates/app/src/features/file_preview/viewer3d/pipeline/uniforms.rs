@@ -20,7 +20,7 @@ pub struct Uniforms {
     pub clip_plane: [f32; 4],
     /// Exact optical plane for height fog; independent of clip bias.
     pub medium_plane: [f32; 4],
-    /// Main widget dimensions used for normalized screen sampling.
+    /// xy: widget dimensions; z: the diagnosed HDR lightmap display fallback.
     pub viewport: [f32; 4],
 }
 
@@ -40,6 +40,22 @@ pub struct MaterialUniform {
 }
 
 impl MaterialUniform {
+    pub fn with_surface(
+        mut self,
+        surface: Option<&crate::bridge::materials::LightmappedMaterial>,
+    ) -> Self {
+        if let Some(surface) = surface {
+            self.flags[2] = if surface.normal.is_some() && surface.diffuse_bump {
+                if surface.ssbump { 2 } else { 1 }
+            } else {
+                0
+            };
+            self.water_bump_s = surface.transform[0];
+            self.water_bump_t = surface.transform[1];
+        }
+        self
+    }
+
     pub fn with_mirror(
         mut self,
         mirror: Option<&crate::bridge::materials::MirrorMaterial>,
@@ -101,6 +117,7 @@ impl MaterialUniform {
 
     pub fn with_water(mut self, water: Option<&crate::bridge::materials::WaterMaterial>) -> Self {
         if let Some(water) = water {
+            self.flags[3] = if water.has_base_texture { 2 } else { 0 };
             self.flags[2] = u32::from(!water.animation_wrap);
             self.water_fog = [
                 water.fog_color_linear[0],
@@ -182,7 +199,12 @@ impl Uniforms {
                         ]
                     }),
                     fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
-                        [fog.start, fog.end, fog.max_density, 1.0]
+                        [
+                            fog.start,
+                            fog.end,
+                            fog.max_density,
+                            if fog.radial { 4.0 } else { 1.0 },
+                        ]
                     }),
                 )
             },
@@ -219,7 +241,14 @@ impl Uniforms {
                     [0.0, 0.0, -1.0, sample.body.surface_z + 2.0]
                 }),
             medium_plane: liquid.map_or([0.0; 4], |sample| [0.0, 0.0, 1.0, -sample.body.surface_z]),
-            viewport: [0.0; 4],
+            viewport: [
+                0.0,
+                0.0,
+                f32::from(scene.lightmap.as_ref().is_some_and(|atlas| {
+                    atlas.source == gmpublished_domain::scene::map::LightmapSource::Hdr
+                })),
+                0.0,
+            ],
         }
     }
 
@@ -256,6 +285,11 @@ impl Uniforms {
         let eye = skybox_eye(frame.eye, sky_camera.origin, sky_camera.scale);
         let view = look_at(eye, eye + frame.forward, SOURCE_UP);
 
+        let fog_scale = if sky_camera.scale > 0.0 {
+            1.0 / sky_camera.scale
+        } else {
+            1.0
+        };
         Self {
             view_proj: mat_mul(frame.proj, view),
             light: [0.4, 0.6, 0.8, AMBIENT],
@@ -269,13 +303,25 @@ impl Uniforms {
                 ]
             }),
             fog_params: fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
-                [fog.start, fog.end, fog.max_density, 1.0]
+                [
+                    fog.start * fog_scale,
+                    fog.end * fog_scale,
+                    fog.max_density,
+                    if fog.radial { 4.0 } else { 1.0 },
+                ]
             }),
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
-            viewport: [0.0; 4],
+            viewport: [
+                0.0,
+                0.0,
+                f32::from(scene.lightmap.as_ref().is_some_and(|atlas| {
+                    atlas.source == gmpublished_domain::scene::map::LightmapSource::Hdr
+                })),
+                0.0,
+            ],
         }
     }
 
@@ -555,6 +601,7 @@ mod tests {
             start: 512.0,
             end: 8192.0,
             max_density: 0.5,
+            radial: false,
         };
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let mut camera = FlyCamera {
@@ -562,6 +609,17 @@ mod tests {
             ..FlyCamera::default()
         };
         let above = Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0);
+        let radial = Uniforms::for_fly(
+            &scene,
+            &camera,
+            bounds,
+            Some(MapFog {
+                radial: true,
+                ..map_fog
+            }),
+            12.0,
+        );
+        assert_eq!(radial.fog_params, [512.0, 8192.0, 0.5, 4.0]);
         camera.position = Some(Vec3::ZERO);
         let submerged = Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0);
         assert_eq!(above.fog_color, [0.8, 0.7, 0.6, 0.0]);
@@ -577,6 +635,34 @@ mod tests {
         assert_eq!(
             Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0).fog_params,
             above.fog_params
+        );
+    }
+    #[test]
+    fn skybox_fog_distances_follow_the_miniature_view_scale() {
+        use super::*;
+        let scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
+        let camera = FlyCamera {
+            position: Some(Vec3::ZERO),
+            ..FlyCamera::default()
+        };
+        let fog = MapFog {
+            color_linear: Vec3::splat(0.2),
+            start: -4000.0,
+            end: 320000.0,
+            max_density: 0.5,
+            radial: true,
+        };
+        let sky = MapSkyCamera {
+            origin: Vec3::new(0.0, 0.0, 1024.0),
+            scale: 16.0,
+            fog: Some(fog),
+        };
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let uniforms = Uniforms::for_fly_skybox_composite(&scene, &camera, bounds, sky, Some(fog));
+        assert_eq!(uniforms.fog_params, [-250.0, 20000.0, 0.5, 4.0]);
+        assert_eq!(
+            Uniforms::for_fly(&scene, &camera, bounds, Some(fog), 0.0).fog_params,
+            [-4000.0, 320000.0, 0.5, 4.0]
         );
     }
 }

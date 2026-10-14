@@ -961,6 +961,7 @@ pub(in super::super) fn bake_prop_door_meshes(
                         normal: vertex.normal,
                         uv: vertex.uv,
                         lightmap_uv: [0.0; 2],
+                        lightmap_bump_step: 0.0,
                         color: lighting.evaluate(closed_normal),
                         blend_alpha: 0.0,
                     }
@@ -1302,6 +1303,7 @@ pub(in super::super) fn bake_prop_placement(
                 normal,
                 uv: vertex.uv,
                 lightmap_uv: [0.0; 2],
+                lightmap_bump_step: 0.0,
                 color: lighting.evaluate(normal),
                 blend_alpha: 0.0,
             }

@@ -15,7 +15,7 @@ mod sibling_gma;
 mod texture;
 mod water;
 pub use mirror::MirrorMaterial;
-pub use water::{MaterialShader, WaterMaterial, WaterNormalMap};
+pub use water::{LightmappedMaterial, MaterialShader, WaterMaterial, WaterNormalMap};
 
 pub use texture::decode_vtf_rgba;
 use texture::{

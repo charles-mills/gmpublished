@@ -492,3 +492,20 @@ fn leaf_water_records_keep_signed_material_and_distinct_heights() {
     assert_eq!(data[1].surface_z, -32.0);
     assert_eq!(data[1].surface_texinfo, -1);
 }
+
+#[test]
+fn hdr_faces_keep_their_own_lighting_offsets_and_styles() {
+    let mut ldr = vec![0_u8; 56];
+    let mut hdr = vec![0_u8; 56];
+    ldr[20..24].copy_from_slice(&40_i32.to_le_bytes());
+    hdr[20..24].copy_from_slice(&400_i32.to_le_bytes());
+    ldr[16..20].copy_from_slice(&[0, 32, 255, 255]);
+    hdr[16..20].copy_from_slice(&[0, 33, 34, 255]);
+    let bytes = build_bsp(&[(lump_ids::FACES, ldr, 0), (lump_ids::FACES_HDR, hdr, 0)]);
+    let limits = Limits::default();
+    let bsp = parse(&bytes, &limits).unwrap();
+    assert_eq!(bsp.faces(&limits).unwrap()[0].light_offset, 40);
+    let hdr = bsp.faces_hdr(&limits).unwrap();
+    assert_eq!(hdr[0].light_offset, 400);
+    assert_eq!(hdr[0].styles, [0, 33, 34, 255]);
+}

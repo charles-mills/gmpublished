@@ -251,17 +251,21 @@ where
 
         let result = if captured {
             if !self.raw.has_focus() {
-                return Err("Cannot capture the cursor in an unfocused window".into());
+                return Err(
+                    "Cannot capture the cursor in an unfocused window".into()
+                );
             }
-            self.raw.set_cursor_grab(CursorGrabMode::Locked)
+            self.raw
+                .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| self.raw.set_cursor_grab(CursorGrabMode::Confined))
                 .map_err(|error| error.to_string())
         } else {
-            self.raw.set_cursor_grab(CursorGrabMode::None)
+            self.raw
+                .set_cursor_grab(CursorGrabMode::None)
                 .map_err(|error| error.to_string())
         };
-        if captured {
-            result.as_ref().map_err(Clone::clone)?;
+        if captured && let Err(error) = &result {
+            return Err(error.clone());
         }
         self.cursor_captured = captured;
         self.raw.set_cursor_visible(!captured);

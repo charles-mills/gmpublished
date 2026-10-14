@@ -2132,3 +2132,28 @@ fn underwater_effect_keeps_its_own_normal_proxy_and_blur_without_a_base_texture(
         assert_eq!(water.fog_clear_linear[channel], srgb_byte_to_linear(byte));
     }
 }
+
+#[test]
+fn lightmapped_patch_preserves_linear_bumps_and_diffuse_controls() {
+    let normal = [190, 72, 222, 255].repeat(4);
+    let white = [255, 255, 255, 255].repeat(4);
+    let archive=PreviewArchive::from_gma(GmaFixtureBuilder::new("Baked directional lighting")
+        .entry("materials/lit/base.vmt",br#"LightmappedGeneric { "$basetexture" "lit/white" "$bumpmap" "lit/normal" "$ssbump" "1" "$bumptransform" "center 0 0 scale 2 3 rotate 0 translate .25 .5" }"#.to_vec())
+        .entry("materials/lit/flat.vmt",br#"patch { include "materials/lit/base.vmt" replace { "$nodiffusebumplighting" "1" } }"#.to_vec())
+        .entry("materials/lit/normal.vtf",fixture_vtf_bytes(2,2,VtfFormat::Rgba8888,&[&normal]))
+        .entry("materials/lit/white.vtf",fixture_vtf_bytes(2,2,VtfFormat::Rgba8888,&[&white]))
+        .build()).unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let lit = resolver.resolve_primary(&[], "lit/base").unwrap();
+    let lit = lit.shader.lightmapped().unwrap();
+    assert_eq!(lit.normal.as_ref().unwrap().frames[0][0].rgba, normal);
+    assert!(lit.ssbump && lit.diffuse_bump);
+    assert_eq!(lit.transform, [[2.0, 0.0, 0.0, 0.25], [0.0, 3.0, 0.0, 0.5]]);
+    let flat = resolver.resolve_primary(&[], "lit/flat").unwrap();
+    let flat = flat.shader.lightmapped().unwrap();
+    assert!(!flat.diffuse_bump);
+    assert!(Arc::ptr_eq(
+        flat.normal.as_ref().unwrap(),
+        lit.normal.as_ref().unwrap()
+    ));
+}
