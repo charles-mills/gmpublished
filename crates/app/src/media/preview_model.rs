@@ -235,6 +235,8 @@ pub struct ModelPreview {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapPreview {
+    pub(crate) entity_meshes: Vec<bool>,
+    pub(crate) skybox_entity_meshes: Vec<bool>,
     pub(crate) scene: Arc<RenderScene>,
     pub(crate) mesh_visibility: Vec<MapMeshVisibility>,
     pub(crate) map_skybox_meshes: Vec<MeshData>,
@@ -681,6 +683,8 @@ mod tests {
 
     fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> MapPreview {
         MapPreview {
+            entity_meshes: Vec::new(),
+            skybox_entity_meshes: Vec::new(),
             scene: Arc::new(RenderScene {
                 meshes: vec![mesh(0), mesh(1)],
                 materials: vec![

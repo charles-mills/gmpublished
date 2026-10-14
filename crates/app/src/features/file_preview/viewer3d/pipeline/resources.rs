@@ -8,8 +8,13 @@ use gmpublished_domain::math::Vec3;
 
 #[derive(Debug)]
 pub struct RenderResources {
+    pub reflected_opaque_pipeline: wgpu::RenderPipeline,
+    pub reflected_translucent_pipeline: wgpu::RenderPipeline,
+    pub reflected_additive_pipeline: wgpu::RenderPipeline,
+    pub uniform_layout: wgpu::BindGroupLayout,
     pub opaque_pipeline: wgpu::RenderPipeline,
     pub water_pipeline: wgpu::RenderPipeline,
+    pub reflected_water_pipeline: wgpu::RenderPipeline,
     /// None when shader translation fails; use the single-pass water pipeline instead.
     pub refractive_water_pipeline: Option<wgpu::RenderPipeline>,
     pub translucent_pipeline: wgpu::RenderPipeline,
@@ -21,12 +26,6 @@ pub struct RenderResources {
     pub phy_debug_pipeline: wgpu::RenderPipeline,
     pub sky_pipeline: wgpu::RenderPipeline,
     pub blit_pipeline: wgpu::RenderPipeline,
-    pub uniform_buffer: wgpu::Buffer,
-    pub uniform_bind_group: wgpu::BindGroup,
-    pub sky_uniform_buffer: wgpu::Buffer,
-    pub sky_uniform_bind_group: wgpu::BindGroup,
-    pub map_skybox_uniform_buffer: wgpu::Buffer,
-    pub map_skybox_uniform_bind_group: wgpu::BindGroup,
     pub material_layout: wgpu::BindGroupLayout,
     pub water_frame_layout: wgpu::BindGroupLayout,
     pub sky_layout: wgpu::BindGroupLayout,
@@ -193,6 +192,16 @@ impl RenderResources {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -288,10 +297,28 @@ impl RenderResources {
                 write_enabled: false,
                 bias: wgpu::DepthBiasState::default(),
                 cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Cw,
             },
             PipelineShaderEntry {
                 fragment: "fs_skybox",
                 label: "file_preview.model_viewer.water_pipeline",
+            },
+        );
+        let reflected_water_pipeline = create_model_pipeline_with_fragment_entry(
+            device,
+            &layout,
+            &water_shader,
+            format,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            PipelineRasterMode {
+                write_enabled: false,
+                bias: wgpu::DepthBiasState::default(),
+                cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Ccw,
+            },
+            PipelineShaderEntry {
+                fragment: "fs_skybox",
+                label: "file_preview.reflected.planar_fallback",
             },
         );
         // Some backends fail shader translation for this pipeline (naga's
@@ -310,6 +337,7 @@ impl RenderResources {
                 write_enabled: false,
                 bias: wgpu::DepthBiasState::default(),
                 cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Cw,
             },
             PipelineShaderEntry {
                 fragment: "fs_main",
@@ -355,6 +383,7 @@ impl RenderResources {
                 // Overlays stay two-sided: their quad winding comes from
                 // the packed overlay basis, not face winding.
                 cull_mode: None,
+                front_face: wgpu::FrontFace::Cw,
             },
             "file_preview.model_viewer.overlay_opaque_pipeline",
         );
@@ -368,6 +397,7 @@ impl RenderResources {
                 write_enabled: false,
                 bias: overlay_depth_bias_state(),
                 cull_mode: None,
+                front_face: wgpu::FrontFace::Cw,
             },
             "file_preview.model_viewer.overlay_translucent_pipeline",
         );
@@ -381,6 +411,7 @@ impl RenderResources {
                 write_enabled: false,
                 bias: overlay_depth_bias_state(),
                 cull_mode: None,
+                front_face: wgpu::FrontFace::Cw,
             },
             "file_preview.model_viewer.overlay_additive_pipeline",
         );
@@ -394,6 +425,7 @@ impl RenderResources {
                 write_enabled: false,
                 bias: overlay_depth_bias_state(),
                 cull_mode: None,
+                front_face: wgpu::FrontFace::Cw,
             },
             "file_preview.model_viewer.phy_debug_pipeline",
         );
@@ -466,17 +498,36 @@ impl RenderResources {
             cache: None,
         });
 
-        let (uniform_buffer, uniform_bind_group) =
-            uniforms(device, &uniform_layout, "file_preview.model_viewer.uniform");
-        let (sky_uniform_buffer, sky_uniform_bind_group) = uniforms(
-            device,
-            &uniform_layout,
-            "file_preview.model_viewer.sky_uniform",
+        let reflected = |write_enabled, blend, label| {
+            create_model_pipeline_with_depth_bias(
+                device,
+                &layout,
+                &shader,
+                format,
+                blend,
+                PipelineRasterMode {
+                    write_enabled,
+                    bias: wgpu::DepthBiasState::default(),
+                    cull_mode: Some(wgpu::Face::Back),
+                    front_face: wgpu::FrontFace::Ccw,
+                },
+                label,
+            )
+        };
+        let reflected_opaque_pipeline = reflected(
+            true,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            "file_preview.reflected.opaque",
         );
-        let (map_skybox_uniform_buffer, map_skybox_uniform_bind_group) = uniforms(
-            device,
-            &uniform_layout,
-            "file_preview.model_viewer.map_skybox_uniform",
+        let reflected_translucent_pipeline = reflected(
+            false,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            "file_preview.reflected.translucent",
+        );
+        let reflected_additive_pipeline = reflected(
+            false,
+            Some(additive_blend_state()),
+            "file_preview.reflected.additive",
         );
 
         let material_sampler = sampler(
@@ -529,8 +580,13 @@ impl RenderResources {
         queue.write_buffer(&sky_vertices, 0, &sky_vertex_bytes);
 
         Self {
+            reflected_opaque_pipeline,
+            reflected_translucent_pipeline,
+            reflected_additive_pipeline,
+            uniform_layout,
             opaque_pipeline,
             water_pipeline,
+            reflected_water_pipeline,
             refractive_water_pipeline,
             translucent_pipeline,
             additive_pipeline,
@@ -541,12 +597,6 @@ impl RenderResources {
             phy_debug_pipeline,
             sky_pipeline,
             blit_pipeline,
-            uniform_buffer,
-            uniform_bind_group,
-            sky_uniform_buffer,
-            sky_uniform_bind_group,
-            map_skybox_uniform_buffer,
-            map_skybox_uniform_bind_group,
             material_layout,
             water_frame_layout,
             sky_layout,
@@ -578,6 +628,7 @@ struct PipelineRasterMode {
     write_enabled: bool,
     bias: wgpu::DepthBiasState,
     cull_mode: Option<wgpu::Face>,
+    front_face: wgpu::FrontFace,
 }
 
 #[derive(Clone, Copy)]
@@ -586,7 +637,7 @@ struct PipelineShaderEntry {
     label: &'static str,
 }
 
-fn uniforms(
+pub fn uniforms(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     label: &str,
@@ -668,6 +719,7 @@ fn create_model_pipeline(
             write_enabled: depth_write_enabled,
             bias: wgpu::DepthBiasState::default(),
             cull_mode: Some(wgpu::Face::Back),
+            front_face: wgpu::FrontFace::Cw,
         },
         label,
     )
@@ -729,7 +781,7 @@ fn create_model_pipeline_with_fragment_entry(
             // Source renders brush/model geometry one-sided with clockwise
             // front faces; without this, up-facing water planes above the
             // camera paint their undersides across the sky.
-            front_face: wgpu::FrontFace::Cw,
+            front_face: raster.front_face,
             cull_mode: raster.cull_mode,
             ..wgpu::PrimitiveState::default()
         },

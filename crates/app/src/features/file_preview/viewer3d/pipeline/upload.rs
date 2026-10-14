@@ -4,14 +4,11 @@ use std::collections::HashMap;
 use super::materials::{MaterialTextureViews, MaterialUploadMode, WHITE_RGBA};
 use super::resources::RenderResources;
 use super::uniforms::scene_sky_tint;
-use super::visibility::{
-    UploadedVisibility, UploadedVisibleIndices, UploadedVisibleVertices, VisibilityClusterState,
-    upload_visible_detail_sprites, upload_visible_indices,
-};
+
 use super::{
     DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance, DoorRenderPose, MapPreview,
     MapVisibilityBucket, MeshData, ModelVertex, OverlayPrimitive, RenderMode, RenderScene,
-    SKYBOX_FACE_COUNT, WorldVisibilityPlan, initial_door_swing, transform_door_vertices, wgpu,
+    SKYBOX_FACE_COUNT, initial_door_swing, transform_door_vertices, wgpu,
 };
 
 #[derive(Debug, Default)]
@@ -93,8 +90,10 @@ impl UploadCache {
                     )
                 });
                 let water = slot.shader.water();
+                let mirror = slot.shader.mirror();
                 let normal = water
                     .and_then(|water| water.normal_map.as_deref())
+                    .or_else(|| mirror.and_then(|mirror| mirror.normal_map.as_deref()))
                     .map(|normal| resources.create_water_normal_view(device, queue, Some(normal)));
                 resources.create_material(
                     device,
@@ -109,6 +108,7 @@ impl UploadCache {
                         force_opaque: slot.force_opaque,
                         render_mode: slot.render_mode,
                         water,
+                        mirror,
                     },
                 )
             })
@@ -122,13 +122,13 @@ impl UploadCache {
                 .map(|slot| slot.render_mode)
                 .collect::<Vec<_>>()
         };
-        let material_water_materials = if scene.materials.is_empty() {
+        let material_planar_materials = if scene.materials.is_empty() {
             vec![false]
         } else {
             scene
                 .materials
                 .iter()
-                .map(|slot| slot.shader.water().is_some())
+                .map(|slot| slot.shader.is_planar())
                 .collect::<Vec<_>>()
         };
         let (material_bind_groups, material_uniforms): (Vec<_>, Vec<_>) =
@@ -152,6 +152,7 @@ impl UploadCache {
                         force_opaque: true,
                         render_mode: RenderMode::Opaque,
                         water: None,
+                        mirror: None,
                     },
                 );
                 (vec![bind_group], vec![uniform])
@@ -159,13 +160,20 @@ impl UploadCache {
                 material_uploads.into_iter().unzip()
             };
 
-        let mut meshes = upload_meshes(device, queue, scene.meshes.as_slice(), false);
+        let mut meshes = upload_meshes(
+            device,
+            queue,
+            scene.meshes.as_slice(),
+            false,
+            map.map(|map| map.entity_meshes.as_slice()),
+        );
         let detail_sprites = map.and_then(|map| {
             meshes.extend(upload_meshes(
                 device,
                 queue,
                 map.map_skybox_meshes.as_slice(),
                 true,
+                Some(&map.skybox_entity_meshes),
             ));
             meshes.extend(upload_door_meshes(device, queue, map.doors.as_slice()));
             upload_detail_sprites(device, queue, map.detail_sprites.as_slice())
@@ -211,13 +219,16 @@ impl UploadCache {
                 phy_debug_meshes: None,
                 material_bind_groups,
                 material_render_modes,
-                material_water_materials,
+                material_planar_materials,
                 _material_uniforms: material_uniforms,
                 skybox,
                 sky_tint,
-                visibility: UploadedVisibility::default(),
+                reflectors: Vec::new(),
             },
         );
+        if let Some(upload) = self.uploads.get_mut(&content_id) {
+            upload.reflectors = super::reflections::collect_reflectors(upload, scene);
+        }
     }
 }
 
@@ -230,11 +241,11 @@ pub struct UploadedModel {
     pub phy_debug_meshes: Option<Vec<UploadedMesh>>,
     pub material_bind_groups: Vec<wgpu::BindGroup>,
     pub material_render_modes: Vec<RenderMode>,
-    pub material_water_materials: Vec<bool>,
+    pub material_planar_materials: Vec<bool>,
     pub _material_uniforms: Vec<wgpu::Buffer>,
     pub skybox: Option<UploadedSkybox>,
     pub sky_tint: Vec3,
-    pub visibility: UploadedVisibility,
+    pub reflectors: Vec<super::reflections::Reflector>,
 }
 
 impl UploadedModel {
@@ -258,83 +269,8 @@ impl UploadedModel {
             queue,
             scene.phy_debug_meshes.as_slice(),
             false,
+            None,
         ));
-    }
-
-    pub fn ensure_world_visibility(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        scene: &MapPreview,
-        enabled: bool,
-        camera_position: Vec3,
-    ) {
-        let Some(visibility) = scene.visibility.as_ref() else {
-            if self
-                .visibility
-                .tracker
-                .set_state(VisibilityClusterState::Disabled)
-                .is_some()
-            {
-                self.apply_world_visibility_plan(device, queue, None);
-            }
-            return;
-        };
-        let Some(state) = self
-            .visibility
-            .tracker
-            .update(enabled, camera_position, |point| {
-                visibility.cluster_at(point)
-            })
-        else {
-            return;
-        };
-
-        match state {
-            VisibilityClusterState::Disabled | VisibilityClusterState::StandDown => {
-                self.apply_world_visibility_plan(device, queue, None);
-            }
-            VisibilityClusterState::Cluster(cluster) => {
-                if let Some(visible_clusters) = visibility.visible_clusters(cluster) {
-                    let plan = WorldVisibilityPlan::from_visible_clusters(scene, &visible_clusters);
-                    log::debug!(
-                        "map preview visibility rebuild cluster {cluster}: {} visible clusters",
-                        plan.visible_cluster_count
-                    );
-                    self.apply_world_visibility_plan(device, queue, Some(plan));
-                } else {
-                    self.apply_world_visibility_plan(device, queue, None);
-                }
-            }
-        }
-    }
-
-    pub fn apply_world_visibility_plan(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        plan: Option<WorldVisibilityPlan>,
-    ) {
-        for mesh in self.meshes.iter_mut() {
-            if mesh.map_skybox || mesh.door_index.is_some() {
-                continue;
-            }
-            mesh.visible_indices = plan.as_ref().map(|plan| {
-                let visible = plan
-                    .mesh_indices
-                    .get(mesh.scene_mesh_index)
-                    .map_or(&[][..], Vec::as_slice);
-                upload_visible_indices(device, queue, visible)
-            });
-        }
-
-        if let Some(detail_sprites) = self.detail_sprites.as_mut() {
-            detail_sprites.visible_vertices = plan
-                .as_ref()
-                .map(|plan| upload_visible_detail_sprites(device, queue, detail_sprites, plan));
-        }
-
-        self.visibility.plan = plan;
     }
 
     pub fn update_door_vertices(
@@ -378,10 +314,10 @@ pub struct UploadedSkybox {
 
 #[derive(Debug)]
 pub struct UploadedMesh {
+    pub entity: bool,
     pub vertices: wgpu::Buffer,
     pub indices: wgpu::Buffer,
     pub index_count: u32,
-    pub visible_indices: Option<UploadedVisibleIndices>,
     // Position in the source scene's mesh list, NOT this upload list:
     // empty-index meshes are dropped at upload, and WorldVisibilityPlan is
     // keyed by the unfiltered scene order.
@@ -403,7 +339,6 @@ pub struct UploadedDetailSprites {
     pub vertex_count: u32,
     pub all_vertices: Vec<u8>,
     pub sprite_count: usize,
-    pub visible_vertices: Option<UploadedVisibleVertices>,
     pub material_index: usize,
 }
 
@@ -444,7 +379,6 @@ pub fn upload_detail_sprites(
         vertex_count: u32::try_from(sprites.len().saturating_mul(6)).unwrap_or(u32::MAX),
         all_vertices: vertex_bytes,
         sprite_count: sprites.len(),
-        visible_vertices: None,
         material_index: first.material_index,
     })
 }
@@ -454,6 +388,7 @@ pub fn upload_meshes(
     queue: &wgpu::Queue,
     meshes: &[MeshData],
     map_skybox: bool,
+    entity_flags: Option<&[bool]>,
 ) -> Vec<UploadedMesh> {
     meshes
         .iter()
@@ -480,10 +415,13 @@ pub fn upload_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             UploadedMesh {
+                entity: entity_flags
+                    .and_then(|flags| flags.get(scene_mesh_index))
+                    .copied()
+                    .unwrap_or(false),
                 vertices,
                 indices,
                 index_count: mesh.indices.len() as u32,
-                visible_indices: None,
                 scene_mesh_index,
                 centroid,
                 material_index: mesh.material_index,
@@ -534,10 +472,10 @@ pub fn upload_door_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             uploaded.push(UploadedMesh {
+                entity: true,
                 vertices,
                 indices,
                 index_count: mesh.indices.len() as u32,
-                visible_indices: None,
                 scene_mesh_index: usize::MAX,
                 centroid: mesh_centroid(&transformed_vertices),
                 material_index: mesh.material_index,

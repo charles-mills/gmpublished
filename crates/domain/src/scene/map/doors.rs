@@ -173,6 +173,7 @@ impl PendingDoorBuild {
 
 fn build_mesh_to_map_mesh_local(mesh: BuildMesh) -> MapMesh {
     MapMesh {
+        entity: mesh.entity,
         vertices: mesh
             .vertices
             .into_iter()
@@ -358,6 +359,7 @@ fn pending_prop_door(
     };
     let visibility = point_visibility_bucket(bsp, origin, cluster_count);
     let placement = StaticPropPlacement {
+        entity: true,
         model_path,
         origin,
         angles,
@@ -443,6 +445,7 @@ pub(super) fn extract_pending_door_meshes(
     if let Some(face_range) = model_face_range(model, bsp.faces.len()) {
         let visibility = MapFaceVisibility::from_bucket(pending.visibility);
         let mut door_context = FaceAppendContext {
+            entity: false,
             transform: super::brushes::BrushTransform::default(),
             meshes: &mut meshes,
             material_names: context.material_names,

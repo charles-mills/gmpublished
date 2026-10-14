@@ -94,6 +94,12 @@ impl shader::Program<Message> for Viewer3d {
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
+            #[cfg(feature = "map-capture")]
+            reflection_target: false,
+            #[cfg(feature = "map-capture")]
+            capture_diagnostics: None,
+            prepared_frame: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            skybox_transform: None,
             preview: PreviewScene::Model(Arc::clone(&self.model)),
             content_id: self.content_id,
             skin_remap: self.skin_remap.clone(),
@@ -747,6 +753,12 @@ impl shader::Program<Message> for FlyViewer {
         bounds: Rectangle,
     ) -> ModelPrimitive {
         ModelPrimitive {
+            #[cfg(feature = "map-capture")]
+            reflection_target: false,
+            #[cfg(feature = "map-capture")]
+            capture_diagnostics: None,
+            prepared_frame: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            skybox_transform: self.sky_camera.map(|camera| (camera.origin, camera.scale)),
             preview: PreviewScene::Map(Arc::clone(&self.scene)),
             content_id: self.content_id,
             skin_remap: Vec::new(),

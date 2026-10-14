@@ -17,6 +17,7 @@ use rayon::prelude::*;
 #[derive(Debug)]
 pub(in super::super) struct PropBakeResult {
     pub(in super::super) meshes: Vec<MeshData>,
+    pub(in super::super) entity_meshes: Vec<bool>,
     pub(in super::super) mesh_visibility: Vec<MapMeshVisibility>,
     pub(in super::super) placed_count: u32,
     pub(in super::super) skip_stats: PropBakeSkipStats,
@@ -615,14 +616,16 @@ pub(in super::super) fn bake_selected_static_props(
 fn bake_selected_with(
     selected: SelectedPropPlacements<'_>,
     load_timing: Duration,
-    bake: impl FnOnce(&[SelectedPropPlacement<'_>]) -> BTreeMap<usize, PropBuildMesh>,
+    bake: impl FnOnce(&[SelectedPropPlacement<'_>]) -> BTreeMap<(usize, bool), PropBuildMesh>,
 ) -> PropBakeResult {
     let bake_started = Instant::now();
     let prop_meshes = bake(&selected.placements);
     let bake_timing = bake_started.elapsed();
+    let entity_meshes = prop_meshes.keys().map(|(_, entity)| *entity).collect();
     let (meshes, mesh_visibility) = prop_meshes_to_mesh_data(prop_meshes);
 
     PropBakeResult {
+        entity_meshes,
         meshes,
         mesh_visibility,
         placed_count: u32::try_from(selected.placements.len()).unwrap_or(u32::MAX),
@@ -755,7 +758,7 @@ pub(in super::super) fn prop_mesh_buffer_bytes(meshes: &[MeshData]) -> usize {
 }
 
 pub(in super::super) fn prop_meshes_to_mesh_data(
-    prop_meshes: BTreeMap<usize, PropBuildMesh>,
+    prop_meshes: BTreeMap<(usize, bool), PropBuildMesh>,
 ) -> (Vec<MeshData>, Vec<MapMeshVisibility>) {
     prop_meshes
         .into_values()
@@ -776,7 +779,7 @@ pub(in super::super) fn prop_meshes_to_mesh_data(
 
 pub(in super::super) fn bake_selected_prop_placements_parallel(
     selected: &[SelectedPropPlacement<'_>],
-) -> BTreeMap<usize, PropBuildMesh> {
+) -> BTreeMap<(usize, bool), PropBuildMesh> {
     if selected.is_empty() {
         return BTreeMap::new();
     }
@@ -798,8 +801,8 @@ pub(in super::super) fn bake_selected_prop_placements_parallel(
 
 pub(in super::super) fn bake_selected_prop_placements_serial(
     selected: &[SelectedPropPlacement<'_>],
-) -> BTreeMap<usize, PropBuildMesh> {
-    let mut prop_meshes = BTreeMap::<usize, PropBuildMesh>::new();
+) -> BTreeMap<(usize, bool), PropBuildMesh> {
+    let mut prop_meshes = BTreeMap::<(usize, bool), PropBuildMesh>::new();
     for selected in selected {
         let baked = bake_prop_placement(
             selected.placement,
@@ -813,12 +816,12 @@ pub(in super::super) fn bake_selected_prop_placements_serial(
 }
 
 pub(in super::super) fn merge_prop_meshes(
-    target_meshes: &mut BTreeMap<usize, PropBuildMesh>,
-    source_meshes: BTreeMap<usize, PropBuildMesh>,
+    target_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
+    source_meshes: BTreeMap<(usize, bool), PropBuildMesh>,
 ) {
-    for (material_index, source) in source_meshes {
+    for ((material_index, entity), source) in source_meshes {
         let target = target_meshes
-            .entry(material_index)
+            .entry((material_index, entity))
             .or_insert_with(|| PropBuildMesh {
                 vertices: Vec::new(),
                 indices: Vec::new(),
@@ -1257,7 +1260,7 @@ pub(in super::super) fn bake_prop_placement(
     placement: &StaticPropPlacement,
     model: &PropModelAsset,
     lighting: PropPlacementLighting,
-    prop_meshes: &mut BTreeMap<usize, PropBuildMesh>,
+    prop_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
 ) -> bool {
     let skin_table = prop_skin_table(&model.model, placement.skin);
     let mut baked_any = false;
@@ -1275,7 +1278,7 @@ pub(in super::super) fn bake_prop_placement(
             continue;
         };
         let Some(base) = prop_meshes
-            .get(&material_index)
+            .get(&(material_index, placement.entity))
             .map_or(0, |target| target.vertices.len())
             .checked_add(mesh.vertices.len())
             .and_then(|count| u32::try_from(count).ok())
@@ -1283,7 +1286,7 @@ pub(in super::super) fn bake_prop_placement(
             continue;
         };
         let target = prop_meshes
-            .entry(material_index)
+            .entry((material_index, placement.entity))
             .or_insert_with(|| PropBuildMesh {
                 vertices: Vec::new(),
                 indices: Vec::new(),

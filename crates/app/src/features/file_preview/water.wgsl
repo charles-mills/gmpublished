@@ -8,12 +8,14 @@ struct Uniforms {
     water_time_sky_tint: vec4<f32>,
     // xy: near and far clip distances.
     water_depth_params: vec4<f32>,
+    clip_plane: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var refraction_texture: texture_2d<f32>;
 @group(0) @binding(2) var refraction_sampler: sampler;
 @group(0) @binding(3) var scene_depth: texture_depth_multisampled_2d;
+@group(0) @binding(4) var reflection_texture: texture_2d<f32>;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
 
@@ -80,7 +82,8 @@ fn surface_lighting(input: VertexOutput) -> SurfaceLighting {
         let normal_b = textureSampleGrad(normal_texture, base_sampler, extra_b, frame, du.yx * 0.45, dv.yx * 0.45);
         encoded = (encoded + normal_a + normal_b) * 0.33;
     }
-    let tangent_normal = vec4<f32>(encoded.xyz * 2.0 - 1.0, encoded.a);
+    var tangent_normal = vec4<f32>(encoded.xyz * 2.0 - 1.0, encoded.a);
+    if material.flags.w != 0u { tangent_normal = vec4<f32>(normalize(tangent_normal.xyz), tangent_normal.a); }
     let px = dpdx(input.world_position);
     let py = dpdy(input.world_position);
     let determinant = du.x * dv.y - du.y * dv.x;
@@ -121,6 +124,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let dimensions = vec2<f32>(dimensions_u);
     let half_texel = vec2<f32>(0.5) / dimensions;
     let unperturbed_uv = clamp(input.clip_position.xy / dimensions, half_texel, vec2<f32>(1.0) - half_texel);
+    if material.flags.w != 0u {
+        let reflected_uv = clamp(unperturbed_uv + vec2<f32>(-lighting.tangent_normal.x, lighting.tangent_normal.y) * lighting.tangent_normal.a * material.water_optics.x, half_texel, vec2<f32>(1.0) - half_texel);
+        let refracted_uv = clamp(unperturbed_uv + lighting.tangent_normal.xy * lighting.tangent_normal.a * material.water_optics.y, half_texel, vec2<f32>(1.0) - half_texel);
+        let reflected = textureSampleLevel(reflection_texture, refraction_sampler, reflected_uv, 0.0).rgb * material.water_reflect.rgb;
+        let refracted = textureSampleLevel(refraction_texture, refraction_sampler, refracted_uv, 0.0).rgb * material.water_refract.rgb;
+        let facing = clamp(dot(lighting.normal, normalize(uniforms.camera_position.xyz-input.world_position)), 0.0, 1.0);
+        let fresnel = (material.water_scroll.y-material.water_scroll.x) * pow(1.0-facing, material.water_scroll.z) + material.water_scroll.x;
+        var color = mix(refracted, reflected, fresnel);
+        if material.water_refract.a < 0.5 { color = reflected; }
+        if material.water_reflect.a < 0.5 { color = refracted; }
+        return vec4<f32>(apply_fog(color, input.world_position), 1.0);
+    }
     let unperturbed_pixel = clamp(vec2<i32>(unperturbed_uv * dimensions), vec2<i32>(0), vec2<i32>(dimensions_u) - vec2<i32>(1));
     let water_depth = linearize_depth(input.clip_position.z);
     let view_distance = distance(input.world_position, uniforms.camera_position.xyz);
@@ -143,7 +158,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let absorption = clamp(depth_value - 0.05, 0.0, 1.0) * material.water_fog.a;
     let absorbed = mix(refracted, material.water_fog.rgb, absorption);
     let fresnel = lighting.fresnel * clamp((depth_value - 0.05) * 20.0, 0.0, 1.0);
-    let reflected = uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb;
+    var reflection = uniforms.water_time_sky_tint.yzw;
+    if uniforms.water_depth_params.z > 0.5 {
+        // Our reflected view reverses winding instead of flipping the render
+        // target vertically, so reflected normal-Y distortion reverses too.
+        let reflection_offset = vec2<f32>(lighting.tangent_normal.x, -lighting.tangent_normal.y)
+            * lighting.tangent_normal.a * material.water_optics.x * original_fog;
+        reflection = textureSampleLevel(reflection_texture, refraction_sampler,
+            clamp(unperturbed_uv + reflection_offset, half_texel, vec2<f32>(1.0) - half_texel), 0.0).rgb;
+    }
+    let reflected = reflection * material.water_reflect.rgb;
     var color = material.water_fog.rgb;
     if material.water_refract.a > 0.5 { color = absorbed; }
     if material.water_reflect.a > 0.5 {
@@ -155,6 +179,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn fs_skybox(input: VertexOutput) -> @location(0) vec4<f32> {
     let lighting = surface_lighting(input);
-    let color = mix(material.water_fog.rgb, uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb, lighting.fresnel * material.water_reflect.a);
+    if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
+    var color = mix(material.water_fog.rgb, uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb, lighting.fresnel * material.water_reflect.a);
+    if material.flags.w != 0u { color = uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb; }
     return vec4<f32>(apply_fog(color, input.world_position), 1.0);
 }

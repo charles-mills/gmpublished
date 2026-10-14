@@ -10,6 +10,7 @@ struct Uniforms {
     water_time_sky_tint: vec4<f32>,
     // xy: near and far clip distances.
     water_depth_params: vec4<f32>,
+    clip_plane: vec4<f32>,
 }
 
 struct Material {
@@ -86,6 +87,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         lit = albedo.rgb * input.color * 2.0;
     }
+    if uniforms.light.w < 0.0 { lit = albedo.rgb; }
     if uniforms.fog_params.w > 0.5 && uniforms.fog_params.y > uniforms.fog_params.x {
         let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
         let fog_factor = clamp(
@@ -95,5 +97,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         );
         lit = mix(lit, uniforms.fog_color.rgb, fog_factor);
     }
+    if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
     return vec4<f32>(lit, albedo.a);
 }

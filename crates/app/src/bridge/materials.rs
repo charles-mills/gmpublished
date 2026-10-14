@@ -10,9 +10,11 @@ use std::{
 };
 
 mod discovery;
+mod mirror;
 mod sibling_gma;
 mod texture;
 mod water;
+pub use mirror::MirrorMaterial;
 pub use water::{MaterialShader, WaterMaterial, WaterNormalMap};
 
 pub use texture::decode_vtf_rgba;
@@ -636,6 +638,7 @@ impl MaterialResolver {
                     render_mode.preserves_texture_alpha() || is_water_shader(&material.shader),
                 )
             })
+            .or_else(|| self.mirror_fallback_texture(&material))
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material));
         let texture2 = material
@@ -678,6 +681,7 @@ impl MaterialResolver {
                     render_mode.preserves_texture_alpha() || is_water_shader(&material.shader),
                 )
             })
+            .or_else(|| self.mirror_fallback_texture(&material))
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material))?;
         Some(ResolvedPrimaryMaterial {
@@ -866,6 +870,14 @@ impl MaterialResolver {
             1,
             false,
         )))
+    }
+
+    fn mirror_fallback_texture(
+        &self,
+        material: &EffectiveMaterial,
+    ) -> Option<Arc<ResolvedTexture>> {
+        mirror::is_mirror_shader(&material.shader)
+            .then(|| Arc::new(ResolvedTexture::rgba(vec![255; 4], 1, 1, 1, 1, false)))
     }
 
     fn water_fallback_texture(&self, material: &EffectiveMaterial) -> Option<Arc<ResolvedTexture>> {

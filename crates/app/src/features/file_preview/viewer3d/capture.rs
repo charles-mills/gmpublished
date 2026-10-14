@@ -1,3 +1,5 @@
+#[path = "capture_isolation.rs"]
+mod isolation;
 use super::{FlyCamera, FlyPose, FlyViewer, Message, ModelPrimitive, MovementMode, Vec3, shader};
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::generation::Generation;
@@ -66,6 +68,8 @@ struct CaptureSuite {
     animation_time: f32,
     #[serde(default)]
     benchmark_frames: usize,
+    #[serde(default)]
+    verify_view_isolation: bool,
     maps: Vec<CaptureMap>,
 }
 
@@ -103,6 +107,10 @@ struct CaptureCamera {
     /// Replay the production widget update path for two seconds without input.
     #[serde(default)]
     live_animation: bool,
+    #[serde(default)]
+    fullbright: bool,
+    #[serde(default)]
+    reflection_target: bool,
     #[serde(default = "enabled")]
     skybox: bool,
     #[serde(default = "enabled")]
@@ -116,9 +124,12 @@ const fn enabled() -> bool {
 }
 
 struct FixedView {
+    diagnostics: Arc<Mutex<Value>>,
     viewer: FlyViewer,
     camera: FlyCamera,
     live_animation: bool,
+    fullbright: bool,
+    reflection_target: bool,
 }
 
 impl shader::Program<Message> for FixedView {
@@ -138,7 +149,7 @@ impl shader::Program<Message> for FixedView {
     }
 
     fn draw(&self, state: &FlyCamera, cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
-        self.viewer.draw(
+        let mut primitive = self.viewer.draw(
             if self.live_animation {
                 state
             } else {
@@ -146,7 +157,16 @@ impl shader::Program<Message> for FixedView {
             },
             cursor,
             bounds,
-        )
+        );
+        primitive.reflection_target = self.reflection_target;
+        primitive.capture_diagnostics = Some(Arc::clone(&self.diagnostics));
+        if self.fullbright {
+            primitive.uniforms.light[3] = -1.0;
+            if let Some(skybox) = primitive.map_skybox_uniforms.as_mut() {
+                skybox.light[3] = -1.0;
+            }
+        }
+        primitive
     }
 }
 
@@ -181,54 +201,59 @@ fn texture_info(texture: &crate::bridge::materials::ResolvedTexture) -> Value {
 }
 
 fn material_info(slot: &MaterialSlot) -> Value {
-    let water =
-        slot.shader.water().map(|water| {
-            let frames =
-                water.normal_map.as_ref().map(|normal| {
-                    normal
-                        .frames
-                        .iter()
-                        .map(|mips| {
-                            mips.iter().map(|mip| json!({
-                "dimensions": [mip.width, mip.height],
-                "payload_crc32": format!("{:08x}", crc32fast::hash(&mip.rgba)),
-                "bytes": mip.rgba.len(),
-            })).collect::<Vec<_>>()
+    let water = slot.shader.water().map(|water| {
+        let frames = water.normal_map.as_ref().map(|normal| {
+            normal
+                .frames
+                .iter()
+                .map(|mips| {
+                    mips.iter()
+                        .map(|mip| {
+                            json!({
+                                "dimensions": [mip.width, mip.height],
+                                "payload_crc32": format!("{:08x}", crc32fast::hash(&mip.rgba)),
+                                "bytes": mip.rgba.len(),
+                            })
                         })
                         .collect::<Vec<_>>()
-                });
-            json!({
-                "shader": water.shader,
-                "parameters": water.parameters,
-                "normal_map_path": water.normal_map_path,
-                "normal_frames_linear_rgba": frames,
-                "bump_transform": water.bump_transform,
-                "proxy_scroll": water.proxy_scroll,
-                "scroll1": water.scroll1, "scroll2": water.scroll2,
-                "bump_frame": water.bump_frame, "frame_rate": water.frame_rate,
-            "animation_wrap": water.animation_wrap,
-                "has_base_texture": water.has_base_texture,
-                "above_water": water.above_water,
-                "reflect_enabled": water.reflect_enabled, "refract_enabled": water.refract_enabled,
-                "reflect_amount": water.reflect_amount, "refract_amount": water.refract_amount,
-                "reflect_tint_linear": water.reflect_tint_linear,
-                "refract_tint_linear": water.refract_tint_linear,
-                "fog_color_linear": water.fog_color_linear,
-                "fog_start": water.fog_start, "fog_end": water.fog_end,
-                "fog_enabled": water.fog_enabled,
-                "below_material": water.below_material,
-                "unsupported_proxies": water.unsupported_proxies,
-                "unsupported_features": water.unsupported_features,
-            })
+                })
+                .collect::<Vec<_>>()
         });
+        json!({
+            "shader": water.shader,
+            "parameters": water.parameters,
+            "normal_map_path": water.normal_map_path,
+            "normal_frames_linear_rgba": frames,
+            "bump_transform": water.bump_transform,
+            "proxy_scroll": water.proxy_scroll,
+            "scroll1": water.scroll1, "scroll2": water.scroll2,
+            "bump_frame": water.bump_frame, "frame_rate": water.frame_rate,
+        "animation_wrap": water.animation_wrap,
+            "has_base_texture": water.has_base_texture,
+            "above_water": water.above_water,
+            "force_cheap":water.force_cheap,"reflect_entities":water.reflect_entities,"reflect_3d_skybox":water.reflect_3d_skybox,
+            "reflect_enabled": water.reflect_enabled, "refract_enabled": water.refract_enabled,
+            "reflect_amount": water.reflect_amount, "refract_amount": water.refract_amount,
+            "reflect_tint_linear": water.reflect_tint_linear,
+            "refract_tint_linear": water.refract_tint_linear,
+            "fog_color_linear": water.fog_color_linear,
+            "fog_start": water.fog_start, "fog_end": water.fog_end,
+            "fog_enabled": water.fog_enabled,
+            "below_material": water.below_material,
+            "unsupported_proxies": water.unsupported_proxies,
+            "unsupported_features": water.unsupported_features,
+        })
+    });
     json!({
         "name": slot.name,
         "shader": match &slot.shader {
             crate::bridge::materials::MaterialShader::Unknown => "unknown",
             crate::bridge::materials::MaterialShader::Surface(name) => name,
+            crate::bridge::materials::MaterialShader::Mirror(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Water(material) => &material.shader,
         },
         "water": water,
+        "mirror": slot.shader.mirror().map(|mirror| json!({"shader":mirror.shader,"parameters":mirror.parameters,"fresnel_power":mirror.fresnel_power,"min_reflectivity":mirror.min_reflectivity,"max_reflectivity":mirror.max_reflectivity,"normal_map_path":mirror.normal_map_path,"unsupported_features":mirror.unsupported_features})),
         "render_mode": format!("{:?}", slot.render_mode),
         "force_opaque": slot.force_opaque,
         "texture": slot.texture.as_deref().map(texture_info),
@@ -502,8 +527,12 @@ pub fn capture_map_reference_frames() {
             } else {
                 super::camera::WaterLevel::Dry
             };
+            let diagnostics = Arc::new(Mutex::new(Value::Null));
             let view = FixedView {
+                diagnostics: Arc::clone(&diagnostics),
                 live_animation: shot.live_animation,
+                fullbright: shot.fullbright,
+                reflection_target: shot.reflection_target,
                 viewer: FlyViewer {
                     scene: Arc::clone(&scene),
                     content_id,
@@ -655,6 +684,8 @@ pub fn capture_map_reference_frames() {
             ];
             map_record["captures"].as_array_mut().unwrap().push(json!({
                 "file": filename,
+                "render_diagnostics": diagnostics.lock().unwrap().clone(),
+                "fullbright": shot.fullbright, "reflection_target": shot.reflection_target,
                 "animation_time": if shot.live_animation { 2.0 } else { animation_time },
                 "live_animation": shot.live_animation.then(|| json!({
                     "redraw_events_without_input": 121,
@@ -678,6 +709,60 @@ pub fn capture_map_reference_frames() {
                 "steady_capture_latency": capture_latency,
             }));
             println!("map capture: {}", directory.join(filename).display());
+        }
+        if suite.verify_view_isolation {
+            map_record["view_isolation"] = isolation::verify(
+                &mut renderer,
+                |shot| {
+                    let pose = FlyPose {
+                        position: Vec3::from(shot.eye),
+                        yaw: shot.angles[1].to_radians(),
+                        pitch: -shot.angles[0].to_radians(),
+                        speed: 1.0,
+                    };
+                    let mut camera = FlyCamera::default();
+                    camera.ensure_spawn(
+                        &scene,
+                        spawn,
+                        content_id,
+                        Some(pose),
+                        Some(MovementMode::Fly),
+                    );
+                    camera.water_time = shot.animation_time.unwrap_or(suite.animation_time);
+                    camera.water = if scene
+                        .walk_collision
+                        .as_ref()
+                        .is_some_and(|collision| collision.water_at(pose.position).is_some())
+                    {
+                        super::camera::WaterLevel::Eyes
+                    } else {
+                        super::camera::WaterLevel::Dry
+                    };
+                    FixedView {
+                        diagnostics: Arc::new(Mutex::new(Value::Null)),
+                        camera,
+                        live_animation: false,
+                        fullbright: shot.fullbright,
+                        reflection_target: false,
+                        viewer: FlyViewer {
+                            scene: Arc::clone(&scene),
+                            content_id,
+                            fog,
+                            fog_enabled: shot.fog,
+                            sky_camera,
+                            map_skybox_visible: shot.skybox,
+                            visibility_culling: shot.visibility,
+                            phy_debug_visible: false,
+                            spawn,
+                            pose: Some(pose),
+                            movement_mode: Some(MovementMode::Fly),
+                            requested_movement_mode: None,
+                        },
+                    }
+                },
+                &map.cameras,
+                &directory,
+            );
         }
         manifest["maps"].as_array_mut().unwrap().push(map_record);
         write_manifest(&output, &manifest);

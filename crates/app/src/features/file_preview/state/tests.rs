@@ -87,6 +87,8 @@ fn render_scene(
 
 fn empty_map(scene: Arc<RenderScene>) -> MapPreview {
     MapPreview {
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
         scene,
         mesh_visibility: Vec::new(),
         map_skybox_meshes: Vec::new(),

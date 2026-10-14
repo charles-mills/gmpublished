@@ -20,6 +20,18 @@ pub struct RefractionTarget {
 }
 
 impl RenderTargets {
+    #[cfg(feature = "map-capture")]
+    pub fn estimated_bytes(&self) -> u64 {
+        u64::from(self.size.0)
+            * u64::from(self.size.1)
+            * (bytes_per_pixel(self.format)
+                + if self.refraction.is_some() {
+                    u64::from(self.format.block_copy_size(None).unwrap_or(4))
+                } else {
+                    0
+                })
+    }
+
     pub fn ensure(
         slot: &mut Option<Self>,
         device: &wgpu::Device,
@@ -27,6 +39,7 @@ impl RenderTargets {
         width: u32,
         height: u32,
         needs_refraction: bool,
+        uniforms: &wgpu::Buffer,
     ) {
         let size = (width.max(1), height.max(1));
         if slot.as_ref().is_some_and(|targets| {
@@ -34,7 +47,7 @@ impl RenderTargets {
         }) {
             if let Some(targets) = slot.as_mut() {
                 if needs_refraction {
-                    targets.ensure_refraction(device, resources);
+                    targets.ensure_refraction(device, resources, uniforms);
                 } else {
                     // Drop the refraction texture when switching to a waterless scene, even if
                     // the viewport size and format are unchanged.
@@ -108,12 +121,17 @@ impl RenderTargets {
             format: resources.target_format,
         };
         if needs_refraction {
-            targets.ensure_refraction(device, resources);
+            targets.ensure_refraction(device, resources, uniforms);
         }
         *slot = Some(targets);
     }
 
-    fn ensure_refraction(&mut self, device: &wgpu::Device, resources: &RenderResources) {
+    fn ensure_refraction(
+        &mut self,
+        device: &wgpu::Device,
+        resources: &RenderResources,
+        uniforms: &wgpu::Buffer,
+    ) {
         if self.refraction.is_some() {
             return;
         }
@@ -132,31 +150,52 @@ impl RenderTargets {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("file_preview.model_viewer.water_frame_bind_group"),
-            layout: &resources.water_frame_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: resources.uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&resources.water_refraction_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&self.depth),
-                },
-            ],
-        });
+        let bind_group = water_bind_group(device, resources, uniforms, &view, &self.depth, &view);
         self.refraction = Some(RefractionTarget {
             texture,
             bind_group,
         });
     }
+}
+
+pub fn water_bind_group(
+    device: &wgpu::Device,
+    resources: &RenderResources,
+    uniforms: &wgpu::Buffer,
+    refraction: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    reflection: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("file_preview.planar_frame"),
+        layout: &resources.water_frame_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(refraction),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&resources.water_refraction_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(reflection),
+            },
+        ],
+    })
+}
+
+/// Colour MSAA + resolved colour + MSAA depth, excluding driver overhead.
+pub fn bytes_per_pixel(format: wgpu::TextureFormat) -> u64 {
+    u64::from(format.block_copy_size(None).unwrap_or(4)) * (u64::from(MSAA_SAMPLE_COUNT) + 1)
+        + 4 * u64::from(MSAA_SAMPLE_COUNT)
 }

@@ -16,6 +16,8 @@ pub struct Uniforms {
     pub fog_params: [f32; 4],
     pub water_time_sky_tint: [f32; 4],
     pub water_depth_params: [f32; 4],
+    /// World-space half-space retained by this view; zero disables clipping.
+    pub clip_plane: [f32; 4],
 }
 
 #[repr(C)]
@@ -34,6 +36,45 @@ pub struct MaterialUniform {
 }
 
 impl MaterialUniform {
+    pub fn with_mirror(
+        mut self,
+        mirror: Option<&crate::bridge::materials::MirrorMaterial>,
+    ) -> Self {
+        if let Some(mirror) = mirror {
+            self.flags[3] = 1;
+            self.water_reflect = [
+                mirror.reflect_tint_linear[0],
+                mirror.reflect_tint_linear[1],
+                mirror.reflect_tint_linear[2],
+                f32::from(mirror.reflect_enabled),
+            ];
+            self.water_refract = [
+                mirror.refract_tint_linear[0],
+                mirror.refract_tint_linear[1],
+                mirror.refract_tint_linear[2],
+                f32::from(mirror.refract_enabled),
+            ];
+            self.water_optics = [mirror.reflect_amount, mirror.refract_amount, 0.0, 0.0];
+            self.water_bump_s = mirror.bump_transform[0];
+            self.water_bump_t = mirror.bump_transform[1];
+            self.water_scroll = [
+                mirror.min_reflectivity,
+                mirror.max_reflectivity,
+                mirror.fresnel_power,
+                0.0,
+            ];
+            self.water_state = [
+                mirror
+                    .normal_map
+                    .as_ref()
+                    .map_or(1.0, |normal| normal.frames.len() as f32),
+                0.0,
+                0.0,
+                0.0,
+            ];
+        }
+        self
+    }
     pub const fn new(force_opaque: bool, render_mode: RenderMode) -> Self {
         Self {
             water_fog: [0.0; 4],
@@ -148,6 +189,7 @@ impl Uniforms {
             fog_params,
             water_time_sky_tint: [water_time, 0.0, 0.0, 0.0],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
+            clip_plane: [0.0; 4],
         }
     }
 
@@ -167,6 +209,7 @@ impl Uniforms {
             fog_params: [0.0, 1.0, 0.0, 0.0],
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
+            clip_plane: [0.0; 4],
         }
     }
 
@@ -198,6 +241,7 @@ impl Uniforms {
             }),
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
+            clip_plane: [0.0; 4],
         }
     }
 
@@ -224,6 +268,7 @@ impl Uniforms {
             fog_params: [0.0, 1.0, 0.0, 0.0],
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [0.0; 4],
+            clip_plane: [0.0; 4],
         }
     }
 }
@@ -360,6 +405,7 @@ mod uniform_layout_tests {
                 "water_depth_params",
                 offset_of!(Uniforms, water_depth_params),
             ),
+            ("clip_plane", offset_of!(Uniforms, clip_plane)),
         ];
         for (name, source) in [
             ("model_viewer", super::super::super::MODEL_SHADER_SOURCE),

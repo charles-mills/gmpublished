@@ -210,6 +210,7 @@ fn load_map_impl(
 
     {
         let mut face_context = FaceAppendContext {
+            entity: false,
             transform: brushes::BrushTransform::default(),
             meshes: &mut meshes,
             material_names: &mut material_names,
@@ -223,6 +224,7 @@ fn load_map_impl(
             }
             let model = &bsp.models[instance.model_index.get()];
             face_context.transform = instance.transform;
+            face_context.entity = instance.model_index.get() != 0;
             let attribution = (instance.model_index.get() != 0)
                 .then(|| instance.attribution(&bsp, &brush_locator, &skybox_partition));
             let Some(face_range) = model_face_range(model, bsp.faces.len()) else {
@@ -299,6 +301,7 @@ fn load_map_impl(
     let meshes = meshes
         .into_iter()
         .map(|mesh| MapMesh {
+            entity: mesh.entity,
             vertices: mesh
                 .vertices
                 .into_iter()
@@ -312,6 +315,7 @@ fn load_map_impl(
     let skybox_meshes = skybox_meshes
         .into_iter()
         .map(|mesh| MapMesh {
+            entity: mesh.entity,
             vertices: mesh
                 .vertices
                 .into_iter()

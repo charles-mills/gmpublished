@@ -658,6 +658,7 @@ fn map_uv_normalization_divides_raw_texels_by_resolved_dimensions() {
 fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
     use gmpublished_domain::scene::map::{MapMesh, MapMeshVisibility, MapVertex};
     let mesh = MapMesh {
+        entity: false,
         vertices: vec![MapVertex {
             position: Vec3::ZERO,
             normal: Vec3::new(0.0, 0.0, 1.0),
@@ -1041,7 +1042,7 @@ fn prop_bake_applies_skin_table_to_material_slot() {
         &mut meshes
     ));
 
-    let mesh = meshes.get(&11).expect("skin remapped material");
+    let mesh = meshes.get(&(11, false)).expect("skin remapped material");
     assert_eq!(mesh.indices, vec![0, 1, 2]);
     assert_vec3_close(mesh.vertices[0].position, Vec3::new(10.0, 21.0, 30.0));
     assert_eq!(mesh.vertices[0].lightmap_uv, [0.0; 2]);
@@ -1070,7 +1071,7 @@ fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
         &mut meshes
     ));
 
-    let mesh = meshes.get(&0).expect("material mesh");
+    let mesh = meshes.get(&(0, false)).expect("material mesh");
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for vertex in &mesh.vertices {
@@ -1726,6 +1727,7 @@ fn prop_placement_with_visibility(
     visibility: impl Into<MapPropVisibility>,
 ) -> StaticPropPlacement {
     StaticPropPlacement {
+        entity: false,
         model_path: model_path.to_owned(),
         origin,
         angles,

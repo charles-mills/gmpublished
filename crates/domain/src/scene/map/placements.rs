@@ -47,6 +47,7 @@ pub(super) fn partitioned_static_prop_placements(
         let origin = prop.origin;
         let visibility = static_prop_leaf_visibility(bsp, prop, cluster_count);
         Some(StaticPropPlacement {
+            entity: false,
             model_path: normalize_static_prop_model_path(bsp.static_prop_model(prop))?,
             origin: Vec3::from(origin),
             angles: Vec3::from(prop.angles),
@@ -197,6 +198,7 @@ fn entity_prop_placement(
     let solid = entity_prop_solid(entity);
 
     Some(StaticPropPlacement {
+        entity: true,
         model_path,
         origin,
         angles,

@@ -21,6 +21,7 @@ pub struct MaterialUploadMode<'a> {
     pub force_opaque: bool,
     pub render_mode: RenderMode,
     pub water: Option<&'a crate::bridge::materials::WaterMaterial>,
+    pub mirror: Option<&'a crate::bridge::materials::MirrorMaterial>,
 }
 
 impl RenderResources {
@@ -295,8 +296,9 @@ impl RenderResources {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let material_uniform =
-            MaterialUniform::new(mode.force_opaque, mode.render_mode).with_water(mode.water);
+        let material_uniform = MaterialUniform::new(mode.force_opaque, mode.render_mode)
+            .with_water(mode.water)
+            .with_mirror(mode.mirror);
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.material_bind_group"),

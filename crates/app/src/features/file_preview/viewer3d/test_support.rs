@@ -24,6 +24,8 @@ fn empty_render_scene(bounds_min: Vec3, bounds_max: Vec3) -> Arc<RenderScene> {
 
 pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> MapPreview {
     MapPreview {
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
         scene: empty_render_scene(bounds_min, bounds_max),
         mesh_visibility: Vec::new(),
         map_skybox_meshes: Vec::new(),

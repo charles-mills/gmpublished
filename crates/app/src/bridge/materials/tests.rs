@@ -2016,3 +2016,67 @@ fn water_normals_use_stored_linear_mips_and_share_the_texture_budget() {
     assert_eq!(budget.rejected_textures(), 1);
     assert_eq!(budget.decoded_bytes(), 4);
 }
+
+#[test]
+fn reflective_glass_keeps_shader_identity_without_a_base_texture() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Reflective Glass")
+            .entry(
+                "materials/glass.vmt",
+                br#"LightmappedReflective {
+            "$reflecttexture" "_rt_WaterReflection" "$refracttexture" "_rt_WaterRefraction"
+            "$reflectamount" "0" "$refractamount" "0"
+            "$reflecttint" "[1 1 1]" "$refracttint" "[.5 .5 .6]"
+            "$normalmap" "dev/flat_normal" "$fresnelpower" "0"
+            "$minreflectivity" ".8" "$maxreflectivity" "1"
+        }"#
+                .to_vec(),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolved = MaterialResolver::new(Arc::new(archive), None)
+        .resolve_primary(&[], "glass")
+        .unwrap();
+    assert!(resolved.shader.water().is_none());
+    assert!(resolved.shader.is_planar());
+    let mirror = resolved.shader.mirror().unwrap();
+    assert_eq!(
+        mirror.reflect_amount, 0.0,
+        "zero amount means no distortion, not no reflection"
+    );
+    assert!(mirror.reflect_enabled && mirror.refract_enabled);
+    assert_eq!(mirror.min_reflectivity, 0.8);
+    assert_eq!(mirror.max_reflectivity, 1.0);
+    assert_eq!(mirror.fresnel_power, 0.0);
+    assert!((mirror.refract_tint_linear[2] - 0.6_f32.powf(2.2)).abs() < 1e-6);
+    assert_eq!(resolved.texture.rgba_bytes().unwrap(), &[255; 4]);
+}
+
+#[test]
+fn reflective_glass_defaults_and_unsupported_variants_are_explicit() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Glass defaults")
+            .entry("materials/glass.vmt", br#"LightmappedReflective { "$basetexture" "missing" Proxies { Sine { resultVar "$reflectamount" } } }"#.to_vec())
+            .build(),
+    ).unwrap();
+    let resolved = MaterialResolver::new(Arc::new(archive), None)
+        .resolve_primary(&[], "glass")
+        .unwrap();
+    let mirror = resolved.shader.mirror().unwrap();
+    assert_eq!(mirror.normal_map_path, "dev/water_normal");
+    assert_eq!(mirror.reflect_amount, 0.8);
+    assert!(mirror.reflect_enabled && mirror.refract_enabled);
+    assert!(
+        mirror
+            .unsupported_features
+            .iter()
+            .any(|feature| feature.contains("lighting/mask"))
+    );
+    assert!(
+        mirror
+            .unsupported_features
+            .iter()
+            .any(|feature| feature.contains("sine"))
+    );
+}

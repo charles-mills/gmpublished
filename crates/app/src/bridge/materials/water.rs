@@ -12,9 +12,20 @@ pub enum MaterialShader {
     Unknown,
     Surface(String),
     Water(Arc<WaterMaterial>),
+    Mirror(Arc<super::MirrorMaterial>),
 }
 
 impl MaterialShader {
+    pub(crate) fn is_planar(&self) -> bool {
+        matches!(self, Self::Water(_) | Self::Mirror(_))
+    }
+    pub(crate) fn mirror(&self) -> Option<&super::MirrorMaterial> {
+        if let Self::Mirror(material) = self {
+            Some(material)
+        } else {
+            None
+        }
+    }
     pub(crate) fn water(&self) -> Option<&WaterMaterial> {
         match self {
             Self::Water(material) => Some(material),
@@ -43,6 +54,9 @@ pub struct WaterMaterial {
     pub above_water: bool,
     pub has_base_texture: bool,
     pub reflect_enabled: bool,
+    pub force_cheap: bool,
+    pub reflect_entities: bool,
+    pub reflect_3d_skybox: bool,
     pub refract_enabled: bool,
     pub reflect_amount: f32,
     pub refract_amount: f32,
@@ -168,7 +182,7 @@ pub(super) fn merge_proxies(
     }
 }
 
-fn scalar(value: Option<&str>, default: f32) -> f32 {
+pub(super) fn scalar(value: Option<&str>, default: f32) -> f32 {
     value
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|v| v.is_finite())
@@ -191,7 +205,7 @@ fn vec2(value: Option<&str>) -> [f32; 2] {
         .map_or([0.0; 2], |v| [v[0], v[1]])
 }
 
-fn tint(value: Option<&str>, default: [f32; 3]) -> [f32; 3] {
+pub(super) fn tint(value: Option<&str>, default: [f32; 3]) -> [f32; 3] {
     value
         .and_then(parse_water_fog_color)
         .map_or(default, |color| {
@@ -201,7 +215,7 @@ fn tint(value: Option<&str>, default: [f32; 3]) -> [f32; 3] {
 
 /// Source texture transforms are centered affine transforms. TextureScroll
 /// replaces the transform with translation at bind time (matching its proxy).
-fn texture_transform(value: Option<&str>) -> [[f32; 4]; 2] {
+pub(super) fn texture_transform(value: Option<&str>) -> [[f32; 4]; 2] {
     let mut center = [0.5_f32; 2];
     let mut scale = [1.0_f32; 2];
     let mut translation = [0.0_f32; 2];
@@ -259,6 +273,9 @@ impl MaterialResolver {
         material: &EffectiveMaterial,
         has_base_texture: bool,
     ) -> MaterialShader {
+        if super::mirror::is_mirror_shader(&material.shader) {
+            return MaterialShader::Mirror(Arc::new(self.resolve_mirror(material)));
+        }
         if !is_water_shader(&material.shader) {
             return MaterialShader::Surface(material.shader.clone());
         }
@@ -318,6 +335,10 @@ impl MaterialResolver {
                 "cheap water needs cubemap reflections",
             ),
             (vmt_bool(get("$blurrefract")), "blurred refraction"),
+            (
+                vmt_bool(get("$reflectonlymarkedentities")),
+                "reflection entity marking",
+            ),
         ] {
             if active {
                 log::warn!("unsupported water feature: {feature}");
@@ -338,7 +359,10 @@ impl MaterialResolver {
             animation_wrap,
             above_water: get("$abovewater").is_none_or(|v| vmt_bool(Some(v))),
             has_base_texture,
-            reflect_enabled: get("$reflecttexture").is_some(),
+            reflect_enabled: get("$reflecttexture").is_some_and(|value| !value.is_empty()),
+            force_cheap: vmt_bool(get("$forcecheap")),
+            reflect_entities: vmt_bool(get("$reflectentities")),
+            reflect_3d_skybox: get("$reflect3dskybox").is_none_or(|v| vmt_bool(Some(v))),
             refract_enabled: get("$refracttexture").is_some(),
             reflect_amount: scalar(get("$reflectamount"), 0.8).max(0.0),
             refract_amount: scalar(get("$refractamount"), 0.0).max(0.0),
@@ -355,7 +379,7 @@ impl MaterialResolver {
         }))
     }
 
-    fn resolve_water_normal(&self, name: &str) -> Option<Arc<WaterNormalMap>> {
+    pub(super) fn resolve_water_normal(&self, name: &str) -> Option<Arc<WaterNormalMap>> {
         let path = texture_path(name)?;
         let key = WaterNormalKey {
             path: path.clone(),

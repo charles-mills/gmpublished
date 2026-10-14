@@ -12,6 +12,7 @@ pub(super) struct BuildMesh {
     pub(super) indices: Vec<u32>,
     pub(super) material_index: usize,
     pub(super) partition: GeometryPartition,
+    pub(super) entity: bool,
     pub(super) visibility: BuildMeshVisibility,
 }
 
@@ -26,6 +27,7 @@ pub(super) enum GeometryPartition {
 pub(super) struct BuildMeshKey {
     pub(super) material_index: usize,
     pub(super) partition: GeometryPartition,
+    pub(super) entity: bool,
 }
 
 #[derive(Debug, Default)]
@@ -39,10 +41,12 @@ impl BuildMeshes {
         &mut self,
         material_index: usize,
         partition: GeometryPartition,
+        entity: bool,
     ) -> &mut BuildMesh {
         let key = BuildMeshKey {
             material_index,
             partition,
+            entity,
         };
         let index = *self.indexes.entry(key).or_insert_with(|| {
             let index = self.meshes.len();
@@ -51,6 +55,7 @@ impl BuildMeshes {
                 indices: Vec::new(),
                 material_index,
                 partition,
+                entity,
                 visibility: BuildMeshVisibility::default(),
             });
             index
@@ -117,6 +122,7 @@ pub(super) struct DisplacementGridVertex {
 }
 
 pub(super) struct FaceAppendContext<'a> {
+    pub(super) entity: bool,
     pub(super) transform: super::brushes::BrushTransform,
     pub(super) meshes: &'a mut BuildMeshes,
     pub(super) material_names: &'a mut Vec<String>,
@@ -169,7 +175,9 @@ pub(super) fn append_face(
         context.lightmap_blocks.push(block);
         Some(index)
     });
-    let mesh = context.meshes.get_or_insert(material_index, partition);
+    let mesh = context
+        .meshes
+        .get_or_insert(material_index, partition, context.entity);
     let index_start = mesh.indices.len();
     let vertex_start = mesh.vertices.len();
     if let Some(displacement) = bsp.face_displacement(face) {

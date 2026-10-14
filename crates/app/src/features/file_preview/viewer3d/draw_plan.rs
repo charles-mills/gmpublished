@@ -12,7 +12,7 @@ pub(super) struct DrawPlans {
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawPlan {
     pub(super) opaque: Vec<DrawItem>,
-    pub(super) water: Vec<DrawItem>,
+    pub(super) planar: Vec<DrawItem>,
     pub(super) overlay_opaque: Vec<OverlayDrawItem>,
     pub(super) overlay_translucent: Vec<OverlayDrawItem>,
     pub(super) overlay_additive: Vec<OverlayDrawItem>,
@@ -58,7 +58,7 @@ pub(super) struct OverlayPlanSource {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DrawPlanMaterials<'a> {
     pub(super) render_modes: &'a [RenderMode],
-    pub(super) water_materials: &'a [bool],
+    pub(super) planar_materials: &'a [bool],
     pub(super) material_count: usize,
 }
 
@@ -85,7 +85,6 @@ pub(super) struct DrawPlanSourceSlices<'a> {
     pub(super) materials: DrawPlanMaterials<'a>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DrawPlanRequest<'a> {
     pub(super) content_id: u64,
@@ -113,36 +112,33 @@ impl PartitionFilter {
 }
 
 pub(super) fn prepare_draw_plans(
-    content_id: u64,
     upload: &UploadedModel,
-    skin_remap: &[u16],
-    bodygroup_choices: &[usize],
-    camera_position: [f32; 4],
-    map_skybox_visible: bool,
-    map_skybox_camera_position: Option<[f32; 4]>,
+    request: DrawPlanRequest<'_>,
 ) -> DrawPlans {
     let world = prepare_partition_draw_plan(
         upload,
-        skin_remap,
-        bodygroup_choices,
-        camera_position,
+        request.selection.skin_remap,
+        request.selection.bodygroup_choices,
+        request.camera_position,
         PartitionFilter::World,
+        request.visibility_plan,
     );
-    let map_skybox = if map_skybox_visible && upload.has_map_skybox_content() {
-        map_skybox_camera_position.map(|camera_position| {
+    let map_skybox = if request.map_skybox_visible && request.map_skybox_content_present {
+        request.map_skybox_camera_position.map(|camera_position| {
             prepare_partition_draw_plan(
                 upload,
-                skin_remap,
-                bodygroup_choices,
+                request.selection.skin_remap,
+                request.selection.bodygroup_choices,
                 camera_position,
                 PartitionFilter::MapSkybox,
+                None,
             )
         })
     } else {
         None
     };
     DrawPlans {
-        content_id,
+        content_id: request.content_id,
         world,
         map_skybox,
     }
@@ -154,6 +150,7 @@ pub(super) fn prepare_partition_draw_plan(
     bodygroup_choices: &[usize],
     camera_position: [f32; 4],
     partition: PartitionFilter,
+    visibility_plan: Option<&WorldVisibilityPlan>,
 ) -> DrawPlan {
     prepare_partition_draw_plan_from_sources(
         upload
@@ -184,7 +181,7 @@ pub(super) fn prepare_partition_draw_plan(
         PartitionPlanContext {
             materials: DrawPlanMaterials {
                 render_modes: upload.material_render_modes.as_slice(),
-                water_materials: upload.material_water_materials.as_slice(),
+                planar_materials: upload.material_planar_materials.as_slice(),
                 material_count: upload.material_bind_groups.len(),
             },
             selection: DrawPlanSelection {
@@ -193,11 +190,7 @@ pub(super) fn prepare_partition_draw_plan(
             },
             camera_position,
             partition,
-            visibility_plan: upload
-                .visibility
-                .plan
-                .as_ref()
-                .filter(|_| partition == PartitionFilter::World),
+            visibility_plan,
         },
     )
 }
@@ -297,12 +290,12 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         };
         if context
             .materials
-            .water_materials
+            .planar_materials
             .get(material_slot)
             .copied()
             .unwrap_or(false)
         {
-            plan.water.push(item);
+            plan.planar.push(item);
         } else {
             match render_mode {
                 RenderMode::Opaque | RenderMode::Cutout => plan.opaque.push(item),
@@ -348,7 +341,7 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
             .total_cmp(&left.distance_squared)
             .then_with(|| left.mesh_index.cmp(&right.mesh_index))
     });
-    plan.water.sort_by(|left, right| {
+    plan.planar.sort_by(|left, right| {
         right
             .distance_squared
             .total_cmp(&left.distance_squared)
@@ -433,7 +426,7 @@ mod tests {
             RenderMode::Translucent,
             RenderMode::Translucent,
         ];
-        let water_materials = [false, true, false];
+        let planar_materials = [false, true, false];
 
         let plans = prepare_draw_plans_from_sources(
             DrawPlanSourceSlices {
@@ -441,7 +434,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_materials: &water_materials,
+                    planar_materials: &planar_materials,
                     material_count: 3,
                 },
             },
@@ -471,7 +464,7 @@ mod tests {
         assert_eq!(
             plans
                 .world
-                .water
+                .planar
                 .iter()
                 .map(|item| item.mesh_index)
                 .collect::<Vec<_>>(),
@@ -502,7 +495,7 @@ mod tests {
                 overlays: &overlays,
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_materials: &[],
+                    planar_materials: &[],
                     material_count: 1,
                 },
             },
@@ -544,7 +537,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_materials: &[],
+                    planar_materials: &[],
                     material_count: 1,
                 },
             },
@@ -576,7 +569,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_materials: &[],
+                    planar_materials: &[],
                     material_count: 1,
                 },
             },
@@ -619,7 +612,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_materials: &[],
+                    planar_materials: &[],
                     material_count: 1,
                 },
             },
@@ -642,7 +635,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_materials: &[],
+                    planar_materials: &[],
                     material_count: 1,
                 },
             },
@@ -713,7 +706,7 @@ mod tests {
                 overlays: &[],
                 materials: DrawPlanMaterials {
                     render_modes: &render_modes,
-                    water_materials: &[],
+                    planar_materials: &[],
                     material_count: 1,
                 },
             },
@@ -778,7 +771,7 @@ mod tests {
                     overlays: &[],
                     materials: DrawPlanMaterials {
                         render_modes: &render_modes,
-                        water_materials: &[],
+                        planar_materials: &[],
                         material_count: 1,
                     },
                 },

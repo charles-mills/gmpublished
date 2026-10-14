@@ -36,6 +36,8 @@ pub struct MapData {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapMesh {
+    /// Geometry belonging to a brush entity, separate from world brushes.
+    pub entity: bool,
     pub vertices: Vec<MapVertex>,
     pub indices: Vec<u32>,
     pub material_index: usize,
@@ -111,6 +113,7 @@ pub struct MapVertex {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticPropPlacement {
+    pub entity: bool,
     pub model_path: String,
     pub origin: Vec3,
     pub angles: Vec3,

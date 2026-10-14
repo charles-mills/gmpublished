@@ -1,4 +1,12 @@
 use super::resources::RenderResources;
+use super::visibility::{UploadedVisibility, UploadedVisibleIndices, UploadedVisibleVertices};
+
+#[derive(Clone, Copy)]
+pub struct DrawView<'a> {
+    pub uniforms: &'a wgpu::BindGroup,
+    pub visibility: &'a UploadedVisibility,
+    pub reflected: bool,
+}
 use super::upload::{UploadedDetailSprites, UploadedMesh, UploadedModel};
 use super::{DrawItem, DrawPlan, OverlayDrawItem, Rectangle, SkyboxFace, wgpu};
 
@@ -23,12 +31,13 @@ pub fn draw_sky_background<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     resources: &'a RenderResources,
     upload: &'a UploadedModel,
+    uniforms: &'a wgpu::BindGroup,
 ) {
     let Some(skybox) = upload.skybox.as_ref() else {
         return;
     };
     pass.set_pipeline(&resources.sky_pipeline);
-    pass.set_bind_group(0, &resources.sky_uniform_bind_group, &[]);
+    pass.set_bind_group(0, uniforms, &[]);
     pass.set_vertex_buffer(0, resources.sky_vertices.slice(..));
     for face in SkyboxFace::ALL {
         let Some(bind_group) = skybox.face_bind_groups[face.index()].as_ref() else {
@@ -45,37 +54,39 @@ pub fn draw_scene_plan<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     resources: &'a RenderResources,
     upload: &'a UploadedModel,
-    plan: &'a DrawPlan,
-    uniform_bind_group: &'a wgpu::BindGroup,
+    plan: &DrawPlan,
+    view: DrawView<'a>,
     detail_sprites: Option<&'a UploadedDetailSprites>,
 ) {
-    draw_scene_plan_opaque(
-        pass,
-        resources,
-        upload,
-        plan,
-        uniform_bind_group,
-        detail_sprites,
-    );
-    draw_scene_plan_transparent(pass, resources, upload, plan, uniform_bind_group, None);
+    draw_scene_plan_opaque(pass, resources, upload, plan, view, detail_sprites);
+    draw_scene_plan_transparent(pass, resources, upload, plan, view, None);
 }
 
 pub fn draw_scene_plan_opaque<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     resources: &'a RenderResources,
     upload: &'a UploadedModel,
-    plan: &'a DrawPlan,
-    uniform_bind_group: &'a wgpu::BindGroup,
+    plan: &DrawPlan,
+    view: DrawView<'a>,
     detail_sprites: Option<&'a UploadedDetailSprites>,
 ) {
-    pass.set_bind_group(0, uniform_bind_group, &[]);
-    pass.set_pipeline(&resources.opaque_pipeline);
+    pass.set_bind_group(0, view.uniforms, &[]);
+    pass.set_pipeline(if view.reflected {
+        &resources.reflected_opaque_pipeline
+    } else {
+        &resources.opaque_pipeline
+    });
     for item in &plan.opaque {
-        draw_model_item(pass, upload, *item);
+        draw_model_item(pass, upload, *item, view.visibility);
     }
     if let Some(detail_sprites) = detail_sprites {
         pass.set_pipeline(&resources.detail_pipeline);
-        draw_detail_sprites(pass, upload, detail_sprites);
+        draw_detail_sprites(
+            pass,
+            upload,
+            detail_sprites,
+            view.visibility.detail_vertices.as_ref(),
+        );
     }
     pass.set_pipeline(&resources.overlay_opaque_pipeline);
     for item in &plan.overlay_opaque {
@@ -87,26 +98,31 @@ pub fn draw_scene_plan_transparent<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     resources: &'a RenderResources,
     upload: &'a UploadedModel,
-    plan: &'a DrawPlan,
-    uniform_bind_group: &'a wgpu::BindGroup,
+    plan: &DrawPlan,
+    view: DrawView<'a>,
     water_frame_bind_group: Option<&'a wgpu::BindGroup>,
 ) {
+    pass.set_bind_group(0, view.uniforms, &[]);
     if let (Some(water_frame_bind_group), Some(refractive_water_pipeline)) = (
         water_frame_bind_group,
         resources.refractive_water_pipeline.as_ref(),
     ) {
         pass.set_pipeline(refractive_water_pipeline);
         pass.set_bind_group(0, water_frame_bind_group, &[]);
-        for item in &plan.water {
-            draw_model_item(pass, upload, *item);
+        for item in &plan.planar {
+            draw_model_item(pass, upload, *item, view.visibility);
         }
         // The remaining pipelines declare group 0 as the uniforms-only
         // layout, which the water frame group does not satisfy.
-        pass.set_bind_group(0, uniform_bind_group, &[]);
+        pass.set_bind_group(0, view.uniforms, &[]);
     } else {
-        pass.set_pipeline(&resources.water_pipeline);
-        for item in &plan.water {
-            draw_model_item(pass, upload, *item);
+        pass.set_pipeline(if view.reflected {
+            &resources.reflected_water_pipeline
+        } else {
+            &resources.water_pipeline
+        });
+        for item in &plan.planar {
+            draw_model_item(pass, upload, *item, view.visibility);
         }
     }
     pass.set_pipeline(&resources.overlay_translucent_pipeline);
@@ -117,13 +133,21 @@ pub fn draw_scene_plan_transparent<'a>(
     for item in &plan.overlay_additive {
         draw_overlay_item(pass, upload, *item);
     }
-    pass.set_pipeline(&resources.translucent_pipeline);
+    pass.set_pipeline(if view.reflected {
+        &resources.reflected_translucent_pipeline
+    } else {
+        &resources.translucent_pipeline
+    });
     for item in &plan.translucent {
-        draw_model_item(pass, upload, *item);
+        draw_model_item(pass, upload, *item, view.visibility);
     }
-    pass.set_pipeline(&resources.additive_pipeline);
+    pass.set_pipeline(if view.reflected {
+        &resources.reflected_additive_pipeline
+    } else {
+        &resources.additive_pipeline
+    });
     for item in &plan.additive {
-        draw_model_item(pass, upload, *item);
+        draw_model_item(pass, upload, *item, view.visibility);
     }
 }
 
@@ -131,6 +155,7 @@ pub fn draw_model_item<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     upload: &'a UploadedModel,
     item: DrawItem,
+    visibility: &'a UploadedVisibility,
 ) {
     let Some(mesh) = upload.meshes.get(item.mesh_index) else {
         return;
@@ -138,7 +163,12 @@ pub fn draw_model_item<'a>(
     let Some(bind_group) = upload.material_bind_groups.get(item.material_slot) else {
         return;
     };
-    draw_uploaded_mesh(pass, mesh, bind_group);
+    draw_uploaded_mesh(
+        pass,
+        mesh,
+        bind_group,
+        visibility.mesh_indices.get(&item.mesh_index),
+    );
 }
 
 pub fn draw_phy_debug_meshes<'a>(
@@ -154,7 +184,7 @@ pub fn draw_phy_debug_meshes<'a>(
         let Some(bind_group) = upload.material_bind_groups.get(mesh.material_index) else {
             continue;
         };
-        draw_uploaded_mesh(pass, mesh, bind_group);
+        draw_uploaded_mesh(pass, mesh, bind_group, None);
     }
 }
 
@@ -162,8 +192,9 @@ pub fn draw_uploaded_mesh<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     mesh: &'a UploadedMesh,
     bind_group: &'a wgpu::BindGroup,
+    visible: Option<&'a UploadedVisibleIndices>,
 ) {
-    if let Some(visible) = mesh.visible_indices.as_ref() {
+    if let Some(visible) = visible {
         if visible.index_count == 0 {
             return;
         }
@@ -186,6 +217,7 @@ pub fn draw_detail_sprites<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     upload: &'a UploadedModel,
     detail_sprites: &'a UploadedDetailSprites,
+    visible: Option<&'a UploadedVisibleVertices>,
 ) {
     let Some(bind_group) = upload
         .material_bind_groups
@@ -194,7 +226,7 @@ pub fn draw_detail_sprites<'a>(
         return;
     };
     pass.set_bind_group(1, bind_group, &[]);
-    if let Some(visible) = detail_sprites.visible_vertices.as_ref() {
+    if let Some(visible) = visible {
         if visible.vertex_count == 0 {
             return;
         }

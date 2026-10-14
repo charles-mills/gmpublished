@@ -1003,6 +1003,7 @@ fn load_map_extracts_static_prop_placements_from_game_lump_fixture() {
     assert_eq!(
         map.static_props,
         vec![StaticPropPlacement {
+            entity: false,
             model_path: "models/props_c17/oildrum001.mdl".to_owned(),
             origin: Vec3::new(10.0, 20.0, 30.0),
             angles: Vec3::new(1.0, 90.0, 3.0),
@@ -1295,21 +1296,22 @@ fn door_extraction_removes_bmodel_faces_without_shifting_downstream_ranges() {
 
     assert_eq!(map.doors.len(), 1);
     let world = map.meshes.first().expect("static mesh");
-    assert_eq!(world.indices.len(), 6);
+    assert!(!world.entity);
+    assert_eq!(world.indices.len(), 3);
+    assert_eq!(
+        map.meshes
+            .iter()
+            .map(|mesh| mesh.indices.len())
+            .sum::<usize>(),
+        6
+    );
     assert_eq!(
         world.visibility.always_visible,
-        vec![
-            MapMeshIndexRange {
-                face: 0,
-                start: 0,
-                count: 3,
-            },
-            MapMeshIndexRange {
-                face: 2,
-                start: 3,
-                count: 3,
-            },
-        ]
+        vec![MapMeshIndexRange {
+            face: 0,
+            start: 0,
+            count: 3,
+        },]
     );
 
     let MapDoorGeometry::Brush {
@@ -1341,7 +1343,15 @@ fn unowned_bmodel_is_not_instantiated_as_world_geometry() {
 
     assert!(map.doors.is_empty());
     let world = map.meshes.first().expect("static mesh");
-    assert_eq!(world.indices.len(), 6);
+    assert!(!world.entity);
+    assert_eq!(world.indices.len(), 3);
+    assert_eq!(
+        map.meshes
+            .iter()
+            .map(|mesh| mesh.indices.len())
+            .sum::<usize>(),
+        6
+    );
     assert_eq!(
         world
             .visibility
@@ -1349,7 +1359,7 @@ fn unowned_bmodel_is_not_instantiated_as_world_geometry() {
             .iter()
             .map(|range| (range.face, range.start, range.count))
             .collect::<Vec<_>>(),
-        vec![(0, 0, 3), (2, 3, 3)]
+        vec![(0, 0, 3)]
     );
 }
 
@@ -1389,7 +1399,12 @@ fn brush_placement_rotates_positions_and_normals_without_changing_authored_uvs()
     assert!(local.lightmap.is_some());
     assert_eq!(local.lightmap, placed.lightmap);
     let vertices_for_face = |map: &MapData| {
-        let mesh = &map.meshes[0];
+        let mesh = map
+            .meshes
+            .iter()
+            .find(|mesh| mesh.visibility.always_visible.iter().any(|r| r.face == 1))
+            .unwrap();
+        assert!(mesh.entity);
         let range = mesh
             .visibility
             .always_visible
@@ -1540,7 +1555,10 @@ fn brush_initial_solidity_and_visibility_follow_entity_semantics() {
         assert_eq!(collision.is_some(), solid, "{keys}");
         let map = load_map(&door_bmodel_bsp_fixture(&entities)).unwrap();
         assert_eq!(
-            map.meshes[0].indices.len(),
+            map.meshes
+                .iter()
+                .map(|mesh| mesh.indices.len())
+                .sum::<usize>(),
             if visible { 9 } else { 6 },
             "{keys}"
         );
@@ -3054,6 +3072,7 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
         blend_alpha: 0.0,
     };
     let mesh = MapMesh {
+        entity: false,
         vertices: vec![
             vertex(Vec3::splat(f32::NAN)),
             vertex(Vec3::splat(f32::INFINITY)),

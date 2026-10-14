@@ -1,6 +1,8 @@
-use super::upload::UploadedDetailSprites;
+use super::MapPreview;
+use super::upload::{UploadedDetailSprites, UploadedModel};
 use super::{DETAIL_VERTEX_FLOAT_COUNT, WorldVisibilityPlan, wgpu};
 use gmpublished_domain::math::Vec3;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct UploadedVisibleIndices {
@@ -18,6 +20,8 @@ pub struct UploadedVisibleVertices {
 pub struct UploadedVisibility {
     pub tracker: VisibilityClusterTracker,
     pub plan: Option<WorldVisibilityPlan>,
+    pub mesh_indices: HashMap<usize, UploadedVisibleIndices>,
+    pub detail_vertices: Option<UploadedVisibleVertices>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -132,6 +136,80 @@ pub fn upload_visible_detail_sprites(
     UploadedVisibleVertices {
         buffer: Some(buffer),
         vertex_count,
+    }
+}
+
+impl UploadedVisibility {
+    pub fn ensure_world_visibility(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &MapPreview,
+        upload: &UploadedModel,
+        enabled: bool,
+        camera_position: Vec3,
+    ) {
+        let Some(visibility) = scene.visibility.as_ref() else {
+            if self
+                .tracker
+                .set_state(VisibilityClusterState::Disabled)
+                .is_some()
+            {
+                self.apply_world_visibility_plan(device, queue, upload, None);
+            }
+            return;
+        };
+        let Some(state) = self.tracker.update(enabled, camera_position, |point| {
+            visibility.cluster_at(point)
+        }) else {
+            return;
+        };
+
+        match state {
+            VisibilityClusterState::Disabled | VisibilityClusterState::StandDown => {
+                self.apply_world_visibility_plan(device, queue, upload, None);
+            }
+            VisibilityClusterState::Cluster(cluster) => {
+                if let Some(visible_clusters) = visibility.visible_clusters(cluster) {
+                    let plan = WorldVisibilityPlan::from_visible_clusters(scene, &visible_clusters);
+                    log::debug!(
+                        "map preview visibility rebuild cluster {cluster}: {} visible clusters",
+                        plan.visible_cluster_count
+                    );
+                    self.apply_world_visibility_plan(device, queue, upload, Some(plan));
+                } else {
+                    self.apply_world_visibility_plan(device, queue, upload, None);
+                }
+            }
+        }
+    }
+
+    pub fn apply_world_visibility_plan(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        upload: &UploadedModel,
+        plan: Option<WorldVisibilityPlan>,
+    ) {
+        self.mesh_indices.clear();
+        if let Some(plan) = plan.as_ref() {
+            for (index, mesh) in upload.meshes.iter().enumerate() {
+                if mesh.map_skybox || mesh.door_index.is_some() {
+                    continue;
+                }
+                let visible = plan
+                    .mesh_indices
+                    .get(mesh.scene_mesh_index)
+                    .map_or(&[][..], Vec::as_slice);
+                self.mesh_indices
+                    .insert(index, upload_visible_indices(device, queue, visible));
+            }
+        }
+        self.detail_vertices = upload.detail_sprites.as_ref().and_then(|sprites| {
+            plan.as_ref()
+                .map(|plan| upload_visible_detail_sprites(device, queue, sprites, plan))
+        });
+        self.plan = plan;
     }
 }
 

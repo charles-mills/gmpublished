@@ -167,6 +167,14 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let skybox_overlay_bake =
         resolve_map_overlays(&map_skybox_overlays, &material_resolver, &mut table);
     let materials_timing = materials_started.elapsed();
+    let mut entity_meshes = map_meshes
+        .iter()
+        .map(|mesh| mesh.entity)
+        .collect::<Vec<_>>();
+    let mut skybox_entity_meshes = map_skybox_meshes
+        .iter()
+        .map(|mesh| mesh.entity)
+        .collect::<Vec<_>>();
     let mut mesh_visibility = map_meshes
         .iter()
         .map(|mesh| mesh.visibility.clone())
@@ -211,6 +219,8 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let prop_mesh_bytes = prop_bake
         .mesh_bytes()
         .saturating_add(skybox_prop_bake.mesh_bytes());
+    entity_meshes.extend(prop_bake.entity_meshes);
+    skybox_entity_meshes.extend(skybox_prop_bake.entity_meshes);
     meshes.extend(prop_bake.meshes);
     mesh_visibility.extend(prop_bake.mesh_visibility);
     map_skybox_meshes.extend(skybox_prop_bake.meshes);
@@ -296,6 +306,8 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             bounds_min,
             bounds_max,
         }),
+        entity_meshes,
+        skybox_entity_meshes,
         mesh_visibility,
         map_skybox_meshes,
         lightmap,
