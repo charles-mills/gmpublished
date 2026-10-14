@@ -7,3 +7,6 @@ This patch recognizes the 52-byte layout, retains the existing legacy layouts, a
 Reference: https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/gamebspfile.h
 
 The remaining package source is the published 0.1.0 code. Keep this patch local until an upstream release contains the correction; both original licenses are included.
+
+
+The renderer also needs the SDK's 12-byte `dleafwaterdata_t` records (lump 36). The added typed accessor preserves surface/minimum height and the signed surface texinfo ID, using the existing bounded/decompressed record reader. A two-record regression covers stride and negative material IDs. The domain layer retains leaf-to-volume association; material resolution and fog remain outside this wire-format crate.

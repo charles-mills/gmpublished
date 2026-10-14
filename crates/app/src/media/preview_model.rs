@@ -235,6 +235,7 @@ pub struct ModelPreview {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapPreview {
+    pub(crate) water_volumes: Option<gmpublished_domain::scene::map::MapWaterVolumes>,
     pub(crate) entity_meshes: Vec<bool>,
     pub(crate) skybox_entity_meshes: Vec<bool>,
     pub(crate) scene: Arc<RenderScene>,
@@ -249,6 +250,34 @@ pub struct MapPreview {
     pub(crate) doors: Vec<DoorInstance>,
     pub(crate) visibility: Option<MapVisibility>,
     pub(crate) walk_collision: Option<MapWalkCollision>,
+}
+
+impl MapPreview {
+    pub(crate) fn immersion_material(
+        &self,
+        eye: Vec3,
+    ) -> Option<&crate::bridge::materials::WaterMaterial> {
+        let sample = self.water_volumes.as_ref()?.at(eye)?;
+        let above = self
+            .scene
+            .materials
+            .iter()
+            .find(|slot| slot.name == sample.body.material_name)?
+            .shader
+            .water()?;
+        above
+            .below_material
+            .as_ref()
+            .and_then(|name| {
+                self.scene
+                    .materials
+                    .iter()
+                    .find(|slot| &slot.name == name)?
+                    .shader
+                    .water()
+            })
+            .or(Some(above))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -686,6 +715,7 @@ mod tests {
 
     fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> MapPreview {
         MapPreview {
+            water_volumes: None,
             entity_meshes: Vec::new(),
             skybox_entity_meshes: Vec::new(),
             scene: Arc::new(RenderScene {

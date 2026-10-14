@@ -65,6 +65,7 @@ pub(super) struct MapBsp {
     pub(super) brush_sides: Vec<BrushSide>,
     pub(super) nodes: Vec<Node>,
     pub(super) leaves: Vec<Leaf>,
+    pub(super) leaf_water_data: Vec<bsp::LeafWaterData>,
     pub(super) leaf_faces: Vec<u16>,
     pub(super) leaf_brushes: Vec<u16>,
     pub(super) displacements: Vec<DispInfo>,
@@ -135,6 +136,7 @@ impl MapBsp {
             brush_sides = bsp.brush_sides(limits);
             nodes = bsp.nodes(limits);
             leaves = bsp.leafs(limits);
+            leaf_water_data = bsp.leaf_water_data(limits);
             leaf_faces = bsp.leaf_faces(limits);
             leaf_brushes = bsp.leaf_brushes(limits);
             displacements = bsp.displacement_infos(limits);
@@ -180,6 +182,7 @@ impl MapBsp {
             brush_sides: brush_sides.map_err(decode_error)?,
             nodes: nodes.map_err(decode_error)?,
             leaves: leaves.map_err(decode_error)?,
+            leaf_water_data: leaf_water_data.map_err(decode_error)?,
             leaf_faces: leaf_faces.map_err(decode_error)?,
             leaf_brushes: leaf_brushes.map_err(decode_error)?,
             displacements: displacements.map_err(decode_error)?,

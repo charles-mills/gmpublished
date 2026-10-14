@@ -8,6 +8,8 @@ use gmpublished_domain::math::Vec3;
 
 #[derive(Debug)]
 pub struct RenderResources {
+    pub screen_refraction: super::screen_refraction::Resources,
+    pub water_near_intersection_pipeline: wgpu::RenderPipeline,
     pub refracted_opaque_pipeline: wgpu::RenderPipeline,
     pub refracted_translucent_pipeline: wgpu::RenderPipeline,
     pub refracted_additive_pipeline: wgpu::RenderPipeline,
@@ -241,7 +243,7 @@ impl RenderResources {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -309,6 +311,7 @@ impl RenderResources {
                 front_face: wgpu::FrontFace::Cw,
             },
             PipelineShaderEntry {
+                vertex: "vs_main",
                 write_mask: wgpu::ColorWrites::ALL,
                 fragment: "fs_skybox",
                 label: "file_preview.model_viewer.water_pipeline",
@@ -327,6 +330,7 @@ impl RenderResources {
                 front_face: wgpu::FrontFace::Ccw,
             },
             PipelineShaderEntry {
+                vertex: "vs_main",
                 write_mask: wgpu::ColorWrites::ALL,
                 fragment: "fs_skybox",
                 label: "file_preview.reflected.planar_fallback",
@@ -351,6 +355,7 @@ impl RenderResources {
                 front_face: wgpu::FrontFace::Cw,
             },
             PipelineShaderEntry {
+                vertex: "vs_main",
                 write_mask: wgpu::ColorWrites::ALL,
                 fragment: "fs_main",
                 label: "file_preview.model_viewer.refractive_water_pipeline",
@@ -364,6 +369,25 @@ impl RenderResources {
                 "refractive water pipeline unavailable, using non-refractive water: {error}"
             );
         }
+        let water_near_intersection_pipeline = create_model_pipeline_with_fragment_entry(
+            device,
+            &refractive_water_layout,
+            &water_shader,
+            format,
+            None,
+            PipelineRasterMode {
+                write_enabled: true,
+                bias: wgpu::DepthBiasState::default(),
+                cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Cw,
+            },
+            PipelineShaderEntry {
+                vertex: "vs_near_main",
+                fragment: "fs_near_intersection",
+                label: "file_preview.water.near_intersection",
+                write_mask: wgpu::ColorWrites::ALL,
+            },
+        );
         let refractive_water_pipeline = translation_error
             .is_none()
             .then_some(refractive_water_pipeline);
@@ -566,6 +590,7 @@ impl RenderResources {
                         front_face: wgpu::FrontFace::Cw,
                     },
                     PipelineShaderEntry {
+                        vertex: "vs_main",
                         fragment,
                         label,
                         write_mask,
@@ -684,6 +709,8 @@ impl RenderResources {
                 ..SamplerSpec::default()
             },
         );
+        let screen_refraction =
+            super::screen_refraction::Resources::new(device, format, &blit_layout);
         let sky_vertex_bytes = skybox_vertex_bytes();
         let sky_vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("file_preview.model_viewer.sky_vertices"),
@@ -694,6 +721,8 @@ impl RenderResources {
         queue.write_buffer(&sky_vertices, 0, &sky_vertex_bytes);
 
         Self {
+            screen_refraction,
+            water_near_intersection_pipeline,
             refracted_opaque_pipeline,
             refracted_translucent_pipeline,
             refracted_additive_pipeline,
@@ -755,6 +784,7 @@ struct PipelineRasterMode {
 
 #[derive(Clone, Copy)]
 struct PipelineShaderEntry {
+    vertex: &'static str,
     write_mask: wgpu::ColorWrites,
     fragment: &'static str,
     label: &'static str,
@@ -865,6 +895,7 @@ fn create_model_pipeline_with_depth_bias(
         blend,
         raster,
         PipelineShaderEntry {
+            vertex: "vs_main",
             write_mask: wgpu::ColorWrites::ALL,
             fragment: if blend == Some(additive_blend_state()) {
                 "fs_additive"
@@ -890,7 +921,7 @@ fn create_model_pipeline_with_fragment_entry(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
+            entry_point: Some(entry.vertex),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[model_vertex_buffer_layout()],
         },

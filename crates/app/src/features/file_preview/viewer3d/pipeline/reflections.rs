@@ -48,6 +48,25 @@ impl Plane {
     pub fn signed_distance(self, point: Vec3) -> f32 {
         self.normal.dot(point) - self.distance
     }
+    pub fn intersects_near_plane(self, uniforms: super::Uniforms) -> bool {
+        let matrix = uniforms.view_proj;
+        let row = |index| Vec3::new(matrix[0][index], matrix[1][index], matrix[2][index]);
+        let x = row(0);
+        let y = row(1);
+        let forward = row(3).normalize_or_zero();
+        let eye = Vec3::new(
+            uniforms.camera_position[0],
+            uniforms.camera_position[1],
+            uniforms.camera_position[2],
+        );
+        // Minimum signed distance over the four perspective near corners.
+        self.signed_distance(eye)
+            + uniforms.water_depth_params[0]
+                * (self.normal.dot(forward)
+                    - self.normal.dot(x).abs() / x.length_squared().max(0.000001)
+                    - self.normal.dot(y).abs() / y.length_squared().max(0.000001))
+            < 0.0
+    }
     pub fn reflect_point(self, point: Vec3) -> Vec3 {
         point - self.normal * (2.0 * self.signed_distance(point))
     }
@@ -207,7 +226,7 @@ pub fn optical_passes(shader: &crate::bridge::materials::MaterialShader) -> (boo
         |water| {
             (
                 water.above_water && water.reflect_enabled && !water.force_cheap,
-                water.above_water && water.refract_enabled && !water.force_cheap,
+                water.refract_enabled && !water.force_cheap,
             )
         },
     )
@@ -405,6 +424,35 @@ impl PlanarView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn near_intersection_culling_covers_corners_on_both_sides_of_water() {
+        use bytemuck::Zeroable;
+        let mut uniforms = super::super::Uniforms::zeroed();
+        let scale = 1.0 / (std::f32::consts::FRAC_PI_8).tan();
+        uniforms.view_proj = [
+            [scale, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, scale, 0.0, 0.0],
+            [0.0; 4],
+        ];
+        uniforms.water_depth_params[0] = 4.0;
+        let above = Plane {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            distance: 0.0,
+        };
+        uniforms.camera_position[2] = 1.0;
+        assert!(above.intersects_near_plane(uniforms));
+        uniforms.camera_position[2] = 2.0;
+        assert!(!above.intersects_near_plane(uniforms));
+        uniforms.camera_position[2] = -1.0;
+        let below = Plane {
+            normal: -above.normal,
+            distance: 0.0,
+        };
+        assert!(below.intersects_near_plane(uniforms));
+        uniforms.camera_position[2] = -2.0;
+        assert!(!below.intersects_near_plane(uniforms));
+    }
     use super::{Plane, Vec3, planar_groups};
     use crate::media::preview_model::{MeshData, ModelVertex};
 

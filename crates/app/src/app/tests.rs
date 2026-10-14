@@ -2562,3 +2562,24 @@ fn selected_interface_language_updates_workshop_query_language_at_runtime() {
             .set_workshop_language(WorkshopLanguage::English)
     );
 }
+
+#[test]
+fn captured_map_escape_releases_mouse_without_requesting_modal_close() {
+    let message = map_mouse_capture_shortcut(
+        &keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::default(),
+    );
+    assert!(matches!(
+        message,
+        Some(RootMessage::FilePreview(
+            file_preview::Message::MouseCaptureRequested(false)
+        ))
+    ));
+    assert!(
+        map_mouse_capture_shortcut(
+            &keyboard::Key::Character("v".into()),
+            keyboard::Modifiers::default()
+        )
+        .is_none()
+    );
+}

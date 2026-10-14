@@ -1084,6 +1084,7 @@ fn map_preview<'a>(
                 pose: state.fly_pose(),
                 movement_mode: state.fly_movement_mode(),
                 requested_movement_mode: state.requested_movement_mode(),
+                mouse_captured: state.mouse_captured(),
             })
             .width(Length::Fill)
             .height(Length::Fill),
@@ -1201,7 +1202,7 @@ fn map_viewer_with_overlays<'a>(
             .height(Length::Fill)
             .into();
     }
-    if scene_supports_walk(map.scene) {
+    if !state.mouse_captured() && scene_supports_walk(map.scene) {
         let active_mode = active_movement_mode(state, map.spawn);
         layered = iced::widget::stack![layered, mode_pill_overlay(active_mode, ctx)]
             .width(Length::Fill)

@@ -186,7 +186,7 @@ pub fn render_frame(
             let sky = primitive.preview.render_scene().materials[material]
                 .shader
                 .water()
-                .is_none();
+                .is_none_or(|water| !water.above_water);
             render_scene(
                 view,
                 resources,
@@ -199,10 +199,15 @@ pub fn render_frame(
         }
     }
     let clear = if primitive.submerged {
+        let rgb = primitive.clear_color.unwrap_or([
+            primitive.uniforms.fog_color[0],
+            primitive.uniforms.fog_color[1],
+            primitive.uniforms.fog_color[2],
+        ]);
         wgpu::Color {
-            r: f64::from(primitive.uniforms.fog_color[0]),
-            g: f64::from(primitive.uniforms.fog_color[1]),
-            b: f64::from(primitive.uniforms.fog_color[2]),
+            r: f64::from(rgb[0]),
+            g: f64::from(rgb[1]),
+            b: f64::from(rgb[2]),
             a: 1.0,
         }
     } else {
@@ -233,6 +238,30 @@ pub fn render_frame(
         draw::configure_scene_pass(&mut pass, &local_bounds(targets));
         let mut remaining = plans.world.clone();
         if let Some(pipeline) = resources.refractive_water_pipeline.as_ref() {
+            // A surface before znear is clipped out of the regular water
+            // pass, even though the near-plane samples are already immersed.
+            // Draw its actual polygon footprint at near depth using the
+            // opposite medium's scene, then let ordinary surfaces compose.
+            for optical in &frame.planar_views {
+                let surface = &upload.reflectors[optical.surface_index];
+                if optical.refraction.is_none()
+                    || !surface.plane.intersects_near_plane(primitive.uniforms)
+                    || primitive.preview.render_scene().materials[surface.material_slot]
+                        .shader
+                        .water()
+                        .is_none()
+                {
+                    continue;
+                }
+                pass.set_pipeline(&resources.water_near_intersection_pipeline);
+                pass.set_bind_group(0, optical.water_bind_group.as_ref().unwrap(), &[]);
+                pass.set_bind_group(1, &upload.material_bind_groups[surface.material_slot], &[]);
+                pass.set_vertex_buffer(0, upload.meshes[surface.mesh_index].vertices.slice(..));
+                if let Some(buffer) = optical.surface_buffer.buffer.as_ref() {
+                    pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..optical.surface_buffer.index_count, 0, 0..1);
+                }
+            }
             for reflection in &frame.planar_views {
                 let surface = &upload.reflectors[reflection.surface_index];
                 pass.set_pipeline(pipeline);
@@ -336,7 +365,19 @@ pub fn render_frame(
         clip_bounds.width,
         clip_bounds.height,
     );
-    pass.set_pipeline(&resources.blit_pipeline);
+    let overlay = frame.screen_overlay.as_ref();
+    #[cfg(feature = "map-capture")]
+    let overlay = if primitive.reflection_target || primitive.refraction_target {
+        None
+    } else {
+        overlay
+    };
+    if let Some(overlay) = overlay {
+        pass.set_pipeline(&resources.screen_refraction.pipeline);
+        pass.set_bind_group(1, &overlay.bind_group, &[]);
+    } else {
+        pass.set_pipeline(&resources.blit_pipeline);
+    }
     pass.set_bind_group(0, &targets.blit_bind_group, &[]);
     pass.draw(0..6, 0..1);
 }

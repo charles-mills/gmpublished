@@ -161,29 +161,48 @@ impl Uniforms {
         bounds: Rectangle,
         fog: Option<MapFog>,
         water_time: f32,
-        submerged: bool,
     ) -> Self {
         let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
         let target = frame.eye + frame.forward;
         let view = look_at(frame.eye, target, SOURCE_UP);
-        let (fog_color, fog_params) = if submerged {
-            let color = scene_water_fog_color(&scene.scene);
-            ([color[0], color[1], color[2], 0.0], [0.0, 2048.0, 1.0, 1.0])
-        } else {
-            (
-                fog.map_or([0.0; 4], |fog| {
+        let liquid = scene
+            .water_volumes
+            .as_ref()
+            .and_then(|volumes| volumes.at(frame.eye));
+        let water = scene.immersion_material(frame.eye);
+        let (fog_color, fog_params) = water.map_or_else(
+            || {
+                (
+                    fog.map_or([0.0; 4], |fog| {
+                        [
+                            fog.color_linear[0],
+                            fog.color_linear[1],
+                            fog.color_linear[2],
+                            0.0,
+                        ]
+                    }),
+                    fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
+                        [fog.start, fog.end, fog.max_density, 1.0]
+                    }),
+                )
+            },
+            |water| {
+                (
                     [
-                        fog.color_linear[0],
-                        fog.color_linear[1],
-                        fog.color_linear[2],
-                        0.0,
-                    ]
-                }),
-                fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
-                    [fog.start, fog.end, fog.max_density, 1.0]
-                }),
-            )
-        };
+                        water.fog_color_linear[0],
+                        water.fog_color_linear[1],
+                        water.fog_color_linear[2],
+                        1.0,
+                    ],
+                    [
+                        water.fog_start,
+                        water.fog_end,
+                        f32::from(water.fog_enabled),
+                        3.0,
+                    ],
+                )
+            },
+        );
 
         Self {
             view_proj: mat_mul(frame.proj, view),
@@ -193,8 +212,13 @@ impl Uniforms {
             fog_params,
             water_time_sky_tint: [water_time, 0.0, 0.0, 0.0],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
-            clip_plane: [0.0; 4],
-            medium_plane: [0.0; 4],
+            clip_plane: liquid
+                .as_ref()
+                .filter(|_| water.is_some_and(|w| w.refract_enabled && !w.force_cheap))
+                .map_or([0.0; 4], |sample| {
+                    [0.0, 0.0, -1.0, sample.body.surface_z + 2.0]
+                }),
+            medium_plane: liquid.map_or([0.0; 4], |sample| [0.0, 0.0, 1.0, -sample.body.surface_z]),
             viewport: [0.0; 4],
         }
     }
@@ -322,16 +346,6 @@ impl FlyCameraFrame {
 }
 
 pub const DEFAULT_SKY_TINT: Vec3 = Vec3::new(0.12, 0.18, 0.24);
-
-fn scene_water_fog_color(scene: &RenderScene) -> Vec3 {
-    scene
-        .materials
-        .iter()
-        .filter_map(|slot| slot.texture.as_deref())
-        .find(|texture| texture.is_water_fallback())
-        .and_then(texture_smallest_mip_average)
-        .unwrap_or(crate::bridge::materials::DEFAULT_WATER_FOG_LINEAR)
-}
 
 pub fn scene_sky_tint(skybox: Option<&Skybox>) -> Vec3 {
     let Some(skybox) = skybox else {
@@ -505,37 +519,64 @@ mod tests {
     }
 
     #[test]
-    fn submerged_fly_uniforms_override_map_fog() {
-        let scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
-        let camera = FlyCamera::default();
+    fn immersion_uses_the_containing_body_and_its_underside_fog() {
+        use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
+        use crate::media::preview_model::MaterialSlot;
+        use crate::test_support::GmaFixtureBuilder;
+        use gmpublished_domain::scene::map::MapWaterVolumes;
+        use std::sync::Arc;
+        let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Liquid")
+            .entry("materials/pool.vmt",br#"Water { "$bottommaterial" "pool_beneath" "$fogend" "9999" }"#.to_vec())
+            .entry("materials/pool_beneath.vmt",br#"Water { "$abovewater" "0" "$fogenable" "1" "$fogcolor" "[0.2 0.3 0.4]" "$fogstart" "-64" "$fogend" "640" "$refracttexture" "_rt_WaterRefraction" }"#.to_vec())
+            .build()).unwrap();
+        let resolver = MaterialResolver::new(Arc::new(archive), None);
+        let mut scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
+        scene.water_volumes = Some(MapWaterVolumes::box_for_tests(
+            Vec3::splat(-128.0),
+            Vec3::splat(128.0),
+            "pool".into(),
+        ));
+        for name in ["pool", "pool_beneath"] {
+            let r = resolver.resolve_primary(&[], name).unwrap();
+            Arc::get_mut(&mut scene.scene)
+                .unwrap()
+                .materials
+                .push(MaterialSlot {
+                    name: name.into(),
+                    shader: r.shader,
+                    texture: Some(r.texture),
+                    texture2: None,
+                    force_opaque: r.force_opaque,
+                    render_mode: r.render_mode,
+                });
+        }
         let map_fog = MapFog {
             color_linear: Vec3::new(0.8, 0.7, 0.6),
             start: 512.0,
             end: 8192.0,
             max_density: 0.5,
         };
-
-        let above = Uniforms::for_fly(
-            &scene,
-            &camera,
-            Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0)),
-            Some(map_fog),
-            12.0,
-            false,
-        );
-        let submerged = Uniforms::for_fly(
-            &scene,
-            &camera,
-            Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0)),
-            Some(map_fog),
-            12.0,
-            true,
-        );
-
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let mut camera = FlyCamera {
+            position: Some(Vec3::new(0.0, 0.0, 160.0)),
+            ..FlyCamera::default()
+        };
+        let above = Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0);
+        camera.position = Some(Vec3::ZERO);
+        let submerged = Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0);
         assert_eq!(above.fog_color, [0.8, 0.7, 0.6, 0.0]);
         assert_eq!(above.fog_params, [512.0, 8192.0, 0.5, 1.0]);
-        assert_eq!(above.water_time_sky_tint[0], 12.0);
-        assert_eq!(submerged.fog_color, [0.03, 0.10, 0.10, 0.0]);
-        assert_eq!(submerged.fog_params, [0.0, 2048.0, 1.0, 1.0]);
+        assert_eq!(
+            submerged.fog_color,
+            [0.2_f32.powf(2.2), 0.3_f32.powf(2.2), 0.4_f32.powf(2.2), 1.0]
+        );
+        assert_eq!(submerged.fog_params, [-64.0, 640.0, 1.0, 3.0]);
+        assert_eq!(submerged.medium_plane, [0.0, 0.0, 1.0, -128.0]);
+        assert_eq!(submerged.clip_plane, [0.0, 0.0, -1.0, 130.0]);
+        camera.position = Some(Vec3::new(256.0, 0.0, 0.0));
+        assert_eq!(
+            Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0).fog_params,
+            above.fog_params
+        );
     }
 }

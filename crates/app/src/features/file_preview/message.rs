@@ -26,6 +26,8 @@ pub enum Message {
         group: usize,
         choice: usize,
     },
+    MouseCaptureRequested(bool),
+    MouseCaptureFailed(Generation),
     MapFogToggled(bool),
     MapSkyboxToggled(bool),
     MapVisibilityToggled(bool),

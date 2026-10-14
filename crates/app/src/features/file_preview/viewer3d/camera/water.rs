@@ -133,10 +133,6 @@ impl FlyCamera {
             collision.trace_aabb(probe, probe + (forward * distance), Vec3::splat(0.0));
         !over_ledge.start_solid && over_ledge.fraction >= 1.0
     }
-
-    pub fn submerged(&self) -> bool {
-        self.water.is_submerged()
-    }
 }
 
 #[cfg(test)]
@@ -180,7 +176,7 @@ mod tests {
             position[2] < 20.0,
             "downward pitch should dive: {position:?}"
         );
-        assert!(camera.submerged());
+        assert!(camera.water.is_submerged());
     }
 
     #[test]

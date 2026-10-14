@@ -21,6 +21,7 @@ mod passes;
 mod reflections;
 mod refraction;
 mod resources;
+mod screen_refraction;
 mod targets;
 mod transparency;
 mod uniforms;
@@ -65,6 +66,8 @@ impl PreviewScene {
     reason = "three independent render toggles plus the camera's water state"
 )]
 pub struct ModelPrimitive {
+    pub(super) clear_color: Option<[f32; 3]>,
+    pub(super) air_fog: Option<super::MapFog>,
     #[cfg(feature = "map-capture")]
     pub(super) reflection_target: bool,
     #[cfg(feature = "map-capture")]
@@ -91,6 +94,7 @@ pub struct ModelPrimitive {
 
 #[derive(Debug)]
 pub struct PreparedFrame {
+    pub screen_overlay: Option<screen_refraction::Frame>,
     pub main: SceneView,
     pub planar_views: Vec<PlanarView>,
     pub content_id: u64,
@@ -126,6 +130,7 @@ impl shader::Primitive for ModelPrimitive {
             .unwrap_or(pipeline.frames.len());
         if slot == pipeline.frames.len() {
             pipeline.frames.push(PreparedFrame {
+                screen_overlay: None,
                 main: SceneView::new(device, &pipeline.resources),
                 planar_views: Vec::new(),
                 content_id: self.content_id,
@@ -137,6 +142,7 @@ impl shader::Primitive for ModelPrimitive {
         let frame = &mut pipeline.frames[slot];
         if frame.content_id != self.content_id {
             frame.planar_views.clear();
+            frame.screen_overlay = None;
             frame.main.visibility = Default::default();
         }
         frame.content_id = self.content_id;
@@ -178,10 +184,6 @@ impl shader::Primitive for ModelPrimitive {
             uniforms.viewport = [size.0 as f32, size.1 as f32, 0.0, 0.0];
             uniforms.water_time_sky_tint[0] = self.uniforms.water_time_sky_tint[0];
             uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
-            if self.submerged {
-                uniforms.fog_color = self.uniforms.fog_color;
-                uniforms.fog_params = self.uniforms.fog_params;
-            }
             uniforms
         };
         frame.main.world.write(queue, &with_time(self.uniforms));
@@ -222,7 +224,17 @@ impl shader::Primitive for ModelPrimitive {
             .enumerate()
             .filter(|(_, surface)| {
                 needs_water
-                    && surface.plane.signed_distance(eye) > 0.01
+                    && {
+                        let distance = surface.plane.signed_distance(eye);
+                        let water = scene.materials[surface.material_slot].shader.water();
+                        if distance.abs() <= 0.01
+                            && let Some(water) = water
+                        {
+                            water.above_water != self.submerged
+                        } else {
+                            distance > 0.01
+                        }
+                    }
                     && surface.intersects_view(self.uniforms.view_proj)
                     && plans
                         .world
@@ -294,6 +306,19 @@ impl shader::Primitive for ModelPrimitive {
             let mut uniforms = with_time(self.uniforms);
             uniforms.water_depth_params[2] = f32::from(surface.reflect_enabled);
             uniforms.water_depth_params[3] = f32::from(surface.refraction.is_some());
+            if scene.materials[upload.reflectors[surface.surface_index].material_slot]
+                .shader
+                .water()
+                .is_some()
+            {
+                let plane = upload.reflectors[surface.surface_index].plane;
+                uniforms.medium_plane = [
+                    plane.normal[0],
+                    plane.normal[1],
+                    plane.normal[2],
+                    -plane.distance,
+                ];
+            }
             surface.surface_uniforms.write(queue, &uniforms);
             let refracted = surface
                 .refraction
@@ -311,6 +336,14 @@ impl shader::Primitive for ModelPrimitive {
                 &reflected.resolve_view,
             ));
         }
+        screen_refraction::prepare(
+            &mut frame.screen_overlay,
+            device,
+            queue,
+            &pipeline.resources,
+            upload,
+            self,
+        );
         frame.main.plans = Some(plans);
         let detail_water_side = frame
             .planar_views
@@ -321,7 +354,7 @@ impl shader::Primitive for ModelPrimitive {
                     .water()
                     .is_some()
             })
-            .then_some(false);
+            .then_some(self.submerged);
         transparency::prepare(
             &mut frame.main,
             upload,
@@ -374,6 +407,10 @@ impl shader::Primitive for ModelPrimitive {
             *diagnostics.lock().expect("capture diagnostics lock") = serde_json::json!({
                 "main_target_dimensions":size,"reflection_views":records(false),"refraction_views":records(true),
                 "single_bounce":true,"nested_planar_fallback":"average sky tint (cubemap pending)",
+                "water_body":map.and_then(|map|map.water_volumes.as_ref()).and_then(|volumes|volumes.at(eye)).map(|sample|serde_json::json!({"index":sample.body_index,"surface_z":sample.body.surface_z,"min_z":sample.body.min_z,"surface_material":sample.body.material_name,"contents":sample.contents})),
+                "underwater_overlay":map.and_then(|map|map.immersion_material(eye)).and_then(|water|water.underwater_overlay.as_ref()).map(|effect|&effect.name),
+                "clear_color_linear":self.clear_color,
+                "main_camera_position":self.uniforms.camera_position, "main_fog_color":self.uniforms.fog_color, "main_fog_params":self.uniforms.fog_params, "main_clip_plane":self.uniforms.clip_plane, "main_visibility_state":format!("{:?}",frame.main.visibility.tracker.state),
                 "estimated_target_bytes":bytes,"composition":"planar depth occludes main transparency; clipped refraction includes below-plane transparency"
             });
         }

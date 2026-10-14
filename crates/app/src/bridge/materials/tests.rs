@@ -2100,3 +2100,35 @@ fn empty_water_refraction_texture_disables_that_optical_input() {
     assert!(water.reflect_enabled);
     assert!(!water.refract_enabled);
 }
+
+#[test]
+fn underwater_effect_keeps_its_own_normal_proxy_and_blur_without_a_base_texture() {
+    let normal = [128, 160, 250, 128].repeat(4);
+    let entries = vec![
+        ("materials/liquid.vmt", br#"Water { "$abovewater" "0" "$underwateroverlay" "effects/testwarp" "$fogcolor" "{24 64 72}" }"#.to_vec()),
+        ("materials/effects/testwarp.vmt", br#"Refract {
+            "$normalmap" "normal" "$refractamount" ".04" "$bluramount" "1"
+            Proxies { TextureScroll { texturescrollvar "$bumptransform" texturescrollrate ".1" texturescrollangle "90" } }
+        }"#.to_vec()),
+        ("materials/normal.vtf", fixture_vtf_bytes(2,2,vformats::vtf::VtfFormat::Rgba8888,&[&normal])),
+    ];
+    let mut builder = GmaFixtureBuilder::new("Underwater effect");
+    for (name, data) in entries {
+        builder = builder.entry(name, data);
+    }
+    let archive = PreviewArchive::from_gma(builder.build()).unwrap();
+    let resolved = MaterialResolver::new(Arc::new(archive), None)
+        .resolve_primary(&[], "liquid")
+        .unwrap();
+    let water = resolved.shader.water().unwrap();
+    let overlay = water.underwater_overlay.as_ref().unwrap();
+    assert_eq!(overlay.name, "effects/testwarp");
+    assert!(overlay.blur);
+    assert_eq!(overlay.refract_amount, 0.04);
+    assert!(overlay.proxy_scroll[0].abs() < 1e-6);
+    assert!((overlay.proxy_scroll[1] - 0.1).abs() < 1e-6);
+    assert_eq!(overlay.normal_map.frames[0][0].rgba, normal);
+    for (channel, byte) in [24, 64, 72].into_iter().enumerate() {
+        assert_eq!(water.fog_clear_linear[channel], srgb_byte_to_linear(byte));
+    }
+}

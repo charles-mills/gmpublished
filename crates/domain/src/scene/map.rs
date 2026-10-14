@@ -35,6 +35,8 @@ mod physics;
 mod placements;
 mod visibility;
 mod walk;
+mod water;
+pub use water::{MapWaterBody, MapWaterSample, MapWaterVolumes};
 
 pub use data::{
     MapBounds, MapData, MapMesh, MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility,
@@ -333,6 +335,14 @@ fn load_map_impl(
     let visibility = MapVisibility::from_bsp(&bsp);
     let walk_collision =
         MapWalkCollision::from_bsp_instances(&bsp, &brush_instances, &door_model_indices);
+    let water_volumes = MapWaterVolumes::from_bsp(&bsp);
+    if let Some(volumes) = &water_volumes {
+        for body in volumes.bodies.iter().flatten() {
+            if !material_names.contains(&body.material_name) {
+                material_names.push(body.material_name.clone());
+            }
+        }
+    }
     let pakfile = MapPakFile::from_pak_bytes(bsp.pakfile_bytes);
     let skybox_completion_bounds = skybox_partition.completion_bounds();
     let skybox_partition = MapSkyboxPartitionStats {
@@ -372,6 +382,7 @@ fn load_map_impl(
         skybox_partition,
         visibility,
         walk_collision,
+        water_volumes,
         pakfile,
     })
 }

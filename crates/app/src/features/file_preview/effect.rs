@@ -7,6 +7,10 @@ use std::sync::Arc;
 #[allow(clippy::enum_variant_names)]
 pub enum Effect {
     ModalCloseRequested,
+    MouseCaptureChanged {
+        captured: bool,
+        epoch: Generation,
+    },
     LoadRequested(PreviewRequest),
     ExtractRequested {
         entry_path: String,

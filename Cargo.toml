@@ -6,11 +6,18 @@ members = [
 ]
 exclude = [
     "crates/vendor/iced_wgpu",
+    "crates/vendor/iced_core",
+    "crates/vendor/iced_runtime",
+    "crates/vendor/iced_winit",
     "crates/vendor/vformats",
 ]
 resolver = "3"
 
 [patch.crates-io]
+# Expose native cursor capture and relative mouse motion for the map viewer.
+iced_core = { path = "crates/vendor/iced_core" }
+iced_runtime = { path = "crates/vendor/iced_runtime" }
+iced_winit = { path = "crates/vendor/iced_winit" }
 # Enable BC textures on supported adapters; see the vendored patch notes.
 iced_wgpu = { path = "crates/vendor/iced_wgpu" }
 # Correct SDK detail-sprite record size/scale; see vendored patch notes.

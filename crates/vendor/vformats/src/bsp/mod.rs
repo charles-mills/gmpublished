@@ -37,7 +37,8 @@ mod record;
 mod lumps;
 pub use lumps::{
     Brush, BrushSide, BspModel, ColorRgbExp, DispInfo, DispVert, Face, Leaf, LeafAmbientIndex,
-    LeafAmbientSample, Node, Overlay, Plane, TexData, TexInfo, contents_flags, texture_flags,
+    LeafAmbientSample, LeafWaterData, Node, Overlay, Plane, TexData, TexInfo, contents_flags,
+    texture_flags,
 };
 
 mod vis;
@@ -73,6 +74,7 @@ pub mod lump_ids {
     pub const BRUSHSIDES: usize = 19;
     pub const DISPINFO: usize = 26;
     pub const GAME_LUMP: usize = 35;
+    pub const LEAF_WATER_DATA: usize = 36;
     pub const LEAF_AMBIENT_INDEX_HDR: usize = 51;
     pub const LEAF_AMBIENT_INDEX: usize = 52;
     pub const LEAF_AMBIENT_LIGHTING_HDR: usize = 55;

@@ -98,6 +98,10 @@ fn shade(input: VertexOutput) -> vec4<f32> {
 // radial distance from the camera. The clipping bias is deliberately separate.
 fn view_fog_factor(position:vec3<f32>, projected_depth:f32) -> f32 {
     if uniforms.fog_params.y <= uniforms.fog_params.x { return 0.0; }
+    if uniforms.fog_params.w > 2.5 {
+        return clamp((projected_depth-uniforms.fog_params.x)
+            /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
+    }
     if uniforms.fog_params.w > 1.5 {
         let point_distance=dot(vec4<f32>(position,1.0),uniforms.medium_plane);
         let eye_distance=dot(vec4<f32>(uniforms.camera_position.xyz,1.0),uniforms.medium_plane);
@@ -129,5 +133,9 @@ fn fs_additive(input:VertexOutput) -> @location(0) vec4<f32> {
 }
 
 fn view_fog_color_factor(position:vec3<f32>,projected_depth:f32) -> f32 {
-    return view_fog_factor(position,projected_depth)*select(1.0,uniforms.fog_color.a,uniforms.fog_params.w>1.5);
+    let factor = view_fog_factor(position,projected_depth);
+    // Source's ps2b+ range-fog blend squares opacity to match hardware fog.
+    // Height-fog depth metadata and the water shader's own absorption stay linear.
+    let opacity = select(factor, factor*factor, uniforms.fog_params.w>2.5);
+    return opacity*select(1.0,uniforms.fog_color.a,uniforms.fog_params.w>1.5);
 }

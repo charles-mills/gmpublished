@@ -36,6 +36,17 @@ pub mod contents_flags {
     pub const PLAYERCLIP: i32 = 0x0001_0000;
 }
 
+/// Compiled liquid surface and fog material (`LUMP_LEAFWATERDATA`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LeafWaterData {
+    /// Height of the liquid surface.
+    pub surface_z: f32,
+    /// Lowest height of this liquid body.
+    pub min_z: f32,
+    /// Surface material's index into [`Bsp::texinfos`].
+    pub surface_texinfo: i16,
+}
+
 /// One splitting plane (`LUMP_PLANES`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plane {
@@ -585,6 +596,21 @@ impl<'a> Bsp<'a> {
                 vector: vec3_at(r, 0),
                 dist: f32_at(r, 12),
                 alpha: f32_at(r, 16),
+            },
+        )
+    }
+
+    /// `LUMP_LEAFWATERDATA` (12-byte SDK records).
+    pub fn leaf_water_data(&self, limits: &Limits) -> Result<Vec<LeafWaterData>, BspError> {
+        self.records(
+            lump_ids::LEAF_WATER_DATA,
+            12,
+            "leaf water data",
+            limits,
+            |r| LeafWaterData {
+                surface_z: f32_at(r, 0),
+                min_z: f32_at(r, 4),
+                surface_texinfo: i16_at(r, 8),
             },
         )
     }

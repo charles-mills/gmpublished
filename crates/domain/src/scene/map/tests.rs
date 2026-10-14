@@ -1849,35 +1849,25 @@ fn load_map_with_missing_vis_keeps_output_unpartitioned() {
 }
 
 #[test]
-fn load_map_skips_down_facing_warp_faces_only() {
-    let map = load_map(&water_underside_bsp_fixture()).expect("fixture bsp should load");
-
+fn load_map_retains_water_undersides_and_already_oriented_plane_normals() {
+    let mut bsp_bytes = water_underside_bsp_fixture();
+    let entry = 8 + FACES_LUMP_INDEX * 16;
+    let offset = i32::from_le_bytes(bsp_bytes[entry..entry + 4].try_into().unwrap()) as usize;
+    // Source repeats the oriented plane's sign bit in side. Do not flip twice.
+    bsp_bytes[offset + 56 + 2] = 1;
+    let map = load_map(&bsp_bytes).expect("fixture BSP should load");
     assert_eq!(map.stats.face_count, 3);
-    assert_eq!(
-        map.material_names,
-        vec!["water/up".to_owned(), "brick/down".to_owned()]
-    );
-    assert_eq!(
+    assert_eq!(map.material_names, ["water/down", "water/up", "brick/down"]);
+    assert_eq!(map.meshes.len(), 3);
+    assert!(map.meshes[0].vertices.iter().all(|v| v.normal[2] < 0.0));
+    assert!(map.meshes[1].vertices.iter().all(|v| v.normal[2] > 0.0));
+    assert!(map.meshes[2].vertices.iter().all(|v| v.normal[2] < 0.0));
+    assert!(
         map.meshes
             .iter()
-            .map(|mesh| mesh.indices.len() / 3)
-            .sum::<usize>(),
-        2
+            .flat_map(|m| &m.vertices)
+            .all(|v| v.texture_size == [512, 512])
     );
-
-    let water = &map.meshes[0];
-    assert_eq!(water.material_index, 0);
-    assert!(water.vertices.iter().all(|vertex| vertex.normal[2] > 0.0));
-    assert!(
-        water
-            .vertices
-            .iter()
-            .all(|vertex| vertex.texture_size == [512, 512])
-    );
-
-    let brick = &map.meshes[1];
-    assert_eq!(brick.material_index, 1);
-    assert!(brick.vertices.iter().all(|vertex| vertex.normal[2] < 0.0));
 }
 
 #[test]
@@ -3103,4 +3093,74 @@ fn a_face_in_no_cluster_finishes_as_always_visible() {
     let clustered = clustered.finish();
     assert!(!clustered.always_visible);
     assert_eq!(clustered.clusters, vec![1, 3]);
+}
+
+#[test]
+fn compiled_water_lookup_distinguishes_stacked_liquids_and_air_gap() {
+    let mut bsp = read_fixture_bsp(&water_underside_bsp_fixture());
+    let plane = bsp.planes[0];
+    bsp.planes = [100.0, 0.0, -32.0, -100.0]
+        .into_iter()
+        .map(|dist| {
+            let mut p = plane;
+            p.normal = [0.0, 0.0, 1.0];
+            p.dist = dist;
+            p
+        })
+        .collect();
+    let node = bsp.nodes[0];
+    bsp.nodes = [(0, [-1, 1]), (1, [-2, 2]), (2, [-1, 3]), (3, [-3, -1])]
+        .into_iter()
+        .map(|(plane, children)| {
+            let mut n = node;
+            n.plane = plane;
+            n.children = children;
+            n
+        })
+        .collect();
+    let leaf = bsp.leaves[0];
+    bsp.leaves = [
+        (-1, 0),
+        (0, contents_flags::WATER),
+        (1, contents_flags::SLIME),
+    ]
+    .into_iter()
+    .map(|(index, contents)| {
+        let mut l = leaf;
+        l.leaf_water_data = index;
+        l.contents = contents;
+        l
+    })
+    .collect();
+    bsp.leaf_water_data = vec![
+        bsp::LeafWaterData {
+            surface_z: 100.0,
+            min_z: 0.0,
+            surface_texinfo: 0,
+        },
+        bsp::LeafWaterData {
+            surface_z: -32.0,
+            min_z: -100.0,
+            surface_texinfo: 1,
+        },
+    ];
+    let volumes = MapWaterVolumes::from_bsp(&bsp).unwrap();
+    let upper = volumes.at(Vec3::new(0.0, 0.0, 50.0)).unwrap();
+    let lower = volumes.at(Vec3::new(0.0, 0.0, -64.0)).unwrap();
+    assert_eq!(upper.body.material_name, "water/down");
+    assert_eq!(upper.body.surface_z, 100.0);
+    assert_eq!(lower.body.material_name, "water/up");
+    assert_eq!(lower.body.surface_z, -32.0);
+    assert_eq!(lower.contents, contents_flags::SLIME);
+    for z in [200.0, -10.0, -120.0] {
+        assert!(volumes.at(Vec3::new(0.0, 0.0, z)).is_none());
+    }
+    assert!(volumes.at(Vec3::splat(f32::NAN)).is_none());
+    bsp.leaf_water_data[0].surface_texinfo = -1;
+    let volumes = MapWaterVolumes::from_bsp(&bsp).unwrap();
+    assert!(volumes.at(Vec3::new(0.0, 0.0, 50.0)).is_none());
+    assert_eq!(
+        volumes.at(Vec3::new(0.0, 0.0, -64.0)).unwrap().body_index,
+        1
+    );
 }

@@ -1,6 +1,21 @@
 use super::{Effect, Message, State};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    let was_captured = state.mouse_captured();
+    let mut effects = update_content(state, message);
+    if was_captured != state.mouse_captured() {
+        effects.insert(
+            0,
+            Effect::MouseCaptureChanged {
+                captured: state.mouse_captured(),
+                epoch: state.mouse_capture_epoch(),
+            },
+        );
+    }
+    effects
+}
+
+fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::OpenRequested(request) => {
             let request = state.begin_open(request);
@@ -65,6 +80,16 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::BodygroupChoiceSelected { group, choice } => {
             state.select_bodygroup_choice(group, choice);
+            Vec::new()
+        }
+        Message::MouseCaptureRequested(captured) => {
+            state.set_mouse_captured(captured);
+            Vec::new()
+        }
+        Message::MouseCaptureFailed(epoch) => {
+            if epoch == state.mouse_capture_epoch() {
+                state.set_mouse_captured(false);
+            }
             Vec::new()
         }
         Message::MapFogToggled(enabled) => {
@@ -153,7 +178,10 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             ));
             Vec::new()
         }
-        Message::BackRequested => vec![Effect::ModalCloseRequested],
+        Message::BackRequested => {
+            state.set_mouse_captured(false);
+            vec![Effect::ModalCloseRequested]
+        }
         Message::ExpandToggled => {
             let was_expanded = state.expanded();
             state.toggle_expanded();

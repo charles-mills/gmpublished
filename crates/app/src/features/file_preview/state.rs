@@ -70,6 +70,8 @@ impl OrbitPose {
 #[derive(Debug)]
 pub struct State {
     open: bool,
+    mouse_captured: bool,
+    mouse_capture_epoch: Generation,
     expanded: bool,
     load: LoadState,
     request_id: Generation,
@@ -250,6 +252,8 @@ impl Default for State {
     fn default() -> Self {
         Self {
             open: false,
+            mouse_captured: false,
+            mouse_capture_epoch: Generation::INITIAL,
             expanded: false,
             load: LoadState::Idle,
             request_id: Generation::INITIAL,
@@ -268,6 +272,27 @@ impl Default for State {
 impl State {
     pub(crate) const fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub(crate) const fn mouse_captured(&self) -> bool {
+        self.mouse_captured
+    }
+
+    pub(super) const fn mouse_capture_epoch(&self) -> Generation {
+        self.mouse_capture_epoch
+    }
+
+    pub(super) fn set_mouse_captured(&mut self, captured: bool) {
+        let captured = captured
+            && self.open
+            && matches!(
+                self.current().map(|data| &data.content),
+                Some(PreviewContent::Map { .. })
+            );
+        if self.mouse_captured != captured {
+            self.mouse_captured = captured;
+            self.mouse_capture_epoch.bump();
+        }
     }
 
     pub(crate) const fn expanded(&self) -> bool {
@@ -391,6 +416,7 @@ impl State {
     }
 
     pub(crate) fn begin_open(&mut self, mut request: PreviewRequest) -> PreviewRequest {
+        self.set_mouse_captured(false);
         self.request_id.bump();
         request.request_id = self.request_id;
         self.open = true;
@@ -791,6 +817,7 @@ impl State {
     }
 
     pub(super) fn toggle_expanded(&mut self) {
+        self.set_mouse_captured(false);
         if self.open {
             self.expanded = !self.expanded;
         }
@@ -831,6 +858,7 @@ impl State {
     }
 
     pub(crate) fn close(&mut self) {
+        self.set_mouse_captured(false);
         if !self.open && !self.loading() && self.current().is_none() && self.request.is_none() {
             return;
         }

@@ -31,6 +31,7 @@ pub struct MapData {
     pub skybox_partition: MapSkyboxPartitionStats,
     pub visibility: Option<MapVisibility>,
     pub walk_collision: Option<MapWalkCollision>,
+    pub water_volumes: Option<super::MapWaterVolumes>,
     pub pakfile: MapPakFile,
 }
 

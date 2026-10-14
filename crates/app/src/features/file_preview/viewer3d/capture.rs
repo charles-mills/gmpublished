@@ -261,7 +261,7 @@ fn material_info(slot: &MaterialSlot) -> Value {
             "reflect_amount": water.reflect_amount, "refract_amount": water.refract_amount,
             "reflect_tint_linear": water.reflect_tint_linear,
             "refract_tint_linear": water.refract_tint_linear,
-            "fog_color_linear": water.fog_color_linear,
+            "fog_color_linear": water.fog_color_linear, "fog_clear_linear":water.fog_clear_linear, "underwater_overlay":water.underwater_overlay.as_ref().map(|effect|serde_json::json!({"name":effect.name,"refract_amount":effect.refract_amount,"blur":effect.blur,"bump_transform":effect.bump_transform,"proxy_scroll":effect.proxy_scroll})),
             "fog_start": water.fog_start, "fog_end": water.fog_end,
             "fog_enabled": water.fog_enabled,
             "below_material": water.below_material,
@@ -289,7 +289,7 @@ fn material_info(slot: &MaterialSlot) -> Value {
 fn git_output(args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .args(args)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .output()
         .ok()?;
     output.status.success().then(|| {
@@ -395,7 +395,7 @@ pub fn capture_map_reference_frames() {
         if !relative.starts_with("crates/vendor/vformats")
             && !relative
                 .extension()
-                .is_some_and(|ext| matches!(ext.to_str(), Some("rs" | "json" | "py")))
+                .is_some_and(|ext| matches!(ext.to_str(), Some("rs" | "wgsl" | "json" | "py")))
         {
             continue;
         }
@@ -573,6 +573,7 @@ pub fn capture_map_reference_frames() {
                     pose: Some(pose),
                     movement_mode: Some(MovementMode::Fly),
                     requested_movement_mode: None,
+                    mouse_captured: false,
                 },
                 camera,
             };
@@ -784,6 +785,7 @@ pub fn capture_map_reference_frames() {
                             pose: Some(pose),
                             movement_mode: Some(MovementMode::Fly),
                             requested_movement_mode: None,
+                            mouse_captured: false,
                         },
                     }
                 },

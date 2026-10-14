@@ -268,7 +268,7 @@ fn normalized_material_dirs(material_dirs: &[String]) -> Vec<String> {
     dirs
 }
 
-fn normalize_material_name(material_name: &str) -> Option<String> {
+pub(super) fn normalize_material_name(material_name: &str) -> Option<String> {
     normalize_source_path(material_name, Some(".vmt"))
 }
 

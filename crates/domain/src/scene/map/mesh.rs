@@ -2,7 +2,7 @@ use super::{
     BTreeMap, BspError, ColorRgbExp, DispInfo, Face, HashMap, MapBsp, MapFaceVisibility,
     MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapVertex, PendingLightmapBlock,
     TexInfo, brush_lightmap_uv, displacement_lightmap_uv, extract_face_lightmap,
-    is_preview_material_visible, normalize_material_name, texture_flags,
+    is_preview_material_visible, normalize_material_name,
 };
 use crate::math::Vec3;
 
@@ -146,10 +146,10 @@ pub(super) fn append_face(
         return Ok(());
     };
 
-    let normal = face_normal(bsp, face);
-    if is_water_underside_face(texinfo, normal) {
-        return Ok(());
-    }
+    // Source writes the already-oriented plane number and repeats its low
+    // bit in face.side (vbsp/writebsp.cpp). Applying side a second time flips
+    // every back-plane normal, including water undersides, back to the top.
+    let normal = bsp.face_plane_normal(face);
 
     let texture_name = bsp.texinfo_name(texinfo);
     let Some(material_name) = normalize_material_name(texture_name) else {
@@ -441,17 +441,4 @@ pub(super) fn fan_indices(vertex_count: usize) -> Result<Vec<u32>, BspError> {
         indices.push(u32::try_from(index + 1).map_err(|_| BspError::TooLarge { item: "indices" })?);
     }
     Ok(indices)
-}
-
-fn face_normal(bsp: &MapBsp, face: &Face) -> Vec3 {
-    let normal = bsp.face_plane_normal(face);
-    if face.side == 0 {
-        normal
-    } else {
-        Vec3::new(-normal[0], -normal[1], -normal[2])
-    }
-}
-
-fn is_water_underside_face(texinfo: &TexInfo, normal: Vec3) -> bool {
-    texinfo.flags & texture_flags::WARP != 0 && normal[2] < 0.0
 }

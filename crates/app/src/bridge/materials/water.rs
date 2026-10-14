@@ -63,11 +63,15 @@ pub struct WaterMaterial {
     pub reflect_tint_linear: [f32; 3],
     pub refract_tint_linear: [f32; 3],
     pub fog_color_linear: [f32; 3],
+    /// Source clears with clamped authored bytes; an sRGB attachment needs
+    /// their inverse sRGB transfer, separately from shader GammaToLinear.
+    pub fog_clear_linear: [f32; 3],
     pub fog_start: f32,
     pub fog_end: f32,
     pub fog_enabled: bool,
     pub no_fresnel: bool,
     pub below_material: Option<String>,
+    pub underwater_overlay: Option<Arc<ScreenRefraction>>,
     pub unsupported_proxies: Vec<String>,
     pub unsupported_features: Vec<String>,
 }
@@ -78,13 +82,28 @@ pub struct WaterNormalMap {
     pub frames: Vec<Vec<ResolvedTextureMip>>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScreenRefraction {
+    pub name: String,
+    pub normal_map: Arc<WaterNormalMap>,
+    pub bump_transform: [[f32; 4]; 2],
+    pub proxy_scroll: [f32; 2],
+    pub bump_frame: f32,
+    pub refract_amount: f32,
+    pub tint_linear: [f32; 3],
+    pub blur: bool,
+}
+
 impl WaterMaterial {
     pub(crate) fn is_animated(&self) -> bool {
-        self.normal_map.as_ref().is_some_and(|normal| {
-            self.proxy_scroll != [0.0; 2]
-                || (self.scroll1[0] != 0.0 && !self.has_base_texture)
-                || (normal.frames.len() > 1 && self.frame_rate > 0.0)
-        })
+        self.underwater_overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.proxy_scroll != [0.0; 2])
+            || self.normal_map.as_ref().is_some_and(|normal| {
+                self.proxy_scroll != [0.0; 2]
+                    || (self.scroll1[0] != 0.0 && !self.has_base_texture)
+                    || (normal.frames.len() > 1 && self.frame_rate > 0.0)
+            })
     }
 }
 
@@ -268,6 +287,62 @@ pub(super) fn texture_transform(value: Option<&str>) -> [[f32; 4]; 2] {
 }
 
 impl MaterialResolver {
+    fn resolve_screen_refraction(&self, name: &str) -> Option<Arc<ScreenRefraction>> {
+        let paths = super::material_paths(&[], name);
+        self.find_entry_by_source(&paths, |path, bytes| {
+            let mut visited = vec![path.clone()];
+            let material =
+                self.effective_material(&String::from_utf8_lossy(&bytes), 0, &mut visited)?;
+            if !material.shader.eq_ignore_ascii_case("Refract")
+                && !material.shader.eq_ignore_ascii_case("Refract_DX90")
+            {
+                log::warn!("unsupported underwater overlay shader {}", material.shader);
+                return None;
+            }
+            let get = |key| material.parameter(key);
+            if ["$normalmap2", "$envmap", "$refracttinttexture"]
+                .iter()
+                .any(|key| get(key).is_some())
+                || vmt_bool(get("$masked"))
+                || vmt_bool(get("$fadeoutonsilhouette"))
+                || scalar(get("$bluramount"), 0.0) > 1.0
+            {
+                log::warn!("unsupported underwater Refract overlay variant: {name}");
+                return None;
+            }
+            let normal_name = get("$normalmap").and_then(normalize_texture_name)?;
+            let normal_map = self.resolve_water_normal(&normal_name)?;
+            let mut bump_transform = texture_transform(get("$bumptransform"));
+            let mut proxy_scroll = [0.0; 2];
+            for proxy in &material.proxies {
+                let value = |key: &str| proxy.values.get(key).map(String::as_str);
+                if proxy.name == "texturescroll"
+                    && value("texturescrollvar")
+                        .is_some_and(|v| v.eq_ignore_ascii_case("$bumptransform"))
+                {
+                    let angle = scalar(value("texturescrollangle"), 0.0).to_radians();
+                    let rate = scalar(value("texturescrollrate"), 1.0);
+                    let scale = scalar(value("texturescale"), 1.0);
+                    proxy_scroll = [angle.cos() * rate, angle.sin() * rate];
+                    bump_transform = [[scale, 0.0, 0.0, 0.0], [0.0, scale, 0.0, 0.0]];
+                } else {
+                    log::warn!("unsupported underwater overlay proxy {}", proxy.name);
+                    return None;
+                }
+            }
+            Some(Arc::new(ScreenRefraction {
+                name: name.to_owned(),
+                normal_map,
+                bump_transform,
+                proxy_scroll,
+                bump_frame: scalar(get("$bumpframe"), 0.0).max(0.0),
+                refract_amount: scalar(get("$refractamount"), 2.0),
+                tint_linear: tint(get("$refracttint"), [1.0; 3]),
+                blur: scalar(get("$bluramount"), 0.0) > 0.0,
+            }))
+        })
+    }
+
     pub(super) fn resolve_shader(
         &self,
         material: &EffectiveMaterial,
@@ -369,11 +444,24 @@ impl MaterialResolver {
             reflect_tint_linear: tint(get("$reflecttint"), [1.0; 3]),
             refract_tint_linear: tint(get("$refracttint"), [1.0; 3]),
             fog_color_linear: tint(get("$fogcolor"), [1.0, 0.0, 0.0]),
+            fog_clear_linear: get("$fogcolor").and_then(parse_water_fog_color).map_or(
+                [1.0, 0.0, 0.0],
+                |color| {
+                    color
+                        .to_array()
+                        .map(|v| super::srgb_byte_to_linear((v.clamp(0.0, 1.0) * 255.0) as u8))
+                },
+            ),
             fog_start: scalar(get("$fogstart"), 0.0),
             fog_end: scalar(get("$fogend"), 1000.0),
             fog_enabled: get("$fogenable").is_none_or(|v| vmt_bool(Some(v))),
             no_fresnel: vmt_bool(get("$nofresnel")),
-            below_material: get("$bottommaterial").map(str::to_owned),
+            below_material: get("$bottommaterial")
+                .and_then(super::discovery::normalize_material_name),
+            underwater_overlay: get("$underwateroverlay")
+                .and_then(super::discovery::normalize_material_name)
+                .filter(|name| name != "0")
+                .and_then(|name| self.resolve_screen_refraction(&name)),
             unsupported_proxies,
             unsupported_features,
         }))

@@ -140,6 +140,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         visibility,
         walk_collision,
         pakfile,
+        water_volumes,
         lightmap,
         skyname,
         fog,
@@ -156,6 +157,25 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     emit_stage(PreviewLoadStage::ResolvingMaterials);
     let materials_started = Instant::now();
     let mut table = resolve_map_material_slots_parallel(&material_names, &material_resolver);
+    // A compiled fog volume can name an underside material even when no
+    // visible face references it. Resolve that dependency independently.
+    let below_names = table
+        .slots()
+        .iter()
+        .filter_map(|slot| {
+            slot.shader
+                .water()
+                .and_then(|water| water.below_material.clone())
+        })
+        .filter(|name| !table.contains(name))
+        .collect::<BTreeSet<_>>();
+    let below = resolve_map_material_slots_parallel(
+        &below_names.into_iter().collect::<Vec<_>>(),
+        &material_resolver,
+    );
+    for slot in below.into_slots() {
+        table.push(&slot.name.clone(), slot);
+    }
     let (detail_sprites, map_skybox_detail_sprites) = resolve_detail_sprites(
         &map_detail_sprites,
         &map_skybox_detail_sprites,
@@ -289,6 +309,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         });
     }
     let scene = Arc::new(MapPreview {
+        water_volumes,
         scene: Arc::new(RenderScene {
             stats: ModelStats {
                 bone_count: 0,

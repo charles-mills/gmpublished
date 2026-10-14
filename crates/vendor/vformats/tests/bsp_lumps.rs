@@ -466,3 +466,29 @@ fn nodes_brush_sides_and_leaf_tables_decode() {
     assert_eq!(bsp.leaf_faces(&limits).expect("leaf faces"), vec![4, 9]);
     assert_eq!(bsp.leaf_brushes(&limits).expect("leaf brushes"), vec![6]);
 }
+
+#[test]
+fn leaf_water_records_keep_signed_material_and_distinct_heights() {
+    let records = Record::new()
+        .f32(128.0)
+        .f32(-256.0)
+        .i16(37)
+        .u16(0)
+        .f32(-32.0)
+        .f32(-512.0)
+        .i16(-1)
+        .u16(0)
+        .0;
+    let bytes = build_bsp(&[(lump_ids::LEAF_WATER_DATA, records, 0)]);
+    let limits = Limits::default();
+    let data = parse(&bytes, &limits)
+        .unwrap()
+        .leaf_water_data(&limits)
+        .unwrap();
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0].surface_z, 128.0);
+    assert_eq!(data[0].min_z, -256.0);
+    assert_eq!(data[0].surface_texinfo, 37);
+    assert_eq!(data[1].surface_z, -32.0);
+    assert_eq!(data[1].surface_texinfo, -1);
+}

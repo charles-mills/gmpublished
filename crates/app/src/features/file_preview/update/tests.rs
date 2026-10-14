@@ -503,3 +503,140 @@ fn inspector_ratio_clamps_to_layout_and_survives_modal_close() {
     let _effects = update(&mut state, Message::CloseFinished);
     assert!((state.inspector_ratio() - 0.58).abs() < f32::EPSILON);
 }
+
+fn loaded_map_state() -> State {
+    use crate::media::preview_model::{MapPreview, MapStats, ModelStats, RenderScene};
+    let mut state = State::default();
+    let request = state.begin_open(map_request());
+    let scene = Arc::new(MapPreview {
+        scene: Arc::new(RenderScene {
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            phy_debug_meshes: Vec::new(),
+            stats: ModelStats {
+                bone_count: 0,
+                sequence_count: 0,
+                vertex_count: 0,
+                triangle_count: 0,
+                mesh_count: 0,
+                material_count: 0,
+                resolved_material_count: 0,
+            },
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::splat(1024.0),
+        }),
+        water_volumes: None,
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
+        mesh_visibility: Vec::new(),
+        map_skybox_meshes: Vec::new(),
+        lightmap: None,
+        skybox: None,
+        detail_sprites: Vec::new(),
+        map_skybox_detail_sprites: Vec::new(),
+        overlays: Vec::new(),
+        map_skybox_overlays: Vec::new(),
+        doors: Vec::new(),
+        visibility: None,
+        walk_collision: None,
+    });
+    let data = PreviewData::from_request(
+        &request,
+        PreviewContent::Map {
+            scene,
+            fog: None,
+            sky_camera: None,
+            spawn: None,
+            stats: MapStats {
+                face_count: 0,
+                displacement_count: 0,
+                entity_count: 0,
+                material_count: 0,
+                resolved_material_count: 0,
+                static_prop_count: 0,
+                placed_prop_count: 0,
+                skipped_prop_count: 0,
+                detail_sprite_count: 0,
+                overlay_count: 0,
+                skybox_face_count: 0,
+                skybox_prop_count: 0,
+                skybox_detail_sprite_count: 0,
+                skybox_overlay_count: 0,
+                cluster_count: 0,
+                version: 20,
+            },
+        },
+    );
+    assert!(state.apply_loaded(request.request_id, Ok(data)));
+    state
+}
+
+#[test]
+fn mouse_capture_only_accepts_loaded_maps_and_escape_keeps_preview_open() {
+    let mut state = State::default();
+    assert!(update(&mut state, Message::MouseCaptureRequested(true)).is_empty());
+    state.begin_open(map_request());
+    assert!(update(&mut state, Message::MouseCaptureRequested(true)).is_empty());
+    let mut state = loaded_map_state();
+    let effects = update(&mut state, Message::MouseCaptureRequested(true));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::MouseCaptureChanged { captured: true, .. }]
+    ));
+    assert!(state.mouse_captured());
+    assert!(update(&mut state, Message::MouseCaptureRequested(true)).is_empty());
+    let effects = update(&mut state, Message::MouseCaptureRequested(false));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::MouseCaptureChanged {
+            captured: false,
+            ..
+        }]
+    ));
+    assert!(!state.mouse_captured());
+    assert!(state.is_open());
+    assert!(state.current().is_some());
+}
+
+#[test]
+fn mouse_capture_releases_when_preview_closes_changes_or_resizes() {
+    for message in [
+        Message::BackRequested,
+        Message::CloseFinished,
+        Message::OpenRequested(request()),
+        Message::ExpandToggled,
+    ] {
+        let mut state = loaded_map_state();
+        update(&mut state, Message::MouseCaptureRequested(true));
+        let effects = update(&mut state, message);
+        assert!(!state.mouse_captured());
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::MouseCaptureChanged {
+                captured: false,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn mouse_capture_failure_releases_input_and_stale_failures_are_ignored() {
+    let mut state = loaded_map_state();
+    update(&mut state, Message::MouseCaptureRequested(true));
+    let stale_epoch = state.mouse_capture_epoch();
+    update(&mut state, Message::MouseCaptureRequested(false));
+    update(&mut state, Message::MouseCaptureRequested(true));
+    assert!(update(&mut state, Message::MouseCaptureFailed(stale_epoch)).is_empty());
+    assert!(state.mouse_captured());
+    let epoch = state.mouse_capture_epoch();
+    let effects = update(&mut state, Message::MouseCaptureFailed(epoch));
+    assert!(!state.mouse_captured());
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::MouseCaptureChanged {
+            captured: false,
+            ..
+        }]
+    ));
+}

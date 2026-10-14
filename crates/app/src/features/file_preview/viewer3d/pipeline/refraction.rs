@@ -36,9 +36,16 @@ impl PlanarView {
         let mut uniforms = primitive.uniforms;
         uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
         let plane = source.plane;
+        let below_water = shader.water().is_some_and(|water| !water.above_water);
         // Source's above-water refraction view clips two units above the
         // exact water plane to avoid shoreline cracks (DF_FUDGE_UP).
-        let clip_bias = if shader.water().is_some() { 2.0 } else { 0.1 };
+        let clip_bias = if below_water {
+            0.0
+        } else if shader.water().is_some() {
+            2.0
+        } else {
+            0.1
+        };
         uniforms.clip_plane = [
             -plane.normal[0],
             -plane.normal[1],
@@ -52,7 +59,22 @@ impl PlanarView {
             -plane.distance,
         ];
         self.refraction_clear = wgpu::Color::BLACK;
-        if let Some(water) = shader.water() {
+        if below_water {
+            // Looking out of water captures the air scene with its own world
+            // fog. The underside material applies the in-water segment later.
+            uniforms.medium_plane = [0.0; 4];
+            uniforms.fog_color = primitive.air_fog.map_or([0.0; 4], |fog| {
+                [
+                    fog.color_linear[0],
+                    fog.color_linear[1],
+                    fog.color_linear[2],
+                    0.0,
+                ]
+            });
+            uniforms.fog_params = primitive.air_fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
+                [fog.start, fog.end, fog.max_density, 1.0]
+            });
+        } else if let Some(water) = shader.water() {
             uniforms.fog_color = [
                 water.fog_color_linear[0],
                 water.fog_color_linear[1],
@@ -61,9 +83,9 @@ impl PlanarView {
             ];
             uniforms.fog_params = [water.fog_start, water.fog_end, 1.0, 2.0];
             self.refraction_clear = wgpu::Color {
-                r: f64::from(uniforms.fog_color[0]),
-                g: f64::from(uniforms.fog_color[1]),
-                b: f64::from(uniforms.fog_color[2]),
+                r: f64::from(water.fog_clear_linear[0]),
+                g: f64::from(water.fog_clear_linear[1]),
+                b: f64::from(water.fog_clear_linear[2]),
                 a: 1.0,
             };
         }
@@ -108,7 +130,8 @@ impl PlanarView {
                     bodygroup_choices: &primitive.bodygroup_choices,
                 },
                 camera_position: uniforms.camera_position,
-                map_skybox_visible: primitive.map_skybox_visible && shader.water().is_none(),
+                map_skybox_visible: primitive.map_skybox_visible
+                    && (shader.water().is_none() || below_water),
                 map_skybox_content_present: upload.has_map_skybox_content(),
                 map_skybox_camera_position: skybox.map(|uniforms| uniforms.camera_position),
                 visibility_plan: view.visibility.plan.as_ref(),
@@ -146,7 +169,13 @@ impl PlanarView {
             view.planar_exclusion_generation = Some(generation);
         }
         view.plans = Some(plans);
-        super::transparency::prepare(view, upload, uniforms, skybox, shader.water().map(|_| true));
+        super::transparency::prepare(
+            view,
+            upload,
+            uniforms,
+            skybox,
+            shader.water().map(|water| water.above_water),
+        );
         RenderTargets::ensure(&mut view.targets, device, resources, size);
     }
 }

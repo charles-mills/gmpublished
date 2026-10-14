@@ -209,9 +209,23 @@ impl UploadCache {
             UploadedSkybox { face_bind_groups }
         });
 
+        let mut screen_refraction_normals = HashMap::new();
+        for effect in scene
+            .materials
+            .iter()
+            .filter_map(|slot| slot.shader.water())
+            .filter_map(|water| water.underwater_overlay.as_deref())
+        {
+            screen_refraction_normals
+                .entry(effect.name.clone())
+                .or_insert_with(|| {
+                    resources.create_water_normal_view(device, queue, Some(&effect.normal_map))
+                });
+        }
         self.uploads.insert(
             content_id,
             UploadedModel {
+                screen_refraction_normals,
                 meshes,
                 detail_sprites,
                 map_skybox_detail_sprites,
@@ -235,6 +249,7 @@ impl UploadCache {
 
 #[derive(Debug)]
 pub struct UploadedModel {
+    pub screen_refraction_normals: HashMap<String, wgpu::TextureView>,
     pub meshes: Vec<UploadedMesh>,
     pub detail_sprites: Option<UploadedDetailSprites>,
     pub map_skybox_detail_sprites: Option<UploadedDetailSprites>,

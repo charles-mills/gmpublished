@@ -94,6 +94,8 @@ impl shader::Program<Message> for Viewer3d {
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
+            air_fog: None,
+            clear_color: None,
             #[cfg(feature = "map-capture")]
             reflection_target: false,
             #[cfg(feature = "map-capture")]
@@ -150,6 +152,7 @@ pub struct FlyViewer {
     pub pose: Option<FlyPose>,
     pub movement_mode: Option<MovementMode>,
     pub requested_movement_mode: Option<MovementMode>,
+    pub mouse_captured: bool,
 }
 
 pub(super) const FLY_LOOK_SENSITIVITY: f32 = 0.006;
@@ -208,7 +211,7 @@ pub struct FlyCamera {
     pub(super) speed: f32,
     pub(super) move_factor: f32,
     pub(super) held: HeldKeys,
-    pub(super) look_from: Option<Point>,
+    pub(super) input_captured: bool,
     pub(super) last_frame: Option<std::time::Instant>,
     /// Visual time is independent of movement and its bounded physics steps.
     pub(super) animation_started_at: Option<std::time::Instant>,
@@ -339,6 +342,19 @@ mod walk;
 mod water;
 
 impl FlyCamera {
+    fn release_input(&mut self) {
+        if self.held.duck {
+            self.duck_reconcile_requested = true;
+        }
+        self.input_captured = false;
+        self.held = HeldKeys::default();
+        self.jump_requested = false;
+        self.move_factor = 0.0;
+        self.walk_velocity[0] = 0.0;
+        self.walk_velocity[1] = 0.0;
+        self.last_frame = None;
+    }
+
     pub(super) fn ensure_spawn(
         &mut self,
         scene: &MapPreview,
@@ -351,7 +367,7 @@ impl FlyCamera {
             return false;
         }
         self.content_id = Some(content_id);
-        self.look_from = None;
+        self.input_captured = false;
         self.held = HeldKeys::default();
         self.last_frame = None;
         self.animation_started_at = None;
@@ -606,6 +622,10 @@ impl shader::Program<Message> for FlyViewer {
             self.pose,
             self.movement_mode,
         );
+        if camera.input_captured && !self.mouse_captured {
+            camera.release_input();
+        }
+        camera.input_captured = self.mouse_captured;
         let mode_request_seen = self.requested_movement_mode.is_some();
         let mode_request_changed = self.requested_movement_mode.is_some_and(|mode| {
             let changed = camera.select_mode(&self.scene, mode);
@@ -616,26 +636,41 @@ impl shader::Program<Message> for FlyViewer {
         });
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let position = cursor.position_over(bounds)?;
-                camera.look_from = Some(position);
+                if !self.mouse_captured {
+                    cursor.position_over(bounds)?;
+                    return Some(
+                        Action::publish(Message::MouseCaptureRequested(true)).and_capture(),
+                    );
+                }
                 Some(Action::capture())
             }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let from = camera.look_from?;
-                let to = cursor.position()?;
-                camera.yaw += (to.x - from.x) * FLY_LOOK_SENSITIVITY;
-                camera.pitch = (camera.pitch - (to.y - from.y) * FLY_LOOK_SENSITIVITY)
+            Event::Mouse(mouse::Event::Motion { delta }) if self.mouse_captured => {
+                if !delta.0.is_finite() || !delta.1.is_finite() {
+                    return None;
+                }
+                camera.yaw += delta.0 as f32 * FLY_LOOK_SENSITIVITY;
+                camera.pitch = (camera.pitch - delta.1 as f32 * FLY_LOOK_SENSITIVITY)
                     .clamp(MIN_PITCH, MAX_PITCH);
-                camera.look_from = Some(to);
                 camera
                     .camera_update_message()
                     .map(|message| Action::publish(message).and_capture())
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                camera.look_from.take().map(|_| Action::capture())
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                ..
+            }) if self.mouse_captured => {
+                camera.release_input();
+                Some(Action::publish(Message::MouseCaptureRequested(false)).and_capture())
+            }
+            Event::Window(iced::window::Event::Unfocused) => {
+                camera.release_input();
+                self.mouse_captured
+                    .then(|| Action::publish(Message::MouseCaptureRequested(false)))
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                cursor.position_over(bounds)?;
+                if !self.mouse_captured {
+                    cursor.position_over(bounds)?;
+                }
                 let steps = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
@@ -645,7 +680,9 @@ impl shader::Program<Message> for FlyViewer {
                     .speed_update_message()
                     .map(|message| Action::publish(message).and_capture())
             }
-            Event::Keyboard(iced::keyboard::Event::KeyPressed { physical_key, .. }) => {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed { physical_key, .. })
+                if self.mouse_captured =>
+            {
                 let iced::keyboard::key::Physical::Code(code) = physical_key else {
                     return None;
                 };
@@ -684,7 +721,9 @@ impl shader::Program<Message> for FlyViewer {
                 }
                 Some(Action::request_redraw().and_capture())
             }
-            Event::Keyboard(iced::keyboard::Event::KeyReleased { physical_key, .. }) => {
+            Event::Keyboard(iced::keyboard::Event::KeyReleased { physical_key, .. })
+                if self.mouse_captured =>
+            {
                 let iced::keyboard::key::Physical::Code(code) = physical_key else {
                     return None;
                 };
@@ -754,7 +793,23 @@ impl shader::Program<Message> for FlyViewer {
         _cursor: mouse::Cursor,
         bounds: Rectangle,
     ) -> ModelPrimitive {
+        let uniforms = Uniforms::for_fly(
+            &self.scene,
+            camera,
+            bounds,
+            self.fog.filter(|_| self.fog_enabled),
+            camera.water_time,
+        );
         ModelPrimitive {
+            air_fog: self.fog.filter(|_| self.fog_enabled),
+            clear_color: self
+                .scene
+                .immersion_material(Vec3::from([
+                    uniforms.camera_position[0],
+                    uniforms.camera_position[1],
+                    uniforms.camera_position[2],
+                ]))
+                .map(|water| water.fog_clear_linear),
             #[cfg(feature = "map-capture")]
             reflection_target: false,
             #[cfg(feature = "map-capture")]
@@ -770,15 +825,8 @@ impl shader::Program<Message> for FlyViewer {
             map_skybox_visible: self.map_skybox_visible,
             visibility_culling: self.visibility_culling,
             phy_debug_visible: self.phy_debug_visible,
-            uniforms: Uniforms::for_fly(
-                &self.scene,
-                camera,
-                bounds,
-                self.fog.filter(|_| self.fog_enabled),
-                camera.water_time,
-                camera.submerged(),
-            ),
-            submerged: camera.submerged(),
+            uniforms,
+            submerged: uniforms.medium_plane[2] != 0.0,
             map_skybox_uniforms: self.sky_camera.map(|sky_camera| {
                 Uniforms::for_fly_skybox_composite(
                     &self.scene,
@@ -806,12 +854,12 @@ impl shader::Program<Message> for FlyViewer {
 
     fn mouse_interaction(
         &self,
-        camera: &FlyCamera,
+        _camera: &FlyCamera,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if camera.look_from.is_some() {
-            mouse::Interaction::Grabbing
+        if self.mouse_captured {
+            mouse::Interaction::Hidden
         } else if cursor.position_over(bounds).is_some() {
             mouse::Interaction::Crosshair
         } else {
@@ -825,6 +873,162 @@ mod tests {
     use super::super::test_support::{empty_preview, floor_scene};
     use super::*;
     use shader::Program as _;
+
+    fn input_viewer(captured: bool) -> FlyViewer {
+        FlyViewer {
+            scene: Arc::new(empty_preview(Vec3::ZERO, Vec3::splat(1024.0))),
+            content_id: 1,
+            fog: None,
+            fog_enabled: true,
+            sky_camera: None,
+            map_skybox_visible: true,
+            visibility_culling: true,
+            phy_debug_visible: false,
+            spawn: None,
+            pose: None,
+            movement_mode: Some(MovementMode::Fly),
+            requested_movement_mode: None,
+            mouse_captured: captured,
+        }
+    }
+
+    fn key_press(key: iced::keyboard::Key, code: iced::keyboard::key::Code) -> Event {
+        Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: iced::keyboard::key::Physical::Code(code),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::default(),
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn map_mouse_capture_requires_a_viewport_click_and_survives_button_release() {
+        let mut viewer = input_viewer(false);
+        let mut camera = FlyCamera::default();
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(640.0, 480.0));
+        let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        assert!(
+            viewer
+                .update(&mut camera, &press, bounds, mouse::Cursor::Unavailable)
+                .is_none()
+        );
+        let action = viewer
+            .update(
+                &mut camera,
+                &press,
+                bounds,
+                mouse::Cursor::Available(Point::new(100.0, 100.0)),
+            )
+            .unwrap();
+        let (message, _, status) = action.into_inner();
+        assert_eq!(message, Some(Message::MouseCaptureRequested(true)));
+        assert_eq!(status, iced::event::Status::Captured);
+        viewer.mouse_captured = true;
+        let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        assert!(
+            viewer
+                .update(&mut camera, &release, bounds, mouse::Cursor::Unavailable)
+                .is_none()
+        );
+        assert!(camera.input_captured);
+    }
+
+    #[test]
+    fn captured_mouse_looks_without_a_cursor_and_ignores_absolute_motion() {
+        let mut viewer = input_viewer(false);
+        let mut camera = FlyCamera::default();
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(640.0, 480.0));
+        let motion = Event::Mouse(mouse::Event::Motion {
+            delta: (800.0, -20.0),
+        });
+        assert!(
+            viewer
+                .update(&mut camera, &motion, bounds, mouse::Cursor::Unavailable)
+                .is_none()
+        );
+        let initial = camera.pose().unwrap();
+        viewer.mouse_captured = true;
+        for _ in 0..3 {
+            let action = viewer
+                .update(&mut camera, &motion, bounds, mouse::Cursor::Unavailable)
+                .unwrap();
+            assert!(matches!(
+                action.into_inner().0,
+                Some(Message::FlyCameraChanged { .. })
+            ));
+        }
+        assert!((camera.yaw - initial.yaw - 2400.0 * FLY_LOOK_SENSITIVITY).abs() < 1e-5);
+        assert!((camera.pitch - initial.pitch - 60.0 * FLY_LOOK_SENSITIVITY).abs() < 1e-5);
+        let pose = camera.pose();
+        let absolute = Event::Mouse(mouse::Event::CursorMoved {
+            position: Point::new(639.0, 479.0),
+        });
+        assert!(
+            viewer
+                .update(&mut camera, &absolute, bounds, mouse::Cursor::Unavailable)
+                .is_none()
+        );
+        assert_eq!(camera.pose(), pose);
+        let huge = Event::Mouse(mouse::Event::Motion {
+            delta: (0.0, -100_000.0),
+        });
+        viewer.update(&mut camera, &huge, bounds, mouse::Cursor::Unavailable);
+        assert_eq!(camera.pitch, MAX_PITCH);
+    }
+
+    #[test]
+    fn map_input_stops_on_escape_focus_loss_and_external_release() {
+        use iced::keyboard::{
+            Key,
+            key::{Code, Named},
+        };
+        let mut viewer = input_viewer(false);
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(640.0, 480.0));
+        let forward = key_press(Key::Character("w".into()), Code::KeyW);
+        let mut camera = FlyCamera::default();
+        assert!(
+            viewer
+                .update(&mut camera, &forward, bounds, mouse::Cursor::Unavailable)
+                .is_none()
+        );
+        assert!(!camera.held.forward);
+
+        for release in [
+            key_press(Key::Named(Named::Escape), Code::Escape),
+            Event::Window(iced::window::Event::Unfocused),
+        ] {
+            viewer.mouse_captured = true;
+            assert!(
+                viewer
+                    .update(&mut camera, &forward, bounds, mouse::Cursor::Unavailable)
+                    .is_some()
+            );
+            assert!(camera.held.forward);
+            camera.held.duck = true;
+            camera.jump_requested = true;
+            camera.walk_velocity = Vec3::new(120.0, 50.0, -10.0);
+            let action = viewer
+                .update(&mut camera, &release, bounds, mouse::Cursor::Unavailable)
+                .unwrap();
+            assert_eq!(
+                action.into_inner().0,
+                Some(Message::MouseCaptureRequested(false))
+            );
+            assert!(!camera.held.any_movement());
+            assert!(!camera.held.duck);
+            assert!(!camera.jump_requested);
+            assert!(camera.duck_reconcile_requested);
+            assert_eq!(camera.walk_velocity, Vec3::new(0.0, 0.0, -10.0));
+        }
+        viewer.update(&mut camera, &forward, bounds, mouse::Cursor::Unavailable);
+        assert!(camera.held.forward);
+        viewer.mouse_captured = false;
+        viewer.update(&mut camera, &forward, bounds, mouse::Cursor::Unavailable);
+        assert!(!camera.held.forward);
+    }
 
     fn animated_water_viewer() -> FlyViewer {
         use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
@@ -865,6 +1069,7 @@ mod tests {
             pose: None,
             movement_mode: Some(MovementMode::Fly),
             requested_movement_mode: None,
+            mouse_captured: false,
         }
     }
 
