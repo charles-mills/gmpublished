@@ -117,6 +117,9 @@ pub struct SceneView {
     pub skybox_visibility: UploadedVisibility,
     pub plans: Option<DrawPlans>,
     pub targets: Option<RenderTargets>,
+    pub planar_exclusion_generation: Option<u64>,
+    pub transparency: Vec<super::transparency::Draw>,
+    pub skybox_transparency: Vec<super::transparency::Draw>,
 }
 impl SceneView {
     pub fn new(device: &wgpu::Device, resources: &RenderResources) -> Self {
@@ -128,6 +131,9 @@ impl SceneView {
             skybox_visibility: UploadedVisibility::default(),
             plans: None,
             targets: None,
+            planar_exclusion_generation: None,
+            transparency: Vec::new(),
+            skybox_transparency: Vec::new(),
         }
     }
 }
@@ -191,6 +197,22 @@ impl Reflector {
     }
 }
 
+pub fn optical_passes(shader: &crate::bridge::materials::MaterialShader) -> (bool, bool) {
+    shader.water().map_or_else(
+        || {
+            shader.mirror().map_or((false, false), |mirror| {
+                (mirror.reflect_enabled, mirror.refract_enabled)
+            })
+        },
+        |water| {
+            (
+                water.above_water && water.reflect_enabled && !water.force_cheap,
+                water.above_water && water.refract_enabled && !water.force_cheap,
+            )
+        },
+    )
+}
+
 pub fn collect_reflectors(upload: &UploadedModel, scene: &super::RenderScene) -> Vec<Reflector> {
     let mut surfaces: Vec<Reflector> = Vec::new();
     for (mesh_index, mesh) in upload.meshes.iter().enumerate() {
@@ -204,14 +226,7 @@ pub fn collect_reflectors(upload: &UploadedModel, scene: &super::RenderScene) ->
         else {
             continue;
         };
-        if !shader.is_planar()
-            || shader.water().is_some_and(|water| {
-                !water.reflect_enabled || !water.above_water || water.force_cheap
-            })
-            || shader
-                .mirror()
-                .is_some_and(|mirror| !mirror.reflect_enabled)
-        {
+        if optical_passes(shader) == (false, false) {
             continue;
         }
         let Some(source) = scene.meshes.get(mesh.scene_mesh_index) else {
@@ -270,16 +285,19 @@ fn planar_groups(mesh: &super::MeshData) -> Vec<PlanarGroup> {
 }
 
 #[derive(Debug)]
-pub struct ReflectionView {
+pub struct PlanarView {
     pub surface_index: usize,
     pub surface_indices: Vec<u32>,
     pub surface_buffer: super::visibility::UploadedVisibleIndices,
     pub view: SceneView,
+    pub reflect_enabled: bool,
+    pub refraction: Option<SceneView>,
+    pub refraction_clear: wgpu::Color,
     pub water_bind_group: Option<wgpu::BindGroup>,
     pub surface_uniforms: ViewUniforms,
 }
 
-impl ReflectionView {
+impl PlanarView {
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -291,6 +309,9 @@ impl ReflectionView {
     ) {
         let surface = &upload.reflectors[self.surface_index];
         let mut main = surface.plane.reflect_uniforms(primitive.uniforms, true);
+        let water = primitive.preview.render_scene().materials[surface.material_slot]
+            .shader
+            .water();
         main.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
         self.view.world.write(queue, &main);
         if let Some(sky) = primitive.sky_uniforms {
@@ -377,15 +398,8 @@ impl ReflectionView {
             }
         }
         self.view.plans = Some(plans);
-        RenderTargets::ensure(
-            &mut self.view.targets,
-            device,
-            resources,
-            size.0,
-            size.1,
-            false,
-            &self.view.world.buffer,
-        );
+        super::transparency::prepare(&mut self.view, upload, main, skybox, water.map(|_| false));
+        RenderTargets::ensure(&mut self.view.targets, device, resources, size);
     }
 }
 
@@ -393,6 +407,37 @@ impl ReflectionView {
 mod tests {
     use super::{Plane, Vec3, planar_groups};
     use crate::media::preview_model::{MeshData, ModelVertex};
+
+    #[test]
+    fn refraction_only_and_cheap_water_select_the_correct_passes() {
+        use crate::bridge::gma::PreviewArchive;
+        use crate::bridge::materials::MaterialResolver;
+        use crate::test_support::GmaFixtureBuilder;
+        for (parameters, expected) in [
+            (
+                r#""$reflecttexture" "" "$refracttexture" "_rt_WaterRefraction""#,
+                (false, true),
+            ),
+            (
+                r#""$reflecttexture" "_rt_WaterReflection" "$refracttexture" "_rt_WaterRefraction" "$forcecheap" "1""#,
+                (false, false),
+            ),
+        ] {
+            let archive = PreviewArchive::from_gma(
+                GmaFixtureBuilder::new("Optical passes")
+                    .entry(
+                        "materials/water.vmt",
+                        format!("Water {{ {parameters} }}").into_bytes(),
+                    )
+                    .build(),
+            )
+            .unwrap();
+            let material = MaterialResolver::new(std::sync::Arc::new(archive), None)
+                .resolve_primary(&[], "water")
+                .unwrap();
+            assert_eq!(super::optical_passes(&material.shader), expected);
+        }
+    }
 
     #[test]
     fn oblique_reflection_is_an_involution_and_fixes_its_plane() {

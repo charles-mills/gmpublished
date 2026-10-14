@@ -97,6 +97,8 @@ impl shader::Program<Message> for Viewer3d {
             #[cfg(feature = "map-capture")]
             reflection_target: false,
             #[cfg(feature = "map-capture")]
+            refraction_target: false,
+            #[cfg(feature = "map-capture")]
             capture_diagnostics: None,
             prepared_frame: std::sync::atomic::AtomicUsize::new(usize::MAX),
             skybox_transform: None,
@@ -755,6 +757,8 @@ impl shader::Program<Message> for FlyViewer {
         ModelPrimitive {
             #[cfg(feature = "map-capture")]
             reflection_target: false,
+            #[cfg(feature = "map-capture")]
+            refraction_target: false,
             #[cfg(feature = "map-capture")]
             capture_diagnostics: None,
             prepared_frame: std::sync::atomic::AtomicUsize::new(usize::MAX),

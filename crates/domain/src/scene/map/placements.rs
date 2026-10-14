@@ -17,6 +17,10 @@ const DETAIL_PROP_TYPE_SPRITE: u8 = 1;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapDetailSprite {
     pub origin: Vec3,
+    pub angles: Vec3,
+    pub orientation: u8,
+    /// Source partitions water detail rendering by the authored BSP leaf.
+    pub underwater_leaf: bool,
     pub upper_left: [f32; 2],
     pub lower_right: [f32; 2],
     pub tex_upper_left: [f32; 2],
@@ -237,6 +241,15 @@ pub(super) fn parse_entity_prop_model_scale(value: &str, classname: &str) -> f32
     scale
 }
 
+fn detail_sprite_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        log::warn!("invalid detail sprite scale {scale}; using one");
+        1.0
+    }
+}
+
 pub(super) fn partitioned_detail_sprite_placements(
     bsp: &MapBsp,
     partition: &SkyboxPartition,
@@ -250,6 +263,10 @@ pub(super) fn partitioned_detail_sprite_placements(
         if prop.prop_type != DETAIL_PROP_TYPE_SPRITE {
             continue;
         }
+        if prop.orientation > 2 {
+            log::warn!("unsupported detail sprite orientation {}", prop.orientation);
+            continue;
+        }
         let Some(sprite) = sprites.get(usize::from(prop.model_index)) else {
             log::debug!(
                 "bsp detail sprite placement skipped: sprite dict index {} missing",
@@ -259,8 +276,18 @@ pub(super) fn partitioned_detail_sprite_placements(
         };
         let placement = MapDetailSprite {
             origin: Vec3::from(prop.origin),
-            upper_left: sprite.upper_left,
-            lower_right: sprite.lower_right,
+            angles: Vec3::from(prop.angles),
+            orientation: prop.orientation,
+            underwater_leaf: bsp
+                .leaves
+                .get(usize::from(prop.leaf))
+                .is_some_and(|leaf| leaf.leaf_water_data >= 0),
+            upper_left: sprite
+                .upper_left
+                .map(|value| value * detail_sprite_scale(prop.scale)),
+            lower_right: sprite
+                .lower_right
+                .map(|value| value * detail_sprite_scale(prop.scale)),
             tex_upper_left: sprite.tex_upper_left,
             tex_lower_right: sprite.tex_lower_right,
             visibility: point_visibility_bucket(bsp, Vec3::from(prop.origin), cluster_count),

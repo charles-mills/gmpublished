@@ -363,7 +363,7 @@ impl MaterialResolver {
             force_cheap: vmt_bool(get("$forcecheap")),
             reflect_entities: vmt_bool(get("$reflectentities")),
             reflect_3d_skybox: get("$reflect3dskybox").is_none_or(|v| vmt_bool(Some(v))),
-            refract_enabled: get("$refracttexture").is_some(),
+            refract_enabled: get("$refracttexture").is_some_and(|value| !value.is_empty()),
             reflect_amount: scalar(get("$reflectamount"), 0.8).max(0.0),
             refract_amount: scalar(get("$refractamount"), 0.0).max(0.0),
             reflect_tint_linear: tint(get("$reflecttint"), [1.0; 3]),

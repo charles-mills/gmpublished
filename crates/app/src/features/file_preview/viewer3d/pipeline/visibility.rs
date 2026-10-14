@@ -1,6 +1,6 @@
 use super::MapPreview;
-use super::upload::{UploadedDetailSprites, UploadedModel};
-use super::{DETAIL_VERTEX_FLOAT_COUNT, WorldVisibilityPlan, wgpu};
+use super::upload::UploadedModel;
+use super::{WorldVisibilityPlan, wgpu};
 use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 
@@ -10,18 +10,11 @@ pub struct UploadedVisibleIndices {
     pub index_count: u32,
 }
 
-#[derive(Debug)]
-pub struct UploadedVisibleVertices {
-    pub buffer: Option<wgpu::Buffer>,
-    pub vertex_count: u32,
-}
-
 #[derive(Debug, Default)]
 pub struct UploadedVisibility {
     pub tracker: VisibilityClusterTracker,
     pub plan: Option<WorldVisibilityPlan>,
     pub mesh_indices: HashMap<usize, UploadedVisibleIndices>,
-    pub detail_vertices: Option<UploadedVisibleVertices>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -98,47 +91,6 @@ pub fn upload_visible_indices(
     }
 }
 
-pub fn upload_visible_detail_sprites(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    sprites: &UploadedDetailSprites,
-    plan: &WorldVisibilityPlan,
-) -> UploadedVisibleVertices {
-    let sprite_bytes = sprites.all_vertices.len() / sprites.sprite_count.max(1);
-    let mut bytes = Vec::with_capacity(sprites.all_vertices.len());
-    for (sprite_index, visible) in plan.detail_sprite_visible.iter().copied().enumerate() {
-        if !visible {
-            continue;
-        }
-        let start = sprite_index.saturating_mul(sprite_bytes);
-        let end = start.saturating_add(sprite_bytes);
-        if let Some(slice) = sprites.all_vertices.get(start..end) {
-            bytes.extend_from_slice(slice);
-        }
-    }
-    let vertex_count = u32::try_from(
-        bytes.len() / (DETAIL_VERTEX_FLOAT_COUNT as usize * std::mem::size_of::<f32>()),
-    )
-    .unwrap_or(u32::MAX);
-    if bytes.is_empty() {
-        return UploadedVisibleVertices {
-            buffer: None,
-            vertex_count,
-        };
-    }
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("file_preview.model_viewer.visible_detail_vertices"),
-        size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, &bytes);
-    UploadedVisibleVertices {
-        buffer: Some(buffer),
-        vertex_count,
-    }
-}
-
 impl UploadedVisibility {
     pub fn ensure_world_visibility(
         &mut self,
@@ -205,10 +157,6 @@ impl UploadedVisibility {
                     .insert(index, upload_visible_indices(device, queue, visible));
             }
         }
-        self.detail_vertices = upload.detail_sprites.as_ref().and_then(|sprites| {
-            plan.as_ref()
-                .map(|plan| upload_visible_detail_sprites(device, queue, sprites, plan))
-        });
         self.plan = plan;
     }
 }

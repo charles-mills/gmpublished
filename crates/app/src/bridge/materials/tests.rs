@@ -2080,3 +2080,23 @@ fn reflective_glass_defaults_and_unsupported_variants_are_explicit() {
             .any(|feature| feature.contains("sine"))
     );
 }
+
+#[test]
+fn empty_water_refraction_texture_disables_that_optical_input() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Reflect-only water")
+            .entry(
+                "materials/water.vmt",
+                br#"Water { "$reflecttexture" "_rt_WaterReflection" "$refracttexture" "" }"#
+                    .to_vec(),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolved = MaterialResolver::new(Arc::new(archive), None)
+        .resolve_primary(&[], "water")
+        .unwrap();
+    let water = resolved.shader.water().unwrap();
+    assert!(water.reflect_enabled);
+    assert!(!water.refract_enabled);
+}

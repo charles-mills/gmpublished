@@ -10,6 +10,8 @@ struct Uniforms {
     water_time_sky_tint: vec4<f32>,
     water_depth_params: vec4<f32>,
     clip_plane: vec4<f32>,
+    medium_plane: vec4<f32>,
+    viewport: vec4<f32>,
     // xy: near and far clip distances.
 }
 

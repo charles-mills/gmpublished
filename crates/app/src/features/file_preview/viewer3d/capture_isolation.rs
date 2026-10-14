@@ -58,7 +58,7 @@ pub(super) fn verify(
 ) -> Value {
     let cameras = cameras
         .iter()
-        .filter(|shot| !shot.reflection_target && !shot.live_animation)
+        .filter(|shot| !shot.reflection_target && !shot.refraction_target && !shot.live_animation)
         .take(2)
         .collect::<Vec<_>>();
     assert_eq!(cameras.len(), 2, "isolation gate needs two fixed cameras");

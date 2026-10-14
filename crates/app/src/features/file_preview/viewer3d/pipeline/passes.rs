@@ -1,6 +1,7 @@
 //! Explicit view-local pass ordering: reflected scene views, main opaque
-//! snapshot, planar surfaces, remaining transparency, then UI composition.
-use super::draw::{self, DrawView};
+//! and clipped refracted scenes, main opaque scene, depth-writing planar
+//! surfaces, depth-tested transparency, then UI composition.
+use super::draw::{self, DrawView, ViewKind};
 use super::reflections::SceneView;
 use super::targets::RenderTargets;
 use super::{ModelPrimitive, PreparedFrame, Rectangle, RenderResources, UploadedModel, wgpu};
@@ -59,7 +60,7 @@ fn render_opaque(
     resources: &RenderResources,
     upload: &UploadedModel,
     encoder: &mut wgpu::CommandEncoder,
-    reflected: bool,
+    kind: ViewKind,
     clear: wgpu::Color,
     sky: bool,
 ) {
@@ -87,9 +88,10 @@ fn render_opaque(
             DrawView {
                 uniforms: &view.skybox.bind_group,
                 visibility: &view.skybox_visibility,
-                reflected,
+                kind,
+                skybox: true,
+                transparency: &view.skybox_transparency,
             },
-            upload.map_skybox_detail_sprites.as_ref(),
         );
     }
     let mut pass = pass(
@@ -116,9 +118,45 @@ fn render_opaque(
         DrawView {
             uniforms: &view.world.bind_group,
             visibility: &view.visibility,
-            reflected,
+            kind,
+            skybox: false,
+            transparency: &view.transparency,
         },
-        upload.detail_sprites.as_ref(),
+    );
+}
+
+fn render_scene(
+    view: &SceneView,
+    resources: &RenderResources,
+    upload: &UploadedModel,
+    encoder: &mut wgpu::CommandEncoder,
+    kind: ViewKind,
+    clear: wgpu::Color,
+    sky: bool,
+) {
+    render_opaque(view, resources, upload, encoder, kind, clear, sky);
+    let targets = view.targets.as_ref().expect("prepared optical targets");
+    let mut pass = pass(
+        encoder,
+        targets,
+        "file_preview.optical.transparent",
+        wgpu::LoadOp::Load,
+        Some(depth_load()),
+        true,
+    );
+    draw::configure_scene_pass(&mut pass, &local_bounds(targets));
+    draw::draw_scene_plan_transparent(
+        &mut pass,
+        resources,
+        upload,
+        &view.plans.as_ref().unwrap().world,
+        DrawView {
+            uniforms: &view.world.bind_group,
+            visibility: &view.visibility,
+            kind,
+            skybox: false,
+            transparency: &view.transparency,
+        },
     );
 }
 
@@ -131,39 +169,34 @@ pub fn render_frame(
     target: &wgpu::TextureView,
     clip_bounds: &Rectangle<u32>,
 ) {
-    for reflection in &frame.reflections {
-        render_opaque(
-            &reflection.view,
-            resources,
-            upload,
-            encoder,
-            true,
-            wgpu::Color::BLACK,
-            true,
-        );
-        let view = &reflection.view;
-        let targets = view.targets.as_ref().unwrap();
-        let mut pass = pass(
-            encoder,
-            targets,
-            "file_preview.reflection.transparent",
-            wgpu::LoadOp::Load,
-            Some(depth_load()),
-            true,
-        );
-        draw::configure_scene_pass(&mut pass, &local_bounds(targets));
-        draw::draw_scene_plan_transparent(
-            &mut pass,
-            resources,
-            upload,
-            &view.plans.as_ref().unwrap().world,
-            DrawView {
-                uniforms: &view.world.bind_group,
-                visibility: &view.visibility,
-                reflected: true,
-            },
-            None,
-        );
+    for surface_view in &frame.planar_views {
+        if surface_view.reflect_enabled {
+            render_scene(
+                &surface_view.view,
+                resources,
+                upload,
+                encoder,
+                ViewKind::Reflection,
+                wgpu::Color::BLACK,
+                true,
+            );
+        }
+        if let Some(view) = surface_view.refraction.as_ref() {
+            let material = upload.reflectors[surface_view.surface_index].material_slot;
+            let sky = primitive.preview.render_scene().materials[material]
+                .shader
+                .water()
+                .is_none();
+            render_scene(
+                view,
+                resources,
+                upload,
+                encoder,
+                ViewKind::Refraction,
+                surface_view.refraction_clear,
+                sky,
+            );
+        }
     }
     let clear = if primitive.submerged {
         wgpu::Color {
@@ -180,7 +213,7 @@ pub fn render_frame(
         resources,
         upload,
         encoder,
-        false,
+        ViewKind::Main,
         clear,
         !primitive.submerged,
     );
@@ -188,44 +221,19 @@ pub fn render_frame(
     let targets = view.targets.as_ref().unwrap();
     let plans = view.plans.as_ref().unwrap();
     assert_eq!(plans.content_id, primitive.content_id);
-    if let Some(refraction) = targets.refraction.as_ref() {
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &targets.resolve_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &refraction.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: targets.size.0,
-                height: targets.size.1,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
     {
         let mut pass = pass(
             encoder,
             targets,
             "file_preview.main.surfaces_transparent",
             wgpu::LoadOp::Load,
-            if targets.refraction.is_some() {
-                None
-            } else {
-                Some(depth_load())
-            },
+            Some(depth_load()),
             true,
         );
         draw::configure_scene_pass(&mut pass, &local_bounds(targets));
         let mut remaining = plans.world.clone();
         if let Some(pipeline) = resources.refractive_water_pipeline.as_ref() {
-            for reflection in &frame.reflections {
+            for reflection in &frame.planar_views {
                 let surface = &upload.reflectors[reflection.surface_index];
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(
@@ -262,12 +270,10 @@ pub fn render_frame(
             DrawView {
                 uniforms: &view.world.bind_group,
                 visibility: &view.visibility,
-                reflected: false,
+                kind: ViewKind::Main,
+                skybox: false,
+                transparency: &view.transparency,
             },
-            targets
-                .refraction
-                .as_ref()
-                .map(|refraction| &refraction.bind_group),
         );
     }
     if primitive.phy_debug_visible {
@@ -284,11 +290,19 @@ pub fn render_frame(
         draw::draw_phy_debug_meshes(&mut pass, resources, upload);
     }
     #[cfg(feature = "map-capture")]
-    let targets = if primitive.reflection_target {
+    let targets = if primitive.refraction_target {
         frame
-            .reflections
-            .first()
-            .and_then(|view| view.view.targets.as_ref())
+            .planar_views
+            .iter()
+            .find_map(|surface| surface.refraction.as_ref())
+            .and_then(|view| view.targets.as_ref())
+            .expect("refraction diagnostic requires a visible refractive surface")
+    } else if primitive.reflection_target {
+        frame
+            .planar_views
+            .iter()
+            .find(|surface| surface.reflect_enabled)
+            .and_then(|surface| surface.view.targets.as_ref())
             .expect("reflection diagnostic requires a visible reflector")
     } else {
         targets

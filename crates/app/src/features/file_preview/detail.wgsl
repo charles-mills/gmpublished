@@ -11,6 +11,8 @@ struct Uniforms {
     // xy: near and far clip distances.
     water_depth_params: vec4<f32>,
     clip_plane: vec4<f32>,
+    medium_plane: vec4<f32>,
+    viewport: vec4<f32>,
 }
 
 struct Material {
@@ -30,6 +32,9 @@ struct VertexInput {
     @location(0) center: vec3<f32>,
     @location(1) corner: vec2<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) orientation:f32,
+    @location(4) axis_right:vec3<f32>,
+    @location(5) axis_up:vec3<f32>,
 }
 
 struct VertexOutput {
@@ -45,9 +50,19 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     if dot(to_camera_xy, to_camera_xy) > 0.0001 {
         facing = normalize(to_camera_xy);
     }
-    let right = vec3<f32>(-facing.y, facing.x, 0.0);
-    let world_position =
-        input.center + right * input.corner.x + vec3<f32>(0.0, 0.0, input.corner.y);
+    var right = vec3<f32>(-facing.y, facing.x, 0.0);
+    var up=vec3<f32>(0.0,0.0,1.0);
+    if input.orientation<0.5 {
+        right=input.axis_right;up=input.axis_up;
+    } else if input.orientation<1.5 {
+        // Source computes angles from each sprite to the current eye, rather
+        // than using one camera-wide basis for every screen-aligned sprite.
+        let to_camera = uniforms.camera_position.xyz - input.center;
+        if dot(to_camera, to_camera) > 0.0001 {
+            up = normalize(cross(normalize(to_camera), right));
+        }
+    }
+    let world_position = input.center+right*input.corner.x+up*input.corner.y;
 
     var out: VertexOutput;
     out.clip_position = uniforms.view_proj * vec4<f32>(world_position, 1.0);
@@ -83,14 +98,26 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var lit = albedo.rgb;
-    if uniforms.fog_params.w > 0.5 && uniforms.fog_params.y > uniforms.fog_params.x {
-        let fog_factor = clamp(
-            (sprite_distance - uniforms.fog_params.x) / (uniforms.fog_params.y - uniforms.fog_params.x),
-            0.0,
-            uniforms.fog_params.z,
-        );
-        lit = mix(lit, uniforms.fog_color.rgb, fog_factor);
-    }
+    lit = mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position,1.0/input.clip_position.w));
     if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
     return vec4<f32>(lit, albedo.a);
+}
+
+// Source height fog stores axial distance through the medium, rather than
+// radial distance from the camera. The clipping bias is deliberately separate.
+fn view_fog_factor(position:vec3<f32>, projected_depth:f32) -> f32 {
+    if uniforms.fog_params.y <= uniforms.fog_params.x { return 0.0; }
+    if uniforms.fog_params.w > 1.5 {
+        let point_distance=dot(vec4<f32>(position,1.0),uniforms.medium_plane);
+        let eye_distance=dot(vec4<f32>(uniforms.camera_position.xyz,1.0),uniforms.medium_plane);
+        let fraction=clamp(-point_distance/max(eye_distance-point_distance,0.00001),0.0,1.0);
+        return clamp(fraction*projected_depth/(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
+    }
+    if uniforms.fog_params.w < 0.5 { return 0.0; }
+    return clamp((distance(position,uniforms.camera_position.xyz)-uniforms.fog_params.x)
+        /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
+}
+
+fn view_fog_color_factor(position:vec3<f32>,projected_depth:f32) -> f32 {
+    return view_fog_factor(position,projected_depth)*select(1.0,uniforms.fog_color.a,uniforms.fog_params.w>1.5);
 }

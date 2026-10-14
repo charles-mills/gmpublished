@@ -228,6 +228,7 @@ impl UploadCache {
         );
         if let Some(upload) = self.uploads.get_mut(&content_id) {
             upload.reflectors = super::reflections::collect_reflectors(upload, scene);
+            super::transparency::build_parts(upload, scene, map);
         }
     }
 }
@@ -315,6 +316,7 @@ pub struct UploadedSkybox {
 #[derive(Debug)]
 pub struct UploadedMesh {
     pub entity: bool,
+    pub transparent_parts: Vec<super::transparency::Part>,
     pub vertices: wgpu::Buffer,
     pub indices: wgpu::Buffer,
     pub index_count: u32,
@@ -336,10 +338,9 @@ pub struct UploadedMesh {
 #[derive(Debug)]
 pub struct UploadedDetailSprites {
     pub vertices: wgpu::Buffer,
-    pub vertex_count: u32,
     pub all_vertices: Vec<u8>,
-    pub sprite_count: usize,
     pub material_index: usize,
+    pub underwater_leaves: Vec<bool>,
 }
 
 #[derive(Debug)]
@@ -360,7 +361,7 @@ pub fn upload_detail_sprites(
     let mut vertex_bytes = Vec::with_capacity(
         sprites.len()
             * 6
-            * usize::try_from(DETAIL_VERTEX_FLOAT_COUNT).unwrap_or(7)
+            * usize::try_from(DETAIL_VERTEX_FLOAT_COUNT).unwrap_or(14)
             * std::mem::size_of::<f32>(),
     );
     for sprite in sprites {
@@ -376,10 +377,12 @@ pub fn upload_detail_sprites(
 
     Some(UploadedDetailSprites {
         vertices,
-        vertex_count: u32::try_from(sprites.len().saturating_mul(6)).unwrap_or(u32::MAX),
         all_vertices: vertex_bytes,
-        sprite_count: sprites.len(),
         material_index: first.material_index,
+        underwater_leaves: sprites
+            .iter()
+            .map(|sprite| sprite.underwater_leaf)
+            .collect(),
     })
 }
 
@@ -415,6 +418,7 @@ pub fn upload_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             UploadedMesh {
+                transparent_parts: Vec::new(),
                 entity: entity_flags
                     .and_then(|flags| flags.get(scene_mesh_index))
                     .copied()
@@ -472,6 +476,7 @@ pub fn upload_door_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             uploaded.push(UploadedMesh {
+                transparent_parts: Vec::new(),
                 entity: true,
                 vertices,
                 indices,
@@ -512,6 +517,19 @@ pub fn push_detail_sprite_vertices(bytes: &mut Vec<u8>, sprite: &DetailSprite) {
         push_f32s(bytes, sprite.origin.as_array());
         push_f32s(bytes, &corner);
         push_f32s(bytes, &uv);
+        push_f32s(bytes, &[f32::from(sprite.orientation)]);
+        push_f32s(
+            bytes,
+            Vec3::new(0.0, -1.0, 0.0)
+                .rotate_source(sprite.angles)
+                .as_array(),
+        );
+        push_f32s(
+            bytes,
+            Vec3::new(0.0, 0.0, 1.0)
+                .rotate_source(sprite.angles)
+                .as_array(),
+        );
     }
 }
 

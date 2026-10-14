@@ -120,6 +120,9 @@ pub(super) fn map_detail_sprite_to_preview(
 ) -> DetailSprite {
     DetailSprite {
         origin: sprite.origin,
+        angles: sprite.angles,
+        orientation: sprite.orientation,
+        underwater_leaf: sprite.underwater_leaf,
         upper_left: sprite.upper_left,
         lower_right: sprite.lower_right,
         tex_upper_left: sprite.tex_upper_left,

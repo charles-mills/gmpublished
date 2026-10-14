@@ -8,6 +8,15 @@ use gmpublished_domain::math::Vec3;
 
 #[derive(Debug)]
 pub struct RenderResources {
+    pub refracted_opaque_pipeline: wgpu::RenderPipeline,
+    pub refracted_translucent_pipeline: wgpu::RenderPipeline,
+    pub refracted_additive_pipeline: wgpu::RenderPipeline,
+    pub refracted_detail_pipeline: wgpu::RenderPipeline,
+    pub refracted_overlay_opaque_pipeline: wgpu::RenderPipeline,
+    pub refracted_overlay_translucent_pipeline: wgpu::RenderPipeline,
+    pub refracted_overlay_additive_pipeline: wgpu::RenderPipeline,
+    pub refracted_planar_pipeline: wgpu::RenderPipeline,
+
     pub reflected_opaque_pipeline: wgpu::RenderPipeline,
     pub reflected_translucent_pipeline: wgpu::RenderPipeline,
     pub reflected_additive_pipeline: wgpu::RenderPipeline,
@@ -300,6 +309,7 @@ impl RenderResources {
                 front_face: wgpu::FrontFace::Cw,
             },
             PipelineShaderEntry {
+                write_mask: wgpu::ColorWrites::ALL,
                 fragment: "fs_skybox",
                 label: "file_preview.model_viewer.water_pipeline",
             },
@@ -317,6 +327,7 @@ impl RenderResources {
                 front_face: wgpu::FrontFace::Ccw,
             },
             PipelineShaderEntry {
+                write_mask: wgpu::ColorWrites::ALL,
                 fragment: "fs_skybox",
                 label: "file_preview.reflected.planar_fallback",
             },
@@ -334,12 +345,13 @@ impl RenderResources {
             format,
             None,
             PipelineRasterMode {
-                write_enabled: false,
+                write_enabled: true,
                 bias: wgpu::DepthBiasState::default(),
                 cull_mode: Some(wgpu::Face::Back),
                 front_face: wgpu::FrontFace::Cw,
             },
             PipelineShaderEntry {
+                write_mask: wgpu::ColorWrites::ALL,
                 fragment: "fs_main",
                 label: "file_preview.model_viewer.refractive_water_pipeline",
             },
@@ -370,6 +382,7 @@ impl RenderResources {
             &detail_shader,
             format,
             "file_preview.model_viewer.detail_pipeline",
+            wgpu::ColorWrites::ALL,
         );
         let overlay_opaque_pipeline = create_model_pipeline_with_depth_bias(
             device,
@@ -530,6 +543,107 @@ impl RenderResources {
             "file_preview.reflected.additive",
         );
 
+        let refraction_pipeline =
+            |fragment, write_enabled, blend, overlay, write_mask, label, water| {
+                create_model_pipeline_with_fragment_entry(
+                    device,
+                    &layout,
+                    if water { &water_shader } else { &shader },
+                    format,
+                    blend,
+                    PipelineRasterMode {
+                        write_enabled,
+                        bias: if overlay {
+                            overlay_depth_bias_state()
+                        } else {
+                            wgpu::DepthBiasState::default()
+                        },
+                        cull_mode: if overlay {
+                            None
+                        } else {
+                            Some(wgpu::Face::Back)
+                        },
+                        front_face: wgpu::FrontFace::Cw,
+                    },
+                    PipelineShaderEntry {
+                        fragment,
+                        label,
+                        write_mask,
+                    },
+                )
+            };
+        let refracted_opaque_pipeline = refraction_pipeline(
+            "fs_refraction",
+            true,
+            None,
+            false,
+            wgpu::ColorWrites::ALL,
+            "file_preview.refracted.opaque",
+            false,
+        );
+        let refracted_translucent_pipeline = refraction_pipeline(
+            "fs_main",
+            false,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+            wgpu::ColorWrites::COLOR,
+            "file_preview.refracted.translucent",
+            false,
+        );
+        let refracted_additive_pipeline = refraction_pipeline(
+            "fs_additive",
+            false,
+            Some(additive_blend_state()),
+            false,
+            wgpu::ColorWrites::COLOR,
+            "file_preview.refracted.additive",
+            false,
+        );
+        let refracted_overlay_opaque_pipeline = refraction_pipeline(
+            "fs_main",
+            false,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            true,
+            wgpu::ColorWrites::COLOR,
+            "file_preview.refracted.overlay_opaque",
+            false,
+        );
+        let refracted_overlay_translucent_pipeline = refraction_pipeline(
+            "fs_main",
+            false,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            true,
+            wgpu::ColorWrites::COLOR,
+            "file_preview.refracted.overlay_translucent",
+            false,
+        );
+        let refracted_overlay_additive_pipeline = refraction_pipeline(
+            "fs_additive",
+            false,
+            Some(additive_blend_state()),
+            true,
+            wgpu::ColorWrites::COLOR,
+            "file_preview.refracted.overlay_additive",
+            false,
+        );
+        let refracted_planar_pipeline = refraction_pipeline(
+            "fs_skybox",
+            true,
+            None,
+            false,
+            wgpu::ColorWrites::ALL,
+            "file_preview.refracted.planar_fallback",
+            true,
+        );
+        let refracted_detail_pipeline = create_detail_pipeline(
+            device,
+            &layout,
+            &detail_shader,
+            format,
+            "file_preview.refracted.detail",
+            wgpu::ColorWrites::COLOR,
+        );
+
         let material_sampler = sampler(
             device,
             "file_preview.model_viewer.material_sampler",
@@ -580,6 +694,14 @@ impl RenderResources {
         queue.write_buffer(&sky_vertices, 0, &sky_vertex_bytes);
 
         Self {
+            refracted_opaque_pipeline,
+            refracted_translucent_pipeline,
+            refracted_additive_pipeline,
+            refracted_detail_pipeline,
+            refracted_overlay_opaque_pipeline,
+            refracted_overlay_translucent_pipeline,
+            refracted_overlay_additive_pipeline,
+            refracted_planar_pipeline,
             reflected_opaque_pipeline,
             reflected_translucent_pipeline,
             reflected_additive_pipeline,
@@ -633,6 +755,7 @@ struct PipelineRasterMode {
 
 #[derive(Clone, Copy)]
 struct PipelineShaderEntry {
+    write_mask: wgpu::ColorWrites,
     fragment: &'static str,
     label: &'static str,
 }
@@ -742,7 +865,12 @@ fn create_model_pipeline_with_depth_bias(
         blend,
         raster,
         PipelineShaderEntry {
-            fragment: "fs_main",
+            write_mask: wgpu::ColorWrites::ALL,
+            fragment: if blend == Some(additive_blend_state()) {
+                "fs_additive"
+            } else {
+                "fs_main"
+            },
             label,
         },
     )
@@ -773,7 +901,7 @@ fn create_model_pipeline_with_fragment_entry(
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend,
-                write_mask: wgpu::ColorWrites::ALL,
+                write_mask: entry.write_mask,
             })],
         }),
         primitive: wgpu::PrimitiveState {
@@ -804,6 +932,7 @@ fn create_detail_pipeline(
     shader: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
     label: &'static str,
+    write_mask: wgpu::ColorWrites,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -821,7 +950,7 @@ fn create_detail_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                write_mask,
             })],
         }),
         primitive: wgpu::PrimitiveState {
@@ -831,7 +960,7 @@ fn create_detail_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: true,
+            depth_write_enabled: false,
             depth_compare: wgpu::CompareFunction::GreaterEqual,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),

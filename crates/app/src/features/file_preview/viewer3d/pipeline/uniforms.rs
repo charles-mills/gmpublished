@@ -18,6 +18,10 @@ pub struct Uniforms {
     pub water_depth_params: [f32; 4],
     /// World-space half-space retained by this view; zero disables clipping.
     pub clip_plane: [f32; 4],
+    /// Exact optical plane for height fog; independent of clip bias.
+    pub medium_plane: [f32; 4],
+    /// Main widget dimensions used for normalized screen sampling.
+    pub viewport: [f32; 4],
 }
 
 #[repr(C)]
@@ -190,6 +194,8 @@ impl Uniforms {
             water_time_sky_tint: [water_time, 0.0, 0.0, 0.0],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
+            medium_plane: [0.0; 4],
+            viewport: [0.0; 4],
         }
     }
 
@@ -210,6 +216,8 @@ impl Uniforms {
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
+            medium_plane: [0.0; 4],
+            viewport: [0.0; 4],
         }
     }
 
@@ -242,6 +250,8 @@ impl Uniforms {
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
+            medium_plane: [0.0; 4],
+            viewport: [0.0; 4],
         }
     }
 
@@ -269,6 +279,8 @@ impl Uniforms {
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [0.0; 4],
             clip_plane: [0.0; 4],
+            medium_plane: [0.0; 4],
+            viewport: [0.0; 4],
         }
     }
 }
@@ -406,6 +418,8 @@ mod uniform_layout_tests {
                 offset_of!(Uniforms, water_depth_params),
             ),
             ("clip_plane", offset_of!(Uniforms, clip_plane)),
+            ("medium_plane", offset_of!(Uniforms, medium_plane)),
+            ("viewport", offset_of!(Uniforms, viewport)),
         ];
         for (name, source) in [
             ("model_viewer", super::super::super::MODEL_SHADER_SOURCE),

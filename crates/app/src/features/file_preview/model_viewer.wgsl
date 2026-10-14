@@ -11,6 +11,8 @@ struct Uniforms {
     // xy: near and far clip distances.
     water_depth_params: vec4<f32>,
     clip_plane: vec4<f32>,
+    medium_plane: vec4<f32>,
+    viewport: vec4<f32>,
 }
 
 struct Material {
@@ -58,8 +60,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     return out;
 }
 
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn shade(input: VertexOutput) -> vec4<f32> {
     var albedo = textureSample(base_texture, base_sampler, input.uv);
     if input.blend_alpha > 0.0 {
         let albedo2 = textureSample(base_texture2, base_sampler, input.uv);
@@ -88,15 +89,45 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         lit = albedo.rgb * input.color * 2.0;
     }
     if uniforms.light.w < 0.0 { lit = albedo.rgb; }
-    if uniforms.fog_params.w > 0.5 && uniforms.fog_params.y > uniforms.fog_params.x {
-        let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
-        let fog_factor = clamp(
-            (fog_distance - uniforms.fog_params.x) / (uniforms.fog_params.y - uniforms.fog_params.x),
-            0.0,
-            uniforms.fog_params.z,
-        );
-        lit = mix(lit, uniforms.fog_color.rgb, fog_factor);
-    }
+    lit = mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position,1.0/input.clip_position.w));
     if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
     return vec4<f32>(lit, albedo.a);
+}
+
+// Source height fog stores axial distance through the medium, rather than
+// radial distance from the camera. The clipping bias is deliberately separate.
+fn view_fog_factor(position:vec3<f32>, projected_depth:f32) -> f32 {
+    if uniforms.fog_params.y <= uniforms.fog_params.x { return 0.0; }
+    if uniforms.fog_params.w > 1.5 {
+        let point_distance=dot(vec4<f32>(position,1.0),uniforms.medium_plane);
+        let eye_distance=dot(vec4<f32>(uniforms.camera_position.xyz,1.0),uniforms.medium_plane);
+        let fraction=clamp(-point_distance/max(eye_distance-point_distance,0.00001),0.0,1.0);
+        return clamp(fraction*projected_depth/(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
+    }
+    if uniforms.fog_params.w < 0.5 { return 0.0; }
+    return clamp((distance(position,uniforms.camera_position.xyz)-uniforms.fog_params.x)
+        /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
+}
+
+@fragment
+fn fs_main(input:VertexOutput) -> @location(0) vec4<f32> { return shade(input); }
+
+@fragment
+fn fs_refraction(input:VertexOutput) -> @location(0) vec4<f32> {
+    let colour=shade(input);
+    let fog=select(1.0,view_fog_factor(input.world_position,1.0/input.clip_position.w),uniforms.fog_params.w>1.5);
+    return vec4<f32>(colour.rgb,fog);
+}
+
+@fragment
+fn fs_additive(input:VertexOutput) -> @location(0) vec4<f32> {
+    let colour=shade(input);
+    // Additive light fades to black in a medium; adding its fog colour would
+    // brighten the background again for every additive layer.
+    let fog=view_fog_color_factor(input.world_position,1.0/input.clip_position.w);
+    return vec4<f32>(max(colour.rgb-uniforms.fog_color.rgb*fog,vec3<f32>(0.0)),colour.a);
+}
+
+fn view_fog_color_factor(position:vec3<f32>,projected_depth:f32) -> f32 {
+    return view_fog_factor(position,projected_depth)*select(1.0,uniforms.fog_color.a,uniforms.fog_params.w>1.5);
 }

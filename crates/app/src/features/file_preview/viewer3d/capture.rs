@@ -111,6 +111,8 @@ struct CaptureCamera {
     fullbright: bool,
     #[serde(default)]
     reflection_target: bool,
+    #[serde(default)]
+    refraction_target: bool,
     #[serde(default = "enabled")]
     skybox: bool,
     #[serde(default = "enabled")]
@@ -123,13 +125,35 @@ const fn enabled() -> bool {
     true
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureTarget {
+    Main,
+    Reflection,
+    Refraction,
+}
+impl CaptureCamera {
+    fn target(&self) -> CaptureTarget {
+        assert!(
+            !(self.reflection_target && self.refraction_target),
+            "choose one optical diagnostic target"
+        );
+        if self.reflection_target {
+            CaptureTarget::Reflection
+        } else if self.refraction_target {
+            CaptureTarget::Refraction
+        } else {
+            CaptureTarget::Main
+        }
+    }
+}
+
 struct FixedView {
     diagnostics: Arc<Mutex<Value>>,
     viewer: FlyViewer,
     camera: FlyCamera,
     live_animation: bool,
     fullbright: bool,
-    reflection_target: bool,
+    target: CaptureTarget,
 }
 
 impl shader::Program<Message> for FixedView {
@@ -158,7 +182,8 @@ impl shader::Program<Message> for FixedView {
             cursor,
             bounds,
         );
-        primitive.reflection_target = self.reflection_target;
+        primitive.reflection_target = self.target == CaptureTarget::Reflection;
+        primitive.refraction_target = self.target == CaptureTarget::Refraction;
         primitive.capture_diagnostics = Some(Arc::clone(&self.diagnostics));
         if self.fullbright {
             primitive.uniforms.light[3] = -1.0;
@@ -354,6 +379,7 @@ pub fn capture_map_reference_frames() {
         "--",
         "crates/app/src",
         "crates/domain/src",
+        "crates/vendor/vformats",
         "tools/map-capture",
     ])
     .unwrap_or_default();
@@ -366,9 +392,10 @@ pub fn capture_map_reference_frames() {
         {
             continue;
         }
-        if !relative
-            .extension()
-            .is_some_and(|ext| matches!(ext.to_str(), Some("rs" | "json" | "py")))
+        if !relative.starts_with("crates/vendor/vformats")
+            && !relative
+                .extension()
+                .is_some_and(|ext| matches!(ext.to_str(), Some("rs" | "json" | "py")))
         {
             continue;
         }
@@ -532,7 +559,7 @@ pub fn capture_map_reference_frames() {
                 diagnostics: Arc::clone(&diagnostics),
                 live_animation: shot.live_animation,
                 fullbright: shot.fullbright,
-                reflection_target: shot.reflection_target,
+                target: shot.target(),
                 viewer: FlyViewer {
                     scene: Arc::clone(&scene),
                     content_id,
@@ -685,7 +712,7 @@ pub fn capture_map_reference_frames() {
             map_record["captures"].as_array_mut().unwrap().push(json!({
                 "file": filename,
                 "render_diagnostics": diagnostics.lock().unwrap().clone(),
-                "fullbright": shot.fullbright, "reflection_target": shot.reflection_target,
+                "fullbright": shot.fullbright, "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
                 "animation_time": if shot.live_animation { 2.0 } else { animation_time },
                 "live_animation": shot.live_animation.then(|| json!({
                     "redraw_events_without_input": 121,
@@ -743,7 +770,7 @@ pub fn capture_map_reference_frames() {
                         camera,
                         live_animation: false,
                         fullbright: shot.fullbright,
-                        reflection_target: false,
+                        target: CaptureTarget::Main,
                         viewer: FlyViewer {
                             scene: Arc::clone(&scene),
                             content_id,

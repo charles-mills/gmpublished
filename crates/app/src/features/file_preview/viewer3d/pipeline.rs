@@ -19,8 +19,10 @@ mod draw;
 mod materials;
 mod passes;
 mod reflections;
+mod refraction;
 mod resources;
 mod targets;
+mod transparency;
 mod uniforms;
 mod upload;
 mod visibility;
@@ -29,7 +31,7 @@ pub use uniforms::Uniforms;
 pub use upload::UploadedModel;
 
 use super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
-use reflections::{ReflectionView, SceneView, ViewUniforms};
+use reflections::{PlanarView, SceneView, ViewUniforms};
 use resources::RenderResources;
 use std::sync::atomic::Ordering;
 use targets::{RenderTargets, water_bind_group};
@@ -66,6 +68,8 @@ pub struct ModelPrimitive {
     #[cfg(feature = "map-capture")]
     pub(super) reflection_target: bool,
     #[cfg(feature = "map-capture")]
+    pub(super) refraction_target: bool,
+    #[cfg(feature = "map-capture")]
     pub(super) capture_diagnostics: Option<Arc<std::sync::Mutex<serde_json::Value>>>,
     pub(super) prepared_frame: std::sync::atomic::AtomicUsize,
     pub(super) skybox_transform: Option<(Vec3, f32)>,
@@ -88,7 +92,7 @@ pub struct ModelPrimitive {
 #[derive(Debug)]
 pub struct PreparedFrame {
     pub main: SceneView,
-    pub reflections: Vec<ReflectionView>,
+    pub planar_views: Vec<PlanarView>,
     pub content_id: u64,
     pub bounds: Rectangle,
     pub live: bool,
@@ -123,7 +127,7 @@ impl shader::Primitive for ModelPrimitive {
         if slot == pipeline.frames.len() {
             pipeline.frames.push(PreparedFrame {
                 main: SceneView::new(device, &pipeline.resources),
-                reflections: Vec::new(),
+                planar_views: Vec::new(),
                 content_id: self.content_id,
                 bounds: *bounds,
                 live: false,
@@ -132,7 +136,7 @@ impl shader::Primitive for ModelPrimitive {
         self.prepared_frame.store(slot, Ordering::Relaxed);
         let frame = &mut pipeline.frames[slot];
         if frame.content_id != self.content_id {
-            frame.reflections.clear();
+            frame.planar_views.clear();
             frame.main.visibility = Default::default();
         }
         frame.content_id = self.content_id;
@@ -171,6 +175,7 @@ impl shader::Primitive for ModelPrimitive {
             );
         }
         let with_time = |mut uniforms: Uniforms| {
+            uniforms.viewport = [size.0 as f32, size.1 as f32, 0.0, 0.0];
             uniforms.water_time_sky_tint[0] = self.uniforms.water_time_sky_tint[0];
             uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
             if self.submerged {
@@ -205,15 +210,7 @@ impl shader::Primitive for ModelPrimitive {
         );
         let needs_water = !plans.world.planar.is_empty()
             && pipeline.resources.refractive_water_pipeline.is_some();
-        RenderTargets::ensure(
-            &mut frame.main.targets,
-            device,
-            &pipeline.resources,
-            size.0,
-            size.1,
-            needs_water,
-            &frame.main.world.buffer,
-        );
+        RenderTargets::ensure(&mut frame.main.targets, device, &pipeline.resources, size);
         let eye = Vec3::from([
             self.uniforms.camera_position[0],
             self.uniforms.camera_position[1],
@@ -243,28 +240,40 @@ impl shader::Primitive for ModelPrimitive {
             })
             .filter(|(_, indices)| !indices.is_empty())
             .collect::<Vec<_>>();
+        let pass_count = active
+            .iter()
+            .map(|(index, _)| {
+                let surface = &upload.reflectors[*index];
+                let (reflect, refract) =
+                    reflections::optical_passes(&scene.materials[surface.material_slot].shader);
+                usize::from(reflect) + usize::from(refract)
+            })
+            .sum();
         let reflection_size =
-            reflections::target_size(size, active.len(), pipeline.resources.target_format);
+            reflections::target_size(size, pass_count, pipeline.resources.target_format);
         frame
-            .reflections
+            .planar_views
             .retain(|view| active.iter().any(|(index, _)| *index == view.surface_index));
         for (surface_index, indices) in active {
             if !frame
-                .reflections
+                .planar_views
                 .iter()
                 .any(|view| view.surface_index == surface_index)
             {
-                frame.reflections.push(ReflectionView {
+                frame.planar_views.push(PlanarView {
                     surface_index,
                     surface_indices: Vec::new(),
                     surface_buffer: visibility::upload_visible_indices(device, queue, &[]),
                     view: SceneView::new(device, &pipeline.resources),
+                    reflect_enabled: false,
+                    refraction: None,
+                    refraction_clear: wgpu::Color::BLACK,
                     water_bind_group: None,
                     surface_uniforms: ViewUniforms::new(device, &pipeline.resources),
                 });
             }
             let view = frame
-                .reflections
+                .planar_views
                 .iter_mut()
                 .find(|view| view.surface_index == surface_index)
                 .unwrap();
@@ -273,8 +282,8 @@ impl shader::Primitive for ModelPrimitive {
                 view.surface_indices = indices;
             }
         }
-        for reflection in &mut frame.reflections {
-            reflection.prepare(
+        for surface in &mut frame.planar_views {
+            surface.prepare_optics(
                 device,
                 queue,
                 &pipeline.resources,
@@ -283,41 +292,90 @@ impl shader::Primitive for ModelPrimitive {
                 reflection_size,
             );
             let mut uniforms = with_time(self.uniforms);
-            uniforms.water_depth_params[2] = 1.0;
-            reflection.surface_uniforms.write(queue, &uniforms);
-            let main = frame.main.targets.as_ref().expect("main targets");
-            let refraction = main.refraction.as_ref().expect("water refraction target");
-            let refract_view = refraction.texture.create_view(&Default::default());
-            let reflected = reflection
-                .view
-                .targets
+            uniforms.water_depth_params[2] = f32::from(surface.reflect_enabled);
+            uniforms.water_depth_params[3] = f32::from(surface.refraction.is_some());
+            surface.surface_uniforms.write(queue, &uniforms);
+            let refracted = surface
+                .refraction
                 .as_ref()
-                .expect("reflection targets");
-            reflection.water_bind_group = Some(water_bind_group(
+                .or_else(|| surface.reflect_enabled.then_some(&surface.view))
+                .and_then(|view| view.targets.as_ref())
+                .expect("active planar input");
+            let reflected = surface.view.targets.as_ref().unwrap_or(refracted);
+            surface.water_bind_group = Some(water_bind_group(
                 device,
                 &pipeline.resources,
-                &reflection.surface_uniforms.buffer,
-                &refract_view,
-                &main.depth,
+                &surface.surface_uniforms.buffer,
+                &refracted.resolve_view,
+                &refracted.depth,
                 &reflected.resolve_view,
             ));
         }
         frame.main.plans = Some(plans);
+        let detail_water_side = frame
+            .planar_views
+            .iter()
+            .any(|view| {
+                scene.materials[upload.reflectors[view.surface_index].material_slot]
+                    .shader
+                    .water()
+                    .is_some()
+            })
+            .then_some(false);
+        transparency::prepare(
+            &mut frame.main,
+            upload,
+            with_time(self.uniforms),
+            self.map_skybox_uniforms,
+            detail_water_side,
+        );
         #[cfg(feature = "map-capture")]
         if let Some(diagnostics) = &self.capture_diagnostics {
-            let reflections=frame.reflections.iter().map(|view| {
-                let surface=&upload.reflectors[view.surface_index];
-                let plans=view.view.plans.as_ref().unwrap();
-                serde_json::json!({"material":scene.materials[surface.material_slot].name,
+            let records = |refracted: bool| {
+                frame.planar_views.iter().filter_map(|surface_view| {
+                let view=if refracted {surface_view.refraction.as_ref()?} else {
+                    if !surface_view.reflect_enabled {return None;}
+                    &surface_view.view
+                };
+                let surface=&upload.reflectors[surface_view.surface_index];
+                let plans=view.plans.as_ref().unwrap();
+                Some(serde_json::json!({
+                    "material":scene.materials[surface.material_slot].name,
                     "plane_normal":surface.plane.normal.to_array(),"plane_distance":surface.plane.distance,
                     "reflected_eye":surface.plane.reflect_point(eye).to_array(),
+                    "camera_position":if refracted {eye.to_array()} else {surface.plane.reflect_point(eye).to_array()},
+                    "transparent_primitives":view.transparency.len(),
                     "world_opaque_meshes":plans.world.opaque.len(),
+                    "world_translucent_meshes":plans.world.translucent.len(),
                     "world_entity_meshes":plans.world.opaque.iter().filter(|item|upload.meshes[item.mesh_index].entity).count(),
                     "skybox_present":plans.map_skybox.is_some(),
-                    "visibility_state":format!("{:?}",view.view.visibility.tracker.state),
-                    "target_dimensions":view.view.targets.as_ref().unwrap().size})
-            }).collect::<Vec<_>>();
-            *diagnostics.lock().expect("capture diagnostics lock") = serde_json::json!({"main_target_dimensions":size,"reflection_views":reflections,"single_bounce":true,"nested_planar_fallback":"average sky tint (cubemap pending)","estimated_target_bytes":frame.main.targets.as_ref().unwrap().estimated_bytes()+frame.reflections.iter().map(|view| view.view.targets.as_ref().unwrap().estimated_bytes()).sum::<u64>()});
+                    "visibility_state":format!("{:?}",view.visibility.tracker.state),
+                    "target_dimensions":view.targets.as_ref().unwrap().size
+                }))
+            }).collect::<Vec<_>>()
+            };
+            let bytes = frame.main.targets.as_ref().unwrap().estimated_bytes()
+                + frame
+                    .planar_views
+                    .iter()
+                    .map(|surface| {
+                        surface
+                            .view
+                            .targets
+                            .as_ref()
+                            .map_or(0, RenderTargets::estimated_bytes)
+                            + surface
+                                .refraction
+                                .as_ref()
+                                .and_then(|view| view.targets.as_ref())
+                                .map_or(0, RenderTargets::estimated_bytes)
+                    })
+                    .sum::<u64>();
+            *diagnostics.lock().expect("capture diagnostics lock") = serde_json::json!({
+                "main_target_dimensions":size,"reflection_views":records(false),"refraction_views":records(true),
+                "single_bounce":true,"nested_planar_fallback":"average sky tint (cubemap pending)",
+                "estimated_target_bytes":bytes,"composition":"planar depth occludes main transparency; clipped refraction includes below-plane transparency"
+            });
         }
     }
     fn render(

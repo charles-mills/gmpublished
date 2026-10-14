@@ -478,6 +478,9 @@ pub struct LightmapSlot {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetailSprite {
     pub(crate) origin: Vec3,
+    pub(crate) angles: Vec3,
+    pub(crate) orientation: u8,
+    pub(crate) underwater_leaf: bool,
     pub(crate) upper_left: [f32; 2],
     pub(crate) lower_right: [f32; 2],
     pub(crate) tex_upper_left: [f32; 2],
@@ -723,6 +726,9 @@ mod tests {
             lightmap: None,
             skybox: None,
             detail_sprites: vec![DetailSprite {
+                angles: Vec3::ZERO,
+                orientation: 2,
+                underwater_leaf: false,
                 origin: Vec3::splat(0.0),
                 upper_left: [0.0; 2],
                 lower_right: [1.0; 2],

@@ -6,12 +6,15 @@ members = [
 ]
 exclude = [
     "crates/vendor/iced_wgpu",
+    "crates/vendor/vformats",
 ]
 resolver = "3"
 
 [patch.crates-io]
 # Enable BC textures on supported adapters; see the vendored patch notes.
 iced_wgpu = { path = "crates/vendor/iced_wgpu" }
+# Correct SDK detail-sprite record size/scale; see vendored patch notes.
+vformats = { path = "crates/vendor/vformats" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

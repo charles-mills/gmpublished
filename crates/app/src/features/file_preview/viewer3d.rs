@@ -93,7 +93,7 @@ const MSAA_SAMPLE_COUNT: u32 = 4;
 const MATERIAL_ANISOTROPY_CLAMP: u16 = 16;
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
-const DETAIL_VERTEX_FLOAT_COUNT: u64 = 7;
+const DETAIL_VERTEX_FLOAT_COUNT: u64 = 14;
 const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x3,
@@ -102,10 +102,13 @@ const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_ar
     4 => Float32x3,
     5 => Float32,
 ];
-const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x2,
     2 => Float32x2,
+    3 => Float32,
+    4 => Float32x3,
+    5 => Float32x3,
 ];
 
 fn mid(min: Vec3, max: Vec3) -> Vec3 {

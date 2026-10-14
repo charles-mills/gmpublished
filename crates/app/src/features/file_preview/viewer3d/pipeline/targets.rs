@@ -4,56 +4,29 @@ use super::{MSAA_SAMPLE_COUNT, wgpu};
 #[derive(Debug)]
 pub struct RenderTargets {
     pub color: wgpu::TextureView,
-    pub resolve_texture: wgpu::Texture,
     pub resolve_view: wgpu::TextureView,
     pub depth: wgpu::TextureView,
-    pub refraction: Option<RefractionTarget>,
     pub blit_bind_group: wgpu::BindGroup,
     pub size: (u32, u32),
     pub format: wgpu::TextureFormat,
 }
 
-#[derive(Debug)]
-pub struct RefractionTarget {
-    pub texture: wgpu::Texture,
-    pub bind_group: wgpu::BindGroup,
-}
-
 impl RenderTargets {
     #[cfg(feature = "map-capture")]
     pub fn estimated_bytes(&self) -> u64 {
-        u64::from(self.size.0)
-            * u64::from(self.size.1)
-            * (bytes_per_pixel(self.format)
-                + if self.refraction.is_some() {
-                    u64::from(self.format.block_copy_size(None).unwrap_or(4))
-                } else {
-                    0
-                })
+        u64::from(self.size.0) * u64::from(self.size.1) * bytes_per_pixel(self.format)
     }
 
     pub fn ensure(
         slot: &mut Option<Self>,
         device: &wgpu::Device,
         resources: &RenderResources,
-        width: u32,
-        height: u32,
-        needs_refraction: bool,
-        uniforms: &wgpu::Buffer,
+        size: (u32, u32),
     ) {
-        let size = (width.max(1), height.max(1));
+        let size = (size.0.max(1), size.1.max(1));
         if slot.as_ref().is_some_and(|targets| {
             targets.size == size && targets.format == resources.target_format
         }) {
-            if let Some(targets) = slot.as_mut() {
-                if needs_refraction {
-                    targets.ensure_refraction(device, resources, uniforms);
-                } else {
-                    // Drop the refraction texture when switching to a waterless scene, even if
-                    // the viewport size and format are unchanged.
-                    targets.refraction = None;
-                }
-            }
             return;
         }
         let extent = wgpu::Extent3d {
@@ -78,9 +51,7 @@ impl RenderTargets {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: resources.target_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
@@ -110,51 +81,15 @@ impl RenderTargets {
                 },
             ],
         });
-        let mut targets = Self {
+        let targets = Self {
             color,
-            resolve_texture: resolve,
             resolve_view,
             depth,
-            refraction: None,
             blit_bind_group,
             size,
             format: resources.target_format,
         };
-        if needs_refraction {
-            targets.ensure_refraction(device, resources, uniforms);
-        }
         *slot = Some(targets);
-    }
-
-    fn ensure_refraction(
-        &mut self,
-        device: &wgpu::Device,
-        resources: &RenderResources,
-        uniforms: &wgpu::Buffer,
-    ) {
-        if self.refraction.is_some() {
-            return;
-        }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("file_preview.model_viewer.refraction"),
-            size: wgpu::Extent3d {
-                width: self.size.0,
-                height: self.size.1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = water_bind_group(device, resources, uniforms, &view, &self.depth, &view);
-        self.refraction = Some(RefractionTarget {
-            texture,
-            bind_group,
-        });
     }
 }
 
