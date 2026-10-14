@@ -553,15 +553,9 @@ fn finish_strip(
     cur_tris: &mut Vec<[u32; 3]>,
     vertices: &[&crate::model::Vertex],
 ) -> StripPlan {
-    let mut used: Vec<u32> = Vec::new();
-    for t in cur_tris.iter() {
-        for &vi in t {
-            if !used.contains(&vi) {
-                used.push(vi);
-            }
-        }
-    }
+    let mut used: Vec<u32> = cur_tris.iter().flatten().copied().collect();
     used.sort_unstable();
+    used.dedup();
     let refs: Vec<&crate::model::Vertex> = used.iter().map(|&vi| vertices[vi as usize]).collect();
     let pal = build_strip_palette(&refs);
     // 组顶点槽位 → 本 strip 内的局部下标。
@@ -1095,15 +1089,9 @@ fn write_vtx_multi(
                     let ml = &all[unified_mesh + ki];
                     let tris_u = ml.triangles.get(lod).cloned().unwrap_or_default();
                     // 收集本 LOD 用到的统一顶点（去重 + 升序，保证确定性）。
-                    let mut used: Vec<u32> = Vec::new();
-                    for t in &tris_u {
-                        for &u in t {
-                            if !used.contains(&u) {
-                                used.push(u);
-                            }
-                        }
-                    }
+                    let mut used: Vec<u32> = tris_u.iter().flatten().copied().collect();
                     used.sort_unstable();
+                    used.dedup();
                     // 三角形下标改写为「verts 内的槽位」。
                     let mut slot: HashMap<u32, u32> = HashMap::with_capacity(used.len());
                     for (i, &u) in used.iter().enumerate() {

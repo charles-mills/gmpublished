@@ -23,6 +23,7 @@ mod lods;
 mod metadata;
 #[path = "model_decompile/physics.rs"]
 mod physics;
+pub use physics::{CollisionMesh, load_collision_meshes};
 #[path = "model_decompile/preview_lods.rs"]
 mod preview_lods;
 pub use preview_lods::{ModelLodPreview, load_model_lod_preview};

@@ -19,6 +19,7 @@ use gmpublished_domain::math::Vec3;
 mod draw;
 mod materials;
 mod resources;
+mod studio_grid;
 mod targets;
 mod uniforms;
 mod upload;
@@ -32,6 +33,8 @@ use draw::{
     draw_scene_plan_transparent, draw_sky_background,
 };
 use resources::RenderResources;
+pub(super) use studio_grid::StudioGrid;
+use studio_grid::StudioGridResources;
 use targets::RenderTargets;
 use uniforms::DEFAULT_SKY_TINT;
 use upload::UploadCache;
@@ -65,6 +68,8 @@ pub(in super::super) struct StagePrimitive {
     pub animation_pose: Option<PreviewPose>,
     pub content_id: u64,
     pub transform: super::super::state::StageTransform,
+    pub live_transform: [[f32; 4]; 4],
+    pub material_tints: Vec<(usize, [u8; 3])>,
     pub skin_remap: Vec<u16>,
     pub bodygroup_choices: Vec<usize>,
     pub phy_debug_visible: bool,
@@ -77,10 +82,12 @@ pub(in super::super) struct StagePrimitive {
 )]
 pub struct ModelPrimitive {
     pub(super) stage: Option<StagePrimitive>,
+    pub(super) studio_grid: Option<StudioGrid>,
     pub(super) preview: PreviewScene,
     pub(super) animation_pose: Option<PreviewPose>,
     pub(super) content_id: u64,
     pub(super) skin_remap: Vec<u16>,
+    pub(super) material_tints: Vec<(usize, [u8; 3])>,
     pub(super) bodygroup_choices: Vec<usize>,
     pub(super) map_skybox_visible: bool,
     pub(super) visibility_culling: bool,
@@ -172,6 +179,12 @@ impl shader::Primitive for ModelPrimitive {
         _bounds: &Rectangle,
         viewport: &Viewport,
     ) {
+        if let Some(grid) = &self.studio_grid {
+            let resources = pipeline.studio_grid.get_or_insert_with(|| {
+                StudioGridResources::new(device, pipeline.resources.target_format)
+            });
+            queue.write_buffer(&resources.uniform_buffer, 0, bytemuck::bytes_of(grid));
+        }
         if let Some(stage) = &self.stage {
             pipeline.stage_uploads.ensure_upload(
                 device,
@@ -183,6 +196,7 @@ impl shader::Primitive for ModelPrimitive {
             );
             pipeline.stage_uploads.touch(stage.content_id);
             if let Some(upload) = pipeline.stage_uploads.get_mut(stage.content_id) {
+                upload.update_material_tints(queue, &stage.model.scene, &stage.material_tints);
                 upload.update_animation_vertices(
                     queue,
                     &stage.model,
@@ -192,21 +206,8 @@ impl shader::Primitive for ModelPrimitive {
                     upload.ensure_phy_debug_meshes(device, queue, &stage.model.scene);
                 }
                 let mut uniforms = self.uniforms;
-                // Rigid transforms let geometry stay uploaded: express the camera and light
-                // in model space so lighting and fog use the same frame as the vertices.
-                uniforms.view_proj = mat_mul(uniforms.view_proj, stage.transform.matrix());
-                let eye = stage.transform.local_point(Vec3::new(
-                    uniforms.camera_position[0],
-                    uniforms.camera_position[1],
-                    uniforms.camera_position[2],
-                ));
-                uniforms.camera_position = [eye[0], eye[1], eye[2], 0.0];
-                let light = stage.transform.inverse_vector(Vec3::new(
-                    uniforms.light[0],
-                    uniforms.light[1],
-                    uniforms.light[2],
-                ));
-                uniforms.light[..3].copy_from_slice(light.as_array());
+                uniforms
+                    .apply_model_transform(mat_mul(stage.transform.matrix(), stage.live_transform));
                 queue.write_buffer(
                     &pipeline.resources.stage_uniform_buffer,
                     0,
@@ -238,6 +239,7 @@ impl shader::Primitive for ModelPrimitive {
         );
         pipeline.uploads.touch(self.content_id);
         if let Some(upload) = pipeline.uploads.get_mut(self.content_id) {
+            upload.update_material_tints(queue, scene, &self.material_tints);
             if let PreviewScene::Model(model) = &self.preview {
                 upload.update_animation_vertices(queue, model, self.animation_pose.as_ref());
             }
@@ -347,6 +349,8 @@ impl shader::Primitive for ModelPrimitive {
                 b: f64::from(self.uniforms.fog_color[2]),
                 a: 1.0,
             }
+        } else if self.studio_grid.is_some() {
+            studio_grid::BACKGROUND
         } else {
             wgpu::Color::TRANSPARENT
         };
@@ -428,6 +432,11 @@ impl shader::Primitive for ModelPrimitive {
             configure_scene_pass(&mut pass, clip_bounds);
             if !has_skybox_composite && !submerged {
                 draw_sky_background(&mut pass, &pipeline.resources, upload);
+            }
+            if self.studio_grid.is_some()
+                && let Some(grid) = &pipeline.studio_grid
+            {
+                grid.draw(&mut pass);
             }
             if let Some(plan) = world_plan {
                 draw_scene_plan_opaque(
@@ -595,6 +604,7 @@ impl shader::Primitive for ModelPrimitive {
 #[derive(Debug)]
 pub struct ModelPipeline {
     resources: RenderResources,
+    studio_grid: Option<StudioGridResources>,
     targets: Option<RenderTargets>,
     uploads: UploadCache,
     stage_uploads: UploadCache,
@@ -606,6 +616,7 @@ impl shader::Pipeline for ModelPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self {
             resources: RenderResources::new(device, queue, format),
+            studio_grid: None,
             targets: None,
             uploads: UploadCache::default(),
             stage_uploads: UploadCache::default(),
@@ -721,6 +732,7 @@ mod tests {
         let scene = Arc::make_mut(&mut preview.scene);
         scene.meshes = vec![mesh];
         scene.materials = vec![MaterialSlot {
+            tint_base: None,
             name: "test".to_owned(),
             texture: None,
             texture2: None,
@@ -750,6 +762,7 @@ mod tests {
             camera.orbit.set_distance(1.6);
         }
         let mut primitive = ModelPrimitive {
+            studio_grid: None,
             animation_pose: None,
             stage: staged.then(|| super::StagePrimitive {
                 local_bounds: preview.visible_bounds(None, &[]),
@@ -757,11 +770,14 @@ mod tests {
                 model: Arc::clone(&preview),
                 content_id: 2,
                 transform: crate::features::file_preview::state::StageTransform::default(),
+                live_transform: super::super::identity_matrix(),
+                material_tints: Vec::new(),
                 skin_remap: vec![0],
                 bodygroup_choices: Vec::new(),
                 phy_debug_visible: false,
             }),
             skin_remap: vec![0],
+            material_tints: Vec::new(),
             bodygroup_choices: Vec::new(),
             map_skybox_visible: false,
             visibility_culling: false,

@@ -4,8 +4,10 @@
 //! path ──► kind_of(path) ──► read_source(path) ──► Smd ──► 原有管线（零改动）
 //! ```
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::smd::{Smd, SmdBoneLink, SmdFrame, SmdNode, SmdPose, SmdTriangle, SmdVertex};
 
@@ -1055,11 +1057,71 @@ fn reference_poses(scene: &ufbx::Scene, kept: &[&ufbx::Node], opts: &FbxOpts) ->
         .collect()
 }
 
-fn load_scene(path: &Path, at: &str) -> Result<ufbx::SceneRoot, FbxError> {
+type SceneCache = HashMap<PathBuf, Rc<ufbx::SceneRoot>>;
+
+thread_local! {
+    static SCENE_CACHE: RefCell<Option<SceneCache>> = const { RefCell::new(None) };
+}
+
+struct SceneCacheScope(bool);
+
+impl Drop for SceneCacheScope {
+    fn drop(&mut self) {
+        if self.0 {
+            SCENE_CACHE.with(|cache| cache.borrow_mut().take());
+        }
+    }
+}
+
+/// Reuses immutable FBX scenes within one operation; subsequent operations read fresh files.
+pub fn with_scene_cache<T>(operation: impl FnOnce() -> T) -> T {
+    let owns_scope = SCENE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.is_some() {
+            false
+        } else {
+            *cache = Some(HashMap::new());
+            true
+        }
+    });
+    let _scope = SceneCacheScope(owns_scope);
+    operation()
+}
+
+pub fn load_scene(path: &Path, at: &str) -> Result<Rc<ufbx::SceneRoot>, FbxError> {
+    let key = std::fs::canonicalize(path)
+        .map_err(|err| ferr(format!("{at}：读不到 {}：{err}", path.display())))?;
+    if let Some(scene) = SCENE_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(&key).cloned())
+    }) {
+        return Ok(scene);
+    }
     let bytes = std::fs::read(path)
         .map_err(|err| ferr(format!("{at}：读不到 {}：{err}", path.display())))?;
-    ufbx::load_memory(&bytes, ufbx::LoadOpts::default())
-        .map_err(|err| ferr(format!("{at}：{} 解析失败：{err:?}", path.display())))
+    let scene = Rc::new(
+        ufbx::load_memory(&bytes, ufbx::LoadOpts::default())
+            .map_err(|err| ferr(format!("{at}：{} 解析失败：{err:?}", path.display())))?,
+    );
+    SCENE_CACHE.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            const MAX_CACHE_BYTES: usize = 256 * 1024 * 1024;
+            let bytes = scene.metadata.result_memory_used;
+            if bytes <= MAX_CACHE_BYTES {
+                let retained: usize = cache
+                    .values()
+                    .map(|scene| scene.metadata.result_memory_used)
+                    .sum();
+                if retained > MAX_CACHE_BYTES - bytes {
+                    cache.clear();
+                }
+                cache.insert(key, Rc::clone(&scene));
+            }
+        }
+    });
+    Ok(scene)
 }
 
 /// 该网格节点是否被 `srcpart` 选中（没写 `srcpart` 时全选）。

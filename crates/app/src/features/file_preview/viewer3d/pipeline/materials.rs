@@ -7,6 +7,7 @@ use super::{
     ResolvedTexture, TextureUploadLevel, bc_mip_is_valid, bc_texture_format, decode_bc_texture,
     wgpu, write_bc_texture_level, write_texture_level,
 };
+use crate::media::preview_model::COLLISION_PIECE_MATERIAL_NAME;
 
 #[derive(Clone, Copy)]
 pub struct MaterialTextureViews<'a> {
@@ -85,6 +86,9 @@ impl RenderResources {
     ) -> wgpu::TextureView {
         if slot.name == PHY_DEBUG_MATERIAL_NAME && texture.is_none() {
             return self.create_texture_view(device, queue, label, PHY_DEBUG_RGBA.as_slice(), 1, 1);
+        }
+        if slot.name == COLLISION_PIECE_MATERIAL_NAME && texture.is_none() {
+            return self.create_texture_view(device, queue, label, &[255, 255, 255, 96], 1, 1);
         }
         self.create_material_texture_view(device, queue, label, texture)
     }
@@ -236,7 +240,19 @@ impl RenderResources {
         });
         let material_uniform = MaterialUniform::new(mode.force_opaque, mode.render_mode);
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        (
+            self.create_material_bind_group(device, views, &uniform),
+            uniform,
+        )
+    }
+
+    pub fn create_material_bind_group(
+        &self,
+        device: &wgpu::Device,
+        views: MaterialTextureViews<'_>,
+        uniform: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.material_bind_group"),
             layout: &self.material_layout,
             entries: &[
@@ -265,8 +281,7 @@ impl RenderResources {
                     resource: uniform.as_entire_binding(),
                 },
             ],
-        });
-        (bind_group, uniform)
+        })
     }
 
     pub fn create_sky_material(

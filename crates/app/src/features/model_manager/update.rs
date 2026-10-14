@@ -8,6 +8,32 @@ use super::{Effect, ExportTarget, MapChoice, Message, SourceKind, State};
 use gmpublished_backend::model_project::{ModelSkin, ModelStage, SkinMaterial};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    let revision = state.preview_revision;
+    let map = state.selected_map.clone();
+    let mut effects =
+        super::preview::update(state, &message).unwrap_or_else(|| update_inner(state, message));
+    if map != state.selected_map && state.preview_for_stage {
+        state.preview_revision.bump();
+        if let Some(job) = &state.preview_job {
+            job.cancel.store(true, Ordering::Release);
+        }
+    }
+    if revision != state.preview_revision {
+        effects.extend(super::preview::schedule(state));
+    } else {
+        effects.extend(super::preview::resume(state));
+    }
+    effects
+}
+
+fn update_inner(state: &mut State, message: Message) -> Vec<Effect> {
+    if let Message::CollisionSourceSelected(generation, path) = &message {
+        return super::collision::source_selected(state, *generation, path.clone())
+            .unwrap_or_default();
+    }
+    if let Some(effects) = super::collision::update(state, &message) {
+        return effects;
+    }
     if let Some(effects) = super::qc_editor::update(state, &message) {
         return effects;
     }
@@ -43,6 +69,12 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         return vec![];
     }
     match message {
+        Message::WorkspaceTabSelected(tab) => {
+            state.workspace_tab = tab;
+            state.pane_open = true;
+        }
+        Message::PaneToggled => state.pane_open = !state.pane_open,
+        Message::AdvancedToggled => state.advanced_open = !state.advanced_open,
         Message::LodSourceRequested
             if !state.busy()
                 && state.kind() == Some(SourceKind::Mesh)
@@ -60,7 +92,18 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                     .map(std::path::Path::to_path_buf),
             )];
         }
+        Message::RouteEntered => {
+            state.route_active = true;
+            let mut effects = refresh_installed_models(state);
+            if state.preview.is_none() && state.inspection.is_some() {
+                effects.extend(request_preview(state, false));
+            } else if state.preview_dirty {
+                effects.extend(super::preview::schedule(state));
+            }
+            return effects;
+        }
         Message::RouteExited => {
+            state.route_active = false;
             state.picker = None;
             state.map_generation = None;
         }
@@ -88,24 +131,24 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.picker = None;
             if let Some(path) = path {
                 state.destination = Some(path);
-                clear_outcome(state);
+                clear_export_outcome(state);
             }
         }
         Message::ModelNameChanged(value) if !state.busy() => {
             state.model_name = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::MaterialDirectoryChanged(value) if !state.busy() => {
             state.material_directory = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::ScaleChanged(value) if !state.busy() => {
             state.scale = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::OrientationChanged(axis, value) if !state.busy() && axis < 3 => {
             state.orientation[axis] = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::AnimationIncluded(index, value) => {
             edit_animation(state, index, |animation| animation.included = value);
@@ -179,6 +222,21 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.qc_editor.diagnostic = None;
             match result {
                 Ok(inspection) => {
+                    if let Some(model) = &inspection.source_model {
+                        let default_name = state.source.as_ref().map(|source| {
+                            format!(
+                                "{}.mdl",
+                                source.file_stem().unwrap_or_default().to_string_lossy()
+                            )
+                        });
+                        if default_name.as_deref() == Some(state.model_name.as_str()) {
+                            state.model_name.clone_from(&model.model_name);
+                        }
+                        if !state.model_type_edited {
+                            state.static_prop = model.static_prop;
+                        }
+                    }
+                    super::collision::inspected(state, &inspection);
                     state.animations = if state.kind() == Some(SourceKind::Mesh) {
                         inspection
                             .animations
@@ -194,11 +252,17 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                         .and_then(|skin| skin.first())
                         .cloned()
                         .or_else(|| inspection.materials.first().cloned());
-                    state.inspection = Some(inspection);
+                    state.inspection = Some(*inspection);
                     sync_material_editor(state);
                 }
-                Err(error) if state.is_qc() => state.qc_editor.diagnostic = Some(error),
-                Err(error) => state.error = Some(error),
+                Err(error) if state.is_qc() => {
+                    state.qc_editor.diagnostic = Some(error);
+                    state.preview_pending = false;
+                }
+                Err(error) => {
+                    state.error = Some(error);
+                    state.preview_pending = false;
+                }
             }
         }
         Message::SkinAdded(name) if !state.busy() => {
@@ -213,7 +277,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 .map_or(1, |inspection| inspection.skins.len().max(1))
                 + state.skins.len()
                 - 1;
-            clear_outcome(state);
+            clear_export_outcome(state);
             sync_material_editor(state);
         }
         Message::SkinSelected(index) if !state.busy() && index < state.skins.len() => {
@@ -231,14 +295,21 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 .and_then(|index| state.skins.get_mut(index))
             {
                 skin.name = name;
-                clear_outcome(state);
+                clear_export_outcome(state);
             }
         }
         Message::MaterialSelected(material) if !state.busy() => {
             state.selected_material = Some(material);
             sync_material_editor(state);
         }
-        Message::MaterialTintChanged(value) if !state.busy() => state.material_tint = value,
+        Message::MaterialTintChanged(value) if !state.busy() => {
+            state.material_tint = value;
+            if let Some(color) = parse_color(&state.material_tint) {
+                let entered = state.material_tint.clone();
+                set_material(state, Some(SkinMaterial::Tint { color }));
+                state.material_tint = entered;
+            }
+        }
         Message::ReplacementMaterialChanged(value) if !state.busy() => {
             state.replacement_material = value;
         }
@@ -314,8 +385,6 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         Message::MapSelected(map) if !state.busy() => {
             state.selected_map = Some(map);
             state.stage = None;
-            state.engine_test = None;
-            state.engine_test_confirmation = false;
             state.qc_saved = false;
         }
         Message::MapBrowseRequested if !state.busy() => {
@@ -332,40 +401,11 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 }
                 state.selected_map = Some(map);
                 state.stage = None;
-                state.engine_test = None;
-                state.engine_test_confirmation = false;
                 state.qc_saved = false;
             }
         }
         Message::StageRequested if state.selected_map.is_some() => {
             return request_preview(state, true);
-        }
-        Message::PreviewBuilt(generation, result) if state.picker == Some(generation) => {
-            match result {
-                Ok(preview) => {
-                    let result = preview.result.clone();
-                    state.preview = Some(preview);
-                    if state.preview_for_stage {
-                        if let Some(map) = &state.selected_map {
-                            return vec![Effect::PrepareStage(generation, result, map.0.clone())];
-                        }
-                    } else {
-                        return vec![Effect::Preview(generation, result)];
-                    }
-                }
-                Err(error) => state.error = Some(error),
-            }
-            state.picker = None;
-        }
-        Message::StagePrepared(generation, result) if state.picker == Some(generation) => {
-            state.picker = None;
-            match result {
-                Ok(prepared) => {
-                    let (model, map) = *prepared;
-                    return vec![Effect::OpenStage { model, map }];
-                }
-                Err(error) => state.error = Some(error),
-            }
         }
         Message::StageSnapshotCaptured {
             position,
@@ -393,67 +433,124 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.stage_skin = skin;
             state.stage_bodygroups = bodygroups;
         }
-        Message::EngineTestRequested if !state.busy() => state.engine_test_confirmation = true,
-        Message::EngineTestDismissed => state.engine_test_confirmation = false,
-        Message::EngineTestConfirmed if !state.busy() && state.engine_test_confirmation => {
-            state.engine_test_confirmation = false;
-            if let Some(result) = state
-                .preview
-                .as_ref()
-                .map(|preview| &preview.result)
-                .or(state.result.as_ref())
-                && let Some(map) = &state.selected_map
-            {
-                let generation = state.generation.bump();
-                state.picker = Some(generation);
-                return vec![Effect::TestInGame {
-                    generation,
-                    result: result.clone(),
-                    map: map.0.clone(),
-                    skin: state.stage_skin,
-                    bodygroups: state.stage_bodygroups.clone(),
-                    placement: state.stage.clone(),
-                }];
+        Message::InstallRequested
+            if !state.busy()
+                && !state.installed_mutation_busy()
+                && state.preview_request().is_some() =>
+        {
+            state.install_confirmation = true;
+            state.install_result = None;
+            state.install_error = None;
+            state.remove_installed_confirmation = None;
+        }
+        Message::InstallDismissed => state.install_confirmation = false,
+        Message::InstallConfirmed
+            if !state.busy() && !state.installed_mutation_busy() && state.install_confirmation =>
+        {
+            state.install_confirmation = false;
+            return super::preview::install_in_game(state);
+        }
+        Message::ModelInstalled(generation, result)
+            if state.install_generation == Some(generation) =>
+        {
+            state.install_generation = None;
+            match result {
+                Ok(model) => {
+                    state
+                        .installed_models
+                        .retain(|existing| existing.directory != model.directory);
+                    state.installed_models.push(model.clone());
+                    state
+                        .installed_models
+                        .sort_by(|left, right| left.name.cmp(&right.name));
+                    state.install_result = Some(model);
+                    state.install_error = None;
+                    return refresh_installed_models(state);
+                }
+                Err(error) => state.install_error = Some(error),
             }
         }
-        Message::EngineTestPrepared(generation, result) if state.picker == Some(generation) => {
-            state.picker = None;
+        Message::InstalledModelsRequested => return refresh_installed_models(state),
+        Message::InstalledModelsLoaded(generation, result)
+            if state.installed_models_generation == Some(generation) =>
+        {
+            state.installed_models_generation = None;
             match result {
-                Ok(launch) => {
-                    let url = launch.url.clone();
-                    state.engine_test = Some(launch);
-                    return vec![Effect::LaunchGame(url)];
+                Ok(models) => {
+                    state.installed_models = models;
+                    state.installed_models_error = None;
                 }
-                Err(error) => state.error = Some(error),
+                Err(error) => state.installed_models_error = Some(error),
+            }
+        }
+        Message::RemoveInstalledRequested(path)
+            if !state.installed_mutation_busy()
+                && state
+                    .installed_models
+                    .iter()
+                    .any(|model| model.directory == path) =>
+        {
+            state.remove_installed_confirmation = Some(path);
+            state.install_confirmation = false;
+        }
+        Message::RemoveInstalledDismissed => state.remove_installed_confirmation = None,
+        Message::RemoveInstalledConfirmed if !state.installed_mutation_busy() => {
+            if let Some(path) = state.remove_installed_confirmation.take() {
+                let generation = state.generation.bump();
+                state.remove_installed_generation = Some((generation, path.clone()));
+                state.installed_models_generation = None;
+                state.installed_models_error = None;
+                return vec![Effect::RemoveInstalledModel(generation, path)];
+            }
+        }
+        Message::InstalledModelRemoved(generation, path, result)
+            if state
+                .remove_installed_generation
+                .as_ref()
+                .is_some_and(|(active, directory)| *active == generation && directory == &path) =>
+        {
+            state.remove_installed_generation = None;
+            match result {
+                Ok(()) => {
+                    state
+                        .installed_models
+                        .retain(|model| model.directory != path);
+                    if state
+                        .install_result
+                        .as_ref()
+                        .is_some_and(|model| model.directory == path)
+                    {
+                        state.install_result = None;
+                    }
+                    return refresh_installed_models(state);
+                }
+                Err(error) => state.installed_models_error = Some(error),
             }
         }
         Message::StaticPropChanged(value) if !state.busy() => {
             state.static_prop = value;
+            state.model_type_edited = true;
             clear_outcome(state);
         }
         Message::AutomaticAxesChanged(value) if !state.busy() => {
             state.automatic_axes = value;
             clear_outcome(state);
         }
-        Message::GenerateCollisionChanged(value) if !state.busy() => {
-            state.generate_collision = value;
-            clear_outcome(state);
-        }
         Message::CollisionMassChanged(value) if !state.busy() => {
             state.collision_mass = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::SurfacePropertyChanged(value) if !state.busy() => {
             state.surface_property = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::ExportMaterialsChanged(value) if !state.busy() => {
             state.export_materials = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::OverwriteChanged(value) if !state.busy() => {
             state.overwrite = value;
-            clear_outcome(state);
+            clear_export_outcome(state);
         }
         Message::ExportRequested | Message::BlenderExportRequested => {
             let Some(mut request) = state.request() else {
@@ -465,7 +562,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 }
                 request.target = ExportTarget::Blender;
             }
-            clear_outcome(state);
+            clear_export_outcome(state);
             let generation = state.generation.bump();
             let cancel = Arc::new(AtomicBool::new(false));
             state.running = Some(RunningExport {
@@ -532,22 +629,25 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             }
         }
         Message::PreviewRequested => return request_preview(state, false),
-        Message::PreviewPrepared(generation, result) if state.picker == Some(generation) => {
-            state.picker = None;
-            match result {
-                Ok(request) => return vec![Effect::OpenPreview(request)],
-                Err(error) => state.error = Some(error),
-            }
-        }
         _ => {}
     }
     vec![]
+}
+
+fn refresh_installed_models(state: &mut State) -> Vec<Effect> {
+    if state.installed_mutation_busy() || state.installed_models_generation.is_some() {
+        return vec![];
+    }
+    let generation = state.generation.bump();
+    state.installed_models_generation = Some(generation);
+    vec![Effect::ListInstalledModels(generation)]
 }
 
 fn select_source(state: &mut State, path: std::path::PathBuf) -> Vec<Effect> {
     let Some(kind) = SourceKind::of(&path) else {
         return vec![];
     };
+    state.install_pending = false;
     state.model_name = if kind == SourceKind::Mesh {
         path.file_stem()
             .unwrap_or_default()
@@ -562,13 +662,13 @@ fn select_source(state: &mut State, path: std::path::PathBuf) -> Vec<Effect> {
     state.overwrite = false;
     state.source = Some(path.clone());
     state.static_prop = false;
+    state.model_type_edited = false;
     state.automatic_axes = true;
-    state.generate_collision = false;
+    state.collision = super::collision::Editor::for_kind(kind);
     state.collision_mass = "1".into();
     state.surface_property.clear();
     state.stage_skin = 0;
     state.stage_bodygroups.clear();
-    state.engine_test = None;
     state.inspection = None;
     state.animations.clear();
     state.skins.clear();
@@ -581,6 +681,13 @@ fn select_source(state: &mut State, path: std::path::PathBuf) -> Vec<Effect> {
     state.orientation = std::array::from_fn(|_| "0".into());
     state.qc_path = None;
     state.stage = None;
+    state.preview = None;
+    state.previous_preview = None;
+    state.displayed_transform = None;
+    state.preview_for_stage = false;
+    state.workspace_tab = super::WorkspaceTab::Model;
+    state.pane_open = true;
+    state.advanced_open = state.is_qc();
     clear_outcome(state);
     let generation = state.generation.bump();
     state.inspection_generation = Some(generation);
@@ -609,57 +716,60 @@ fn edit_animation(
 }
 
 pub(super) fn clear_outcome(state: &mut State) {
+    clear_export_outcome(state);
+    state.preview_dirty = true;
+    state.preview_revision.bump();
+    if let Some(job) = &state.preview_job {
+        job.cancel.store(true, Ordering::Release);
+    }
+}
+
+fn clear_export_outcome(state: &mut State) {
+    state.export_revision.bump();
+    state.preview_export_dirty = true;
     state.result = None;
     state.error = None;
     state.blender_launch_error = None;
     state.cancelled = false;
     state.qc_saved = false;
-    state.preview = None;
-    state.engine_test = None;
-    state.engine_test_confirmation = false;
+    state.install_confirmation = false;
 }
 
 fn request_preview(state: &mut State, stage: bool) -> Vec<Effect> {
-    let Some(request) = state.preview_request() else {
-        return vec![];
-    };
-    state.preview_for_stage = stage;
-    state.error = None;
-    let generation = state.generation.bump();
-    state.picker = Some(generation);
-    if let Some(result) = state
-        .preview
-        .as_ref()
-        .map(|preview| &preview.result)
-        .or(state.result.as_ref())
-        && result.compiled
-    {
-        return if stage {
-            state
-                .selected_map
-                .as_ref()
-                .map(|map| Effect::PrepareStage(generation, result.clone(), map.0.clone()))
-                .into_iter()
-                .collect()
-        } else {
-            vec![Effect::Preview(generation, result.clone())]
-        };
-    }
-    vec![Effect::BuildPreview(generation, request)]
+    super::preview::request(state, stage)
 }
 
 fn set_material(state: &mut State, replacement: Option<SkinMaterial>) {
+    let live_tint = matches!(replacement, Some(SkinMaterial::Tint { .. }))
+        || (replacement.is_none()
+            && state
+                .selected_skin
+                .and_then(|index| state.skins.get(index))
+                .and_then(|skin| {
+                    state
+                        .selected_material
+                        .as_ref()
+                        .and_then(|material| skin.replacements.get(material))
+                })
+                .is_some_and(|material| matches!(material, SkinMaterial::Tint { .. })));
     if let Some(skin) = state
         .selected_skin
         .and_then(|index| state.skins.get_mut(index))
         && let Some(material) = &state.selected_material
     {
+        if skin.replacements.get(material) == replacement.as_ref() {
+            return;
+        }
         if let Some(replacement) = replacement {
             skin.replacements.insert(material.clone(), replacement);
         } else {
             skin.replacements.remove(material);
         }
-        clear_outcome(state);
+        if live_tint {
+            clear_export_outcome(state);
+        } else {
+            clear_outcome(state);
+        }
         sync_material_editor(state);
     }
 }
@@ -700,10 +810,174 @@ mod tests {
     use crate::generation::Generation;
 
     fn ready() -> State {
-        let mut state = State::default();
+        let mut state = State {
+            route_active: false,
+            ..State::default()
+        };
         update(&mut state, Message::SourceDropped("cube.smd".into()));
         state.destination = Some("out".into());
         state
+    }
+
+    fn installed_model(name: &str) -> super::super::InstalledModel {
+        super::super::InstalledModel {
+            directory: format!("GarrysMod/garrysmod/addons/{name}").into(),
+            name: name.into(),
+            model: format!("models/{name}.mdl"),
+            bytes: 512,
+            modified: false,
+        }
+    }
+
+    fn install_ready() -> State {
+        let mut state = ready();
+        state.destination = None;
+        let directory = Arc::new(tempfile::tempdir().unwrap());
+        state.preview = Some(super::super::PreviewBuild {
+            result: super::super::ExportResult {
+                directory: directory.path().into(),
+                files: vec![directory.path().join("models/prop.mdl")],
+                bytes: 512,
+                warnings: vec![],
+                compiled: true,
+            },
+            _directory: directory,
+        });
+        state.preview_dirty = false;
+        state.preview_export_dirty = false;
+        state.displayed_transform = Some((1.0, [0.0; 3]));
+        state
+    }
+
+    #[test]
+    fn installation_requires_confirmation_and_tracks_copy_across_source_and_route_changes() {
+        let mut state = install_ready();
+        let previous = installed_model("previous");
+        state.installed_models = vec![previous.clone()];
+        let refresh = update(&mut state, Message::InstalledModelsRequested);
+        let [Effect::ListInstalledModels(stale_list)] = refresh.as_slice() else {
+            panic!("expected installed model discovery");
+        };
+        assert!(update(&mut state, Message::InstallConfirmed).is_empty());
+        assert!(state.install_generation.is_none());
+        update(&mut state, Message::InstallRequested);
+        assert!(state.install_confirmation);
+        let effects = update(&mut state, Message::InstallConfirmed);
+        let [Effect::InstallModel { generation, result }] = effects.as_slice() else {
+            panic!("expected the confirmed copy without a map or export folder");
+        };
+        assert!(result.compiled);
+        assert!(state.install_result.is_none());
+        assert!(state.selected_map.is_none());
+        let generation = *generation;
+        update(&mut state, Message::RouteExited);
+        update(&mut state, Message::SourceDropped("other.fbx".into()));
+        update(&mut state, Message::ImportRequested);
+        let picker = state.picker;
+        let installed = installed_model("current");
+        update(
+            &mut state,
+            Message::ModelInstalled(generation.next(), Ok(installed.clone())),
+        );
+        assert_eq!(state.installed_models, vec![previous.clone()]);
+        assert_eq!(state.install_generation, Some(generation));
+        update(
+            &mut state,
+            Message::ModelInstalled(generation, Ok(installed.clone())),
+        );
+        assert_eq!(state.picker, picker);
+        assert!(state.install_generation.is_none());
+        assert_eq!(state.install_result, Some(installed.clone()));
+        assert!(state.installed_models.contains(&previous));
+        assert!(state.installed_models.contains(&installed));
+        update(
+            &mut state,
+            Message::InstalledModelsLoaded(*stale_list, Ok(vec![])),
+        );
+        assert!(state.installed_models.contains(&installed));
+    }
+
+    #[test]
+    fn failed_installation_preserves_existing_models_and_reports_no_success() {
+        let mut state = install_ready();
+        let previous = installed_model("previous");
+        state.installed_models = vec![previous.clone()];
+        update(&mut state, Message::InstallRequested);
+        update(&mut state, Message::InstallConfirmed);
+        let generation = state.install_generation.unwrap();
+        update(
+            &mut state,
+            Message::ModelInstalled(generation, Err("destination is not writable".into())),
+        );
+        assert!(state.install_result.is_none());
+        assert!(state.install_generation.is_none());
+        assert_eq!(state.installed_models, vec![previous]);
+        assert_eq!(
+            state.install_error.as_deref(),
+            Some("destination is not writable")
+        );
+    }
+
+    #[test]
+    fn removal_waits_for_worker_confirmation_and_keeps_other_models() {
+        let mut state = ready();
+        let first = installed_model("first");
+        let second = installed_model("second");
+        state.installed_models = vec![first.clone(), second.clone()];
+        assert!(update(&mut state, Message::RemoveInstalledConfirmed).is_empty());
+        update(
+            &mut state,
+            Message::RemoveInstalledRequested("unmanaged".into()),
+        );
+        assert!(state.remove_installed_confirmation.is_none());
+        update(
+            &mut state,
+            Message::RemoveInstalledRequested(first.directory.clone()),
+        );
+        update(&mut state, Message::RemoveInstalledDismissed);
+        assert!(update(&mut state, Message::RemoveInstalledConfirmed).is_empty());
+        update(
+            &mut state,
+            Message::RemoveInstalledRequested(first.directory.clone()),
+        );
+        let effects = update(&mut state, Message::RemoveInstalledConfirmed);
+        let [Effect::RemoveInstalledModel(generation, path)] = effects.as_slice() else {
+            panic!("expected confirmed removal");
+        };
+        assert_eq!(path, &first.directory);
+        assert_eq!(state.installed_models, vec![first.clone(), second.clone()]);
+        let generation = *generation;
+        update(&mut state, Message::RouteExited);
+        update(&mut state, Message::SourceDropped("other.fbx".into()));
+        update(
+            &mut state,
+            Message::InstalledModelRemoved(generation.next(), first.directory.clone(), Ok(())),
+        );
+        assert!(state.remove_installed_generation.is_some());
+        update(
+            &mut state,
+            Message::InstalledModelRemoved(
+                generation,
+                first.directory.clone(),
+                Err("access denied".into()),
+            ),
+        );
+        assert_eq!(state.installed_models, vec![first.clone(), second.clone()]);
+        assert_eq!(
+            state.installed_models_error.as_deref(),
+            Some("access denied")
+        );
+        update(
+            &mut state,
+            Message::RemoveInstalledRequested(first.directory.clone()),
+        );
+        update(&mut state, Message::RemoveInstalledConfirmed);
+        let generation = state.remove_installed_generation.as_ref().unwrap().0;
+        update(
+            &mut state,
+            Message::InstalledModelRemoved(generation, first.directory, Ok(())),
+        );
+        assert_eq!(state.installed_models, vec![second]);
     }
 
     fn load_qc(state: &mut State) {
@@ -712,6 +986,54 @@ mod tests {
             state,
             Message::QcLoaded(generation, Ok("$body body cube.smd\n".into())),
         );
+    }
+
+    #[test]
+    fn failed_refresh_preserves_the_last_successful_build_and_can_retry() {
+        let mut state = ready();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
+        let result = super::super::ExportResult {
+            directory: directory.path().to_path_buf(),
+            files: vec![directory.path().join("models/model.mdl")],
+            bytes: 1,
+            warnings: vec![],
+            compiled: true,
+        };
+        state.preview = Some(super::super::PreviewBuild {
+            result: result.clone(),
+            _directory: directory,
+        });
+        state.preview_dirty = false;
+        update(&mut state, Message::AutomaticAxesChanged(false));
+        assert_eq!(state.preview.as_ref().unwrap().result, result);
+        let effects = update(&mut state, Message::PreviewRequested);
+        let [Effect::BuildPreview(generation, request, _)] = effects.as_slice() else {
+            panic!("edited options must rebuild the model");
+        };
+        assert!(!request.automatic_axes);
+        let replacement_directory = Arc::new(tempfile::tempdir().unwrap());
+        update(
+            &mut state,
+            Message::PreviewBuilt(
+                *generation,
+                Ok(super::super::PreviewBuild {
+                    result: super::super::ExportResult {
+                        directory: replacement_directory.path().to_path_buf(),
+                        ..result.clone()
+                    },
+                    _directory: replacement_directory,
+                }),
+            ),
+        );
+        assert!(state.previous_preview.is_some());
+        update(&mut state, Message::PreviewFailed("decode failed".into()));
+        assert_eq!(state.preview.as_ref().unwrap().result, result);
+        assert!(state.preview_dirty);
+        assert!(!state.busy());
+        assert!(matches!(
+            update(&mut state, Message::PreviewRequested).as_slice(),
+            [Effect::BuildPreview(..)]
+        ));
     }
 
     #[test]
@@ -802,7 +1124,7 @@ mod tests {
         assert!(state.error.is_none());
         assert!(matches!(
             update(&mut state, Message::PreviewRequested).as_slice(),
-            [Effect::BuildPreview(_, request)]
+            [Effect::BuildPreview(_, request, _)]
                 if request.source == std::path::Path::new("prop.mdl")
                     && request.target == ExportTarget::Source
         ));
@@ -834,7 +1156,10 @@ mod tests {
     #[test]
     fn physics_edits_are_shared_by_export_preview_and_qc_save() {
         let mut state = ready();
-        update(&mut state, Message::GenerateCollisionChanged(true));
+        update(
+            &mut state,
+            Message::CollisionModeChanged(super::super::CollisionMode::Automatic),
+        );
         update(&mut state, Message::CollisionMassChanged(" 1250.5 ".into()));
         update(
             &mut state,
@@ -844,7 +1169,10 @@ mod tests {
             let request = request.expect("valid physics options");
             assert_eq!(request.collision_mass, 1250.5);
             assert_eq!(request.surface_property.as_deref(), Some("metal"));
-            assert!(request.generate_collision);
+            assert!(matches!(
+                request.collision,
+                gmpublished_backend::model_compile::ModelCollision::Automatic(_)
+            ));
         }
         let effects = update(&mut state, Message::ExportRequested);
         assert!(matches!(&effects[..], [Effect::Export(_, _, _)]));
@@ -857,14 +1185,20 @@ mod tests {
     #[test]
     fn invalid_physics_blocks_all_builds_and_new_imports_clear_physics_edits() {
         let mut state = ready();
-        update(&mut state, Message::GenerateCollisionChanged(true));
+        update(
+            &mut state,
+            Message::CollisionModeChanged(super::super::CollisionMode::Automatic),
+        );
         for value in ["", "0", "-3", "NaN", "inf", "1e99"] {
             update(&mut state, Message::CollisionMassChanged(value.into()));
             assert!(!state.can_export(), "mass: {value}");
             assert!(update(&mut state, Message::PreviewRequested).is_empty());
             assert!(update(&mut state, Message::SaveQcRequested).is_empty());
         }
-        update(&mut state, Message::GenerateCollisionChanged(false));
+        update(
+            &mut state,
+            Message::CollisionModeChanged(super::super::CollisionMode::None),
+        );
         assert_eq!(state.request().unwrap().collision_mass, 1.0);
         for value in ["metal wood", "metal\nwood", "\"metal\"", "x{}", "../metal"] {
             update(&mut state, Message::SurfacePropertyChanged(value.into()));
@@ -943,7 +1277,7 @@ mod tests {
         update(&mut state, Message::RouteExited);
         update(
             &mut state,
-            Message::Inspected(*validation, Ok(inspection_fixture())),
+            Message::Inspected(*validation, Ok(Box::new(inspection_fixture()))),
         );
         assert!(state.qc_editor.validated);
         assert_eq!(state.inspection.as_ref().unwrap().materials, ["paint"]);
@@ -953,7 +1287,7 @@ mod tests {
         update(&mut state, Message::RouteExited);
         update(
             &mut state,
-            Message::Inspected(inspecting, Ok(inspection_fixture())),
+            Message::Inspected(inspecting, Ok(Box::new(inspection_fixture()))),
         );
         assert_eq!(state.animations[0].name, "idle");
         assert_eq!(state.inspection.as_ref().unwrap().materials, ["paint"]);
@@ -962,6 +1296,9 @@ mod tests {
     fn inspection_fixture() -> gmpublished_backend::model_compile::ModelInspection {
         use gmpublished_backend::model_compile::{AnimationSettings, ModelInspection};
         ModelInspection {
+            source_model: None,
+            collision_parts: vec![],
+            collision_physics: None,
             parts: vec![],
             materials: vec!["paint".into()],
             material_directories: vec![],
@@ -984,6 +1321,9 @@ mod tests {
     fn authored_skins_keep_indices_and_change_only_the_selected_material() {
         let mut state = ready();
         state.inspection = Some(gmpublished_backend::model_compile::ModelInspection {
+            source_model: None,
+            collision_parts: vec![],
+            collision_physics: None,
             parts: vec![],
             animations: vec![],
             materials: vec!["paint".into(), "glass".into()],
@@ -1021,13 +1361,14 @@ mod tests {
         update(&mut state, Message::SourceDropped("car.fbx".into()));
         assert!(!state.can_export());
         let effects = update(&mut state, Message::PreviewRequested);
-        let Effect::BuildPreview(_, request) = &effects[0] else {
+        let Effect::BuildPreview(_, request, _) = &effects[0] else {
             panic!("preview build");
         };
         assert_eq!(request.source, std::path::PathBuf::from("car.fbx"));
         assert!(request.destination.as_os_str().is_empty());
         assert!(request.automatic_axes);
-        assert!(state.busy());
+        assert!(state.preview_busy());
+        assert!(!state.busy());
         assert!(update(&mut state, Message::ExportRequested).is_empty());
     }
 
@@ -1096,6 +1437,11 @@ mod tests {
         assert!(!state.request().unwrap().automatic_axes);
         assert!(!state.qc_request().unwrap().automatic_axes);
         update(&mut state, Message::SourceDropped("car.glb".into()));
+        let generation = state.inspection_generation.unwrap();
+        update(
+            &mut state,
+            Message::Inspected(generation, Ok(Box::new(inspection_fixture()))),
+        );
         assert!(state.preview_request().unwrap().automatic_axes);
         assert_eq!(state.orientation, ["0", "0", "0"]);
     }
@@ -1105,7 +1451,10 @@ mod tests {
         let mut state = ready();
         update(&mut state, Message::StaticPropChanged(true));
         update(&mut state, Message::OrientationChanged(2, "90".into()));
-        update(&mut state, Message::GenerateCollisionChanged(true));
+        update(
+            &mut state,
+            Message::CollisionModeChanged(super::super::CollisionMode::Automatic),
+        );
         update(
             &mut state,
             Message::MapSelected(MapChoice("gm_construct.bsp".into())),
@@ -1121,7 +1470,10 @@ mod tests {
         );
         let request = state.qc_request().expect("QC request");
         assert_eq!(request.orientation, [0.0, 0.0, 90.0]);
-        assert!(request.generate_collision);
+        assert!(matches!(
+            request.collision,
+            gmpublished_backend::model_compile::ModelCollision::Automatic(_)
+        ));
         let scene = state.stage.as_ref().expect("scene");
         assert_eq!(scene.position, [1.0, 2.0, 3.0]);
         assert_eq!(scene.selected_skin, 2);
@@ -1182,13 +1534,18 @@ mod tests {
             state,
             Message::Inspected(
                 generation,
-                Ok(gmpublished_backend::model_compile::ModelInspection {
-                    parts: vec![],
-                    animations,
-                    materials: vec![],
-                    material_directories: vec![],
-                    skins: vec![],
-                }),
+                Ok(Box::new(
+                    gmpublished_backend::model_compile::ModelInspection {
+                        source_model: None,
+                        collision_parts: vec![],
+                        collision_physics: None,
+                        parts: vec![],
+                        animations,
+                        materials: vec![],
+                        material_directories: vec![],
+                        skins: vec![],
+                    },
+                )),
             ),
         );
     }
@@ -1367,13 +1724,18 @@ mod tests {
             &mut state,
             Message::Inspected(
                 stale,
-                Ok(gmpublished_backend::model_compile::ModelInspection {
-                    parts: vec![],
-                    animations: vec![],
-                    materials: vec![],
-                    material_directories: vec![],
-                    skins: vec![],
-                }),
+                Ok(Box::new(
+                    gmpublished_backend::model_compile::ModelInspection {
+                        source_model: None,
+                        collision_parts: vec![],
+                        collision_physics: None,
+                        parts: vec![],
+                        animations: vec![],
+                        materials: vec![],
+                        material_directories: vec![],
+                        skins: vec![],
+                    },
+                )),
             ),
         );
         assert_eq!(state.animations[0].name, "new_name");

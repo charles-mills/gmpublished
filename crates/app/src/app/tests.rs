@@ -2327,7 +2327,7 @@ fn file_preview_request() -> preview_model::PreviewRequest {
 }
 
 #[test]
-fn model_preview_restores_selection_and_keeps_it_after_closing() {
+fn model_workspace_preserves_selection_without_replacing_archive_previews() {
     use crate::features::model_manager;
     use gmpublished_domain::math::Vec3;
 
@@ -2335,6 +2335,10 @@ fn model_preview_restores_selection_and_keeps_it_after_closing() {
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
         shell::Route::Models,
     )));
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::SourceDropped("test.smd".into()),
+    );
     let _task = app.update(RootMessage::ModelManager(
         model_manager::Message::PreviewSelectionCaptured {
             skin: 1,
@@ -2343,10 +2347,14 @@ fn model_preview_restores_selection_and_keeps_it_after_closing() {
     ));
     let mut request = file_preview_request();
     request.entry_path = "models/test.mdl".into();
-    let _task = app.update(RootMessage::FilePreview(
-        file_preview::Message::OpenRequested(request),
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewRequested,
+    );
+    let _task = app.update(RootMessage::ModelPreview(
+        file_preview::Message::WorkspaceOpenRequested(request),
     ));
-    let request = app.state.features.file_preview.request().unwrap().clone();
+    let request = app.state.features.model_preview.request().unwrap().clone();
     let data = preview_model::PreviewData::from_request(
         &request,
         preview_model::PreviewContent::Model(Arc::new(preview_model::ModelPreview {
@@ -2375,45 +2383,213 @@ fn model_preview_restores_selection_and_keeps_it_after_closing() {
             bodygroups: vec![3],
         })),
     );
-    let _task = app.update(RootMessage::FilePreview(file_preview::Message::Loaded(
+    let _task = app.update(RootMessage::ModelPreview(file_preview::Message::Loaded(
         request.request_id,
         Box::new(Ok(data.clone())),
     )));
-    assert_eq!(app.state.features.file_preview.selected_skin(), 1);
-    assert_eq!(app.state.features.file_preview.bodygroup_choices(), &[2]);
-    let _task = app.update(RootMessage::FilePreview(
+    assert_eq!(app.state.features.model_preview.selected_skin(), 1);
+    assert_eq!(app.state.features.model_preview.bodygroup_choices(), &[2]);
+    let _task = app.update(RootMessage::ModelPreview(
         file_preview::Message::SkinSelected(0),
     ));
-    let _task = app.apply_file_preview_message(file_preview::Message::BackRequested);
-    assert_eq!(
-        app.state.features.model_manager.preview_selection(),
-        (0, vec![2])
-    );
     app.capture_model_stage();
+    let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
+        shell::Route::Downloader,
+    )));
+    assert!(app.state.features.model_preview.is_open());
     assert_eq!(
         app.state.features.model_manager.preview_selection(),
         (0, vec![2])
     );
+    let _task = app
+        .apply_file_preview_message(file_preview::Message::OpenRequested(file_preview_request()));
+    assert!(app.state.features.file_preview.is_open());
+    let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
+        shell::Route::Models,
+    )));
 
-    let _task = app.update(RootMessage::FilePreview(
-        file_preview::Message::OpenRequested(request),
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewRequested,
+    );
+    let _task = app.update(RootMessage::ModelPreview(
+        file_preview::Message::WorkspaceOpenRequested(request),
     ));
-    let request = app.state.features.file_preview.request().unwrap().clone();
-    let _task = app.update(RootMessage::FilePreview(file_preview::Message::Loaded(
+    let request = app.state.features.model_preview.request().unwrap().clone();
+    let _task = app.update(RootMessage::ModelPreview(file_preview::Message::Loaded(
         request.request_id,
         Box::new(Ok(data)),
     )));
-    assert_eq!(app.state.features.file_preview.bodygroup_choices(), &[2]);
+    assert_eq!(app.state.features.model_preview.bodygroup_choices(), &[2]);
     let _task = app.handle_file_drop("replacement.smd".into());
-    assert!(!app.state.features.file_preview.is_open());
-    let _task = app.update(RootMessage::ModelManager(
-        model_manager::Message::SourceDropped("replacement.smd".into()),
-    ));
+    assert!(!app.state.features.model_preview.is_open());
+    assert!(app.state.features.file_preview.is_open());
     app.capture_model_stage();
     assert_eq!(
         app.state.features.model_manager.preview_selection(),
         (0, vec![])
     );
+}
+
+#[test]
+fn live_skin_survives_playback_and_route_changes_until_another_skin_is_selected() {
+    use crate::features::model_manager;
+    use gmpublished_backend::model_compile::ModelInspection;
+
+    let mut app = App::new_for_test();
+    let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
+        shell::Route::Models,
+    )));
+    let model = crate::model_animation_test_support::animated_model();
+    let material = model.scene.materials[0].name.clone();
+    let effects = model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::SourceDropped("animated.smd".into()),
+    );
+    let [model_manager::Effect::Inspect(generation, _)] = effects.as_slice() else {
+        panic!("source inspection");
+    };
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::Inspected(
+            *generation,
+            Ok(Box::new(ModelInspection {
+                source_model: None,
+                collision_parts: vec![],
+                collision_physics: None,
+                parts: vec![],
+                animations: vec![],
+                materials: vec![material.clone()],
+                material_directories: vec![],
+                skins: vec![vec![material.clone()]],
+            })),
+        ),
+    );
+    let _task = app.apply_model_preview_message(file_preview::Message::WorkspaceOpenRequested(
+        file_preview_request(),
+    ));
+    let request = app.state.features.model_preview.request().unwrap().clone();
+    let data = preview_model::PreviewData::from_request(
+        &request,
+        preview_model::PreviewContent::Model(model),
+    );
+    let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
+        request.request_id,
+        Box::new(Ok(data)),
+    ));
+    let _task = app.apply_model_manager_message(model_manager::Message::SkinAdded("Paint".into()));
+    let _task = app.apply_model_manager_message(model_manager::Message::MaterialSelected(material));
+    let _task = app.apply_model_manager_message(model_manager::Message::MaterialTintChanged(
+        "#123456".into(),
+    ));
+    assert!(!app.state.features.model_manager.preview_busy());
+    let tints = app
+        .state
+        .features
+        .model_preview
+        .workspace_material_tints()
+        .to_vec();
+    assert_eq!(tints.len(), 1);
+    let _task = app.apply_model_manager_message(model_manager::Message::Viewer(
+        file_preview::Message::ModelPlaybackToggled,
+    ));
+    assert_eq!(app.state.features.model_manager.preview_selection().0, 1);
+    assert_eq!(
+        app.state.features.model_preview.workspace_material_tints(),
+        tints
+    );
+    for route in [shell::Route::Downloader, shell::Route::Models] {
+        let _task = app.update(RootMessage::Shell(shell::Message::Navigate(route)));
+        assert_eq!(app.state.features.model_manager.preview_selection().0, 1);
+        assert_eq!(
+            app.state.features.model_preview.workspace_material_tints(),
+            tints
+        );
+    }
+    let _task = app.apply_model_manager_message(model_manager::Message::Viewer(
+        file_preview::Message::SkinSelected(0),
+    ));
+    assert_eq!(app.state.features.model_manager.preview_selection().0, 0);
+    assert!(
+        app.state
+            .features
+            .model_preview
+            .workspace_material_tints()
+            .is_empty()
+    );
+}
+
+#[test]
+fn importing_a_source_prepares_the_workspace_before_choosing_an_export_folder() {
+    use crate::features::model_manager;
+    use gmpublished_backend::model_compile::ModelInspection;
+    let mut app = App::new_for_test();
+    let effects = model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::SourceDropped("model.glb".into()),
+    );
+    let [model_manager::Effect::Inspect(generation, _)] = effects.as_slice() else {
+        panic!("inspection");
+    };
+    let _task = app.update(RootMessage::ModelManager(
+        model_manager::Message::Inspected(
+            *generation,
+            Ok(Box::new(ModelInspection {
+                source_model: None,
+                collision_physics: None,
+                collision_parts: vec![],
+                parts: vec![],
+                animations: vec![],
+                materials: vec!["paint".into()],
+                material_directories: vec![],
+                skins: vec![],
+            })),
+        ),
+    ));
+    assert!(app.state.features.model_manager.preview_busy());
+    assert!(!app.state.features.model_manager.busy());
+    assert!(!app.state.features.model_manager.can_export());
+    let _task = app.apply_model_manager_message(model_manager::Message::RouteExited);
+    assert!(app.state.features.model_manager.preview_busy());
+    assert!(!app.state.features.model_manager.busy());
+    let _task = app.apply_model_manager_message(model_manager::Message::PreviewFailed(
+        "invalid model".into(),
+    ));
+    assert!(!app.state.features.model_manager.busy());
+    assert!(!app.state.features.model_manager.preview_busy());
+}
+
+#[test]
+fn replacing_a_source_during_decode_releases_the_cancelled_preview_job() {
+    use crate::features::model_manager;
+    let mut app = App::new_for_test();
+    let _task =
+        app.apply_model_manager_message(model_manager::Message::SourceDropped("old.smd".into()));
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewRequested,
+    );
+    let _task = app.apply_model_preview_message(file_preview::Message::WorkspaceOpenRequested(
+        file_preview_request(),
+    ));
+    let loading = app.state.features.model_preview_loading.unwrap();
+    let _task =
+        app.apply_model_manager_message(model_manager::Message::SourceDropped("new.smd".into()));
+    assert!(!app.state.features.model_preview.is_open());
+    assert!(app.state.features.model_manager.preview_busy());
+    let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
+        loading,
+        Box::new(Err(preview_model::PreviewLoadError::Decode(
+            "old source failed".into(),
+        ))),
+    ));
+    assert!(!app.state.features.model_manager.preview_busy());
+    assert_eq!(
+        app.state.features.model_manager.source_path(),
+        Some(std::path::Path::new("new.smd"))
+    );
+    assert_eq!(app.state.features.model_preview_loading, None);
+    assert!(!app.state.features.model_preview.is_open());
 }
 
 fn installed_preview_target() -> installed_addons::PreviewTarget {

@@ -2,8 +2,12 @@ use super::{Effect, Message, State};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
-        Message::StageRequested { model, map } => {
-            let (model, map) = state.begin_stage(*model, *map);
+        Message::WorkspaceLoadCancelled => {
+            state.cancel_workspace_load();
+            vec![]
+        }
+        Message::WorkspaceStageRequested { model, map } => {
+            let (model, map) = state.begin_workspace_stage(*model, *map);
             vec![
                 Effect::AudioStopRequested,
                 Effect::LoadStage {
@@ -72,6 +76,10 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::OpenRequested(request) => {
             let request = state.begin_open(request);
+            vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
+        }
+        Message::WorkspaceOpenRequested(request) => {
+            let request = state.begin_workspace_open(request);
             vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
         }
         Message::LoadStageChanged(request_id, stage) => {
@@ -200,6 +208,10 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::OrbitPoseChanged(pose) => {
             state.set_orbit_pose(pose);
+            Vec::new()
+        }
+        Message::ModelCameraResetRequested => {
+            state.reset_model_camera();
             Vec::new()
         }
         Message::ParticleSystemSelected(index) => {

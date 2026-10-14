@@ -2,8 +2,8 @@ use std::fs;
 use std::sync::atomic::AtomicBool;
 
 use gmpublished_backend::model_compile::{
-    ModelCompileError, ModelCompileRequest, ModelOutputKind, compile_model,
-    compile_model_with_cancel,
+    CollisionDetail, ModelCollision, ModelCompileError, ModelCompileRequest, ModelOutputKind,
+    compile_model, compile_model_with_cancel,
 };
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -104,7 +104,7 @@ fn direct_gltf_converts_metres_corrects_y_up_and_keeps_collision_aligned() {
     let mut request = ModelCompileRequest::new(source, root.path().join("auto"));
     request.static_prop = true;
     request.export_materials = false;
-    request.generate_collision = true;
+    request.collision = ModelCollision::Automatic(CollisionDetail::Simple);
     let output = compile_model(&request).unwrap();
     let bytes = |kind| {
         fs::read(
@@ -153,7 +153,7 @@ fn direct_gltf_converts_metres_corrects_y_up_and_keeps_collision_aligned() {
     }
     request.automatic_axes = false;
     request.destination = root.path().join("raw");
-    request.generate_collision = false;
+    request.collision = ModelCollision::Existing;
     let output = compile_model(&request).unwrap();
     let vvd = vformats::mdl::parse_vvd(
         &fs::read(
@@ -764,7 +764,7 @@ fn generated_convex_collision_matches_final_rotated_mesh_and_model_checksum() {
     let mut request = ModelCompileRequest::new(source, root.path().join("collision"));
     request.static_prop = true;
     request.orientation = [90.0, 0.0, 0.0];
-    request.generate_collision = true;
+    request.collision = ModelCollision::Automatic(CollisionDetail::Simple);
     request.export_materials = false;
     let output = compile_model(&request).unwrap();
     let phy_bytes = fs::read(
@@ -841,7 +841,7 @@ fn prop_mass_and_surface_are_consistent_in_model_and_collision_files() {
     let (root, source) = fixture();
     let mut request = ModelCompileRequest::new(source, root.path().join("physics"));
     request.export_materials = false;
-    request.generate_collision = true;
+    request.collision = ModelCollision::Automatic(CollisionDetail::Simple);
     request.collision_mass = 37.5;
     request.surface_property = Some("painted_metal".into());
     let output = compile_model(&request).unwrap();
@@ -870,7 +870,7 @@ fn prop_mass_and_surface_are_consistent_in_model_and_collision_files() {
     assert!(text.contains("\"surfaceprop\" \"painted_metal\""));
 
     request.destination = root.path().join("no_collision");
-    request.generate_collision = false;
+    request.collision = ModelCollision::Existing;
     request.collision_mass = f32::NAN;
     let output = compile_model(&request).unwrap();
     assert!(
@@ -899,7 +899,7 @@ fn tiny_total_mass_keeps_precision_and_studiomdl_solid_mass_floor() {
     let (root, source) = fixture();
     let mut request = ModelCompileRequest::new(source, root.path().join("tiny_mass"));
     request.export_materials = false;
-    request.generate_collision = true;
+    request.collision = ModelCollision::Automatic(CollisionDetail::Simple);
     request.collision_mass = 1e-7;
     let output = compile_model(&request).unwrap();
     let bytes = |kind| {
@@ -930,7 +930,7 @@ fn invalid_prop_physics_options_publish_nothing() {
     let (root, source) = fixture();
     let mut request = ModelCompileRequest::new(source, root.path().join("invalid_physics"));
     request.export_materials = false;
-    request.generate_collision = true;
+    request.collision = ModelCollision::Automatic(CollisionDetail::Simple);
     for mass in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         request.collision_mass = mass;
         assert!(matches!(
@@ -976,14 +976,14 @@ fn authored_descriptions_reject_automatic_physics_overrides() {
         .unwrap();
         let mut request = ModelCompileRequest::new(source, root.path().join("override"));
         request.export_materials = false;
-        request.generate_collision = true;
+        request.collision = ModelCollision::Automatic(CollisionDetail::Simple);
         request.collision_mass = 10.0;
         assert!(matches!(
             compile_model(&request),
             Err(ModelCompileError::InvalidOption(_))
         ));
         assert!(!request.destination.exists());
-        request.generate_collision = false;
+        request.collision = ModelCollision::Existing;
         request.surface_property = Some("metal".into());
         assert!(matches!(
             compile_model(&request),
@@ -1032,7 +1032,10 @@ fn native_vtf_skin_texture_preserves_the_original_file_and_mipmaps() {
 }
 
 #[test]
-fn automatic_collision_rejects_multi_bone_rigs_before_publication() {
+fn multi_bone_prop_collision_matches_playback_and_survives_qc_export() {
+    use gmpublished_backend::model_decompile::load_animation_preview;
+    use gmpublished_backend::model_project::save_model_qc;
+
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("rig.smd");
     fs::write(
@@ -1041,20 +1044,59 @@ fn automatic_collision_rejects_multi_bone_rigs_before_publication() {
     )
     .unwrap();
     let mut request = ModelCompileRequest::new(source, root.path().join("rigid"));
-    request.generate_collision = true;
+    request.collision = ModelCollision::Automatic(CollisionDetail::Simple);
     request.export_materials = false;
-    let error = compile_model(&request).unwrap_err();
-    assert!(matches!(error, ModelCompileError::InvalidOption(_)));
-    assert!(error.to_string().contains("skeleton"));
-    assert!(!request.destination.exists());
-    request.static_prop = true;
-    let static_output = compile_model(&request).unwrap();
-    assert!(
-        static_output
-            .files
-            .iter()
-            .any(|file| file.kind == ModelOutputKind::Phy)
-    );
+    let original = compile_model(&request).unwrap();
+    let qc = root.path().join("prop.qc");
+    save_model_qc(&request, &qc).unwrap();
+    let mut saved = ModelCompileRequest::new(qc, root.path().join("saved"));
+    saved.export_materials = false;
+    let rebuilt = compile_model(&saved).unwrap();
+    for output in [&original, &rebuilt] {
+        let bytes = |kind| {
+            fs::read(
+                &output
+                    .files
+                    .iter()
+                    .find(|file| file.kind == kind)
+                    .unwrap()
+                    .path,
+            )
+            .unwrap()
+        };
+        let mdl = bytes(ModelOutputKind::Mdl);
+        let vvd = bytes(ModelOutputKind::Vvd);
+        let vtx = bytes(ModelOutputKind::Vtx);
+        let phy = bytes(ModelOutputKind::Phy);
+        let limits = vformats::Limits::default();
+        let model = vformats::mdl::parse_mdl(&mdl, &limits).unwrap();
+        assert_eq!(model.bones.len(), 3);
+        let playback = load_animation_preview(&mdl, &vvd, &vtx, None).unwrap();
+        let visual = playback.evaluate(0, 0.0).unwrap();
+        let physics = vformats::phy::parse(&phy, &limits).unwrap();
+        assert_eq!(physics.solids.len(), 1);
+        assert_eq!(physics.solids[0].ledges.len(), 1);
+        for axis in 0..3 {
+            for reduce in [f32::min, f32::max] {
+                let visual_bound = visual
+                    .iter()
+                    .flatten()
+                    .map(|vertex| vertex.position[axis])
+                    .reduce(reduce)
+                    .unwrap();
+                let physical_bound = physics.solids[0].ledges[0]
+                    .vertices
+                    .iter()
+                    .map(|point| point[axis])
+                    .reduce(reduce)
+                    .unwrap();
+                assert!(
+                    (visual_bound - physical_bound).abs() < 0.001,
+                    "collision {physical_bound} does not match playback {visual_bound}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

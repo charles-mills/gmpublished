@@ -11,16 +11,128 @@ use crate::generation::Generation;
 use crate::media::preview_model::PreviewRequest;
 
 impl App {
+    pub(super) fn apply_model_manager_message(
+        &mut self,
+        message: model_manager::Message,
+    ) -> Task<RootMessage> {
+        if let model_manager::Message::Viewer(message) = message {
+            let skin_selected = matches!(message, file_preview::Message::SkinSelected(_));
+            let task = self.apply_model_preview_message(message);
+            self.capture_model_stage_selection(skin_selected);
+            self.sync_model_workspace();
+            return task;
+        }
+        if matches!(
+            message,
+            model_manager::Message::PreviewRequested
+                | model_manager::Message::ApplyMaterialTint
+                | model_manager::Message::ApplyReplacementMaterial
+                | model_manager::Message::MaterialReset
+                | model_manager::Message::SkinTextureSelected(..)
+                | model_manager::Message::StageRequested
+                | model_manager::Message::InstallRequested
+                | model_manager::Message::SaveQcRequested
+                | model_manager::Message::ExportRequested
+                | model_manager::Message::BlenderExportRequested
+        ) {
+            let desired_selection = self
+                .state
+                .features
+                .model_manager
+                .preview_skin_materials()
+                .is_some()
+                .then(|| self.state.features.model_manager.preview_selection())
+                .or_else(|| {
+                    self.state
+                        .features
+                        .model_manager
+                        .preview_dirty()
+                        .then(|| self.state.features.model_manager.preview_selection())
+                });
+            self.capture_model_stage();
+            if let Some((skin, bodygroups)) = desired_selection {
+                let message = if self
+                    .state
+                    .features
+                    .model_preview
+                    .staged_placement()
+                    .is_some()
+                    && let Some((position, angles)) =
+                        self.state.features.model_manager.saved_stage_placement()
+                {
+                    model_manager::Message::StageSnapshotCaptured {
+                        position,
+                        angles,
+                        skin,
+                        bodygroups,
+                    }
+                } else {
+                    model_manager::Message::PreviewSelectionCaptured { skin, bodygroups }
+                };
+                model_manager::update(&mut self.state.features.model_manager, message);
+            }
+        }
+        let old_source = self
+            .state
+            .features
+            .model_manager
+            .source_path()
+            .map(Path::to_path_buf);
+        let skin_selected = matches!(message, model_manager::Message::SkinSelected(_));
+        let inspected = matches!(message, model_manager::Message::Inspected(_, Ok(_)));
+        let effects = model_manager::update(&mut self.state.features.model_manager, message);
+        let mut tasks = Vec::new();
+        if self.state.features.model_manager.source_path() != old_source.as_deref() {
+            tasks.push(self.apply_model_preview_message(file_preview::Message::CloseFinished));
+        }
+        if skin_selected {
+            let (skin, _) = self.state.features.model_manager.preview_selection();
+            tasks.push(self.apply_model_preview_message(file_preview::Message::SkinSelected(skin)));
+        }
+        tasks.push(self.batch_effects(effects, Self::run_model_manager_effect));
+        if inspected && self.state.features.model_manager.needs_initial_preview() {
+            tasks.push(self.apply_model_manager_message(model_manager::Message::PreviewRequested));
+        }
+        self.sync_model_workspace();
+        Task::batch(tasks)
+    }
+
     pub(super) fn capture_model_stage(&mut self) {
-        if !self.state.features.file_preview.is_open() {
+        self.capture_model_stage_selection(false);
+    }
+
+    fn capture_model_stage_selection(&mut self, skin_selected: bool) {
+        if !self.state.features.model_preview.is_open()
+            || self.state.features.model_preview.current_model().is_none()
+        {
             return;
         }
-        if let Some((position, angles)) = self.state.features.file_preview.staged_placement() {
-            let skin = self.state.features.file_preview.selected_skin();
+        let skin = if !skin_selected
+            && self
+                .state
+                .features
+                .model_manager
+                .preview_skin_materials()
+                .is_some()
+        {
+            self.state.features.model_manager.preview_selection().0
+        } else {
+            self.state.features.model_preview.selected_skin()
+        };
+        if let Some((position, angles)) = self.state.features.model_preview.staged_placement() {
+            let displayed_map = self
+                .state
+                .features
+                .model_preview
+                .request()
+                .and_then(|request| request.archive.entry_disk_path(&request.entry_path));
+            if displayed_map != self.state.features.model_manager.selected_map_path() {
+                return;
+            }
             let bodygroups = self
                 .state
                 .features
-                .file_preview
+                .model_preview
                 .bodygroup_choices()
                 .to_vec();
             model_manager::update(
@@ -33,11 +145,10 @@ impl App {
                 },
             );
         } else if self.state.features.shell.route() == super::shell::Route::Models {
-            let skin = self.state.features.file_preview.selected_skin();
             let bodygroups = self
                 .state
                 .features
-                .file_preview
+                .model_preview
                 .bodygroup_choices()
                 .to_vec();
             model_manager::update(
@@ -53,6 +164,37 @@ impl App {
     ) -> Task<RootMessage> {
         use model_manager::{Effect, Message};
         match effect {
+            Effect::PickCollisionSource(generation, directory) => {
+                let title = self.state.i18n.tr("models-collision-custom-file");
+                Task::future(async move {
+                    let mut dialog = rfd::AsyncFileDialog::new().set_title(title).add_filter(
+                        "SMD, DMX, FBX, glTF, GLB",
+                        &["smd", "dmx", "fbx", "gltf", "glb"],
+                    );
+                    if let Some(directory) = directory {
+                        dialog = dialog.set_directory(directory);
+                    }
+                    let path = dialog
+                        .pick_file()
+                        .await
+                        .map(|file| file.path().to_path_buf());
+                    RootMessage::ModelManager(Message::CollisionSourceSelected(generation, path))
+                })
+            }
+            Effect::InspectCollision(generation, source) => self
+                .environment
+                .ctx
+                .run_blocking("model-collision-inspect", move |_| {
+                    model_compile::inspect_model(&source)
+                        .map(Box::new)
+                        .map_err(|error| error.to_string())
+                })
+                .map(move |result| {
+                    RootMessage::ModelManager(Message::CollisionSourceInspected(
+                        generation,
+                        result.unwrap_or_else(|error| Err(error.to_string())),
+                    ))
+                }),
             Effect::PickLodSource(generation, directory) => {
                 let title = self.state.i18n.tr("models-lod-source");
                 Task::future(async move {
@@ -138,21 +280,24 @@ impl App {
                     })
             }
             Effect::Copy(text) => self.copy_text_task(text),
-            Effect::Preview(generation, result) => self
-                .environment
-                .ctx
-                .run_blocking("model-preview-index", move |_| {
-                    prepare_preview(generation, &result)
-                })
-                .map(move |result| {
-                    RootMessage::ModelManager(Message::PreviewPrepared(
-                        generation,
-                        result.unwrap_or_else(|error| Err(error.to_string())),
-                    ))
-                }),
-            Effect::OpenPreview(request) => {
-                self.apply_file_preview_message(file_preview::Message::OpenRequested(request))
+            Effect::Preview(generation, result) => {
+                let directory = self.state.features.model_manager.preview_directory();
+                self.environment
+                    .ctx
+                    .run_blocking("model-preview-index", move |_| {
+                        let _directory = directory;
+                        prepare_preview(generation, &result)
+                    })
+                    .map(move |result| {
+                        RootMessage::ModelManager(Message::PreviewPrepared(
+                            generation,
+                            result.unwrap_or_else(|error| Err(error.to_string())),
+                        ))
+                    })
             }
+            Effect::OpenPreview(request) => self.apply_model_preview_message(
+                file_preview::Message::WorkspaceOpenRequested(request),
+            ),
             Effect::LoadQc(generation, source) => self
                 .environment
                 .ctx
@@ -170,6 +315,7 @@ impl App {
                 .ctx
                 .run_blocking("model-qc-validate", move |_| {
                     model_compile::inspect_qc_text(&source, &text)
+                        .map(Box::new)
                         .map_err(|error| error.to_string())
                 })
                 .map(move |result| {
@@ -182,7 +328,9 @@ impl App {
                 .environment
                 .ctx
                 .run_blocking("model-inspect", move |_| {
-                    model_compile::inspect_model(&source).map_err(|error| error.to_string())
+                    model_compile::inspect_model(&source)
+                        .map(Box::new)
+                        .map_err(|error| error.to_string())
                 })
                 .map(move |result| {
                     RootMessage::ModelManager(Message::Inspected(
@@ -280,12 +428,16 @@ impl App {
                     RootMessage::ModelManager(Message::MapBrowseSelected(generation, path))
                 })
             }
-            Effect::BuildPreview(generation, request) => self
+            Effect::DebouncePreview(revision) => Task::future(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                RootMessage::ModelManager(Message::PreviewUpdateDue(revision))
+            }),
+            Effect::BuildPreview(generation, request, cancel) => self
                 .environment
                 .ctx
                 .run_blocking("model-preview-build", move |services| {
                     let game = services.settings_and_paths_snapshot().1.gmod_dir;
-                    build_preview(generation, request, game.as_deref())
+                    build_preview(generation, request, game.as_deref(), &cancel)
                 })
                 .map(move |result| {
                     RootMessage::ModelManager(Message::PreviewBuilt(
@@ -293,35 +445,32 @@ impl App {
                         result.unwrap_or_else(|error| Err(error.to_string())),
                     ))
                 }),
-            Effect::PrepareStage(generation, result, map) => self
-                .environment
-                .ctx
-                .run_blocking("model-stage-index", move |_| {
-                    Ok(Box::new((
-                        prepare_preview(generation, &result)?,
-                        super::model_stage::prepare_map_preview(generation, &map)?,
-                    )))
-                })
-                .map(move |result| {
-                    RootMessage::ModelManager(Message::StagePrepared(
-                        generation,
-                        result.unwrap_or_else(|error| Err(error.to_string())),
-                    ))
-                }),
+            Effect::PrepareStage(generation, result, map) => {
+                let directory = self.state.features.model_manager.preview_directory();
+                self.environment
+                    .ctx
+                    .run_blocking("model-stage-index", move |_| {
+                        let _directory = directory;
+                        Ok(Box::new((
+                            prepare_preview(generation, &result)?,
+                            super::model_stage::prepare_map_preview(generation, &map)?,
+                        )))
+                    })
+                    .map(move |result| {
+                        RootMessage::ModelManager(Message::StagePrepared(
+                            generation,
+                            result.unwrap_or_else(|error| Err(error.to_string())),
+                        ))
+                    })
+            }
             Effect::OpenStage { model, map } => {
-                self.apply_file_preview_message(file_preview::Message::StageRequested {
+                self.apply_model_preview_message(file_preview::Message::WorkspaceStageRequested {
                     model: Box::new(model),
                     map: Box::new(map),
                 })
             }
-            Effect::TestInGame {
-                generation,
-                result,
-                map,
-                skin,
-                bodygroups,
-                placement,
-            } => {
+            Effect::InstallModel { generation, result } => {
+                let lease = self.state.features.model_manager.preview_directory();
                 let gmod = self
                     .environment
                     .ctx
@@ -330,32 +479,60 @@ impl App {
                     .gmod_dir;
                 self.environment
                     .ctx
-                    .run_blocking("model-engine-test", move |_| {
+                    .run_blocking("model-install", move |_| {
+                        let _lease = lease;
                         let gmod = gmod.ok_or_else(|| "Garry's Mod was not detected".to_owned())?;
-                        let map = map.file_stem().unwrap_or_default().to_string_lossy();
-                        let placement = placement.map(|stage| (stage.position, stage.angles));
-                        super::model_stage::prepare_engine_test(
-                            &gmod,
-                            &result,
-                            &map,
-                            skin,
-                            &bodygroups,
-                            placement,
-                        )
-                        .map(|launch| model_manager::EngineTestResult {
-                            url: launch.url,
-                            addon_directory: launch.addon_directory,
-                            console_command: launch.console_command,
-                        })
+                        super::model_stage::install_model(&gmod, &result)
                     })
                     .map(move |result| {
-                        RootMessage::ModelManager(Message::EngineTestPrepared(
+                        RootMessage::ModelManager(Message::ModelInstalled(
                             generation,
                             result.unwrap_or_else(|error| Err(error.to_string())),
                         ))
                     })
             }
-            Effect::LaunchGame(url) => self.open_url_task(url),
+            Effect::ListInstalledModels(generation) => {
+                let gmod = self
+                    .environment
+                    .ctx
+                    .settings_and_paths_snapshot()
+                    .1
+                    .gmod_dir;
+                self.environment
+                    .ctx
+                    .run_blocking("model-installed-list", move |_| {
+                        let gmod = gmod.ok_or_else(|| "Garry's Mod was not detected".to_owned())?;
+                        super::model_stage::list_models(&gmod)
+                    })
+                    .map(move |result| {
+                        RootMessage::ModelManager(Message::InstalledModelsLoaded(
+                            generation,
+                            result.unwrap_or_else(|error| Err(error.to_string())),
+                        ))
+                    })
+            }
+            Effect::RemoveInstalledModel(generation, directory) => {
+                let gmod = self
+                    .environment
+                    .ctx
+                    .settings_and_paths_snapshot()
+                    .1
+                    .gmod_dir;
+                let selected = directory.clone();
+                self.environment
+                    .ctx
+                    .run_blocking("model-installed-remove", move |_| {
+                        let gmod = gmod.ok_or_else(|| "Garry's Mod was not detected".to_owned())?;
+                        super::model_stage::remove_model(&gmod, &directory)
+                    })
+                    .map(move |result| {
+                        RootMessage::ModelManager(Message::InstalledModelRemoved(
+                            generation,
+                            selected.clone(),
+                            result.unwrap_or_else(|error| Err(error.to_string())),
+                        ))
+                    })
+            }
         }
     }
 }
@@ -425,7 +602,9 @@ fn compile_request(
     options.model_name = request.model_name;
     options.material_directory = request.material_directory;
     options.static_prop = request.static_prop;
-    options.generate_collision = request.generate_collision;
+    options.static_prop_override =
+        (request.kind == model_manager::SourceKind::Mesh).then_some(request.static_prop);
+    options.collision = request.collision;
     options.collision_mass = request.collision_mass;
     options.surface_property = request.surface_property;
     options.scale = request.scale;
@@ -454,6 +633,7 @@ fn build_preview(
     generation: Generation,
     mut request: model_manager::ExportRequest,
     game_directory: Option<&Path>,
+    cancel: &AtomicBool,
 ) -> Result<model_manager::PreviewBuild, String> {
     let directory = std::sync::Arc::new(tempfile::tempdir().map_err(|error| error.to_string())?);
     if request.kind == model_manager::SourceKind::Compiled {
@@ -467,7 +647,7 @@ fn build_preview(
     request.destination = directory.path().to_path_buf();
     request.overwrite = false;
     request.export_materials = true;
-    let result = export_model(request, &AtomicBool::new(false), game_directory)?;
+    let result = export_model(request, cancel, game_directory)?;
     Ok(model_manager::PreviewBuild {
         result,
         _directory: directory,
@@ -493,11 +673,23 @@ const BLENDER_IMPORT_EXPRESSION: &str = r"import bpy, math, sys
 bpy.ops.wm.read_factory_settings(use_empty=True)
 options = {'import_scene_as_collection': True} if 'import_scene_as_collection' in bpy.ops.import_scene.gltf.get_rna_type().properties else {}
 bpy.ops.import_scene.gltf(filepath=sys.argv[-1], **options)
+# Blender's glTF exporter reads material variants from the first data scene.
+variant_property = 'gltf2_KHR_materials_variants_variants'
+variant_source = next((scene for scene in bpy.data.scenes if getattr(scene, variant_property, None)), None)
+if variant_source is not None and variant_source != bpy.data.scenes[0]:
+    variants = [(variant.variant_idx, variant.name) for variant in getattr(variant_source, variant_property)]
+    target = getattr(bpy.data.scenes[0], variant_property)
+    target.clear()
+    for index, name in variants:
+        variant = target.add()
+        variant.variant_idx = index
+        variant.name = name
 frame_end = max(1, math.ceil(max((action.frame_range[1] for action in bpy.data.actions), default=1)))
 for scene in bpy.data.scenes:
     scene.frame_start = 0
     scene.frame_end = frame_end
     scene.frame_set(0)
+    scene['glTF2ExportSettings'] = {'export_extras': True}
 if not bpy.app.background:
     for window in bpy.context.window_manager.windows:
         layer = window.view_layer

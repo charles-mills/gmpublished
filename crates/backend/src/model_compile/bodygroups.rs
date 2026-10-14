@@ -227,7 +227,8 @@ mod tests {
         let parts = source_parts(&source).unwrap();
         let mut request = ModelCompileRequest::new(source, root.path().join("original"));
         request.export_materials = false;
-        request.generate_collision = true;
+        request.collision =
+            super::super::ModelCollision::Automatic(super::super::CollisionDetail::Simple);
         request.static_prop = true;
         request.bodygroups = vec![ModelBodygroup {
             name: "hat".into(),
@@ -335,7 +336,11 @@ mod tests {
         for static_prop in [false, true] {
             let (root, mut request) = fixture();
             request.static_prop = static_prop;
-            request.generate_collision = static_prop;
+            request.collision = if static_prop {
+                super::super::ModelCollision::Automatic(super::super::CollisionDetail::Simple)
+            } else {
+                super::super::ModelCollision::Existing
+            };
             if static_prop {
                 request.orientation = [17.0, -31.0, 22.0];
                 request.scale = 1.7;

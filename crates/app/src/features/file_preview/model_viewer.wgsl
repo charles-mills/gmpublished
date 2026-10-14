@@ -15,6 +15,7 @@ struct Uniforms {
 struct Material {
     // x: force opaque, y: alpha test cutout.
     flags: vec4<u32>,
+    tint: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -64,6 +65,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let albedo2 = textureSample(base_texture2, base_sampler, input.uv);
         albedo = mix(albedo, albedo2, clamp(input.blend_alpha, 0.0, 1.0));
     }
+    albedo = vec4<f32>(albedo.rgb * material.tint.rgb, albedo.a);
     if material.flags.x != 0u {
         albedo.a = 1.0;
     } else if material.flags.y != 0u && albedo.a < 0.5 {

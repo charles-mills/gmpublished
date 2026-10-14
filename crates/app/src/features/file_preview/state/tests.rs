@@ -617,6 +617,141 @@ fn staged_with_model(model: Arc<ModelPreview>) -> State {
 }
 
 #[test]
+fn live_scale_preserves_geometry_and_camera_until_explicitly_reframed() {
+    let mut state = State::default();
+    let model = crate::model_animation_test_support::lod_blended_model();
+    let request = state.begin_workspace_open(request("models/preview.mdl"));
+    assert!(state.apply_loaded(
+        request.request_id,
+        Ok(PreviewData::from_request(
+            &request,
+            PreviewContent::Model(model)
+        )),
+    ));
+    let content_id = state.current().unwrap().content_id();
+    let bounds = state.model_bounds().unwrap();
+    let framing = state.model_framing_bounds();
+    let mut matrix = super::workspace::IDENTITY;
+    for (axis, column) in matrix.iter_mut().enumerate().take(3) {
+        column[axis] = 2.0;
+    }
+    state.set_workspace_transform(matrix);
+    let scaled = state.model_bounds().unwrap();
+    assert_eq!(scaled.min, bounds.min * 2.0);
+    assert_eq!(scaled.max, bounds.max * 2.0);
+    assert_eq!(state.model_framing_bounds(), framing);
+    assert_eq!(state.current().unwrap().content_id(), content_id);
+    state.reset_model_camera();
+    assert_eq!(state.model_framing_bounds(), Some(scaled));
+}
+
+#[test]
+fn workspace_refresh_retains_model_and_rejects_superseded_results() {
+    let model = Arc::clone(staged_state().stage_model().unwrap());
+    let mut state = State::default();
+    let original = state.begin_open(request("models/test.mdl"));
+    let data = PreviewData::from_request(&original, PreviewContent::Model(model));
+    assert!(state.apply_loaded(original.request_id, Ok(data.clone())));
+    let pose = OrbitPose {
+        yaw: 1.0,
+        pitch: 0.5,
+        distance: 2.0,
+    };
+    state.set_orbit_pose(pose);
+    state.select_skin(1);
+    state.select_bodygroup_choice(0, 1);
+
+    let superseded = state.begin_workspace_open(request("models/test.mdl"));
+    let pending = state.begin_workspace_open(request("models/test.mdl"));
+    assert!(pending.request_id > superseded.request_id);
+    assert!(state.loading());
+    assert_eq!(state.current(), Some(&data));
+    assert_eq!(state.request(), Some(&original));
+    assert_eq!(state.orbit_pose(), Some(pose));
+    assert_eq!(state.selected_skin(), 1);
+    assert!(!state.apply_loaded(superseded.request_id, Ok(data.clone())));
+    let error = PreviewLoadError::Decode("bad replacement".to_owned());
+    assert!(state.apply_loaded(pending.request_id, Err(error.clone())));
+    assert!(!state.loading());
+    assert_eq!(state.current(), Some(&data));
+    assert_eq!(state.error(), Some(&error));
+    assert_eq!(state.bodygroup_choices(), &[1]);
+    assert!(!state.apply_loaded(pending.request_id, Ok(data.clone())));
+
+    let retry = state.begin_workspace_open(request("models/test.mdl"));
+    let mut replacement = data;
+    replacement.crc32 += 1;
+    assert!(retry.request_id > pending.request_id);
+    assert!(state.apply_loaded(retry.request_id, Ok(replacement.clone())));
+    assert_eq!(state.current(), Some(&replacement));
+    assert_eq!(state.request(), Some(&retry));
+    assert_eq!(state.orbit_pose(), Some(pose));
+    assert_eq!(state.selected_skin(), 1);
+    assert_eq!(state.bodygroup_choices(), &[1]);
+    assert!(state.error().is_none());
+    assert!(state.workspace_retained.is_none());
+}
+
+#[test]
+fn workspace_stage_refresh_preserves_camera_placement_and_selection() {
+    let mut state = staged_state();
+    let data = state.current().unwrap().clone();
+    let model = Arc::clone(state.stage_model().unwrap());
+    let transform = StageTransform {
+        position: Vec3::new(200.0, 300.0, 400.0),
+        angles: Vec3::new(0.0, 90.0, 0.0),
+    };
+    let camera = FlyPose {
+        position: Vec3::new(800.0, 600.0, 400.0),
+        yaw: 0.5,
+        pitch: -0.25,
+        speed: 2.0,
+    };
+    state.set_stage_transform(transform);
+    state.set_fly_camera(camera, MovementMode::Fly);
+    state.select_skin(1);
+    let (_, failed) =
+        state.begin_workspace_stage(request("models/test.mdl"), request("maps/test.bsp"));
+    assert!(state.loading());
+    assert_eq!(state.stage_transform(), Some(transform));
+    assert_eq!(state.current(), Some(&data));
+    assert!(state.apply_stage_loaded(
+        failed.request_id,
+        Err(PreviewLoadError::Decode("bad map".to_owned()))
+    ));
+    assert_eq!(state.stage_transform(), Some(transform));
+    assert_eq!(state.fly_pose(), Some(camera));
+    assert!(Arc::ptr_eq(state.stage_model().unwrap(), &model));
+
+    let (_, retry) =
+        state.begin_workspace_stage(request("models/test.mdl"), request("maps/test.bsp"));
+    assert!(state.apply_stage_loaded(retry.request_id, Ok((data, model))));
+    assert_eq!(state.stage_transform(), Some(transform));
+    assert_eq!(state.fly_pose(), Some(camera));
+    assert_eq!(state.selected_skin(), 1);
+    assert!(state.stage_can_undo());
+    assert!(state.error().is_none());
+}
+
+#[test]
+fn regular_open_and_close_discard_pending_workspace_fallback() {
+    for close in [false, true] {
+        let mut state = staged_state();
+        let data = state.current().unwrap().clone();
+        let pending = state.begin_workspace_open(request("models/replacement.mdl"));
+        if close {
+            state.close();
+        } else {
+            state.begin_open(request("models/other.mdl"));
+        }
+        assert!(state.current().is_none());
+        assert!(state.stage_model().is_none());
+        assert!(state.workspace_retained.is_none());
+        assert!(!state.apply_loaded(pending.request_id, Ok(data)));
+    }
+}
+
+#[test]
 fn stage_selection_and_transform_preserve_map_and_model_identity() {
     let mut state = staged_state();
     let map_id = state.current().unwrap().content_id();

@@ -1066,6 +1066,7 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     materials.push(
         "door_skin",
         MaterialSlot {
+            tint_base: None,
             name: "door_skin".to_owned(),
             texture: None,
             texture2: None,
@@ -1636,6 +1637,7 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
     let mut materials = (0..25)
         .rev()
         .map(|index| MaterialSlot {
+            tint_base: None,
             name: format!("missing_{index:02}"),
             texture: None,
             texture2: None,
@@ -1644,6 +1646,7 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
         })
         .collect::<Vec<_>>();
     materials.push(MaterialSlot {
+        tint_base: None,
         name: "missing_03".to_owned(),
         texture: None,
         texture2: None,

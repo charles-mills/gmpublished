@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::materials::{MaterialTextureViews, MaterialUploadMode, WHITE_RGBA};
 use super::resources::RenderResources;
-use super::uniforms::scene_sky_tint;
+use super::uniforms::{MaterialUniform, scene_sky_tint};
 use super::visibility::{
     UploadedVisibility, UploadedVisibleIndices, UploadedVisibleVertices, VisibilityClusterState,
     upload_visible_detail_sprites, upload_visible_indices,
@@ -78,6 +78,8 @@ impl UploadCache {
             lightmap_height,
         );
 
+        let mut tint_material_bind_groups = Vec::with_capacity(scene.materials.len());
+        let mut tint_texture_views = HashMap::new();
         let material_uploads = scene
             .materials
             .iter()
@@ -98,7 +100,7 @@ impl UploadCache {
                         Some(texture),
                     )
                 });
-                resources.create_material(
+                let (bind_group, uniform) = resources.create_material(
                     device,
                     queue,
                     MaterialTextureViews {
@@ -110,7 +112,29 @@ impl UploadCache {
                         force_opaque: slot.force_opaque,
                         render_mode: slot.render_mode,
                     },
-                )
+                );
+                let tint_group = slot.tint_base.as_ref().map(|texture| {
+                    let key = std::sync::Arc::as_ptr(texture).addr();
+                    let view = tint_texture_views.entry(key).or_insert_with(|| {
+                        resources.create_material_texture_view(
+                            device,
+                            queue,
+                            "file_preview.model_viewer.tint_base",
+                            Some(texture),
+                        )
+                    });
+                    resources.create_material_bind_group(
+                        device,
+                        MaterialTextureViews {
+                            base: view,
+                            base2: base2_view.as_ref().unwrap_or(view),
+                            lightmap: &lightmap_view,
+                        },
+                        &uniform,
+                    )
+                });
+                tint_material_bind_groups.push(tint_group);
+                (bind_group, uniform)
             })
             .collect::<Vec<_>>();
         let material_render_modes = if scene.materials.is_empty() {
@@ -216,7 +240,9 @@ impl UploadCache {
                 material_bind_groups,
                 material_render_modes,
                 material_water_fallbacks,
-                _material_uniforms: material_uniforms,
+                material_uniforms,
+                tint_material_bind_groups,
+                active_material_tints: Vec::new(),
                 skybox,
                 sky_tint,
                 visibility: UploadedVisibility::default(),
@@ -237,13 +263,64 @@ pub struct UploadedModel {
     pub material_bind_groups: Vec<wgpu::BindGroup>,
     pub material_render_modes: Vec<RenderMode>,
     pub material_water_fallbacks: Vec<bool>,
-    pub _material_uniforms: Vec<wgpu::Buffer>,
+    pub material_uniforms: Vec<wgpu::Buffer>,
+    tint_material_bind_groups: Vec<Option<wgpu::BindGroup>>,
+    active_material_tints: Vec<(usize, [u8; 3])>,
     pub skybox: Option<UploadedSkybox>,
     pub sky_tint: Vec3,
     pub visibility: UploadedVisibility,
 }
 
 impl UploadedModel {
+    pub fn material_bind_group(&self, slot: usize) -> Option<&wgpu::BindGroup> {
+        if self
+            .active_material_tints
+            .iter()
+            .any(|(index, _)| *index == slot)
+            && let Some(Some(group)) = self.tint_material_bind_groups.get(slot)
+        {
+            return Some(group);
+        }
+        self.material_bind_groups.get(slot)
+    }
+
+    pub fn update_material_tints(
+        &mut self,
+        queue: &wgpu::Queue,
+        scene: &RenderScene,
+        tints: &[(usize, [u8; 3])],
+    ) {
+        if self.active_material_tints == tints {
+            return;
+        }
+        let mut slots = self
+            .active_material_tints
+            .iter()
+            .chain(tints)
+            .map(|(slot, _)| *slot)
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        slots.dedup();
+        for slot in slots {
+            let Some(buffer) = self.material_uniforms.get(slot) else {
+                continue;
+            };
+            let (opaque, mode) = scene
+                .materials
+                .get(slot)
+                .map_or((true, RenderMode::Opaque), |material| {
+                    (material.force_opaque, material.render_mode)
+                });
+            let mut uniform = MaterialUniform::new(opaque, mode);
+            if let Some((_, color)) = tints.iter().find(|(index, _)| *index == slot) {
+                uniform = uniform.with_tint(*color);
+            }
+            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+        }
+        self.active_material_tints.clear();
+        self.active_material_tints.extend_from_slice(tints);
+    }
+
     pub fn update_animation_vertices(
         &mut self,
         queue: &wgpu::Queue,

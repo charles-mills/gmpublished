@@ -12,6 +12,7 @@ use gmpublished_domain::math::Vec3;
 
 pub struct Viewer3d {
     pub framing_bounds: Option<crate::media::preview_model::ModelBounds>,
+    pub studio_bounds: Option<crate::media::preview_model::ModelBounds>,
     pub model: Arc<ModelPreview>,
     pub animation_pose: Option<PreviewPose>,
     pub content_id: u64,
@@ -19,14 +20,20 @@ pub struct Viewer3d {
     pub bodygroup_choices: Vec<usize>,
     pub phy_debug_visible: bool,
     pub pose: Option<OrbitPose>,
+    pub camera_epoch: crate::generation::Generation,
+    pub reserved_space: [f32; 2],
+    pub studio_grid: bool,
+    pub live_transform: [[f32; 4]; 4],
+    pub material_tints: Vec<(usize, [u8; 3])>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Camera {
     pub(super) content_id: Option<u64>,
     /// `distance` is a multiplier over the model's auto-framed distance.
     pub(super) orbit: Orbit,
     pub(super) drag_from: Option<Point>,
+    reset_epoch: crate::generation::Generation,
 }
 
 impl Default for Camera {
@@ -35,11 +42,20 @@ impl Default for Camera {
             content_id: None,
             orbit: Orbit::new(ZoomFloor::SolidMesh),
             drag_from: None,
+            reset_epoch: crate::generation::Generation::INITIAL,
         }
     }
 }
 
 impl Camera {
+    fn sync(&mut self, viewer: &Viewer3d) {
+        if self.reset_epoch != viewer.camera_epoch {
+            self.content_id = None;
+            self.reset_epoch = viewer.camera_epoch;
+        }
+        self.ensure_spawn(viewer.content_id, viewer.pose);
+    }
+
     pub(super) fn ensure_spawn(&mut self, content_id: u64, pose: Option<OrbitPose>) {
         if self.content_id == Some(content_id) {
             return;
@@ -65,7 +81,7 @@ impl shader::Program<Message> for Viewer3d {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
-        camera.ensure_spawn(self.content_id, self.pose);
+        camera.sync(self);
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let position = cursor.position_over(bounds)?;
@@ -96,17 +112,45 @@ impl shader::Program<Message> for Viewer3d {
     }
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
+        let mut camera = camera.clone();
+        camera.sync(self);
+        let available = Rectangle {
+            width: (bounds.width - self.reserved_space[0]).max(1.0),
+            height: (bounds.height - self.reserved_space[1]).max(1.0),
+            ..bounds
+        };
+        let mut uniforms =
+            Uniforms::for_model(&self.model, &camera, available, self.framing_bounds);
+        // Keep the scene behind floating panes while framing the model in the uncovered area.
+        let scale_x = (available.width / bounds.width.max(1.0)).min(1.0);
+        let scale_y = (available.height / bounds.height.max(1.0)).min(1.0);
+        for column in &mut uniforms.view_proj {
+            column[0] = column[0] * scale_x + column[3] * (scale_x - 1.0);
+            column[1] = column[1] * scale_y + column[3] * (1.0 - scale_y);
+        }
+        let framing = self.studio_bounds.or(self.framing_bounds).unwrap_or(
+            crate::media::preview_model::ModelBounds {
+                min: self.model.scene.bounds_min,
+                max: self.model.scene.bounds_max,
+            },
+        );
+        let studio_grid = self
+            .studio_grid
+            .then(|| super::pipeline::StudioGrid::new(uniforms.view_proj, framing));
+        uniforms.apply_model_transform(self.live_transform);
         ModelPrimitive {
+            studio_grid,
             stage: None,
             animation_pose: self.animation_pose.clone(),
             preview: PreviewScene::Model(Arc::clone(&self.model)),
             content_id: self.content_id,
             skin_remap: self.skin_remap.clone(),
+            material_tints: self.material_tints.clone(),
             bodygroup_choices: self.bodygroup_choices.clone(),
             map_skybox_visible: true,
             visibility_culling: false,
             phy_debug_visible: self.phy_debug_visible,
-            uniforms: Uniforms::for_model(&self.model, camera, bounds, self.framing_bounds),
+            uniforms,
             submerged: false,
             map_skybox_uniforms: None,
             sky_uniforms: None,
@@ -741,6 +785,7 @@ impl shader::Program<Message> for FlyViewer {
         bounds: Rectangle,
     ) -> ModelPrimitive {
         ModelPrimitive {
+            studio_grid: None,
             stage: self
                 .stage
                 .as_ref()
@@ -750,12 +795,15 @@ impl shader::Program<Message> for FlyViewer {
                     local_bounds: stage.local_bounds,
                     content_id: stage.content_id,
                     transform: stage.transform,
+                    live_transform: stage.live_transform,
+                    material_tints: stage.material_tints.clone(),
                     skin_remap: stage.skin_remap.clone(),
                     bodygroup_choices: stage.bodygroup_choices.clone(),
                     phy_debug_visible: stage.phy_debug_visible,
                 }),
             animation_pose: None,
             preview: PreviewScene::Map(Arc::clone(&self.scene)),
+            material_tints: Vec::new(),
             content_id: self.content_id,
             skin_remap: Vec::new(),
             bodygroup_choices: Vec::new(),
@@ -814,8 +862,58 @@ impl shader::Program<Message> for FlyViewer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{empty_preview, floor_scene};
+    use super::super::test_support::{empty_model_preview, empty_preview, floor_scene};
     use super::*;
+
+    #[test]
+    fn workspace_camera_reset_frames_uncovered_area_without_input() {
+        let model = Arc::new(empty_model_preview(Vec3::splat(-10.0), Vec3::splat(10.0)));
+        let mut camera = Camera::default();
+        camera.ensure_spawn(
+            7,
+            Some(OrbitPose {
+                yaw: 1.5,
+                pitch: -0.5,
+                distance: 4.0,
+            }),
+        );
+        let viewer = Viewer3d {
+            model,
+            content_id: 7,
+            framing_bounds: None,
+            studio_bounds: None,
+            animation_pose: None,
+            skin_remap: Vec::new(),
+            bodygroup_choices: Vec::new(),
+            phy_debug_visible: false,
+            pose: Some(OrbitPose::default()),
+            camera_epoch: crate::generation::Generation::INITIAL.next(),
+            reserved_space: [320.0, 80.0],
+            studio_grid: false,
+            live_transform: super::super::identity_matrix(),
+            material_tints: Vec::new(),
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(1200.0, 800.0));
+        let primitive = <Viewer3d as shader::Program<Message>>::draw(
+            &viewer,
+            &camera,
+            mouse::Cursor::Unavailable,
+            bounds,
+        );
+        let center = primitive.uniforms.view_proj[3];
+        let center_x = (center[0] / center[3] + 1.0) * bounds.width * 0.5;
+        let center_y = (1.0 - center[1] / center[3]) * bounds.height * 0.5;
+        assert!((center_x - 440.0).abs() < 0.001);
+        assert!((center_y - 360.0).abs() < 0.001);
+        let radius = Vec3::splat(10.0).length();
+        let eye = Vec3::from([
+            primitive.uniforms.camera_position[0],
+            primitive.uniforms.camera_position[1],
+            primitive.uniforms.camera_position[2],
+        ]);
+        assert!((eye.length() - radius * 2.2).abs() < 0.001);
+        assert_eq!(primitive.content_id, 7);
+    }
 
     #[test]
     fn restored_fly_mode_keeps_fly_pose() {
@@ -917,6 +1015,7 @@ mod tests {
                 super::super::super::orbit::ZoomFloor::SolidMesh,
             ),
             drag_from: Some(Point::new(1.0, 2.0)),
+            ..Camera::default()
         };
 
         camera.ensure_spawn(7, None);

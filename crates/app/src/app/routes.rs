@@ -108,18 +108,28 @@ impl App {
             shell::Route::Models => {
                 if lifecycle == RouteLifecycle::Exited {
                     self.capture_model_stage();
+                    let playback = if self.state.features.model_preview.model_playing() {
+                        self.apply_model_preview_message(
+                            crate::features::file_preview::Message::ModelPlaybackToggled,
+                        )
+                    } else {
+                        Task::none()
+                    };
                     Task::batch([
+                        playback,
                         self.apply_model_manager_message(
                             crate::features::model_manager::Message::RouteExited,
                         ),
-                        self.apply_file_preview_message(
-                            crate::features::file_preview::Message::BackRequested,
-                        ),
                     ])
                 } else {
-                    self.apply_model_manager_message(
-                        crate::features::model_manager::Message::MapsRequested,
-                    )
+                    Task::batch([
+                        self.apply_model_manager_message(
+                            crate::features::model_manager::Message::RouteEntered,
+                        ),
+                        self.apply_model_manager_message(
+                            crate::features::model_manager::Message::MapsRequested,
+                        ),
+                    ])
                 }
             }
             shell::Route::SizeAnalyzer => {

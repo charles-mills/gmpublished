@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gmpublished_backend::model_compile::{
-    AnimationEvent, AnimationSettings, ModelBodygroup, ModelInspection,
+    AnimationEvent, AnimationSettings, ModelBodygroup, ModelCollision, ModelInspection,
 };
 use gmpublished_backend::model_project::{ModelSkin, ModelStage};
 
@@ -27,6 +27,16 @@ impl SourceKind {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkspaceTab {
+    #[default]
+    Model,
+    Appearance,
+    Physics,
+    Export,
+    Import,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExportTarget {
     #[default]
     Source,
@@ -48,7 +58,7 @@ pub struct ExportRequest {
     pub material_directory: Option<String>,
     pub scale: f32,
     pub static_prop: bool,
-    pub generate_collision: bool,
+    pub collision: ModelCollision,
     pub collision_mass: f32,
     pub surface_property: Option<String>,
     pub export_materials: bool,
@@ -86,11 +96,13 @@ pub struct PreviewBuild {
     pub _directory: Arc<tempfile::TempDir>,
 }
 
-#[derive(Clone, Debug)]
-pub struct EngineTestResult {
-    pub url: String,
-    pub addon_directory: PathBuf,
-    pub console_command: String,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalledModel {
+    pub directory: PathBuf,
+    pub name: String,
+    pub model: String,
+    pub bytes: u64,
+    pub modified: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,11 +177,35 @@ pub(super) struct RunningExport {
 }
 
 #[derive(Debug)]
+pub(super) struct PreviewJob {
+    pub generation: Generation,
+    pub revision: Generation,
+    pub export_revision: Generation,
+    pub request: ExportRequest,
+    pub cancel: Arc<AtomicBool>,
+    pub replaced_preview: bool,
+}
+
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "compile options are independent toggles"
 )]
 pub struct State {
+    pub(super) workspace_tab: WorkspaceTab,
+    pub(super) pane_open: bool,
+    pub(super) advanced_open: bool,
+    pub(super) preview_dirty: bool,
+    pub(super) preview_job: Option<PreviewJob>,
+    pub(super) preview_revision: Generation,
+    pub(super) export_revision: Generation,
+    pub(super) preview_export_dirty: bool,
+    pub(super) preview_due: Option<Generation>,
+    pub(super) preview_pending: bool,
+    pub(super) displayed_transform: Option<(f32, [f32; 3])>,
+    pub(super) install_pending: bool,
+    pub(super) route_active: bool,
+    pub(super) previous_preview: Option<PreviewBuild>,
     pub(super) qc_editor: super::qc_editor::State,
     pub(super) source: Option<PathBuf>,
     pub(super) destination: Option<PathBuf>,
@@ -177,7 +213,8 @@ pub struct State {
     pub(super) material_directory: String,
     pub(super) scale: String,
     pub(super) static_prop: bool,
-    pub(super) generate_collision: bool,
+    pub(super) model_type_edited: bool,
+    pub(super) collision: super::collision::Editor,
     pub(super) collision_mass: String,
     pub(super) surface_property: String,
     pub(super) export_materials: bool,
@@ -211,15 +248,36 @@ pub struct State {
     pub(super) stage: Option<ModelStage>,
     pub(super) preview: Option<PreviewBuild>,
     pub(super) preview_for_stage: bool,
-    pub(super) engine_test_confirmation: bool,
+    pub(super) install_confirmation: bool,
+    pub(super) install_generation: Option<Generation>,
+    pub(super) install_result: Option<InstalledModel>,
+    pub(super) install_error: Option<String>,
+    pub(super) installed_models: Vec<InstalledModel>,
+    pub(super) installed_models_generation: Option<Generation>,
+    pub(super) installed_models_error: Option<String>,
+    pub(super) remove_installed_confirmation: Option<PathBuf>,
+    pub(super) remove_installed_generation: Option<(Generation, PathBuf)>,
     pub(super) stage_skin: usize,
     pub(super) stage_bodygroups: Vec<usize>,
-    pub(super) engine_test: Option<EngineTestResult>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
+            workspace_tab: WorkspaceTab::Model,
+            pane_open: true,
+            advanced_open: false,
+            preview_dirty: false,
+            preview_job: None,
+            preview_revision: Generation::INITIAL,
+            export_revision: Generation::INITIAL,
+            preview_export_dirty: false,
+            preview_due: None,
+            preview_pending: false,
+            displayed_transform: None,
+            install_pending: false,
+            route_active: true,
+            previous_preview: None,
             qc_editor: super::qc_editor::State::default(),
             source: None,
             destination: None,
@@ -227,7 +285,8 @@ impl Default for State {
             material_directory: String::new(),
             scale: "1".into(),
             static_prop: false,
-            generate_collision: false,
+            model_type_edited: false,
+            collision: super::collision::Editor::default(),
             collision_mass: "1".into(),
             surface_property: String::new(),
             export_materials: true,
@@ -261,15 +320,78 @@ impl Default for State {
             stage: None,
             preview: None,
             preview_for_stage: false,
-            engine_test_confirmation: false,
+            install_confirmation: false,
+            install_generation: None,
+            install_result: None,
+            install_error: None,
+            installed_models: vec![],
+            installed_models_generation: None,
+            installed_models_error: None,
+            remove_installed_confirmation: None,
+            remove_installed_generation: None,
             stage_skin: 0,
             stage_bodygroups: vec![],
-            engine_test: None,
         }
     }
 }
 
 impl State {
+    pub(super) fn install_busy(&self) -> bool {
+        self.install_pending || self.install_generation.is_some()
+    }
+
+    pub(super) fn installed_mutation_busy(&self) -> bool {
+        self.install_busy() || self.remove_installed_generation.is_some()
+    }
+
+    pub fn needs_initial_preview(&self) -> bool {
+        self.route_active
+            && self.preview.is_none()
+            && !self.preview_busy()
+            && self.inspection.is_some()
+            && self.preview_request().is_some()
+    }
+
+    pub fn preview_dirty(&self) -> bool {
+        self.preview_dirty
+    }
+
+    pub fn preview_busy(&self) -> bool {
+        self.preview_job.is_some()
+    }
+
+    pub fn preview_accepts_presentation(&self) -> bool {
+        self.preview_job.as_ref().is_some_and(|job| {
+            job.revision == self.preview_revision
+                && !job.cancel.load(std::sync::atomic::Ordering::Acquire)
+        })
+    }
+
+    pub fn preview_directory(&self) -> Option<Arc<tempfile::TempDir>> {
+        self.preview
+            .as_ref()
+            .map(|preview| Arc::clone(&preview._directory))
+    }
+
+    pub fn displayed_preview_transform(&self) -> Option<(f32, [f32; 3])> {
+        self.displayed_transform
+    }
+
+    pub fn desired_preview_transform(&self) -> Option<(f32, [f32; 3])> {
+        if self.kind() != Some(SourceKind::Mesh) {
+            return None;
+        }
+        Some((self.parsed_scale()?, self.parsed_orientation()?))
+    }
+
+    pub fn selected_map_path(&self) -> Option<&Path> {
+        self.selected_map.as_ref().map(|map| map.0.as_path())
+    }
+
+    pub fn source_path(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+
     pub fn saved_stage_placement(&self) -> Option<([f32; 3], [f32; 3])> {
         self.stage
             .as_ref()
@@ -290,6 +412,7 @@ impl State {
 
     pub fn can_export(&self) -> bool {
         !self.busy()
+            && !self.preview_busy()
             && self.source.is_some()
             && self.qc_editor_ready()
             && self.destination.is_some()
@@ -326,7 +449,8 @@ impl State {
     fn physics_options_valid(&self) -> bool {
         self.kind() != Some(SourceKind::Mesh)
             || (self.surface_property_valid()
-                && (!self.generate_collision || self.parsed_collision_mass().is_some()))
+                && self.collision_request().is_some()
+                && (!self.collision_generates_physics() || self.parsed_collision_mass().is_some()))
     }
 
     pub(super) fn request(&self) -> Option<ExportRequest> {
@@ -362,8 +486,8 @@ impl State {
                 1.0
             },
             static_prop: self.static_prop,
-            generate_collision: self.generate_collision,
-            collision_mass: if mesh && self.generate_collision {
+            collision: self.collision_request()?,
+            collision_mass: if mesh && self.collision_generates_physics() {
                 self.parsed_collision_mass()?
             } else {
                 1.0

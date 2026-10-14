@@ -29,14 +29,9 @@ impl App {
             if self.state.features.model_manager.busy() {
                 return Task::none();
             }
-            return Task::batch([
-                self.apply_file_preview_message(
-                    crate::features::file_preview::Message::BackRequested,
-                ),
-                Task::done(RootMessage::ModelManager(
-                    crate::features::model_manager::Message::SourceDropped(path),
-                )),
-            ]);
+            return self.apply_model_manager_message(
+                crate::features::model_manager::Message::SourceDropped(path),
+            );
         }
         let prepare_publish_accepts = self.state.features.modal_stack.active()
             == Some(modal_stack::ActiveModal::PreparePublish)

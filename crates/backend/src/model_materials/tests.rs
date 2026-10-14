@@ -437,6 +437,65 @@ Connections: { }
 }
 
 #[test]
+fn fbx_scene_reuse_does_not_hide_edits_after_an_operation_or_panic() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("paint.fbx");
+    let write_color = |color: &str| {
+        fs::write(
+            &path,
+            format!(
+                r#"; FBX 7.4.0 project file
+FBXHeaderExtension: {{ FBXHeaderVersion: 1003
+    FBXVersion: 7400
+}}
+Objects: {{
+    Material: 100, "Material::paint", "" {{
+        Properties70: {{
+            P: "DiffuseColor", "Color", "", "A", {color}
+        }}
+    }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+    };
+    let pixels = || {
+        let prepared = prepare_materials_for_source(&["paint".into()], &[], &path).unwrap();
+        let asset = prepared
+            .assets
+            .iter()
+            .find(|asset| {
+                asset
+                    .relative_path
+                    .extension()
+                    .is_some_and(|ext| ext == "vtf")
+            })
+            .unwrap();
+        vformats::vtf::parse(&asset.bytes, &vformats::Limits::default())
+            .unwrap()
+            .decode_rgba(0, 0, 0, &vformats::Limits::default())
+            .unwrap()
+            .rgba
+    };
+    write_color("1.0, 0.0, 0.0");
+    mdlc::fbx::with_scene_cache(|| {
+        assert_eq!(pixels(), [255, 0, 0, 255]);
+        mdlc::fbx::with_scene_cache(|| assert_eq!(pixels(), [255, 0, 0, 255]));
+    });
+    write_color("0.0, 1.0, 0.0");
+    let interrupted = std::panic::catch_unwind(|| {
+        mdlc::fbx::with_scene_cache(|| {
+            assert_eq!(pixels(), [0, 255, 0, 255]);
+            panic!("interrupted material operation");
+        })
+    });
+    assert!(interrupted.is_err());
+    write_color("0.0, 0.0, 1.0");
+    mdlc::fbx::with_scene_cache(|| assert_eq!(pixels(), [0, 0, 255, 255]));
+}
+
+#[test]
 fn referenced_sources_merge_materials_and_reject_conflicting_definitions() {
     let source = tempfile::tempdir().unwrap();
     let write = |file: &str, name: &str, color: [f32; 4]| {
@@ -713,4 +772,186 @@ fn fbx_texture_folders_are_resolved_and_corrupt_or_unsafe_images_are_rejected() 
         prepare_materials_for_source(&["paint".into()], &[], &path),
         Err(MaterialExportError::UnsafePath(_))
     ));
+}
+
+#[test]
+fn blender_source_materials_keep_shader_proxies_and_edited_textures_over_loose_assets() {
+    let source = tempfile::tempdir().unwrap();
+    fs::create_dir_all(source.path().join("materials/models/test")).unwrap();
+    fs::write(
+        source.path().join("materials/models/test/paint.vmt"),
+        "\"VertexLitGeneric\" { \"$basetexture\" \"models/test/paint\" \"$bumpmap\" \"models/test/paint_normal\" }",
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("materials/models/test/paint.vtf"),
+        encode_vtf(
+            &RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255])),
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("materials/models/test/paint_normal.vtf"),
+        encode_vtf(
+            &RgbaImage::from_pixel(1, 1, image::Rgba([128, 128, 255, 255])),
+            true,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut png = io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([0, 200, 120, 64])))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let parameters = serde_json::json!({
+        "$basetexture":"original/paint", "$bumpmap":"original/normal",
+        "$phong":"1", "$phongexponent":"32", "$basealphaenvmapmask":"1",
+        "$envmap":"env_cubemap", "$detail":"original/detail"
+    });
+    let blocks = serde_json::json!({"Proxies":{"TextureScroll":{
+        "textureScrollVar":"$basetexturetransform", "textureScrollRate":"0.125"
+    }}});
+    let mut document = serde_json::json!({
+        "asset":{"version":"2.0"},
+        "images":[{"uri":format!("data:image/png;base64,{}",base64::encode(png.into_inner()))}],
+        "textures":[{"source":0}],
+        "materials":[{"name":"paint", "normalTexture":{"index":0}, "pbrMetallicRoughness":{
+            "baseColorTexture":{"index":0}, "metallicFactor":0.0
+        }, "extras":{"sourceShader":"UnlitGeneric", "sourceParameters":parameters, "sourceBlocks":blocks}}]
+    });
+    let path = source.path().join("edited.gltf");
+    for strings in [false, true] {
+        if strings {
+            for key in ["sourceParameters", "sourceBlocks"] {
+                document["materials"][0]["extras"][key] =
+                    serde_json::Value::String(document["materials"][0]["extras"][key].to_string());
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let prepared = prepare_materials_for_sources(
+            &["paint".into()],
+            &["models/test".into()],
+            source.path(),
+            std::slice::from_ref(&path),
+        )
+        .unwrap();
+        let vmt = prepared
+            .assets
+            .iter()
+            .find(|asset| asset.relative_path.ends_with("paint.vmt"))
+            .unwrap();
+        let text = std::str::from_utf8(&vmt.bytes).unwrap();
+        let parsed = vformats::vmt::parse(text, &vformats::Limits::default()).unwrap();
+        assert_eq!(parsed.shader, "UnlitGeneric");
+        assert_eq!(parsed.value("$basetexture"), Some("models/test/paint"));
+        assert_eq!(parsed.value("$bumpmap"), Some("models/test/paint_normal"));
+        assert_eq!(parsed.value("$phongexponent"), Some("32"));
+        assert_eq!(parsed.value("$basealphaenvmapmask"), Some("1"));
+        assert_eq!(parsed.value("$translucent"), None);
+        let proxies = parsed.kv.blocks("Proxies").next().unwrap();
+        let scroll = proxies.blocks("TextureScroll").next().unwrap();
+        assert!(scroll.pairs.iter().any(|pair| pair.key == "textureScrollRate"
+            && matches!(&pair.value, vformats::keyvalues::KvValue::String(value) if value == "0.125")));
+        let texture = prepared
+            .assets
+            .iter()
+            .find(|asset| asset.relative_path.ends_with("paint.vtf"))
+            .unwrap();
+        assert_eq!(
+            vformats::vtf::parse(&texture.bytes, &vformats::Limits::default())
+                .unwrap()
+                .decode_rgba(0, 0, 0, &vformats::Limits::default())
+                .unwrap()
+                .rgba,
+            [0, 200, 120, 64]
+        );
+        let normal = prepared
+            .assets
+            .iter()
+            .find(|asset| asset.relative_path.ends_with("paint_normal.vtf"))
+            .unwrap();
+        let normal = vformats::vtf::parse(&normal.bytes, &vformats::Limits::default()).unwrap();
+        assert_eq!(normal.flags() & 0x80, 0x80);
+        assert_eq!(
+            normal
+                .decode_rgba(0, 0, 0, &vformats::Limits::default())
+                .unwrap()
+                .rgba,
+            [0, 200, 120, 64]
+        );
+        assert!(prepared.warnings.iter().any(|warning| warning.contains("original/detail") && warning.contains("not found")));
+        assert!(
+            !prepared
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("env_cubemap")
+                    || warning.contains("original/paint")
+                    || warning.contains("original/normal"))
+        );
+    }
+}
+
+#[test]
+fn blender_source_tint_is_applied_once_and_color_edits_replace_original_tint() {
+    let source = tempfile::tempdir().unwrap();
+    let mut png = io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+        1,
+        1,
+        image::Rgba([255, 255, 255, 128]),
+    ))
+    .write_to(&mut png, image::ImageFormat::Png)
+    .unwrap();
+    let mut document = serde_json::json!({
+        "asset":{"version":"2.0"},
+        "images":[{"uri":format!("data:image/png;base64,{}",base64::encode(png.into_inner()))}],
+        "textures":[{"source":0}],
+        "materials":[{"name":"paint", "alphaMode":"BLEND", "pbrMetallicRoughness":{
+            "baseColorTexture":{"index":0},"baseColorFactor":[0.5,0.25,1.0,0.5],"metallicFactor":0.0
+        }, "extras":{"sourceShader":"VertexLitGeneric", "sourceParameters":{
+            "$color":"[0.5 0.25 1]", "$alpha":"0.5", "$phong":"1"
+        }}}]
+    });
+    let path = source.path().join("edited.gltf");
+    for edited in [false, true] {
+        if edited {
+            document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] =
+                serde_json::json!([1.0, 0.25, 1.0, 1.0]);
+        }
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let prepared = prepare_materials_for_source(&["paint".into()], &[], &path).unwrap();
+        let vmt = prepared
+            .assets
+            .iter()
+            .find(|asset| asset.relative_path.ends_with("paint.vmt"))
+            .unwrap();
+        let parsed = vformats::vmt::parse(
+            std::str::from_utf8(&vmt.bytes).unwrap(),
+            &vformats::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(parsed.value("$phong"), Some("1"));
+        assert_eq!(parsed.value("$color"), (!edited).then_some("[0.5 0.25 1]"));
+        assert_eq!(parsed.value("$alpha"), (!edited).then_some("0.5"));
+        let texture = prepared
+            .assets
+            .iter()
+            .find(|asset| asset.relative_path.ends_with("paint.vtf"))
+            .unwrap();
+        let rgba = vformats::vtf::parse(&texture.bytes, &vformats::Limits::default())
+            .unwrap()
+            .decode_rgba(0, 0, 0, &vformats::Limits::default())
+            .unwrap()
+            .rgba;
+        assert_eq!(
+            rgba,
+            if edited {
+                [255, 137, 255, 128]
+            } else {
+                [255, 255, 255, 128]
+            }
+        );
+    }
 }

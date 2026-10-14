@@ -110,6 +110,7 @@ fn model(blended: bool, lods: bool, offset: f32) -> Arc<ModelPreview> {
                 .material_names
                 .iter()
                 .map(|name| MaterialSlot {
+                    tint_base: None,
                     name: name.clone(),
                     texture: None,
                     texture2: None,

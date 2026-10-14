@@ -209,6 +209,15 @@ pub fn prepare_materials_for_source(
     material_directories: &[String],
     source_file: &Path,
 ) -> Result<PreparedMaterials, MaterialExportError> {
+    prepare_materials_for_source_inner(material_names, material_directories, source_file)
+        .map(|(prepared, _)| prepared)
+}
+
+fn prepare_materials_for_source_inner(
+    material_names: &[String],
+    material_directories: &[String],
+    source_file: &Path,
+) -> Result<(PreparedMaterials, BTreeSet<PathBuf>), MaterialExportError> {
     let source_file =
         fs::canonicalize(source_file).map_err(|error| io_error(source_file, error))?;
     let root = source_file.parent().expect("source file has parent");
@@ -225,6 +234,7 @@ pub fn prepare_materials_for_source(
             }
         })?;
     let mut imported_names = BTreeSet::new();
+    let mut overrides = BTreeSet::new();
     for material in imported {
         let clean = model_material_name(&material.name, material_directories)?;
         if !material_names.iter().any(|name| {
@@ -241,7 +251,18 @@ pub fn prepare_materials_for_source(
         if !imported_names.insert(name.clone()) {
             return Err(MaterialExportError::Conflict(path));
         }
-        if prepared
+        if material.source_vmt.is_some() {
+            for generated in [
+                path.clone(),
+                path.with_extension("vtf"),
+                PathBuf::from("materials").join(format!("{name}_normal.vtf")),
+            ] {
+                prepared
+                    .assets
+                    .retain(|asset| asset.relative_path != generated);
+                overrides.insert(generated);
+            }
+        } else if prepared
             .assets
             .iter()
             .any(|asset| asset.relative_path == path)
@@ -260,20 +281,45 @@ pub fn prepare_materials_for_source(
             prepared.warnings.push(format!("Resized texture for '{clean}' from {width}×{height} to {}×{} for Source texture compatibility.", image.width(), image.height()));
         }
         let alpha = image.pixels().any(|pixel| pixel[3] != 255);
-        let mut vmt = format!("\"VertexLitGeneric\"\n{{\n\t\"$basetexture\" \"{name}\"\n");
+        let mut source_vmt = material.source_vmt.unwrap_or_else(|| source::SourceVmt {
+            shader: "VertexLitGeneric".into(),
+            parameters: BTreeMap::new(),
+            blocks: BTreeMap::new(),
+        });
+        source_vmt
+            .parameters
+            .insert("$basetexture".into(), name.clone());
+        for parameter in [
+            "$alphatest",
+            "$alphatestreference",
+            "$translucent",
+            "$nocull",
+        ] {
+            source_vmt.parameters.remove(parameter);
+        }
         if material.alpha_mask {
-            use std::fmt::Write as _;
-            writeln!(
-                vmt,
-                "\t\"$alphatest\" \"1\"\n\t\"$alphatestreference\" \"{}\"",
-                material.alpha_cutoff
-            )
-            .expect("string write succeeds");
-        } else if material.translucent && alpha {
-            vmt.push_str("\t\"$translucent\" \"1\"\n");
+            source_vmt
+                .parameters
+                .insert("$alphatest".into(), "1".into());
+            source_vmt.parameters.insert(
+                "$alphatestreference".into(),
+                material.alpha_cutoff.to_string(),
+            );
+        } else if material.translucent && (alpha || overrides.contains(&path)) {
+            source_vmt
+                .parameters
+                .insert("$translucent".into(), "1".into());
         }
         if material.double_sided {
-            vmt.push_str("\t\"$nocull\" \"1\"\n");
+            source_vmt.parameters.insert("$nocull".into(), "1".into());
+        }
+        let ssbump = source_vmt.parameters.get("$ssbump").is_some_and(|value| {
+            value.trim().eq_ignore_ascii_case("true")
+                || value.parse::<f64>().is_ok_and(|value| value != 0.0)
+        });
+        if !ssbump {
+            source_vmt.parameters.remove("$bumpmap");
+            source_vmt.parameters.remove("$normalmap");
         }
         prepared.assets.push(MaterialAsset {
             relative_path: path.with_extension("vtf"),
@@ -299,10 +345,52 @@ pub fn prepare_materials_for_source(
                 relative_path: normal_path,
                 bytes: encode_vtf_with_flags(&normal, true, material.normal_flags)?,
             });
-            use std::fmt::Write as _;
-            writeln!(vmt, "\t\"$bumpmap\" \"{normal_name}\"").expect("string write succeeds");
+            source_vmt.parameters.insert("$bumpmap".into(), normal_name);
+            source_vmt.parameters.remove("$ssbump");
         }
-        vmt.push_str("}\n");
+        let vmt = render_source_vmt(&source_vmt, &source_file)?;
+        let document =
+            vformats::vmt::parse(&vmt, &vformats::Limits::default()).map_err(|error| {
+                MaterialExportError::Decode {
+                    path: source_file.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+        let mut dependencies = Vec::new();
+        texture_dependencies(&document.kv, &mut dependencies);
+        let mut builder = MaterialBuilder {
+            source_root: root.to_owned(),
+            files: BTreeMap::new(),
+            visited_materials: BTreeSet::new(),
+            warnings: Vec::new(),
+        };
+        for (key, texture) in dependencies {
+            if texture.eq_ignore_ascii_case("env_cubemap") || texture.starts_with(['_', '!']) {
+                continue;
+            }
+            let texture_name = material_name(&texture)?;
+            let texture_path = PathBuf::from("materials").join(format!("{texture_name}.vtf"));
+            if prepared
+                .assets
+                .iter()
+                .any(|asset| asset.relative_path == texture_path)
+            {
+                continue;
+            }
+            if !builder.copy_texture(
+                &texture_name,
+                key.contains("bump") || key.contains("normal"),
+            )? {
+                prepared.warnings.push(format!("Texture '{texture}' referenced by '{name}' was not found. Its Source material parameter was preserved; provide the original texture or mount its game content."));
+            }
+        }
+        for (relative_path, bytes) in builder.files {
+            prepared.assets.push(MaterialAsset {
+                relative_path,
+                bytes,
+            });
+        }
+        prepared.warnings.extend(builder.warnings);
         prepared.assets.push(MaterialAsset {
             relative_path: path,
             bytes: vmt.into_bytes(),
@@ -316,7 +404,85 @@ pub fn prepare_materials_for_source(
     prepared
         .assets
         .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    Ok(prepared)
+    Ok((prepared, overrides))
+}
+
+fn render_source_vmt(
+    source: &source::SourceVmt,
+    path: &Path,
+) -> Result<String, MaterialExportError> {
+    fn quoted(value: &str, path: &Path) -> Result<String, MaterialExportError> {
+        let quote = if !value.contains('"') {
+            '"'
+        } else if !value.contains('\'') {
+            '\''
+        } else {
+            return Err(MaterialExportError::Decode {
+                path: path.to_owned(),
+                reason: "Source material values cannot contain both quote delimiters".into(),
+            });
+        };
+        Ok(format!("{quote}{value}{quote}"))
+    }
+    fn block(
+        output: &mut String,
+        values: &serde_json::Map<String, serde_json::Value>,
+        depth: usize,
+        path: &Path,
+    ) -> Result<(), MaterialExportError> {
+        if depth > 32 {
+            return Err(MaterialExportError::Decode {
+                path: path.to_owned(),
+                reason: "Source material block nesting exceeds 32".into(),
+            });
+        }
+        for (key, value) in values {
+            if key.chars().any(char::is_control) {
+                return Err(MaterialExportError::Decode {
+                    path: path.to_owned(),
+                    reason: "Source material block key is invalid".into(),
+                });
+            }
+            output.push_str(&"\t".repeat(depth));
+            output.push_str(&quoted(key, path)?);
+            match value {
+                serde_json::Value::String(value) if !value.chars().any(char::is_control) => {
+                    output.push(' ');
+                    output.push_str(&quoted(value, path)?);
+                    output.push('\n');
+                }
+                serde_json::Value::Object(values) => {
+                    output.push('\n');
+                    output.push_str(&"\t".repeat(depth));
+                    output.push_str("{\n");
+                    block(output, values, depth + 1, path)?;
+                    output.push_str(&"\t".repeat(depth));
+                    output.push_str("}\n");
+                }
+                _ => {
+                    return Err(MaterialExportError::Decode {
+                        path: path.to_owned(),
+                        reason: "Source material blocks must contain strings or objects".into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut output = format!("{}\n{{\n", quoted(&source.shader, path)?);
+    for (key, value) in &source.parameters {
+        use std::fmt::Write as _;
+        writeln!(output, "\t{} {}", quoted(key, path)?, quoted(value, path)?)
+            .expect("string write succeeds");
+    }
+    let blocks = source
+        .blocks
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    block(&mut output, &blocks, 1, path)?;
+    output.push_str("}\n");
+    Ok(output)
 }
 
 pub fn prepare_materials_for_sources(
@@ -326,7 +492,7 @@ pub fn prepare_materials_for_sources(
     source_files: &[PathBuf],
 ) -> Result<PreparedMaterials, MaterialExportError> {
     let mut prepared = prepare_materials(material_names, material_directories, source_root)?;
-    let preferred: BTreeSet<_> = prepared
+    let mut preferred: BTreeSet<_> = prepared
         .assets
         .iter()
         .map(|asset| asset.relative_path.clone())
@@ -349,9 +515,12 @@ pub fn prepare_materials_for_sources(
         if !visited.insert(path.clone()) {
             continue;
         }
-        let imported = prepare_materials_for_source(material_names, material_directories, &path)?;
+        let (imported, overrides) =
+            prepare_materials_for_source_inner(material_names, material_directories, &path)?;
         for asset in imported.assets {
-            if let Some(existing) = assets.get(&asset.relative_path) {
+            if overrides.contains(&asset.relative_path) && preferred.remove(&asset.relative_path) {
+                assets.insert(asset.relative_path, asset.bytes);
+            } else if let Some(existing) = assets.get(&asset.relative_path) {
                 if existing != &asset.bytes && !preferred.contains(&asset.relative_path) {
                     return Err(MaterialExportError::Conflict(asset.relative_path));
                 }

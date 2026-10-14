@@ -57,7 +57,7 @@ impl Playback {
 }
 
 impl State {
-    fn model_selection(&self) -> Option<&ModelUiState> {
+    pub(super) fn model_selection(&self) -> Option<&ModelUiState> {
         if let Some(stage) = &self.stage {
             return Some(&stage.selection);
         }
@@ -78,18 +78,26 @@ impl State {
     }
 
     pub(crate) fn model_bounds(&self) -> Option<crate::media::preview_model::ModelBounds> {
-        self.current_model()?.visible_bounds(
-            self.model_animation_pose().as_ref(),
-            self.bodygroup_choices(),
-        )
+        self.current_model()?
+            .visible_bounds(
+                self.model_animation_pose().as_ref(),
+                self.bodygroup_choices(),
+            )
+            .map(|bounds| self.transformed_workspace_bounds(bounds))
     }
 
     pub(crate) fn model_framing_bounds(&self) -> Option<crate::media::preview_model::ModelBounds> {
-        self.model_selection()?.framing_bounds
+        self.workspace_camera_bounds
+            .or(self.model_selection()?.framing_bounds)
     }
 
     pub(super) fn refresh_model_framing(&mut self) {
-        let bounds = self.model_bounds();
+        let bounds = self.current_model().and_then(|model| {
+            model.visible_bounds(
+                self.model_animation_pose().as_ref(),
+                self.bodygroup_choices(),
+            )
+        });
         if let Some(selection) = self.model_selection_mut() {
             selection.framing_bounds = bounds;
         }

@@ -1,5 +1,6 @@
 mod model_animation;
 mod staging;
+mod workspace;
 use gmpublished_domain::math::Vec3;
 use staging::StageState;
 pub use staging::StageTransform;
@@ -77,9 +78,17 @@ pub struct State {
     expanded: bool,
     load: LoadState,
     request_id: Generation,
+    camera_epoch: Generation,
     request: Option<PreviewRequest>,
     stage: Option<StageState>,
     stage_request: Option<PreviewRequest>,
+    workspace_retained: Option<WorkspaceRetained>,
+    workspace_pending: bool,
+    workspace_error: Option<PreviewLoadError>,
+    workspace_transform: [[f32; 4]; 4],
+    workspace_camera_bounds: Option<crate::media::preview_model::ModelBounds>,
+    workspace_material_tints: Vec<(usize, [u8; 3])>,
+    workspace_skin_remap: Option<Vec<u16>>,
     spinner: SpinnerClock,
     content_ui: ContentUiState,
     inspector_panes: split_pane::State<Pane>,
@@ -94,6 +103,12 @@ enum LoadState {
     },
     Ready(Box<PreviewData>),
     Failed(PreviewLoadError),
+}
+
+#[derive(Debug)]
+struct WorkspaceRetained {
+    data: Box<PreviewData>,
+    request: Option<PreviewRequest>,
 }
 
 /// CP0 is the effect origin, pinned at the viewport centre; the rest fan out
@@ -283,9 +298,17 @@ impl Default for State {
             expanded: false,
             load: LoadState::Idle,
             request_id: Generation::INITIAL,
+            camera_epoch: Generation::INITIAL,
             request: None,
             stage: None,
             stage_request: None,
+            workspace_retained: None,
+            workspace_pending: false,
+            workspace_error: None,
+            workspace_transform: workspace::IDENTITY,
+            workspace_camera_bounds: None,
+            workspace_material_tints: vec![],
+            workspace_skin_remap: None,
             spinner: SpinnerClock::Idle,
             content_ui: ContentUiState::None,
             inspector_panes: split_pane::State::vertical(
@@ -320,14 +343,27 @@ impl State {
     pub(crate) fn error(&self) -> Option<&PreviewLoadError> {
         match &self.load {
             LoadState::Failed(error) => Some(error),
-            _ => None,
+            _ => self.workspace_error.as_ref(),
         }
     }
 
     pub(crate) fn current(&self) -> Option<&PreviewData> {
         match &self.load {
             LoadState::Ready(data) => Some(data.as_ref()),
-            _ => None,
+            _ => self
+                .workspace_retained
+                .as_ref()
+                .map(|retained| retained.data.as_ref()),
+        }
+    }
+
+    fn current_mut(&mut self) -> Option<&mut PreviewData> {
+        match &mut self.load {
+            LoadState::Ready(data) => Some(data.as_mut()),
+            _ => self
+                .workspace_retained
+                .as_mut()
+                .map(|retained| retained.data.as_mut()),
         }
     }
 
@@ -389,7 +425,10 @@ impl State {
     }
 
     pub(crate) const fn request(&self) -> Option<&PreviewRequest> {
-        self.request.as_ref()
+        match &self.workspace_retained {
+            Some(retained) => retained.request.as_ref(),
+            None => self.request.as_ref(),
+        }
     }
 
     pub(crate) fn related_preview(
@@ -430,9 +469,42 @@ impl State {
         self.load = LoadState::Loading { stage: None };
         self.stage = None;
         self.stage_request = None;
+        self.workspace_retained = None;
+        self.workspace_pending = false;
+        self.workspace_error = None;
+        self.workspace_transform = workspace::IDENTITY;
+        self.workspace_camera_bounds = None;
+        self.workspace_material_tints.clear();
+        self.workspace_skin_remap = None;
         self.request = Some(request.clone());
         self.spinner.stop();
         self.content_ui = ContentUiState::from_request(&request);
+        request
+    }
+
+    pub(crate) fn begin_workspace_open(&mut self, mut request: PreviewRequest) -> PreviewRequest {
+        if self.workspace_retained.is_none()
+            && matches!(&self.load, LoadState::Ready(data) if matches!(data.content, PreviewContent::Model(_) | PreviewContent::Map { .. }))
+            && let LoadState::Ready(data) = std::mem::take(&mut self.load)
+        {
+            self.workspace_retained = Some(WorkspaceRetained {
+                data,
+                request: self.request.take(),
+            });
+        }
+        if self.workspace_retained.is_none() {
+            self.content_ui = ContentUiState::from_request(&request);
+            self.stage = None;
+        }
+        self.request_id.bump();
+        request.request_id = self.request_id;
+        self.open = true;
+        self.load = LoadState::Loading { stage: None };
+        self.request = Some(request.clone());
+        self.stage_request = None;
+        self.workspace_pending = true;
+        self.workspace_error = None;
+        self.spinner.stop();
         request
     }
 
@@ -477,6 +549,20 @@ impl State {
             ContentUiState::Model(model) => model.orbit_pose,
             ContentUiState::Particle(particle) => particle.orbit_pose,
             _ => None,
+        }
+    }
+
+    pub(super) const fn camera_epoch(&self) -> Generation {
+        self.camera_epoch
+    }
+
+    pub(super) fn reset_model_camera(&mut self) {
+        if self.open && matches!(self.content_ui, ContentUiState::Model(_)) {
+            if self.workspace_camera_bounds.is_some() {
+                self.workspace_camera_bounds = self.model_bounds();
+            }
+            self.set_orbit_pose(OrbitPose::default());
+            self.camera_epoch.bump();
         }
     }
 
@@ -526,20 +612,66 @@ impl State {
         request_id: Generation,
         result: Result<PreviewData, PreviewLoadError>,
     ) -> bool {
-        if !self.open || self.request_id != request_id {
+        if !self.open || self.request_id != request_id || !self.loading() {
             return false;
         }
 
         match result {
             Ok(data) => {
+                let mut selection = None;
+                if self.workspace_pending {
+                    let same_source = self.workspace_retained.as_ref().is_some_and(|retained| {
+                        retained.request.as_ref().map(|request| &request.entry_path)
+                            == self.request.as_ref().map(|request| &request.entry_path)
+                    });
+                    if !same_source {
+                        self.content_ui = ContentUiState::from_content(&data.content);
+                        self.camera_epoch.bump();
+                    } else if let ContentUiState::Model(model) = &self.content_ui {
+                        selection = Some((model.selected_skin, model.bodygroup_choices.clone()));
+                    }
+                    self.stage = None;
+                }
                 self.content_ui.reconcile_with_content(&data.content);
+                if let (
+                    Some((skin, choices)),
+                    ContentUiState::Model(ui),
+                    PreviewContent::Model(model),
+                ) = (selection, &mut self.content_ui, &data.content)
+                {
+                    ui.selected_skin = skin.min(model.skin_tables.len().saturating_sub(1));
+                    for (index, choice) in ui.bodygroup_choices.iter_mut().enumerate() {
+                        *choice = choices
+                            .get(index)
+                            .copied()
+                            .unwrap_or(0)
+                            .min(model.bodygroups[index].saturating_sub(1));
+                    }
+                }
                 self.load = LoadState::Ready(Box::new(data));
+                self.workspace_retained = None;
+                if self.workspace_pending {
+                    self.refresh_model_framing();
+                    if self.workspace_camera_bounds.is_none() {
+                        self.workspace_camera_bounds = self
+                            .model_selection()
+                            .and_then(|model| model.framing_bounds);
+                    }
+                }
             }
             Err(error) => {
-                self.content_ui = ContentUiState::None;
-                self.load = LoadState::Failed(error);
+                if let Some(retained) = self.workspace_retained.take() {
+                    self.load = LoadState::Ready(retained.data);
+                    self.request = retained.request;
+                    self.workspace_error = Some(error);
+                } else {
+                    self.content_ui = ContentUiState::None;
+                    self.load = LoadState::Failed(error);
+                }
             }
         }
+        self.workspace_pending = false;
+        self.stage_request = None;
         true
     }
 
@@ -730,7 +862,7 @@ impl State {
     pub(super) fn select_lod(&mut self, lod: usize) {
         if let Some(stage) = &mut self.stage {
             stage.model = stage.model.at_lod(lod);
-        } else if let LoadState::Ready(data) = &mut self.load
+        } else if let Some(data) = self.current_mut()
             && let PreviewContent::Model(model) = &mut data.content
         {
             *model = model.at_lod(lod);
@@ -920,6 +1052,13 @@ impl State {
         self.load = LoadState::Idle;
         self.stage = None;
         self.stage_request = None;
+        self.workspace_retained = None;
+        self.workspace_pending = false;
+        self.workspace_error = None;
+        self.workspace_transform = workspace::IDENTITY;
+        self.workspace_camera_bounds = None;
+        self.workspace_material_tints.clear();
+        self.workspace_skin_remap = None;
         self.spinner.stop();
         self.content_ui = ContentUiState::None;
     }

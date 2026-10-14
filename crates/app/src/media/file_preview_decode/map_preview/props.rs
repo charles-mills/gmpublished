@@ -1224,6 +1224,7 @@ pub(in super::super) fn prop_material_index(
     context.table.push(
         &key,
         MaterialSlot {
+            tint_base: None,
             name: name.to_owned(),
             texture,
             texture2: None,

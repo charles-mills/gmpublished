@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::media::preview_model::{MeshData, ModelData};
+use crate::media::preview_model::{MeshData, ModelData, ModelVertex};
 use cosmic_text::{
     Align, Attrs, Buffer, Color as TextColor, FontSystem, Metrics, PlatformFallback, Shaping,
     SwashCache, fontdb,
@@ -19,8 +19,8 @@ use rodio::Source as _;
 
 use crate::bridge::materials::{MaterialResolver, RenderMode, ResolvedMaterialTextures};
 use crate::media::preview_model::{
-    DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot, ModelPreview, ModelStats,
-    OverlayPrimitive, OverlayVertex, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot,
+    COLLISION_PIECE_MATERIAL_NAME, DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot,
+    ModelPreview, ModelStats, OverlayPrimitive, OverlayVertex, ParticleMaterialSlot,
     ParticlePreview, ParticleSystemInfo, PreviewContent, PreviewData, PreviewLoadError,
     PreviewLoadStage, PreviewRequest, RenderScene, Skybox, SkyboxFace, normalize_particle_material,
 };
@@ -33,6 +33,7 @@ mod syntax;
 
 #[cfg(test)]
 use crate::media::preview_model::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
+use map_preview::map_preview_data;
 #[cfg(test)]
 use map_preview::{
     LoadedPropModel, LoadedPropPhysics, MaterialTable, PropBakeSkipStats, PropModelAsset,
@@ -43,7 +44,6 @@ use map_preview::{
     normalize_map_uv, transform_prop_normal, transform_prop_position,
     unresolved_material_names_for_debug,
 };
-use map_preview::{PhyDebugMeshBuilder, map_preview_data, parse_phy_bytes};
 #[cfg(test)]
 use materials::{
     resolve_map_material_slots_parallel, resolve_map_material_slots_serial, resolve_skybox,
@@ -623,9 +623,10 @@ fn model_preview_data(
         .map_err(|error| error.to_string())
     });
     let resolver = MaterialResolver::new(request.archive.clone(), gmod_dir);
+    let collision = model_phy_debug_meshes(mdl_bytes, stem, &resolver, model.material_names.len());
     let lods: Vec<_> = models
         .into_iter()
-        .map(|model| model_lod_scene(model, stem, &resolver))
+        .map(|model| model_lod_scene(model, &collision, &resolver))
         .collect();
     PreviewData::from_request(
         request,
@@ -642,13 +643,17 @@ fn model_preview_data(
     )
 }
 
-fn model_lod_scene(model: ModelData, stem: &str, resolver: &MaterialResolver) -> Arc<RenderScene> {
+fn model_lod_scene(
+    model: ModelData,
+    collision: &[MeshData],
+    resolver: &MaterialResolver,
+) -> Arc<RenderScene> {
     let mut resolved_material_count = 0_u32;
     let mut materials = model
         .material_names
         .iter()
         .map(|name| {
-            let resolved = resolver.resolve_primary(&model.material_dirs, name);
+            let resolved = resolver.resolve_model_primary(&model.material_dirs, name);
             let texture = resolved
                 .as_ref()
                 .map(|material| Arc::clone(&material.texture));
@@ -656,6 +661,9 @@ fn model_lod_scene(model: ModelData, stem: &str, resolver: &MaterialResolver) ->
                 resolved_material_count = resolved_material_count.saturating_add(1);
             }
             MaterialSlot {
+                tint_base: resolved
+                    .as_ref()
+                    .and_then(|material| material.tint_base.as_ref().map(Arc::clone)),
                 name: name.clone(),
                 texture,
                 texture2: None,
@@ -668,10 +676,10 @@ fn model_lod_scene(model: ModelData, stem: &str, resolver: &MaterialResolver) ->
             }
         })
         .collect::<Vec<_>>();
-    let phy_debug_meshes = model_phy_debug_mesh(stem, resolver, materials.len());
-    if phy_debug_meshes.is_some() {
+    if !collision.is_empty() {
         materials.push(MaterialSlot {
-            name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
+            tint_base: None,
+            name: COLLISION_PIECE_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,
             force_opaque: false,
@@ -691,7 +699,7 @@ fn model_lod_scene(model: ModelData, stem: &str, resolver: &MaterialResolver) ->
         },
         meshes: model.meshes,
         materials,
-        phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
+        phy_debug_meshes: collision.to_vec(),
         bounds_min: model.bounds_min,
         bounds_max: model.bounds_max,
     })
@@ -718,22 +726,74 @@ fn load_model_companions(
     Some((vvd_bytes, vtx_bytes))
 }
 
-fn model_phy_debug_mesh(
+fn model_phy_debug_meshes(
+    mdl_bytes: &[u8],
     stem: &str,
     resolver: &MaterialResolver,
     material_index: usize,
-) -> Option<MeshData> {
+) -> Vec<MeshData> {
     let phy_path = format!("{stem}.phy");
-    let bytes = resolver.entry_bytes(&phy_path)?;
-    let physics = parse_phy_bytes(&bytes, &format!("model preview physics {phy_path}")).ok()?;
-    let mut builder = PhyDebugMeshBuilder::default();
-    builder.push_loaded_phy(&physics, |position| position);
-    if builder.truncated {
-        log::debug!(
-            "model preview .phy debug mesh truncated at {PHY_DEBUG_TRIANGLE_CAP} triangles"
-        );
+    let Some(bytes) = resolver.entry_bytes(&phy_path) else {
+        return Vec::new();
+    };
+    let pieces =
+        match gmpublished_backend::model_decompile::load_collision_meshes(mdl_bytes, &bytes) {
+            Ok(pieces) => pieces,
+            Err(error) => {
+                log::debug!("model preview physics {phy_path} failed: {error}");
+                return Vec::new();
+            }
+        };
+    let palette = [
+        Vec3::new(0.48, 0.15, 0.10),
+        Vec3::new(0.12, 0.43, 0.24),
+        Vec3::new(0.12, 0.28, 0.49),
+        Vec3::new(0.45, 0.36, 0.08),
+        Vec3::new(0.32, 0.16, 0.46),
+        Vec3::new(0.05, 0.40, 0.43),
+    ];
+    let mut meshes = Vec::new();
+    let mut triangle_count = 0usize;
+    for (piece, mesh) in pieces.into_iter().enumerate() {
+        let mut vertices = Vec::new();
+        for triangle in mesh.indices.chunks_exact(3) {
+            if triangle_count >= PHY_DEBUG_TRIANGLE_CAP {
+                break;
+            }
+            let points = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                let [x, y, z] = mesh.vertices[index as usize];
+                Vec3::new(x, y, z)
+            });
+            let normal = (points[1] - points[0])
+                .cross(points[2] - points[0])
+                .normalize_or_zero();
+            if normal.length_squared() <= f32::EPSILON {
+                continue;
+            }
+            vertices.extend(points.map(|position| ModelVertex {
+                position,
+                normal,
+                uv: [0.0; 2],
+                lightmap_uv: [0.0; 2],
+                color: palette[piece % palette.len()],
+                blend_alpha: 0.0,
+            }));
+            triangle_count += 1;
+        }
+        if !vertices.is_empty() {
+            meshes.push(MeshData {
+                indices: (0..vertices.len() as u32).collect(),
+                vertices,
+                material_index,
+                bodygroup: 0,
+                bodygroup_choice: 0,
+            });
+        }
+        if triangle_count >= PHY_DEBUG_TRIANGLE_CAP {
+            break;
+        }
     }
-    builder.finish(material_index)
+    meshes
 }
 
 fn load_model_catching_panic(

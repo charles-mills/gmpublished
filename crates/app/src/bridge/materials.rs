@@ -240,6 +240,7 @@ pub struct ResolvedMaterialTextures {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPrimaryMaterial {
     pub(crate) texture: Arc<ResolvedTexture>,
+    pub(crate) tint_base: Option<Arc<ResolvedTexture>>,
     pub(crate) force_opaque: bool,
     pub(crate) render_mode: RenderMode,
 }
@@ -548,7 +549,7 @@ impl MaterialResolver {
     ) -> Option<Arc<ResolvedTexture>> {
         let material_paths = material_paths(material_dirs, material_name);
         self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_primary_material_bytes(material_path, &vmt_bytes)
+            self.resolve_primary_material_bytes(material_path, &vmt_bytes, false)
                 .map(|material| Arc::clone(&material.texture))
         })
     }
@@ -560,7 +561,18 @@ impl MaterialResolver {
     ) -> Option<ResolvedPrimaryMaterial> {
         let material_paths = material_paths(material_dirs, material_name);
         self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_primary_material_bytes(material_path, &vmt_bytes)
+            self.resolve_primary_material_bytes(material_path, &vmt_bytes, false)
+        })
+    }
+
+    pub(crate) fn resolve_model_primary(
+        &self,
+        material_dirs: &[String],
+        material_name: &str,
+    ) -> Option<ResolvedPrimaryMaterial> {
+        let material_paths = material_paths(material_dirs, material_name);
+        self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
+            self.resolve_primary_material_bytes(material_path, &vmt_bytes, true)
         })
     }
 
@@ -651,6 +663,7 @@ impl MaterialResolver {
         &self,
         material_path: &ContentPath,
         vmt_bytes: &[u8],
+        editable_tint: bool,
     ) -> Option<ResolvedPrimaryMaterial> {
         let vmt_text = String::from_utf8_lossy(vmt_bytes);
         let mut visited_includes = vec![material_path.clone()];
@@ -662,8 +675,25 @@ impl MaterialResolver {
             .and_then(|base_texture| self.resolve_material_texture(base_texture, &material))
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material))?;
+        let tint_base = if editable_tint
+            && material
+                .color2
+                .as_deref()
+                .and_then(parse_material_color)
+                .is_some_and(|color| color != [1.0; 3])
+        {
+            let mut untinted = material;
+            untinted.color2 = None;
+            untinted
+                .base_texture
+                .as_deref()
+                .and_then(|base| self.resolve_material_texture(base, &untinted))
+        } else {
+            None
+        };
         Some(ResolvedPrimaryMaterial {
             texture,
+            tint_base,
             force_opaque: render_mode.force_opaque(),
             render_mode,
         })

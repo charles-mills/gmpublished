@@ -13,7 +13,9 @@ use gmpublished_domain::particles::ControlPointIndex;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     OpenRequested(PreviewRequest),
-    StageRequested {
+    WorkspaceOpenRequested(PreviewRequest),
+    WorkspaceLoadCancelled,
+    WorkspaceStageRequested {
         model: Box<PreviewRequest>,
         map: Box<PreviewRequest>,
     },
@@ -95,6 +97,7 @@ pub enum Message {
     MovementModeSelected(MovementMode),
     DoorAudioEvents(Vec<DoorAudioEvent>),
     OrbitPoseChanged(OrbitPose),
+    ModelCameraResetRequested,
     ParticleSystemSelected(usize),
     ParticlePlayToggled,
     ParticleRestartRequested,

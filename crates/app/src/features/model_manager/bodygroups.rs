@@ -49,10 +49,11 @@ fn new_choice(state: &State, group: usize) -> BodygroupChoice {
         .as_ref()
         .and_then(|inspection| {
             inspection.parts.iter().find(|part| {
-                !state
-                    .bodygroups
-                    .iter()
-                    .any(|group| owns_part(group, &part.selector))
+                !state.is_collision_part(&part.selector)
+                    && !state
+                        .bodygroups
+                        .iter()
+                        .any(|group| owns_part(group, &part.selector))
             })
         })
         .map(|part| vec![part.selector.clone()])
@@ -143,16 +144,18 @@ pub(super) fn edit(state: &mut State, message: &Message) -> bool {
             name.clone_from(value);
         }
         Message::BodygroupPartToggled(index, choice, selector, selected) => {
-            if !state.inspection.as_ref().is_some_and(|inspection| {
-                inspection
-                    .parts
+            if state.is_collision_part(selector)
+                || !state.inspection.as_ref().is_some_and(|inspection| {
+                    inspection
+                        .parts
+                        .iter()
+                        .any(|part| &part.selector == selector)
+                })
+                || state
+                    .bodygroups
                     .iter()
-                    .any(|part| &part.selector == selector)
-            }) || state
-                .bodygroups
-                .iter()
-                .enumerate()
-                .any(|(owner, group)| owner != *index && owns_part(group, selector))
+                    .enumerate()
+                    .any(|(owner, group)| owner != *index && owns_part(group, selector))
             {
                 return false;
             }
@@ -209,19 +212,19 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
     }
     for (group_index, group) in state.bodygroups.iter().enumerate() {
         content = content.push(
-            row![
+            column![
                 text_input(&i18n.tr("models-bodygroup-name"), &group.name)
                     .on_input_maybe((!busy).then_some(move |value| {
                         Message::BodygroupNameChanged(group_index, value)
                     }))
                     .padding(tokens.spacing.pad_control)
                     .style(move |_, status| theme::styles::input(&tokens, status)),
-                button(text(i18n.tr("models-bodygroup-remove")))
+                button(text(i18n.tr("models-bodygroup-remove")).size(tokens.typography.body_sm))
                     .on_press_maybe((!busy).then_some(Message::BodygroupRemoved(group_index)))
                     .style(move |_, status| theme::styles::button(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap)
-            .align_y(iced::Center),
+            .width(Length::Fill),
         );
         for (choice_index, choice) in group.choices.iter().enumerate() {
             let mut option = column![].spacing(tokens.spacing.gap);
@@ -239,40 +242,42 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
                         .into()
                 }
             };
-            option =
-                option.push(
-                    row![
-                        label,
-                        button(text("↑"))
-                            .on_press_maybe((!busy && choice_index > 0).then_some(
+            option = option.push(label).push(
+                row![
+                    button(text("↑"))
+                        .on_press_maybe((!busy && choice_index > 0).then_some(
+                            Message::BodygroupChoiceMoved(
+                                group_index,
+                                choice_index,
+                                choice_index.saturating_sub(1)
+                            )
+                        ))
+                        .style(move |_, status| theme::styles::button(&tokens, status)),
+                    button(text("↓"))
+                        .on_press_maybe(
+                            (!busy && choice_index + 1 < group.choices.len()).then_some(
                                 Message::BodygroupChoiceMoved(
                                     group_index,
                                     choice_index,
-                                    choice_index.saturating_sub(1)
-                                )
-                            ))
-                            .style(move |_, status| theme::styles::button(&tokens, status)),
-                        button(text("↓"))
-                            .on_press_maybe(
-                                (!busy && choice_index + 1 < group.choices.len()).then_some(
-                                    Message::BodygroupChoiceMoved(
-                                        group_index,
-                                        choice_index,
-                                        choice_index + 1
-                                    )
+                                    choice_index + 1
                                 )
                             )
-                            .style(move |_, status| theme::styles::button(&tokens, status)),
-                        button(text(i18n.tr("models-bodygroup-remove-choice")))
-                            .on_press_maybe((!busy).then_some(Message::BodygroupChoiceRemoved(
-                                group_index,
-                                choice_index
-                            )))
-                            .style(move |_, status| theme::styles::button(&tokens, status)),
-                    ]
-                    .spacing(tokens.spacing.gap)
-                    .align_y(iced::Center),
-                );
+                        )
+                        .style(move |_, status| theme::styles::button(&tokens, status)),
+                    button(
+                        text(i18n.tr("models-bodygroup-remove-choice"))
+                            .size(tokens.typography.body_sm)
+                    )
+                    .on_press_maybe(
+                        (!busy)
+                            .then_some(Message::BodygroupChoiceRemoved(group_index, choice_index))
+                    )
+                    .style(move |_, status| theme::styles::button(&tokens, status)),
+                ]
+                .spacing(tokens.spacing.gap)
+                .align_y(iced::Center)
+                .wrap(),
+            );
             if choice_index == 0 {
                 option = option.push(
                     text(i18n.tr("models-bodygroup-default"))
@@ -318,13 +323,15 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
                         .collect();
                     for (part, label) in matching.iter().take(100) {
                         let selector = part.selector.clone();
-                        let available =
-                            !state.bodygroups.iter().enumerate().any(|(owner, group)| {
+                        let available = !state.is_collision_part(&selector)
+                            && !state.bodygroups.iter().enumerate().any(|(owner, group)| {
                                 owner != group_index && owns_part(group, &selector)
                             });
                         option = option.push(
                             checkbox(parts.contains(&selector))
                                 .label(label.clone())
+                                .text_size(tokens.typography.body_sm)
+                                .width(Length::Fill)
                                 .on_toggle_maybe((!busy && available).then_some(move |selected| {
                                     Message::BodygroupPartToggled(
                                         group_index,
@@ -350,27 +357,31 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
         }
         content = content.push(
             row![
-                button(text(i18n.tr("models-bodygroup-add-choice")))
-                    .on_press_maybe(
-                        (!busy && group.choices.len() < 32)
-                            .then_some(Message::BodygroupChoiceAdded(group_index))
-                    )
-                    .style(move |_, status| theme::styles::button(&tokens, status)),
-                button(text(i18n.tr("models-bodygroup-add-hidden")))
-                    .on_press_maybe(
-                        (!busy
-                            && group.choices.len() < 32
-                            && !group.choices.contains(&BodygroupChoice::Hidden))
-                        .then_some(Message::BodygroupHiddenAdded(group_index))
-                    )
-                    .style(move |_, status| theme::styles::button(&tokens, status)),
+                button(
+                    text(i18n.tr("models-bodygroup-add-choice")).size(tokens.typography.body_sm)
+                )
+                .on_press_maybe(
+                    (!busy && group.choices.len() < 32)
+                        .then_some(Message::BodygroupChoiceAdded(group_index))
+                )
+                .style(move |_, status| theme::styles::button(&tokens, status)),
+                button(
+                    text(i18n.tr("models-bodygroup-add-hidden")).size(tokens.typography.body_sm)
+                )
+                .on_press_maybe(
+                    (!busy
+                        && group.choices.len() < 32
+                        && !group.choices.contains(&BodygroupChoice::Hidden))
+                    .then_some(Message::BodygroupHiddenAdded(group_index))
+                )
+                .style(move |_, status| theme::styles::button(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap)
             .wrap(),
         );
     }
     content = content.push(
-        button(text(i18n.tr("models-bodygroup-add")))
+        button(text(i18n.tr("models-bodygroup-add")).size(tokens.typography.body_sm))
             .on_press_maybe(
                 (!busy && state.bodygroups.len() < 32 && state.lods.is_empty())
                     .then_some(Message::BodygroupAdded),
@@ -407,6 +418,9 @@ mod tests {
         super::super::update(&mut state, Message::SourceDropped("prop.gltf".into()));
         state.destination = Some("output".into());
         state.inspection = Some(ModelInspection {
+            source_model: None,
+            collision_parts: vec![],
+            collision_physics: None,
             parts: (0..3)
                 .map(|index| SourcePart {
                     selector: format!("@node:{index}"),
@@ -472,14 +486,17 @@ mod tests {
     #[test]
     fn group_and_hidden_choice_controls_are_clickable_in_every_locale() {
         let mut state = state();
-        let tokens = Tokens::dark();
+        let tokens = Tokens::dark().with_display_preferences(
+            crate::bridge::UiDensity::Comfortable,
+            crate::bridge::MAX_TEXT_SIZE_PERCENT,
+        );
         for locale in [
             "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
         ] {
             let i18n = I18n::for_locale(Some(locale));
             let mut ui = iced_test::Simulator::with_size(
                 iced::Settings::default(),
-                iced::Size::new(900.0, 900.0),
+                iced::Size::new(1200.0, 1200.0),
                 view(&state, ViewCtx::new(&tokens, &i18n)),
             );
             ui.click(i18n.tr("models-bodygroup-add").as_str()).unwrap();
@@ -495,15 +512,23 @@ mod tests {
             let i18n = I18n::for_locale(Some(locale));
             let mut ui = iced_test::Simulator::with_size(
                 iced::Settings::default(),
-                iced::Size::new(560.0, 900.0),
+                iced::Size::new(310.0, 1200.0),
                 view(&state, ViewCtx::new(&tokens, &i18n)),
             );
             let control = ui
                 .find(i18n.tr("models-bodygroup-add-hidden").as_str())
                 .unwrap();
             assert!(
-                control.bounds().x >= 0.0 && control.bounds().x + control.bounds().width <= 560.0,
+                control.bounds().x >= 0.0 && control.bounds().x + control.bounds().width <= 310.0,
                 "bodygroup controls overflow in {locale}"
+            );
+            let remove = ui
+                .find(i18n.tr("models-bodygroup-remove-choice").as_str())
+                .unwrap()
+                .bounds();
+            assert!(
+                remove.x >= 0.0 && remove.x + remove.width <= 310.0,
+                "{locale}: {remove:?}"
             );
             ui.click(i18n.tr("models-bodygroup-add-hidden").as_str())
                 .unwrap();

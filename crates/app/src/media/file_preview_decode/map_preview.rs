@@ -40,8 +40,7 @@ mod world_geometry;
 
 use build::{PropBuildPhase, build_props};
 pub(super) use collision::{
-    PhyDebugMeshBuilder, enrich_walk_collision_with_prop_collision,
-    phy_debug_mesh_from_loaded_prop_models,
+    enrich_walk_collision_with_prop_collision, phy_debug_mesh_from_loaded_prop_models,
 };
 use diagnostics::{
     MapPreviewStatuses, MapPreviewTimings, lightmap_status, log_map_preview_summary,
@@ -62,7 +61,7 @@ pub(super) use props::{
     DoorBakeResult, LoadedPhy, LoadedPropModel, LoadedPropPhysics, PropBakeResult,
     PropBakeSkipStats, PropCollisionStats, PropModelAsset, bake_map_doors_with_prop_model_loader,
     bake_static_props_from_loaded_model_cache, load_prop_model, load_unique_prop_models_parallel,
-    log_prop_door_material_resolution, parse_phy_bytes, pre_resolve_prop_materials,
+    log_prop_door_material_resolution, pre_resolve_prop_materials,
     refresh_entity_prop_aabb_visibility, transform_prop_position,
 };
 #[cfg(test)]
@@ -270,6 +269,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let render_mode_status = render_mode_log_suffix(table.slots());
     if !phy_debug_meshes.is_empty() {
         table.push_unindexed(MaterialSlot {
+            tint_base: None,
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,

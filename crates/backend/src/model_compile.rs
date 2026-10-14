@@ -10,9 +10,15 @@ use parking_lot::Mutex;
 use crate::model_project::{ModelSkin, SkinMaterial};
 use crate::{ErrorKey, HasErrorKey, error_keys, model_materials};
 
+#[path = "model_compile/authoring.rs"]
+pub(crate) mod authoring;
 #[path = "model_compile/bodygroups.rs"]
 mod bodygroups;
+#[path = "model_compile/collision.rs"]
+mod collision;
 pub use bodygroups::{BodygroupChoice, ModelBodygroup, validate_bodygroups};
+pub(crate) use collision::collision_hulls;
+pub use collision::{CollisionDetail, CollisionPhysics, ModelCollision, collision_parts};
 #[path = "model_compile/lods.rs"]
 mod lods;
 mod surfaces;
@@ -36,6 +42,7 @@ pub struct ModelCompileRequest {
     pub model_name: Option<String>,
     pub material_directory: Option<String>,
     pub static_prop: bool,
+    pub static_prop_override: Option<bool>,
     pub scale: f32,
     pub overwrite: bool,
     pub export_materials: bool,
@@ -45,7 +52,7 @@ pub struct ModelCompileRequest {
     pub bodygroups: Vec<ModelBodygroup>,
     pub lods: Vec<ModelLod>,
     pub animation_settings: Vec<AnimationSettings>,
-    pub generate_collision: bool,
+    pub collision: ModelCollision,
     pub collision_mass: f32,
     pub surface_property: Option<String>,
 }
@@ -61,6 +68,7 @@ impl ModelCompileRequest {
             model_name: None,
             material_directory: None,
             static_prop: false,
+            static_prop_override: None,
             scale: 1.0,
             overwrite: false,
             export_materials: true,
@@ -70,7 +78,7 @@ impl ModelCompileRequest {
             bodygroups: Vec::new(),
             lods: Vec::new(),
             animation_settings: Vec::new(),
-            generate_collision: false,
+            collision: ModelCollision::Existing,
             collision_mass: 1.0,
             surface_property: None,
         }
@@ -170,7 +178,9 @@ pub fn compile_model_with_cancel(
     request: &ModelCompileRequest,
     cancel: &AtomicBool,
 ) -> Result<ModelCompileOutput, ModelCompileError> {
-    let (result, warnings) = mdlc::diag::capture_warnings(|| compile_model_inner(request, cancel));
+    let (result, warnings) = mdlc::diag::capture_warnings(|| {
+        mdlc::fbx::with_scene_cache(|| compile_model_inner(request, cancel))
+    });
     result.map(|mut output| {
         for warning in warnings {
             if !output.warnings.contains(&warning) {
@@ -195,6 +205,7 @@ fn compile_model_inner(
         .parent()
         .ok_or_else(|| ModelCompileError::InvalidOption("source must be a file".into()))?;
     let mut desc = load_description(request, &source, base)?;
+    let _authoring_assets = authoring::prepare_assets(&mut desc, &source)?;
     desc.model.version = Some(48);
     if let Some(name) = &request.model_name {
         desc.model.name = normalize_model_name(name)?;
@@ -223,17 +234,11 @@ fn compile_model_inner(
     }
     let mut compiled =
         mdlc::compile::compile(&desc, base).map_err(mdlc::pipeline::PipelineError::Compile)?;
+    authoring::restore_animation_labels(&mut compiled, &source)?;
     apply_orientation(&mut compiled, &source, request.orientation)?;
     let variants = apply_skins(&mut compiled.desc, &request.skins)?;
     let mut output = pipeline::build_compiled(compiled, base, PipelineOptions::default())?;
-    if request.generate_collision {
-        if !output.compiled.desc.model.static_prop && output.compiled.desc.bones.len() > 1 {
-            return Err(ModelCompileError::InvalidOption(
-                "automatic collision generation supports rigid props; compile this mesh as a static prop or provide authored collision through QC for its skeleton".into(),
-            ));
-        }
-        output.phy = Some(generate_collision(&output)?);
-    }
+    collision::apply(&mut output, request, cancel)?;
     if let Some(bytes) = &output.phy {
         let phy = vformats::phy::parse(bytes, &vformats::Limits::default()).map_err(|error| {
             ModelCompileError::Description(format!("collision output failed validation: {error}"))
@@ -621,8 +626,17 @@ fn sampled_animation_frames(
     Ok(animation.frames.len())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedModelSettings {
+    pub model_name: String,
+    pub static_prop: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInspection {
+    pub source_model: Option<ImportedModelSettings>,
+    pub collision_physics: Option<CollisionPhysics>,
+    pub collision_parts: Vec<String>,
     pub parts: Vec<mdlc::fbx::SourcePart>,
     pub animations: Vec<AnimationSettings>,
     pub materials: Vec<String>,
@@ -669,6 +683,13 @@ fn inspect_source(
     source: &Path,
     qc_text: Option<&str>,
 ) -> Result<ModelInspection, ModelCompileError> {
+    mdlc::fbx::with_scene_cache(|| inspect_source_inner(source, qc_text))
+}
+
+fn inspect_source_inner(
+    source: &Path,
+    qc_text: Option<&str>,
+) -> Result<ModelInspection, ModelCompileError> {
     crate::util::main_thread_forbidden!();
     let source = fs::canonicalize(source).map_err(|error| ModelCompileError::Io {
         path: source.to_path_buf(),
@@ -708,6 +729,9 @@ fn inspect_source(
                 .collect::<Result<Vec<_>, _>>()?
         };
         return Ok(ModelInspection {
+            source_model: None,
+            collision_physics: None,
+            collision_parts: Vec::new(),
             parts: Vec::new(),
             animations: Vec::new(),
             materials,
@@ -755,29 +779,38 @@ fn inspect_source(
         .unwrap_or_default()
         .to_string_lossy()
         .to_ascii_lowercase();
-    let animations = desc
-        .sequences
-        .iter()
-        .map(|sequence| {
-            Ok(AnimationSettings {
-                source: sequence.src_stack.clone(),
-                included: true,
-                name: sequence.name.clone(),
-                fps: sequence.fps.unwrap_or(30.0),
-                looping: sequence.looping,
-                frame_count: if matches!(extension.as_str(), "smd" | "dmx" | "fbx" | "gltf" | "glb")
-                {
-                    sampled_animation_frames(sequence, base)?
-                } else {
-                    0
-                },
-                activity: sequence.activity.clone(),
-                activity_weight: sequence.activity_weight,
-                events: Vec::new(),
+    let source_model = authoring::model_settings(&source)?;
+    let animations = if source_model.is_some() {
+        authoring::inspection_animations(&desc, &source)?
+    } else {
+        desc.sequences
+            .iter()
+            .map(|sequence| {
+                Ok(AnimationSettings {
+                    source: sequence.src_stack.clone(),
+                    included: true,
+                    name: sequence.name.clone(),
+                    fps: sequence.fps.unwrap_or(30.0),
+                    looping: sequence.looping,
+                    frame_count: if matches!(
+                        extension.as_str(),
+                        "smd" | "dmx" | "fbx" | "gltf" | "glb"
+                    ) {
+                        sampled_animation_frames(sequence, base)?
+                    } else {
+                        0
+                    },
+                    activity: sequence.activity.clone(),
+                    activity_weight: sequence.activity_weight,
+                    events: Vec::new(),
+                })
             })
-        })
-        .collect::<Result<Vec<_>, ModelCompileError>>()?;
+            .collect::<Result<Vec<_>, ModelCompileError>>()?
+    };
     Ok(ModelInspection {
+        source_model,
+        collision_physics: collision::collision_physics(&source)?,
+        collision_parts: collision_parts(&source)?,
         parts: bodygroups::source_parts(&source)?,
         animations,
         materials,
@@ -884,57 +917,6 @@ pub(crate) fn apply_skins(
     }
     desc.materials.skin_families = families;
     Ok(variants)
-}
-
-pub(crate) fn collision_hull(
-    compiled: &mdlc::model::CompiledModelDesc,
-) -> Result<mdlc::phy::PhyHull, ModelCompileError> {
-    let mut seen = std::collections::HashSet::new();
-    let points = compiled
-        .bodyparts
-        .iter()
-        .filter_map(|body| body.models.first())
-        .flat_map(|model| &model.meshes)
-        .flat_map(|mesh| &mesh.vertices)
-        .filter(|vertex| {
-            seen.insert(
-                vertex
-                    .pos
-                    .map(|value| if value == 0.0 { 0 } else { value.to_bits() }),
-            )
-        })
-        // The native PHY writer applies StudioMDL's +90-degree source rotation.
-        .map(|vertex| [vertex.pos[1], -vertex.pos[0], vertex.pos[2]])
-        .collect::<Vec<_>>();
-    if points.len() < 4 {
-        return Err(ModelCompileError::InvalidOption(
-            "generated collision requires at least four vertices in the default bodygroup choices; select a visible default or disable generated collision".into(),
-        ));
-    }
-    Ok(mdlc::phy::PhyHull::from_points(&points)
-        .map_err(pipeline::PipelineError::BuildPhy)?
-        .compact_outer_hull())
-}
-
-fn generate_collision(output: &pipeline::PipelineOutput) -> Result<Vec<u8>, ModelCompileError> {
-    let hull = collision_hull(&output.compiled)?;
-    let name = Path::new(&output.stem)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("model");
-    let mut params = mdlc::phy::PhyParams::new(name, output.checksum as u32);
-    params.total_mass = output.compiled.desc.physics.effective_mass();
-    params.surface_prop = output
-        .compiled
-        .desc
-        .model
-        .surface_prop
-        .as_deref()
-        .unwrap_or("default");
-    let bytes = mdlc::phy::write_phy(&[hull], &[mdlc::phy::PhySolid::prop(name)], &params)
-        .map_err(pipeline::PipelineError::BuildPhy)?;
-    mdlc::phy::check_invariants(&bytes).map_err(pipeline::PipelineError::CheckPhy)?;
-    Ok(bytes)
 }
 
 pub(crate) fn apply_orientation(
@@ -1053,8 +1035,10 @@ pub(crate) fn load_description(
             "scale must be finite and positive".into(),
         ));
     }
-    if request.generate_collision
-        && (!request.collision_mass.is_finite() || request.collision_mass <= 0.0)
+    if matches!(
+        request.collision,
+        ModelCollision::Automatic(_) | ModelCollision::Custom { .. }
+    ) && (!request.collision_mass.is_finite() || request.collision_mass <= 0.0)
     {
         return Err(ModelCompileError::InvalidOption(
             "collision mass must be finite and positive".into(),
@@ -1083,7 +1067,11 @@ pub(crate) fn load_description(
                     "authored QC defines its own bodygroups".into(),
                 ));
             }
-            if request.generate_collision || request.surface_property.is_some() {
+            if matches!(
+                request.collision,
+                ModelCollision::Automatic(_) | ModelCollision::Custom { .. }
+            ) || request.surface_property.is_some()
+            {
                 return Err(ModelCompileError::InvalidOption(
                     "set collision and surface properties inside the QC or TOML description".into(),
                 ));
@@ -1121,6 +1109,9 @@ pub(crate) fn load_description(
             }
         }
         "smd" | "dmx" | "fbx" | "gltf" | "glb" => {
+            if let Some(description) = authoring::restore(request, source)? {
+                return Ok(description);
+            }
             let filename = source
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1196,8 +1187,12 @@ pub(crate) fn load_description(
             }
             bodygroups::apply(&mut desc, request, source)?;
             lods::apply(&mut desc, request, source)?;
+            collision::exclude_render_parts(&mut desc, request, source)?;
             apply_animation_settings(&mut desc, &request.animation_settings, base)?;
-            if request.generate_collision {
+            if matches!(
+                request.collision,
+                ModelCollision::Automatic(_) | ModelCollision::Custom { .. }
+            ) {
                 desc.physics.mass = Some(request.collision_mass);
             }
             desc.model
@@ -1208,6 +1203,9 @@ pub(crate) fn load_description(
         _ => Err(ModelCompileError::UnsupportedSource(source.to_path_buf())),
     };
     result.map(|mut description| {
+        if request.collision == ModelCollision::None {
+            description.physics = mdlc::model::Physics::default();
+        }
         if description.physics.auto_mass && !request.surface_properties.is_empty() {
             let authored = std::mem::replace(
                 &mut description.physics.surface_properties,

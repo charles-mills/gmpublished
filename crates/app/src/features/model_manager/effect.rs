@@ -3,11 +3,12 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use super::{ExportRequest, ExportResult};
 use crate::generation::Generation;
-use gmpublished_backend::model_project::ModelStage;
 
 #[derive(Debug)]
 pub enum Effect {
     PickSource(Generation),
+    PickCollisionSource(Generation, Option<PathBuf>),
+    InspectCollision(Generation, PathBuf),
     PickLodSource(Generation, Option<PathBuf>),
     PickDestination(Generation, Option<PathBuf>),
     Export(Generation, ExportRequest, Arc<AtomicBool>),
@@ -24,19 +25,17 @@ pub enum Effect {
     PickSkinTexture(Generation),
     DiscoverMaps(Generation),
     PickMap(Generation),
-    BuildPreview(Generation, ExportRequest),
+    DebouncePreview(Generation),
+    BuildPreview(Generation, ExportRequest, Arc<AtomicBool>),
     PrepareStage(Generation, ExportResult, PathBuf),
     OpenStage {
         model: crate::media::preview_model::PreviewRequest,
         map: crate::media::preview_model::PreviewRequest,
     },
-    TestInGame {
+    InstallModel {
         generation: Generation,
         result: ExportResult,
-        map: PathBuf,
-        skin: usize,
-        bodygroups: Vec<usize>,
-        placement: Option<ModelStage>,
     },
-    LaunchGame(String),
+    ListInstalledModels(Generation),
+    RemoveInstalledModel(Generation, PathBuf),
 }

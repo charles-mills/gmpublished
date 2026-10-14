@@ -6,6 +6,7 @@ mod state;
 mod update;
 mod view;
 mod viewer3d;
+mod workspace;
 
 pub use effect::Effect;
 use iced::{Subscription, time};
@@ -13,6 +14,9 @@ pub use message::Message;
 pub use state::State;
 pub use update::update;
 pub use view::pane;
+pub use workspace::{
+    workspace, workspace_animation_controls, workspace_selection_controls, workspace_stage_controls,
+};
 
 pub fn embedded_expanded(state: &State) -> bool {
     state.is_open() && state.expanded()

@@ -7,6 +7,7 @@ use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
+pub const COLLISION_PIECE_MATERIAL_NAME: &str = "__gmpublished_collision_piece";
 pub use gmpublished_domain::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
     MapVisibilityBucket, MapWalkCollision,
@@ -505,6 +506,7 @@ fn bucket_visible(bucket: MapVisibilityBucket, visible_clusters: &[bool]) -> boo
 pub struct MaterialSlot {
     pub(crate) name: String,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
+    pub(crate) tint_base: Option<Arc<ResolvedTexture>>,
     pub(crate) texture2: Option<Arc<ResolvedTexture>>,
     pub(crate) force_opaque: bool,
     pub(crate) render_mode: RenderMode,
@@ -729,6 +731,7 @@ mod tests {
                 meshes: vec![mesh(0), mesh(1)],
                 materials: vec![
                     MaterialSlot {
+                        tint_base: None,
                         name: "a".to_owned(),
                         texture: None,
                         texture2: None,
@@ -736,6 +739,7 @@ mod tests {
                         render_mode: RenderMode::Opaque,
                     },
                     MaterialSlot {
+                        tint_base: None,
                         name: "b".to_owned(),
                         texture: None,
                         texture2: None,

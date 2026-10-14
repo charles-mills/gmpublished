@@ -92,9 +92,11 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
         let name = lod.source.file_name().unwrap_or_default().to_string_lossy();
         content = content.push(
             column![
-                text(format!("LOD {} · {name}", index + 1)).size(tokens.typography.body_sm),
+                text(format!("LOD {} · {name}", index + 1))
+                    .size(tokens.typography.body_sm)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+                text(i18n.tr("models-lod-threshold")).size(tokens.typography.body_sm),
                 row![
-                    text(i18n.tr("models-lod-threshold")).size(tokens.typography.body_sm),
                     text_input("20", &lod.threshold)
                         .on_input_maybe(
                             (!busy)
@@ -103,7 +105,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
                         .padding(tokens.spacing.pad_control)
                         .width(Length::Fill)
                         .style(move |_, status| theme::styles::input(&tokens, status)),
-                    button(text(i18n.tr("models-lod-remove")))
+                    button(text(i18n.tr("models-lod-remove")).size(tokens.typography.body_sm))
                         .on_press_maybe((!busy).then_some(Message::LodRemoved(index)))
                         .style(move |_, status| theme::styles::button(&tokens, status)),
                 ]
@@ -206,14 +208,17 @@ mod tests {
             }],
             ..State::default()
         };
-        let tokens = Tokens::dark();
+        let tokens = Tokens::dark().with_display_preferences(
+            crate::bridge::UiDensity::Comfortable,
+            crate::bridge::MAX_TEXT_SIZE_PERCENT,
+        );
         for locale in [
             "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
         ] {
             let i18n = I18n::for_locale(Some(locale));
             let mut ui = iced_test::Simulator::with_size(
                 iced::Settings::default(),
-                iced::Size::new(560.0, 540.0),
+                iced::Size::new(310.0, 900.0),
                 view(&state, ViewCtx::new(&tokens, &i18n)),
             );
             for key in [
@@ -227,7 +232,7 @@ mod tests {
                 assert_ne!(label, key);
                 let widget = ui.find(label.as_str()).unwrap();
                 assert!(
-                    widget.bounds().x >= 0.0 && widget.bounds().x + widget.bounds().width <= 560.0,
+                    widget.bounds().x >= 0.0 && widget.bounds().x + widget.bounds().width <= 310.0,
                     "{locale}: {key}"
                 );
             }

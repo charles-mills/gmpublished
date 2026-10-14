@@ -167,6 +167,15 @@ pub(super) fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[f32
     ]
 }
 
+pub(super) const fn identity_matrix() -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
 pub(super) fn mat_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0_f32; 4]; 4];
     for (column, out_column) in out.iter_mut().enumerate() {

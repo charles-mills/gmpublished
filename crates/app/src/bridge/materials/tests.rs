@@ -1862,6 +1862,39 @@ fn color_and_color2_multiply_in_linear_space_and_preserve_texture_alpha() {
 }
 
 #[test]
+fn editable_model_tint_retains_base_channels_hidden_by_inherited_color2() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Editable tint")
+            .entry(
+                "materials/test/base.vmt",
+                br#"VertexLitGeneric { "$basetexture" "test/shared" "$color" "[0.5 1 1]" "$translucent" "1" }"#.to_vec(),
+            )
+            .entry(
+                "materials/test/tinted.vmt",
+                br#"Patch { include "materials/test/base.vmt" insert { "$color2" "[0 0.5 1]" } }"#.to_vec(),
+            )
+            .entry(
+                "materials/test/shared.vtf",
+                create_vtf_bytes(&[255, 128, 64, 90].repeat(4)),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let original = resolver.resolve_primary(&[], "test/tinted").unwrap();
+    assert_eq!(&texture_rgba(&original.texture)[..4], &[0, 92, 64, 90]);
+    assert!(original.tint_base.is_none());
+    let editable = resolver.resolve_model_primary(&[], "test/tinted").unwrap();
+    assert!(Arc::ptr_eq(&editable.texture, &original.texture));
+    assert_eq!(editable.render_mode, RenderMode::Translucent);
+    let base = editable.tint_base.unwrap();
+    assert_eq!(&texture_rgba(&base)[..4], &[188, 128, 64, 90]);
+    let unchanged = resolver.resolve_model_primary(&[], "test/base").unwrap();
+    assert!(unchanged.tint_base.is_none());
+    assert!(Arc::ptr_eq(&base, &unchanged.texture));
+}
+
+#[test]
 fn authored_skin_exports_resolve_to_distinct_preview_colors() {
     use gmpublished_backend::model_compile::{ModelCompileRequest, compile_model};
     use gmpublished_backend::model_project::{ModelSkin, SkinMaterial};

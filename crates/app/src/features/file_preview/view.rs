@@ -198,7 +198,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         .into()
 }
 
-fn body<'a>(
+pub(super) fn body<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
     show_inspector: bool,
@@ -253,7 +253,7 @@ fn body<'a>(
     )
 }
 
-fn preview_content<'a>(
+pub(super) fn preview_content<'a>(
     state: &'a State,
     data: &'a PreviewData,
     ctx: ViewCtx<'a>,
@@ -574,6 +574,7 @@ fn model_preview<'a>(
         container(
             iced::widget::shader(super::viewer3d::Viewer3d {
                 framing_bounds: state.model_framing_bounds(),
+                studio_bounds: None,
                 animation_pose: state.model_animation_pose(),
                 model: std::sync::Arc::clone(model),
                 content_id: data.content_id(),
@@ -581,6 +582,11 @@ fn model_preview<'a>(
                 bodygroup_choices: state.bodygroup_choices().to_vec(),
                 phy_debug_visible: state.phy_debug_enabled(),
                 pose: state.orbit_pose(),
+                camera_epoch: state.camera_epoch(),
+                reserved_space: [0.0; 2],
+                studio_grid: false,
+                live_transform: super::viewer3d::identity_matrix(),
+                material_tints: Vec::new(),
             })
             .width(Length::Fill)
             .height(Length::Fill),
@@ -629,7 +635,24 @@ impl std::fmt::Display for IndexedChoice {
     }
 }
 
-fn model_selectors<'a>(
+pub(super) fn model_selectors<'a>(
+    state: &'a State,
+    model: &'a ModelPreview,
+    ctx: ViewCtx<'a>,
+    stacked: bool,
+) -> Element<'a, Message> {
+    let tokens = *ctx.tokens;
+    let mut selectors = column![].spacing(tokens.spacing.gap_xs).width(Length::Fill);
+    if state.phy_debug_control_visible() {
+        selectors = selectors.push(phy_debug_checkbox(state, ctx));
+    }
+    selectors
+        .push(model_selection_controls(state, model, ctx, stacked))
+        .push(model_animation_controls(state, model, ctx, stacked))
+        .into()
+}
+
+pub(super) fn model_selection_controls<'a>(
     state: &'a State,
     model: &'a ModelPreview,
     ctx: ViewCtx<'a>,
@@ -638,11 +661,6 @@ fn model_selectors<'a>(
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let mut selectors = column![].spacing(tokens.spacing.gap_xs).width(Length::Fill);
-
-    if state.phy_debug_control_visible() {
-        selectors = selectors.push(phy_debug_checkbox(state, ctx));
-    }
-
     if model.lod_count() > 1 {
         let options = indexed_choices(model.lod_count(), |index| {
             i18n.trn(
@@ -704,7 +722,6 @@ fn model_selectors<'a>(
         ));
     }
 
-    selectors = selectors.push(model_animation_controls(state, model, ctx, stacked));
     selectors.into()
 }
 
@@ -1264,11 +1281,9 @@ fn map_preview<'a>(
                         model: std::sync::Arc::clone(model),
                         content_id: state.stage_content_id().unwrap_or_default(),
                         transform: state.stage_transform().unwrap_or_default(),
-                        skin_remap: model
-                            .skin_tables
-                            .get(state.selected_skin())
-                            .cloned()
-                            .unwrap_or_default(),
+                        live_transform: state.workspace_transform(),
+                        material_tints: state.workspace_material_tints().to_vec(),
+                        skin_remap: state.workspace_skin_remap(),
                         bodygroup_choices: state.bodygroup_choices().to_vec(),
                         phy_debug_visible: state.phy_debug_enabled(),
                     }),
@@ -1325,21 +1340,34 @@ fn map_preview<'a>(
     resizable_inspector(state, &tokens, content_width, viewer, inspector)
 }
 
-fn stage_inspector<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+pub(super) fn stage_inspector<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+    stage_controls(state, ctx, true)
+}
+
+pub(super) fn stage_placement_controls<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+) -> Element<'a, Message> {
+    stage_controls(state, ctx, false)
+}
+
+fn stage_controls<'a>(state: &'a State, ctx: ViewCtx<'a>, full: bool) -> Element<'a, Message> {
     let Some(model) = state.stage_model() else {
         return Space::new().into();
     };
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
-    let mut controls = column![
-        text(i18n.tr("file-preview-stage-title")).size(tokens.typography.body),
-        text(i18n.tr("file-preview-stage-controls"))
-            .size(tokens.typography.caption)
-            .wrapping(text::Wrapping::WordOrGlyph),
-        model_selectors(state, model, ctx, true)
-    ]
-    .spacing(tokens.spacing.gap_sm)
-    .width(Length::Fill);
+    let mut controls = column![].spacing(tokens.spacing.gap_sm).width(Length::Fill);
+    if full {
+        controls = controls
+            .push(text(i18n.tr("file-preview-stage-title")).size(tokens.typography.body))
+            .push(
+                text(i18n.tr("file-preview-stage-controls"))
+                    .size(tokens.typography.caption)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            )
+            .push(model_selectors(state, model, ctx, true));
+    }
     if let Some((position, angles)) = state.stage_fields() {
         for (rotation, values, key) in [
             (false, position, "file-preview-stage-position"),
@@ -1411,20 +1439,24 @@ fn stage_inspector<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
                 .then_some(Message::StageDropRequested),
         ),
     );
-    if model.scene.phy_debug_meshes.is_empty() {
+    if full && !model.scene.phy_debug_meshes.is_empty() {
+        controls = controls.push(phy_debug_checkbox(state, ctx));
+    }
+    if full && model.scene.phy_debug_meshes.is_empty() {
         controls = controls.push(
             text(i18n.tr("file-preview-stage-no-collision"))
                 .size(tokens.typography.caption)
                 .wrapping(text::Wrapping::WordOrGlyph),
         );
     }
-    controls
-        .push(
+    if full {
+        controls = controls.push(
             text(i18n.tr("file-preview-stage-placement-only"))
                 .size(tokens.typography.caption)
                 .wrapping(text::Wrapping::WordOrGlyph),
-        )
-        .into()
+        );
+    }
+    controls.into()
 }
 
 fn resizable_inspector<'a>(
@@ -1663,38 +1695,7 @@ fn map_inspector_rows<'a>(
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let material_status = material_status_text(stats.resolved_material_count, stats.material_count);
-    let mut rows = column![].spacing(tokens.spacing.gap_sm).width(Length::Fill);
-    if state.map_visibility_control_visible() {
-        rows = rows.push(
-            checkbox(state.map_visibility_enabled())
-                .label(i18n.tr("file-preview-map-visibility-culling"))
-                .on_toggle(Message::MapVisibilityToggled)
-                .text_size(tokens.typography.body)
-                .style(move |_, status| theme::styles::checkbox(&tokens, status)),
-        );
-    }
-    if state.map_fog_control_visible() {
-        rows = rows.push(
-            checkbox(state.map_fog_enabled())
-                .label(i18n.tr("file-preview-map-fog"))
-                .on_toggle(Message::MapFogToggled)
-                .text_size(tokens.typography.body)
-                .style(move |_, status| theme::styles::checkbox(&tokens, status)),
-        );
-    }
-    if state.map_skybox_control_visible() {
-        rows = rows.push(
-            checkbox(state.map_skybox_enabled())
-                .label(i18n.tr("file-preview-map-3d-skybox"))
-                .on_toggle(Message::MapSkyboxToggled)
-                .text_size(tokens.typography.body)
-                .style(move |_, status| theme::styles::checkbox(&tokens, status)),
-        );
-    }
-    if state.stage_model().is_none() && state.phy_debug_control_visible() {
-        rows = rows.push(phy_debug_checkbox(state, ctx));
-    }
-    rows = rows.push(info_row(
+    let rows = map_render_controls(state, ctx).push(info_row(
         i18n.tr("file-preview-path"),
         data.entry_path.as_str(),
         &tokens,
@@ -1741,11 +1742,69 @@ fn map_inspector_rows<'a>(
     rows.into()
 }
 
+pub(super) fn map_render_controls<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+) -> iced::widget::Column<'a, Message> {
+    let tokens = *ctx.tokens;
+    let i18n = ctx.i18n;
+    let mut rows = column![].spacing(tokens.spacing.gap_sm).width(Length::Fill);
+    if state.map_visibility_control_visible() {
+        rows = rows.push(
+            checkbox(state.map_visibility_enabled())
+                .label(i18n.tr("file-preview-map-visibility-culling"))
+                .on_toggle(Message::MapVisibilityToggled)
+                .text_size(tokens.typography.body)
+                .style(move |_, status| theme::styles::checkbox(&tokens, status)),
+        );
+    }
+    if state.map_fog_control_visible() {
+        rows = rows.push(
+            checkbox(state.map_fog_enabled())
+                .label(i18n.tr("file-preview-map-fog"))
+                .on_toggle(Message::MapFogToggled)
+                .text_size(tokens.typography.body)
+                .style(move |_, status| theme::styles::checkbox(&tokens, status)),
+        );
+    }
+    if state.map_skybox_control_visible() {
+        rows = rows.push(
+            checkbox(state.map_skybox_enabled())
+                .label(i18n.tr("file-preview-map-3d-skybox"))
+                .on_toggle(Message::MapSkyboxToggled)
+                .text_size(tokens.typography.body)
+                .style(move |_, status| theme::styles::checkbox(&tokens, status)),
+        );
+    }
+    if state.stage_model().is_none() && state.phy_debug_control_visible() {
+        rows = rows.push(phy_debug_checkbox(state, ctx));
+    }
+    rows
+}
+
 fn phy_debug_checkbox<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
+    let scene = state.stage_model().map(|model| &model.scene).or_else(|| {
+        match state.current().map(|data| &data.content) {
+            Some(PreviewContent::Model(model)) => Some(&model.scene),
+            _ => None,
+        }
+    });
+    let label = scene.map_or_else(
+        || i18n.tr("file-preview-map-phy-debug"),
+        |scene| {
+            i18n.trn(
+                "models-collision-preview",
+                &[(
+                    "count",
+                    crate::i18n::Arg::Number(&scene.phy_debug_meshes.len().to_string()),
+                )],
+            )
+        },
+    );
     checkbox(state.phy_debug_enabled())
-        .label(i18n.tr("file-preview-map-phy-debug"))
+        .label(label)
         .on_toggle(Message::PhyDebugToggled)
         .text_size(tokens.typography.body)
         .style(move |_, status| theme::styles::checkbox(&tokens, status))

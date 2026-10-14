@@ -10,11 +10,119 @@ impl App {
         &mut self,
         message: file_preview::Message,
     ) -> Task<RootMessage> {
+        let effects = file_preview::update(&mut self.state.features.file_preview, message);
+        self.batch_effects(effects, Self::run_file_preview_effect)
+    }
+
+    pub(super) fn apply_model_preview_message(
+        &mut self,
+        message: file_preview::Message,
+    ) -> Task<RootMessage> {
+        let completed = match &message {
+            file_preview::Message::Loaded(generation, result)
+                if self.state.features.model_preview_loading == Some(*generation) =>
+            {
+                Some((
+                    false,
+                    result
+                        .as_ref()
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(ToString::to_string),
+                ))
+            }
+            file_preview::Message::StageLoaded(generation, result)
+                if self.state.features.model_preview_loading == Some(*generation) =>
+            {
+                Some((
+                    true,
+                    result
+                        .as_ref()
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(ToString::to_string),
+                ))
+            }
+            _ => None,
+        };
+        if completed.is_some() {
+            self.state.features.model_preview_loading = None;
+        }
+        if completed.is_some()
+            && !self
+                .state
+                .features
+                .model_manager
+                .preview_accepts_presentation()
+        {
+            file_preview::update(
+                &mut self.state.features.model_preview,
+                file_preview::Message::WorkspaceLoadCancelled,
+            );
+            return self.apply_model_manager_message(
+                crate::features::model_manager::Message::PreviewPresented,
+            );
+        }
         if matches!(message, file_preview::Message::BackRequested) {
             self.capture_model_stage();
         }
-        let effects = file_preview::update(&mut self.state.features.file_preview, message);
-        self.batch_effects(effects, Self::run_file_preview_effect)
+        let effects = file_preview::update(&mut self.state.features.model_preview, message);
+        if let Some(generation) = effects.iter().find_map(|effect| match effect {
+            file_preview::Effect::LoadRequested(request) => Some(request.request_id),
+            file_preview::Effect::LoadStage { generation, .. } => Some(*generation),
+            _ => None,
+        }) {
+            self.state.features.model_preview_loading = Some(generation);
+        }
+        let mut tasks = Vec::new();
+        for effect in effects {
+            if matches!(effect, file_preview::Effect::ModalCloseRequested) {
+                file_preview::update(
+                    &mut self.state.features.model_preview,
+                    file_preview::Message::CloseFinished,
+                );
+            } else if !matches!(effect, file_preview::Effect::AudioStopRequested) {
+                let lease = self.state.features.model_manager.preview_directory();
+                tasks.push(self.run_file_preview_effect(effect).map(move |message| {
+                    let _lease = &lease;
+                    match message {
+                        RootMessage::FilePreview(message) => RootMessage::ModelPreview(message),
+                        other => other,
+                    }
+                }));
+            }
+        }
+        if let Some((staged, result)) = completed {
+            match result {
+                Ok(()) => {
+                    tasks.push(self.apply_model_manager_message(
+                        crate::features::model_manager::Message::PreviewPresented,
+                    ));
+                    if staged
+                        && let Some((position, angles)) =
+                            self.state.features.model_manager.saved_stage_placement()
+                    {
+                        tasks.push(self.apply_model_preview_message(
+                            file_preview::Message::StagePlacementRestored { position, angles },
+                        ));
+                    }
+                    let (skin, bodygroups) = self.state.features.model_manager.preview_selection();
+                    tasks.push(
+                        self.apply_model_preview_message(file_preview::Message::SkinSelected(skin)),
+                    );
+                    for (group, choice) in bodygroups.into_iter().enumerate() {
+                        tasks.push(self.apply_model_preview_message(
+                            file_preview::Message::BodygroupChoiceSelected { group, choice },
+                        ));
+                    }
+                }
+                Err(error) => tasks.push(self.apply_model_manager_message(
+                    crate::features::model_manager::Message::PreviewFailed(error),
+                )),
+            }
+        }
+        self.sync_model_workspace();
+        Task::batch(tasks)
     }
 
     fn run_file_preview_effect(&mut self, effect: file_preview::Effect) -> Task<RootMessage> {
@@ -122,6 +230,19 @@ impl App {
             .settings_and_paths_snapshot()
             .1
             .gmod_dir;
+        let cached_map = self
+            .state
+            .features
+            .model_preview
+            .request()
+            .filter(|request| {
+                request.crc32 == map.crc32
+                    && request.entry_path == map.entry_path
+                    && request.archive == map.archive
+            })
+            .and_then(|_| self.state.features.model_preview.current())
+            .filter(|data| matches!(data.content, PreviewContent::Map { .. }))
+            .cloned();
         let ctx = self.environment.ctx.clone();
         Task::stream(stream::channel(100, async move |output| {
             let mut schedule_error_output = output.clone();
@@ -150,8 +271,19 @@ impl App {
                             model.display_name
                         )));
                     };
-                    let loaded_map =
-                        load_preview(&map, &tokens, gmod_dir, app.cpu_executor(), &mut on_stage)?;
+                    let loaded_map = match cached_map {
+                        Some(data) => crate::media::preview_model::PreviewData::from_request(
+                            &map,
+                            data.content,
+                        ),
+                        None => load_preview(
+                            &map,
+                            &tokens,
+                            gmod_dir,
+                            app.cpu_executor(),
+                            &mut on_stage,
+                        )?,
+                    };
                     if !matches!(loaded_map.content, PreviewContent::Map { .. }) {
                         return Err(PreviewLoadError::Decode(format!(
                             "Cannot decode map {}",

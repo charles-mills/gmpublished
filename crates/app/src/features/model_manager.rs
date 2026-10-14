@@ -1,17 +1,21 @@
 mod bodygroups;
+mod collision;
 mod effect;
+mod live;
 mod lods;
 mod message;
+mod preview;
 mod qc_editor;
 mod state;
 mod update;
 mod view;
 
+pub use collision::CollisionMode;
 pub use effect::Effect;
 pub use message::Message;
 pub use state::{
-    EngineTestResult, ExportRequest, ExportResult, ExportTarget, MapChoice, PreviewBuild,
-    SourceKind, State,
+    ExportRequest, ExportResult, ExportTarget, InstalledModel, MapChoice, PreviewBuild, SourceKind,
+    State, WorkspaceTab,
 };
 pub use update::update;
-pub use view::view;
+pub use view::{pane_reservation, workspace_view};

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use super::{
@@ -17,6 +19,13 @@ pub(super) struct SourceMaterial {
     pub translucent: bool,
     pub double_sided: bool,
     pub warnings: Vec<String>,
+    pub source_vmt: Option<SourceVmt>,
+}
+
+pub(super) struct SourceVmt {
+    pub shader: String,
+    pub parameters: BTreeMap<String, String>,
+    pub blocks: BTreeMap<String, Value>,
 }
 
 pub(super) fn read_materials(
@@ -107,7 +116,22 @@ fn read_gltf(
             continue;
         }
         let pbr = &material["pbrMetallicRoughness"];
-        let factor = color_factor(&pbr["baseColorFactor"]);
+        let mut source_vmt = read_source_vmt(path, &material["extras"])?;
+        let mut factor = color_factor(&pbr["baseColorFactor"]);
+        if let Some(source) = source_vmt.as_mut() {
+            let original = source_color_factor(&source.parameters);
+            if factor
+                .iter()
+                .zip(original)
+                .all(|(current, original)| (current - original).abs() < 1e-6)
+            {
+                factor = [1.0; 4];
+            } else {
+                for parameter in ["$color", "$color2", "$alpha"] {
+                    source.parameters.remove(parameter);
+                }
+            }
+        }
         let mut image = if let Some(index) = pbr["baseColorTexture"]["index"].as_u64() {
             gltf_texture(path, &document, &buffers, index as usize)?
         } else {
@@ -118,7 +142,7 @@ fn read_gltf(
             for channel in 0..3 {
                 pixel[channel] = linear_to_srgb(srgb_to_linear(pixel[channel]) * factor[channel]);
             }
-            pixel[3] = if opaque {
+            pixel[3] = if opaque && source_vmt.is_none() {
                 255
             } else {
                 (f32::from(pixel[3]) * factor[3]).round().clamp(0.0, 255.0) as u8
@@ -194,9 +218,87 @@ fn read_gltf(
             translucent: material["alphaMode"].as_str() == Some("BLEND"),
             double_sided: material["doubleSided"].as_bool().unwrap_or(false),
             warnings,
+            source_vmt,
         });
     }
     Ok(output)
+}
+
+fn read_source_vmt(path: &Path, extras: &Value) -> Result<Option<SourceVmt>, MaterialExportError> {
+    let Some(shader) = extras["sourceShader"].as_str() else {
+        return Ok(None);
+    };
+    if shader.is_empty() || shader.chars().any(char::is_control) {
+        return Err(decode_error(path, "Source material shader is invalid"));
+    }
+    let object = |key: &str| -> Result<serde_json::Map<String, Value>, MaterialExportError> {
+        let value = match &extras[key] {
+            Value::String(text) => serde_json::from_str(text)
+                .map_err(|error| decode_error(path, &format!("Invalid {key}: {error}")))?,
+            value => value.clone(),
+        };
+        match value {
+            Value::Null => Ok(serde_json::Map::new()),
+            Value::Object(value) => Ok(value),
+            _ => Err(decode_error(path, &format!("{key} must be an object"))),
+        }
+    };
+    let mut parameters = BTreeMap::new();
+    for (key, value) in object("sourceParameters")? {
+        let value = value
+            .as_str()
+            .ok_or_else(|| decode_error(path, "Source material parameters must be strings"))?;
+        if !key.starts_with('$') || key.chars().chain(value.chars()).any(char::is_control) {
+            return Err(decode_error(path, "Source material parameter is invalid"));
+        }
+        parameters.insert(key.to_ascii_lowercase(), value.to_owned());
+    }
+    let blocks = object("sourceBlocks")?.into_iter().collect();
+    Ok(Some(SourceVmt {
+        shader: shader.to_owned(),
+        parameters,
+        blocks,
+    }))
+}
+
+fn source_color_factor(parameters: &BTreeMap<String, String>) -> [f32; 4] {
+    let color = |key| -> [f32; 3] {
+        let Some(value) = parameters.get(key) else {
+            return [1.0; 3];
+        };
+        let divisor = if value.trim_start().starts_with('{') {
+            255.0
+        } else {
+            1.0
+        };
+        let values: Vec<_> = value
+            .trim()
+            .trim_matches(['[', ']', '{', '}'])
+            .split(|character: char| character.is_ascii_whitespace() || character == ',')
+            .filter(|value| !value.is_empty())
+            .map(str::parse::<f32>)
+            .collect();
+        match values.as_slice() {
+            [Ok(r), Ok(g), Ok(b)] if [r, g, b].iter().all(|value| value.is_finite()) => {
+                [r, g, b].map(|value| (value / divisor).clamp(0.0, 1.0))
+            }
+            _ => [1.0; 3],
+        }
+    };
+    let first = color("$color");
+    let second = color("$color2");
+    let alpha = parameters
+        .get("$alpha")
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    [
+        first[0] * second[0],
+        first[1] * second[1],
+        first[2] * second[2],
+        alpha,
+    ]
 }
 
 fn gltf_texture_flags(
@@ -324,9 +426,14 @@ fn read_fbx(
     material_names: &[String],
     material_directories: &[String],
 ) -> Result<Vec<SourceMaterial>, MaterialExportError> {
-    let bytes = read_source(path)?;
-    let scene = ufbx::load_memory(&bytes, ufbx::LoadOpts::default())
-        .map_err(|error| decode_error(path, &format!("{error:?}")))?;
+    let length = fs::metadata(path)
+        .map_err(|error| io_error(path, error))?
+        .len();
+    if length > MAX_SOURCE_BYTES {
+        return Err(MaterialExportError::SourceTooLarge(path.to_path_buf()));
+    }
+    let scene = mdlc::fbx::load_scene(path, "materials")
+        .map_err(|error| decode_error(path, &error.to_string()))?;
     let mut output = Vec::new();
     for material in &scene.materials {
         let name = material.element.name.as_ref().to_owned();
@@ -410,6 +517,7 @@ fn read_fbx(
             translucent: true,
             double_sided: material.features.double_sided.enabled,
             warnings,
+            source_vmt: None,
         });
     }
     Ok(output)

@@ -22,11 +22,18 @@ pub struct Uniforms {
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialUniform {
     pub flags: [u32; 4],
+    pub tint: [f32; 4],
 }
 
 impl MaterialUniform {
+    pub fn with_tint(mut self, color: [u8; 3]) -> Self {
+        self.tint[..3].copy_from_slice(&color.map(srgb_channel_to_linear));
+        self
+    }
+
     pub const fn new(force_opaque: bool, render_mode: RenderMode) -> Self {
         Self {
+            tint: [1.0; 4],
             flags: [
                 (force_opaque && matches!(render_mode, RenderMode::Opaque)) as u32,
                 matches!(render_mode, RenderMode::Cutout) as u32,
@@ -38,6 +45,37 @@ impl MaterialUniform {
 }
 
 impl Uniforms {
+    pub fn apply_model_transform(&mut self, transform: [[f32; 4]; 4]) {
+        self.view_proj = mat_mul(self.view_proj, transform);
+        let scale_squared = (0..3)
+            .map(|axis| transform[0][axis].powi(2))
+            .sum::<f32>()
+            .max(f32::MIN_POSITIVE);
+        let inverse_vector = |vector: [f32; 3]| -> [f32; 3] {
+            std::array::from_fn(|axis| {
+                (0..3)
+                    .map(|channel| transform[axis][channel] * vector[channel])
+                    .sum::<f32>()
+                    / scale_squared
+            })
+        };
+        let eye = inverse_vector(std::array::from_fn(|axis| {
+            self.camera_position[axis] - transform[3][axis]
+        }));
+        self.camera_position[..3].copy_from_slice(&eye);
+        let scale = scale_squared.sqrt();
+        self.fog_params[0] /= scale;
+        self.fog_params[1] /= scale;
+        let light = Vec3::from(inverse_vector([
+            self.light[0],
+            self.light[1],
+            self.light[2],
+        ]))
+        .normalize()
+        .unwrap_or(SOURCE_UP);
+        self.light[..3].copy_from_slice(light.as_array());
+    }
+
     pub fn for_fly(
         scene: &MapPreview,
         camera: &FlyCamera,
@@ -312,6 +350,26 @@ mod uniform_layout_tests {
             )
             .validate(&module)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
+            if let Some(naga::TypeInner::Struct { members, span }) = module
+                .types
+                .iter()
+                .find_map(|(_, ty)| (ty.name.as_deref() == Some("Material")).then_some(&ty.inner))
+            {
+                assert_eq!(
+                    *span as usize,
+                    size_of::<super::MaterialUniform>(),
+                    "{name}: material size"
+                );
+                assert_eq!(members.len(), 2);
+                assert_eq!(
+                    members[0].offset as usize,
+                    offset_of!(super::MaterialUniform, flags)
+                );
+                assert_eq!(
+                    members[1].offset as usize,
+                    offset_of!(super::MaterialUniform, tint)
+                );
+            }
             let uniform = module
                 .types
                 .iter()
@@ -336,6 +394,61 @@ mod tests {
 
     use super::super::super::test_support::empty_preview;
     use super::{FlyCamera, MapFog, Rectangle, Uniforms, Vec3, average_srgb_rgba};
+
+    #[test]
+    fn material_tint_matches_srgb_texture_sampling_and_preserves_render_flags() {
+        let base = super::MaterialUniform::new(false, super::RenderMode::Cutout);
+        let tinted = base.with_tint([128, 0, 255]);
+        assert_eq!(tinted.flags, base.flags);
+        assert!((tinted.tint[0] - 0.215_860_5).abs() < 0.000_001);
+        assert_eq!(&tinted.tint[1..], &[0.0, 1.0, 1.0]);
+        assert_eq!(base.tint, [1.0; 4]);
+    }
+
+    #[test]
+    fn live_uniform_transform_preserves_world_camera_and_light() {
+        let scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
+        let camera = FlyCamera::default();
+        let mut uniforms = Uniforms::for_fly(
+            &scene,
+            &camera,
+            Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0)),
+            None,
+            0.0,
+            false,
+        );
+        let original_projection = uniforms.view_proj;
+        uniforms.camera_position = [8.0, 14.0, 20.0, 0.0];
+        uniforms.light = [0.0, 1.0, 0.0, 0.35];
+        uniforms.fog_params = [100.0, 1000.0, 0.5, 1.0];
+        let transform = [
+            [0.0, 2.0, 0.0, 0.0],
+            [-2.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [10.0, 10.0, 10.0, 1.0],
+        ];
+        uniforms.apply_model_transform(transform);
+        assert_eq!(uniforms.camera_position, [2.0, 1.0, 5.0, 0.0]);
+        assert_eq!(uniforms.light, [1.0, 0.0, 0.0, 0.35]);
+        assert_eq!(uniforms.fog_params, [50.0, 500.0, 0.5, 1.0]);
+        let local_point = [2.0, 1.0, 5.0, 1.0];
+        let world_point = [8.0, 14.0, 20.0, 1.0];
+        let project = |matrix: [[f32; 4]; 4], point: [f32; 4]| -> [f32; 4] {
+            std::array::from_fn(|row| {
+                matrix
+                    .iter()
+                    .zip(point)
+                    .map(|(col, value)| col[row] * value)
+                    .sum()
+            })
+        };
+        for (local_clip, world_clip) in project(uniforms.view_proj, local_point)
+            .into_iter()
+            .zip(project(original_projection, world_point))
+        {
+            assert!((local_clip - world_clip).abs() < 0.0001);
+        }
+    }
 
     #[test]
     fn sky_tint_averages_known_2x2_texture() {

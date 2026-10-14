@@ -144,12 +144,36 @@ impl Smd {
     }
 }
 
-// 早先这里有一个 `tokens(line) -> Vec<&str>` 辅助函数（`split_whitespace`
-// 后 `collect`）。它**每行分配一次堆内存**，是 `parse_smd` 最大的分配来源，
-// 已删除 —— 现在 `parse_smd` 复用一个 token 缓冲，见那里的说明。
-//
-// 切词规则未变：按空白切分，**不**处理引号内的空格（SMD 的引号只用于名字，
-// 而名字里不含空格 —— 这是格式约定，不是本实现的简化）。
+fn node_tokens<'a>(
+    mut text: &'a str,
+    line: usize,
+    tokens: &mut Vec<&'a str>,
+) -> Result<(), SmdError> {
+    loop {
+        text = text.trim_start();
+        if text.is_empty() || text.starts_with("//") {
+            return Ok(());
+        }
+        if let Some(quoted) = text.strip_prefix('"') {
+            let end = quoted
+                .find('"')
+                .ok_or_else(|| err(line, "Unterminated node name"))?;
+            tokens.push(&quoted[..end]);
+            text = &quoted[end + 1..];
+        } else {
+            let end = text.find(char::is_whitespace).unwrap_or(text.len());
+            let token = &text[..end];
+            if let Some(comment) = token.find("//") {
+                if comment > 0 {
+                    tokens.push(&token[..comment]);
+                }
+                return Ok(());
+            }
+            tokens.push(token);
+            text = &text[end..];
+        }
+    }
+}
 
 fn parse_f32(tok: &str, line: usize, what: &str) -> Result<f32, SmdError> {
     tok.parse::<f32>()
@@ -180,7 +204,6 @@ fn unquote(s: &str) -> String {
 /// 1200 万次）。现在改成**复用一个 token 缓冲**（`clear()` + `extend()`），
 /// 全程只有一次分配。
 ///
-/// 语义完全不变：`t` 在每个分支里看到的仍是同一行、同一顺序的 token。
 pub fn parse_smd(text: &str) -> Result<Smd, SmdError> {
     let mut version: Option<i32> = None;
     let mut nodes: Vec<SmdNode> = Vec::new();
@@ -220,7 +243,11 @@ pub fn parse_smd(text: &str) -> Result<Smd, SmdError> {
             None => raw,
         };
         t.clear();
-        t.extend(body.split_whitespace());
+        if section == Section::Nodes {
+            node_tokens(raw, line, &mut t)?;
+        } else {
+            t.extend(body.split_whitespace());
+        }
         if t.is_empty() {
             continue;
         }
@@ -573,6 +600,21 @@ pub fn parse_smd(text: &str) -> Result<Smd, SmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_bone_names_keep_spaces_and_comment_characters() {
+        let source = MINIMAL
+            .replace("\"root\" -1", "\"collision / model / Piece 1\" -1 // root")
+            .replace("\"tip\" 0", "\"child // joint\" 0// child");
+        let parsed = parse_smd(&source).unwrap();
+        assert_eq!(parsed.nodes[0].name, "collision / model / Piece 1");
+        assert_eq!(parsed.nodes[0].parent, -1);
+        assert_eq!(parsed.nodes[1].name, "child // joint");
+        assert_eq!(parsed.nodes[1].parent, 0);
+        let error = parse_smd(&MINIMAL.replace("\"tip\" 0", "\"tip 0")).unwrap_err();
+        assert_eq!(error.line, 4);
+        assert!(error.message.contains("Unterminated node name"));
+    }
 
     /// 与真实文件同构的最小 SMD：两根骨骼、一个三角形。
     const MINIMAL: &str = r#"version 1

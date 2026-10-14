@@ -136,7 +136,7 @@ pub fn draw_model_item<'a>(
     let Some(mesh) = upload.meshes.get(item.mesh_index) else {
         return;
     };
-    let Some(bind_group) = upload.material_bind_groups.get(item.material_slot) else {
+    let Some(bind_group) = upload.material_bind_group(item.material_slot) else {
         return;
     };
     draw_uploaded_mesh(pass, mesh, bind_group);
@@ -152,7 +152,7 @@ pub fn draw_phy_debug_meshes<'a>(
     };
     pass.set_pipeline(&resources.phy_debug_pipeline);
     for mesh in meshes {
-        let Some(bind_group) = upload.material_bind_groups.get(mesh.material_index) else {
+        let Some(bind_group) = upload.material_bind_group(mesh.material_index) else {
             continue;
         };
         draw_uploaded_mesh(pass, mesh, bind_group);
@@ -218,7 +218,7 @@ pub fn draw_overlay_item<'a>(
     let Some(overlay) = upload.overlays.get(item.overlay_index) else {
         return;
     };
-    let Some(bind_group) = upload.material_bind_groups.get(item.material_slot) else {
+    let Some(bind_group) = upload.material_bind_group(item.material_slot) else {
         return;
     };
     pass.set_bind_group(1, bind_group, &[]);

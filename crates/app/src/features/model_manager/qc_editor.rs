@@ -144,9 +144,10 @@ pub(super) fn view<'a>(state: &'a ModelState, ctx: ViewCtx<'a>) -> Element<'a, M
         if state.qc_editor.original.is_some() {
             let editor = text_editor(&state.qc_editor.content)
                 .font(iced::Font::MONOSPACE)
-                .height(Length::Fixed(340.0))
+                .height(Length::Fixed(tokens.text_size(260.0)))
                 .padding(tokens.spacing.pad_control)
                 .size(tokens.typography.body_sm)
+                .wrapping(text::Wrapping::WordOrGlyph)
                 .style(move |_, status| theme::styles::text_editor(&tokens, status));
             content = content.push(if enabled {
                 editor.on_action(Message::QcAction)
@@ -167,7 +168,8 @@ pub(super) fn view<'a>(state: &'a ModelState, ctx: ViewCtx<'a>) -> Element<'a, M
                         .style(move |_, status| theme::styles::button(&tokens, status)),
                 ]
                 .spacing(tokens.spacing.gap)
-                .align_y(iced::Center),
+                .align_y(iced::Center)
+                .wrap(),
             );
             content = content.push(
                 text(i18n.tr(if state.qc_editor.validated {
@@ -348,23 +350,26 @@ mod tests {
     #[test]
     fn editor_controls_are_localized_and_busy_guarded() {
         let state = imported();
-        let tokens = crate::theme::Tokens::dark();
+        let tokens = crate::theme::Tokens::dark().with_display_preferences(
+            crate::bridge::UiDensity::Comfortable,
+            crate::bridge::MAX_TEXT_SIZE_PERCENT,
+        );
         for locale in [
             "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
         ] {
             let i18n = crate::i18n::I18n::for_locale(Some(locale));
             let mut ui = iced_test::Simulator::with_size(
                 iced::Settings::default(),
-                iced::Size::new(560.0, 620.0),
+                iced::Size::new(310.0, 1200.0),
                 view(&state, ViewCtx::new(&tokens, &i18n)),
             );
             for key in ["models-qc-validate", "models-qc-reset"] {
                 let bounds = ui.find(i18n.tr(key).as_str()).unwrap().bounds();
                 assert!(
                     bounds.x >= 0.0
-                        && bounds.x + bounds.width <= 560.0
+                        && bounds.x + bounds.width <= 310.0
                         && bounds.y >= 0.0
-                        && bounds.y + bounds.height <= 620.0,
+                        && bounds.y + bounds.height <= 1200.0,
                     "{locale}: {key}: {bounds:?}"
                 );
             }
@@ -380,7 +385,7 @@ mod tests {
         let i18n = crate::i18n::I18n::for_locale(Some("en"));
         let mut ui = iced_test::Simulator::with_size(
             iced::Settings::default(),
-            iced::Size::new(560.0, 620.0),
+            iced::Size::new(310.0, 1200.0),
             view(&state, ViewCtx::new(&tokens, &i18n)),
         );
         ui.click(i18n.tr("models-qc-validate").as_str()).unwrap();

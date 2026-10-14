@@ -1,21 +1,17 @@
-use std::{path::Path, sync::atomic::AtomicBool};
+use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
 
-use super::super::{LoadedModel, sibling, u32_at};
+use super::super::{LoadedModel, u32_at};
 use super::{DecompileError, Document, check_cancelled, flexes::Reader};
 
 pub(super) fn write(
     output: &mut Document,
     loaded: &LoadedModel,
-    path: &Path,
     cancelled: &AtomicBool,
 ) -> Result<(), DecompileError> {
     let raw = &loaded.raw_mdl;
     let reader = Reader(raw);
-    if sibling(path, "phy").is_ok() {
-        output.warnings.push("The matching physics mesh and ragdoll constraints are not included in the Blender file. Keep the QC source export for those settings.".into());
-    }
     output.extras["sourceBounds"] = json!({
         "eyePosition": vector(&reader, 80)?,
         "illuminationPosition": vector(&reader, 92)?,

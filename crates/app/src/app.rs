@@ -7,7 +7,7 @@ use std::{
 };
 
 use iced::futures::channel::mpsc as iced_mpsc;
-use iced::widget::{Space, column, container, mouse_area, row, sensor, stack, text};
+use iced::widget::{Space, column, container, mouse_area, responsive, row, sensor, stack, text};
 use iced::{
     Element, Event, Length, Padding, Point, Size, Subscription, Task, Theme, event, keyboard,
     mouse, stream, system, theme::Mode, window,
@@ -51,6 +51,7 @@ mod display;
 mod drag;
 mod hidden_addons;
 mod model_stage;
+mod model_workspace;
 mod routes;
 pub mod runners;
 mod side_effects_addons;
@@ -186,6 +187,8 @@ pub struct FeatureStates {
     search: search::State,
     destination_select: destination_select::State,
     file_preview: file_preview::State,
+    model_preview: file_preview::State,
+    model_preview_loading: Option<crate::generation::Generation>,
     prepare_publish: prepare_publish::State,
     preview_gma: preview_gma::State,
     settings: settings::State,
@@ -525,6 +528,7 @@ pub enum RootMessage {
     Search(search::Message),
     DestinationSelect(destination_select::Message),
     FilePreview(file_preview::Message),
+    ModelPreview(file_preview::Message),
     PreparePublish(prepare_publish::Message),
     PreviewGma(preview_gma::Message),
     DescriptionEditor(description_editor::Message),
@@ -822,61 +826,13 @@ impl App {
             RootMessage::InstalledAddons(message) => self.apply_installed_addons_message(message),
             RootMessage::Downloader(message) => self.apply_downloader_message(message, update),
             RootMessage::SizeAnalyzer(message) => self.apply_size_analyzer_message(message),
-            RootMessage::ModelManager(message) => {
-                if matches!(message, model_manager::Message::EngineTestRequested) {
-                    self.capture_model_stage();
-                }
-                self.apply_model_manager_message(message)
-            }
+            RootMessage::ModelManager(message) => self.apply_model_manager_message(message),
             RootMessage::Search(message) => self.apply_search_message(message, update),
             RootMessage::DestinationSelect(message) => {
                 self.apply_destination_select_message(message)
             }
-            RootMessage::FilePreview(message) => {
-                let model_loaded = match &message {
-                    file_preview::Message::StageLoaded(generation, result) if result.is_ok() => {
-                        Some((*generation, true))
-                    }
-                    file_preview::Message::Loaded(generation, result)
-                        if result.is_ok()
-                            && self.state.features.shell.route() == shell::Route::Models =>
-                    {
-                        Some((*generation, false))
-                    }
-                    _ => None,
-                };
-                let task = self.apply_file_preview_message(message);
-                if let Some((generation, staged)) = model_loaded
-                    && self
-                        .state
-                        .features
-                        .file_preview
-                        .request()
-                        .is_some_and(|request| request.request_id == generation)
-                    && self.state.features.file_preview.current_model().is_some()
-                {
-                    let mut tasks = vec![task];
-                    if staged
-                        && let Some((position, angles)) =
-                            self.state.features.model_manager.saved_stage_placement()
-                    {
-                        tasks.push(self.apply_file_preview_message(
-                            file_preview::Message::StagePlacementRestored { position, angles },
-                        ));
-                    }
-                    let (skin, bodygroups) = self.state.features.model_manager.preview_selection();
-                    tasks.push(
-                        self.apply_file_preview_message(file_preview::Message::SkinSelected(skin)),
-                    );
-                    for (group, choice) in bodygroups.into_iter().enumerate() {
-                        tasks.push(self.apply_file_preview_message(
-                            file_preview::Message::BodygroupChoiceSelected { group, choice },
-                        ));
-                    }
-                    return Task::batch(tasks);
-                }
-                task
-            }
+            RootMessage::FilePreview(message) => self.apply_file_preview_message(message),
+            RootMessage::ModelPreview(message) => self.apply_model_preview_message(message),
             RootMessage::PreparePublish(message) => {
                 self.prepare_publish_message_task(message, update)
             }
@@ -1086,7 +1042,6 @@ impl App {
     feature_dispatch! {
         apply_installed_addons_message => installed_addons.installed_addons, run_installed_addons_effect;
         apply_size_analyzer_message => size_analyzer.size_analyzer, run_size_analyzer_effect;
-        apply_model_manager_message => model_manager.model_manager, run_model_manager_effect;
         apply_destination_select_message => destination_select.destination_select, run_destination_select_effect;
         apply_settings_message => settings.settings, run_settings_effect;
     }
@@ -1891,20 +1846,28 @@ impl App {
                 installed_addons::view(&self.state.features.installed_addons, ctx)
                     .map(RootMessage::InstalledAddons)
             }
-            (shell::Route::Models, None) => {
-                if self.state.features.file_preview.is_open() {
-                    file_preview::pane(
-                        &self.state.features.file_preview,
+            (shell::Route::Models, None) => responsive(move |size| {
+                let (right, bottom) = model_manager::pane_reservation(
+                    &self.state.features.model_manager,
+                    ctx,
+                    size.width,
+                    size.height,
+                );
+                stack![
+                    file_preview::workspace(&self.state.features.model_preview, ctx, right, bottom)
+                        .map(RootMessage::ModelPreview),
+                    model_manager::workspace_view(
+                        &self.state.features.model_manager,
+                        &self.state.features.model_preview,
                         ctx,
-                        true,
-                        self.state.viewport_size.width,
                     )
-                    .map(RootMessage::FilePreview)
-                } else {
-                    model_manager::view(&self.state.features.model_manager, ctx)
-                        .map(RootMessage::ModelManager)
-                }
-            }
+                    .map(RootMessage::ModelManager),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+            })
+            .into(),
             (shell::Route::SizeAnalyzer, None) => {
                 size_analyzer::view(&self.state.features.size_analyzer, ctx)
                     .map(RootMessage::SizeAnalyzer)
@@ -2106,6 +2069,12 @@ impl App {
             file_preview::subscription(&self.state.features.file_preview)
                 .map(RootMessage::FilePreview),
         );
+        if self.state.features.shell.route() == shell::Route::Models {
+            streams.push(
+                file_preview::subscription(&self.state.features.model_preview)
+                    .map(RootMessage::ModelPreview),
+            );
+        }
         streams.push(search::subscription(&self.state.features.search).map(RootMessage::Search));
         streams
             .push(settings::subscription(&self.state.features.settings).map(RootMessage::Settings));

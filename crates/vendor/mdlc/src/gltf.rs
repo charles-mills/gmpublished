@@ -367,9 +367,8 @@ fn load_document(
     let bytes = std::fs::read(path)
         .map_err(|err| ferr(format!("{at}：读不到 {}：{err}", path.display())))?;
 
-    let (doc, blob) = gltf::Gltf::from_slice_without_validation(&bytes)
-        .map_err(|err| ferr(format!("{at}：{} 解析失败：{err}", path.display())))
-        .map(|g| (g.document, g.blob))?;
+    let (doc, blob) = parse_document(&bytes)
+        .map_err(|err| ferr(format!("{at}：{} 解析失败：{err}", path.display())))?;
 
     validate_structure(&doc, at)?;
     check_extensions(&doc, at)?;
@@ -382,6 +381,45 @@ fn load_document(
         ..Default::default()
     };
     Ok((doc, buffers, notes))
+}
+
+fn parse_document(bytes: &[u8]) -> Result<(gltf::Document, Option<Vec<u8>>), String> {
+    let original = match gltf::Gltf::from_slice_without_validation(bytes) {
+        Ok(parsed) => return Ok((parsed.document, parsed.blob)),
+        Err(error) => error.to_string(),
+    };
+    let glb = bytes
+        .starts_with(b"glTF")
+        .then(|| gltf::binary::Glb::from_slice(bytes))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let json = glb.as_ref().map_or(bytes, |glb| glb.json.as_ref());
+    let mut json: serde_json::Value =
+        serde_json::from_slice(json).map_err(|error| error.to_string())?;
+    let mut normalized = false;
+    if let Some(scenes) = json
+        .get_mut("scenes")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for scene in scenes {
+            if let Some(scene) = scene.as_object_mut()
+                && !scene.contains_key("nodes")
+            {
+                // Scene.nodes is optional in glTF; gltf-json 1.4 requires it.
+                scene.insert("nodes".into(), serde_json::json!([]));
+                normalized = true;
+            }
+        }
+    }
+    if !normalized {
+        return Err(original);
+    }
+    let json = serde_json::from_value(json).map_err(|error| error.to_string())?;
+    Ok((
+        gltf::Document::from_json_without_validation(json),
+        glb.and_then(|glb| glb.bin)
+            .map(std::borrow::Cow::into_owned),
+    ))
 }
 
 fn validate_structure(document: &gltf::Document, at: &str) -> Result<(), GltfError> {
@@ -855,6 +893,23 @@ fn kept_joints(
             cur = parent[p];
         }
     }
+    if opts.axis == Some(ForcedAxis::Auto) {
+        for node in doc.nodes().filter(|node| node.mesh().is_none()) {
+            let wrapper = node.extras().as_ref().is_some_and(|extras| {
+                serde_json::from_str::<serde_json::Value>(extras.get()).is_ok_and(|extras| {
+                    extras["gmpublishedSourceMetadata"]
+                        .as_str()
+                        .is_some_and(|metadata| {
+                            serde_json::from_str::<serde_json::Value>(metadata)
+                                .is_ok_and(|metadata| metadata["sourceToGltfAxes"].is_array())
+                        })
+                })
+            });
+            if wrapper {
+                used.remove(&(node.index() as u32));
+            }
+        }
+    }
     let nodes: Vec<(u32, Option<u32>)> = (0..doc.nodes().len())
         .map(|i| (i as u32, parent[i].map(|p| p as u32)))
         .collect();
@@ -914,6 +969,7 @@ fn node_selected(n: &gltf::Node, opts: &GltfOpts, selectors: &[String]) -> bool 
 }
 
 fn smd_nodes(doc: &gltf::Document, parent: &[Option<usize>], kept: &[usize]) -> Vec<SmdNode> {
+    let parent = skeleton_parents(parent, kept);
     let idx_of: HashMap<usize, i32> = kept
         .iter()
         .enumerate()
@@ -930,6 +986,25 @@ fn smd_nodes(doc: &gltf::Document, parent: &[Option<usize>], kept: &[usize]) -> 
                 .unwrap_or(-1),
         })
         .collect()
+}
+
+fn skeleton_parents(parent: &[Option<usize>], kept: &[usize]) -> Vec<Option<usize>> {
+    let mut selected = vec![false; parent.len()];
+    for &id in kept {
+        selected[id] = true;
+    }
+    let mut result = vec![None; parent.len()];
+    for &id in kept {
+        let mut candidate = parent[id];
+        while let Some(index) = candidate {
+            if selected[index] {
+                break;
+            }
+            candidate = parent[index];
+        }
+        result[id] = candidate;
+    }
+    result
 }
 
 pub fn stable_source_names<'a>(
@@ -1686,6 +1761,7 @@ fn reference_poses(
     kept: &[usize],
     opts: &GltfOpts,
 ) -> Vec<SmdPose> {
+    let parent = skeleton_parents(parent, kept);
     let pose_world: Vec<World> = (0..world.len())
         .map(|i| bind.get(&i).copied().unwrap_or(world[i]))
         .collect();
@@ -1757,6 +1833,39 @@ pub fn source_parts(path: &Path, at: &str) -> Result<Vec<crate::fbx::SourcePart>
                     .filter(|name| !name.is_empty())
                     .map_or_else(|| format!("mesh{}", node.index()), str::to_owned),
             })
+        })
+        .collect())
+}
+
+pub fn collision_parts(path: &Path, at: &str) -> Result<Vec<String>, GltfError> {
+    let (document, _, _) = load_document(path, at)?;
+    let selectors = part_selectors(&document, &parent_table(&document))?;
+    Ok(document
+        .nodes()
+        .filter(|node| node.mesh().is_some())
+        .filter(|node| {
+            node.name()
+                .is_some_and(|name| name.starts_with("collision / "))
+                || node.extras().as_ref().is_some_and(|extras| {
+                    serde_json::from_str::<serde_json::Value>(extras.get()).is_ok_and(|extras| {
+                        extras["gmpublishedCollision"] == true || extras["sourceCollision"] == true
+                    })
+                })
+        })
+        .map(|node| selectors[node.index()].clone())
+        .collect())
+}
+
+pub fn source_metadata(path: &Path, at: &str) -> Result<Vec<String>, GltfError> {
+    let (document, _, _) = load_document(path, at)?;
+    Ok(document
+        .nodes()
+        .filter_map(|node| {
+            let extras = node.extras().as_ref()?;
+            let extras: serde_json::Value = serde_json::from_str(extras.get()).ok()?;
+            extras["gmpublishedSourceMetadata"]
+                .as_str()
+                .map(str::to_owned)
         })
         .collect())
 }
@@ -1848,6 +1957,54 @@ fn import_units(opts: &GltfOpts) -> std::borrow::Cow<'_, GltfOpts> {
     } else {
         std::borrow::Cow::Borrowed(opts)
     }
+}
+
+fn source_axis_matrix(document: &gltf::Document) -> Result<ufbx::Matrix, GltfError> {
+    for node in document.nodes() {
+        let Some(extras) = node.extras().as_ref() else {
+            continue;
+        };
+        let extras: serde_json::Value = serde_json::from_str(extras.get())
+            .map_err(|error| ferr(format!("Invalid glTF node metadata: {error}")))?;
+        let Some(metadata) = extras["gmpublishedSourceMetadata"].as_str() else {
+            continue;
+        };
+        let metadata: serde_json::Value = serde_json::from_str(metadata)
+            .map_err(|error| ferr(format!("Invalid Source axis metadata: {error}")))?;
+        let Some(axes) = metadata.get("sourceToGltfAxes") else {
+            continue;
+        };
+        let axes: [[f64; 3]; 3] = serde_json::from_value(axes.clone())
+            .map_err(|error| ferr(format!("Invalid Source axis matrix: {error}")))?;
+        for row in 0..3 {
+            for other in 0..3 {
+                let dot: f64 = (0..3)
+                    .map(|column| axes[row][column] * axes[other][column])
+                    .sum();
+                let expected = if row == other { 1.0 } else { 0.0 };
+                if !dot.is_finite() || (dot - expected).abs() > 0.000001 {
+                    return Err(ferr(
+                        "Source axis metadata must contain an orthonormal matrix",
+                    ));
+                }
+            }
+        }
+        return Ok(ufbx::Matrix {
+            m00: axes[0][0],
+            m01: axes[1][0],
+            m02: axes[2][0],
+            m10: axes[0][1],
+            m11: axes[1][1],
+            m12: axes[2][1],
+            m20: axes[0][2],
+            m21: axes[1][2],
+            m22: axes[2][2],
+            m03: 0.0,
+            m13: 0.0,
+            m23: 0.0,
+        });
+    }
+    automatic_axis_matrix(ufbx::axes_right_handed_y_up())
 }
 
 fn option_vector(value: [f32; 3], opts: &GltfOpts, position: bool) -> [f32; 3] {
@@ -2049,10 +2206,7 @@ pub fn read(path: &Path, at: &str, opts: &GltfOpts) -> Result<GltfGeometry, Gltf
         }
     }
     if opts.axis == Some(ForcedAxis::Auto) {
-        convert_geometry_axes(
-            &mut geometry,
-            &automatic_axis_matrix(ufbx::axes_right_handed_y_up())?,
-        );
+        convert_geometry_axes(&mut geometry, &source_axis_matrix(&doc)?);
     }
     Ok(geometry)
 }
@@ -2081,10 +2235,10 @@ pub fn read_frames(
 ) -> Result<Smd, GltfError> {
     let units = import_units(opts);
     let opts = units.as_ref();
-    let axes = (opts.axis == Some(ForcedAxis::Auto))
-        .then(|| automatic_axis_matrix(ufbx::axes_right_handed_y_up()))
-        .transpose()?;
     let (doc, buffers, notes) = load_document(path, at)?;
+    let axes = (opts.axis == Some(ForcedAxis::Auto))
+        .then(|| source_axis_matrix(&doc))
+        .transpose()?;
     for line in notes.lines(at) {
         log::info!("{line}");
     }
@@ -2094,6 +2248,8 @@ pub fn read_frames(
     let kept = kept_joints(&doc, &parent, opts, &selectors);
     let nodes = smd_nodes(&doc, &parent, &kept);
     let get = buffer_getter(&buffers);
+
+    let skeleton_parent = skeleton_parents(&parent, &kept);
 
     // 参考姿态（= 没有动画时的姿态，也是每条通道缺省时的取值）。
     let reference_world = world_transforms(&doc, &parent);
@@ -2231,13 +2387,23 @@ pub fn read_frames(
 
         let mut poses: Vec<SmdPose> = Vec::with_capacity(kept.len());
         for (i, &id) in kept.iter().enumerate() {
-            let pos = match parent[id] {
+            let pos = match skeleton_parent[id] {
                 Some(p) => rigid_bone_offset(&world[p], &world[id]),
                 None => world_translation(&world[id]),
             };
+            let rotation = if skeleton_parent[id] == parent[id] {
+                trs[id].rotation
+            } else {
+                match skeleton_parent[id] {
+                    Some(p) => {
+                        crate::fbx::local_rotation(&world[p].to_ufbx(), &world[id].to_ufbx())
+                    }
+                    None => ufbx::matrix_to_transform(&world[id].to_ufbx()).rotation,
+                }
+            };
             let (pos, rot) = opts.local(ufbx::Transform {
                 translation: pos,
-                rotation: trs[id].rotation,
+                rotation,
                 scale: ufbx::Vec3 {
                     x: 1.0,
                     y: 1.0,
@@ -3012,6 +3178,80 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// `data:` URI 要自己解（关掉 `import` feature 之后 crate 不管了）。
+    #[test]
+    fn collision_selectors_survive_hidden_scenes_and_missing_custom_properties() {
+        let directory = tmpdir("collision-selectors");
+        let path = write_gltf(&directory, "model.gltf", &tri_bytes(), TRI_BODY);
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        document["nodes"] = serde_json::json!([
+            {"name":"render","mesh":0},
+            {"name":"authored hull","mesh":0,"extras":{"gmpublishedCollision":true,"gmpublishedSourceMetadata":"{\"sourceUnits\":\"inches\"}"}},
+            {"name":"collision / prop / Piece 1","mesh":0},
+            {"name":"ordinary mesh","mesh":0,"extras":{"sourceCollision":false}},
+        ]);
+        document["scenes"] = serde_json::json!([{"nodes":[0,3]},{"nodes":[1,2]}]);
+        document["scene"] = serde_json::json!(0);
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let parts = source_parts(&path, "model").unwrap();
+        assert_eq!(
+            collision_parts(&path, "model").unwrap(),
+            vec![parts[1].selector.clone(), parts[2].selector.clone(),]
+        );
+        assert_eq!(
+            source_metadata(&path, "model").unwrap(),
+            vec!["{\"sourceUnits\":\"inches\"}"]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn blender_empty_scenes_keep_geometry_and_binary_buffers_readable() {
+        let directory = tmpdir("empty-scenes");
+        let path = write_gltf(&directory, "model.gltf", &tri_bytes(), TRI_BODY);
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        document["scenes"] = serde_json::json!([{"name":"Collision"},{"nodes":[0]}]);
+        document["scene"] = serde_json::json!(1);
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(
+            read(&path, "model", &GltfOpts::default())
+                .unwrap()
+                .smd
+                .triangles
+                .len(),
+            1
+        );
+        document["buffers"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("uri");
+        let json = serde_json::to_vec(&document).unwrap();
+        let bytes = tri_bytes();
+        let binary = gltf::binary::Glb {
+            header: gltf::binary::Header {
+                magic: *b"glTF",
+                version: 2,
+                length: 0,
+            },
+            json: std::borrow::Cow::Borrowed(&json),
+            bin: Some(std::borrow::Cow::Borrowed(&bytes)),
+        }
+        .to_vec()
+        .unwrap();
+        let path = directory.join("model.glb");
+        std::fs::write(&path, binary).unwrap();
+        assert_eq!(
+            read(&path, "model", &GltfOpts::default())
+                .unwrap()
+                .smd
+                .triangles
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn world_transforms_handle_deep_child_first_hierarchies_without_recursion() {
         let count = 50_000;

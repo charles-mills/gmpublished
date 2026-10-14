@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Write as _};
+use std::{collections::HashSet, fmt::Write as _, sync::atomic::AtomicBool};
 
 use mdlc::{bone_math, smd::SmdPose};
 use vformats::{
@@ -8,6 +8,171 @@ use vformats::{
 };
 
 use super::{DecompileError, ExportFiles, invalid, quoted, skeleton_smd};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollisionMesh {
+    pub solid: usize,
+    pub piece: usize,
+    pub bone: Option<usize>,
+    /// Engine Source inches in the model's bone bind pose.
+    pub vertices: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+}
+
+pub fn load_collision_meshes(
+    raw_mdl: &[u8],
+    raw_phy: &[u8],
+) -> Result<Vec<CollisionMesh>, DecompileError> {
+    if raw_mdl.len() as u64 > super::MAX_INPUT_BYTES {
+        return Err(DecompileError::SizeLimit);
+    }
+    let mut geometry = raw_mdl.to_vec();
+    geometry
+        .get_mut(180..184)
+        .ok_or_else(|| invalid("Truncated MDL header"))?
+        .fill(0);
+    let limits = vformats::Limits {
+        max_input_bytes: super::MAX_INPUT_BYTES,
+        ..vformats::Limits::default()
+    };
+    let model =
+        vformats::mdl::parse_mdl(&geometry, &limits).map_err(|error| invalid(error.to_string()))?;
+    super::validate_skeleton(&model)?;
+    Ok(collision_geometry(&model, raw_phy, &AtomicBool::new(false))?.meshes)
+}
+
+pub(super) struct CollisionGeometry {
+    pub meshes: Vec<CollisionMesh>,
+    pub worlds: Vec<bone_math::Matrix3x4>,
+    pub metadata: String,
+    pub has_constraints: bool,
+}
+
+pub(super) fn collision_geometry(
+    model: &Mdl,
+    raw_phy: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<CollisionGeometry, DecompileError> {
+    super::check_cancelled(cancelled)?;
+    let limits = vformats::Limits {
+        max_input_bytes: super::MAX_INPUT_BYTES,
+        max_entries: 65_536,
+        ..vformats::Limits::default()
+    };
+    let physics = phy::parse(raw_phy, &limits)
+        .map_err(|error| invalid(format!("Cannot read collision data: {error}")))?;
+    if physics.header.mdl_checksum != model.checksum {
+        return Err(invalid("The MDL and PHY checksums do not match"));
+    }
+    if physics.solids.is_empty()
+        || physics.stats.declared_solids != physics.solids.len()
+        || !physics.stats.skip_reasons.is_empty()
+    {
+        return Err(invalid(
+            "The collision reader could not preserve all PHY geometry",
+        ));
+    }
+    let text = physics
+        .text
+        .ok_or_else(|| invalid("The PHY has no solid metadata"))?;
+    validate_collision_text(text.bytes)?;
+    let metadata = text
+        .keyvalues(&limits)
+        .ok_or_else(|| invalid("Invalid PHY keyvalues"))?;
+    let solids = metadata.blocks("solid").collect::<Vec<_>>();
+    if solids.len() != physics.solids.len() {
+        return Err(invalid(
+            "The PHY solid metadata does not match its geometry",
+        ));
+    }
+    let bindings = solid_bindings(raw_phy, physics.solids.len())?;
+    let joints = bindings.iter().any(Option::is_some);
+    if joints && bindings.iter().any(Option::is_none) {
+        return Err(invalid("The PHY mixes bound and unbound collision solids"));
+    }
+    let worlds = quaternion_worlds(model)?;
+    let mut meshes = Vec::new();
+    for (index, solid) in physics.solids.iter().enumerate() {
+        super::check_cancelled(cancelled)?;
+        if integer(solids[index], "index")? != index {
+            return Err(invalid("The PHY solid indices are not sequential"));
+        }
+        if let Some(bone) = bindings[index] {
+            let bone = model
+                .bones
+                .get(bone)
+                .ok_or_else(|| invalid("A collision solid references an absent model bone"))?;
+            if !string(solids[index], "name")?.eq_ignore_ascii_case(&bone.name) {
+                return Err(invalid("A PHY solid name does not match its bound bone"));
+            }
+        }
+        if solid.ledges.len() > 1024 || meshes.len().saturating_add(solid.ledges.len()) > 65_536 {
+            return Err(DecompileError::SizeLimit);
+        }
+        for (piece, ledge) in solid.ledges.iter().enumerate() {
+            super::check_cancelled(cancelled)?;
+            let vertices = ledge
+                .vertices
+                .iter()
+                .map(|&point| bindings[index].map_or(point, |bone| transform(&worlds[bone], point)))
+                .collect::<Vec<_>>();
+            let center = std::array::from_fn::<_, 3, _>(|axis| {
+                vertices.iter().map(|point| point[axis] as f64).sum::<f64>() as f32
+                    / vertices.len() as f32
+            });
+            let mut indices = Vec::with_capacity(ledge.triangles.len() * 3);
+            for (face, triangle) in ledge.triangles.iter().enumerate() {
+                if face.is_multiple_of(4096) {
+                    super::check_cancelled(cancelled)?;
+                }
+                let [a, b, c] = triangle.map(|index| vertices[index]);
+                let u: [f32; 3] = std::array::from_fn(|axis| b[axis] - a[axis]);
+                let v: [f32; 3] = std::array::from_fn(|axis| c[axis] - a[axis]);
+                let normal = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                let outward = normal
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, n)| n * (a[axis] - center[axis]))
+                    .sum::<f32>()
+                    >= 0.0;
+                let mut triangle = triangle.map(|index| index as u32);
+                if !outward {
+                    triangle.swap(1, 2);
+                }
+                indices.extend_from_slice(&triangle);
+            }
+            meshes.push(CollisionMesh {
+                solid: index,
+                piece,
+                bone: bindings[index],
+                vertices,
+                indices,
+            });
+        }
+    }
+    Ok(CollisionGeometry {
+        meshes,
+        worlds,
+        metadata: std::str::from_utf8(text.bytes.strip_suffix(&[0]).unwrap_or(text.bytes))
+            .map_err(|_| invalid("Collision text is not UTF-8"))?
+            .to_owned(),
+        has_constraints: metadata.blocks("ragdollconstraint").next().is_some(),
+    })
+}
+
+fn quaternion_worlds(model: &Mdl) -> Result<Vec<bone_math::Matrix3x4>, DecompileError> {
+    skeleton_worlds(model, |index| {
+        let bone = &model.bones[index];
+        bone_math::quaternion_local_transform(
+            bone_math::quaternion_normalize(bone.quaternion),
+            bone.position,
+        )
+    })
+}
 
 #[derive(Default)]
 pub(super) struct PhysicsReport {
@@ -391,6 +556,16 @@ fn collision_skeleton(model: &Mdl, frame: &[SmdPose]) -> Result<String, Decompil
 }
 
 fn model_worlds(model: &Mdl) -> Result<Vec<bone_math::Matrix3x4>, DecompileError> {
+    skeleton_worlds(model, |index| {
+        let bone = &model.bones[index];
+        bone_math::local_transform(bone.position, bone.rotation)
+    })
+}
+
+fn skeleton_worlds(
+    model: &Mdl,
+    local: impl Fn(usize) -> bone_math::Matrix3x4,
+) -> Result<Vec<bone_math::Matrix3x4>, DecompileError> {
     let mut worlds = vec![None; model.bones.len()];
     for index in 0..model.bones.len() {
         let mut chain = Vec::new();
@@ -412,11 +587,11 @@ fn model_worlds(model: &Mdl) -> Result<Vec<bone_math::Matrix3x4>, DecompileError
         }
         for current in chain.into_iter().rev() {
             let bone = &model.bones[current];
-            let local = bone_math::local_transform(bone.position, bone.rotation);
+            let matrix = local(current);
             worlds[current] = Some(if bone.parent == -1 {
-                local
+                matrix
             } else {
-                bone_math::concat(&worlds[bone.parent as usize].unwrap(), &local)
+                bone_math::concat(&worlds[bone.parent as usize].unwrap(), &matrix)
             });
         }
     }

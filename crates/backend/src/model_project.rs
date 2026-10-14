@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use crate::model_compile::{
-    self, ModelCompileError, ModelCompileRequest, ModelOutputFile, ModelOutputKind,
+    self, ModelCollision, ModelCompileError, ModelCompileRequest, ModelOutputFile, ModelOutputKind,
 };
 use crate::model_materials;
 
@@ -83,6 +83,10 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
         ));
     }
     let mut desc = model_compile::load_description(request, &source, base)?;
+    if model_compile::authoring::model_settings(&source)?.is_some() {
+        return save_source_authoring_qc(request, path, &destination);
+    }
+    let _authoring_assets = model_compile::authoring::prepare_assets(&mut desc, &source)?;
     desc.model.version = Some(48);
     desc.model.name = model_compile::normalize_model_name(
         request.model_name.as_deref().unwrap_or(&desc.model.name),
@@ -105,9 +109,6 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
     let mut writes = Vec::new();
     let mut baked = false;
     let mut qc = if source_extension == "qc" {
-        if request.generate_collision {
-            return Err(invalid("QC descriptions define their own collision model"));
-        }
         portable_qc::copy(
             request,
             &desc,
@@ -404,26 +405,24 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
     if !request.skins.is_empty() {
         qc.push_str(&skin_group(&compiled.desc)?);
     }
-    if request.generate_collision {
-        if !compiled.desc.model.static_prop && compiled.desc.bones.len() > 1 {
-            return Err(invalid(
-                "automatic collision generation requires a rigid prop or authored collision",
-            ));
-        }
+    if matches!(
+        request.collision,
+        ModelCollision::Automatic(_) | ModelCollision::Custom { .. }
+    ) {
         let relative = PathBuf::from(&assets).join("collision.smd");
-        stage_asset(
-            &files_root,
-            &relative,
-            collision_smd(&compiled, baked)?.as_bytes(),
-            &mut writes,
-        )?;
+        let (collision, pieces) = collision_smd(&compiled, request, baked)?;
+        stage_asset(&files_root, &relative, collision.as_bytes(), &mut writes)?;
         writeln!(
             qc,
-            "$scale 1\n$collisionmodel {}\n{{\n\t$mass {}\n}}",
+            "$scale 1\n$collisionmodel {}\n{{\n\t$mass {}",
             quote_path(&relative)?,
             compiled.desc.physics.effective_mass()
         )
         .unwrap();
+        if pieces > 1 {
+            writeln!(qc, "\t$concave\n\t$maxconvexpieces {pieces}").unwrap();
+        }
+        qc.push_str("}\n");
     }
     if request.export_materials {
         let mut sources = vec![source.clone()];
@@ -471,7 +470,31 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
     }
     stage_asset(&files_root, Path::new(filename), qc.as_bytes(), &mut writes)?;
     let candidate = files_root.join(filename);
-    let parsed = mdlc::qc::parse_qc_file(&candidate).map_err(|errors| {
+    validate_saved_qc(&qc, &candidate, (source_extension == "qc").then_some(&desc))?;
+    publish_qc(stage, &files_root, &destination, writes)
+}
+
+fn save_source_authoring_qc(
+    request: &ModelCompileRequest,
+    path: &Path,
+    destination: &Path,
+) -> Result<(), ModelCompileError> {
+    let stage = tempfile::Builder::new()
+        .prefix(".gmpublished-qc-")
+        .tempdir_in(destination)
+        .map_err(|error| io_error(path, error))?;
+    let mut compile_request = request.clone();
+    compile_request.destination = stage.path().join("compiled");
+    let output = model_compile::compile_model(&compile_request)?;
+    let model = output
+        .files
+        .iter()
+        .find(|file| file.kind == ModelOutputKind::Mdl)
+        .ok_or_else(|| invalid("compiled model output is missing"))?;
+    let decompiled =
+        crate::model_decompile::decompile_model(&model.path, &stage.path().join("decompiled"))
+            .map_err(|error| ModelCompileError::Description(error.to_string()))?;
+    let original = mdlc::qc::parse_qc_file(&decompiled.qc_path).map_err(|errors| {
         ModelCompileError::Description(
             errors
                 .iter()
@@ -480,12 +503,69 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
                 .join("\n"),
         )
     })?;
-    if source_extension == "qc" {
-        portable_qc::validate_dependencies(&qc, &candidate, &parsed, &desc)?;
+    let files_root = stage.path().join("files");
+    fs::create_dir(&files_root).map_err(|error| io_error(&files_root, error))?;
+    let assets = asset_namespace(path);
+    let mut writes = Vec::new();
+    let mut bytes = 0usize;
+    for file in &decompiled.files {
+        let relative = file
+            .strip_prefix(&decompiled.output_directory)
+            .map_err(|_| ModelCompileError::UnsafePath(file.clone()))?;
+        let material = relative.starts_with("materials");
+        if material
+            && relative
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        {
+            continue;
+        }
+        let relative = if material {
+            relative.to_owned()
+        } else {
+            Path::new(&assets).join(relative)
+        };
+        let data = fs::read(file).map_err(|error| io_error(file, error))?;
+        bytes = bytes
+            .checked_add(data.len())
+            .filter(|total| *total <= 512 * 1024 * 1024)
+            .ok_or_else(|| invalid("QC assets exceed the 512 MiB limit"))?;
+        stage_asset(&files_root, &relative, &data, &mut writes)?;
+    }
+    let qc = format!(
+        "$cd {}\n$include {}\n",
+        quote(&assets)?,
+        quote_path(&Path::new(&assets).join("model.qc"))?
+    );
+    let filename = path
+        .file_name()
+        .ok_or_else(|| invalid("QC filename is required"))?;
+    stage_asset(&files_root, Path::new(filename), qc.as_bytes(), &mut writes)?;
+    validate_saved_qc(&qc, &files_root.join(filename), Some(&original))?;
+    publish_qc(stage, &files_root, destination, writes)
+}
+
+fn validate_saved_qc(
+    qc: &str,
+    candidate: &Path,
+    original: Option<&mdlc::model::ModelDesc>,
+) -> Result<(), ModelCompileError> {
+    let files_root = candidate.parent().expect("saved QC has parent");
+    let parsed = mdlc::qc::parse_qc_file(candidate).map_err(|errors| {
+        ModelCompileError::Description(
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    })?;
+    if let Some(original) = original {
+        portable_qc::validate_dependencies(qc, candidate, &parsed, original)?;
     }
     let validated = mdlc::pipeline::build(
         &parsed,
-        &files_root,
+        files_root,
         mdlc::pipeline::PipelineOptions::default(),
     )?;
     if let Some(bytes) = &validated.phy {
@@ -498,6 +578,15 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
             ));
         }
     }
+    Ok(())
+}
+
+fn publish_qc(
+    stage: tempfile::TempDir,
+    files_root: &Path,
+    destination: &Path,
+    writes: Vec<PathBuf>,
+) -> Result<(), ModelCompileError> {
     let files = writes
         .into_iter()
         .map(|relative| ModelOutputFile {
@@ -509,8 +598,8 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
     let _export = model_compile::EXPORT_LOCK.lock();
     model_compile::publish(
         stage,
-        &files_root,
-        &destination,
+        files_root,
+        destination,
         &files,
         &[],
         true,
@@ -604,7 +693,7 @@ fn mesh_smd<'a>(
     Ok(result)
 }
 
-fn source_smd(source: &mdlc::smd::Smd) -> Result<String, ModelCompileError> {
+pub(crate) fn source_smd(source: &mdlc::smd::Smd) -> Result<String, ModelCompileError> {
     let mut result = String::from("version 1\nnodes\n");
     for node in &source.nodes {
         writeln!(
@@ -666,9 +755,10 @@ fn source_smd(source: &mdlc::smd::Smd) -> Result<String, ModelCompileError> {
 
 fn collision_smd(
     compiled: &mdlc::model::CompiledModelDesc,
+    request: &ModelCompileRequest,
     baked: bool,
-) -> Result<String, ModelCompileError> {
-    let hull = model_compile::collision_hull(compiled)?;
+) -> Result<(String, usize), ModelCompileError> {
+    let hulls = model_compile::collision_hulls(compiled, request, &AtomicBool::new(false))?;
     // PHY compilation applies sequence_world * inverse(collision_rest). Matching
     // those poses keeps the generated hull in its corrected source coordinates.
     let mut result = if baked {
@@ -707,15 +797,26 @@ fn collision_smd(
         .first()
         .ok_or_else(|| invalid("collision requires a model material"))?;
     smd_material(&material.name)?;
-    for triangle in &hull.faces {
-        writeln!(result, "{}", material.name).unwrap();
-        for &index in triangle {
-            let p = hull.vertices[index as usize];
-            writeln!(result, "0 {} {} {} 0 0 1 0 0 1 0 1", p[0], p[1], p[2]).unwrap();
+    for (piece, hull) in hulls.iter().enumerate() {
+        let height = 1.0 - 2.0 * (piece as f32 + 0.5) / hulls.len() as f32;
+        let radius = (1.0 - height * height).sqrt();
+        let angle = piece as f32 * std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+        let normal = [radius * angle.cos(), radius * angle.sin(), height];
+        for triangle in &hull.faces {
+            writeln!(result, "{}", material.name).unwrap();
+            for &index in triangle {
+                let p = hull.vertices[index as usize];
+                writeln!(
+                    result,
+                    "0 {} {} {} {} {} {} 0 0 1 0 1",
+                    p[0], p[1], p[2], normal[0], normal[1], normal[2]
+                )
+                .unwrap();
+            }
         }
     }
     result.push_str("end\n");
-    Ok(result)
+    Ok((result, hulls.len()))
 }
 
 fn smd_header() -> String {

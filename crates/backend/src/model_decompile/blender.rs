@@ -11,6 +11,8 @@ use super::{DecompileError, MAX_OUTPUT_BYTES, check_cancelled, invalid, io_error
 
 #[path = "blender/animation.rs"]
 mod animation;
+#[path = "blender/authoring.rs"]
+mod authoring;
 #[path = "blender/flexes.rs"]
 mod flexes;
 #[path = "blender/geometry.rs"]
@@ -19,6 +21,8 @@ mod geometry;
 mod materials;
 #[path = "blender/metadata.rs"]
 mod metadata;
+#[path = "blender/physics.rs"]
+mod physics;
 
 #[cfg(test)]
 #[path = "blender/tests.rs"]
@@ -89,14 +93,16 @@ pub fn export_blender_model_with_cancel(
             .push(json!({"name":name,"bufferView":view,"mimeType":"image/png"}));
     }
     geometry::write(&mut output, &loaded, &lods, cancelled)?;
+    physics::write(&mut output, &loaded, path, cancelled)?;
     animation::write(&mut output, &loaded, cancelled)?;
-    match metadata::write(&mut output, &loaded, path, cancelled) {
+    match metadata::write(&mut output, &loaded, cancelled) {
         Ok(()) => {}
         Err(error @ (DecompileError::Cancelled | DecompileError::SizeLimit)) => return Err(error),
         Err(error) => output.warnings.push(format!(
             "Some Source authoring settings could not be preserved as custom data: {error}"
         )),
     }
+    authoring::write(&mut output, path, &loaded, cancelled)?;
     check_cancelled(cancelled)?;
     let bytes = output.finish()?;
     let temporary = tempfile::Builder::new()

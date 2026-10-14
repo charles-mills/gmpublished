@@ -339,15 +339,22 @@ fn animated_blender_model_recompiles_with_original_geometry_and_deformation() {
     let root = fixture("$body body rig.smd\n$sequence walk rig.smd fps 30\n");
     let source = root.path().join("models/test.mdl");
     let report = export_blender_model(&source, &root.path().join("blender")).unwrap();
-    let (document, _) = document(&report.model_path);
-    let clip = document["animations"][0]["name"].as_str().unwrap();
-    let description = qc::parse_qc_str(&format!("$modelname models/rebuilt.mdl\n$body body blender/model.glb srcaxis auto\n$sequence walk blender/model.glb srcstack \"{clip}\" srcfps 30\n"),root.path()).unwrap();
-    let rebuilt = pipeline::build(
-        &description,
-        root.path(),
-        pipeline::PipelineOptions::default(),
-    )
-    .unwrap();
+    let mut request = crate::model_compile::ModelCompileRequest::new(
+        report.model_path,
+        root.path().join("rebuilt"),
+    );
+    request.export_materials = false;
+    let rebuilt = crate::model_compile::compile_model(&request).unwrap();
+    let rebuilt_path = &rebuilt
+        .files
+        .iter()
+        .find(|file| file.kind == crate::model_compile::ModelOutputKind::Mdl)
+        .unwrap()
+        .path;
+    let rebuilt_mdl = fs::read(rebuilt_path).unwrap();
+    let rebuilt_vvd = fs::read(rebuilt_path.with_extension("vvd")).unwrap();
+    let rebuilt_vtx = fs::read(rebuilt_path.with_extension("dx90.vtx")).unwrap();
+    let rebuilt_ani = fs::read(rebuilt_path.with_extension("ani")).ok();
     let original_mdl = fs::read(&source).unwrap();
     let original_vvd = fs::read(source.with_extension("vvd")).unwrap();
     let original_vtx = fs::read(source.with_extension("dx90.vtx")).unwrap();
@@ -359,15 +366,15 @@ fn animated_blender_model_recompiles_with_original_geometry_and_deformation() {
     )
     .unwrap();
     let compiled = super::super::animations::preview::load_animation_preview(
-        &rebuilt.mdl,
-        &rebuilt.vvd,
-        &rebuilt.vtx,
-        rebuilt.ani.as_deref(),
+        &rebuilt_mdl,
+        &rebuilt_vvd,
+        &rebuilt_vtx,
+        rebuilt_ani.as_deref(),
     )
     .unwrap();
     let mut differences = Vec::new();
     let bound =
-        |offset: usize| f32::from_le_bytes(rebuilt.mdl[offset..offset + 4].try_into().unwrap());
+        |offset: usize| f32::from_le_bytes(rebuilt_mdl[offset..offset + 4].try_into().unwrap());
     let minimum: [f32; 3] = std::array::from_fn(|axis| bound(104 + axis * 4));
     let maximum: [f32; 3] = std::array::from_fn(|axis| bound(116 + axis * 4));
     for cycle in [0.0, 0.25, 0.5, 0.75, 1.0] {
@@ -626,4 +633,235 @@ fn failed_or_cancelled_export_leaves_no_partial_destination_and_never_overwrites
         Err(DecompileError::DestinationExists(_))
     ));
     assert_eq!(fs::read(destination.join("keep")).unwrap(), b"original");
+}
+
+fn collision_tetra(offset: f32) -> mdlc::phy::PhyHull {
+    mdlc::phy::PhyHull {
+        vertices: vec![
+            [offset, 0.0, 0.0],
+            [offset + 4.0, 0.0, 0.0],
+            [offset, 7.0, 0.0],
+            [offset, 0.0, 9.0],
+        ],
+        faces: vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+    }
+}
+
+#[test]
+fn collision_export_keeps_each_convex_piece_in_a_separate_hidden_scene_with_engine_axes() {
+    let root = fixture("$body body rig.smd\n$sequence walk rig.smd\n");
+    let source = root.path().join("models/test.mdl");
+    let raw_mdl = fs::read(&source).unwrap();
+    let model = vformats::mdl::parse_mdl(&raw_mdl, &vformats::Limits::default()).unwrap();
+    let raw_phy = mdlc::phy::write_phy_multi(
+        &[vec![collision_tetra(0.0), collision_tetra(20.0)]],
+        &[mdlc::phy::PhySolid::prop("collision")],
+        &mdlc::phy::PhyParams::new("collision", model.checksum),
+    )
+    .unwrap();
+    fs::write(source.with_extension("phy"), &raw_phy).unwrap();
+    let report = export_blender_model(&source, &root.path().join("blender")).unwrap();
+    let (document, bin) = document(&report.model_path);
+    let collision = document["scenes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scene| scene["name"] == "Collision")
+        .unwrap();
+    assert_ne!(collision, &document["scenes"][0]);
+    let collision_root = collision["nodes"][1].as_u64().unwrap() as usize;
+    assert!(
+        !document["scenes"][0]["nodes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(collision_root))
+    );
+    let pieces = document["nodes"][collision_root]["children"]
+        .as_array()
+        .unwrap();
+    assert_eq!(pieces.len(), 2);
+    for (piece, node) in pieces.iter().enumerate() {
+        let node = &document["nodes"][node.as_u64().unwrap() as usize];
+        assert_eq!(node["extras"]["sourceCollisionPiece"], piece);
+        assert_eq!(node["extras"]["gmpublishedCollision"], true);
+        assert!(node.get("skin").is_none());
+        let mesh = &document["meshes"][node["mesh"].as_u64().unwrap() as usize];
+        let positions = floats(
+            &document,
+            &bin,
+            mesh["primitives"][0]["attributes"]["POSITION"]
+                .as_u64()
+                .unwrap() as usize,
+        );
+        let offset = piece as f32 * 20.0;
+        let expected = [
+            [offset, 0.0, 0.0],
+            [offset + 4.0, 0.0, 0.0],
+            [offset, 0.0, -7.0],
+            [offset, 9.0, 0.0],
+        ]
+        .map(|point| point.map(|value| value * 0.0254));
+        for point in positions.chunks_exact(3) {
+            assert!(
+                expected.iter().any(|other| point
+                    .iter()
+                    .zip(other)
+                    .all(|(a, b)| (a - b).abs() < 0.00002)),
+                "{point:?}"
+            );
+        }
+        assert_eq!(positions.len(), 12);
+    }
+    let parts = mdlc::gltf::source_parts(&report.model_path, "collision").unwrap();
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|part| part.name.starts_with("collision / "))
+            .count(),
+        2
+    );
+    let metadata: Value = serde_json::from_str(
+        document["nodes"][collision_root]["extras"]["gmpublishedSourceMetadata"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        metadata["sourcePhysicsKeyvalues"]
+            .as_str()
+            .unwrap()
+            .contains("editparams")
+    );
+    assert!(
+        !report.warnings.iter().any(
+            |warning| warning.contains("physics mesh and ragdoll constraints are not included")
+        )
+    );
+}
+
+#[test]
+fn ragdoll_collision_uses_bone_local_engine_axes_and_a_matching_blender_skin() {
+    let root = fixture("$body body rig.smd\n$sequence walk rig.smd\n");
+    let source = root.path().join("models/test.mdl");
+    let raw_mdl = fs::read(&source).unwrap();
+    let model = vformats::mdl::parse_mdl(&raw_mdl, &vformats::Limits::default()).unwrap();
+    let mut hull = collision_tetra(0.0);
+    for point in &mut hull.vertices {
+        *point = [point[1], -point[0], point[2]];
+    }
+    let raw_phy = mdlc::phy::write_phy(
+        &[hull.clone(), hull],
+        &[
+            mdlc::phy::PhySolid::ragdoll(0, "root", None),
+            mdlc::phy::PhySolid::ragdoll(1, "child", Some("root".into())),
+        ],
+        &mdlc::phy::PhyParams::new("collision", model.checksum),
+    )
+    .unwrap();
+    fs::write(source.with_extension("phy"), &raw_phy).unwrap();
+    let pieces = super::super::load_collision_meshes(&raw_mdl, &raw_phy).unwrap();
+    let root_world =
+        bone_math::quaternion_local_transform(model.bones[0].quaternion, model.bones[0].position);
+    let child_world = bone_math::concat(
+        &root_world,
+        &bone_math::quaternion_local_transform(model.bones[1].quaternion, model.bones[1].position),
+    );
+    let transform = |matrix: &bone_math::Matrix3x4, point: [f32; 3]| {
+        std::array::from_fn::<_, 3, _>(|axis| {
+            matrix[axis * 4] * point[0]
+                + matrix[axis * 4 + 1] * point[1]
+                + matrix[axis * 4 + 2] * point[2]
+                + matrix[axis * 4 + 3]
+        })
+    };
+    for (piece, world) in pieces.iter().zip([root_world, child_world]) {
+        let expected = [
+            [0.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [0.0, 7.0, 0.0],
+            [0.0, 0.0, 9.0],
+        ]
+        .map(|point| transform(&world, point));
+        for point in &piece.vertices {
+            assert!(
+                expected
+                    .iter()
+                    .any(|other| point.iter().zip(other).all(|(a, b)| (a - b).abs() < 0.0001)),
+                "{point:?}"
+            );
+        }
+        assert_eq!(piece.vertices.len(), 4);
+    }
+    let report = export_blender_model(&source, &root.path().join("blender")).unwrap();
+    let (document, bin) = document(&report.model_path);
+    let skin = document["skins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|skin| skin["name"] == "Collision")
+        .unwrap();
+    let inverse = floats(
+        &document,
+        &bin,
+        skin["inverseBindMatrices"].as_u64().unwrap() as usize,
+    );
+    for (index, world) in [root_world, child_world].iter().enumerate() {
+        let matrix = &inverse[index * 16..(index + 1) * 16];
+        for point in [[0.0, 0.0, 0.0], [4.0, 7.0, 9.0]] {
+            let world = position(transform(world, point));
+            let local: [f32; 3] = std::array::from_fn(|axis| {
+                matrix[axis] * world[0]
+                    + matrix[4 + axis] * world[1]
+                    + matrix[8 + axis] * world[2]
+                    + matrix[12 + axis]
+            });
+            for (actual, expected) in local.into_iter().zip(position(point)) {
+                near(actual, expected);
+            }
+        }
+    }
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("ragdoll constraints are preserved"))
+    );
+    let metadata: Value = serde_json::from_str(
+        document["nodes"][0]["extras"]["gmpublishedSourceMetadata"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        metadata["sourcePhysics"]["sourcePhysicsKeyvalues"]
+            .as_str()
+            .unwrap()
+            .contains("ragdollconstraint")
+    );
+}
+
+#[test]
+fn blender_collision_rejects_wrong_companions_before_creating_output() {
+    let root = fixture("$body body rig.smd\n$sequence walk rig.smd\n");
+    let source = root.path().join("models/test.mdl");
+    let raw_mdl = fs::read(&source).unwrap();
+    let model = vformats::mdl::parse_mdl(&raw_mdl, &vformats::Limits::default()).unwrap();
+    let mut raw_phy = mdlc::phy::write_phy(
+        &[collision_tetra(0.0)],
+        &[mdlc::phy::PhySolid::prop("collision")],
+        &mdlc::phy::PhyParams::new("collision", model.checksum),
+    )
+    .unwrap();
+    raw_phy[12] ^= 1;
+    fs::write(source.with_extension("phy"), &raw_phy).unwrap();
+    let output = root.path().join("blender");
+    assert!(
+        matches!(export_blender_model(&source,&output),Err(DecompileError::InvalidModel(error)) if error.contains("checksums"))
+    );
+    assert!(!output.exists());
+    raw_phy[12] ^= 1;
+    raw_phy.truncate(80);
+    fs::write(source.with_extension("phy"), &raw_phy).unwrap();
+    assert!(export_blender_model(&source, &output).is_err());
+    assert!(!output.exists());
 }

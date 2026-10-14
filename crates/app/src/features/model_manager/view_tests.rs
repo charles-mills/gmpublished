@@ -1,6 +1,6 @@
 use iced::{Settings, Size};
 
-use super::super::{Message, State, update};
+use super::super::{Message, State, WorkspaceTab, update};
 use super::view;
 use crate::i18n::I18n;
 use crate::theme::{Tokens, ViewCtx};
@@ -15,7 +15,7 @@ fn empty_manager_import_is_clickable_without_a_source() {
         Size::new(560.0, 560.0),
         view(&state, ViewCtx::new(&tokens, &i18n)),
     );
-    ui.click(i18n.tr("models-import").as_str()).unwrap();
+    ui.click(i18n.tr("browse").as_str()).unwrap();
     assert!(
         ui.into_messages()
             .any(|message| matches!(message, Message::ImportRequested))
@@ -51,10 +51,12 @@ fn busy_cancel_stays_within_small_route_viewports_in_every_locale() {
 }
 
 #[test]
-fn compile_stays_visible_with_mesh_options_in_a_small_viewport() {
+fn export_stays_visible_in_a_small_workspace() {
     let mut state = State::default();
     update(&mut state, Message::SourceDropped("prop.fbx".into()));
     state.destination = Some("export".into());
+    state.workspace_tab = WorkspaceTab::Export;
+    state.preview_dirty = false;
     let tokens = Tokens::dark();
     let i18n = I18n::for_locale(Some("en"));
     let mut ui = iced_test::Simulator::with_size(
@@ -77,83 +79,73 @@ fn compiled_models_offer_distinct_blender_and_qc_exports_in_every_locale() {
     let mut state = State::default();
     update(&mut state, Message::SourceDropped("prop.mdl".into()));
     state.destination = Some("export".into());
-    let tokens = Tokens::dark();
-    for locale in [
-        "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
-    ] {
-        let i18n = I18n::for_locale(Some(locale));
-        let mut ui = iced_test::Simulator::with_size(
-            Settings::default(),
-            Size::new(560.0, 560.0),
-            view(&state, ViewCtx::new(&tokens, &i18n)),
-        );
-        for key in ["models-export-blender", "models-decompile"] {
-            let label = i18n.tr(key);
-            let action = ui.find(label.as_str()).unwrap();
-            assert!(
-                action.bounds().x >= 0.0
-                    && action.bounds().x + action.bounds().width <= 560.0
-                    && action.bounds().y >= 0.0
-                    && action.bounds().y + action.bounds().height <= 560.0,
-                "{key} exceeds viewport in {locale}"
+    state.workspace_tab = WorkspaceTab::Export;
+    state.preview_dirty = false;
+    for text_percent in [100, crate::bridge::MAX_TEXT_SIZE_PERCENT] {
+        let tokens = Tokens::dark()
+            .with_display_preferences(crate::bridge::UiDensity::Comfortable, text_percent);
+        for locale in [
+            "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
+        ] {
+            let i18n = I18n::for_locale(Some(locale));
+            let mut ui = iced_test::Simulator::with_size(
+                Settings::default(),
+                Size::new(560.0, 560.0),
+                view(&state, ViewCtx::new(&tokens, &i18n)),
             );
-            ui.click(label.as_str()).unwrap();
+            for key in ["models-export-blender", "models-decompile"] {
+                let label = i18n.tr(key);
+                let action = ui.find(label.as_str()).unwrap();
+                assert!(
+                    action.bounds().width > 0.0
+                        && action.bounds().height > 0.0
+                        && action.bounds().x >= 0.0
+                        && action.bounds().x + action.bounds().width <= 560.0
+                        && action.bounds().y >= 0.0
+                        && action.bounds().y + action.bounds().height <= 560.0,
+                    "{key} outside viewport in {locale} at {text_percent}%: {:?}",
+                    action.bounds()
+                );
+                ui.click(label.as_str()).unwrap();
+            }
+            let messages: Vec<_> = ui.into_messages().collect();
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::BlenderExportRequested, Message::ExportRequested]
+            ));
         }
-        let messages: Vec<_> = ui.into_messages().collect();
-        assert!(matches!(
-            messages.as_slice(),
-            [Message::BlenderExportRequested, Message::ExportRequested]
-        ));
     }
 }
 
 #[test]
-fn model_editor_actions_fit_in_every_locale() {
+fn workspace_tabs_preserve_model_edits_in_every_locale() {
     let mut state = State::default();
     update(&mut state, Message::SourceDropped("Mercedes.fbx".into()));
-    state.destination = Some("export".into());
-    update(&mut state, Message::GenerateCollisionChanged(true));
     update(&mut state, Message::CollisionMassChanged("1250.5".into()));
     update(&mut state, Message::SurfacePropertyChanged("metal".into()));
-    state.inspection = Some(gmpublished_backend::model_compile::ModelInspection {
-        parts: vec![],
-        animations: vec![],
-        materials: vec!["paint".into(), "glass".into()],
-        material_directories: vec![],
-        skins: vec![vec!["paint".into(), "glass".into()]],
-    });
-    update(&mut state, Message::SkinAdded("Black".into()));
-    update(&mut state, Message::MaterialSelected("paint".into()));
-    update(
-        &mut state,
-        Message::MapsLoaded(crate::generation::Generation::INITIAL, vec![]),
-    );
     let tokens = Tokens::dark();
     for locale in [
         "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
     ] {
         let i18n = I18n::for_locale(Some(locale));
-        let mut ui = iced_test::Simulator::with_size(
-            Settings::default(),
-            Size::new(560.0, 560.0),
-            view(&state, ViewCtx::new(&tokens, &i18n)),
-        );
-        for key in ["models-compile", "models-preview", "models-save-qc"] {
-            let widget = ui.find(i18n.tr(key).as_str()).unwrap();
-            let bounds = widget.bounds();
-            assert!(
-                bounds.x >= 0.0
-                    && bounds.x + bounds.width <= 560.0
-                    && bounds.y >= 0.0
-                    && bounds.y + bounds.height <= 560.0,
-                "{locale}: {key} overflows: {bounds:?}"
+        for (tab, key) in [
+            (WorkspaceTab::Appearance, "models-tab-appearance"),
+            (WorkspaceTab::Physics, "models-tab-physics"),
+            (WorkspaceTab::Export, "models-tab-export"),
+            (WorkspaceTab::Model, "models-tab-model"),
+        ] {
+            let mut ui = iced_test::Simulator::with_size(
+                Settings::default(),
+                Size::new(560.0, 560.0),
+                view(&state, ViewCtx::new(&tokens, &i18n)),
             );
+            ui.click(i18n.tr(key).as_str()).unwrap();
+            let message = ui.into_messages().next().unwrap();
+            assert!(matches!(message, Message::WorkspaceTabSelected(selected) if selected == tab));
+            update(&mut state, message);
+            assert_eq!(state.collision_mass, "1250.5");
+            assert_eq!(state.surface_property, "metal");
         }
-        ui.click(i18n.tr("models-save-qc").as_str()).unwrap();
-        assert!(
-            ui.into_messages()
-                .any(|message| matches!(message, Message::SaveQcRequested))
-        );
     }
 }
 
@@ -162,6 +154,8 @@ fn decompiled_source_opens_directly_for_editing_and_recompilation() {
     let mut state = State::default();
     update(&mut state, Message::SourceDropped("model.mdl".into()));
     state.destination = Some("export".into());
+    state.workspace_tab = WorkspaceTab::Export;
+    state.preview_dirty = false;
     state.result = Some(super::super::ExportResult {
         directory: "export/model-source".into(),
         files: vec!["export/model-source/model.qc".into()],
@@ -195,7 +189,10 @@ fn decompiled_source_opens_directly_for_editing_and_recompilation() {
 
 #[test]
 fn animation_controls_are_localized_clickable_and_gated_while_busy() {
-    let mut state = State::default();
+    let mut state = State {
+        route_active: false,
+        ..State::default()
+    };
     update(&mut state, Message::SourceDropped("character.glb".into()));
     state.destination = Some("export".into());
     let animation = gmpublished_backend::model_compile::AnimationSettings {
@@ -209,7 +206,25 @@ fn animation_controls_are_localized_clickable_and_gated_while_busy() {
         activity_weight: 0,
         events: vec![],
     };
-    state.animations = vec![super::super::state::AnimationEditor::from(&animation)];
+    let generation = state.inspection_generation.unwrap();
+    update(
+        &mut state,
+        Message::Inspected(
+            generation,
+            Ok(Box::new(
+                gmpublished_backend::model_compile::ModelInspection {
+                    source_model: None,
+                    collision_parts: vec![],
+                    collision_physics: None,
+                    animations: vec![animation],
+                    parts: vec![],
+                    materials: vec![],
+                    material_directories: vec![],
+                    skins: vec![],
+                },
+            )),
+        ),
+    );
     let tokens = Tokens::dark();
     for locale in [
         "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
@@ -257,7 +272,10 @@ fn animation_controls_are_localized_clickable_and_gated_while_busy() {
 #[test]
 fn advanced_animation_fields_and_events_are_localized_and_busy_gated() {
     use gmpublished_backend::model_compile::{AnimationEvent, AnimationSettings};
-    let mut state = State::default();
+    let mut state = State {
+        route_active: false,
+        ..State::default()
+    };
     update(&mut state, Message::SourceDropped("character.glb".into()));
     state.destination = Some("export".into());
     let animation = AnimationSettings {
@@ -275,7 +293,25 @@ fn advanced_animation_fields_and_events_are_localized_and_busy_gated() {
             options: "step".into(),
         }],
     };
-    state.animations = vec![super::super::state::AnimationEditor::from(&animation)];
+    let generation = state.inspection_generation.unwrap();
+    update(
+        &mut state,
+        Message::Inspected(
+            generation,
+            Ok(Box::new(
+                gmpublished_backend::model_compile::ModelInspection {
+                    source_model: None,
+                    collision_parts: vec![],
+                    collision_physics: None,
+                    animations: vec![animation],
+                    parts: vec![],
+                    materials: vec![],
+                    material_directories: vec![],
+                    skins: vec![],
+                },
+            )),
+        ),
+    );
     update(&mut state, Message::AnimationAdvancedToggled(0));
     let tokens = Tokens::dark();
     for locale in [
@@ -284,7 +320,7 @@ fn advanced_animation_fields_and_events_are_localized_and_busy_gated() {
         let i18n = I18n::for_locale(Some(locale));
         let mut ui = iced_test::Simulator::with_size(
             Settings::default(),
-            Size::new(600.0, 1000.0),
+            Size::new(310.0, 1200.0),
             super::animations_card(&state, ViewCtx::new(&tokens, &i18n)),
         );
         for key in [
@@ -302,7 +338,7 @@ fn advanced_animation_fields_and_events_are_localized_and_busy_gated() {
             assert_ne!(label, key);
             let bounds = ui.find(label.as_str()).unwrap().bounds();
             assert!(
-                bounds.x >= 0.0 && bounds.x + bounds.width <= 600.0,
+                bounds.x >= 0.0 && bounds.x + bounds.width <= 310.0,
                 "{locale} {key}: {bounds:?}"
             );
         }
@@ -318,7 +354,7 @@ fn advanced_animation_fields_and_events_are_localized_and_busy_gated() {
     let i18n = I18n::for_locale(Some("en"));
     let mut ui = iced_test::Simulator::with_size(
         Settings::default(),
-        Size::new(600.0, 1000.0),
+        Size::new(310.0, 1200.0),
         super::animations_card(&state, ViewCtx::new(&tokens, &i18n)),
     );
     ui.click(i18n.tr("models-animation-event-add").as_str())
@@ -345,7 +381,7 @@ fn saved_mesh_qc_opens_in_the_integrated_editor() {
         let mut ui = iced_test::Simulator::with_size(
             Settings::default(),
             Size::new(560.0, 560.0),
-            view(&state, ViewCtx::new(&tokens, &i18n)),
+            super::project_actions(&state, ViewCtx::new(&tokens, &i18n)),
         );
         let control = ui.find(i18n.tr("models-qc-editor").as_str()).unwrap();
         let bounds = control.bounds();
@@ -370,4 +406,119 @@ fn saved_mesh_qc_opens_in_the_integrated_editor() {
             .iter()
             .any(|effect| matches!(effect, super::super::Effect::LoadQc(_, _)))
     );
+}
+
+#[test]
+fn long_source_names_do_not_displace_workspace_actions() {
+    let mut state = State::default();
+    let source = format!("{}.fbx", "Mercedes+Benz+GLS+580".repeat(12));
+    update(&mut state, Message::SourceDropped(source.into()));
+    state.destination = Some("export".into());
+    state.workspace_tab = WorkspaceTab::Export;
+    state.preview_dirty = false;
+    let tokens = Tokens::dark();
+    let i18n = I18n::for_locale(Some("en"));
+    for size in [Size::new(900.0, 560.0), Size::new(560.0, 400.0)] {
+        let mut ui = iced_test::Simulator::with_size(
+            Settings::default(),
+            size,
+            view(&state, ViewCtx::new(&tokens, &i18n)),
+        );
+        for key in ["models-import-action", "models-compile"] {
+            let bounds = ui.find(i18n.tr(key).as_str()).unwrap().bounds();
+            assert!(
+                bounds.x >= 0.0
+                    && bounds.y >= 0.0
+                    && bounds.x + bounds.width <= size.width
+                    && bounds.y + bounds.height <= size.height,
+                "{key}: {bounds:?} outside {size:?}"
+            );
+        }
+        ui.click(i18n.tr("models-compile").as_str()).unwrap();
+        assert!(
+            ui.into_messages()
+                .any(|message| matches!(message, Message::ExportRequested))
+        );
+    }
+}
+
+#[test]
+fn installed_models_are_manageable_in_export_without_a_source_in_every_locale() {
+    use super::super::InstalledModel;
+
+    let directory = std::path::PathBuf::from("GarrysMod/garrysmod/addons/model_test");
+    let state = State {
+        workspace_tab: WorkspaceTab::Export,
+        installed_models: vec![InstalledModel {
+            directory: directory.clone(),
+            name: "Mercedes".into(),
+            model: "models/vehicles/mercedes.mdl".into(),
+            bytes: 512,
+            modified: false,
+        }],
+        ..State::default()
+    };
+    let tokens = Tokens::dark();
+    for locale in [
+        "en", "de", "es", "fr", "kr", "nl", "pl", "pt-BR", "ru", "tr", "uk", "zh-cn",
+    ] {
+        let i18n = I18n::for_locale(Some(locale));
+        let mut ui = iced_test::Simulator::with_size(
+            Settings::default(),
+            Size::new(900.0, 900.0),
+            view(&state, ViewCtx::new(&tokens, &i18n)),
+        );
+        ui.find(i18n.tr("models-installed-title").as_str()).unwrap();
+        ui.find("Mercedes").unwrap();
+        assert!(ui.find(i18n.tr("models-import-title").as_str()).is_err());
+        ui.click(i18n.tr("models-installed-refresh").as_str())
+            .unwrap();
+        ui.click(i18n.tr("models-installed-open").as_str()).unwrap();
+        ui.click(i18n.tr("models-installed-remove").as_str())
+            .unwrap();
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::InstalledModelsRequested, Message::RevealRequested(open), Message::RemoveInstalledRequested(remove)]
+                if open == &directory && remove == &directory
+        ));
+    }
+}
+
+#[test]
+fn removal_warns_about_modified_files_only_when_the_addon_has_changed() {
+    use super::super::InstalledModel;
+
+    let tokens = Tokens::dark();
+    let i18n = I18n::for_locale(Some("en"));
+    for modified in [false, true] {
+        let directory = std::path::PathBuf::from("GarrysMod/garrysmod/addons/model_test");
+        let state = State {
+            workspace_tab: WorkspaceTab::Export,
+            remove_installed_confirmation: Some(directory.clone()),
+            installed_models: vec![InstalledModel {
+                directory,
+                name: "Mercedes".into(),
+                model: "models/vehicles/mercedes.mdl".into(),
+                bytes: 512,
+                modified,
+            }],
+            ..State::default()
+        };
+        let mut ui = iced_test::Simulator::with_size(
+            Settings::default(),
+            Size::new(560.0, 900.0),
+            super::panels::export_panel(&state, ViewCtx::new(&tokens, &i18n)),
+        );
+        assert_eq!(
+            ui.find(i18n.tr("models-installed-modified").as_str())
+                .is_ok(),
+            modified,
+        );
+        ui.click(i18n.tr("cancel").as_str()).unwrap();
+        assert!(matches!(
+            ui.into_messages().collect::<Vec<_>>().as_slice(),
+            [Message::RemoveInstalledDismissed]
+        ));
+    }
 }

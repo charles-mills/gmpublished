@@ -83,11 +83,111 @@ fn collision_bounds(output: &ModelCompileOutput) -> ([f32; 3], [f32; 3]) {
 }
 
 #[test]
+fn custom_collision_survives_portable_qc_with_scale_rotation_and_multiple_pieces() {
+    let (root, mut request) = fixture();
+    let source = fs::read_to_string(&request.source).unwrap();
+    let (header, geometry) = source.split_once("triangles\n").unwrap();
+    let geometry = geometry.trim_end().strip_suffix("end").unwrap();
+    let shifted = geometry
+        .lines()
+        .map(|line| {
+            let mut fields = line
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if fields.len() >= 9 {
+                fields[1] = (fields[1].parse::<f32>().unwrap() + 8.0).to_string();
+                fields.join(" ")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let custom = root.path().join("authored.smd");
+    fs::write(
+        &custom,
+        format!("{header}triangles\n{geometry}{shifted}\nend\n"),
+    )
+    .unwrap();
+    request.collision = ModelCollision::Custom {
+        source: custom.clone(),
+        parts: Vec::new(),
+        repair: None,
+    };
+    request.scale = 1.75;
+    request.orientation = [17.0, 31.0, -43.0];
+    request.export_materials = false;
+    let original = compile_model(&request).unwrap();
+    let saved = root.path().join("authored.qc");
+    save_model_qc(&request, &saved).unwrap();
+    fs::remove_file(custom).unwrap();
+    let rebuilt = compile_model(&ModelCompileRequest::new(
+        saved,
+        root.path().join("rebuilt"),
+    ))
+    .unwrap();
+    for output in [&original, &rebuilt] {
+        let raw = bytes(output, ModelOutputKind::Phy);
+        let physics = vformats::phy::parse(&raw, &vformats::Limits::default()).unwrap();
+        assert_eq!(physics.solids.len(), 1);
+        assert_eq!(physics.solids[0].ledges.len(), 2);
+    }
+    let original_bounds = collision_bounds(&original);
+    let rebuilt_bounds = collision_bounds(&rebuilt);
+    for (a, b) in original_bounds
+        .0
+        .into_iter()
+        .chain(original_bounds.1)
+        .zip(rebuilt_bounds.0.into_iter().chain(rebuilt_bounds.1))
+    {
+        assert!(
+            (a - b).abs() < 0.001,
+            "custom collision moved during QC relocation: {a} != {b}"
+        );
+    }
+}
+
+#[test]
+fn disabling_authored_collision_survives_saving_and_reimporting_qc() {
+    let (root, mut request) = fixture();
+    request.collision = ModelCollision::Automatic(model_compile::CollisionDetail::Simple);
+    request.export_materials = false;
+    let authored = root.path().join("authored.qc");
+    save_model_qc(&request, &authored).unwrap();
+    let mut request = ModelCompileRequest::new(authored, root.path().join("disabled"));
+    request.collision = ModelCollision::None;
+    request.export_materials = false;
+    let direct = compile_model(&request).unwrap();
+    assert!(
+        !direct
+            .files
+            .iter()
+            .any(|file| file.kind == ModelOutputKind::Phy)
+    );
+    let saved = root.path().join("disabled.qc");
+    save_model_qc(&request, &saved).unwrap();
+    let reimported = compile_model(&ModelCompileRequest::new(
+        saved,
+        root.path().join("reimported"),
+    ))
+    .unwrap();
+    assert!(
+        !reimported
+            .files
+            .iter()
+            .any(|file| file.kind == ModelOutputKind::Phy)
+    );
+    assert_eq!(vertices(&direct), vertices(&reimported));
+}
+
+#[test]
 fn saved_qc_recompiles_skins_rotation_scale_and_collision() {
     let (root, mut request) = fixture();
     request.scale = 1.75;
     request.orientation = [17.0, 31.0, -43.0];
-    request.generate_collision = true;
+    request.collision =
+        model_compile::ModelCollision::Automatic(model_compile::CollisionDetail::Simple);
     request.collision_mass = 1250.5;
     request.surface_property = Some("metal".into());
     request.skins.push(ModelSkin {
@@ -230,7 +330,8 @@ fn rigid_gltf_qc_is_portable_with_axes_uvs_skins_and_collision() {
         request.scale = 1.75;
         request.model_name = Some("props/portable.mdl".into());
         request.material_directory = Some("models/portable".into());
-        request.generate_collision = true;
+        request.collision =
+            model_compile::ModelCollision::Automatic(model_compile::CollisionDetail::Simple);
         request.surface_property = Some("metal".into());
         request.collision_mass = 125.0;
         request.skins.push(ModelSkin {
@@ -395,7 +496,8 @@ fn generated_collision_keeps_alignment_with_a_rotated_source_root() {
         .unwrap();
     let modified = text.replacen(original_pose, "0 0 0 0 1.5707964 0 0", 1);
     fs::write(&request.source, modified).unwrap();
-    request.generate_collision = true;
+    request.collision =
+        model_compile::ModelCollision::Automatic(model_compile::CollisionDetail::Simple);
     let original = compile_model(&request).unwrap();
     let saved = root.path().join("rotated.qc");
     save_model_qc(&request, &saved).unwrap();
@@ -1347,4 +1449,109 @@ fn direct_dmx_import_and_portable_qc_preserve_mesh_parts_and_morph_output() {
         bytes(&expected, ModelOutputKind::Mdl),
         bytes(&actual, ModelOutputKind::Mdl)
     );
+}
+
+#[test]
+fn blender_authoring_saved_qc_remains_portable_and_preserves_edited_geometry_and_settings() {
+    let (root, mut request) = fixture();
+    let original = root.path().join("original.qc");
+    fs::write(&original, "$modelname models/authored.mdl\n$cdmaterials models/qc_saved\n$surfaceprop metal\n$body primary cube.smd\n$bodygroup options {\n studio cube.smd\n blank\n}\n$attachment muzzle root 1 2 3 rotate 10 20 30\n$hboxset shots\n$hbox 2 root -2 -3 -4 5 6 7\n$sequence idle cube.smd fps 24 loop activity ACT_IDLE 2 { event 5004 0 fire }\n$texturegroup skins { { material } { alternate } }\n$lod 25 { replacemodel cube.smd cube.smd }\n$collisionmodel cube.smd { $mass 31 }\n").unwrap();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([60, 150, 220, 255]))
+        .save(root.path().join("alternate.png"))
+        .unwrap();
+    request.source = original;
+    request.static_prop = false;
+    let initial = compile_model(&request).unwrap();
+    let mdl = initial
+        .files
+        .iter()
+        .find(|file| file.kind == ModelOutputKind::Mdl)
+        .unwrap();
+    let exported =
+        crate::model_decompile::export_blender_model(&mdl.path, &root.path().join("blender"))
+            .unwrap();
+    let mut glb = fs::read(&exported.model_path).unwrap();
+    let json_length = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let document: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_length]).unwrap();
+    let accessor = &document["accessors"]
+        [document["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .unwrap() as usize];
+    let view = &document["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+    let offset = 28
+        + json_length
+        + view["byteOffset"].as_u64().unwrap_or(0) as usize
+        + accessor["byteOffset"].as_u64().unwrap_or(0) as usize;
+    let position = f32::from_le_bytes(glb[offset..offset + 4].try_into().unwrap()) + 0.0254;
+    glb[offset..offset + 4].copy_from_slice(&position.to_le_bytes());
+    fs::write(&exported.model_path, glb).unwrap();
+    let request = ModelCompileRequest::new(exported.model_path, root.path().join("edited"));
+    let expected = compile_model(&request).unwrap();
+    assert_ne!(vertices(&initial), vertices(&expected));
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("prop.qc")).unwrap();
+    let desc = mdlc::qc::parse_qc_file(&saved.join("prop.qc")).unwrap();
+    assert_eq!(desc.bodyparts.len(), 2);
+    assert_eq!(desc.bodyparts[1].models.len(), 2);
+    assert!(desc.bodyparts[1].models[1].smd.is_empty());
+    assert_eq!(desc.bodyparts[0].models[0].lods[0].switch_point, Some(25.0));
+    assert_eq!(desc.materials.skin_families.len(), 2);
+    assert_eq!(desc.attachments[0].name, "muzzle");
+    assert_eq!(desc.attachments[0].bone, "root");
+    assert_eq!(desc.hitboxes.set_name.as_deref(), Some("shots"));
+    assert_eq!(desc.hitboxes.boxes[0].group, Some(2));
+    assert_eq!(desc.model.surface_prop.as_deref(), Some("metal"));
+    assert_eq!(desc.physics.mass, Some(31.0));
+    let sequence = &desc.sequences[0];
+    let animation = desc.animations.iter().find(|animation| {
+        sequence.smd == animation.name
+            || sequence
+                .blends
+                .first()
+                .is_some_and(|name| name == &animation.name)
+    });
+    assert_eq!(
+        sequence
+            .fps
+            .or_else(|| animation.and_then(|animation| animation.fps)),
+        Some(24.0)
+    );
+    assert!(desc.sequences[0].looping);
+    assert_eq!(desc.sequences[0].activity.as_deref(), Some("ACT_IDLE"));
+    assert_eq!(desc.sequences[0].events[0].event, 5004);
+    assert_eq!(desc.sequences[0].events[0].options, "fire");
+    let moved = root.path().join("moved");
+    fs::rename(saved, &moved).unwrap();
+    fs::remove_dir_all(root.path().join("blender")).unwrap();
+    for filename in ["original.qc", "cube.smd", "material.png", "alternate.png"] {
+        fs::remove_file(root.path().join(filename)).unwrap();
+    }
+    let actual = compile_model(&ModelCompileRequest::new(
+        moved.join("prop.qc"),
+        root.path().join("rebuilt"),
+    ))
+    .unwrap();
+    let expected_vertices = vertices(&expected);
+    let actual_vertices = vertices(&actual);
+    assert_eq!(expected_vertices.len(), actual_vertices.len());
+    for (expected, actual) in expected_vertices.iter().zip(&actual_vertices) {
+        for (expected, actual) in expected.iter().zip(actual) {
+            assert!((expected - actual).abs() < 0.002, "{expected} != {actual}");
+        }
+    }
+    let expected_bounds = collision_bounds(&expected);
+    let actual_bounds = collision_bounds(&actual);
+    for (expected, actual) in [expected_bounds.0, expected_bounds.1]
+        .iter()
+        .zip([actual_bounds.0, actual_bounds.1])
+    {
+        for (expected, actual) in expected.iter().zip(actual) {
+            assert!((expected - actual).abs() < 0.002);
+        }
+    }
+    assert!(actual.files.iter().any(|file| {
+        file.path
+            .ends_with("materials/models/qc_saved/material.vmt")
+    }));
 }

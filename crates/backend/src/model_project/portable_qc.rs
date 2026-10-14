@@ -371,6 +371,42 @@ fn rewrite(
             index += 1;
             continue;
         }
+        if depth == 0
+            && matches!(request.collision, model_compile::ModelCollision::None)
+            && ["$collisionmodel", "$collisionjoints", "$collisiontext"]
+                .iter()
+                .any(|command| token.text.eq_ignore_ascii_case(command))
+        {
+            let mut end = index + 1;
+            while end < tokens.len()
+                && (tokens[end].quoted
+                    || tokens[end].text != "{" && !tokens[end].text.starts_with('$'))
+            {
+                end += 1;
+            }
+            if end < tokens.len() && !tokens[end].quoted && tokens[end].text == "{" {
+                let mut block_depth = 0usize;
+                loop {
+                    let current = tokens
+                        .get(end)
+                        .ok_or_else(|| invalid("unterminated QC collision block"))?;
+                    if !current.quoted {
+                        match current.text.as_str() {
+                            "{" => block_depth += 1,
+                            "}" => block_depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    end += 1;
+                    if block_depth == 0 {
+                        break;
+                    }
+                }
+            }
+            edits.push((token.start, tokens[end - 1].end, String::new()));
+            index = end;
+            continue;
+        }
         if token.text == "{" {
             depth += 1;
         }

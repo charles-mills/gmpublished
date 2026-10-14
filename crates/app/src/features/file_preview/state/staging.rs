@@ -77,12 +77,25 @@ impl StageState {
 }
 
 impl State {
+    #[cfg(test)]
     pub(crate) fn begin_stage(
         &mut self,
         mut model: PreviewRequest,
         map: PreviewRequest,
     ) -> (PreviewRequest, PreviewRequest) {
         let map = self.begin_open(map);
+        self.expanded = true;
+        model.request_id = map.request_id;
+        self.stage_request = Some(model.clone());
+        (model, map)
+    }
+
+    pub(crate) fn begin_workspace_stage(
+        &mut self,
+        mut model: PreviewRequest,
+        map: PreviewRequest,
+    ) -> (PreviewRequest, PreviewRequest) {
+        let map = self.begin_workspace_open(map);
         self.expanded = true;
         model.request_id = map.request_id;
         self.stage_request = Some(model.clone());
@@ -102,6 +115,14 @@ impl State {
                 let Some(model_request) = self.stage_request.take() else {
                     return false;
                 };
+                let previous_stage = self.stage.take().filter(|stage| {
+                    self.workspace_pending
+                        && stage.model_request.entry_path == model_request.entry_path
+                        && self
+                            .workspace_retained
+                            .as_ref()
+                            .is_some_and(|retained| retained.data.entry_path == data.entry_path)
+                });
                 let selection = ModelUiState::for_model(&model);
                 let initial = initial_placement(&data, selection.framing_bounds);
                 if !self.apply_loaded(generation, Ok(data)) {
@@ -119,8 +140,30 @@ impl State {
                     angle_fields: std::array::from_fn(|_| String::new()),
                     falling: None,
                 };
+                if let Some(previous) = previous_stage {
+                    stage.transform = previous.transform;
+                    stage.initial = previous.initial;
+                    stage.undo = previous.undo;
+                    stage.selection.orbit_pose = previous.selection.orbit_pose;
+                    stage.selection.phy_debug_enabled = previous.selection.phy_debug_enabled;
+                    stage.selection.selected_skin = previous
+                        .selection
+                        .selected_skin
+                        .min(stage.model.skin_tables.len().saturating_sub(1));
+                    for (index, choice) in stage.selection.bodygroup_choices.iter_mut().enumerate()
+                    {
+                        *choice = previous
+                            .selection
+                            .bodygroup_choices
+                            .get(index)
+                            .copied()
+                            .unwrap_or(0)
+                            .min(stage.model.bodygroups[index].saturating_sub(1));
+                    }
+                }
                 stage.refresh_fields();
                 self.stage = Some(stage);
+                self.refresh_model_framing();
             }
             Err(error) => {
                 self.apply_loaded(generation, Err(error));
@@ -355,15 +398,15 @@ impl State {
         }
     }
     pub(in super::super) fn tick_stage(&mut self, now: Instant) {
-        let super::LoadState::Ready(data) = &self.load else {
+        let Some(PreviewContent::Map { scene, .. }) = self.current().map(|data| &data.content)
+        else {
             return;
         };
-        let PreviewContent::Map { scene, .. } = &data.content else {
-            return;
-        };
+        let scene = Arc::clone(scene);
         let Some(collision) = &scene.walk_collision else {
             return;
         };
+        let live_transform = self.workspace_transform();
         let Some(stage) = &mut self.stage else {
             return;
         };
@@ -386,7 +429,8 @@ impl State {
             .iter()
             .flat_map(|mesh| &mesh.vertices)
         {
-            let point = vertex.position.rotate_source(stage.transform.angles);
+            let point = Self::workspace_point(live_transform, vertex.position)
+                .rotate_source(stage.transform.angles);
             for axis in 0..3 {
                 min[axis] = min[axis].min(point[axis]);
                 max[axis] = max[axis].max(point[axis]);
