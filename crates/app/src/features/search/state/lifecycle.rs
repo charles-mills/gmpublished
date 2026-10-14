@@ -1,6 +1,27 @@
 use super::*;
 
 impl State {
+    pub(crate) fn set_reduce_motion(&mut self, reduce_motion: bool) -> bool {
+        if self.palette.reduce_motion == reduce_motion {
+            return false;
+        }
+        self.palette.reduce_motion = reduce_motion;
+        let mut policy = crate::theme::invariant().motion;
+        policy.reduce_motion = reduce_motion;
+        self.palette
+            .presence
+            .set_durations(policy.modal_enter_duration(), policy.modal_exit_duration());
+        if reduce_motion {
+            self.palette.presence.snap(self.palette.expanded);
+            if !self.palette.expanded && self.palette.visible {
+                self.reset_after_close();
+                self.palette.visible = false;
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn input(&self) -> &str {
         &self.input
     }
@@ -101,7 +122,11 @@ impl State {
         }
         self.palette.expanded = true;
         self.palette.visible = true;
-        self.palette.presence.go(true, now);
+        if self.palette.reduce_motion {
+            self.palette.presence.snap(true);
+        } else {
+            self.palette.presence.go(true, now);
+        }
         true
     }
 
@@ -140,7 +165,13 @@ impl State {
 
     /// True when closing finishes. Recalculate demands now that the fading rows are gone.
     pub(crate) fn tick_motion(&mut self, now: Instant) -> bool {
-        if self.palette.presence.tick(now) && !self.palette.expanded && self.palette.visible {
+        let settled = if self.palette.reduce_motion {
+            self.palette.presence.snap(self.palette.expanded);
+            true
+        } else {
+            self.palette.presence.tick(now)
+        };
+        if settled && !self.palette.expanded && self.palette.visible {
             self.reset_after_close();
             self.palette.visible = false;
             return true;
@@ -225,5 +256,32 @@ impl State {
 
     pub(crate) fn finish_full_search(&mut self, request: &SearchFullRequest) -> bool {
         self.session.finish_full_search(request)
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+
+    #[test]
+    fn reducing_motion_cleans_up_a_closing_search_and_opens_without_ticks() {
+        let mut state = State::default();
+        let now = Instant::now();
+        state.focus(now);
+        let _edit = state.edit_query("addon".to_owned());
+        let _cancel = state.dismiss(now);
+        assert!(state.palette_visible());
+        assert!(state.set_reduce_motion(true));
+        assert!(!state.palette_visible());
+        assert!(state.input().is_empty());
+        assert!(!state.needs_motion_ticks());
+        state.focus(now);
+        assert_eq!(state.opacity(now), 1.0);
+        assert_eq!(state.scale(now), 1.0);
+        assert!(!state.needs_motion_ticks());
+        let _cancel = state.dismiss(now);
+        assert_eq!(state.opacity(now), 0.0);
+        assert!(state.tick_motion(now));
+        assert!(!state.needs_motion_ticks());
     }
 }

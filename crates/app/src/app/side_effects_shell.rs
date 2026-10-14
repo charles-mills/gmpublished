@@ -86,6 +86,9 @@ impl App {
             return self.apply_file_preview_message(message);
         }
 
+        if self.state.features.modal_stack.active() == Some(modal_stack::ActiveModal::Settings) {
+            return self.apply_settings_message(settings::Message::CloseRequested);
+        }
         self.modal_stack_task(&modal_stack::Message::CloseRequested, update)
     }
 

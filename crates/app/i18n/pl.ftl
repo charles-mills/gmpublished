@@ -658,3 +658,38 @@ models-qc-loading = Wczytywanie QC…
 
 file-preview-model-lod = Poziom szczegółowości
 file-preview-model-lod-option = Poziom {$index}
+
+# About
+settings-tab-about = O programie
+settings-about-description = Publikuj i przeglądaj dodatki do Garry’s Mod oraz nimi zarządzaj.
+settings-about-github = gmpublished w serwisie GitHub
+settings-about-debug-title = Informacje diagnostyczne
+settings-about-debug-description = Wersja aplikacji, system operacyjny, instalacja i grafika.
+settings-about-copy-debug = Kopiuj diagnostykę
+settings-about-copied = Skopiowano
+settings-about-debug-show = Pokaż informacje diagnostyczne
+settings-about-debug-hide = Ukryj informacje diagnostyczne
+settings-about-debug-loading = Zbieranie informacji o systemie…
+settings-about-debug-failed = Nie udało się zebrać informacji diagnostycznych.
+settings-about-debug-retry = Spróbuj ponownie
+settings-about-credits = Autorzy
+settings-about-upstream = Natywny fork programu gmpublisher autorstwa William Venner.
+settings-about-maintainers = Stworzony przez Charles Mills i społeczność otwartego oprogramowania przy użyciu Rust i Iced.
+settings-about-license = Licencja (GNU GPL v3)
+settings-about-notices = Informacje o komponentach zewnętrznych
+settings-about-releases = Informacje o wydaniu
+
+settings-display-heading = Wyświetlanie
+settings-display-spacing = Odstępy
+settings-display-comfortable = Wygodne
+settings-display-compact = Kompaktowe
+settings-display-text-size = Rozmiar tekstu
+settings-display-reset-text = Resetuj rozmiar tekstu
+settings-display-reset = Resetuj ustawienia wyświetlania
+settings-display-sample-heading = Dostosuj do swoich potrzeb
+settings-display-sample-body = Tekst i elementy sterujące dostosowują się razem, zachowując zawartość.
+settings-display-sample-supporting = Odstępy i rozmiar tekstu są niezależne.
+settings-display-colors = Kolory akcentów
+
+settings-display-reduce-motion = Ogranicz animacje
+settings-display-reduce-motion-hint = Pokazuj zmiany układu, menu i okna dialogowe bez przejść.

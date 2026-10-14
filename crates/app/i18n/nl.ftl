@@ -639,3 +639,38 @@ models-qc-loading = QC laden…
 
 file-preview-model-lod = Detailniveau
 file-preview-model-lod-option = Detailniveau {$index}
+
+# About
+settings-tab-about = Over
+settings-about-description = Publiceer, beheer en bekijk Garry’s Mod-addons.
+settings-about-github = gmpublished op GitHub
+settings-about-debug-title = Diagnostische informatie
+settings-about-debug-description = Appversie, besturingssysteem, installatie en grafische gegevens.
+settings-about-copy-debug = Diagnose kopiëren
+settings-about-copied = Gekopieerd
+settings-about-debug-show = Diagnostische informatie bekijken
+settings-about-debug-hide = Diagnostische informatie verbergen
+settings-about-debug-loading = Systeeminformatie verzamelen…
+settings-about-debug-failed = De diagnostische informatie kon niet worden verzameld.
+settings-about-debug-retry = Opnieuw proberen
+settings-about-credits = Bijdragen
+settings-about-upstream = Een native fork van gmpublisher van William Venner.
+settings-about-maintainers = Gemaakt door Charles Mills en opensourcebijdragers, met Rust en Iced.
+settings-about-license = Licentie (GNU GPL v3)
+settings-about-notices = Vermeldingen van derden
+settings-about-releases = Versieopmerkingen
+
+settings-display-heading = Weergave
+settings-display-spacing = Afstand
+settings-display-comfortable = Ruim
+settings-display-compact = Compacte weergave
+settings-display-text-size = Tekstgrootte
+settings-display-reset-text = Tekstgrootte herstellen
+settings-display-reset = Weergavevoorkeuren herstellen
+settings-display-sample-heading = Maak het uzelf gemakkelijk
+settings-display-sample-body = Tekst en bediening passen zich samen aan terwijl uw inhoud behouden blijft.
+settings-display-sample-supporting = Afstand en tekstgrootte zijn onafhankelijk.
+settings-display-colors = Accentkleuren
+
+settings-display-reduce-motion = Beweging verminderen
+settings-display-reduce-motion-hint = Toon indelingswijzigingen, menu’s en dialoogvensters zonder overgangen.

@@ -59,6 +59,15 @@ fn update_message(state: &mut State, message: Message) -> Vec<Effect> {
     }
 }
 
+pub(super) fn apply_ui_metrics(
+    state: &mut State,
+    follow_ups: Vec<addon_grid::Message>,
+) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    grid_rows::append_grid_follow_up_effects(state, follow_ups, &mut effects, apply_grid_message);
+    effects
+}
+
 fn grid_update(state: &mut State, message: addon_grid::Message) -> Vec<Effect> {
     let mut effects = Vec::new();
     apply_grid_message(state, message, &mut effects);
@@ -90,6 +99,9 @@ fn apply_grid_message(state: &mut State, message: addon_grid::Message, effects: 
         addon_grid::Message::VisibleRangeChanged(_, _) => {
             state.reconcile_visible_counts();
             effects.push(Effect::ThumbnailDemandsChanged);
+        }
+        addon_grid::Message::ScrollAnchored(delta) => {
+            effects.push(Effect::GridScrollAnchored(delta));
         }
         addon_grid::Message::CardHoverChanged(id, hovered) => {
             state.set_card_hovered(&id, hovered);
@@ -521,6 +533,34 @@ mod tests {
             update(&mut state, Message::RouteEntered)
                 .iter()
                 .any(|effect| matches!(effect, Effect::PageRequested { .. }))
+        );
+    }
+    #[test]
+    fn empty_workshop_header_can_start_a_new_publish() {
+        let mut state = State::default();
+        let (generation, page) = state.begin_for_test();
+        let _ = update(
+            &mut state,
+            Message::PageCompleted(
+                generation,
+                page,
+                Ok(PageResult {
+                    page,
+                    total: 0,
+                    rows: Vec::new(),
+                }),
+            ),
+        );
+        assert!(state.is_loaded_and_empty());
+        let effects = update(
+            &mut state,
+            Message::Grid(addon_grid::Message::CardClicked(CardId::from(
+                PUBLISH_NEW_ROW_ID,
+            ))),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::PreparePublishRequested(PreparePublishTarget::New)]
         );
     }
 }

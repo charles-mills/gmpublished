@@ -639,3 +639,38 @@ models-qc-loading = Loading QC…
 
 file-preview-model-lod = Level of detail
 file-preview-model-lod-option = LOD {$index}
+
+# About
+settings-tab-about = About
+settings-about-description = Publish, manage, and preview Garry’s Mod addons.
+settings-about-github = gmpublished on GitHub
+settings-about-debug-title = Debug information
+settings-about-debug-description = App version, operating system, installation, and graphics.
+settings-about-copy-debug = Copy debug info
+settings-about-copied = Copied
+settings-about-debug-show = View debug information
+settings-about-debug-hide = Hide debug information
+settings-about-debug-loading = Collecting system information…
+settings-about-debug-failed = Could not collect debug information.
+settings-about-debug-retry = Try again
+settings-about-credits = Credits
+settings-about-upstream = A native fork of gmpublisher by William Venner.
+settings-about-maintainers = Made by Charles Mills and open-source contributors, with Rust and Iced.
+settings-about-license = License (GNU GPL v3)
+settings-about-notices = Third-party notices
+settings-about-releases = Release notes
+
+settings-display-heading = Display
+settings-display-spacing = Spacing
+settings-display-comfortable = Comfortable
+settings-display-compact = Compact
+settings-display-text-size = Text size
+settings-display-reset-text = Reset text size
+settings-display-reset = Reset display preferences
+settings-display-sample-heading = Make yourself comfortable
+settings-display-sample-body = Text and controls adapt together while your content stays in place.
+settings-display-sample-supporting = Spacing and text size are independent.
+settings-display-colors = Accent colors
+
+settings-display-reduce-motion = Reduce motion
+settings-display-reduce-motion-hint = Use instant transitions for layout changes, menus and dialogs.

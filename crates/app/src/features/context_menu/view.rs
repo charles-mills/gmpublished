@@ -1,7 +1,9 @@
 use std::time::Instant;
 
 use iced::widget::text::{Shaping as TextShaping, Wrapping};
-use iced::widget::{Space, button, column, container, mouse_area, opaque, row, svg, text};
+use iced::widget::{
+    Space, button, column, container, mouse_area, opaque, row, scrollable, svg, text,
+};
 use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Size, alignment};
 
 use crate::{
@@ -97,13 +99,20 @@ fn menu_panel<'a>(
         rows = rows.push(menu_row(entry, ctx, motion.opacity, motion.interactive));
     }
 
-    container(rows)
-        .width(Length::Fixed(layout.width))
-        .height(Length::Fixed(layout.height))
-        .align_y(alignment::Vertical::Top)
-        .clip(true)
-        .style(move |_| context_menu_style(&tokens, motion.opacity))
-        .into()
+    container(
+        scrollable(rows)
+            .height(Length::Fill)
+            .direction(scrollable::Direction::Vertical(
+                crate::theme::styles::vertical_scrollbar(&tokens),
+            ))
+            .style(move |_, status| crate::theme::styles::scrollbar(&tokens, status)),
+    )
+    .width(Length::Fixed(layout.width))
+    .height(Length::Fixed(layout.height))
+    .align_y(alignment::Vertical::Top)
+    .clip(true)
+    .style(move |_| context_menu_style(&tokens, motion.opacity))
+    .into()
 }
 
 #[derive(Clone, Copy)]

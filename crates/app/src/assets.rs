@@ -104,82 +104,82 @@ pub mod icons {
         };
     }
 
-    svg_icon!(globe, "../ui/images/globe.svg");
-    svg_icon!(akar_arrow_left, "../ui/images/akar-arrow-left.svg");
-    svg_icon!(akar_download, "../ui/images/akar-download.svg");
-    svg_icon!(akar_enlarge, "../ui/images/akar-enlarge.svg");
-    svg_icon!(akar_folder, "../ui/images/akar-folder.svg");
-    svg_icon!(akar_folder_add, "../ui/images/akar-folder-add.svg");
-    svg_icon!(akar_reduce, "../ui/images/akar-reduce.svg");
-    svg_icon!(check, "../ui/images/check.svg");
-    svg_icon!(chevron_up, "../ui/images/chevron-up.svg");
-    svg_icon!(chevron_down, "../ui/images/chevron-down.svg");
-    svg_icon!(circle_alert, "../ui/images/circle-alert.svg");
-    svg_icon!(circle_plus, "../ui/images/circle-plus.svg");
-    svg_icon!(cloud_download, "../ui/images/cloud-download.svg");
+    svg_icon!(globe, "../ui/icons/globe.svg");
+    svg_icon!(akar_arrow_left, "../ui/icons/akar-arrow-left.svg");
+    svg_icon!(akar_download, "../ui/icons/akar-download.svg");
+    svg_icon!(akar_enlarge, "../ui/icons/akar-enlarge.svg");
+    svg_icon!(akar_folder, "../ui/icons/akar-folder.svg");
+    svg_icon!(akar_folder_add, "../ui/icons/akar-folder-add.svg");
+    svg_icon!(akar_reduce, "../ui/icons/akar-reduce.svg");
+    svg_icon!(check, "../ui/icons/check.svg");
+    svg_icon!(chevron_up, "../ui/icons/chevron-up.svg");
+    svg_icon!(chevron_down, "../ui/icons/chevron-down.svg");
+    svg_icon!(circle_alert, "../ui/icons/circle-alert.svg");
+    svg_icon!(circle_plus, "../ui/icons/circle-plus.svg");
+    svg_icon!(cloud_download, "../ui/icons/cloud-download.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
-    svg_icon!(cloud_off, "../ui/images/cloud-off.svg");
-    svg_icon!(cloud_upload, "../ui/images/cloud-upload.svg");
+    svg_icon!(cloud_off, "../ui/icons/cloud-off.svg");
+    svg_icon!(cloud_upload, "../ui/icons/cloud-upload.svg");
     svg_icon!(
         context_cloud_download,
-        "../ui/images/context-menu/cloud-download.svg"
+        "../ui/icons/context-menu/cloud-download.svg"
     );
-    svg_icon!(context_copy, "../ui/images/context-menu/copy.svg");
-    svg_icon!(context_edit, "../ui/images/context-menu/edit.svg");
-    svg_icon!(context_folder, "../ui/images/context-menu/folder.svg");
+    svg_icon!(context_copy, "../ui/icons/context-menu/copy.svg");
+    svg_icon!(context_edit, "../ui/icons/context-menu/edit.svg");
+    svg_icon!(context_folder, "../ui/icons/context-menu/folder.svg");
     svg_icon!(
         context_folder_add,
-        "../ui/images/context-menu/folder-add.svg"
+        "../ui/icons/context-menu/folder-add.svg"
     );
-    svg_icon!(context_image, "../ui/images/context-menu/image.svg");
+    svg_icon!(context_image, "../ui/icons/context-menu/image.svg");
     svg_icon!(
         context_link_chain,
-        "../ui/images/context-menu/link-chain.svg"
+        "../ui/icons/context-menu/link-chain.svg"
     );
-    svg_icon!(context_link_out, "../ui/images/context-menu/link-out.svg");
-    svg_icon!(cross, "../ui/images/cross.svg");
+    svg_icon!(context_link_out, "../ui/icons/context-menu/link-out.svg");
+    svg_icon!(cross, "../ui/icons/cross.svg");
     svg_icon!(dead, "../ui/icons/dead.svg");
-    svg_icon!(download_count, "../ui/images/download-count.svg");
+    svg_icon!(download_count, "../ui/icons/download-count.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
-    svg_icon!(eye_off, "../ui/images/eye-off.svg");
-    svg_icon!(folder, "../ui/images/folder.svg");
-    svg_icon!(play, "../ui/images/play.svg");
-    svg_icon!(folder_add, "../ui/images/folder-add.svg");
+    svg_icon!(eye_off, "../ui/icons/eye-off.svg");
+    svg_icon!(folder, "../ui/icons/folder.svg");
+    svg_icon!(play, "../ui/icons/play.svg");
+    svg_icon!(folder_add, "../ui/icons/folder-add.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
-    svg_icon!(folder_x, "../ui/images/folder-x.svg");
-    svg_icon!(gear, "../ui/images/gear.svg");
+    svg_icon!(folder_x, "../ui/icons/folder-x.svg");
+    svg_icon!(gear, "../ui/icons/gear.svg");
 
     /// Multicolor artwork: render WITHOUT a tint override so its natural
     /// blue/white fills show.
     pub fn gmod_logo() -> svg::Handle {
-        svg::Handle::from_memory(include_bytes!("../ui/images/gmod-logo.svg"))
+        svg::Handle::from_memory(include_bytes!("../ui/icons/gmod-logo.svg"))
     }
 
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
-    svg_icon!(image, "../ui/images/image.svg");
-    svg_icon!(link_chain, "../ui/images/link-chain.svg");
+    svg_icon!(image, "../ui/icons/image.svg");
+    svg_icon!(link_chain, "../ui/icons/link-chain.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
-    svg_icon!(package_open, "../ui/images/package-open.svg");
+    svg_icon!(package_open, "../ui/icons/package-open.svg");
 
-    svg_icon!(mode_fly, "../ui/images/mode-fly.svg");
-    svg_icon!(mode_walk, "../ui/images/mode-walk.svg");
+    svg_icon!(mode_fly, "../ui/icons/mode-fly.svg");
+    svg_icon!(mode_walk, "../ui/icons/mode-walk.svg");
 
-    svg_icon!(route_downloader, "../ui/images/route-downloader.svg");
+    svg_icon!(route_downloader, "../ui/icons/route-downloader.svg");
     svg_icon!(
         route_installed_addons,
-        "../ui/images/route-installed-addons.svg"
+        "../ui/icons/route-installed-addons.svg"
     );
-    svg_icon!(route_my_workshop, "../ui/images/route-my-workshop.svg");
-    svg_icon!(route_models, "../ui/images/route-models.svg");
-    svg_icon!(route_size_analyzer, "../ui/images/route-size-analyzer.svg");
-    svg_icon!(search, "../ui/images/search.svg");
-    svg_icon!(star_filled, "../ui/images/star-filled.svg");
+    svg_icon!(route_models, "../ui/icons/route-models.svg");
+    svg_icon!(route_my_workshop, "../ui/icons/route-my-workshop.svg");
+    svg_icon!(route_size_analyzer, "../ui/icons/route-size-analyzer.svg");
+    svg_icon!(search, "../ui/icons/search.svg");
+    svg_icon!(star_filled, "../ui/icons/star-filled.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
-    svg_icon!(table, "../ui/images/table.svg");
-    svg_icon!(tag_point, "../ui/images/tag-point.svg");
+    svg_icon!(table, "../ui/icons/table.svg");
+    svg_icon!(tag_point, "../ui/icons/tag-point.svg");
 
     pub fn tooltip_arrow() -> svg::Handle {
-        svg::Handle::from_memory(include_bytes!("../ui/images/tooltip-arrow.svg"))
+        svg::Handle::from_memory(include_bytes!("../ui/icons/tooltip-arrow.svg"))
     }
 }
 

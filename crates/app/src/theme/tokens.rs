@@ -254,6 +254,9 @@ pub struct Typography {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Motion {
+    pub(crate) reduce_motion: bool,
+    pub(crate) layout_animating: bool,
+    pub(crate) layout_ms: u16,
     pub(crate) fast_ms: u16,
     pub(crate) hover_in_ms: u16,
     pub(crate) hover_out_ms: u16,
@@ -279,14 +282,18 @@ pub struct Dimensions {
     pub(crate) sidebar_band_padding_x: f32,
     pub(crate) sidebar_rail_width: f32,
     pub(crate) sidebar_rail_width_inset: f32,
+    pub(crate) sidebar_rail_width_wide: f32,
     pub(crate) sidebar_float_margin: f32,
     pub(crate) sidebar_float_radius: f32,
     pub(crate) sidebar_divider_width: f32,
     pub(crate) sidebar_rail_icon_button_size: f32,
     pub(crate) sidebar_rail_icon_glyph: f32,
+    pub(crate) sidebar_rail_icon_button_size_wide: f32,
+    pub(crate) sidebar_rail_icon_glyph_wide: f32,
     pub(crate) sidebar_route_spacing: f32,
     pub(crate) sidebar_account_row_height: f32,
     pub(crate) sidebar_account_rail_avatar_size: f32,
+    pub(crate) sidebar_account_rail_avatar_size_wide: f32,
     pub(crate) sidebar_account_rail_box_size: f32,
     pub(crate) presence_badge_size: f32,
     pub(crate) presence_badge_ring: f32,
@@ -378,26 +385,32 @@ pub struct Tokens {
     pub(crate) typography: Typography,
     pub(crate) motion: Motion,
     pub(crate) dims: Dimensions,
+    pub(super) text_scale_factor: f32,
+    pub(super) spacing_scale_factor: f32,
+    pub(super) row_scale_factor: f32,
+    pub(super) preferred_card_width: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct InvariantTokens {
+pub struct LayoutMetrics {
     pub(crate) spacing: Spacing,
     pub(crate) radii: Radii,
     pub(crate) typography: Typography,
     pub(crate) motion: Motion,
     pub(crate) dims: Dimensions,
+    pub(crate) preferred_card_width: f32,
 }
 
-static INVARIANT_TOKENS: InvariantTokens = InvariantTokens {
+static INVARIANT_TOKENS: LayoutMetrics = LayoutMetrics {
     spacing: spacing(),
     radii: radii(),
     typography: typography(),
     motion: motion(),
     dims: dimensions(),
+    preferred_card_width: 200.0,
 };
 
-pub fn invariant() -> &'static InvariantTokens {
+pub fn invariant() -> &'static LayoutMetrics {
     &INVARIANT_TOKENS
 }
 
@@ -439,6 +452,10 @@ impl Tokens {
             typography: typography(),
             motion: motion(),
             dims: dimensions(),
+            text_scale_factor: 1.0,
+            spacing_scale_factor: 1.0,
+            row_scale_factor: 1.0,
+            preferred_card_width: 200.0,
         }
     }
 
@@ -941,15 +958,18 @@ const fn typography() -> Typography {
 
 const fn motion() -> Motion {
     Motion {
+        reduce_motion: false,
+        layout_animating: false,
+        layout_ms: 180,
         fast_ms: 100,
         hover_in_ms: 90,
-        hover_out_ms: 220,
+        hover_out_ms: 120,
         modal_enter_ms: 180,
         modal_exit_ms: 130,
         context_menu_enter_ms: 120,
         context_menu_exit_ms: 100,
         thumb_reveal_ms: 150,
-        overlay_toast_ms: 500,
+        overlay_toast_ms: 180,
     }
 }
 
@@ -967,14 +987,18 @@ const fn dimensions() -> Dimensions {
         sidebar_band_padding_x: 12.0,
         sidebar_rail_width: 52.0,
         sidebar_rail_width_inset: 84.0,
+        sidebar_rail_width_wide: 96.0,
         sidebar_float_margin: 10.0,
         sidebar_float_radius: 12.0,
         sidebar_divider_width: 1.0,
         sidebar_rail_icon_button_size: 36.0,
         sidebar_rail_icon_glyph: 20.0,
+        sidebar_rail_icon_button_size_wide: 48.0,
+        sidebar_rail_icon_glyph_wide: 24.0,
         sidebar_route_spacing: 8.0,
         sidebar_account_row_height: 56.0,
         sidebar_account_rail_avatar_size: 40.0,
+        sidebar_account_rail_avatar_size_wide: 56.0,
         sidebar_account_rail_box_size: 48.0,
         presence_badge_size: 9.0,
         presence_badge_ring: 2.0,

@@ -77,7 +77,7 @@ fluent-bundle = { version = "0.16.0", default-features = false }
 fluent-langneg = { version = "0.13.1", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 gif = { version = "0.14.2", default-features = false, features = ["std"] }
-iced = { version = "0.14.0", default-features = false, features = ["advanced", "canvas", "wgpu", "tiny-skia", "svg", "image-without-codecs", "tokio", "x11", "wayland", "linux-theme-detection"] }
+iced = { version = "0.14.0", default-features = false, features = ["advanced", "canvas", "wgpu", "tiny-skia", "svg", "image-without-codecs", "tokio", "x11", "wayland", "linux-theme-detection", "sysinfo"] }
 jiff = { version = "0.2.31", default-features = false, features = ["tz-system"] }
 log = "0.4"
 lzma-rust2 = { version = "0.16.4", default-features = false, features = ["std", "optimization"] }

@@ -9,7 +9,6 @@ use crate::theme::{self, motion};
 const EXPIRE_HOLD: Duration = Duration::from_millis(2500);
 
 pub const TOAST_HEIGHT: f32 = 49.0;
-pub const TOAST_GAP: f32 = TOAST_HEIGHT / 2.0;
 
 /// Visible-stack cap: four toasts at a 1080p work area, scaling linearly
 /// with viewport height, never fewer than two.
@@ -136,9 +135,23 @@ impl Toast {
 #[derive(Debug, Default)]
 pub struct State {
     toasts: Vec<Toast>,
+    reduce_motion: bool,
 }
 
 impl State {
+    pub(crate) fn set_reduce_motion(&mut self, reduce_motion: bool) {
+        if self.reduce_motion == reduce_motion {
+            return;
+        }
+        self.reduce_motion = reduce_motion;
+        if reduce_motion {
+            for toast in &mut self.toasts {
+                toast.presence.snap(!toast.expiring);
+            }
+            self.toasts.retain(|toast| !toast.expiring);
+        }
+    }
+
     pub(crate) fn toasts(&self) -> &[Toast] {
         &self.toasts
     }
@@ -185,7 +198,11 @@ impl State {
             status,
         } = update
         {
-            self.toasts.push(Toast::new(task_id, kind, status, now));
+            let mut toast = Toast::new(task_id, kind, status, now);
+            if self.reduce_motion {
+                toast.presence.snap(true);
+            }
+            self.toasts.push(toast);
             return true;
         }
 
@@ -201,7 +218,11 @@ impl State {
             };
             if !toast.expiring && expire_at.is_some_and(|at| now >= at) {
                 toast.expiring = true;
-                toast.presence.go(false, now);
+                if self.reduce_motion {
+                    toast.presence.snap(false);
+                } else {
+                    toast.presence.go(false, now);
+                }
                 changed = true;
             }
             changed |= toast.presence.tick(now);
@@ -228,6 +249,27 @@ mod tests {
 
     fn event(id: u64, update: TaskUpdate) -> TaskEvent {
         (TaskId::from_raw(id), SharedTaskUpdate::new(update))
+    }
+
+    #[test]
+    fn reduced_motion_toasts_keep_expiry_hold_without_animation() {
+        let mut state = State::default();
+        state.set_reduce_motion(true);
+        let now = Instant::now();
+        state.apply_task_events(
+            vec![event(
+                1,
+                started(TaskKind::Notice, TransactionStatus::Notice),
+            )],
+            now,
+        );
+        assert_eq!(state.toasts()[0].presence(now), 1.0);
+        state.apply_task_events(vec![event(1, TaskUpdate::Finished)], now);
+        state.tick(now + EXPIRE_HOLD - Duration::from_millis(1));
+        assert_eq!(state.toasts().len(), 1);
+        state.tick(now + EXPIRE_HOLD);
+        assert!(state.is_empty());
+        assert!(!state.needs_ticks());
     }
 
     #[test]

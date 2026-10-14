@@ -69,15 +69,21 @@ impl ChromeStrategy {
     }
 }
 
-pub fn sidebar_width(tokens: &Tokens, chrome_strategy: ChromeStrategy) -> f32 {
-    sidebar_rail_width(tokens, chrome_strategy) + tokens.dims.sidebar_float_margin * 2.0
+pub fn sidebar_width(tokens: &Tokens, chrome_strategy: ChromeStrategy, viewport_width: f32) -> f32 {
+    sidebar_rail_width(tokens, chrome_strategy, viewport_width)
+        + tokens.dims.sidebar_float_margin * 2.0
 }
 
-pub fn sidebar_rail_width(tokens: &Tokens, chrome_strategy: ChromeStrategy) -> f32 {
-    match chrome_strategy {
+pub fn sidebar_rail_width(
+    tokens: &Tokens,
+    chrome_strategy: ChromeStrategy,
+    viewport_width: f32,
+) -> f32 {
+    let minimum = match chrome_strategy {
         ChromeStrategy::MacNativeInset => tokens.dims.sidebar_rail_width_inset,
         ChromeStrategy::SystemDefault => tokens.dims.sidebar_rail_width,
-    }
+    };
+    (viewport_width / 24.0).clamp(minimum, tokens.dims.sidebar_rail_width_wide)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -108,6 +114,7 @@ pub struct State {
     account_menu_open: bool,
     account_menu_visible: bool,
     account_menu_presence: motion::Presence<bool>,
+    reduce_motion: bool,
 }
 
 impl Default for State {
@@ -131,11 +138,37 @@ impl Default for State {
                 tokens.motion.context_menu_exit_duration(),
                 Easing::EaseOut,
             ),
+            reduce_motion: false,
         }
     }
 }
 
 impl State {
+    pub(crate) fn set_reduce_motion(&mut self, reduce: bool) {
+        if self.reduce_motion == reduce {
+            return;
+        }
+        self.reduce_motion = reduce;
+        let mut policy = theme::invariant().motion;
+        policy.reduce_motion = reduce;
+        self.account_menu_presence.set_durations(
+            policy.context_menu_enter_duration(),
+            policy.context_menu_exit_duration(),
+        );
+        self.downloader_badge
+            .opacity
+            .set_durations(policy.fast_duration(), policy.fast_duration());
+        if reduce {
+            self.account_menu_presence.snap(self.account_menu_open);
+            self.account_menu_visible = self.account_menu_open;
+            self.downloader_badge
+                .opacity
+                .snap(self.downloader_badge.visible);
+            if !self.downloader_badge.visible {
+                self.downloader_badge.count = 0;
+            }
+        }
+    }
     pub(crate) const fn app_version(&self) -> &'static str {
         self.app_version
     }

@@ -12,7 +12,7 @@ use iced::{
 };
 
 use crate::assets;
-use crate::theme::{self, InvariantTokens, Tokens, motion};
+use crate::theme::{self, LayoutMetrics, Tokens, motion};
 use crate::widgets::context_area::context_area;
 use crate::widgets::download_count_icon::download_count_icon;
 use crate::widgets::grid_rows::CardId;
@@ -151,6 +151,12 @@ impl Data {
         (self.enabled && self.hover_motion.needs_ticks()) || self.reveal_motion.needs_ticks()
     }
 
+    pub(crate) fn finish_motion(&mut self) {
+        self.hover_motion.snap(self.hovered);
+        self.reveal_motion.snap(true);
+        self.reveal_under = None;
+    }
+
     pub(crate) fn tick_motion(&mut self, now: Instant) {
         self.hover_motion.tick(now);
         if self.reveal_motion.tick(now) {
@@ -256,7 +262,7 @@ pub enum Message {
 }
 
 #[cfg(test)]
-pub fn preferred_height(data: &Data, width: f32, tokens: &InvariantTokens) -> f32 {
+pub fn preferred_height(data: &Data, width: f32, tokens: &LayoutMetrics) -> f32 {
     let measured_title_height = measure_title_height(data.display_title(), width, tokens);
 
     preferred_height_for_title_height(width, measured_title_height, tokens)
@@ -265,16 +271,39 @@ pub fn preferred_height(data: &Data, width: f32, tokens: &InvariantTokens) -> f3
 pub fn preferred_height_for_title_height(
     width: f32,
     title_height: f32,
-    tokens: &InvariantTokens,
+    tokens: &LayoutMetrics,
 ) -> f32 {
     fixed_content_height(width, tokens) + clamp_title_height(title_height, tokens)
 }
 
-fn fixed_content_height(width: f32, tokens: &InvariantTokens) -> f32 {
+fn stats_height(tokens: &LayoutMetrics) -> f32 {
+    tokens
+        .dims
+        .card_stats_height
+        .max(tokens.typography.body * STATS_LINE_HEIGHT)
+}
+
+fn stacked_stats(width: f32, tokens: &LayoutMetrics) -> bool {
+    // Reserve a useful count label before placing the rating beside it. The
+    // same rule drives measured card height and the rendered arrangement.
+    let count_width =
+        tokens.typography.body * 6.0 + tokens.dims.star_rating_height * (DOWNLOAD_ICON_SIZE / 14.0);
+    width < tokens.dims.star_rating_width + count_width + tokens.spacing.gap_sm
+}
+
+fn stats_block_height(width: f32, tokens: &LayoutMetrics) -> f32 {
+    if stacked_stats(width, tokens) {
+        stats_height(tokens) + tokens.spacing.gap_xs + tokens.dims.star_rating_height
+    } else {
+        stats_height(tokens)
+    }
+}
+
+fn fixed_content_height(width: f32, tokens: &LayoutMetrics) -> f32 {
     let preview_size = preview_size(width, tokens);
 
     tokens.dims.card_padding * 2.0
-        + tokens.dims.card_stats_height
+        + stats_block_height(content_width(width, tokens), tokens)
         + tokens.dims.card_inner_gap
         + preview_size
         + tokens.dims.card_inner_gap
@@ -287,17 +316,33 @@ pub fn view<'a>(
     content_height: f32,
     tokens: &Tokens,
     now: Instant,
+    opacity: f32,
 ) -> Element<'a, Message> {
-    let tokens = *tokens;
-    let layout = theme::invariant();
+    let opacity = opacity.clamp(0.0, 1.0);
+    let mut tokens = *tokens;
+    for color in [
+        &mut tokens.colors.text,
+        &mut tokens.colors.icon_muted,
+        &mut tokens.colors.surface_preview,
+        &mut tokens.colors.sidebar_item_hover,
+        &mut tokens.colors.shadow_card,
+        &mut tokens.colors.shadow_card_strong,
+    ] {
+        *color = motion::scaled_alpha(*color, opacity);
+    }
+    let layout = &tokens.layout();
     let content_width = content_width(width, layout);
     let preview_size = preview_size(width, layout);
     let title_height = title_height_from_content_height(content_height, width, layout);
-    let hover_progress = data.hover_progress(now);
+    let hover_progress = if tokens.motion.enabled() {
+        data.hover_progress(now)
+    } else {
+        f32::from(data.hovered && data.enabled)
+    };
 
-    let stats = stats_row(data, content_width, &tokens);
-    let preview = preview(data, preview_size, &tokens, hover_progress, now);
-    let title = title(data, title_height, &tokens);
+    let stats = stats_row(data, content_width, &tokens, opacity);
+    let preview = preview(data, preview_size, &tokens, hover_progress, now, opacity);
+    let title = title(data, content_width, title_height, &tokens);
 
     let body = column![stats, preview, title]
         .spacing(layout.dims.card_inner_gap)
@@ -338,28 +383,41 @@ pub fn view<'a>(
         .into()
 }
 
-fn stats_row<'a>(data: &'a Data, width: f32, tokens: &Tokens) -> Element<'a, Message> {
-    let opacity = enabled_opacity(data.enabled, tokens);
+fn stats_row<'a>(
+    data: &'a Data,
+    width: f32,
+    tokens: &Tokens,
+    opacity: f32,
+) -> Element<'a, Message> {
+    let opacity = enabled_opacity(data.enabled, tokens) * opacity;
     let text_color = text_color(data.enabled, tokens);
 
     let count = subscription_count_label(data, text_color.into(), tokens);
 
     let count_block = row![
-        download_count_icon(tokens, DOWNLOAD_ICON_SIZE, opacity),
+        download_count_icon(tokens, tokens.icon_size(DOWNLOAD_ICON_SIZE), opacity),
         count,
     ]
-    .spacing(3.0)
+    .spacing(tokens.space(3.0))
     .align_y(alignment::Vertical::Center)
     .width(Length::Fill)
-    .height(Length::Fixed(tokens.dims.card_stats_height));
+    .height(Length::Fixed(stats_height(&tokens.layout())));
 
     let stars = star_rating(data.score_bucket, tokens, opacity);
+    let layout = tokens.layout();
+    if stacked_stats(width, &layout) {
+        return column![count_block, stars]
+            .spacing(layout.spacing.gap_xs)
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(stats_block_height(width, &layout)))
+            .into();
+    }
 
     row![count_block, stars]
-        .spacing(8.0)
+        .spacing(tokens.spacing.gap_sm)
         .align_y(alignment::Vertical::Center)
         .width(Length::Fixed(width))
-        .height(Length::Fixed(tokens.dims.card_stats_height))
+        .height(Length::Fixed(stats_height(&tokens.layout())))
         .into()
 }
 
@@ -378,7 +436,7 @@ fn subscription_count_label<'a>(
             line_height: STATS_LINE_HEIGHT,
         })
         .width(Length::Fill)
-        .height(Length::Fixed(tokens.dims.card_stats_height))
+        .height(Length::Fixed(stats_height(&tokens.layout())))
         .into();
     }
 
@@ -501,14 +559,19 @@ fn preview<'a>(
     tokens: &Tokens,
     hover_progress: f32,
     now: Instant,
+    opacity: f32,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
-    let opacity = enabled_opacity(data.enabled, &tokens);
+    let opacity = enabled_opacity(data.enabled, &tokens) * opacity;
     let content: Element<'a, Message> = match (&data.kind, &data.thumbnail) {
         (Kind::PublishNew, _) => plus_glyph(data, &tokens, hover_progress),
         (Kind::Addon, Thumbnail::Placeholder(handle)) => thumb_image(handle, size, opacity),
         (Kind::Addon, Thumbnail::Ready(handle)) => {
-            let reveal = data.reveal_progress(now);
+            let reveal = if tokens.motion.enabled() {
+                data.reveal_progress(now)
+            } else {
+                1.0
+            };
             let top = thumb_image(handle, size, opacity * reveal);
             match &data.reveal_under {
                 Some(under) if reveal < 1.0 => {
@@ -578,8 +641,8 @@ fn plus_glyph<'a>(data: &Data, tokens: &Tokens, hover_progress: f32) -> Element<
 fn dead_glyph<'a>(tokens: &Tokens) -> Element<'a, Message> {
     let tokens = *tokens;
     svg(assets::icons::dead())
-        .width(Length::Fixed(DEAD_GLYPH_SIZE))
-        .height(Length::Fixed(DEAD_GLYPH_SIZE))
+        .width(Length::Fixed(tokens.icon_size(DEAD_GLYPH_SIZE)))
+        .height(Length::Fixed(tokens.icon_size(DEAD_GLYPH_SIZE)))
         .content_fit(ContentFit::Contain)
         .style(move |_, _| svg::Style {
             color: Some(tokens.colors.icon_muted.into()),
@@ -588,7 +651,7 @@ fn dead_glyph<'a>(tokens: &Tokens) -> Element<'a, Message> {
 }
 
 fn loading_glyph<'a>(tokens: &Tokens) -> Element<'a, Message> {
-    let size = LOADING_GLYPH_SIZE;
+    let size = tokens.icon_size(LOADING_GLYPH_SIZE);
     let width = (size * 0.111).max(2.0);
     let heights = [0.56, 0.68, 1.0, 0.68, 0.56];
     let mut bars = row![]
@@ -628,54 +691,131 @@ fn bar<'a>(width: f32, height: f32, tokens: &Tokens) -> Element<'a, Message> {
     .into()
 }
 
-fn title<'a>(data: &Data, height: f32, tokens: &Tokens) -> Element<'a, Message> {
-    text(data.display_title().to_owned())
-        .size(tokens.typography.body)
-        .font(assets::fonts::default_font())
-        .line_height(TITLE_LINE_HEIGHT)
-        .width(Length::Fill)
-        .height(Length::Fixed(height))
-        .align_x(alignment::Horizontal::Center)
-        .align_y(alignment::Vertical::Top)
-        .wrapping(text_widget::Wrapping::WordOrGlyph)
-        .color(Color::from(text_color(data.enabled, tokens)))
-        .into()
+fn title<'a>(data: &Data, width: f32, height: f32, tokens: &Tokens) -> Element<'a, Message> {
+    let label = text(bounded_title(
+        data.display_title(),
+        width,
+        tokens.typography.body,
+    ))
+    .size(tokens.typography.body)
+    .font(assets::fonts::default_font())
+    .line_height(TITLE_LINE_HEIGHT)
+    .width(Length::Fill)
+    .height(Length::Fixed(height))
+    .align_x(alignment::Horizontal::Center)
+    .align_y(alignment::Vertical::Top)
+    .wrapping(text_widget::Wrapping::WordOrGlyph)
+    .color(Color::from(text_color(data.enabled, tokens)));
+    label.into()
 }
 
-fn content_width(width: f32, tokens: &InvariantTokens) -> f32 {
+thread_local! {
+    static DISPLAY_TITLE_CACHE: RefCell<HashMap<(String, u32, u32), String>> =
+        RefCell::new(HashMap::new());
+}
+
+fn title_paragraph(content: &str, width: f32, size: f32) -> IcedParagraph {
+    IcedParagraph::with_text(iced::advanced::Text {
+        content,
+        bounds: Size::new(width.max(1.0), f32::INFINITY),
+        size: Pixels(size),
+        line_height: iced::advanced::text::LineHeight::Relative(TITLE_LINE_HEIGHT),
+        font: assets::fonts::default_font(),
+        align_x: iced::advanced::text::Alignment::Default,
+        align_y: alignment::Vertical::Top,
+        shaping: iced::advanced::text::Shaping::default(),
+        wrapping: iced::advanced::text::Wrapping::WordOrGlyph,
+    })
+}
+
+/// Iced's text bounds clip glyphs rather than complete lines. Truncate the
+/// shaped label explicitly, so an overflowing line never leaves partial glyphs.
+fn bounded_title(title: &str, width: f32, size: f32) -> String {
+    let key = (title.to_owned(), width.to_bits(), size.to_bits());
+    if let Some(label) = DISPLAY_TITLE_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return label;
+    }
+    let label = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        use unicode_segmentation::UnicodeSegmentation as _;
+        if title_paragraph(title, width, size)
+            .buffer()
+            .layout_runs()
+            .count()
+            <= MAX_TITLE_LINES
+        {
+            return title.to_owned();
+        }
+        let boundaries = title
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(title.len()))
+            .collect::<Vec<_>>();
+        let mut lower = 0;
+        let mut upper = boundaries.len() - 1;
+        while lower < upper {
+            let middle = (lower + upper).div_ceil(2);
+            let candidate = format!("{}…", title[..boundaries[middle]].trim_end());
+            if title_paragraph(&candidate, width, size)
+                .buffer()
+                .layout_runs()
+                .count()
+                <= MAX_TITLE_LINES
+            {
+                lower = middle;
+            } else {
+                upper = middle - 1;
+            }
+        }
+        format!("{}…", title[..boundaries[lower]].trim_end())
+    }))
+    .unwrap_or_else(|_| title.to_owned());
+    DISPLAY_TITLE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 1024 {
+            cache.clear();
+        }
+        let _ = cache.insert(key, label.clone());
+    });
+    label
+}
+
+fn content_width(width: f32, tokens: &LayoutMetrics) -> f32 {
     (width - tokens.dims.card_padding * 2.0).max(1.0)
 }
 
-fn preview_size(width: f32, tokens: &InvariantTokens) -> f32 {
+fn preview_size(width: f32, tokens: &LayoutMetrics) -> f32 {
     content_width(width, tokens).max(1.0)
 }
 
-pub fn single_line_title_height(tokens: &InvariantTokens) -> f32 {
+pub fn single_line_title_height(tokens: &LayoutMetrics) -> f32 {
     title_line_height(tokens)
 }
 
-pub fn measure_title_height(title: &str, width: f32, tokens: &InvariantTokens) -> f32 {
-    let line_height = title_line_height(tokens);
-    let measured = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let paragraph = IcedParagraph::with_text(iced::advanced::Text {
-            content: title,
-            bounds: Size::new(content_width(width, tokens), f32::INFINITY),
-            size: Pixels(tokens.typography.body),
-            line_height: iced::advanced::text::LineHeight::Relative(TITLE_LINE_HEIGHT),
-            font: assets::fonts::default_font(),
-            align_x: iced::advanced::text::Alignment::Default,
-            align_y: alignment::Vertical::Top,
-            shaping: iced::advanced::text::Shaping::default(),
-            wrapping: iced::advanced::text::Wrapping::WordOrGlyph,
-        });
+#[cfg(test)]
+pub fn measure_title_height(title: &str, width: f32, tokens: &LayoutMetrics) -> f32 {
+    measure_title_cached(title, width, tokens, &mut None).0
+}
 
-        paragraph.min_bounds().height
+pub(super) fn measure_title_cached(
+    title: &str,
+    width: f32,
+    tokens: &LayoutMetrics,
+    cached: &mut Option<IcedParagraph>,
+) -> (f32, Option<f32>) {
+    let line_height = title_line_height(tokens);
+    let bounds = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let bounds = Size::new(content_width(width, tokens), f32::INFINITY);
+        let paragraph = cached
+            .get_or_insert_with(|| title_paragraph(title, bounds.width, tokens.typography.body));
+        paragraph.resize(bounds);
+        paragraph.min_bounds()
     }))
     .ok()
-    .filter(|height| height.is_finite() && *height > 0.0)
-    .unwrap_or(line_height);
-
-    clamp_title_height(measured, tokens)
+    .filter(|bounds| bounds.height.is_finite() && bounds.height > 0.0)
+    .unwrap_or_else(|| Size::new(width, line_height));
+    let height = clamp_title_height(bounds.height, tokens);
+    let single_line_at = (height <= line_height + 0.5).then_some(bounds.width + 1.0);
+    (height, single_line_at)
 }
 
 thread_local! {
@@ -734,12 +874,12 @@ fn measure_stats_text_width_uncached(content: &str, size: f32, line_height: f32)
 fn title_height_from_content_height(
     content_height: f32,
     width: f32,
-    tokens: &InvariantTokens,
+    tokens: &LayoutMetrics,
 ) -> f32 {
     clamp_title_height(content_height - fixed_content_height(width, tokens), tokens)
 }
 
-fn clamp_title_height(height: f32, tokens: &InvariantTokens) -> f32 {
+fn clamp_title_height(height: f32, tokens: &LayoutMetrics) -> f32 {
     let height = if height.is_finite() && height > 0.0 {
         height
     } else {
@@ -749,12 +889,12 @@ fn clamp_title_height(height: f32, tokens: &InvariantTokens) -> f32 {
     height.clamp(title_line_height(tokens), max_title_height(tokens))
 }
 
-fn title_line_height(tokens: &InvariantTokens) -> f32 {
+fn title_line_height(tokens: &LayoutMetrics) -> f32 {
     tokens.typography.body * TITLE_LINE_HEIGHT
 }
 
-fn max_title_height(tokens: &InvariantTokens) -> f32 {
-    (title_line_height(tokens) * MAX_TITLE_LINES as f32).min(tokens.dims.card_title_height)
+fn max_title_height(tokens: &LayoutMetrics) -> f32 {
+    title_line_height(tokens) * MAX_TITLE_LINES as f32
 }
 
 fn finite_nonnegative(value: f32) -> f32 {
@@ -769,10 +909,7 @@ fn text_color(enabled: bool, tokens: &Tokens) -> crate::theme::tokens::Rgba {
     if enabled {
         tokens.colors.text
     } else {
-        tokens
-            .colors
-            .text
-            .with_alpha(motion::opacity_byte(tokens.dims.disabled_opacity))
+        motion::scaled_alpha(tokens.colors.text, tokens.dims.disabled_opacity)
     }
 }
 
@@ -1002,7 +1139,7 @@ mod tests {
         let width = 200.0;
         let preview = width - tokens.dims.card_padding * 2.0;
         let base = tokens.dims.card_padding * 2.0
-            + tokens.dims.card_stats_height
+            + super::stats_block_height(preview, tokens)
             + tokens.dims.card_inner_gap
             + preview
             + tokens.dims.card_inner_gap;
@@ -1034,5 +1171,53 @@ mod tests {
 
         let preferred = preferred_height(&Data::addon(CardId::from("1"), "Short"), 200.0, tokens);
         assert!(preferred.is_finite());
+    }
+    #[test]
+    fn enlarged_text_stacks_metadata_using_the_measured_card_geometry() {
+        let tokens = crate::theme::Tokens::dark()
+            .with_display_preferences(crate::bridge::UiDensity::Compact, 150);
+        let metrics = tokens.layout();
+        let width = 220.0;
+        let inner_width = super::content_width(width, &metrics);
+        assert!(super::stacked_stats(inner_width, &metrics));
+        assert_eq!(
+            super::max_title_height(&metrics),
+            super::title_line_height(&metrics) * 3.0
+        );
+        assert_eq!(
+            super::stats_block_height(inner_width, &metrics),
+            super::stats_height(&metrics)
+                + metrics.spacing.gap_xs
+                + metrics.dims.star_rating_height,
+        );
+        assert!(!super::stacked_stats(360.0, &metrics));
+        let card = Data::addon(CardId::from("large"), "Title");
+        let measured = preferred_height(&card, width, &metrics);
+        let _element = super::view(
+            &card,
+            width,
+            measured,
+            measured,
+            &tokens,
+            std::time::Instant::now(),
+            1.0,
+        );
+    }
+    #[test]
+    fn long_titles_end_at_a_complete_line_and_keep_unicode_graphemes() {
+        let title = "An unusually long Workshop title with 日本語 and 한국어 labels that must not paint a partial fourth line on a compact card";
+        let width = 150.0;
+        let size = 21.0;
+        let label = super::bounded_title(title, width, size);
+        assert!(label.ends_with('…'));
+        assert!(title.starts_with(label.trim_end_matches('…').trim_end()));
+        assert!(
+            super::title_paragraph(&label, width, size)
+                .buffer()
+                .layout_runs()
+                .count()
+                <= 3
+        );
+        assert_eq!(super::bounded_title("日本語", width, size), "日本語");
     }
 }

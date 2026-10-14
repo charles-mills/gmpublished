@@ -352,7 +352,7 @@ fn code_line<'a>(line_number: usize, line: &'a CodeLine, tokens: &Tokens) -> Ele
         .font(Font::MONOSPACE)
         .color(Color::from(tokens.colors.text_dim))
         .align_x(iced::alignment::Horizontal::Right)
-        .width(Length::Fixed(CODE_LINE_NUMBER_WIDTH));
+        .width(Length::Fixed(CODE_LINE_NUMBER_WIDTH * tokens.text_scale()));
 
     row![
         number,
@@ -874,7 +874,7 @@ fn selector_row_layout<'a>(
         .width(if stacked {
             Length::Fill
         } else {
-            Length::Fixed(INFO_LABEL_WIDTH)
+            Length::Fixed(INFO_LABEL_WIDTH * tokens.text_scale())
         });
     let field = select::field(
         selected
@@ -1435,6 +1435,15 @@ fn resizable_inspector<'a>(
     inspector: impl Fn() -> Element<'a, Message>,
 ) -> Element<'a, Message> {
     let tokens = *tokens;
+    if width < (VIEWER_MIN_WIDTH + INSPECTOR_MIN_WIDTH) * tokens.text_scale() + tokens.spacing.gap {
+        return column![
+            container(viewer()).height(Length::FillPortion(3)),
+            container(inspector()).height(Length::FillPortion(2)),
+        ]
+        .spacing(tokens.spacing.gap_sm)
+        .height(Length::Fill)
+        .into();
+    }
     let ratio = effective_inspector_ratio(state.inspector_ratio(), width);
     let viewer_width = (width * ratio - split_pane::DIVIDER_WIDTH / 2.0)
         .round()
@@ -1526,6 +1535,7 @@ fn speed_readout_overlay<'a>(speed: f32, tokens: &Tokens) -> Element<'a, Message
 }
 
 fn mode_pill_overlay(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message> {
+    let tokens = *ctx.tokens;
     let pill = mode_pill(active_mode, ctx);
     column![
         Space::new().height(Length::Fill),
@@ -1533,7 +1543,7 @@ fn mode_pill_overlay(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_,
     ]
     .width(Length::Fill)
     .height(Length::Fill)
-    .padding(MODE_PILL_MARGIN)
+    .padding(tokens.space(MODE_PILL_MARGIN))
     .into()
 }
 
@@ -1557,9 +1567,9 @@ fn mode_pill(active_mode: MovementMode, ctx: ViewCtx<'_>) -> Element<'_, Message
                 &tokens,
             ),
         ]
-        .spacing(MODE_PILL_SLOT_GAP),
+        .spacing(tokens.space(MODE_PILL_SLOT_GAP)),
     )
-    .padding(MODE_PILL_PADDING)
+    .padding(tokens.space(MODE_PILL_PADDING))
     .style(|_| mode_pill_style())
     .into()
 }
@@ -1574,14 +1584,18 @@ fn mode_pill_slot<'a>(
     let active = mode == active_mode;
     let icon_color = Color::from_rgba(1.0, 1.0, 1.0, if active { 1.0 } else { 0.4 });
     let slot = button(
-        container(icon(icon_handle, icon_color, MODE_PILL_ICON_SIZE))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
+        container(icon(
+            icon_handle,
+            icon_color,
+            tokens.icon_size(MODE_PILL_ICON_SIZE),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill),
     )
-    .width(Length::Fixed(MODE_PILL_SLOT_WIDTH))
-    .height(Length::Fixed(MODE_PILL_SLOT_HEIGHT))
+    .width(Length::Fixed(tokens.row_height(MODE_PILL_SLOT_WIDTH)))
+    .height(Length::Fixed(tokens.row_height(MODE_PILL_SLOT_HEIGHT)))
     .padding(0)
     .on_press_maybe((!active).then_some(Message::MovementModeSelected(mode)))
     .style(move |_, _| mode_pill_slot_style(active));
@@ -1807,10 +1821,74 @@ fn size_bytes(state: &State) -> u64 {
 fn silk_image<'a>(icon: SilkIcon, tooltip: String, tokens: &Tokens) -> Element<'a, Message> {
     tooltip_widget::below(
         image(assets::silkicons::silkicon(icon))
-            .width(Length::Fixed(SILKICON_SIZE))
-            .height(Length::Fixed(SILKICON_SIZE)),
+            .width(Length::Fixed(tokens.icon_size(SILKICON_SIZE)))
+            .height(Length::Fixed(tokens.icon_size(SILKICON_SIZE))),
         tooltip,
         tokens,
         tokens.dims.tooltip_max_width,
     )
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_file_preview_display_fixtures() {
+    use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
+    use crate::generation::Generation;
+    use crate::media::preview_model::{CodeSpan, PreviewRequest};
+    use std::sync::Arc;
+    let archive = PreviewArchive::from_gma(
+        crate::test_support::GmaFixtureBuilder::new("Code preview")
+            .entry("lua/radio/client.lua", b"print('radio')".to_vec())
+            .build(),
+    )
+    .unwrap();
+    let request = PreviewRequest {
+        request_id: Generation::INITIAL,
+        archive: Arc::new(PreviewArchiveSource::Gma(Arc::new(archive))),
+        entry_path: "lua/radio/client.lua".into(),
+        display_name: "client.lua".into(),
+        size_bytes: 2048,
+        crc32: 1234,
+        bypass_size_limits: false,
+    };
+    let mut state = State::default();
+    let request = state.begin_open(request);
+    let lines = [
+        "-- A Lua radio configuration",
+        "local stations = {",
+        "    { name = '日本語 · 中文 · 한국어', url = 'https://example.com/radio' },",
+        "}",
+        "",
+        "for _, station in ipairs(stations) do",
+        "    print(station.name)",
+        "end",
+    ]
+    .into_iter()
+    .map(|line| {
+        vec![CodeSpan {
+            text: line.into(),
+            color: None,
+        }]
+    })
+    .collect();
+    state.apply_loaded(
+        request.request_id,
+        Ok(PreviewData::from_request(
+            &request,
+            PreviewContent::Code {
+                lines,
+                truncated: false,
+            },
+        )),
+    );
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = Tokens::dark().with_display_preferences(density, percent);
+        crate::test_support::capture_ui_surface(
+            &format!("file-preview-{name}"),
+            size,
+            pane(&state, ViewCtx::new(&tokens, &i18n), true, size.width),
+        );
+    }
 }

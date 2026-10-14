@@ -639,3 +639,38 @@ models-qc-loading = Carregando QC…
 
 file-preview-model-lod = Nível de detalhe
 file-preview-model-lod-option = Nível {$index}
+
+# About
+settings-tab-about = Sobre
+settings-about-description = Publique, gerencie e visualize addons do Garry’s Mod.
+settings-about-github = gmpublished no GitHub
+settings-about-debug-title = Informações de diagnóstico
+settings-about-debug-description = Versão, sistema operacional, instalação e gráficos.
+settings-about-copy-debug = Copiar diagnóstico
+settings-about-copied = Copiado
+settings-about-debug-show = Ver informações de diagnóstico
+settings-about-debug-hide = Ocultar informações de diagnóstico
+settings-about-debug-loading = Coletando informações do sistema…
+settings-about-debug-failed = Não foi possível coletar as informações de diagnóstico.
+settings-about-debug-retry = Tentar novamente
+settings-about-credits = Créditos
+settings-about-upstream = Um fork nativo do gmpublisher, criado por William Venner.
+settings-about-maintainers = Desenvolvido por Charles Mills e colaboradores de código aberto, com Rust e Iced.
+settings-about-license = Licença (GNU GPL v3)
+settings-about-notices = Avisos de terceiros
+settings-about-releases = Notas da versão
+
+settings-display-heading = Exibição
+settings-display-spacing = Espaçamento
+settings-display-comfortable = Confortável
+settings-display-compact = Compacto
+settings-display-text-size = Tamanho do texto
+settings-display-reset-text = Redefinir tamanho do texto
+settings-display-reset = Redefinir preferências de exibição
+settings-display-sample-heading = Fique à vontade
+settings-display-sample-body = O texto e os controles se adaptam juntos enquanto seu conteúdo permanece no lugar.
+settings-display-sample-supporting = O espaçamento e o tamanho do texto são independentes.
+settings-display-colors = Cores de destaque
+
+settings-display-reduce-motion = Reduzir movimento
+settings-display-reduce-motion-hint = Mostrar mudanças de layout, menus e diálogos sem transições.

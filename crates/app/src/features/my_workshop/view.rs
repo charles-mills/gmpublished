@@ -1,4 +1,4 @@
-use iced::widget::{column, text};
+use iced::widget::{Space, button, column, row, text};
 use iced::{Color, Element, Length};
 
 use crate::assets;
@@ -13,8 +13,48 @@ use super::{Message, State};
 pub const GRID_KEY: &str = "my-workshop-grid";
 
 pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
-    if state.is_loaded_and_empty() {
-        return route_state::view(
+    let tokens = *ctx.tokens;
+    let title = row![
+        text(ctx.i18n.tr("my-workshop"))
+            .size(tokens.typography.title_lg)
+            .font(crate::theme::styles::inter_font(
+                iced::font::Weight::Semibold
+            )),
+        text(state.total_count().max(state.loaded_count()).to_string())
+            .size(tokens.typography.body)
+            .color(Color::from(tokens.colors.text_dim)),
+    ]
+    .spacing(tokens.spacing.gap_sm)
+    .align_y(iced::Center);
+    let publish = button(text(ctx.i18n.tr("publish-new")).size(tokens.typography.body))
+        .padding([tokens.spacing.pad_control_y, tokens.spacing.pad_control_x])
+        .on_press(Message::Grid(addon_grid::Message::CardClicked(
+            super::model::PUBLISH_NEW_ROW_ID.into(),
+        )))
+        .style(move |_, status| crate::theme::styles::action_button(&tokens, status));
+    let heading: Element<'a, Message> =
+        if state.grid().available_width() >= 640.0 * tokens.text_scale() {
+            row![title, Space::new().width(Length::Fill), publish]
+                .align_y(iced::Center)
+                .width(Length::Fill)
+                .into()
+        } else {
+            column![title, publish]
+                .spacing(tokens.spacing.gap_sm)
+                .into()
+        };
+    let mut header = column![heading].spacing(tokens.spacing.gap_sm);
+    if let Some(status) =
+        status_line(state, ctx.i18n).or_else(|| partial_count_line(state, ctx.i18n))
+    {
+        header = header.push(
+            text(status)
+                .size(tokens.typography.body)
+                .color(Color::from(tokens.colors.text_dim)),
+        );
+    }
+    let content = if state.is_loaded_and_empty() {
+        route_state::view(
             RouteState::new(
                 Glyph::Icon(assets::icons::package_open()),
                 Tone::Quiet,
@@ -22,42 +62,15 @@ pub fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
                 ctx.i18n.tr("my-workshop-empty-body"),
             ),
             ctx,
-        );
-    }
-
-    let grid = addon_grid::view(state.grid(), ctx.tokens, GRID_KEY).map(Message::Grid);
-    if let Some(header) = header_line(state, ctx) {
-        column![header, grid]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .spacing(ctx.tokens.spacing.gap)
-            .into()
+        )
     } else {
-        column![grid]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
-}
-
-fn header_line<'a>(state: &State, ctx: ViewCtx<'a>) -> Option<Element<'a, Message>> {
-    let tokens = ctx.tokens;
-    let i18n = ctx.i18n;
-    if state.loaded_count() == 0 {
-        return status_line(state, i18n).map(|status| {
-            text(status)
-                .size(tokens.typography.body)
-                .color(Color::from(tokens.colors.text_dim))
-                .into()
-        });
-    }
-
-    partial_count_line(state, i18n).map(|count| {
-        text(count)
-            .size(tokens.typography.title_lg)
-            .color(Color::from(tokens.colors.text))
-            .into()
-    })
+        addon_grid::view(state.grid(), ctx.tokens, GRID_KEY).map(Message::Grid)
+    };
+    column![header, content]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .spacing(tokens.spacing.gap)
+        .into()
 }
 
 fn partial_count_line(state: &State, i18n: &I18n) -> Option<String> {

@@ -639,3 +639,38 @@ models-qc-loading = QC 불러오는 중…
 
 file-preview-model-lod = 세부 수준
 file-preview-model-lod-option = 단계 {$index}
+
+# About
+settings-tab-about = 정보
+settings-about-description = Garry’s Mod 애드온을 게시하고 관리하고 미리 보세요.
+settings-about-github = GitHub에서 gmpublished 보기
+settings-about-debug-title = 진단 정보
+settings-about-debug-description = 앱 버전, 운영 체제, 설치 형식 및 그래픽 정보입니다.
+settings-about-copy-debug = 진단 정보 복사
+settings-about-copied = 복사됨
+settings-about-debug-show = 진단 정보 보기
+settings-about-debug-hide = 진단 정보 숨기기
+settings-about-debug-loading = 시스템 정보를 수집하는 중…
+settings-about-debug-failed = 진단 정보를 수집하지 못했습니다.
+settings-about-debug-retry = 다시 시도
+settings-about-credits = 만든 사람들
+settings-about-upstream = William Venner가 만든 gmpublisher의 네이티브 포크입니다.
+settings-about-maintainers = Charles Mills와 오픈 소스 기여자들이 Rust와 Iced로 만들었습니다.
+settings-about-license = 라이선스 (GNU GPL v3)
+settings-about-notices = 타사 고지 사항
+settings-about-releases = 릴리스 노트
+
+settings-display-heading = 화면
+settings-display-spacing = 간격
+settings-display-comfortable = 여유롭게
+settings-display-compact = 촘촘하게
+settings-display-text-size = 글자 크기
+settings-display-reset-text = 글자 크기 초기화
+settings-display-reset = 화면 설정 초기화
+settings-display-sample-heading = 편안하게 사용하세요
+settings-display-sample-body = 콘텐츠를 유지하면서 글자와 컨트롤이 함께 조정됩니다.
+settings-display-sample-supporting = 간격과 글자 크기는 별도로 설정할 수 있습니다.
+settings-display-colors = 강조 색상
+
+settings-display-reduce-motion = 동작 줄이기
+settings-display-reduce-motion-hint = 레이아웃 변경, 메뉴 및 대화 상자에 전환 효과를 사용하지 않습니다.

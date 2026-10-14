@@ -1,7 +1,7 @@
-//! Origin-scaled content that can render through the overlay pass.
+//! Origin-scaled and translated content rendered through the overlay pass.
 //!
 //! Adapted from `iced_widget` 0.14.2 `float.rs` (MIT). Deltas: lift whenever
-//! `scale != 1.0`, allow overshoot, drop shadow styling, and let callers
+//! the transform is active, allow overshoot, drop shadow styling, and let callers
 //! disable all child interactivity while still drawing the content.
 
 use iced::advanced::widget::{Operation, Tree, tree};
@@ -21,6 +21,7 @@ pub struct Scaled<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
     scale: f32,
     origin: Origin,
     interactive: bool,
+    translation: Vector,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -44,6 +45,7 @@ impl<'a, Message, Theme, Renderer> Scaled<'a, Message, Theme, Renderer> {
             scale: 1.0,
             origin: Origin::Center,
             interactive: true,
+            translation: Vector::ZERO,
         }
     }
 
@@ -66,8 +68,16 @@ impl<'a, Message, Theme, Renderer> Scaled<'a, Message, Theme, Renderer> {
         self
     }
 
+    pub(crate) fn translation(mut self, translation: Vector) -> Self {
+        if translation.x.is_finite() && translation.y.is_finite() {
+            self.translation = translation;
+        }
+        self
+    }
+
     fn lifts_to_overlay(&self) -> bool {
-        !is_invisible(self.scale) && (self.scale - 1.0).abs() > f32::EPSILON
+        !is_invisible(self.scale)
+            && ((self.scale - 1.0).abs() > f32::EPSILON || self.translation != Vector::ZERO)
     }
 }
 
@@ -153,7 +163,7 @@ where
         let bounds = layout.bounds();
 
         if self.lifts_to_overlay() {
-            // While scaled, content uses the overlay layer and can draw above
+            // While transformed, content uses the overlay layer and can draw above
             // sibling overlays. At scale 1 it returns to normal paint order.
             let origin = match self.origin {
                 Origin::Center => (
@@ -163,10 +173,11 @@ where
                 Origin::BottomLeft => (bounds.x, bounds.y + bounds.height),
             };
             let transformed_origin = (origin.0 + translation.x, origin.1 + translation.y);
-            let transformation =
-                Transformation::translate(transformed_origin.0, transformed_origin.1)
-                    * Transformation::scale(self.scale)
-                    * Transformation::translate(-origin.0, -origin.1);
+            let transformation = Transformation::translate(
+                transformed_origin.0 + self.translation.x,
+                transformed_origin.1 + self.translation.y,
+            ) * Transformation::scale(self.scale)
+                * Transformation::translate(-origin.0, -origin.1);
 
             Some(overlay::Element::new(Box::new(Overlay {
                 scaled: self,

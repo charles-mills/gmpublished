@@ -12,7 +12,7 @@ use crate::widgets::icon::svg_icon;
 use crate::{assets, widgets};
 
 use super::Message;
-use super::state::{Outcome, State, TOAST_GAP, TOAST_HEIGHT, Toast};
+use super::state::{Outcome, State, TOAST_HEIGHT, Toast};
 
 const WIDTH_RATIO: f32 = 0.45;
 const FALLBACK_WIDTH: f32 = 500.0;
@@ -30,19 +30,31 @@ pub fn view<'a>(
         return None;
     }
 
+    let tokens = *ctx.tokens;
     let width = if viewport_size.width > 0.0 {
-        viewport_size.width * WIDTH_RATIO
+        (viewport_size.width * WIDTH_RATIO)
+            .max(FALLBACK_WIDTH * tokens.text_scale())
+            .min(760.0 * tokens.text_scale())
+            .min((viewport_size.width - tokens.spacing.pad * 2.0).max(1.0))
     } else {
         FALLBACK_WIDTH
     };
+    let toast_gap = tokens.spacing.gap;
+    let toast_height = tokens
+        .row_height(TOAST_HEIGHT)
+        .max(tokens.typography.body * 2.6 + tokens.spacing.pad_sm * 2.0);
 
-    let max_visible = State::max_visible(viewport_size.height);
+    let max_visible = State::max_visible(viewport_size.height).min(
+        (viewport_size.height * 0.4 / (toast_height + toast_gap))
+            .floor()
+            .max(1.0) as usize,
+    );
     let visible = state
         .toasts()
         .iter()
         .skip(state.toasts().len().saturating_sub(max_visible));
 
-    let mut cards = column![].spacing(TOAST_GAP).align_x(Alignment::Center);
+    let mut cards = column![].spacing(toast_gap).align_x(Alignment::Center);
     for toast in visible {
         cards = cards.push(card(toast, ctx, width, now));
     }
@@ -53,7 +65,7 @@ pub fn view<'a>(
             .height(Length::Fill)
             .align_x(alignment::Horizontal::Center)
             .align_y(alignment::Vertical::Bottom)
-            .padding(Padding::ZERO.bottom(TOAST_GAP))
+            .padding(Padding::ZERO.bottom(toast_gap))
             .into(),
     )
 }
@@ -100,30 +112,40 @@ fn card<'a>(toast: &'a Toast, ctx: ViewCtx<'a>, width: f32, now: Instant) -> Ele
             .size(tokens.typography.body)
             .color(faded_text)
             .shaping(TextShaping::Advanced)
-            .wrapping(Wrapping::None),
+            .width(Length::Fill)
+            .wrapping(Wrapping::WordOrGlyph),
     ]
-    .spacing(8.0)
+    .spacing(tokens.spacing.gap_sm)
     .align_y(Alignment::Center);
     layers = layers.push(
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(alignment::Horizontal::Center)
-            .align_y(alignment::Vertical::Center),
+            .align_y(alignment::Vertical::Center)
+            .padding(
+                Padding::ZERO
+                    .horizontal(tokens.space(CONTENT_PADDING))
+                    .right(
+                        tokens.space(CONTENT_PADDING)
+                            + tokens.icon_size(ICON_SIZE)
+                            + tokens.spacing.gap,
+                    ),
+            ),
     );
 
     if toast.cancellable() {
         let task_id = toast.task_id();
         let cancel = button(
             svg(assets::icons::cross())
-                .width(Length::Fixed(ICON_SIZE))
-                .height(Length::Fixed(ICON_SIZE))
+                .width(Length::Fixed(tokens.icon_size(ICON_SIZE)))
+                .height(Length::Fixed(tokens.icon_size(ICON_SIZE)))
                 .style(move |_, _| svg::Style {
                     color: Some(faded_text),
                 }),
         )
         .on_press(Message::CancelPressed(task_id))
-        .padding(0.0)
+        .padding(tokens.spacing.pad_xs)
         .style(move |_, _| cancel_button_style(faded_text));
         layers = layers.push(
             container(cancel)
@@ -131,16 +153,22 @@ fn card<'a>(toast: &'a Toast, ctx: ViewCtx<'a>, width: f32, now: Instant) -> Ele
                 .height(Length::Fill)
                 .align_x(alignment::Horizontal::Right)
                 .align_y(alignment::Vertical::Center)
-                .padding(Padding::ZERO.right(CONTENT_PADDING)),
+                .padding(Padding::ZERO.right(tokens.space(CONTENT_PADDING))),
         );
     }
 
-    let height = (TOAST_HEIGHT * presence).max(1.0);
-    container(layers)
+    let height = tokens
+        .row_height(TOAST_HEIGHT)
+        .max(tokens.typography.body * 2.6 + tokens.spacing.pad_sm * 2.0);
+    let content = container(layers)
         .width(Length::Fixed(width))
         .height(Length::Fixed(height))
         .clip(true)
-        .style(move |_| card_style(&tokens, background, presence))
+        .style(move |_| card_style(&tokens, background, presence));
+    container(content)
+        .height(Length::Fixed((height * presence).max(1.0)))
+        .align_y(alignment::Vertical::Bottom)
+        .clip(true)
         .into()
 }
 
@@ -153,10 +181,30 @@ fn status_icon<'a>(
     let tokens = *tokens;
     match toast.outcome() {
         Outcome::Pending => {
-            widgets::spinner::spinner(&tokens, toast.spinner_elapsed(now), ICON_SIZE)
+            let mut spinner_tokens = tokens;
+            spinner_tokens.colors.text_on_neutral = crate::theme::motion::scaled_alpha(
+                spinner_tokens.colors.text_on_neutral,
+                toast.presence(now),
+            );
+            widgets::spinner::spinner(
+                &spinner_tokens,
+                if tokens.motion.enabled() {
+                    toast.spinner_elapsed(now)
+                } else {
+                    0.0
+                },
+                tokens.icon_size(ICON_SIZE),
+            )
         }
-        Outcome::Finished { .. } => svg_icon(assets::icons::check(), color, ICON_SIZE).into(),
-        Outcome::Error { .. } => svg_icon(assets::icons::circle_alert(), color, ICON_SIZE).into(),
+        Outcome::Finished { .. } => {
+            svg_icon(assets::icons::check(), color, tokens.icon_size(ICON_SIZE)).into()
+        }
+        Outcome::Error { .. } => svg_icon(
+            assets::icons::circle_alert(),
+            color,
+            tokens.icon_size(ICON_SIZE),
+        )
+        .into(),
     }
 }
 

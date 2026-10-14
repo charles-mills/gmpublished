@@ -38,7 +38,7 @@ pub fn view<'a>(
 
     let body = column![
         header(state, ctx),
-        language_and_title(state, ctx),
+        language_and_title(state, ctx, modal_size.width - tokens.spacing.pad * 2.0),
         feedback(state, ctx),
         toolbar(state, ctx),
         workspace(state, ctx),
@@ -126,7 +126,7 @@ fn header<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
         back,
         identity,
         container(Space::new()).width(Length::Fill),
-        trailing,
+        trailing.wrap(),
     ]
     .spacing(tokens.spacing.gap_sm)
     .align_y(Center)
@@ -316,7 +316,7 @@ fn toolbar<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
     let i18n = ctx.i18n;
     let enabled = !state.loading() && !state.load_failed() && !state.saving();
 
-    let mut bar = row![].spacing(2.0).align_y(Center);
+    let mut bar = row![].spacing(tokens.space(2.0)).align_y(Center);
     let groups = tools();
     let group_count = groups.len();
     for (index, group) in groups.into_iter().enumerate() {
@@ -333,7 +333,7 @@ fn toolbar<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
                     icon(handle, tokens.colors.text.into(), tokens.dims.icon_size).into()
                 }
             };
-            let control = button(container(glyph).center_x(Length::Fixed(26.0)))
+            let control = button(container(glyph).center_x(Length::Fixed(tokens.row_height(26.0))))
                 .on_press_maybe(enabled.then_some(Message::ToolbarApplied(tool.action)))
                 .padding(tokens.spacing.pad_xs)
                 .style(move |_, status| theme::styles::ghost_button(&tokens, status));
@@ -356,7 +356,7 @@ fn toolbar<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
             bar = bar.push(Space::new().width(tokens.spacing.gap_xs));
         }
     }
-    bar.into()
+    bar.wrap().into()
 }
 
 fn workspace<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
@@ -498,21 +498,21 @@ fn preview_pane<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
     };
 
     let rendered =
-        bbcode::steam_view(document, revealed, state, ctx.i18n).map(|event| match event {
+        bbcode::steam_view(document, revealed, state, ctx.i18n, &tokens).map(|event| match event {
             bbcode::Event::OpenLink(url) => Message::LinkOpenRequested(url),
             bbcode::Event::ToggleSpoiler(id) => Message::SpoilerToggled(id),
         });
 
     let column = container(rendered)
-        .width(Length::Fixed(bbcode::STEAM_DESCRIPTION_WIDTH))
+        .width(Length::Fill)
+        .max_width(bbcode::STEAM_DESCRIPTION_WIDTH * tokens.text_scale())
         .padding(tokens.spacing.pad);
 
     container(
         scrollable(container(column).center_x(Length::Fill))
-            .direction(scrollable::Direction::Both {
-                vertical: scrollable::Scrollbar::default(),
-                horizontal: scrollable::Scrollbar::default(),
-            })
+            .direction(scrollable::Direction::Vertical(
+                theme::styles::vertical_scrollbar(&tokens),
+            ))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_, status| theme::styles::scrollbar(&tokens, status)),
@@ -529,7 +529,7 @@ fn preview_pane<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> 
     .into()
 }
 
-fn language_and_title<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
+fn language_and_title<'a>(state: &'a State, ctx: ViewCtx<'a>, width: f32) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let mut title = text_input(
         &ctx.i18n.tr("prepare-publish-title-placeholder"),
@@ -581,15 +581,20 @@ fn language_and_title<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Mes
             &tokens,
         )
     };
-    row![
-        container(language)
-            .id("workshop-language")
-            .width(Length::Fixed(240.0)),
-        title
-    ]
-    .spacing(tokens.spacing.gap_sm)
-    .align_y(Center)
-    .into()
+    let language = container(language).id("workshop-language");
+    if width < 540.0 * tokens.text_scale() + tokens.spacing.gap_sm {
+        column![language.width(Length::Fill), title]
+            .spacing(tokens.spacing.gap_sm)
+            .into()
+    } else {
+        row![
+            language.width(Length::Fixed(240.0 * tokens.text_scale())),
+            title
+        ]
+        .spacing(tokens.spacing.gap_sm)
+        .align_y(Center)
+        .into()
+    }
 }
 
 fn feedback<'a>(state: &State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
@@ -722,5 +727,22 @@ mod tests {
                 Message::EnterPressed | Message::ToolbarApplied(_) | Message::Undo | Message::Redo
             )));
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "opt-in real UI screenshots"]
+fn capture_editor_display_fixtures() {
+    let mut state = State::default();
+    state.open_draft("Workshop description".into(), "[h1]Welcome to rRadio[/h1]\n\nA configurable radio for your server.\n\n[b]Features[/b]\n[list][*]Boombox and car radio[*]日本語 · 中文 · 한국어[*]Configurable station lists[/list]\n[code]print(\"Hello, world!\")[/code]");
+    let i18n = crate::i18n::I18n::for_locale(Some("en"));
+    for (density, percent, size, name) in crate::test_support::capture_display_cases() {
+        let tokens = theme::Tokens::dark().with_display_preferences(density, percent);
+        crate::test_support::capture_ui_surface(
+            &format!("editor-{name}"),
+            size,
+            view(&state, ViewCtx::new(&tokens, &i18n), size, 0.0),
+        );
     }
 }

@@ -1,7 +1,9 @@
+use std::time::{Duration, Instant};
+
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, overlay, renderer};
 use iced::widget::{button, column, container, row, scrollable, svg, text};
-use iced::{Element, Event, Length, Padding, Point, Rectangle, Size, Vector, mouse};
+use iced::{Element, Event, Length, Padding, Rectangle, Size, Vector, mouse};
 
 use crate::assets;
 use crate::theme::{self, Tokens};
@@ -68,12 +70,14 @@ pub struct Geometry {
     /// panel's top stroke stack into a seam twice as heavy as the rest of the
     /// ring; overlapping them by exactly one width leaves a single line.
     pub seam: f32,
+    pub enter_duration: Duration,
 }
 
 pub fn geometry(rows: usize, metrics: Metrics, tokens: &Tokens) -> Geometry {
     Geometry {
         height: menu_height(rows, metrics),
         seam: tokens.dims.focus_border_width,
+        enter_duration: tokens.motion.context_menu_enter_duration(),
     }
 }
 
@@ -215,6 +219,31 @@ fn face<'a, Message: 'a>(
 #[derive(Default)]
 struct State {
     is_open: bool,
+    opening_started: Option<Instant>,
+    offset: f32,
+}
+
+impl State {
+    fn open(&mut self, now: Instant, duration: Duration) {
+        self.is_open = true;
+        self.opening_started = (!duration.is_zero()).then_some(now);
+        self.offset = if duration.is_zero() { 0.0 } else { 4.0 };
+    }
+
+    fn tick(&mut self, now: Instant, duration: Duration) -> bool {
+        let Some(started) = self.opening_started else {
+            return false;
+        };
+        let previous_offset = self.offset;
+        let elapsed = now.saturating_duration_since(started);
+        if duration.is_zero() || elapsed >= duration {
+            self.opening_started = None;
+            self.offset = 0.0;
+        } else {
+            self.offset = 4.0 * (1.0 - elapsed.as_secs_f32() / duration.as_secs_f32()).powi(3);
+        }
+        self.offset != previous_offset || self.opening_started.is_none()
+    }
 }
 
 const CLOSED: usize = 0;
@@ -290,6 +319,11 @@ where
     }
 
     fn diff(&self, tree: &mut Tree) {
+        if self.geometry.enter_duration.is_zero() {
+            let state = tree.state.downcast_mut::<State>();
+            state.opening_started = None;
+            state.offset = 0.0;
+        }
         tree.diff_children(&[&self.closed, &self.open, &self.menu]);
     }
 
@@ -396,7 +430,14 @@ where
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
         ) && cursor.is_over(layout.bounds())
         {
-            tree.state.downcast_mut::<State>().is_open = !open;
+            let state = tree.state.downcast_mut::<State>();
+            if open {
+                state.is_open = false;
+                state.opening_started = None;
+                state.offset = 0.0;
+            } else {
+                state.open(Instant::now(), self.geometry.enter_duration);
+            }
             shell.capture_event();
             shell.invalidate_layout();
             shell.request_redraw();
@@ -454,26 +495,46 @@ struct Menu<'a, 'b, Message, Theme, Renderer> {
 }
 
 impl<Message, Theme, Renderer> Menu<'_, '_, Message, Theme, Renderer> {
-    /// Available menu bounds below the control, at its width.
-    /// Prefers the containing panel but may spill beyond it to fit the menu.
-    fn limits(&self, window: Size) -> layout::Limits {
-        let top = self.top();
-        let in_panel = (self.limit.y + self.limit.height) - top;
-        let height = self.geometry.height;
-        let room = if height <= in_panel {
-            in_panel
-        } else {
-            window.height - top
-        };
-
-        layout::Limits::new(
-            Size::new(self.anchor.width, 0.0),
-            Size::new(self.anchor.width, height.min(room).max(0.0)),
-        )
+    fn bounds(&self, window: Size) -> Rectangle {
+        menu_bounds(self.anchor, self.limit, self.geometry, window)
     }
+}
 
-    fn top(&self) -> f32 {
-        self.anchor.y + self.anchor.height - self.geometry.seam
+/// Prefer the containing panel, then flip above the field when the bottom
+/// edge cannot accommodate the menu. Always constrain the scroll viewport.
+fn menu_bounds(anchor: Rectangle, limit: Rectangle, geometry: Geometry, window: Size) -> Rectangle {
+    let below_top = anchor.y + anchor.height - geometry.seam;
+    let below = (window.height - below_top).max(0.0);
+    let above = (anchor.y + geometry.seam).max(0.0);
+    let in_panel = (limit.y + limit.height - below_top).max(0.0);
+    let open_above = geometry.height > in_panel && geometry.height > below && above > below;
+    let height = geometry.height.min(if open_above { above } else { below });
+    let width = anchor.width.min(window.width).max(0.0);
+    Rectangle {
+        x: anchor.x.clamp(0.0, (window.width - width).max(0.0)),
+        y: if open_above {
+            (anchor.y + geometry.seam - height).max(0.0)
+        } else {
+            below_top.max(0.0)
+        },
+        width,
+        height,
+    }
+}
+
+fn opening_offset(panel: Rectangle, anchor: Rectangle, remaining: f32) -> f32 {
+    if panel.y < anchor.y {
+        remaining
+    } else {
+        -remaining
+    }
+}
+
+fn clipped_cursor(cursor: mouse::Cursor, bounds: Rectangle) -> mouse::Cursor {
+    if cursor.is_over(bounds) {
+        cursor
+    } else {
+        mouse::Cursor::Unavailable
     }
 }
 
@@ -483,13 +544,16 @@ where
     Renderer: renderer::Renderer,
 {
     fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
-        let limits = self.limits(bounds);
-        let node = self
+        let placement = self.bounds(bounds);
+        let limits = layout::Limits::new(Size::new(placement.width, 0.0), placement.size());
+        let child = self
             .content
             .as_widget_mut()
             .layout(self.tree, renderer, &limits);
-
-        node.move_to(Point::new(self.anchor.x, self.top()))
+        let size = child.size();
+        let offset = opening_offset(placement, self.anchor, self.state.offset);
+        layout::Node::with_children(size, vec![child.move_to(iced::Point::new(0.0, offset))])
+            .move_to(placement.position())
     }
 
     fn draw(
@@ -500,21 +564,26 @@ where
         layout: Layout<'_>,
         cursor: mouse::Cursor,
     ) {
-        self.content.as_widget().draw(
-            self.tree,
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            &layout.bounds(),
-        );
+        renderer.with_layer(layout.bounds(), |renderer| {
+            self.content.as_widget().draw(
+                self.tree,
+                renderer,
+                theme,
+                style,
+                layout.children().next().unwrap(),
+                cursor,
+                &layout.bounds(),
+            );
+        });
     }
 
     fn operate(&mut self, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
-        self.content
-            .as_widget_mut()
-            .operate(self.tree, layout, renderer, operation);
+        self.content.as_widget_mut().operate(
+            self.tree,
+            layout.children().next().unwrap(),
+            renderer,
+            operation,
+        );
     }
 
     fn update(
@@ -527,6 +596,14 @@ where
         shell: &mut Shell<'_, Message>,
     ) {
         let bounds = layout.bounds();
+        if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
+            if self.state.tick(*now, self.geometry.enter_duration) {
+                shell.invalidate_layout();
+            }
+            if self.state.opening_started.is_some() {
+                shell.request_redraw_at(*now + Duration::from_millis(16));
+            }
+        }
 
         // A local shell tells us whether an option was actually chosen: only
         // then does the menu close. Pressing the scrollbar publishes nothing,
@@ -534,13 +611,21 @@ where
         let mut messages = Vec::new();
         let mut inner = Shell::new(&mut messages);
         self.content.as_widget_mut().update(
-            self.tree, event, layout, cursor, renderer, clipboard, &mut inner, &bounds,
+            self.tree,
+            event,
+            layout.children().next().unwrap(),
+            clipped_cursor(cursor, bounds),
+            renderer,
+            clipboard,
+            &mut inner,
+            &bounds,
         );
         let chose_option = !inner.is_empty();
         shell.merge(inner, |message| message);
 
         if chose_option {
             self.state.is_open = false;
+            self.state.opening_started = None;
             shell.invalidate_layout();
             shell.request_redraw();
             return;
@@ -555,6 +640,7 @@ where
 
         if dismissed {
             self.state.is_open = false;
+            self.state.opening_started = None;
             shell.capture_event();
             shell.invalidate_layout();
             shell.request_redraw();
@@ -569,8 +655,8 @@ where
     ) -> mouse::Interaction {
         self.content.as_widget().mouse_interaction(
             self.tree,
-            layout,
-            cursor,
+            layout.children().next().unwrap(),
+            clipped_cursor(cursor, layout.bounds()),
             &layout.bounds(),
             renderer,
         )
@@ -591,9 +677,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use iced::Padding;
+    use std::time::{Duration, Instant};
 
-    use super::{Metrics, menu_height, row_height};
+    use iced::{Padding, Point, Rectangle, Size, mouse};
+
+    use super::{
+        Geometry, Metrics, State, clipped_cursor, menu_bounds, menu_height, opening_offset,
+        row_height,
+    };
 
     const METRICS: Metrics = Metrics {
         text_size: 14.0,
@@ -608,6 +699,127 @@ mod tests {
     };
 
     #[test]
+    fn dropdown_redraw_replays_converge_and_keep_the_next_frame_scheduled() {
+        use iced_test::core::renderer::Headless as _;
+        use iced_test::runtime::{UserInterface, user_interface};
+        let mut tokens = crate::theme::Tokens::dark();
+        // Font initialization must not consume the synthetic animation interval.
+        tokens.motion.context_menu_enter_ms = 60_000;
+        let element = super::field(
+            "First".into(),
+            vec![
+                super::Row {
+                    label: "First".into(),
+                    on_select: 1u8,
+                    selected: true,
+                },
+                super::Row {
+                    label: "Second".into(),
+                    on_select: 2,
+                    selected: false,
+                },
+            ],
+            METRICS,
+            super::Chevron::Shown,
+            &tokens,
+        );
+        let mut renderer = futures::executor::block_on(iced::Renderer::new(
+            iced::Font::default(),
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut ui = UserInterface::build(
+            element,
+            Size::new(300.0, 300.0),
+            user_interface::Cache::default(),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                mouse::Button::Left,
+            ))],
+            mouse::Cursor::Available(Point::new(20.0, 20.0)),
+            &mut renderer,
+            &mut iced_test::core::clipboard::Null,
+            &mut messages,
+        );
+        let now = Instant::now() + Duration::from_millis(40);
+        let event = iced::Event::Window(iced::window::Event::RedrawRequested(now));
+        for replay in 0..4 {
+            let (state, _) = ui.update(
+                std::slice::from_ref(&event),
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut iced_test::core::clipboard::Null,
+                &mut messages,
+            );
+            assert_eq!(state.has_layout_changed(), replay == 0);
+            assert!(
+                matches!(state, user_interface::State::Updated { redraw_request, .. }
+                if redraw_request <= iced::window::RedrawRequest::At(now + Duration::from_millis(16))),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_flips_above_a_field_near_the_bottom_of_the_window() {
+        let anchor = Rectangle {
+            x: 600.0,
+            y: 520.0,
+            width: 250.0,
+            height: 40.0,
+        };
+        let window = Size::new(800.0, 600.0);
+        let bounds = menu_bounds(
+            anchor,
+            Rectangle::with_size(window),
+            Geometry {
+                height: 300.0,
+                seam: 2.0,
+                enter_duration: Duration::from_millis(120),
+            },
+            window,
+        );
+        assert_eq!(bounds.y, 222.0);
+        assert_eq!(bounds.x, 550.0);
+        assert_eq!(bounds.height, 300.0);
+        assert!(bounds.y + bounds.height <= anchor.y + 2.0);
+    }
+
+    #[test]
+    fn oversized_menu_has_a_reachable_scrolling_viewport() {
+        let anchor = Rectangle {
+            x: 10.0,
+            y: 200.0,
+            width: 1000.0,
+            height: 60.0,
+        };
+        let window = Size::new(800.0, 600.0);
+        let bounds = menu_bounds(
+            anchor,
+            Rectangle::with_size(window),
+            Geometry {
+                height: 1000.0,
+                seam: 2.0,
+                enter_duration: Duration::from_millis(120),
+            },
+            window,
+        );
+        assert_eq!(
+            bounds,
+            Rectangle {
+                x: 0.0,
+                y: 258.0,
+                width: 800.0,
+                height: 342.0
+            }
+        );
+    }
+
+    #[test]
     fn row_height_covers_padding_and_the_full_text_line() {
         assert_eq!(row_height(METRICS), 22.0 + 14.0 * 1.3);
     }
@@ -618,5 +830,57 @@ mod tests {
 
         assert_eq!(menu_height(3, METRICS), 3.0 * row_height(METRICS) + inset);
         assert_eq!(menu_height(20, METRICS), 8.0 * row_height(METRICS) + inset);
+    }
+
+    #[test]
+    fn opening_settles_within_four_pixels_and_stops_requesting_frames() {
+        let mut state = State::default();
+        let now = Instant::now();
+        let duration = Duration::from_millis(120);
+        state.open(now, duration);
+        assert_eq!(state.offset, 4.0);
+        assert!(state.tick(now + duration / 2, duration));
+        assert!((state.offset - 0.5).abs() < 0.001);
+        assert!(state.tick(now + duration, duration));
+        assert_eq!(state.offset, 0.0);
+        assert!(!state.tick(now + duration * 2, duration));
+        assert!(state.is_open);
+    }
+
+    #[test]
+    fn reduced_motion_opens_without_a_frame_gate() {
+        let mut state = State::default();
+        let now = Instant::now();
+        state.open(now, Duration::ZERO);
+        assert!(state.is_open);
+        assert_eq!(state.offset, 0.0);
+        assert!(!state.tick(now, Duration::ZERO));
+    }
+
+    #[test]
+    fn motion_moves_away_from_anchor_without_expanding_pointer_bounds() {
+        let anchor = Rectangle {
+            x: 20.0,
+            y: 200.0,
+            width: 200.0,
+            height: 40.0,
+        };
+        let below = Rectangle {
+            y: 238.0,
+            height: 100.0,
+            ..anchor
+        };
+        let above = Rectangle {
+            y: 102.0,
+            height: 100.0,
+            ..anchor
+        };
+        assert_eq!(opening_offset(below, anchor, 4.0), -4.0);
+        assert_eq!(opening_offset(above, anchor, 4.0), 4.0);
+        assert_eq!(opening_offset(above, anchor, 0.0), 0.0);
+        let inside = mouse::Cursor::Available(Point::new(30.0, 239.0));
+        assert_eq!(clipped_cursor(inside, below), inside);
+        let clipped = mouse::Cursor::Available(Point::new(30.0, 236.0));
+        assert_eq!(clipped_cursor(clipped, below), mouse::Cursor::Unavailable);
     }
 }

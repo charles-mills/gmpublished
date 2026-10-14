@@ -8,47 +8,47 @@ mapped_enum_with_all! {
     pub enum SilkIcon {
         Bricks => (
                 "bricks",
-                include_bytes!("../../ui/images/silkicons/bricks.png"),
+                include_bytes!("../../ui/icons/silkicons/bricks.png"),
             ),
         Comments => (
                 "comments",
-                include_bytes!("../../ui/images/silkicons/comments.png"),
+                include_bytes!("../../ui/icons/silkicons/comments.png"),
             ),
         Folder => (
                 "folder",
-                include_bytes!("../../ui/images/silkicons/folder.png"),
+                include_bytes!("../../ui/icons/silkicons/folder.png"),
             ),
-        Font => ("font", include_bytes!("../../ui/images/silkicons/font.png")),
-        Map => ("map", include_bytes!("../../ui/images/silkicons/map.png")),
+        Font => ("font", include_bytes!("../../ui/icons/silkicons/font.png")),
+        Map => ("map", include_bytes!("../../ui/icons/silkicons/map.png")),
         PageWhite => (
                 "page_white",
-                include_bytes!("../../ui/images/silkicons/page_white.png"),
+                include_bytes!("../../ui/icons/silkicons/page_white.png"),
             ),
         PageWhiteText => (
                 "page_white_text",
-                include_bytes!("../../ui/images/silkicons/page_white_text.png"),
+                include_bytes!("../../ui/icons/silkicons/page_white_text.png"),
             ),
         PageWhiteWrench => (
                 "page_white_wrench",
-                include_bytes!("../../ui/images/silkicons/page_white_wrench.png"),
+                include_bytes!("../../ui/icons/silkicons/page_white_wrench.png"),
             ),
         Photo => (
                 "photo",
-                include_bytes!("../../ui/images/silkicons/photo.png"),
+                include_bytes!("../../ui/icons/silkicons/photo.png"),
             ),
         PictureLink => (
                 "picture_link",
-                include_bytes!("../../ui/images/silkicons/picture_link.png"),
+                include_bytes!("../../ui/icons/silkicons/picture_link.png"),
             ),
         ScriptCode => (
                 "script_code",
-                include_bytes!("../../ui/images/silkicons/script_code.png"),
+                include_bytes!("../../ui/icons/silkicons/script_code.png"),
             ),
         Sound => (
                 "sound",
-                include_bytes!("../../ui/images/silkicons/sound.png"),
+                include_bytes!("../../ui/icons/silkicons/sound.png"),
             ),
-        Wand => ("wand", include_bytes!("../../ui/images/silkicons/wand.png")),
+        Wand => ("wand", include_bytes!("../../ui/icons/silkicons/wand.png")),
     }
     bytes -> (&'static str, &'static [u8])
 }

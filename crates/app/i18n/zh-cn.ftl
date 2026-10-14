@@ -639,3 +639,38 @@ models-qc-loading = 正在加载 QC…
 
 file-preview-model-lod = 细节级别
 file-preview-model-lod-option = 级别 {$index}
+
+# About
+settings-tab-about = 关于
+settings-about-description = 发布、管理和预览 Garry’s Mod 插件。
+settings-about-github = 在 GitHub 上查看 gmpublished
+settings-about-debug-title = 诊断信息
+settings-about-debug-description = 应用版本、操作系统、安装方式和图形信息。
+settings-about-copy-debug = 复制诊断信息
+settings-about-copied = 已复制
+settings-about-debug-show = 查看诊断信息
+settings-about-debug-hide = 隐藏诊断信息
+settings-about-debug-loading = 正在收集系统信息…
+settings-about-debug-failed = 无法收集诊断信息。
+settings-about-debug-retry = 重试
+settings-about-credits = 致谢
+settings-about-upstream = 基于 William Venner 开发的 gmpublisher 的原生分支。
+settings-about-maintainers = 由 Charles Mills 和开源贡献者使用 Rust 和 Iced 开发。
+settings-about-license = 许可证 (GNU GPL v3)
+settings-about-notices = 第三方声明
+settings-about-releases = 版本说明
+
+settings-display-heading = 显示
+settings-display-spacing = 间距
+settings-display-comfortable = 舒适
+settings-display-compact = 紧凑
+settings-display-text-size = 文字大小
+settings-display-reset-text = 重置文字大小
+settings-display-reset = 重置显示偏好
+settings-display-sample-heading = 调整到舒适的状态
+settings-display-sample-body = 文字和控件会一起调整，同时保留您的内容。
+settings-display-sample-supporting = 间距和文字大小可独立设置。
+settings-display-colors = 强调色
+
+settings-display-reduce-motion = 减少动态效果
+settings-display-reduce-motion-hint = 布局更改、菜单和对话框立即切换。

@@ -40,6 +40,7 @@ pub struct State {
     snapshot: Option<LibrarySnapshot>,
     snapshot_error: Option<UiError>,
     scale_factor: f32,
+    text_scale: f32,
     pending_viewport: Option<RenderViewport>,
     last_completed_viewport: Option<RenderViewport>,
     projection_key: Option<LayoutProjectionKey>,
@@ -70,6 +71,7 @@ impl Default for State {
             snapshot: None,
             snapshot_error: None,
             scale_factor: 1.0,
+            text_scale: 1.0,
             pending_viewport: None,
             last_completed_viewport: None,
             projection_key: None,
@@ -244,6 +246,21 @@ impl State {
         self.project_current();
     }
 
+    pub(crate) fn set_text_scale(&mut self, scale: f32) {
+        let scale = if scale.is_finite() {
+            scale.clamp(0.9, 1.5)
+        } else {
+            1.0
+        };
+        if scale != self.text_scale {
+            self.text_scale = scale;
+            if let Some(layout) = self.layout.clone() {
+                self.labels = rasterize_labels_for(&layout, self.scale_factor, self.text_scale);
+                let _invalidation = self.invalidate_layers(LayerInvalidation::LABELS);
+            }
+        }
+    }
+
     pub(crate) fn set_scale_factor(&mut self, scale_factor: f32) -> bool {
         let bucket = bucketed_label_scale(scale_factor);
         if bucket.to_bits() == self.scale_factor.to_bits() {
@@ -261,7 +278,7 @@ impl State {
         let Some(layout) = self.layout.clone() else {
             return;
         };
-        self.labels = rasterize_labels_for(&layout, self.scale_factor);
+        self.labels = rasterize_labels_for(&layout, self.scale_factor, self.text_scale);
         let _invalidation = self.invalidate_layers(LayerInvalidation::LABELS);
     }
 
@@ -558,7 +575,7 @@ impl State {
                 self.thumbnail_plan = spatial_thumbnail_plan(&layout);
                 // Rasterize labels with the layout so live resizes never draw
                 // labels from an older layout.
-                self.labels = rasterize_labels_for(&layout, self.scale_factor);
+                self.labels = rasterize_labels_for(&layout, self.scale_factor, self.text_scale);
                 self.layout = Some(layout);
                 self.load_status = LoadStatus::Ready;
                 let _invalidation = self.invalidate_layers(LayerInvalidation::ALL);
@@ -637,9 +654,13 @@ pub fn visible_tag_labels<'a>(
         .filter(move |label| hidden_tag != Some(label.text.as_str()))
 }
 
-fn rasterize_labels_for(layout: &TreemapLayout, scale: f32) -> Vec<SizeAnalyzerLabelSprite> {
+fn rasterize_labels_for(
+    layout: &TreemapLayout,
+    scale: f32,
+    text_scale: f32,
+) -> Vec<SizeAnalyzerLabelSprite> {
     crate::media::size_analyzer_render::with_shared_label_context(|context| {
-        context.rasterize_layout_labels(layout, scale)
+        context.rasterize_layout_labels_with_text_scale(layout, scale, text_scale)
     })
 }
 
