@@ -289,6 +289,10 @@ mod tests {
     fn one_transparent_prop_can_straddle_a_separately_sorted_pane() {
         let make = |y| super::super::ModelVertex {
             position: Vec3::new(0.0, y, 0.0),
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
             normal: Vec3::new(0.0, 1.0, 0.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -296,6 +300,8 @@ mod tests {
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
         };
         let vertices = vec![
             make(300.0),
@@ -330,6 +336,10 @@ mod tests {
     fn shared_material_placements_keep_separate_ranges_and_cluster_membership() {
         let make = |z| super::super::ModelVertex {
             position: Vec3::new(0.0, 0.0, z),
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -337,6 +347,8 @@ mod tests {
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
         };
         let vertices = vec![
             make(300.0),
@@ -381,6 +393,10 @@ mod tests {
     fn skybox_material_batches_sort_individual_triangles_in_each_camera() {
         let make = |y| super::super::ModelVertex {
             position: Vec3::new(0.0, y, 0.0),
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
             normal: Vec3::new(0.0, 1.0, 0.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -388,6 +404,8 @@ mod tests {
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
         };
         let vertices = [
             make(100.0),
@@ -412,6 +430,7 @@ mod tests {
                 clip_plane: [0.0; 4],
                 medium_plane: [0.0; 4],
                 viewport: [0.0; 4],
+                raster_params: [0.0; 4],
             };
             uniforms.view_proj[1][3] = direction;
             let item = DrawItem {

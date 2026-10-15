@@ -20,6 +20,8 @@ pub struct MaterialTextureViews<'a> {
 pub struct MaterialUploadMode<'a> {
     pub unlit: Option<&'a crate::bridge::materials::UnlitMaterial>,
     pub surface: Option<&'a crate::bridge::materials::LightmappedMaterial>,
+    pub base_flags: Option<u32>,
+    pub base2_flags: Option<u32>,
     pub force_opaque: bool,
     pub render_mode: RenderMode,
     pub water: Option<&'a crate::bridge::materials::WaterMaterial>,
@@ -39,9 +41,18 @@ impl RenderResources {
             height: 1,
         }]];
         let frames = normal.map_or(fallback.as_slice(), |normal| normal.frames.as_slice());
+        Self::create_texture_frames_view(device, queue, frames, wgpu::TextureFormat::Rgba8Unorm)
+    }
+
+    pub(super) fn create_texture_frames_view(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frames: &[Vec<crate::bridge::materials::ResolvedTextureMip>],
+        format: wgpu::TextureFormat,
+    ) -> wgpu::TextureView {
         let base = &frames[0][0];
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("file_preview.water.normal_frames"),
+            label: Some("file_preview.material.texture_frames"),
             size: wgpu::Extent3d {
                 width: base.width,
                 height: base.height,
@@ -50,7 +61,7 @@ impl RenderResources {
             mip_level_count: frames[0].len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -160,6 +171,23 @@ impl RenderResources {
         label: &'static str,
         levels: &[TextureUploadLevel<'_>],
     ) -> wgpu::TextureView {
+        self.create_texture_view_from_levels_format(
+            device,
+            queue,
+            label,
+            levels,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        )
+    }
+
+    pub fn create_texture_view_from_levels_format(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &'static str,
+        levels: &[TextureUploadLevel<'_>],
+        format: wgpu::TextureFormat,
+    ) -> wgpu::TextureView {
         let fallback_level = TextureUploadLevel {
             rgba: WHITE_RGBA.as_slice(),
             width: 1,
@@ -192,7 +220,7 @@ impl RenderResources {
             mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -304,6 +332,106 @@ impl RenderResources {
             .with_water(mode.water)
             .with_mirror(mode.mirror);
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
+        use wgpu::util::DeviceExt;
+        let model_material = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("file_preview.model_material"),
+            contents: bytemuck::bytes_of(&super::model_lighting::ModelMaterialUniform::new(
+                mode.surface,
+            )),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let surface_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("file_preview.material.surface_uniform"),
+            contents: bytemuck::bytes_of(&super::surface::SurfaceUniform::new(
+                mode.surface,
+                mode.base_flags,
+                mode.base2_flags,
+            )),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let role_view = |source: Option<&crate::bridge::materials::LinearTextureFrames>,
+                         srgb: bool| {
+            source.map(|source| {
+                Self::create_texture_frames_view(
+                    device,
+                    queue,
+                    source.frames.as_slice(),
+                    if srgb {
+                        wgpu::TextureFormat::Rgba8UnormSrgb
+                    } else {
+                        wgpu::TextureFormat::Rgba8Unorm
+                    },
+                )
+            })
+        };
+        let detail = mode.surface.and_then(|surface| surface.detail.as_ref());
+        let detail_srgb = mode.surface.zip(detail).is_some_and(|(surface, _)| {
+            use crate::bridge::materials::SurfaceFamily;
+            if matches!(
+                surface.family,
+                SurfaceFamily::VertexLit | SurfaceFamily::Unlit
+            ) {
+                surface
+                    .effective_detail_mode()
+                    .is_some_and(|mode| mode != 0)
+            } else {
+                surface.effective_detail_mode() == Some(1)
+            }
+        });
+        let detail_view = role_view(
+            detail.and_then(|detail| detail.texture.as_deref()),
+            detail_srgb,
+        );
+        let blend_view = role_view(
+            mode.surface
+                .and_then(|surface| surface.blend_modulation.as_deref()),
+            false,
+        );
+        let emission_view = role_view(
+            mode.surface
+                .and_then(|surface| surface.emission.as_ref())
+                .and_then(|emission| emission.mask.as_deref()),
+            false,
+        );
+        let envmap = mode.surface.and_then(|surface| surface.envmap.as_deref());
+        let cube_view = envmap.and_then(|envmap| match &envmap.source {
+            crate::bridge::materials::EnvironmentMapSource::Named(cube) => {
+                Some(super::cubemap::create_view(device, queue, Some(cube)))
+            }
+            crate::bridge::materials::EnvironmentMapSource::LocalProbe => None,
+        });
+        let cube_sampler = super::cubemap::create_sampler(
+            device,
+            envmap
+                .and_then(|envmap| match &envmap.source {
+                    crate::bridge::materials::EnvironmentMapSource::Named(cube) => Some(cube.flags),
+                    crate::bridge::materials::EnvironmentMapSource::LocalProbe => None,
+                })
+                .unwrap_or(0),
+        );
+        let envmap_mask_view = role_view(
+            envmap.and_then(|envmap| envmap.mask_texture.as_deref()),
+            false,
+        );
+        let phong = mode.surface.and_then(|surface| surface.phong.as_deref());
+        let exponent_view = role_view(
+            phong
+                .and_then(|phong| phong.exponent_texture.as_ref())
+                .and_then(|texture| texture.texture.as_deref()),
+            false,
+        );
+        let diffuse_warp_view = role_view(
+            phong
+                .and_then(|phong| phong.diffuse_warp.as_ref())
+                .and_then(|texture| texture.texture.as_deref()),
+            false,
+        );
+        let specular_warp_view = role_view(
+            phong
+                .and_then(|phong| phong.specular_warp.as_ref())
+                .and_then(|texture| texture.texture.as_deref()),
+            false,
+        );
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.material_bind_group"),
             layout: &self.material_layout,
@@ -336,6 +464,70 @@ impl RenderResources {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(views.normal2),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: surface_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(
+                        detail_view.as_ref().unwrap_or(&self.surface_white),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(
+                        blend_view.as_ref().unwrap_or(&self.surface_white),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(
+                        emission_view.as_ref().unwrap_or(&self.surface_white),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(
+                        cube_view.as_ref().unwrap_or(&self.surface_black_cube),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(
+                        envmap_mask_view.as_ref().unwrap_or(&self.surface_white),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::Sampler(&cube_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: model_material.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(
+                        exponent_view.as_ref().unwrap_or(&self.surface_white),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(
+                        diffuse_warp_view.as_ref().unwrap_or(&self.surface_white),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(
+                        specular_warp_view.as_ref().unwrap_or(&self.surface_white),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: wgpu::BindingResource::Sampler(&self.simple_sampler),
+                },
             ],
         });
         (bind_group, uniform)
@@ -345,7 +537,43 @@ impl RenderResources {
         &self,
         device: &wgpu::Device,
         view: &wgpu::TextureView,
+        state: super::sky::SkyUniform,
+        texture_flags: u32,
     ) -> wgpu::BindGroup {
+        use wgpu::util::DeviceExt;
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("file_preview.sky.material_state"),
+            contents: bytemuck::bytes_of(&state),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        use vformats::vtf::texture_flags as flags;
+        let address = |bit| {
+            if texture_flags & bit != 0 {
+                wgpu::AddressMode::ClampToEdge
+            } else {
+                wgpu::AddressMode::Repeat
+            }
+        };
+        let filter = if texture_flags & flags::POINTSAMPLE != 0 {
+            wgpu::FilterMode::Nearest
+        } else {
+            wgpu::FilterMode::Linear
+        };
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("file_preview.sky.stars_sampler"),
+            address_mode_u: address(flags::CLAMPS),
+            address_mode_v: address(flags::CLAMPT),
+            mag_filter: filter,
+            min_filter: filter,
+            // Native VTF controls select linear mip blending for either flag,
+            // including ANISOTROPIC with the captured mat_forceaniso=1 profile.
+            mipmap_filter: if texture_flags & (flags::TRILINEAR | flags::ANISOTROPIC) != 0 {
+                wgpu::FilterMode::Linear
+            } else {
+                wgpu::FilterMode::Nearest
+            },
+            ..Default::default()
+        });
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.sky_bind_group"),
             layout: &self.sky_layout,
@@ -357,6 +585,14 @@ impl RenderResources {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.simple_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
         })

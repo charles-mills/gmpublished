@@ -136,11 +136,13 @@ fn ambient_lookup_selects_nearest_sample_in_leaf() {
     let ambient = test_ambient_lighting(vec![
         MapAmbientSample {
             position: Vec3::splat(0.0),
+            encoded_position: [128; 3],
             cube: red,
             cluster: 7,
         },
         MapAmbientSample {
             position: Vec3::new(10.0, 0.0, 0.0),
+            encoded_position: [207, 128, 128],
             cube: green,
             cluster: 7,
         },
@@ -374,7 +376,7 @@ fn displacement_walk_collision_uses_the_rendered_checkerboard_surface() {
     }
 }
 
-fn displacement_test_bsp(power: i32, corners: [Vec3; 4], start_corner: usize) -> MapBsp {
+pub(super) fn displacement_test_bsp(power: i32, corners: [Vec3; 4], start_corner: usize) -> MapBsp {
     let mut bsp = read_fixture_bsp(&bsp_fixture(None));
     bsp.vertices = corners.to_vec();
     bsp.edges = vec![[0, 1], [1, 2], [2, 3], [3, 0]];
@@ -405,6 +407,9 @@ fn displacement_test_bsp(power: i32, corners: [Vec3; 4], start_corner: usize) ->
         map_face: 0,
         lightmap_alpha_start: 0,
         lightmap_sample_position_start: 0,
+        edge_neighbors: [[vformats::bsp::DispSubNeighbor::default(); 2]; 4],
+        corner_neighbors: [vformats::bsp::DispCornerNeighbors::default(); 4],
+        allowed_vertices: [u32::MAX; 10],
     }];
     let side = (1 << power) + 1;
     bsp.displacement_verts = vec![
@@ -871,6 +876,11 @@ fn pakfile_paths_are_normalized_and_limited_to_preview_entries() {
     assert!(is_pakfile_retained_entry("models/props/tree.dx90.vtx"));
     assert!(is_pakfile_retained_entry("models/props/tree.vvd"));
     assert!(is_pakfile_retained_entry("models/props/tree.phy"));
+    assert!(is_pakfile_retained_entry("sp_0.vhv"));
+    assert!(is_pakfile_retained_entry("sp_hdr_181.vhv"));
+    assert!(!is_pakfile_retained_entry("models/sp_0.vhv"));
+    assert!(!is_pakfile_retained_entry("sp_.vhv"));
+    assert!(!is_pakfile_retained_entry("sp_hdr_bad.vhv"));
     assert!(!is_pakfile_retained_entry("maps/thumb.png"));
     assert!(!is_pakfile_entry_oversized(MAX_PAKFILE_ENTRY_BYTES));
     assert!(is_pakfile_entry_oversized(
@@ -1321,6 +1331,14 @@ fn load_map_extracts_static_prop_placements_from_game_lump_fixture() {
         map.static_props,
         vec![StaticPropPlacement {
             entity: false,
+            static_prop_index: Some(0),
+            lighting_origin: None,
+            lighting_origin_reference: None,
+            diffuse_modulation: [255; 4],
+            render_mode: 0,
+            flags: 0,
+            flags_ex: None,
+            extra_flags: Some(0),
             model_path: "models/props_c17/oildrum001.mdl".to_owned(),
             origin: Vec3::new(10.0, 20.0, 30.0),
             angles: Vec3::new(1.0, 90.0, 3.0),
@@ -1330,6 +1348,91 @@ fn load_map_extracts_static_prop_placements_from_game_lump_fixture() {
             visibility: MapPropVisibility::Always,
         }]
     );
+}
+
+#[test]
+fn model_entities_retain_render_color_alpha_and_mode_before_draw_policy() {
+    let entities = r#"
+    { "classname" "prop_dynamic" "model" "models/test/model.mdl" "origin" "0 0 0"
+      "rendercolor" "121 67 233" "renderamt" "128" "rendermode" "0" }
+    { "classname" "prop_dynamic" "model" "models/test/model.mdl" "origin" "1 0 0"
+      "rendercolor" "32 64 128 191" "rendermode" "2" }
+    { "classname" "prop_dynamic" "model" "models/test/model.mdl" "origin" "2 0 0"
+      "rendercolor" "32 64 128 191" "renderamt" "96" "rendermode" "10" }
+    "#;
+    let map = load_map(&bsp_fixture_with_entities(entities)).unwrap();
+    let entities = map
+        .static_props
+        .iter()
+        .filter(|prop| prop.entity)
+        .collect::<Vec<_>>();
+    assert_eq!(entities.len(), 3);
+    assert_eq!(entities[0].diffuse_modulation, [121, 67, 233, 128]);
+    assert_eq!(entities[0].render_mode, 0);
+    assert_eq!(entities[1].diffuse_modulation, [32, 64, 128, 191]);
+    assert_eq!(entities[1].render_mode, 2);
+    assert_eq!(entities[2].diffuse_modulation, [32, 64, 128, 96]);
+    assert_eq!(entities[2].render_mode, 10);
+}
+
+#[test]
+fn static_prop_version_eleven_preserves_lighting_tint_flags_and_scale() {
+    let mut bytes = static_prop_bsp_fixture();
+    let mut data = static_prop_game_lump_data();
+    let record = data.len() - 72;
+    data.truncate(record + 56);
+    data[record + 31] = 0x42;
+    for (axis, value) in [12.0_f32, 34.0, 56.0].into_iter().enumerate() {
+        data[record + 44 + axis * 4..record + 48 + axis * 4].copy_from_slice(&value.to_le_bytes());
+    }
+    data.extend_from_slice(&1.0_f32.to_le_bytes());
+    data.extend_from_slice(&[0, 0, 0, 0]);
+    data.extend_from_slice(&[31, 63, 127, 191]);
+    data.extend_from_slice(&0_u32.to_le_bytes());
+    data.extend_from_slice(&0x0123_4567_u32.to_le_bytes());
+    data.extend_from_slice(&2.5_f32.to_le_bytes());
+    let game_offset = bytes.len();
+    append_sprp_game_lump(&mut bytes, &data);
+    bytes[game_offset + 10..game_offset + 12].copy_from_slice(&11_u16.to_le_bytes());
+    let map = load_map(&bytes).unwrap();
+    let prop = &map.static_props[0];
+    assert_eq!(prop.static_prop_index, Some(0));
+    assert_eq!(prop.lighting_origin, Some(Vec3::new(12.0, 34.0, 56.0)));
+    assert_eq!(prop.diffuse_modulation, [31, 63, 127, 191]);
+    assert_eq!(prop.flags, 0x42);
+    assert_eq!(prop.flags_ex, Some(0x0123_4567));
+    assert_eq!(prop.extra_flags, None);
+    assert_eq!(prop.scale, 2.5);
+}
+
+#[test]
+fn skipped_static_props_do_not_shift_compiled_lighting_indices() {
+    let mut bytes = static_prop_bsp_fixture();
+    let mut data = static_prop_game_lump_data();
+    let record = data.len() - 72;
+    let second = data[record..].to_vec();
+    data[record - 4..record].copy_from_slice(&2_i32.to_le_bytes());
+    data[record + 24..record + 26].copy_from_slice(&999_u16.to_le_bytes());
+    data.extend_from_slice(&second);
+    append_sprp_game_lump(&mut bytes, &data);
+    let map = load_map(&bytes).unwrap();
+    assert_eq!(map.static_props.len(), 1);
+    assert_eq!(map.static_props[0].static_prop_index, Some(1));
+}
+
+#[test]
+fn invalid_static_prop_scale_and_lighting_origin_have_finite_fallbacks() {
+    let mut bsp = read_fixture_bsp(&static_prop_bsp_fixture());
+    let partition = SkyboxPartition::inactive(false);
+    for scale in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+        let prop = &mut bsp.static_props.as_mut().unwrap().props[0];
+        prop.uniform_scale = Some(scale);
+        prop.flags = 0x02;
+        prop.lighting_origin = [f32::NAN, 0.0, 0.0];
+        let (world, _) = partitioned_static_prop_placements(&bsp, &partition);
+        assert_eq!(world[0].scale, 1.0);
+        assert_eq!(world[0].lighting_origin, None);
+    }
 }
 
 #[test]
@@ -1394,6 +1497,70 @@ fn load_map_extracts_supported_entity_prop_classnames() {
         entity_props
             .iter()
             .all(|prop| prop.visibility == MapPropVisibility::Always)
+    );
+}
+
+#[test]
+fn entity_lighting_anchor_retains_first_reference_and_missing_or_ambiguous_diagnostics() {
+    let map = load_map(&bsp_fixture_with_entities(r#"
+        { "classname" "info_lighting" "targetname" "unique" "origin" "101 202 303" }
+        { "classname" "info_lighting" "targetname" "duplicate" "origin" "4 5 6" }
+        { "classname" "info_lighting" "targetname" "duplicate" "origin" "7 8 9" }
+        { "classname" "prop_dynamic" "model" "models/anchor_unique.mdl" "origin" "1 2 3" "lightingorigin" "unique" }
+        { "classname" "prop_dynamic" "model" "models/anchor_missing.mdl" "origin" "1 2 3" "lightingorigin" "missing" }
+        { "classname" "prop_dynamic" "model" "models/anchor_duplicate.mdl" "origin" "1 2 3" "lightingorigin" "duplicate" }
+        "#)).unwrap();
+    let prop = |name: &str| {
+        map.static_props
+            .iter()
+            .find(|prop| prop.model_path == name)
+            .unwrap()
+    };
+    let unique = prop("models/anchor_unique.mdl");
+    assert_eq!(unique.lighting_origin, Some(Vec3::new(101.0, 202.0, 303.0)));
+    assert_eq!(
+        unique
+            .lighting_origin_reference
+            .as_ref()
+            .unwrap()
+            .match_count,
+        1
+    );
+    assert!(
+        unique
+            .lighting_origin_reference
+            .as_ref()
+            .unwrap()
+            .first_entity
+            .is_some()
+    );
+    let missing = prop("models/anchor_missing.mdl");
+    assert_eq!(missing.lighting_origin, None);
+    assert_eq!(
+        missing
+            .lighting_origin_reference
+            .as_ref()
+            .unwrap()
+            .match_count,
+        0
+    );
+    assert_eq!(
+        missing
+            .lighting_origin_reference
+            .as_ref()
+            .unwrap()
+            .first_entity,
+        None
+    );
+    let duplicate = prop("models/anchor_duplicate.mdl");
+    assert_eq!(duplicate.lighting_origin, Some(Vec3::new(4.0, 5.0, 6.0)));
+    assert_eq!(
+        duplicate
+            .lighting_origin_reference
+            .as_ref()
+            .unwrap()
+            .match_count,
+        2
     );
 }
 
@@ -2748,11 +2915,11 @@ fn merge_skybox_collections(mut map: MapData) -> MapData {
     map
 }
 
-fn bsp_fixture_with_entities(entities: &str) -> Vec<u8> {
+pub(super) fn bsp_fixture_with_entities(entities: &str) -> Vec<u8> {
     bsp_fixture(Some(entities))
 }
 
-fn parse_test_entities(entities: &str) -> Vec<MapEntity> {
+pub(super) fn parse_test_entities(entities: &str) -> Vec<MapEntity> {
     read_fixture_bsp(&bsp_fixture_with_entities(entities)).entities
 }
 
@@ -3377,6 +3544,8 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
     let vertex = |position| MapVertex {
         texture_size: [0; 2],
         position,
+        tangent_s: Vec3::ZERO,
+        tangent_t: Vec3::ZERO,
         normal: Vec3::new(0.0, 0.0, 1.0),
         tex_s: 0.0,
         tex_t: 0.0,

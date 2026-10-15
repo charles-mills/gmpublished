@@ -68,8 +68,16 @@ name = "vformats"
 path = "src/lib.rs"
 
 [[test]]
+name = "bsp_frames"
+path = "tests/bsp_frames.rs"
+
+[[test]]
 name = "bsp"
 path = "tests/bsp.rs"
+
+[[test]]
+name = "bsp_cubemaps"
+path = "tests/bsp_cubemaps.rs"
 
 [[test]]
 name = "bsp_adversarial"
@@ -138,6 +146,10 @@ features = [
 ]
 optional = true
 default-features = false
+
+[[test]]
+name = "bsp_world_lights"
+path = "tests/bsp_world_lights.rs"
 
 [dev-dependencies.lzma-rust2]
 version = "0.16.4"

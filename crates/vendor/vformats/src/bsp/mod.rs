@@ -36,13 +36,16 @@ mod record;
 
 mod lumps;
 pub use lumps::{
-    Brush, BrushSide, BspModel, ColorRgbExp, DispInfo, DispVert, Face, Leaf, LeafAmbientIndex,
-    LeafAmbientSample, LeafWaterData, Node, Overlay, Plane, TexData, TexInfo, contents_flags,
-    texture_flags,
+    Brush, BrushSide, BspModel, ColorRgbExp, CubemapSample, DispCornerNeighbors, DispInfo,
+    DispSubNeighbor, DispVert, Face, Leaf, LeafAmbientIndex, LeafAmbientSample, LeafWaterData,
+    Node, Overlay, Plane, TexData, TexInfo, contents_flags, texture_flags,
 };
 
 mod vis;
 pub use vis::Visibility;
+
+mod world_lights;
+pub use world_lights::{WorldLight, WorldLightError, WorldLightKind};
 
 mod zip;
 pub use zip::{ZipEntry, ZipError, ZipReader};
@@ -69,11 +72,15 @@ pub mod lump_ids {
     pub const EDGES: usize = 12;
     pub const SURFEDGES: usize = 13;
     pub const MODELS: usize = 14;
+    pub const WORLDLIGHTS: usize = 15;
+    pub const WORLDLIGHTS_HDR: usize = 54;
     pub const LEAF_FACES: usize = 16;
     pub const LEAF_BRUSHES: usize = 17;
     pub const BRUSHES: usize = 18;
     pub const BRUSHSIDES: usize = 19;
     pub const DISPINFO: usize = 26;
+    pub const VERT_NORMALS: usize = 30;
+    pub const VERT_NORMAL_INDICES: usize = 31;
     pub const GAME_LUMP: usize = 35;
     pub const LEAF_WATER_DATA: usize = 36;
     pub const LEAF_AMBIENT_INDEX_HDR: usize = 51;
@@ -81,6 +88,7 @@ pub mod lump_ids {
     pub const LEAF_AMBIENT_LIGHTING_HDR: usize = 55;
     pub const LEAF_AMBIENT_LIGHTING: usize = 56;
     pub const PAKFILE: usize = 40;
+    pub const CUBEMAPS: usize = 42;
     pub const DISP_VERTS: usize = 33;
     pub const TEXDATA_STRING_DATA: usize = 43;
     pub const TEXDATA_STRING_TABLE: usize = 44;

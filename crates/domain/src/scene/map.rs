@@ -23,21 +23,31 @@ use vformats::{
 use crate::scene::QAngle;
 
 mod brushes;
+mod cubemaps;
 mod data;
 mod doors;
 mod entities;
+mod frames;
 mod lighting;
+mod lighting_trace;
 mod lumps;
 mod mesh;
 mod pakfile;
 mod paths;
 mod physics;
 mod placements;
+mod radiosity;
+mod sky;
+mod spatial;
 mod visibility;
 mod walk;
 mod water;
+mod world_lights;
 pub use water::{MapWaterBody, MapWaterSample, MapWaterVolumes};
+use world_lights::map_world_lighting;
+pub use world_lights::{MapLightStyleEntity, MapWorldLight, MapWorldLightSet, MapWorldLighting};
 
+pub use cubemaps::MapCubemapProbe;
 pub use data::{
     MapBounds, MapData, MapMesh, MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility,
     MapPropSolid, MapPropVisibility, MapSkyboxPartitionStats, MapStatsRaw, MapVertex,
@@ -56,19 +66,19 @@ use entities::{
 };
 pub use lighting::{
     AmbientCube, AmbientLightSource, LightmapAtlas, LightmapSource, LightmapUpdate,
-    MapAmbientLighting, MapEnvironmentLighting, MapSunLighting,
+    MapAmbientLighting, MapAmbientSample, MapEnvironmentLighting, MapSunLighting,
 };
 #[cfg(test)]
 use lighting::{
-    AmbientSampleRange, MapAmbientSample, brush_lightmap_uv_from_transforms,
-    decode_ambient_sample_linear, decode_light_sample, decode_light_sample_linear,
-    pack_lightmap_blocks,
+    AmbientSampleRange, brush_lightmap_uv_from_transforms, decode_ambient_sample_linear,
+    decode_light_sample, decode_light_sample_linear, pack_lightmap_blocks,
 };
 use lighting::{
     PendingLightmapBlock, bake_lightmap_atlas, brush_lightmap_uv, displacement_lightmap_uv,
     extract_face_lightmap, map_ambient_lighting, map_environment_lighting,
     selected_lightmap_samples,
 };
+pub use lighting_trace::{MASK_OPAQUE, MapLightingCollision, MapLightingTrace};
 pub use lumps::{BrushIndex, ModelIndex};
 use lumps::{
     MapBsp, MapEntity, MapLeaf, MapNode, MapPlane, NodeChild, brush_indices_for_model, bsp_version,
@@ -90,13 +100,19 @@ use paths::{
     is_preview_material_visible, normalize_entity_prop_model_path, normalize_material_name,
     normalize_skyname, normalize_source_path, normalize_static_prop_model_path,
 };
-pub use placements::{MapDetailSprite, MapOverlay};
+pub use placements::{MapDetailSprite, MapLightingOriginReference, MapOverlay};
 #[cfg(test)]
 use placements::{OverlayBasis, overlay_quad_positions, parse_entity_prop_model_scale};
 use placements::{
     partitioned_detail_sprite_placements, partitioned_entity_prop_placements,
     partitioned_map_overlays, partitioned_static_prop_placements,
 };
+pub use radiosity::{
+    MapRadiosityDisplacement, MapRadiosityHit, MapRadiosityMaterialFlags, MapRadiosityStyles,
+    MapRadiositySurfaces, MapRadiosityTraceError,
+};
+pub use sky::{MapSkyPaint, MapSun};
+use sky::{map_sky_paint, map_suns};
 pub use visibility::MapVisibility;
 use visibility::{
     FaceAttributions, MapFaceVisibility, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT,
@@ -182,6 +198,8 @@ fn load_map_impl(
     };
     let player_start = info_player_start(&bsp.entities);
     let sky_camera = map_sky_camera(&bsp.entities);
+    let suns = map_suns(&bsp.entities);
+    let sky_paint = map_sky_paint(&bsp.entities, &suns);
     let mut skybox_partition = partition_skybox
         .then(|| SkyboxPartition::from_bsp(&bsp, player_start.as_ref(), sky_camera))
         .flatten()
@@ -288,6 +306,7 @@ fn load_map_impl(
         partitioned_detail_sprite_placements(&bsp, &skybox_partition);
     let (overlays, skybox_overlays) = partitioned_map_overlays(&bsp, &skybox_partition);
     let ambient = map_ambient_lighting(&bsp);
+    let world_lighting = map_world_lighting(&bsp, lightmap_source, ambient.source());
     let environment_lighting = map_environment_lighting(&bsp.entities);
     let skyname = worldspawn_skyname(&bsp.entities);
     let fog = map_fog(&bsp.entities);
@@ -342,6 +361,8 @@ fn load_map_impl(
     let walk_collision =
         MapWalkCollision::from_bsp_instances(&bsp, &brush_instances, &door_model_indices);
     let water_volumes = MapWaterVolumes::from_bsp(&bsp);
+    let lighting_collision = MapLightingCollision::from_bsp(&bsp);
+    let radiosity_surfaces = MapRadiositySurfaces::from_bsp(&bsp);
     if let Some(volumes) = &water_volumes {
         for body in volumes.bodies.iter().flatten() {
             if !material_names.contains(&body.material_name) {
@@ -375,9 +396,17 @@ fn load_map_impl(
         overlays,
         skybox_overlays,
         ambient,
+        world_lighting,
         environment_lighting,
         player_start,
         skyname,
+        sky_paint,
+        suns,
+        cubemap_probes: bsp
+            .cubemap_samples
+            .iter()
+            .map(MapCubemapProbe::from)
+            .collect(),
         fog,
         sky_camera,
         skybox_completion_bounds,
@@ -389,6 +418,8 @@ fn load_map_impl(
         visibility,
         walk_collision,
         water_volumes,
+        lighting_collision,
+        radiosity_surfaces,
         pakfile,
     })
 }

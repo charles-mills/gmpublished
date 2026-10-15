@@ -37,6 +37,7 @@ pub mod texture_flags {
     pub const PROCEDURAL: u32 = 0x0000_0800;
     pub const ONEBITALPHA: u32 = 0x0000_1000;
     pub const EIGHTBITALPHA: u32 = 0x0000_2000;
+    pub const SSBUMP: u32 = 0x0800_0000;
     pub const ENVMAP: u32 = 0x0000_4000;
     pub const RENDERTARGET: u32 = 0x0000_8000;
     pub const NODEPTHBUFFER: u32 = 0x0080_0000;

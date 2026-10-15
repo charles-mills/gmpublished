@@ -16,13 +16,64 @@ use std::collections::BTreeMap;
 
 use super::MdlError;
 use super::studio::{FLAG_STATIC_PROP, Mdl, MdlAnimation};
+use super::vertex_compression::{
+    VertexCompression, source_short2_weights, source_ubyte4_tangent, source_ubyte4_vector,
+};
 use super::vtx::Vtx;
 use super::vvd::{Vvd, VvdVertex};
-use crate::math::sqrt_f32;
+
+/// Model assembly's physical vertex-stream choices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModelAssemblyOptions {
+    /// Applied before bone blending; authored source frames remain available.
+    pub vertex_compression: VertexCompression,
+}
+
+/// Authored VVD frame, in original materialized LOD-0 vertex-pool order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelSourceVertexFrame {
+    /// Raw model-space authored position and unmodified skinning channels.
+    pub position: [f32; 3],
+    /// Raw VVD weights, before physical-stream quantization.
+    pub weights: [f32; 3],
+    /// Raw authored bone indices for the three weight slots.
+    pub bones: [u8; 3],
+    /// Authored number of populated skinning slots.
+    pub bone_count: u8,
+    /// Raw model-space authored normal.
+    pub normal: [f32; 3],
+    /// Raw authored tangent XYZ and independent handedness W.
+    pub tangent: Option<[f32; 4]>,
+}
 
 /// Assembled model geometry (LOD 0).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelData {
+    /// Physical stream representation used for assembled vertices.
+    pub vertex_compression: VertexCompression,
+    /// Authored frames retained independently of physical stream encoding.
+    pub source_frames: Vec<ModelSourceVertexFrame>,
+    /// Authored model-space illumination position, before instance placement.
+    pub illumination_position: [f32; 3],
+    /// Authored model-space hull minimum; independent of assembled bounds.
+    pub hull_min: [f32; 3],
+    /// Authored model-space hull maximum.
+    pub hull_max: [f32; 3],
+    /// Optional zero-based authored illumination attachment selector.
+    pub illumination_attachment_index: Option<usize>,
+    /// Selected attachment position after rest bone posing, before entity placement.
+    /// `None` with a selector indicates an unresolved virtual-model attachment.
+    pub illumination_attachment_position: Option<[f32; 3]>,
+    /// Local attachments assembled with the same runtime bone pose as geometry.
+    pub attachments: Vec<ModelAttachment>,
+    /// Raw authored studio-header flags, independent of runtime compact flags.
+    pub mdl_flags: u32,
+    /// Checksum of the source `.mdl`, used to validate compiled prop lighting.
+    pub checksum: u32,
+    /// Whether the source model companions agree sufficiently to attach VHV data.
+    pub lighting_compatible: bool,
+    /// Hardware strip-group directory in bodypart/model/LOD/mesh/group order.
+    pub lighting_meshes: Vec<ModelLightingMesh>,
     /// Render meshes, bodypart-major order.
     pub meshes: Vec<MeshData>,
     /// Material names from the `.mdl`.
@@ -47,11 +98,22 @@ pub struct ModelData {
     pub triangle_count: u32,
 }
 
+/// Bone-posed attachment before entity placement or model scaling.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelAttachment {
+    /// Authored record, including bone-local matrix and flags.
+    pub source: super::MdlAttachment,
+    /// Row-major model-space matrix; world-align flags remain for placement.
+    pub model: [[f32; 4]; 3],
+}
+
 /// One renderable mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
     /// Deduplicated vertices, first-use order.
     pub vertices: Vec<ModelVertex>,
+    /// VHV hardware vertex identity, parallel to [`vertices`](Self::vertices).
+    pub vertex_lighting: Vec<ModelLightingVertex>,
     /// Triangle indices into [`vertices`](Self::vertices), winding
     /// already flipped for a Cw-front convention.
     pub indices: Vec<u32>,
@@ -64,13 +126,37 @@ pub struct MeshData {
     pub bodygroup_choice: usize,
 }
 
+/// One VHV hardware mesh, corresponding to one VTX strip group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelLightingMesh {
+    /// Source model level of detail.
+    pub lod: u32,
+    /// Full strip-group vertex-pool length, including unused vertices.
+    pub vertex_count: usize,
+}
+
+/// A render vertex's location in the compiled hardware lighting streams.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelLightingVertex {
+    /// Index into [`ModelData::lighting_meshes`] and the VHV mesh directory.
+    pub mesh: usize,
+    /// Index into that strip group's original vertex pool.
+    pub vertex: usize,
+}
+
 /// One skinned vertex.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModelVertex {
     /// Skinned model-space position.
     pub position: [f32; 3],
-    /// Skinned unit normal (zero when unrecoverable).
+    /// Skinned normal (zero when unrecoverable).
     pub normal: [f32; 3],
+    /// Authored VVD S tangent transformed by the vertex's bone blend.
+    pub tangent_s: [f32; 3],
+    /// Binormal reconstructed from normal, tangent and authored handedness.
+    pub tangent_t: [f32; 3],
+    /// Authored tangent handedness; retained independently of degenerate frames.
+    pub tangent_sign: f32,
     /// Texture coordinates.
     pub uv: [f32; 2],
 }
@@ -143,6 +229,8 @@ pub enum AssemblySkip {
     VertexNonFiniteSkinning,
     /// All of a vertex's weights were zero; skinning was skipped.
     VertexZeroWeightSum,
+    /// A vertex has no usable authored VVD tangent; its tangent frame is zero.
+    VertexMissingTangent,
     /// The `.mdl`/`.vvd`/`.vtx` trio's checksums disagreed; assembly
     /// proceeded anyway ([`assemble_lossy`] only — [`assemble`] errors).
     ChecksumMismatch,
@@ -166,7 +254,7 @@ pub enum AssemblySkip {
 /// silently pairs unrelated triangles with unrelated vertices. Use
 /// [`assemble_lossy`] to render a best-effort mismatched trio instead.
 pub fn assemble(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx) -> Result<ModelRead, MdlError> {
-    assemble_impl(mdl, vvd, vtx, true)
+    assemble_impl(mdl, vvd, vtx, true, ModelAssemblyOptions::default())
 }
 
 /// Same as [`assemble`], but a checksum or mesh-count mismatch is
@@ -175,10 +263,26 @@ pub fn assemble(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx) -> Result<ModelRead, MdlError> 
 /// [`AssemblySkip::MeshCountMismatch`]) instead of failing; a mismatched
 /// mesh count still zip-truncates to the shorter list.
 pub fn assemble_lossy(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx) -> Result<ModelRead, MdlError> {
-    assemble_impl(mdl, vvd, vtx, false)
+    assemble_lossy_with_options(mdl, vvd, vtx, ModelAssemblyOptions::default())
 }
 
-fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelRead, MdlError> {
+/// Best-effort assembly with an explicit physical stream representation.
+pub fn assemble_lossy_with_options(
+    mdl: &Mdl,
+    vvd: &Vvd,
+    vtx: &Vtx,
+    options: ModelAssemblyOptions,
+) -> Result<ModelRead, MdlError> {
+    assemble_impl(mdl, vvd, vtx, false, options)
+}
+
+fn assemble_impl(
+    mdl: &Mdl,
+    vvd: &Vvd,
+    vtx: &Vtx,
+    strict: bool,
+    options: ModelAssemblyOptions,
+) -> Result<ModelRead, MdlError> {
     let mut stats = MdlStats::default();
     let static_prop = mdl.flags & FLAG_STATIC_PROP != 0;
 
@@ -193,7 +297,7 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
         stats.note(AssemblySkip::ChecksumMismatch);
     }
 
-    let geometry = prepare_model_geometry(mdl, vvd, static_prop, &mut stats);
+    let geometry = prepare_model_geometry_with_options(mdl, vvd, static_prop, &mut stats, options)?;
     let skin_tables = skin_tables(mdl);
     let bodygroups: Vec<usize> = mdl
         .body_parts
@@ -220,13 +324,29 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
                 })
         })
         .collect();
-    let vtx_meshes: Vec<_> = vtx
-        .body_parts
-        .iter()
-        .flat_map(|part| part.models.iter())
-        .flat_map(|model| model.lods.first())
-        .flat_map(|lod| lod.meshes.iter())
-        .collect();
+    let mut lighting_meshes = Vec::new();
+    let mut vtx_meshes = Vec::new();
+    for part in &vtx.body_parts {
+        for model in &part.models {
+            for (lod_index, lod) in model.lods.iter().enumerate() {
+                for mesh in &lod.meshes {
+                    let lighting_base = lighting_meshes.len();
+                    lighting_meshes.extend(mesh.strip_groups.iter().map(|group| {
+                        ModelLightingMesh {
+                            lod: count_to_u32(lod_index),
+                            vertex_count: group.vertices.len(),
+                        }
+                    }));
+                    if lod_index == 0 {
+                        vtx_meshes.push((mesh, lighting_base));
+                    }
+                }
+            }
+        }
+    }
+    let lighting_compatible = mdl.checksum == vvd.checksum
+        && mdl.checksum == vtx.checksum
+        && mdl_meshes.len() == vtx_meshes.len();
 
     if mdl_meshes.len() != vtx_meshes.len() {
         if strict {
@@ -239,7 +359,7 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
     }
 
     let mut meshes = Vec::new();
-    for ((group, choice, model_offset, mdl_mesh), vtx_mesh) in
+    for ((group, choice, model_offset, mdl_mesh), (vtx_mesh, lighting_base)) in
         mdl_meshes.into_iter().zip(vtx_meshes)
     {
         let material_index = usize::try_from(mdl_mesh.material)
@@ -249,12 +369,13 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
                 index: mdl_mesh.material,
             })?;
 
-        let mut local_indices = BTreeMap::<usize, u32>::new();
+        let mut local_indices = BTreeMap::<(usize, usize), u32>::new();
         let mut vertices = Vec::new();
+        let mut vertex_lighting = Vec::new();
         let mut indices = Vec::new();
         let base_offset = vertex_base_offset(model_offset, mdl_mesh.vertex_offset)?;
 
-        for strip_group in &vtx_mesh.strip_groups {
+        for (strip_group_index, strip_group) in vtx_mesh.strip_groups.iter().enumerate() {
             for strip in &strip_group.strips {
                 for position in strip.triangle_index_positions() {
                     // parse_vtx validates strip ranges against the pool,
@@ -279,8 +400,9 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
                             part: "vertex index overflow",
                         })?;
 
+                    let hardware_vertex = (strip_group_index, pool_value);
                     let local_index =
-                        if let Some(index) = local_indices.get(&source_index).copied() {
+                        if let Some(index) = local_indices.get(&hardware_vertex).copied() {
                             index
                         } else {
                             let source_vertex = geometry.vertices.get(source_index).ok_or(
@@ -291,7 +413,11 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
                             let local_index = u32::try_from(vertices.len())
                                 .map_err(|_| MdlError::TooManyVertices)?;
                             vertices.push(*source_vertex);
-                            local_indices.insert(source_index, local_index);
+                            vertex_lighting.push(ModelLightingVertex {
+                                mesh: lighting_base + strip_group_index,
+                                vertex: pool_value,
+                            });
+                            local_indices.insert(hardware_vertex, local_index);
                             local_index
                         };
                     indices.push(local_index);
@@ -301,6 +427,7 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
         flip_triangle_winding(&mut indices);
         meshes.push(MeshData {
             vertices,
+            vertex_lighting,
             indices,
             material_index,
             bodygroup: group,
@@ -313,6 +440,33 @@ fn assemble_impl(mdl: &Mdl, vvd: &Vvd, vtx: &Vtx, strict: bool) -> Result<ModelR
 
     Ok(ModelRead {
         model: ModelData {
+            vertex_compression: options.vertex_compression,
+            source_frames: vvd
+                .vertices
+                .iter()
+                .enumerate()
+                .map(|(index, vertex)| ModelSourceVertexFrame {
+                    position: vertex.position,
+                    weights: vertex.weights,
+                    bones: vertex.bones,
+                    bone_count: vertex.bone_count,
+                    normal: vertex.normal,
+                    tangent: vvd.tangents.get(index).copied(),
+                })
+                .collect(),
+            illumination_position: mdl.illumination_position,
+            hull_min: mdl.hull_min,
+            hull_max: mdl.hull_max,
+            illumination_attachment_index: mdl.illumination_attachment_index,
+            illumination_attachment_position: mdl
+                .illumination_attachment_index
+                .and_then(|index| geometry.attachments.get(index))
+                .map(|attachment| attachment.model.map(|row| row[3])),
+            attachments: geometry.attachments,
+            mdl_flags: mdl.flags,
+            checksum: mdl.checksum,
+            lighting_compatible,
+            lighting_meshes,
             meshes,
             material_names: mdl.textures.clone(),
             material_dirs: mdl.texture_paths.clone(),
@@ -344,6 +498,7 @@ fn flip_triangle_winding(indices: &mut [u32]) {
 
 struct PreparedModelGeometry {
     vertices: Vec<ModelVertex>,
+    attachments: Vec<ModelAttachment>,
     bounds: ([f32; 3], [f32; 3]),
 }
 
@@ -372,29 +527,101 @@ struct LocalBonePose {
     rotation: Quat,
 }
 
+#[cfg(test)]
 fn prepare_model_geometry(
     mdl: &Mdl,
     vvd: &Vvd,
     static_prop: bool,
     stats: &mut MdlStats,
 ) -> PreparedModelGeometry {
-    let rest_overrides = rest_animation_local_overrides(mdl, stats);
-    let bone_transforms = pose_to_bone_skinning_matrices(mdl, static_prop, &rest_overrides, stats);
+    prepare_model_geometry_with_options(
+        mdl,
+        vvd,
+        static_prop,
+        stats,
+        ModelAssemblyOptions::default(),
+    )
+    .expect("valid fixture model")
+}
+
+fn prepare_model_geometry_with_options(
+    mdl: &Mdl,
+    vvd: &Vvd,
+    static_prop: bool,
+    stats: &mut MdlStats,
+    options: ModelAssemblyOptions,
+) -> Result<PreparedModelGeometry, MdlError> {
+    let bones = mdl.runtime_bones()?;
+    let rest_overrides = rest_animation_local_overrides(mdl, &bones, stats);
+    let pose_chains = if !static_prop || !mdl.attachments.is_empty() {
+        bone_pose_chains(&bones, &rest_overrides, stats)
+    } else {
+        Vec::new()
+    };
+    let bone_transforms = skinning_matrices(&bones, static_prop, &pose_chains, stats);
+    let attachments = mdl
+        .attachments
+        .iter()
+        .map(|source| {
+            let bone = pose_chains
+                .get(source.local_bone)
+                .copied()
+                .ok_or(MdlError::Corrupt {
+                    part: "mdl attachment bone",
+                })?;
+            let local = mat4_from_pose_to_bone(source.local).ok_or(MdlError::Corrupt {
+                part: "mdl attachment matrix",
+            })?;
+            let model = mat4_mul(bone, local);
+            if !matrix_is_finite(&model) {
+                return Err(MdlError::Corrupt {
+                    part: "mdl posed attachment matrix",
+                });
+            }
+            Ok(ModelAttachment {
+                source: source.clone(),
+                model: std::array::from_fn(|row| std::array::from_fn(|column| model[column][row])),
+            })
+        })
+        .collect::<Result<Vec<_>, MdlError>>()?;
     let vertices: Vec<ModelVertex> = vvd
         .vertices
         .iter()
-        .map(|vertex| model_vertex(&bone_transforms, vertex, stats))
+        .enumerate()
+        .map(|(index, vertex)| {
+            let mut physical = *vertex;
+            let mut tangent = vvd.tangents.get(index).copied();
+            if matches!(
+                options.vertex_compression,
+                VertexCompression::SourceUbyte4 | VertexCompression::SourceHardware
+            ) {
+                physical.normal = source_ubyte4_vector(vertex.normal).unwrap_or(vertex.normal);
+                tangent = tangent.map(|frame| source_ubyte4_tangent(frame).unwrap_or(frame));
+            }
+            let blend = (options.vertex_compression == VertexCompression::SourceHardware)
+                .then(|| source_hardware_blend(&bone_transforms, &physical))
+                .flatten();
+            model_vertex(&bone_transforms, &physical, tangent, blend, stats)
+        })
         .collect();
     let bounds = bounds_from_vertices(&vertices);
-    PreparedModelGeometry { vertices, bounds }
+    Ok(PreparedModelGeometry {
+        vertices,
+        attachments,
+        bounds,
+    })
 }
 
 fn stored_quat_to_wxyz(quat: [f32; 4]) -> Quat {
     [quat[3], quat[0], quat[1], quat[2]]
 }
 
-fn rest_animation_local_overrides(mdl: &Mdl, stats: &mut MdlStats) -> Vec<Option<LocalBonePose>> {
-    let mut overrides = vec![None; mdl.bones.len()];
+fn rest_animation_local_overrides(
+    mdl: &Mdl,
+    bones: &[super::studio::MdlBone],
+    stats: &mut MdlStats,
+) -> Vec<Option<LocalBonePose>> {
+    let mut overrides = vec![None; bones.len()];
     let Some(desc) = mdl.local_animations.first() else {
         return overrides;
     };
@@ -409,7 +636,7 @@ fn rest_animation_local_overrides(mdl: &Mdl, stats: &mut MdlStats) -> Vec<Option
             stats.note(AssemblySkip::RestBoneOutOfRange);
             continue;
         }
-        let (position, rotation) = rest_channel_pose(&mdl.bones[bone_index], animation, stats);
+        let (position, rotation) = rest_channel_pose(&bones[bone_index], animation, stats);
         if !array_is_finite(position) || !quat_is_valid_unit(rotation) {
             stats.note(AssemblySkip::RestPoseInvalid);
             continue;
@@ -441,24 +668,27 @@ fn rest_channel_pose(
     (position, rotation)
 }
 
+#[cfg(test)]
 fn pose_to_bone_skinning_matrices(
-    mdl: &Mdl,
+    bones: &[super::studio::MdlBone],
     static_prop: bool,
     rest_overrides: &[Option<LocalBonePose>],
     stats: &mut MdlStats,
 ) -> Vec<Mat4> {
-    let bones = &mdl.bones;
-    if bones.is_empty() {
-        return Vec::new();
-    }
-    if static_prop {
-        // Source static props ignore bone posing; preserve stored
-        // model-space vertices via identity transforms.
-        return vec![MAT4_IDENTITY; bones.len()];
-    }
+    let poses = if static_prop {
+        Vec::new()
+    } else {
+        bone_pose_chains(bones, rest_overrides, stats)
+    };
+    skinning_matrices(bones, static_prop, &poses, stats)
+}
 
+fn bone_pose_chains(
+    bones: &[super::studio::MdlBone],
+    rest_overrides: &[Option<LocalBonePose>],
+    stats: &mut MdlStats,
+) -> Vec<Mat4> {
     let mut pose_chains: Vec<Mat4> = Vec::with_capacity(bones.len());
-    let mut skinning_transforms: Vec<Mat4> = Vec::with_capacity(bones.len());
     for (index, bone) in bones.iter().enumerate() {
         let local = if let Some(Some(rest_pose)) = rest_overrides.get(index) {
             local_pose_matrix(*rest_pose)
@@ -479,20 +709,36 @@ fn pose_to_bone_skinning_matrices(
                 |parent| mat4_mul(pose_chains[parent], local),
             );
         pose_chains.push(pose_chain);
-
-        let pose_to_bone = mat4_from_pose_to_bone(bone.pose_to_bone).unwrap_or_else(|| {
-            stats.note(AssemblySkip::NonFinitePoseToBone);
-            MAT4_IDENTITY
-        });
-        let transform = mat4_mul(pose_chain, pose_to_bone);
-        skinning_transforms.push(if matrix_is_finite(&transform) {
-            snap_near_identity(transform)
-        } else {
-            stats.note(AssemblySkip::NonFiniteSkinningMatrix);
-            MAT4_IDENTITY
-        });
     }
-    skinning_transforms
+    pose_chains
+}
+
+fn skinning_matrices(
+    bones: &[super::studio::MdlBone],
+    static_prop: bool,
+    pose_chains: &[Mat4],
+    stats: &mut MdlStats,
+) -> Vec<Mat4> {
+    if static_prop {
+        return vec![MAT4_IDENTITY; bones.len()];
+    }
+    bones
+        .iter()
+        .zip(pose_chains)
+        .map(|(bone, pose_chain)| {
+            let pose_to_bone = mat4_from_pose_to_bone(bone.pose_to_bone).unwrap_or_else(|| {
+                stats.note(AssemblySkip::NonFinitePoseToBone);
+                MAT4_IDENTITY
+            });
+            let transform = mat4_mul(*pose_chain, pose_to_bone);
+            if matrix_is_finite(&transform) {
+                snap_near_identity(transform)
+            } else {
+                stats.note(AssemblySkip::NonFiniteSkinningMatrix);
+                MAT4_IDENTITY
+            }
+        })
+        .collect()
 }
 
 fn local_bind_pose_matrix(bone: &super::studio::MdlBone, stats: &mut MdlStats) -> Mat4 {
@@ -575,12 +821,121 @@ fn mat4_transform_direction(matrix: Mat4, direction: [f32; 3]) -> [f32; 3] {
     })
 }
 
-fn model_vertex(bone_transforms: &[Mat4], vertex: &VvdVertex, stats: &mut MdlStats) -> ModelVertex {
-    let (position, normal) = skin_model_vertex(bone_transforms, vertex, stats);
+fn model_vertex(
+    bone_transforms: &[Mat4],
+    vertex: &VvdVertex,
+    tangent: Option<[f32; 4]>,
+    blend: Option<Mat4>,
+    stats: &mut MdlStats,
+) -> ModelVertex {
+    let (position, normal) = blend.map_or_else(
+        || skin_model_vertex(bone_transforms, vertex, stats),
+        |blend| {
+            (
+                mat4_transform_point(blend, vertex.position),
+                mat4_transform_direction(blend, vertex.normal),
+            )
+        },
+    );
+    let tangent_s = tangent
+        .filter(|t| {
+            t.iter().all(|x| x.is_finite()) && t[3] != 0.0 && t[..3].iter().any(|x| *x != 0.0)
+        })
+        .map_or_else(
+            || {
+                stats.note(AssemblySkip::VertexMissingTangent);
+                [0.0; 3]
+            },
+            |t| {
+                blend.map_or_else(
+                    || skin_direction(bone_transforms, vertex, [t[0], t[1], t[2]]),
+                    |blend| mat4_transform_direction(blend, [t[0], t[1], t[2]]),
+                )
+            },
+        );
+    let handedness = tangent.map_or(0.0, |t| if t[3].is_finite() { t[3] } else { 0.0 });
+    let tangent_t = [
+        (normal[1] * tangent_s[2] - normal[2] * tangent_s[1]) * handedness,
+        (normal[2] * tangent_s[0] - normal[0] * tangent_s[2]) * handedness,
+        (normal[0] * tangent_s[1] - normal[1] * tangent_s[0]) * handedness,
+    ];
     ModelVertex {
         position,
         normal,
+        tangent_s,
+        tangent_t,
+        tangent_sign: handedness,
         uv: vertex.uv,
+    }
+}
+
+/// Mirror the compiled Source VS: decode two physical weights, reconstruct
+/// the third, blend the three matrices, then transform all vertex channels.
+fn source_hardware_blend(bones: &[Mat4], vertex: &VvdVertex) -> Option<Mat4> {
+    if !(1..=3).contains(&vertex.bone_count)
+        || !array_is_finite(vertex.position)
+        || !array_is_finite(vertex.normal)
+        || vertex.weights.iter().sum::<f32>() <= f32::EPSILON
+    {
+        return None;
+    }
+    let weights = source_short2_weights(vertex.weights)?;
+    let mut matrices = [MAT4_IDENTITY; 3];
+    for slot in 0..3 {
+        if weights[slot] != 0.0 {
+            matrices[slot] = *bones.get(usize::from(vertex.bones[slot]))?;
+            if matrices[slot]
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+            {
+                return None;
+            }
+        }
+    }
+    Some(std::array::from_fn(|column| {
+        std::array::from_fn(|row| {
+            matrices[0][column][row] * weights[0]
+                + matrices[1][column][row] * weights[1]
+                + matrices[2][column][row] * weights[2]
+        })
+    }))
+}
+
+fn skin_direction(bone_transforms: &[Mat4], vertex: &VvdVertex, direction: [f32; 3]) -> [f32; 3] {
+    let count = usize::from(vertex.bone_count);
+    if count == 0 || count > 3 {
+        return direction;
+    }
+    let mut result = [0.0; 3];
+    let mut total = 0.0;
+    for slot in 0..count {
+        let weight = vertex.weights[slot];
+        if !weight.is_finite() || weight < 0.0 {
+            return direction;
+        }
+        if weight <= f32::EPSILON {
+            continue;
+        }
+        let Some(transform) = bone_transforms
+            .get(usize::from(vertex.bones[slot]))
+            .copied()
+        else {
+            return direction;
+        };
+        let transformed = mat4_transform_direction(transform, direction);
+        if !array_is_finite(transformed) {
+            return direction;
+        }
+        for axis in 0..3 {
+            result[axis] += transformed[axis] * weight;
+        }
+        total += weight;
+    }
+    if !total.is_finite() || total <= f32::EPSILON || !array_is_finite(result) {
+        direction
+    } else {
+        result
     }
 }
 
@@ -622,10 +977,7 @@ fn skin_model_vertex(
             return stored_vertex(vertex);
         };
         let skinned_position = sanitize_vector(mat4_transform_point(transform, vertex.position));
-        let skinned_normal = normalize_vector(sanitize_vector(mat4_transform_direction(
-            transform,
-            vertex.normal,
-        )));
+        let skinned_normal = mat4_transform_direction(transform, vertex.normal);
         if !array_is_finite(skinned_position) || !array_is_finite(skinned_normal) {
             stats.note(AssemblySkip::VertexNonFiniteSkinning);
             return stored_vertex(vertex);
@@ -641,12 +993,12 @@ fn skin_model_vertex(
         stats.note(AssemblySkip::VertexZeroWeightSum);
         return stored_vertex(vertex);
     }
-
-    for axis in 0..3 {
-        position[axis] /= weight_sum;
-        normal[axis] /= weight_sum;
+    if !array_is_finite(position) || !array_is_finite(normal) {
+        stats.note(AssemblySkip::VertexNonFiniteSkinning);
+        return stored_vertex(vertex);
     }
-    (position, normalize_vector(normal))
+
+    (position, normal)
 }
 
 fn stored_vertex(vertex: &VvdVertex) -> ([f32; 3], [f32; 3]) {
@@ -655,7 +1007,7 @@ fn stored_vertex(vertex: &VvdVertex) -> ([f32; 3], [f32; 3]) {
 
 fn safe_normal(normal: [f32; 3]) -> [f32; 3] {
     if array_is_finite(normal) {
-        normalize_vector(normal)
+        normal
     } else {
         [0.0; 3]
     }
@@ -693,15 +1045,6 @@ fn sanitize_vector(vector: [f32; 3]) -> [f32; 3] {
         vector
     } else {
         [0.0; 3]
-    }
-}
-
-fn normalize_vector(vector: [f32; 3]) -> [f32; 3] {
-    let length = sqrt_f32(vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]);
-    if length <= f32::EPSILON {
-        [0.0; 3]
-    } else {
-        [vector[0] / length, vector[1] / length, vector[2] / length]
     }
 }
 
@@ -755,3 +1098,289 @@ fn count_to_u32(count: usize) -> u32 {
 #[cfg(test)]
 #[path = "assembly_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod tangent_frame_tests {
+    use super::*;
+
+    #[test]
+    fn linear_pose_arrays_drive_geometry_while_full_bones_remain_raw() {
+        let mut mdl = super::tests::mdl_with_for_compression_test();
+        let full = mdl.bones.clone();
+        let half = std::f32::consts::FRAC_PI_4;
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let mut inverse = identity;
+        inverse[0][3] = -2.0;
+        mdl.linear_bones = Some(super::super::MdlLinearBones {
+            flags: vec![0; 2],
+            parents: vec![-1; 2],
+            positions: vec![[10.0, 0.0, 0.0], [0.0; 3]],
+            quaternions: vec![[0.0, 0.0, half.sin(), half.cos()], [0.0, 0.0, 0.0, 1.0]],
+            rotations: vec![[0.0; 3]; 2],
+            pose_to_bone: vec![inverse, identity],
+            position_scales: vec![[0.0; 3]; 2],
+            rotation_scales: vec![[0.0; 3]; 2],
+            quaternion_alignment: vec![[0.0, 0.0, 0.0, 1.0]; 2],
+        });
+        let vvd = Vvd {
+            checksum: 0,
+            vertices: vec![VvdVertex {
+                weights: [1.0, 0.0, 0.0],
+                bones: [0; 3],
+                bone_count: 1,
+                position: [3.0, 0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+                uv: [0.0; 2],
+            }],
+            tangents: vec![[0.0, 1.0, 0.0, -1.0]],
+        };
+        let geometry = prepare_model_geometry_with_options(
+            &mdl,
+            &vvd,
+            false,
+            &mut MdlStats::default(),
+            Default::default(),
+        )
+        .unwrap();
+        for (actual, expected) in geometry.vertices[0]
+            .position
+            .into_iter()
+            .zip([10.0, 1.0, 0.0])
+        {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+        for (actual, expected) in geometry.vertices[0].normal.into_iter().zip([0.0, 1.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+        assert_eq!(mdl.bones, full);
+        mdl.linear_bones.as_mut().unwrap().positions.pop();
+        assert!(matches!(
+            prepare_model_geometry_with_options(
+                &mdl,
+                &vvd,
+                false,
+                &mut MdlStats::default(),
+                Default::default()
+            ),
+            Err(MdlError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn source_hardware_stream_quantizes_weights_before_sharing_one_blended_frame() {
+        let mut scale = MAT4_IDENTITY;
+        for (axis, column) in scale.iter_mut().take(3).enumerate() {
+            column[axis] = 2.0;
+        }
+        scale[3] = [10.0, 20.0, 30.0, 1.0];
+        let mut rotated = MAT4_IDENTITY;
+        rotated[0] = [0.0, 1.0, 0.0, 0.0];
+        rotated[1] = [-1.0, 0.0, 0.0, 0.0];
+        rotated[3] = [-10.0, -20.0, -30.0, 1.0];
+        let vertex = VvdVertex {
+            weights: [0.3, 0.4, 0.3],
+            bones: [0, 1, 2],
+            bone_count: 3,
+            position: [3.0, -2.0, 4.0],
+            normal: [1.0, 0.0, 0.0],
+            uv: [0.25, 0.75],
+        };
+        let matrices = [MAT4_IDENTITY, scale, rotated];
+        let blend = source_hardware_blend(&matrices, &vertex).unwrap();
+        let first = 9830.0 / 32768.0;
+        let second = 13108.0 / 32768.0;
+        let third = first;
+        let diagonal = first + 2.0 * second;
+        let mut stats = MdlStats::default();
+        let result = model_vertex(
+            &matrices,
+            &vertex,
+            Some([0.0, 1.0, 0.0, -1.0]),
+            Some(blend),
+            &mut stats,
+        );
+        assert_eq!(result.normal, [diagonal, third, 0.0]);
+        assert_eq!(result.tangent_s, [-third, diagonal, 0.0]);
+        assert_eq!(result.tangent_sign, -1.0);
+        assert_eq!(
+            result.position,
+            [
+                3.0 * diagonal + 2.0 * third + 10.0 * (second - third),
+                3.0 * third - 2.0 * diagonal + 20.0 * (second - third),
+                4.0 * (1.0 + second) + 30.0 * (second - third)
+            ]
+        );
+        assert_eq!(vertex.weights, [0.3, 0.4, 0.3]);
+        assert_ne!(
+            result.normal,
+            skin_direction(&matrices, &vertex, vertex.normal)
+        );
+        assert_eq!(result.uv, vertex.uv);
+    }
+
+    #[test]
+    fn source_hardware_blends_matrices_before_large_origin_position_arithmetic() {
+        let matrix = |rotation, position| {
+            local_pose_matrix(LocalBonePose {
+                position,
+                rotation: stored_quat_to_wxyz(rotation),
+            })
+        };
+        let a = matrix(
+            [0.0, 0.0, 0.14943813, 0.9887711],
+            [-2000.17, 3000.8, -100.3],
+        );
+        let b = matrix(
+            [0.0, 0.0, 0.7512804, 0.65998316],
+            [-1500.95, 3300.45, -700.33],
+        );
+        let c = matrix(
+            [0.0, 0.43496552, 0.0, 0.90044713],
+            [-3200.1, 2000.33, 500.88],
+        );
+        let vertex = VvdVertex {
+            weights: [0.25, 0.5, 0.25],
+            bones: [0, 1, 2],
+            bone_count: 3,
+            position: [105.7, 33.9, -150.33],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0; 2],
+        };
+        let matrices = [a, b, c];
+        let actual = mat4_transform_point(
+            source_hardware_blend(&matrices, &vertex).unwrap(),
+            vertex.position,
+        );
+        let previous = skin_model_vertex(&matrices, &vertex, &mut MdlStats::default()).0;
+        assert_ne!(
+            actual, previous,
+            "post-transform blending loses the Source arithmetic order"
+        );
+        assert!(
+            actual
+                .into_iter()
+                .zip(previous)
+                .all(|(a, b)| (a - b).abs() < 0.001)
+        );
+    }
+
+    #[test]
+    fn physical_stream_compression_precedes_nonidentity_bone_blending() {
+        let mut mdl = super::tests::mdl_with_for_compression_test();
+        mdl.illumination_position = [1.0, 2.0, 3.0];
+        let original = VvdVertex {
+            weights: [0.25, 0.75, 0.0],
+            bones: [0, 1, 0],
+            bone_count: 2,
+            position: [0.0; 3],
+            normal: [0.2, 0.3, 0.5],
+            uv: [0.0; 2],
+        };
+        let vvd = Vvd {
+            checksum: 0,
+            vertices: vec![original],
+            tangents: vec![[0.2, 0.3, 0.5, -1.0]],
+        };
+        let options = ModelAssemblyOptions {
+            vertex_compression: VertexCompression::SourceUbyte4,
+        };
+        let result = prepare_model_geometry_with_options(
+            &mdl,
+            &vvd,
+            false,
+            &mut MdlStats::default(),
+            options,
+        )
+        .unwrap();
+        let encoded = source_ubyte4_vector(original.normal).unwrap();
+        let expected = [
+            0.25 * encoded[0] - 0.75 * encoded[1],
+            0.25 * encoded[1] + 0.75 * encoded[0],
+            encoded[2],
+        ];
+        for (actual, expected) in result.vertices[0].normal.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+        assert_eq!(vvd.vertices[0].normal, original.normal);
+        assert_eq!(vvd.tangents[0], [0.2, 0.3, 0.5, -1.0]);
+        assert_eq!(result.vertices[0].tangent_sign, -1.0);
+    }
+
+    #[test]
+    fn skinned_normal_and_tangent_share_linear_bone_blend_and_authored_handedness() {
+        let a = MAT4_IDENTITY;
+        let mut b = MAT4_IDENTITY;
+        b[0][0] = 0.0;
+        b[0][1] = 1.0;
+        b[1][0] = -1.0;
+        b[1][1] = 0.0;
+        let vertex = VvdVertex {
+            weights: [0.25, 0.75, 0.0],
+            bones: [0, 1, 0],
+            bone_count: 2,
+            position: [0.0; 3],
+            normal: [1.0, 0.0, 0.0],
+            uv: [0.0; 2],
+        };
+        let mut stats = MdlStats::default();
+        let result = model_vertex(
+            &[a, b],
+            &vertex,
+            Some([0.0, 1.0, 0.0, -1.0]),
+            None,
+            &mut stats,
+        );
+        assert_eq!(result.normal, [0.25, 0.75, 0.0]);
+        assert_eq!(result.tangent_s, [-0.75, 0.25, 0.0]);
+        assert_eq!(result.tangent_t, [0.0, 0.0, -0.625]);
+        assert_eq!(result.tangent_sign, -1.0);
+        assert!(stats.sanitized.is_empty());
+    }
+
+    #[test]
+    fn missing_vvd_tangent_has_zero_frame_and_explicit_degradation() {
+        let vertex = VvdVertex {
+            weights: [1.0, 0.0, 0.0],
+            bones: [0; 3],
+            bone_count: 1,
+            position: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0; 2],
+        };
+        let mut stats = MdlStats::default();
+        let result = model_vertex(&[MAT4_IDENTITY], &vertex, None, None, &mut stats);
+        assert_eq!(result.tangent_s, [0.0; 3]);
+        assert_eq!(result.tangent_t, [0.0; 3]);
+        assert_eq!(result.tangent_sign, 0.0);
+        assert!(
+            stats
+                .sanitized
+                .contains_key(&AssemblySkip::VertexMissingTangent)
+        );
+    }
+
+    #[test]
+    fn authored_handedness_survives_a_degenerate_skinned_frame() {
+        let vertex = VvdVertex {
+            weights: [1.0, 0.0, 0.0],
+            bones: [0; 3],
+            bone_count: 1,
+            position: [0.0; 3],
+            normal: [1.0, 0.0, 0.0],
+            uv: [0.0; 2],
+        };
+        let result = model_vertex(
+            &[MAT4_IDENTITY],
+            &vertex,
+            Some([1.0, 0.0, 0.0, -1.0]),
+            None,
+            &mut MdlStats::default(),
+        );
+        assert_eq!(result.tangent_t, [0.0; 3]);
+        assert_eq!(result.tangent_sign, -1.0);
+    }
+}

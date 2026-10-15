@@ -9,7 +9,7 @@ use super::{ModelPrimitive, RenderResources, UploadedModel, Vec3, wgpu};
 #[derive(Clone, Copy)]
 pub struct OpticalInputs<'a> {
     pub size: (u32, u32),
-    pub lightmap: &'a super::lightmaps::Frame,
+    pub lighting: &'a super::lighting::Frame,
 }
 impl PlanarView {
     pub fn prepare_optics(
@@ -21,7 +21,8 @@ impl PlanarView {
         upload: &UploadedModel,
         inputs: OpticalInputs<'_>,
     ) {
-        let OpticalInputs { size, lightmap } = inputs;
+        let resources = resources.optical();
+        let OpticalInputs { size, lighting } = inputs;
         let source = &upload.reflectors[self.surface_index];
         let shader = &primitive.preview.render_scene().materials[source.material_slot].shader;
         let (reflect, refract) = super::reflections::optical_passes(shader);
@@ -38,8 +39,10 @@ impl PlanarView {
         }
         let view = self
             .refraction
-            .get_or_insert_with(|| SceneView::new(device, resources, lightmap));
-        let mut uniforms = primitive.uniforms;
+            .get_or_insert_with(|| SceneView::new(device, resources, lighting));
+        let mut uniforms = primitive
+            .uniforms
+            .with_raster_offset(size, primitive.raster_offset());
         uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
         let plane = source.plane;
         let below_water = shader.water().is_some_and(|water| !water.above_water);
@@ -87,22 +90,25 @@ impl PlanarView {
             });
         } else if let Some(water) = shader.water() {
             uniforms.fog_color = [
-                water.fog_color_linear[0],
-                water.fog_color_linear[1],
-                water.fog_color_linear[2],
+                water.scene_fog_color_linear[0],
+                water.scene_fog_color_linear[1],
+                water.scene_fog_color_linear[2],
                 f32::from(water.fog_enabled),
             ];
             uniforms.fog_params = [water.fog_start, water.fog_end, 1.0, 2.0];
             self.refraction_clear = wgpu::Color {
-                r: f64::from(water.fog_clear_linear[0]),
-                g: f64::from(water.fog_clear_linear[1]),
-                b: f64::from(water.fog_clear_linear[2]),
+                r: f64::from(water.scene_fog_color_linear[0]),
+                g: f64::from(water.scene_fog_color_linear[1]),
+                b: f64::from(water.scene_fog_color_linear[2]),
                 a: 1.0,
             };
         }
         view.world.write(queue, &uniforms);
         if let Some(sky) = primitive.sky_uniforms {
-            view.sky.write(queue, &sky);
+            view.sky.write(
+                queue,
+                &sky.with_raster_offset(size, primitive.raster_offset()),
+            );
         }
         let skybox = primitive.map_skybox_uniforms.map(|mut skybox| {
             let (origin, scale) = primitive.skybox_transform.unwrap_or((Vec3::ZERO, 16.0));
@@ -113,7 +119,7 @@ impl PlanarView {
                 -plane.normal[2],
                 distance + clip_bias / scale,
             ];
-            skybox
+            skybox.with_raster_offset(size, primitive.raster_offset())
         });
         if let Some(skybox) = skybox {
             view.skybox.write(queue, &skybox);
@@ -215,6 +221,10 @@ mod tests {
     fn exclusion_keeps_a_second_water_height_in_the_same_material_mesh() {
         let make = |z| super::super::ModelVertex {
             position: Vec3::new(0.0, 0.0, z),
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -222,6 +232,8 @@ mod tests {
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
         };
         let mut vertices = vec![make(-160.0); 3];
         vertices[1].position[0] = 64.0;

@@ -33,6 +33,8 @@ pub mod contents_flags {
     pub const GRATE: i32 = 0x0000_0008;
     pub const SLIME: i32 = 0x0000_0010;
     pub const WATER: i32 = 0x0000_0020;
+    pub const OPAQUE: i32 = 0x0000_0080;
+    pub const MOVEABLE: i32 = 0x0000_4000;
     pub const PLAYERCLIP: i32 = 0x0001_0000;
 }
 
@@ -45,6 +47,15 @@ pub struct LeafWaterData {
     pub min_z: f32,
     /// Surface material's index into [`Bsp::texinfos`].
     pub surface_texinfo: i16,
+}
+
+/// Compiled environment-map sample (`LUMP_CUBEMAPS`, 16-byte record).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CubemapSample {
+    /// Integer Source position; also identifies the packed texture filename.
+    pub origin: [i32; 3],
+    /// Authored resolution exponent; zero selects the engine default.
+    pub size: u8,
 }
 
 /// One splitting plane (`LUMP_PLANES`).
@@ -216,8 +227,40 @@ impl Leaf {
     }
 }
 
-/// One displacement descriptor (`LUMP_DISPINFO`, 176 bytes; the
-/// neighbor tables are not currently decoded).
+/// One authored displacement edge connection (six bytes including padding).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DispSubNeighbor {
+    /// Displacement index, or `u16::MAX` when absent.
+    pub neighbor: u16,
+    /// Counterclockwise quarter-turns of the neighboring grid.
+    pub orientation: u8,
+    /// Whole edge (0), lower half (1), or upper half (2).
+    pub span: u8,
+    /// Corresponding span on the neighboring edge.
+    pub neighbor_span: u8,
+}
+
+impl Default for DispSubNeighbor {
+    fn default() -> Self {
+        Self {
+            neighbor: u16::MAX,
+            orientation: 0,
+            span: 0,
+            neighbor_span: 0,
+        }
+    }
+}
+
+/// Displacements connected only at a corner (ten-byte record).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DispCornerNeighbors {
+    /// Authored neighbor indices; only `count` entries are active.
+    pub neighbors: [u16; 4],
+    /// Number of active entries, bounded by four when consumed.
+    pub count: u8,
+}
+
+/// One displacement descriptor (`LUMP_DISPINFO`, 176 bytes).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DispInfo {
     /// World position of the first corner.
@@ -230,7 +273,8 @@ pub struct DispInfo {
     pub power: i32,
     /// Minimum tesselation.
     pub min_tess: i32,
-    /// Lighting smoothing angle in radians.
+    /// Legacy authored smoothing angle; published core generation does not use
+    /// this value to gate neighbor smoothing.
     pub smoothing_angle: f32,
     /// Contents bits.
     pub contents: i32,
@@ -240,6 +284,12 @@ pub struct DispInfo {
     pub lightmap_alpha_start: i32,
     /// Byte offset into the lightmap sample positions.
     pub lightmap_sample_position_start: i32,
+    /// Source left/top/right/bottom edges, each with up to two neighbor spans.
+    pub edge_neighbors: [[DispSubNeighbor; 2]; 4],
+    /// Authored lists of displacements meeting at each corner.
+    pub corner_neighbors: [DispCornerNeighbors; 4],
+    /// Allowed-vertex bitset retained for tessellation.
+    pub allowed_vertices: [u32; 10],
 }
 
 /// One displacement vertex (`LUMP_DISP_VERTS`, 20 bytes).
@@ -361,6 +411,29 @@ fn color_at(record: &[u8], at: usize) -> ColorRgbExp {
 }
 
 impl<'a> Bsp<'a> {
+    /// Bounded environment-map sample directory, preserving original order.
+    pub fn cubemap_samples(&self, limits: &Limits) -> Result<Vec<CubemapSample>, BspError> {
+        let bytes = self.lump_data(lump_ids::CUBEMAPS, limits)?;
+        if bytes.len() % 16 != 0 {
+            return Err(BspError::Decode {
+                part: "cubemap samples",
+            });
+        }
+        if bytes.len() / 16 > limits.max_entries {
+            return Err(BspError::TooManyRecords {
+                part: "cubemap samples",
+                max: limits.max_entries,
+            });
+        }
+        Ok(bytes
+            .chunks_exact(16)
+            .map(|record| CubemapSample {
+                origin: [i32_at(record, 0), i32_at(record, 4), i32_at(record, 8)],
+                size: record[12],
+            })
+            .collect())
+    }
+
     fn records<T>(
         &self,
         lump: usize,
@@ -590,8 +663,45 @@ impl<'a> Bsp<'a> {
                 map_face: u16_at(r, 36),
                 lightmap_alpha_start: i32_at(r, 40),
                 lightmap_sample_position_start: i32_at(r, 44),
+                edge_neighbors: std::array::from_fn(|edge| {
+                    std::array::from_fn(|sub| {
+                        let offset = 48 + edge * 12 + sub * 6;
+                        DispSubNeighbor {
+                            neighbor: u16_at(r, offset),
+                            orientation: r[offset + 2],
+                            span: r[offset + 3],
+                            neighbor_span: r[offset + 4],
+                        }
+                    })
+                }),
+                corner_neighbors: std::array::from_fn(|corner| {
+                    let offset = 96 + corner * 10;
+                    DispCornerNeighbors {
+                        neighbors: std::array::from_fn(|index| u16_at(r, offset + index * 2)),
+                        count: r[offset + 8],
+                    }
+                }),
+                allowed_vertices: std::array::from_fn(|index| i32_at(r, 136 + index * 4) as u32),
             }
         })
+    }
+
+    /// Compiled brush per-corner normal vectors (`LUMP_VERTNORMALS`).
+    pub fn vertex_normals(&self, limits: &Limits) -> Result<Vec<[f32; 3]>, BspError> {
+        self.records(lump_ids::VERT_NORMALS, 12, "vertex normals", limits, |r| {
+            vec3_at(r, 0)
+        })
+    }
+
+    /// Face-order, local-edge-order indices into the compiled normal table.
+    pub fn vertex_normal_indices(&self, limits: &Limits) -> Result<Vec<u16>, BspError> {
+        self.records(
+            lump_ids::VERT_NORMAL_INDICES,
+            2,
+            "vertex normal indices",
+            limits,
+            |r| u16_at(r, 0),
+        )
     }
 
     /// `LUMP_DISP_VERTS`.

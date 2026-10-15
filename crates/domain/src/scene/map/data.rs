@@ -1,6 +1,7 @@
 use super::{
-    LightmapAtlas, MapAmbientLighting, MapDetailSprite, MapDoor, MapEnvironmentLighting, MapFog,
-    MapOverlay, MapPakFile, MapPlayerStart, MapSkyCamera, MapVisibility, MapWalkCollision,
+    LightmapAtlas, MapAmbientLighting, MapCubemapProbe, MapDetailSprite, MapDoor,
+    MapEnvironmentLighting, MapFog, MapLightingCollision, MapOverlay, MapPakFile, MapPlayerStart,
+    MapSkyCamera, MapSkyPaint, MapSun, MapVisibility, MapWalkCollision, MapWorldLighting,
 };
 use crate::math::Vec3;
 
@@ -18,9 +19,13 @@ pub struct MapData {
     pub overlays: Vec<MapOverlay>,
     pub skybox_overlays: Vec<MapOverlay>,
     pub ambient: MapAmbientLighting,
+    pub world_lighting: MapWorldLighting,
     pub environment_lighting: Option<MapEnvironmentLighting>,
     pub player_start: Option<MapPlayerStart>,
     pub skyname: Option<String>,
+    pub sky_paint: Option<MapSkyPaint>,
+    pub suns: Vec<MapSun>,
+    pub cubemap_probes: Vec<MapCubemapProbe>,
     pub fog: Option<MapFog>,
     pub sky_camera: Option<MapSkyCamera>,
     pub skybox_completion_bounds: Option<MapBounds>,
@@ -32,6 +37,8 @@ pub struct MapData {
     pub visibility: Option<MapVisibility>,
     pub walk_collision: Option<MapWalkCollision>,
     pub water_volumes: Option<super::MapWaterVolumes>,
+    pub lighting_collision: Option<MapLightingCollision>,
+    pub radiosity_surfaces: Option<super::MapRadiositySurfaces>,
     pub pakfile: MapPakFile,
 }
 
@@ -102,6 +109,8 @@ impl From<MapVisibilityBucket> for MapPropVisibility {
 pub struct MapVertex {
     pub position: Vec3,
     pub normal: Vec3,
+    pub tangent_s: Vec3,
+    pub tangent_t: Vec3,
     /// Raw Source texel-space S coordinate: position.dot(s_axis) + s_offset.
     pub tex_s: f32,
     /// Raw Source texel-space T coordinate: position.dot(t_axis) + t_offset.
@@ -119,6 +128,15 @@ pub struct MapVertex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticPropPlacement {
     pub entity: bool,
+    /// Original game-lump index used by `sp_N.vhv`, unaffected by filtering/partitioning.
+    pub static_prop_index: Option<usize>,
+    pub lighting_origin: Option<Vec3>,
+    pub lighting_origin_reference: Option<super::placements::MapLightingOriginReference>,
+    pub diffuse_modulation: [u8; 4],
+    pub render_mode: i32,
+    pub flags: u8,
+    pub flags_ex: Option<u32>,
+    pub extra_flags: Option<u32>,
     pub model_path: String,
     pub origin: Vec3,
     pub angles: Vec3,

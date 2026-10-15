@@ -7,9 +7,15 @@ use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
+#[path = "model_lighting.rs"]
+mod model_lighting;
 pub use gmpublished_domain::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
     MapVisibilityBucket, MapWalkCollision,
+};
+pub use model_lighting::{
+    ModelLightKind, ModelLightingContext, ModelLightingHistory, ModelLightingSceneInputs,
+    ModelLocalLight, placement_sample_point, placement_static_bounds,
 };
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreviewLoadError {
@@ -31,6 +37,17 @@ pub struct ModelVertex {
     pub blend_alpha: f32,
     /// Authored vertex opacity, separate from WorldVertexTransition blending.
     pub opacity: f32,
+    /// Explicit linear illumination, independent of authored vertex colour.
+    pub illumination: Vec3,
+    /// Bit 0 selects separate linear illumination and raw instance RGB;
+    /// bit 1 identifies the static-prop draw context's modulation overrides.
+    /// Bit 2 enables a directional lighting context; bit 3 marks a model draw
+    /// whose per-instance opacity replaces the material alpha constant.
+    pub lighting_mode: u32,
+    pub tangent_s: Vec3,
+    pub tangent_t: Vec3,
+    pub tangent_sign: f32,
+    pub lighting_context: u32,
 }
 
 impl From<&vformats::mdl::ModelVertex> for ModelVertex {
@@ -38,18 +55,32 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
         Self {
             position: Vec3::from(vertex.position),
             normal: Vec3::from(vertex.normal),
+            tangent_s: Vec3::from(vertex.tangent_s),
+            tangent_t: Vec3::from(vertex.tangent_t),
+            tangent_sign: vertex.tangent_sign,
+            lighting_context: 0,
             uv: vertex.uv,
             lightmap_uv: [0.0; 2],
             lightmap_bump_step: 0.0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 8,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MeshGeometry {
+    #[default]
+    Brush,
+    Model,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
+    pub geometry: MeshGeometry,
     pub vertices: Vec<ModelVertex>,
     pub indices: Vec<u32>,
     pub material_index: usize,
@@ -60,6 +91,7 @@ pub struct MeshData {
 impl From<&vformats::mdl::MeshData> for MeshData {
     fn from(mesh: &vformats::mdl::MeshData) -> Self {
         Self {
+            geometry: MeshGeometry::Model,
             vertices: mesh.vertices.iter().map(ModelVertex::from).collect(),
             indices: mesh.indices.clone(),
             material_index: mesh.material_index,
@@ -71,6 +103,15 @@ impl From<&vformats::mdl::MeshData> for MeshData {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelData {
+    pub mdl_flags: u32,
+    pub vertex_compression: vformats::mdl::VertexCompression,
+    pub source_frames: Vec<vformats::mdl::ModelSourceVertexFrame>,
+    pub illumination_position: Vec3,
+    pub hull_min: Vec3,
+    pub hull_max: Vec3,
+    pub illumination_attachment_index: Option<usize>,
+    pub illumination_attachment_position: Option<Vec3>,
+    pub lighting: Option<Arc<ModelLightingData>>,
     pub meshes: Vec<MeshData>,
     pub material_names: Vec<String>,
     pub material_dirs: Vec<String>,
@@ -84,9 +125,44 @@ pub struct ModelData {
     pub triangle_count: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelLightingData {
+    pub checksum: u32,
+    pub compatible: bool,
+    pub compiler_layout_verified: bool,
+    pub compiler_aliases: Vec<(
+        vformats::mdl::ModelLightingVertex,
+        vformats::mdl::ModelLightingVertex,
+    )>,
+    pub meshes: Vec<vformats::mdl::ModelLightingMesh>,
+    pub vertices: Vec<Vec<vformats::mdl::ModelLightingVertex>>,
+}
+
 impl From<vformats::mdl::ModelData> for ModelData {
     fn from(model: vformats::mdl::ModelData) -> Self {
         Self {
+            mdl_flags: model.mdl_flags,
+            illumination_position: Vec3::from(model.illumination_position),
+            hull_min: Vec3::from(model.hull_min),
+            hull_max: Vec3::from(model.hull_max),
+            illumination_attachment_index: model.illumination_attachment_index,
+            illumination_attachment_position: model
+                .illumination_attachment_position
+                .map(Vec3::from),
+            vertex_compression: model.vertex_compression,
+            source_frames: model.source_frames,
+            lighting: Some(Arc::new(ModelLightingData {
+                checksum: model.checksum,
+                compatible: model.lighting_compatible,
+                compiler_layout_verified: false,
+                compiler_aliases: Vec::new(),
+                meshes: model.lighting_meshes,
+                vertices: model
+                    .meshes
+                    .iter()
+                    .map(|mesh| mesh.vertex_lighting.clone())
+                    .collect(),
+            })),
             meshes: model.meshes.iter().map(MeshData::from).collect(),
             material_names: model.material_names,
             material_dirs: model.material_dirs,
@@ -246,8 +322,13 @@ pub struct MapPreview {
     pub(crate) scene: Arc<RenderScene>,
     pub(crate) mesh_visibility: Vec<MapMeshVisibility>,
     pub(crate) map_skybox_meshes: Vec<MeshData>,
+    pub(crate) model_lighting: Vec<ModelLightingContext>,
+    pub(crate) model_lighting_inputs: Option<Arc<ModelLightingSceneInputs>>,
     pub(crate) lightmap: Option<LightmapSlot>,
     pub(crate) skybox: Option<Skybox>,
+    pub(crate) suns: Vec<gmpublished_domain::scene::map::MapSun>,
+    pub(crate) cubemap_probes: Vec<gmpublished_domain::scene::map::MapCubemapProbe>,
+    pub(crate) sun_material_slots: Vec<[usize; 2]>,
     pub(crate) detail_sprites: Vec<DetailSprite>,
     pub(crate) map_skybox_detail_sprites: Vec<DetailSprite>,
     pub(crate) overlays: Vec<OverlayPrimitive>,
@@ -532,9 +613,11 @@ pub struct OverlayVertex {
     pub(crate) uv: [f32; 2],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Skybox {
     pub(crate) faces: [Option<Arc<ResolvedTexture>>; SKYBOX_FACE_COUNT],
+    pub(crate) materials: [Option<crate::bridge::materials::SkyMaterial>; SKYBOX_FACE_COUNT],
+    pub(crate) paint: Option<gmpublished_domain::scene::map::MapSkyPaint>,
 }
 
 enum_with_all! {
@@ -682,6 +765,10 @@ mod tests {
     fn vertex(x: f32) -> ModelVertex {
         ModelVertex {
             position: Vec3::new(x, 0.0, 0.0),
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -689,11 +776,14 @@ mod tests {
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
         }
     }
 
     fn mesh(material_index: usize) -> MeshData {
         MeshData {
+            geometry: MeshGeometry::Model,
             vertices: vec![vertex(0.0), vertex(1.0), vertex(2.0)],
             indices: vec![0, 1, 2],
             material_index,
@@ -718,6 +808,9 @@ mod tests {
 
     fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> MapPreview {
         MapPreview {
+            suns: Vec::new(),
+            cubemap_probes: Vec::new(),
+            sun_material_slots: Vec::new(),
             water_volumes: None,
             entity_meshes: Vec::new(),
             skybox_entity_meshes: Vec::new(),
@@ -756,6 +849,8 @@ mod tests {
             }),
             mesh_visibility,
             map_skybox_meshes: Vec::new(),
+            model_lighting: Vec::new(),
+            model_lighting_inputs: None,
             lightmap: None,
             skybox: None,
             detail_sprites: vec![DetailSprite {

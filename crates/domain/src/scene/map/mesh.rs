@@ -198,7 +198,7 @@ pub(super) fn append_face(
             lightmap_block,
         )?;
     } else {
-        append_brush_face(bsp, face, texinfo, normal, mesh, lightmap_block)?;
+        append_brush_face(bsp, face, face_index, texinfo, normal, mesh, lightmap_block)?;
     }
     // Evaluate texinfo and lightmap transforms in compiled model space first.
     // Moving the position before UV evaluation makes textures slide with origin.
@@ -211,6 +211,8 @@ pub(super) fn append_face(
         });
         vertex.vertex.position = context.transform.point(vertex.vertex.position);
         vertex.vertex.normal = context.transform.vector(vertex.vertex.normal);
+        vertex.vertex.tangent_s = context.transform.vector(vertex.vertex.tangent_s);
+        vertex.vertex.tangent_t = context.transform.vector(vertex.vertex.tangent_t);
     }
     let index_count = mesh.indices.len().saturating_sub(index_start);
     if index_count > 0
@@ -230,6 +232,7 @@ pub(super) fn append_face(
 pub(super) fn append_brush_face(
     bsp: &MapBsp,
     face: &Face,
+    face_index: usize,
     texinfo: &TexInfo,
     normal: Vec3,
     mesh: &mut BuildMesh,
@@ -238,15 +241,27 @@ pub(super) fn append_brush_face(
     let base =
         u32::try_from(mesh.vertices.len()).map_err(|_| BspError::TooLarge { item: "vertices" })?;
     let positions = bsp.face_vertex_positions(face);
-    for position in positions.iter().copied() {
+    let offset = bsp.face_normal_offsets.get(face_index).copied();
+    for (corner, position) in positions.iter().copied().enumerate() {
+        let corner_normal = offset
+            .and_then(|o| bsp.vertex_normal_indices.get(o + corner))
+            .and_then(|i| bsp.vertex_normals.get(usize::from(*i)))
+            .copied()
+            .filter(|normal| normal.is_finite())
+            .unwrap_or(normal);
+        let (tangent_s, tangent_t) = super::frames::texture_frame(corner_normal, normal, texinfo);
         mesh.vertices.push(BuildVertex {
-            vertex: map_vertex(
-                position,
-                normal,
-                texinfo,
-                lightmap_block.map_or([0.0; 2], |_| brush_lightmap_uv(position, texinfo, face)),
-                0.0,
-            ),
+            vertex: MapVertex {
+                tangent_s,
+                tangent_t,
+                ..map_vertex(
+                    position,
+                    corner_normal,
+                    texinfo,
+                    lightmap_block.map_or([0.0; 2], |_| brush_lightmap_uv(position, texinfo, face)),
+                    0.0,
+                )
+            },
             lightmap_block,
         });
     }
@@ -265,16 +280,43 @@ pub(super) fn append_displacement(
     mesh: &mut BuildMesh,
     lightmap_block: Option<usize>,
 ) -> Result<(), BspError> {
+    let fallback;
+    let normals = if let Some(normals) = usize::try_from(face.displacement)
+        .ok()
+        .and_then(|i| bsp.displacement_normals.get(i))
+        .filter(|n| !n.normals.is_empty())
+    {
+        normals
+    } else {
+        fallback = super::frames::displacement_normals(bsp)?;
+        fallback
+            .get(usize::try_from(face.displacement).unwrap_or(usize::MAX))
+            .ok_or(BspError::Malformed {
+                message: "missing displacement normal grid",
+            })?
+    };
     for vertex in displacement_vertices(bsp, face, displacement)? {
+        let grid_index = vertex.column * (vertex.steps + 1) + vertex.row;
+        let vertex_normal = normals.normals.get(grid_index).copied().unwrap_or(normal);
+        let stage = normals.stages.get(grid_index).copied().unwrap_or_default();
+        let (tangent_s, tangent_t) = super::frames::displacement_frame(
+            vertex_normal,
+            normal,
+            texinfo,
+            stage,
+            normals.tangent_s.get(grid_index).copied(),
+        );
         let index = u32::try_from(mesh.vertices.len())
             .map_err(|_| BspError::TooLarge { item: "vertices" })?;
         mesh.vertices.push(BuildVertex {
             vertex: MapVertex {
                 position: vertex.position,
+                tangent_s,
+                tangent_t,
                 opacity: vertex.alpha,
                 ..map_vertex(
                     vertex.base_position,
-                    normal,
+                    vertex_normal,
                     texinfo,
                     lightmap_block.map_or([0.0; 2], |_| {
                         displacement_lightmap_uv(vertex.column, vertex.row, vertex.steps, face)
@@ -296,9 +338,12 @@ pub(super) fn map_vertex(
     lightmap_uv: [f32; 2],
     blend_alpha: f32,
 ) -> MapVertex {
+    let (tangent_s, tangent_t) = super::frames::texture_frame(normal, normal, texinfo);
     MapVertex {
         position,
         normal,
+        tangent_s,
+        tangent_t,
         tex_s: texture_coord(position, texinfo.texture_vecs[0]),
         tex_t: texture_coord(position, texinfo.texture_vecs[1]),
         texture_size: [0; 2],
@@ -321,6 +366,11 @@ pub(super) fn displacement_vertices(
     face: &Face,
     displacement: &DispInfo,
 ) -> Result<Vec<DisplacementBuildVertex>, BspError> {
+    if !(2..=4).contains(&displacement.power) {
+        return Err(BspError::Malformed {
+            message: "unsupported displacement power",
+        });
+    }
     let power =
         u32::try_from(displacement.power).map_err(|_| BspError::TooLarge { item: "vertices" })?;
     let steps = 2usize
@@ -330,7 +380,103 @@ pub(super) fn displacement_vertices(
         .checked_add(1)
         .ok_or(BspError::TooLarge { item: "vertices" })?;
     let grid = displacement_grid(bsp, face, displacement, steps)?;
-    Ok(tessellate_displacement_grid(&grid, steps, side))
+    if grid.len() != side * side {
+        return Err(BspError::Malformed {
+            message: "incomplete displacement vertex grid",
+        });
+    }
+    let all_allowed = (0..side * side)
+        .all(|index| displacement.allowed_vertices[index / 32] & (1 << (index % 32)) != 0);
+    if all_allowed {
+        return Ok(tessellate_displacement_grid(&grid, steps, side));
+    }
+    Ok(
+        displacement_allowed_triangles(steps, &displacement.allowed_vertices)
+            .into_iter()
+            .flatten()
+            .filter_map(|index| {
+                grid.get(index).map(|vertex| DisplacementBuildVertex {
+                    position: vertex.position,
+                    base_position: vertex.base_position,
+                    column: index / side,
+                    row: index % side,
+                    steps,
+                    alpha: vertex.alpha,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn displacement_allowed_triangles(steps: usize, allowed: &[u32; 10]) -> Vec<[usize; 3]> {
+    fn active(point: [usize; 2], side: usize, allowed: &[u32; 10]) -> bool {
+        let index = point[1] * side + point[0];
+        allowed[index / 32] & (1 << (index % 32)) != 0
+    }
+    fn node(
+        center: [usize; 2],
+        radius: usize,
+        side: usize,
+        allowed: &[u32; 10],
+        triangles: &mut Vec<[usize; 3]>,
+    ) {
+        let index = |point: [usize; 2]| point[1] * side + point[0];
+        let offset = |delta: [i32; 2], distance: usize| {
+            std::array::from_fn(|axis| {
+                (center[axis] as i32 + delta[axis] * distance as i32) as usize
+            })
+        };
+        let mut children = [false; 4];
+        if radius > 1 {
+            for (child, delta) in [[1, 1], [-1, 1], [-1, -1], [1, -1]].into_iter().enumerate() {
+                let point = offset(delta, radius / 2);
+                children[child] = active(point, side, allowed);
+                if children[child] {
+                    node(point, radius / 2, side, allowed, triangles);
+                }
+            }
+        }
+        // Source's shared engine/compiler tessellator visits a clockwise ring
+        // around each node. Active children cover their quadrants; inactive
+        // boundary points are omitted and the remaining segment forms one fan
+        // triangle. This prevents higher-power edges from retaining vertices
+        // the compiler removed to meet their coarser neighbors.
+        let winding = [
+            ([1, -1], Some(3)),
+            ([0, -1], None),
+            ([-1, -1], Some(2)),
+            ([-1, 0], None),
+            ([-1, 1], Some(1)),
+            ([0, 1], None),
+            ([1, 1], Some(0)),
+            ([1, 0], None),
+            ([1, -1], Some(3)),
+        ];
+        let mut previous = None;
+        for (delta, child) in winding {
+            if child.is_some_and(|child| children[child]) {
+                previous = None;
+                continue;
+            }
+            let point = offset(delta, radius);
+            if active(point, side, allowed) {
+                let current = index(point);
+                if let Some(previous) = previous {
+                    triangles.push([previous, current, index(center)]);
+                }
+                previous = Some(current);
+            }
+        }
+    }
+    let mut triangles = Vec::new();
+    node(
+        [steps / 2; 2],
+        steps / 2,
+        steps + 1,
+        allowed,
+        &mut triangles,
+    );
+    triangles
 }
 
 pub(super) fn tessellate_displacement_grid(
@@ -465,4 +611,96 @@ pub(super) fn fan_indices(vertex_count: usize) -> Result<Vec<u32>, BspError> {
         indices.push(u32::try_from(index + 1).map_err(|_| BspError::TooLarge { item: "indices" })?);
     }
     Ok(indices)
+}
+
+#[cfg(test)]
+mod allowed_vertex_tests {
+    use super::*;
+
+    #[test]
+    fn shared_tessellator_full_allowed_mesh_matches_existing_checkerboard_for_every_power() {
+        for power in 2..=4 {
+            let steps = 1 << power;
+            let side = steps + 1;
+            let grid = (0..side)
+                .flat_map(|column| {
+                    (0..side).map(move |row| DisplacementGridVertex {
+                        position: Vec3::new(column as f32, row as f32, 0.0),
+                        base_position: Vec3::ZERO,
+                        alpha: 0.0,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let canonical = |mut triangles: Vec<[usize; 3]>| {
+                for t in &mut triangles {
+                    t.sort_unstable();
+                }
+                triangles.sort_unstable();
+                triangles
+            };
+            let expected = tessellate_displacement_grid(&grid, steps, side)
+                .chunks_exact(3)
+                .map(|t| std::array::from_fn(|i| t[i].column * side + t[i].row))
+                .collect();
+            let actual = displacement_allowed_triangles(steps, &[u32::MAX; 10]);
+            assert_eq!(actual.len(), steps * steps * 2);
+            assert_eq!(canonical(actual), canonical(expected));
+        }
+    }
+
+    #[test]
+    fn disallowed_edge_vertex_is_omitted_and_adjacent_segments_merge_into_one_triangle() {
+        let mut allowed = [u32::MAX; 10];
+        allowed[0] &= !(1 << 9); // Source grid point x4,y1 in a power2 patch.
+        let triangles = displacement_allowed_triangles(4, &allowed);
+        assert_eq!(triangles.len(), 31);
+        assert!(triangles.iter().all(|t| !t.contains(&9)));
+        assert!(triangles.contains(&[14, 4, 8]));
+        let area: i32 = triangles
+            .iter()
+            .map(|t| {
+                let p = t.map(|i| [(i % 5) as i32, (i / 5) as i32]);
+                ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                    - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]))
+                    .abs()
+            })
+            .sum();
+        assert_eq!(area, 32); // Twice the unchanged 4x4 patch area.
+    }
+
+    #[test]
+    fn collision_and_rendering_ignore_authored_positions_of_disallowed_boundary_vertices() {
+        let mut bsp = super::super::tests::displacement_test_bsp(
+            2,
+            [
+                Vec3::ZERO,
+                Vec3::new(256.0, 0.0, 0.0),
+                Vec3::new(256.0, 256.0, 0.0),
+                Vec3::new(0.0, 256.0, 0.0),
+            ],
+            0,
+        );
+        bsp.displacements[0].allowed_vertices[0] &= !(1 << 9);
+        bsp.displacement_verts[9].dist = 128.0;
+        let vertices = displacement_vertices(&bsp, &bsp.faces[0], &bsp.displacements[0]).unwrap();
+        assert_eq!(vertices.len(), 31 * 3);
+        assert!(vertices.iter().all(|v| v.position[2] == 0.0));
+        let collision = super::super::walk::walk_displacements_from_bsp(&bsp);
+        assert_eq!(collision.len(), 1);
+        assert!(
+            collision[0]
+                .triangles
+                .iter()
+                .all(|triangle| triangle.vertices.iter().all(|vertex| vertex[2] == 0.0))
+        );
+        let mut collision_world = super::super::MapWalkCollision::empty();
+        collision_world.displacements = collision;
+        let hit = collision_world.trace_aabb(
+            Vec3::new(64.0, 252.0, 256.0),
+            Vec3::new(64.0, 252.0, -64.0),
+            Vec3::ZERO,
+        );
+        assert!(hit.fraction < 1.0 && !hit.start_solid);
+        assert!(hit.end_position[2].abs() < 1e-5);
+    }
 }

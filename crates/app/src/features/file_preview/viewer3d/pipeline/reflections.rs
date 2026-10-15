@@ -16,7 +16,8 @@ pub fn target_size(size: (u32, u32), count: usize, format: wgpu::TextureFormat) 
         return size;
     }
     let pixels = u64::from(size.0) * u64::from(size.1);
-    let budget = TARGET_BUDGET_BYTES / super::targets::bytes_per_pixel(format) / count as u64;
+    let budget =
+        TARGET_BUDGET_BYTES / super::targets::bytes_per_pixel_for_samples(format, 1) / count as u64;
     let scale = (budget as f64 / pixels.max(1) as f64).sqrt().min(1.0);
     (
         ((f64::from(size.0) * scale).floor() as u32).max(1),
@@ -118,14 +119,13 @@ impl ViewUniforms {
     pub fn new(
         device: &wgpu::Device,
         resources: &RenderResources,
-        lightmap: &super::lightmaps::Frame,
+        lighting: &super::lighting::Frame,
     ) -> Self {
         let (buffer, bind_group) = super::resources::uniforms(
             device,
             &resources.uniform_layout,
             "file_preview.scene_view",
-            &lightmap.view,
-            &lightmap.raw_view,
+            lighting,
         );
         Self { buffer, bind_group }
     }
@@ -135,6 +135,7 @@ impl ViewUniforms {
 }
 #[derive(Debug)]
 pub struct SceneView {
+    pub sun: super::sun::gpu::Frame,
     pub world: ViewUniforms,
     pub sky: ViewUniforms,
     pub skybox: ViewUniforms,
@@ -150,12 +151,13 @@ impl SceneView {
     pub fn new(
         device: &wgpu::Device,
         resources: &RenderResources,
-        lightmap: &super::lightmaps::Frame,
+        lighting: &super::lighting::Frame,
     ) -> Self {
         Self {
-            world: ViewUniforms::new(device, resources, lightmap),
-            sky: ViewUniforms::new(device, resources, lightmap),
-            skybox: ViewUniforms::new(device, resources, lightmap),
+            sun: super::sun::gpu::Frame::default(),
+            world: ViewUniforms::new(device, resources, lighting),
+            sky: ViewUniforms::new(device, resources, lighting),
+            skybox: ViewUniforms::new(device, resources, lighting),
             visibility: UploadedVisibility::default(),
             skybox_visibility: UploadedVisibility::default(),
             plans: None,
@@ -337,7 +339,20 @@ impl PlanarView {
         size: (u32, u32),
     ) {
         let surface = &upload.reflectors[self.surface_index];
-        let mut main = surface.plane.reflect_uniforms(primitive.uniforms, true);
+        let shader = &primitive.preview.render_scene().materials[surface.material_slot].shader;
+        let offset = primitive.raster_offset();
+        // Stored optical targets use the main-camera reflection matrix. Source
+        // uses a proper reflected camera, with a different axis reversal for
+        // water and reflective glass; transform its raster bias accordingly.
+        let reflected_offset = if shader.mirror().is_some() {
+            [-offset[0], offset[1]]
+        } else {
+            [offset[0], -offset[1]]
+        };
+        let mut main = surface
+            .plane
+            .reflect_uniforms(primitive.uniforms, true)
+            .with_raster_offset(size, reflected_offset);
         let water = primitive.preview.render_scene().materials[surface.material_slot]
             .shader
             .water();
@@ -348,9 +363,12 @@ impl PlanarView {
                 distance: 0.0,
                 ..surface.plane
             };
-            self.view
-                .sky
-                .write(queue, &direction_plane.reflect_uniforms(sky, false));
+            self.view.sky.write(
+                queue,
+                &direction_plane
+                    .reflect_uniforms(sky, false)
+                    .with_raster_offset(size, reflected_offset),
+            );
         }
         let skybox = primitive.map_skybox_uniforms.map(|mut uniforms| {
             uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
@@ -364,27 +382,27 @@ impl PlanarView {
                 distance: surface.plane.distance / scale + surface.plane.normal.dot(origin),
             }
             .reflect_uniforms(uniforms, true)
+            .with_raster_offset(size, reflected_offset)
         });
         if let Some(skybox) = skybox {
             self.view.skybox.write(queue, &skybox);
         }
         if let Some(map) = primitive.preview.map() {
-            // Source water uses the liquid's visibility leaf, not the mirrored
-            // eye (which can be inside solid space beneath the map).
+            // Main SetupVis remains active while Source builds optical world
+            // lists. Keep the reflected frustum and clipping view-local;
+            // projecting the eye onto water admits unrelated world clusters.
             let eye = Vec3::from([
                 primitive.uniforms.camera_position[0],
                 primitive.uniforms.camera_position[1],
                 primitive.uniforms.camera_position[2],
             ]);
-            let vis_origin = eye - surface.plane.normal * surface.plane.signed_distance(eye)
-                + surface.plane.normal * 0.5;
             self.view.visibility.ensure_world_visibility(
                 device,
                 queue,
                 map,
                 upload,
                 primitive.visibility_culling,
-                vis_origin,
+                eye,
             );
         }
         let mut plans = prepare_draw_plans(
@@ -426,9 +444,24 @@ impl PlanarView {
                 plans.map_skybox = None;
             }
         }
+        let sun_skybox = skybox.filter(|_| plans.map_skybox.is_some());
         self.view.plans = Some(plans);
         super::transparency::prepare(&mut self.view, upload, main, skybox, water.map(|_| false));
         RenderTargets::ensure(&mut self.view.targets, device, resources, size);
+        // Legacy env_sun overlays are part of GMod's reflected sky scene. Keep
+        // their visibility history and depth queries local to this view, using
+        // its reflected camera and the skybox plan actually rendered here.
+        self.view.sun.prepare(
+            device,
+            queue,
+            &resources.sun,
+            &super::sun::gpu::Inputs {
+                map: primitive.preview.map(),
+                world: main,
+                skybox: sun_skybox,
+                targets: self.view.targets.as_ref().unwrap(),
+            },
+        );
     }
 }
 
@@ -537,7 +570,7 @@ mod tests {
                 u64::from(size.0)
                     * u64::from(size.1)
                     * count as u64
-                    * super::super::targets::bytes_per_pixel(format)
+                    * super::super::targets::bytes_per_pixel_for_samples(format, 1)
                     <= super::TARGET_BUDGET_BYTES
             );
         }
@@ -601,6 +634,10 @@ mod tests {
     fn one_material_at_multiple_heights_and_angles_gets_distinct_planes() {
         let vertex = |position, normal| ModelVertex {
             position,
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
             normal,
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -608,6 +645,8 @@ mod tests {
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
         };
         let mut vertices = Vec::new();
         for z in [-144.0, 128.0] {
@@ -627,6 +666,7 @@ mod tests {
             vertices.push(vertex(position, Vec3::new(1.0, 0.0, 0.0)));
         }
         let mesh = MeshData {
+            geometry: crate::media::preview_model::MeshGeometry::Brush,
             vertices,
             indices: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2],
             material_index: 0,

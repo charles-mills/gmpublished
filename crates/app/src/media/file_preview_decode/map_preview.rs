@@ -1,12 +1,12 @@
 use super::materials::{
     resolve_detail_sprites, resolve_map_material_slots_parallel, resolve_map_overlays,
-    resolve_skybox, sky_log_status,
+    resolve_skybox, resolve_sun_materials, sky_log_status,
 };
 use super::{
     MAP_FALLBACK_TEXTURE_DIMENSION, MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP,
     MAP_TEXTURE_DECODE_BUDGET_BYTES, MAP_TEXTURE_MAX_DIMENSION, MAP_TOO_LARGE_BYTES,
     PHY_DEBUG_TRIANGLE_CAP, PHY_DEBUG_VERTEX_COLOR, catch_asset_decode, entry_stem,
-    info_preview_data, load_model_catching_panic, load_model_companions,
+    info_preview_data, load_model_companions,
 };
 use crate::bridge::materials::{
     ContentSourceTier, DecodedTextureBudget, MaterialResolver, RenderMode, ResolvedPrimaryMaterial,
@@ -32,10 +32,13 @@ use vformats::phy::{ConvexLedge, ReadStats, SkipReason};
 
 mod build;
 mod collision;
+mod compiled_lighting;
+mod cubemaps;
 mod diagnostics;
 mod lighting;
 mod materials;
 mod props;
+mod runtime_lighting;
 mod world_geometry;
 
 use build::{PropBuildPhase, build_props};
@@ -58,6 +61,8 @@ pub(super) use materials::{
     material_dimensions, normalize_map_uv, render_mode_log_suffix, texture_payload_log_suffix,
     water_fallback_log_suffix,
 };
+#[cfg(feature = "map-capture")]
+pub(super) use props::load_prop_model_with_options;
 pub(super) use props::{
     DoorBakeResult, LoadedPhy, LoadedPropModel, LoadedPropPhysics, PropBakeResult,
     PropBakeSkipStats, PropCollisionStats, PropModelAsset, bake_map_doors_with_prop_model_loader,
@@ -130,6 +135,9 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         overlays: map_overlays,
         skybox_overlays: map_skybox_overlays,
         ambient,
+        world_lighting,
+        lighting_collision,
+        radiosity_surfaces,
         environment_lighting,
         player_start,
         bounds_min,
@@ -143,6 +151,9 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         water_volumes,
         lightmap,
         skyname,
+        sky_paint,
+        suns,
+        cubemap_probes,
         fog,
         sky_camera,
     } = map;
@@ -157,6 +168,22 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     emit_stage(PreviewLoadStage::ResolvingMaterials);
     let materials_started = Instant::now();
     let mut table = resolve_map_material_slots_parallel(&material_names, &material_resolver);
+    let surface_materials = radiosity_surfaces
+        .as_ref()
+        .map_or_else(Vec::new, |surfaces| {
+            parallel_collect(
+                &(0..surfaces.texdatas.len()).collect::<Vec<_>>(),
+                |&index| material_resolver.resolve_surface_lighting(surfaces.material_name(index)?),
+            )
+        });
+    let model_lighting_inputs = Arc::new(crate::media::preview_model::ModelLightingSceneInputs {
+        ambient,
+        world_lighting,
+        visibility: visibility.clone(),
+        collision: lighting_collision,
+        radiosity_surfaces,
+        surface_materials,
+    });
     // A compiled fog volume can name an underside material even when no
     // visible face references it. Resolve that dependency independently.
     let below_names = table
@@ -222,8 +249,18 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         &raw_stats,
         visibility.as_ref(),
         walk_collision,
-        &ambient,
+        &model_lighting_inputs.ambient,
+        cubemaps::PropEnvironmentMapInputs {
+            map_name: request
+                .entry_path
+                .rsplit(['/', '\\'])
+                .next()
+                .and_then(entry_stem)
+                .unwrap_or_default(),
+            probes: &cubemap_probes,
+        },
         environment_lighting.as_ref(),
+        lightmap.as_ref().map(|atlas| atlas.source),
         &material_resolver,
         &mut table,
         load_model,
@@ -239,19 +276,40 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let prop_mesh_bytes = prop_bake
         .mesh_bytes()
         .saturating_add(skybox_prop_bake.mesh_bytes());
+    let sky_context_offset =
+        u32::try_from(prop_bake.model_lighting.len()).expect("bounded model contexts");
+    let mut skybox_prop_bake = skybox_prop_bake;
+    for mesh in &mut skybox_prop_bake.meshes {
+        for vertex in &mut mesh.vertices {
+            if vertex.lighting_context != 0 {
+                vertex.lighting_context += sky_context_offset;
+            }
+        }
+    }
+    let mut model_lighting = prop_bake.model_lighting;
+    model_lighting.extend(skybox_prop_bake.model_lighting);
+    model_lighting_inputs.seed_entities(&mut model_lighting);
+    model_lighting_inputs.seed_static(&mut model_lighting);
     entity_meshes.extend(prop_bake.entity_meshes);
     skybox_entity_meshes.extend(skybox_prop_bake.entity_meshes);
     meshes.extend(prop_bake.meshes);
     mesh_visibility.extend(prop_bake.mesh_visibility);
     map_skybox_meshes.extend(skybox_prop_bake.meshes);
+    runtime_lighting::activate(&mut meshes, &model_lighting, table.slots());
+    runtime_lighting::activate(&mut map_skybox_meshes, &model_lighting, table.slots());
     emit_stage(PreviewLoadStage::BakingLightmap);
     let lightmap_started = Instant::now();
     let lightmap_status = lightmap_status(lightmap.as_ref());
     let lightmap_timing = lightmap_started.elapsed();
-    let skybox = skyname
-        .as_deref()
-        .and_then(|skyname| resolve_skybox(skyname, &resolver.with_bc_textures_disabled()));
+    let skybox = skyname.as_deref().and_then(|skyname| {
+        resolve_skybox(
+            skyname,
+            &resolver.with_bc_textures_disabled(),
+            sky_paint.as_ref(),
+        )
+    });
     let sky_status = sky_log_status(skyname.as_deref());
+    let sun_material_slots = resolve_sun_materials(&suns, &material_resolver, &mut table);
     let vertex_count = meshes
         .iter()
         .chain(&map_skybox_meshes)
@@ -304,6 +362,8 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         });
     }
     let scene = Arc::new(MapPreview {
+        model_lighting,
+        model_lighting_inputs: Some(model_lighting_inputs),
         water_volumes,
         scene: Arc::new(RenderScene {
             stats: ModelStats {
@@ -328,6 +388,9 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         map_skybox_meshes,
         lightmap,
         skybox,
+        suns,
+        cubemap_probes,
+        sun_material_slots,
         detail_sprites,
         map_skybox_detail_sprites,
         overlays: overlay_bake.overlays,

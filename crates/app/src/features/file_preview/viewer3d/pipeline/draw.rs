@@ -1,7 +1,8 @@
 use super::resources::RenderResources;
+use super::surface_pipelines::SurfaceBlend;
 use super::visibility::{UploadedVisibility, UploadedVisibleIndices};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ViewKind {
     Main,
     Reflection,
@@ -78,22 +79,46 @@ pub fn draw_scene_plan_opaque<'a>(
     view: DrawView<'a>,
 ) {
     pass.set_bind_group(0, view.uniforms, &[]);
-    pass.set_pipeline(if view.kind == ViewKind::Refraction {
+    let ordinary = if view.kind == ViewKind::Refraction {
         &resources.refracted_opaque_pipeline
     } else if view.kind == ViewKind::Reflection {
         &resources.reflected_opaque_pipeline
     } else {
         &resources.opaque_pipeline
-    });
+    };
     for item in &plan.opaque {
+        pass.set_pipeline(
+            upload
+                .surface_pipelines
+                .get(
+                    item.material_slot,
+                    view.kind,
+                    false,
+                    SurfaceBlend::Opaque,
+                    upload.meshes[item.mesh_index].geometry,
+                )
+                .unwrap_or(ordinary),
+        );
         draw_model_item(pass, upload, *item, view.visibility);
     }
-    pass.set_pipeline(if view.kind == ViewKind::Refraction {
+    let overlay = if view.kind == ViewKind::Refraction {
         &resources.refracted_overlay_opaque_pipeline
     } else {
         &resources.overlay_opaque_pipeline
-    });
+    };
     for item in &plan.overlay_opaque {
+        pass.set_pipeline(
+            upload
+                .surface_pipelines
+                .get(
+                    item.material_slot,
+                    view.kind,
+                    true,
+                    SurfaceBlend::Opaque,
+                    crate::media::preview_model::MeshGeometry::Brush,
+                )
+                .unwrap_or(overlay),
+        );
         draw_overlay_item(pass, upload, *item);
     }
 }
@@ -120,12 +145,23 @@ pub fn draw_scene_plan_transparent<'a>(
         use super::transparency::Primitive;
         match &operation.primitive {
             Primitive::Mesh(item, range) => {
-                pass.set_pipeline(transparent_pipeline(
-                    resources,
-                    view,
-                    false,
-                    operation.additive,
-                ));
+                let ordinary = transparent_pipeline(resources, view, false, operation.additive);
+                pass.set_pipeline(
+                    upload
+                        .surface_pipelines
+                        .get(
+                            item.material_slot,
+                            view.kind,
+                            false,
+                            if operation.additive {
+                                SurfaceBlend::Additive
+                            } else {
+                                SurfaceBlend::Alpha
+                            },
+                            upload.meshes[item.mesh_index].geometry,
+                        )
+                        .unwrap_or(ordinary),
+                );
                 if let Some(range) = range {
                     let mesh = &upload.meshes[item.mesh_index];
                     pass.set_bind_group(1, &upload.material_bind_groups[item.material_slot], &[]);
@@ -137,12 +173,23 @@ pub fn draw_scene_plan_transparent<'a>(
                 }
             }
             Primitive::Overlay(item) => {
-                pass.set_pipeline(transparent_pipeline(
-                    resources,
-                    view,
-                    true,
-                    operation.additive,
-                ));
+                let ordinary = transparent_pipeline(resources, view, true, operation.additive);
+                pass.set_pipeline(
+                    upload
+                        .surface_pipelines
+                        .get(
+                            item.material_slot,
+                            view.kind,
+                            true,
+                            if operation.additive {
+                                SurfaceBlend::Additive
+                            } else {
+                                SurfaceBlend::Alpha
+                            },
+                            crate::media::preview_model::MeshGeometry::Brush,
+                        )
+                        .unwrap_or(ordinary),
+                );
                 draw_overlay_item(pass, upload, *item);
             }
             Primitive::Sprite(range) => {

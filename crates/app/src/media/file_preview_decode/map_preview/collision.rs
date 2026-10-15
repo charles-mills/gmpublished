@@ -154,6 +154,10 @@ impl PhyDebugMeshBuilder {
         self.vertices
             .extend(positions.into_iter().map(|position| ModelVertex {
                 position,
+                tangent_s: Vec3::ZERO,
+                tangent_t: Vec3::ZERO,
+                tangent_sign: 0.0,
+                lighting_context: 0,
                 normal,
                 uv: [0.0; 2],
                 lightmap_uv: [0.0; 2],
@@ -161,6 +165,8 @@ impl PhyDebugMeshBuilder {
                 color: PHY_DEBUG_VERTEX_COLOR,
                 blend_alpha: 0.0,
                 opacity: 1.0,
+                illumination: Vec3::splat(1.0),
+                lighting_mode: 0,
             }));
         self.indices
             .extend_from_slice(&[base, base.saturating_add(1), base.saturating_add(2)]);
@@ -168,6 +174,7 @@ impl PhyDebugMeshBuilder {
 
     pub(in super::super) fn finish(self, material_index: usize) -> Option<MeshData> {
         (!self.indices.is_empty()).then_some(MeshData {
+            geometry: crate::media::preview_model::MeshGeometry::Brush,
             vertices: self.vertices,
             indices: self.indices,
             material_index,

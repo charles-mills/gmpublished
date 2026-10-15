@@ -16,10 +16,25 @@ use std::fmt;
 
 mod assembly;
 pub use assembly::{
-    AssemblySkip, MdlStats, MeshData, ModelData, ModelRead, ModelVertex, assemble, assemble_lossy,
+    AssemblySkip, MdlStats, MeshData, ModelAssemblyOptions, ModelAttachment, ModelData,
+    ModelLightingMesh, ModelLightingVertex, ModelRead, ModelSourceVertexFrame, ModelVertex,
+    assemble, assemble_lossy, assemble_lossy_with_options,
 };
 
+mod vertex_compression;
+pub use vertex_compression::{
+    VertexCompression, source_short2_weights, source_ubyte4_tangent, source_ubyte4_vector,
+};
+
+mod vhv;
+pub use vhv::{Vhv, VhvError, VhvMesh, parse_vhv};
+
+mod attachments;
+pub use attachments::{ATTACHMENT_FLAG_WORLD_ALIGN, MdlAttachment};
+
+mod linear_bones;
 mod studio;
+pub use linear_bones::MdlLinearBones;
 pub use studio::{
     FLAG_STATIC_PROP, Mdl, MdlAnimation, MdlAnimationDescription, MdlBodyPart, MdlBone, MdlMesh,
     MdlModel, parse_mdl,

@@ -266,15 +266,24 @@ pub(super) fn overlay_primitive(overlay: &MapOverlay, material_index: usize) -> 
     }
 }
 
-pub(super) fn resolve_skybox(skyname: &str, resolver: &MaterialResolver) -> Option<Skybox> {
+pub(super) fn resolve_skybox(
+    skyname: &str,
+    resolver: &MaterialResolver,
+    paint: Option<&gmpublished_domain::scene::map::MapSkyPaint>,
+) -> Option<Skybox> {
     let mut faces = std::array::from_fn(|_| None);
+    let mut materials = std::array::from_fn(|_| None);
     for face in SkyboxFace::ALL {
         let path = skybox_face_material_path(skyname, face);
-        let Some(texture) = resolver.resolve_base_texture_at_path(&path) else {
+        let Some(material) = resolver.resolve_sky_material_at_path(&path, paint) else {
             log::debug!(
                 "map skybox {skyname}: missing LDR base texture for {}",
                 face.suffix()
             );
+            continue;
+        };
+        materials[face.index()] = Some(material.clone());
+        let Some(texture) = material.texture else {
             continue;
         };
         if texture.width > SKYBOX_FACE_DIMENSION_CAP || texture.height > SKYBOX_FACE_DIMENSION_CAP {
@@ -290,11 +299,53 @@ pub(super) fn resolve_skybox(skyname: &str, resolver: &MaterialResolver) -> Opti
         faces[face.index()] = Some(Arc::new(texture.without_mip_chain()));
     }
 
-    if faces.iter().any(Option::is_some) {
-        Some(Skybox { faces })
+    if materials.iter().any(Option::is_some) {
+        Some(Skybox {
+            faces,
+            materials,
+            paint: paint.cloned(),
+        })
     } else {
         None
     }
+}
+
+pub(super) fn resolve_sun_materials(
+    suns: &[gmpublished_domain::scene::map::MapSun],
+    resolver: &MaterialResolver,
+    table: &mut MaterialTable,
+) -> Vec<[usize; 2]> {
+    suns.iter()
+        .map(|sun| {
+            [&sun.material, &sun.overlay_material].map(|name| {
+                if let Some(index) = table.index_of(name) {
+                    return index;
+                }
+                let material = resolver.resolve_with_base2(&[], name);
+                table.push(
+                    name,
+                    MaterialSlot {
+                        name: name.clone(),
+                        shader: material
+                            .as_ref()
+                            .map_or_else(Default::default, |material| material.shader.clone()),
+                        texture: material
+                            .as_ref()
+                            .and_then(|material| material.texture.as_ref().map(Arc::clone)),
+                        texture2: material
+                            .as_ref()
+                            .and_then(|material| material.texture2.as_ref().map(Arc::clone)),
+                        force_opaque: material
+                            .as_ref()
+                            .is_some_and(|material| material.force_opaque),
+                        render_mode: material
+                            .as_ref()
+                            .map_or(RenderMode::Additive, |material| material.render_mode),
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 pub(super) fn skybox_face_material_path(skyname: &str, face: SkyboxFace) -> String {

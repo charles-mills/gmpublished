@@ -11,8 +11,17 @@ use crate::math::Vec3;
 /// `SolidType::Physics` (the vphysics collision mode) in the static prop
 /// game lump's `solid` byte.
 const STATIC_PROP_SOLID_PHYSICS: u8 = 6;
+const STATIC_PROP_USE_LIGHTING_ORIGIN: u8 = 0x02;
 
 const DETAIL_PROP_TYPE_SPRITE: u8 = 1;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MapLightingOriginReference {
+    pub name: String,
+    /// Authored BSP entity index, independent of runtime edict allocation.
+    pub first_entity: Option<usize>,
+    pub match_count: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapDetailSprite {
@@ -47,20 +56,37 @@ pub(super) fn partitioned_static_prop_placements(
     let mut visible = Vec::new();
     let mut skybox = Vec::new();
     let cluster_count = bsp.cluster_count();
-    for prop in bsp.static_props_iter().filter_map(|prop| {
-        let origin = prop.origin;
-        let visibility = static_prop_leaf_visibility(bsp, prop, cluster_count);
-        Some(StaticPropPlacement {
-            entity: false,
-            model_path: normalize_static_prop_model_path(bsp.static_prop_model(prop))?,
-            origin: Vec3::from(origin),
-            angles: Vec3::from(prop.angles),
-            skin: prop.skin,
-            scale: 1.0,
-            solid: static_prop_solid(prop.solid),
-            visibility,
+    for prop in bsp
+        .static_props_iter()
+        .enumerate()
+        .filter_map(|(index, prop)| {
+            let origin = prop.origin;
+            let visibility = static_prop_leaf_visibility(bsp, prop, cluster_count);
+            Some(StaticPropPlacement {
+                entity: false,
+                static_prop_index: Some(index),
+                lighting_origin: (prop.flags & STATIC_PROP_USE_LIGHTING_ORIGIN != 0)
+                    .then_some(Vec3::from(prop.lighting_origin))
+                    .filter(|origin| origin.is_finite()),
+                lighting_origin_reference: None,
+                diffuse_modulation: prop.diffuse_modulation.unwrap_or([255; 4]),
+                render_mode: 0,
+                flags: prop.flags,
+                flags_ex: prop.flags_ex,
+                extra_flags: prop.extra_flags,
+                model_path: normalize_static_prop_model_path(bsp.static_prop_model(prop))?,
+                origin: Vec3::from(origin),
+                angles: Vec3::from(prop.angles),
+                skin: prop.skin,
+                scale: prop
+                    .uniform_scale
+                    .filter(|scale| scale.is_finite() && *scale > 0.0)
+                    .unwrap_or(1.0),
+                solid: static_prop_solid(prop.solid),
+                visibility,
+            })
         })
-    }) {
+    {
         match partition.point_partition(bsp, prop.origin) {
             GeometryPartition::Visible => visible.push(prop),
             GeometryPartition::Skybox => skybox.push(prop),
@@ -201,8 +227,20 @@ fn entity_prop_placement(
         .map_or(1.0, |value| parse_entity_prop_model_scale(value, classname));
     let solid = entity_prop_solid(entity);
 
+    let (lighting_origin, lighting_origin_reference) = entity_lighting_origin(entity, bsp);
     Some(StaticPropPlacement {
         entity: true,
+        static_prop_index: None,
+        lighting_origin,
+        lighting_origin_reference,
+        diffuse_modulation: entity_diffuse_modulation(entity),
+        render_mode: entity
+            .prop("rendermode")
+            .and_then(parse_entity_i32)
+            .unwrap_or(0),
+        flags: 0,
+        flags_ex: None,
+        extra_flags: None,
         model_path,
         origin,
         angles,
@@ -213,11 +251,64 @@ fn entity_prop_placement(
     })
 }
 
+fn entity_lighting_origin(
+    entity: &MapEntity,
+    bsp: &MapBsp,
+) -> (Option<Vec3>, Option<MapLightingOriginReference>) {
+    let Some(name) = entity
+        .prop("lightingorigin")
+        .filter(|name| !name.is_empty())
+    else {
+        return (None, None);
+    };
+    let mut matches = bsp
+        .entities
+        .iter()
+        .enumerate()
+        .filter(|(_, entity)| entity.prop("targetname") == Some(name));
+    let first = matches.next();
+    let match_count = usize::from(first.is_some()) + matches.count();
+    let origin = first.and_then(|(_, target)| target.prop("origin").and_then(parse_entity_vec3));
+    let reference = MapLightingOriginReference {
+        name: name.to_owned(),
+        first_entity: first.map(|(index, _)| index),
+        match_count,
+    };
+    if origin.is_none() || match_count > 1 {
+        log::warn!(
+            "map prop lighting anchor {name:?}: matches {match_count}, first entity {:?}, finite origin {}",
+            reference.first_entity,
+            origin.is_some()
+        );
+    }
+    (origin, Some(reference))
+}
+
 fn static_prop_solid(solid: u8) -> MapPropSolid {
     match solid {
         STATIC_PROP_SOLID_PHYSICS => MapPropSolid::Physics,
         _ => MapPropSolid::None,
     }
+}
+
+pub(super) fn entity_diffuse_modulation(entity: &MapEntity) -> [u8; 4] {
+    let mut color = [255_u8; 4];
+    if let Some(value) = entity.prop("rendercolor") {
+        let components = value
+            .split_ascii_whitespace()
+            .map(parse_entity_float)
+            .collect::<Option<Vec<_>>>();
+        if let Some(components) = components.filter(|components| matches!(components.len(), 3 | 4))
+        {
+            for (channel, value) in color.iter_mut().zip(components) {
+                *channel = value.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    if let Some(alpha) = entity.prop("renderamt").and_then(parse_entity_float) {
+        color[3] = alpha.clamp(0.0, 255.0) as u8;
+    }
+    color
 }
 
 fn entity_prop_solid(entity: &MapEntity) -> MapPropSolid {

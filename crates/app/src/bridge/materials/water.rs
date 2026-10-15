@@ -13,38 +13,40 @@ pub enum MaterialShader {
     Surface(String),
     Unlit(Arc<UnlitMaterial>),
     Lightmapped(Arc<LightmappedMaterial>),
+    VertexLit(Arc<super::SurfaceMaterial>),
     Water(Arc<WaterMaterial>),
     Mirror(Arc<super::MirrorMaterial>),
 }
 
 /// UnlitGeneric's authored vertex modulation is independent of baked lighting.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UnlitMaterial {
     pub shader: String,
     pub vertex_color: bool,
     pub vertex_alpha: bool,
+    pub surface: Arc<super::SurfaceMaterial>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct LightmappedMaterial {
-    pub shader: String,
-    pub normal: Option<Arc<WaterNormalMap>>,
-    pub normal2: Option<Arc<WaterNormalMap>>,
-    pub ssbump: bool,
-    pub diffuse_bump: bool,
-    pub transform: [[f32; 4]; 2],
-}
+pub type LightmappedMaterial = super::SurfaceMaterial;
 impl MaterialShader {
-    pub(crate) fn unlit(&self) -> Option<&UnlitMaterial> {
-        if let Self::Unlit(material) = self {
-            Some(material)
-        } else {
-            None
-        }
+    pub(crate) fn bind_environment_map(&mut self, environment: Arc<super::EnvironmentMapMaterial>) {
+        let surface = match self {
+            Self::Unlit(material) => &mut Arc::make_mut(material).surface,
+            Self::Lightmapped(surface) | Self::VertexLit(surface) => surface,
+            _ => return,
+        };
+        Arc::make_mut(surface).envmap = Some(environment);
     }
 
-    pub(crate) fn lightmapped(&self) -> Option<&LightmappedMaterial> {
-        if let Self::Lightmapped(material) = self {
+    pub(crate) fn surface(&self) -> Option<&super::SurfaceMaterial> {
+        match self {
+            Self::Unlit(material) => Some(&material.surface),
+            Self::Lightmapped(material) | Self::VertexLit(material) => Some(material),
+            _ => None,
+        }
+    }
+    pub(crate) fn unlit(&self) -> Option<&UnlitMaterial> {
+        if let Self::Unlit(material) = self {
             Some(material)
         } else {
             None
@@ -98,9 +100,9 @@ pub struct WaterMaterial {
     pub reflect_tint_linear: [f32; 3],
     pub refract_tint_linear: [f32; 3],
     pub fog_color_linear: [f32; 3],
-    /// Source clears with clamped authored bytes; an sRGB attachment needs
-    /// their inverse sRGB transfer, separately from shader GammaToLinear.
-    pub fog_clear_linear: [f32; 3],
+    /// Scene fog and its clear use quantized authored bytes through the
+    /// framebuffer transfer, separately from Water's shader GammaToLinear.
+    pub scene_fog_color_linear: [f32; 3],
     pub fog_start: f32,
     pub fog_end: f32,
     pub fog_enabled: bool,
@@ -112,7 +114,8 @@ pub struct WaterMaterial {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WaterNormalMap {
+pub struct LinearTextureFrames {
+    pub flags: u32,
     /// Stored, linear-data mip chains. Each layer is one animation frame.
     pub frames: Vec<Vec<ResolvedTextureMip>>,
 }
@@ -165,8 +168,8 @@ pub(super) fn string_values(document: &KvDocument<'_>) -> BTreeMap<String, Strin
     }
     // The preview currently uses the Source LDR/sRGB profile. Preserve raw
     // conditional keys for diagnostics, then apply that profile's overrides.
-    // Evaluate each document before merging patches so a later patch can still
-    // override an included material's conditional value.
+    // Raw profile blocks survive include/patch assembly. This final pass
+    // evaluates conditional strings in each selected inheritance layer.
     let overrides = document
         .pairs
         .iter()
@@ -179,13 +182,9 @@ pub(super) fn string_values(document: &KvDocument<'_>) -> BTreeMap<String, Strin
             let (condition, negate) = condition
                 .strip_prefix('!')
                 .map_or((condition, false), |condition| (condition, true));
-            let enabled = match condition {
-                "srgb" => true,
-                "hdr" => false,
-                _ => {
-                    log::warn!("unsupported material condition {condition}");
-                    return None;
-                }
+            let Some(enabled) = super::profile::HardwareProfile::LDR.condition(condition) else {
+                log::warn!("unsupported material condition {condition}");
+                return None;
             };
             (enabled != negate).then(|| (parameter.to_owned(), value.to_string()))
         })
@@ -206,34 +205,6 @@ pub(super) fn proxies(document: &KvDocument<'_>) -> Vec<MaterialProxy> {
             KvValue::String(_) => None,
         })
         .collect()
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum PatchMode {
-    Insert,
-    Replace,
-    Override,
-}
-
-pub(super) fn merge_proxies(
-    base: &mut Vec<MaterialProxy>,
-    incoming: Vec<MaterialProxy>,
-    mode: PatchMode,
-) {
-    for proxy in incoming {
-        if let Some(existing) = base.iter_mut().find(|p| p.name == proxy.name) {
-            for (key, value) in proxy.values {
-                let exists = existing.values.contains_key(&key);
-                if matches!(mode, PatchMode::Override | PatchMode::Replace)
-                    || matches!(mode, PatchMode::Insert) && !exists
-                {
-                    existing.values.insert(key, value);
-                }
-            }
-        } else {
-            base.push(proxy);
-        }
-    }
 }
 
 pub(super) fn scalar(value: Option<&str>, default: f32) -> f32 {
@@ -321,6 +292,8 @@ pub(super) fn texture_transform(value: Option<&str>) -> [[f32; 4]; 2] {
     ]
 }
 
+pub type WaterNormalMap = LinearTextureFrames;
+
 impl MaterialResolver {
     fn resolve_screen_refraction(&self, name: &str) -> Option<Arc<ScreenRefraction>> {
         let paths = super::material_paths(&[], name);
@@ -395,6 +368,7 @@ impl MaterialResolver {
                     shader: material.shader.clone(),
                     vertex_color: vmt_bool(material.parameter("$vertexcolor")),
                     vertex_alpha: vmt_bool(material.parameter("$vertexalpha")),
+                    surface: self.resolve_surface(material, super::SurfaceFamily::Unlit),
                 }));
             }
             if [
@@ -406,21 +380,28 @@ impl MaterialResolver {
             .iter()
             .any(|name| material.shader.eq_ignore_ascii_case(name))
             {
-                let get = |key| material.parameter(key);
-                let normal = get("$bumpmap")
-                    .and_then(normalize_texture_name)
-                    .and_then(|name| self.resolve_water_normal(&name));
-                let normal2 = get("$bumpmap2")
-                    .and_then(normalize_texture_name)
-                    .and_then(|name| self.resolve_water_normal(&name));
-                return MaterialShader::Lightmapped(Arc::new(LightmappedMaterial {
-                    shader: material.shader.clone(),
-                    normal,
-                    normal2,
-                    ssbump: vmt_bool(get("$ssbump")),
-                    diffuse_bump: !vmt_bool(get("$nodiffusebumplighting")),
-                    transform: texture_transform(get("$bumptransform")),
-                }));
+                let family = if material
+                    .shader
+                    .to_ascii_lowercase()
+                    .starts_with("worldvertextransition")
+                {
+                    super::SurfaceFamily::Transition
+                } else {
+                    super::SurfaceFamily::Lightmapped
+                };
+                return MaterialShader::Lightmapped(self.resolve_surface(material, family));
+            }
+            if [
+                "VertexLitGeneric",
+                "VertexLitGeneric_DX9",
+                "VertexLitGeneric_DX8",
+            ]
+            .iter()
+            .any(|name| material.shader.eq_ignore_ascii_case(name))
+            {
+                return MaterialShader::VertexLit(
+                    self.resolve_surface(material, super::SurfaceFamily::VertexLit),
+                );
             }
             return MaterialShader::Surface(material.shader.clone());
         }
@@ -510,7 +491,7 @@ impl MaterialResolver {
             reflect_tint_linear: tint(get("$reflecttint"), [1.0; 3]),
             refract_tint_linear: tint(get("$refracttint"), [1.0; 3]),
             fog_color_linear: tint(get("$fogcolor"), [1.0, 0.0, 0.0]),
-            fog_clear_linear: get("$fogcolor").and_then(parse_water_fog_color).map_or(
+            scene_fog_color_linear: get("$fogcolor").and_then(parse_water_fog_color).map_or(
                 [1.0, 0.0, 0.0],
                 |color| {
                     color
@@ -534,6 +515,13 @@ impl MaterialResolver {
     }
 
     pub(super) fn resolve_water_normal(&self, name: &str) -> Option<Arc<WaterNormalMap>> {
+        self.resolve_raw_texture_frames(name)
+    }
+
+    pub(super) fn resolve_raw_texture_frames(
+        &self,
+        name: &str,
+    ) -> Option<Arc<LinearTextureFrames>> {
         let path = texture_path(name)?;
         let key = WaterNormalKey {
             path: path.clone(),
@@ -546,7 +534,7 @@ impl MaterialResolver {
             let limits = Limits::default();
             let vtf = vformats::vtf::parse(&bytes, &limits).ok()?;
             if vtf.frame_count() == 0 || vtf.frame_count() > 128 {
-                log::warn!("water normal {name}: invalid or excessive animation frame count");
+                log::warn!("linear texture {name}: invalid or excessive animation frame count");
                 return None;
             }
             let max = self
@@ -562,7 +550,7 @@ impl MaterialResolver {
             }
             if (vtf.width() >> first_mip).max(vtf.height() >> first_mip) > max {
                 log::warn!(
-                    "water normal {name}: no stored mip satisfies the texture dimension limit"
+                    "linear texture {name}: no stored mip satisfies the texture dimension limit"
                 );
                 return None;
             }
@@ -575,7 +563,7 @@ impl MaterialResolver {
                 })
                 .sum::<u64>();
             if estimate > 64 * 1024 * 1024 {
-                log::warn!("water normal {name}: decoded animation exceeds 64 MiB");
+                log::warn!("linear texture {name}: decoded animation exceeds 64 MiB");
                 return None;
             }
             let mut frames = Vec::new();
@@ -600,10 +588,13 @@ impl MaterialResolver {
             if let Some(budget) = &self.config.decoded_texture_budget
                 && !budget.try_reserve(byte_len)
             {
-                log::warn!("water normal {name}: texture budget exhausted");
+                log::warn!("linear texture {name}: texture budget exhausted");
                 return None;
             }
-            let normal = Arc::new(WaterNormalMap { frames });
+            let normal = Arc::new(WaterNormalMap {
+                flags: vtf.flags(),
+                frames,
+            });
             cache.insert(key.clone(), Arc::clone(&normal));
             drop(cache);
             Some(normal)

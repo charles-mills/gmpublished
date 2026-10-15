@@ -1,28 +1,38 @@
+use super::camera::ViewId;
 use super::{
     AMBIENT, Arc, BLIT_SHADER_SOURCE, BcFormat, CHECKERBOARD_BYTES, CHECKERBOARD_MIP_1X1_BYTES,
     CHECKERBOARD_MIP_2X2_BYTES, CHECKERBOARD_MIP_4X4_BYTES, CHECKERBOARD_MIP_RGBA,
     CHECKERBOARD_SIZE, CHECKERBOARD_SIZE_USIZE, Camera, DETAIL_SHADER_SOURCE,
     DETAIL_VERTEX_ATTRIBUTES, DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance,
     DoorRenderPose, DrawItem, DrawPlan, DrawPlans, FOV_Y, FlyCamera, MATERIAL_ANISOTROPY_CLAMP,
-    MODEL_VERTEX_ATTRIBUTES, MSAA_SAMPLE_COUNT, MapFog, MapPreview, MapSkyCamera,
-    MapVisibilityBucket, MaterialSlot, MeshData, ModelPreview, ModelVertex, OverlayDrawItem,
-    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA, Rectangle, RenderMode, RenderScene,
-    ResolvedBcMip, ResolvedTexture, SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SOURCE_UP,
-    Skybox, SkyboxFace, TextureUploadLevel, Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan,
+    MODEL_VERTEX_ATTRIBUTES, MapFog, MapPreview, MapSkyCamera, MapVisibilityBucket, MaterialSlot,
+    MeshData, ModelPreview, ModelVertex, OverlayDrawItem, OverlayPrimitive,
+    PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA, Rectangle, RenderMode, RenderScene, ResolvedBcMip,
+    ResolvedTexture, SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SOURCE_UP, Skybox,
+    SkyboxFace, TextureUploadLevel, Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan,
     bc_mip_is_valid, bc_texture_format, decode_bc_texture, half_extent, initial_door_swing,
-    look_at, mat_mul, mid, perspective, prepare_draw_plans, shader, skybox_eye,
-    transform_door_vertices, wgpu, write_bc_texture_level, write_texture_level,
+    look_at, look_to, mat_mul, mid, perspective, prepare_draw_plans, scene_sample_count, shader,
+    skybox_eye, transform_door_vertices, wgpu, write_bc_texture_level, write_texture_level,
 };
 use gmpublished_domain::math::Vec3;
 
+mod cubemap;
 mod draw;
+mod lighting;
 mod lightmaps;
 mod materials;
+mod model_lighting;
+mod model_lighting_visibility;
 mod passes;
 mod reflections;
 mod refraction;
 mod resources;
+pub(super) mod sampling;
 mod screen_refraction;
+mod sky;
+mod sun;
+mod surface;
+mod surface_pipelines;
 mod targets;
 mod transparency;
 mod uniforms;
@@ -67,6 +77,8 @@ impl PreviewScene {
     reason = "three independent render toggles plus the camera's water state"
 )]
 pub struct ModelPrimitive {
+    pub(super) model_lighting_time: f64,
+    pub(super) view_id: ViewId,
     pub(super) clear_color: Option<[f32; 3]>,
     pub(super) air_fog: Option<super::MapFog>,
     #[cfg(feature = "map-capture")]
@@ -75,6 +87,10 @@ pub struct ModelPrimitive {
     pub(super) refraction_target: bool,
     #[cfg(feature = "map-capture")]
     pub(super) capture_diagnostics: Option<Arc<std::sync::Mutex<serde_json::Value>>>,
+    #[cfg(feature = "map-capture")]
+    pub(super) capture_lighting_timeline: Option<Arc<super::capture::ModelLightingTimeline>>,
+    #[cfg(feature = "map-capture")]
+    pub(super) raster_offset: Option<[f32; 2]>,
     pub(super) prepared_frame: std::sync::atomic::AtomicUsize,
     pub(super) skybox_transform: Option<(Vec3, f32)>,
     pub(super) preview: PreviewScene,
@@ -95,13 +111,41 @@ pub struct ModelPrimitive {
 
 #[derive(Debug)]
 pub struct PreparedFrame {
-    pub lightmap: lightmaps::Frame,
+    view_id: ViewId,
+    pub lighting: lighting::Frame,
     pub screen_overlay: Option<screen_refraction::Frame>,
     pub main: SceneView,
     pub planar_views: Vec<PlanarView>,
     pub content_id: u64,
     pub bounds: Rectangle,
     pub live: bool,
+}
+
+impl ModelPrimitive {
+    pub(super) fn raster_offset(&self) -> [f32; 2] {
+        #[cfg(feature = "map-capture")]
+        if let Some(offset) = self.raster_offset {
+            return offset;
+        }
+        if self.preview.map().is_some() {
+            [0.5; 2]
+        } else {
+            [0.0; 2]
+        }
+    }
+}
+
+fn frame_slot(frames: impl Iterator<Item = (ViewId, bool)>, view_id: ViewId) -> usize {
+    let mut count = 0;
+    for (index, (identity, live)) in frames.enumerate() {
+        if identity == view_id && !live {
+            return index;
+        }
+        count = index + 1;
+    }
+    // Inactive frames may belong to widgets prepared later in this frame.
+    // Preserve their temporal GPU state rather than assigning it by draw order.
+    count
 }
 
 impl shader::Primitive for ModelPrimitive {
@@ -125,22 +169,20 @@ impl shader::Primitive for ModelPrimitive {
             map,
         );
         pipeline.uploads.touch(self.content_id);
-        let slot = pipeline
-            .frames
-            .iter()
-            .position(|frame| !frame.live)
-            .unwrap_or(pipeline.frames.len());
+        let slot = frame_slot(
+            pipeline
+                .frames
+                .iter()
+                .map(|frame| (frame.view_id, frame.live)),
+            self.view_id,
+        );
         if slot == pipeline.frames.len() {
-            let lightmap = lightmaps::Frame::new(
-                device,
-                queue,
-                &pipeline.resources,
-                map.and_then(|map| map.lightmap.as_ref()),
-            );
+            let lighting = lighting::Frame::new(device, queue, &pipeline.resources, map);
             pipeline.frames.push(PreparedFrame {
+                view_id: self.view_id,
                 screen_overlay: None,
-                main: SceneView::new(device, &pipeline.resources, &lightmap),
-                lightmap,
+                main: SceneView::new(device, &pipeline.resources, &lighting),
+                lighting,
                 planar_views: Vec::new(),
                 content_id: self.content_id,
                 bounds: *bounds,
@@ -152,19 +194,13 @@ impl shader::Primitive for ModelPrimitive {
         if frame.content_id != self.content_id {
             frame.planar_views.clear();
             frame.screen_overlay = None;
-            frame.lightmap = lightmaps::Frame::new(
-                device,
-                queue,
-                &pipeline.resources,
-                map.and_then(|map| map.lightmap.as_ref()),
-            );
-            frame.main = SceneView::new(device, &pipeline.resources, &frame.lightmap);
+            frame.lighting = lighting::Frame::new(device, queue, &pipeline.resources, map);
+            frame.main = SceneView::new(device, &pipeline.resources, &frame.lighting);
         }
-        frame.lightmap.update(
-            queue,
-            map.and_then(|map| map.lightmap.as_ref()),
-            self.uniforms.water_time_sky_tint[0],
-        );
+        #[cfg(feature = "map-capture")]
+        frame
+            .lighting
+            .apply_capture_timeline(map, self.capture_lighting_timeline.as_ref());
         frame.content_id = self.content_id;
         frame.live = true;
         let scale = viewport.scale_factor();
@@ -201,14 +237,16 @@ impl shader::Primitive for ModelPrimitive {
             );
         }
         let with_time = |mut uniforms: Uniforms| {
-            uniforms.viewport = [size.0 as f32, size.1 as f32, self.uniforms.viewport[2], 0.0];
+            uniforms.viewport[2] = self.uniforms.viewport[2];
             uniforms.water_time_sky_tint[0] = self.uniforms.water_time_sky_tint[0];
             uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
-            uniforms
+            uniforms.with_raster_offset(size, self.raster_offset())
         };
         frame.main.world.write(queue, &with_time(self.uniforms));
         if let Some(sky) = self.sky_uniforms {
-            frame.main.sky.write(queue, &with_time(sky));
+            let mut sky_with_metadata = with_time(sky);
+            sky_with_metadata.water_time_sky_tint[0] = sky.water_time_sky_tint[0];
+            frame.main.sky.write(queue, &sky_with_metadata);
         }
         if let Some(skybox) = self.map_skybox_uniforms {
             frame.main.skybox.write(queue, &with_time(skybox));
@@ -233,6 +271,20 @@ impl shader::Primitive for ModelPrimitive {
         let needs_water = !plans.world.planar.is_empty()
             && pipeline.resources.refractive_water_pipeline.is_some();
         RenderTargets::ensure(&mut frame.main.targets, device, &pipeline.resources, size);
+        frame.main.sun.prepare(
+            device,
+            queue,
+            &pipeline.resources.sun,
+            &sun::gpu::Inputs {
+                map,
+                world: with_time(self.uniforms),
+                skybox: self
+                    .map_skybox_uniforms
+                    .filter(|_| plans.map_skybox.is_some())
+                    .map(with_time),
+                targets: frame.main.targets.as_ref().unwrap(),
+            },
+        );
         let eye = Vec3::from([
             self.uniforms.camera_position[0],
             self.uniforms.camera_position[1],
@@ -255,7 +307,7 @@ impl shader::Primitive for ModelPrimitive {
                             distance > 0.01
                         }
                     }
-                    && surface.intersects_view(self.uniforms.view_proj)
+                    && surface.intersects_view(with_time(self.uniforms).view_proj)
                     && plans
                         .world
                         .planar
@@ -296,7 +348,7 @@ impl shader::Primitive for ModelPrimitive {
                     surface_index,
                     surface_indices: Vec::new(),
                     surface_buffer: visibility::upload_visible_indices(device, queue, &[]),
-                    view: SceneView::new(device, &pipeline.resources, &frame.lightmap),
+                    view: SceneView::new(device, &pipeline.resources, &frame.lighting),
                     reflect_enabled: false,
                     refraction: None,
                     refraction_clear: wgpu::Color::BLACK,
@@ -304,7 +356,7 @@ impl shader::Primitive for ModelPrimitive {
                     surface_uniforms: ViewUniforms::new(
                         device,
                         &pipeline.resources,
-                        &frame.lightmap,
+                        &frame.lighting,
                     ),
                 });
             }
@@ -327,7 +379,7 @@ impl shader::Primitive for ModelPrimitive {
                 upload,
                 refraction::OpticalInputs {
                     size: reflection_size,
-                    lightmap: &frame.lightmap,
+                    lighting: &frame.lighting,
                 },
             );
             let mut uniforms = with_time(self.uniforms);
@@ -361,7 +413,7 @@ impl shader::Primitive for ModelPrimitive {
                 &refracted.resolve_view,
                 &refracted.depth,
                 &reflected.resolve_view,
-                &frame.lightmap,
+                &frame.lighting.lightmap,
             ));
         }
         screen_refraction::prepare(
@@ -373,6 +425,25 @@ impl shader::Primitive for ModelPrimitive {
             self,
         );
         frame.main.plans = Some(plans);
+        let mut lighting_contexts = vec![false; map.map_or(0, |map| map.model_lighting.len())];
+        model_lighting_visibility::gather(&mut lighting_contexts, scene, map, upload, &frame.main);
+        for planar in &frame.planar_views {
+            if planar.reflect_enabled {
+                model_lighting_visibility::gather(
+                    &mut lighting_contexts,
+                    scene,
+                    map,
+                    upload,
+                    &planar.view,
+                );
+            }
+            if let Some(view) = &planar.refraction {
+                model_lighting_visibility::gather(&mut lighting_contexts, scene, map, upload, view);
+            }
+        }
+        frame
+            .lighting
+            .update(queue, map, self.model_lighting_time, &lighting_contexts);
         let detail_water_side = frame
             .planar_views
             .iter()
@@ -387,7 +458,7 @@ impl shader::Primitive for ModelPrimitive {
             &mut frame.main,
             upload,
             with_time(self.uniforms),
-            self.map_skybox_uniforms,
+            self.map_skybox_uniforms.map(with_time),
             detail_water_side,
         );
         #[cfg(feature = "map-capture")]
@@ -433,7 +504,7 @@ impl shader::Primitive for ModelPrimitive {
                     })
                     .sum::<u64>();
             *diagnostics.lock().expect("capture diagnostics lock") = serde_json::json!({
-                "main_target_dimensions":size,"reflection_views":records(false),"refraction_views":records(true),
+                "raster_offset_physical_pixels":self.raster_offset(),"main_target_dimensions":size,"reflection_views":records(false),"refraction_views":records(true),
                 "single_bounce":true,"nested_planar_fallback":"average sky tint (cubemap pending)",
                 "water_body":map.and_then(|map|map.water_volumes.as_ref()).and_then(|volumes|volumes.at(eye)).map(|sample|serde_json::json!({"index":sample.body_index,"surface_z":sample.body.surface_z,"min_z":sample.body.min_z,"surface_material":sample.body.material_name,"contents":sample.contents})),
                 "underwater_overlay":map.and_then(|map|map.immersion_material(eye)).and_then(|water|water.underwater_overlay.as_ref()).map(|effect|&effect.name),
@@ -453,7 +524,7 @@ impl shader::Primitive for ModelPrimitive {
         let Some(frame) = pipeline
             .frames
             .get(self.prepared_frame.load(Ordering::Relaxed))
-            .filter(|frame| frame.content_id == self.content_id)
+            .filter(|frame| frame.view_id == self.view_id && frame.content_id == self.content_id)
         else {
             return;
         };
@@ -492,5 +563,104 @@ impl shader::Pipeline for ModelPipeline {
         for frame in &mut self.frames {
             frame.live = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_identity_tests {
+    use super::*;
+
+    struct History {
+        view_id: ViewId,
+        live: bool,
+        sun_visibility: f32,
+    }
+
+    fn claim(frames: &mut Vec<History>, view_id: ViewId) -> usize {
+        let slot = frame_slot(
+            frames.iter().map(|frame| (frame.view_id, frame.live)),
+            view_id,
+        );
+        if slot == frames.len() {
+            frames.push(History {
+                view_id,
+                live: false,
+                sun_visibility: 0.0,
+            });
+        }
+        assert!(!frames[slot].live);
+        frames[slot].live = true;
+        slot
+    }
+
+    #[test]
+    fn reordered_widgets_keep_distinct_temporal_histories() {
+        let clear = ViewId::default();
+        let occluded = ViewId::default();
+        let mut frames = vec![
+            History {
+                view_id: clear,
+                live: false,
+                sun_visibility: 1.0,
+            },
+            History {
+                view_id: occluded,
+                live: false,
+                sun_visibility: 0.25,
+            },
+        ];
+        let second = claim(&mut frames, occluded);
+        assert_eq!(second, 1);
+        assert_eq!(frames[second].sun_visibility, 0.25);
+        frames[second].sun_visibility *= 0.5;
+        let first = claim(&mut frames, clear);
+        assert_eq!(first, 0);
+        assert_eq!(frames[first].sun_visibility, 1.0);
+        assert_eq!(frames[second].sun_visibility, 0.125);
+        assert_eq!(frames.len(), 2);
+    }
+
+    #[test]
+    fn inserting_widget_preserves_later_unclaimed_views_and_drops_dead_history() {
+        let removed = ViewId::default();
+        let retained = ViewId::default();
+        let inserted = ViewId::default();
+        let mut frames = vec![
+            History {
+                view_id: removed,
+                live: false,
+                sun_visibility: 0.8,
+            },
+            History {
+                view_id: retained,
+                live: false,
+                sun_visibility: 0.6,
+            },
+        ];
+        let new = claim(&mut frames, inserted);
+        assert_eq!(new, 2);
+        assert_eq!(frames[new].sun_visibility, 0.0);
+        let existing = claim(&mut frames, retained);
+        assert_eq!(existing, 1);
+        assert_eq!(frames[existing].sun_visibility, 0.6);
+        frames.retain(|frame| frame.live);
+        for frame in &mut frames {
+            frame.live = false;
+        }
+        assert_eq!(frames.len(), 2);
+        assert_eq!(claim(&mut frames, inserted), 1);
+        assert_eq!(claim(&mut frames, retained), 0);
+    }
+
+    #[test]
+    fn repeated_prepare_cannot_overwrite_a_live_frame() {
+        let view_id = ViewId::default();
+        let mut frames = Vec::new();
+        let first = claim(&mut frames, view_id);
+        frames[first].sun_visibility = 0.7;
+        let second = claim(&mut frames, view_id);
+        assert_ne!(first, second);
+        assert_eq!(frames[first].sun_visibility, 0.7);
+        assert_eq!(frames[second].sun_visibility, 0.0);
     }
 }

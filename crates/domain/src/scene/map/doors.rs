@@ -360,6 +360,17 @@ fn pending_prop_door(
     let visibility = point_visibility_bucket(bsp, origin, cluster_count);
     let placement = StaticPropPlacement {
         entity: true,
+        static_prop_index: None,
+        lighting_origin: None,
+        lighting_origin_reference: None,
+        diffuse_modulation: super::placements::entity_diffuse_modulation(entity),
+        render_mode: entity
+            .prop("rendermode")
+            .and_then(parse_entity_i32)
+            .unwrap_or(0),
+        flags: 0,
+        flags_ex: None,
+        extra_flags: None,
         model_path,
         origin,
         angles,

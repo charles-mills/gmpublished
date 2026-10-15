@@ -13,6 +13,7 @@ struct Uniforms {
     clip_plane: vec4<f32>,
     medium_plane: vec4<f32>,
     viewport: vec4<f32>,
+    raster_params: vec4<f32>,
 }
 
 struct Material {

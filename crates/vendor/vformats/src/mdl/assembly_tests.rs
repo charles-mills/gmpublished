@@ -87,7 +87,13 @@ fn mdl_with(
         checksum: 0,
         version: 48,
         flags: if static_prop { FLAG_STATIC_PROP } else { 0 },
+        illumination_position: [0.0; 3],
+        hull_min: [0.0; 3],
+        hull_max: [0.0; 3],
+        attachments: Vec::new(),
+        illumination_attachment_index: None,
         bones,
+        linear_bones: None,
         textures: Vec::new(),
         texture_paths: Vec::new(),
         skin_reference_count: 0,
@@ -96,6 +102,23 @@ fn mdl_with(
         local_animations: animations,
         sequence_count: 0,
     }
+}
+
+pub(super) fn mdl_with_for_compression_test() -> Mdl {
+    mdl_with(
+        vec![
+            bone("root", -1, [0.0; 3], QUAT_IDENTITY_WXYZ, MAT4_IDENTITY),
+            bone(
+                "turn",
+                -1,
+                [0.0; 3],
+                quat_z(std::f32::consts::FRAC_PI_2),
+                MAT4_IDENTITY,
+            ),
+        ],
+        false,
+        vec![],
+    )
 }
 
 fn rest_desc(animations: Vec<MdlAnimation>, frame_count: usize) -> MdlAnimationDescription {
@@ -121,7 +144,7 @@ fn vertex(position: [f32; 3], normal: [f32; 3], bone: u8) -> VvdVertex {
 fn vvd_with(vertices: Vec<VvdVertex>) -> Vvd {
     Vvd {
         checksum: 0,
-        tangents: vec![[0.0; 4]; vertices.len()],
+        tangents: vec![[1.0, 0.0, 0.0, 1.0]; vertices.len()],
         vertices,
     }
 }
@@ -182,7 +205,8 @@ fn rest_animation_pose_uses_pose_to_bone_and_overrides_bind() {
 
     // Without the override, pose == bind snaps to the exact input.
     let mut stats = MdlStats::default();
-    let bind_only = pose_to_bone_skinning_matrices(&mdl, false, &[None, None, None], &mut stats);
+    let bind_only =
+        pose_to_bone_skinning_matrices(&mdl.bones, false, &[None, None, None], &mut stats);
     assert_vec3_near(
         mat4_transform_point(bind_only[1], [1.0, 0.0, 0.0]),
         [1.0, 0.0, 0.0],
@@ -386,6 +410,82 @@ fn model_vertex_at(position: [f32; 3]) -> ModelVertex {
     ModelVertex {
         position,
         normal: [0.0, 1.0, 0.0],
+        tangent_s: [0.0; 3],
+        tangent_t: [0.0; 3],
+        tangent_sign: 0.0,
         uv: [0.0; 2],
     }
+}
+
+#[test]
+fn attachments_use_full_parent_pose_not_vertex_inverse_bind() {
+    let mut mdl = mdl_with(
+        vec![
+            bone(
+                "root",
+                -1,
+                [10.0, 0.0, 0.0],
+                quat_z(std::f32::consts::FRAC_PI_2),
+                MAT4_IDENTITY,
+            ),
+            bone(
+                "child",
+                0,
+                [0.0, 20.0, 0.0],
+                QUAT_IDENTITY_WXYZ,
+                mat4_from_translation([400.0, 0.0, 0.0]),
+            ),
+        ],
+        false,
+        vec![],
+    );
+    mdl.attachments.push(super::super::MdlAttachment {
+        name: "illum".into(),
+        flags: super::super::ATTACHMENT_FLAG_WORLD_ALIGN,
+        local_bone: 1,
+        local: mat4_to_pose_to_bone_rows(mat4_from_translation([0.0, 3.0, 4.0])),
+    });
+    let (geometry, _) = geometry(&mdl, &vvd_with(Vec::new()));
+    assert_vec3_near(
+        geometry.attachments[0].model.map(|row| row[3]),
+        [-13.0, 0.0, 4.0],
+        1e-4,
+    );
+    assert_eq!(
+        geometry.attachments[0].source.flags,
+        super::super::ATTACHMENT_FLAG_WORLD_ALIGN
+    );
+}
+
+#[test]
+fn static_vertex_identity_does_not_erase_attachment_bone_pose() {
+    let mut mdl = mdl_with(
+        vec![bone(
+            "root",
+            -1,
+            [10.0, 20.0, 30.0],
+            QUAT_IDENTITY_WXYZ,
+            MAT4_IDENTITY,
+        )],
+        true,
+        vec![rest_desc(
+            vec![MdlAnimation::for_tests(0, None, Some([40.0, 50.0, 60.0]))],
+            1,
+        )],
+    );
+    mdl.attachments.push(super::super::MdlAttachment {
+        name: "illum".into(),
+        flags: 0,
+        local_bone: 0,
+        local: mat4_to_pose_to_bone_rows(mat4_from_translation([1.0, 2.0, 3.0])),
+    });
+    let (geometry, _) = geometry(
+        &mdl,
+        &vvd_with(vec![vertex([4.0, 5.0, 6.0], [0.0, 0.0, 1.0], 0)]),
+    );
+    assert_eq!(geometry.vertices[0].position, [4.0, 5.0, 6.0]);
+    assert_eq!(
+        geometry.attachments[0].model.map(|row| row[3]),
+        [41.0, 52.0, 63.0]
+    );
 }

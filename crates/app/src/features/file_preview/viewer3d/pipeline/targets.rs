@@ -1,5 +1,5 @@
 use super::resources::RenderResources;
-use super::{MSAA_SAMPLE_COUNT, wgpu};
+use super::wgpu;
 
 #[derive(Debug)]
 pub struct RenderTargets {
@@ -9,12 +9,15 @@ pub struct RenderTargets {
     pub blit_bind_group: wgpu::BindGroup,
     pub size: (u32, u32),
     pub format: wgpu::TextureFormat,
+    pub sample_count: u32,
 }
 
 impl RenderTargets {
     #[cfg(feature = "map-capture")]
     pub fn estimated_bytes(&self) -> u64 {
-        u64::from(self.size.0) * u64::from(self.size.1) * bytes_per_pixel(self.format)
+        u64::from(self.size.0)
+            * u64::from(self.size.1)
+            * bytes_per_pixel_for_samples(self.format, self.sample_count)
     }
 
     pub fn ensure(
@@ -25,7 +28,9 @@ impl RenderTargets {
     ) {
         let size = (size.0.max(1), size.1.max(1));
         if slot.as_ref().is_some_and(|targets| {
-            targets.size == size && targets.format == resources.target_format
+            targets.size == size
+                && targets.format == resources.target_format
+                && targets.sample_count == resources.sample_count
         }) {
             return;
         }
@@ -34,16 +39,6 @@ impl RenderTargets {
             height: size.1,
             depth_or_array_layers: 1,
         };
-        let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("file_preview.model_viewer.msaa_color"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: MSAA_SAMPLE_COUNT,
-            dimension: wgpu::TextureDimension::D2,
-            format: resources.target_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
         let resolve = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("file_preview.model_viewer.msaa_resolve"),
             size: extent,
@@ -58,13 +53,30 @@ impl RenderTargets {
             label: Some("file_preview.model_viewer.depth"),
             size: extent,
             mip_level_count: 1,
-            sample_count: MSAA_SAMPLE_COUNT,
+            sample_count: resources.sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let color = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let color = if resources.sample_count > 1 {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("file_preview.model_viewer.msaa_color"),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: resources.sample_count,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: resources.target_format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        } else {
+            // A single-sample pass writes the sampled colour texture itself.
+            // Resolving a one-sample attachment is invalid in WebGPU.
+            resolve.create_view(&wgpu::TextureViewDescriptor::default())
+        };
         let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
         let depth = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -88,6 +100,7 @@ impl RenderTargets {
             blit_bind_group,
             size,
             format: resources.target_format,
+            sample_count: resources.sample_count,
         };
         *slot = Some(targets);
     }
@@ -139,7 +152,8 @@ pub fn water_bind_group(
 }
 
 /// Colour MSAA + resolved colour + MSAA depth, excluding driver overhead.
-pub fn bytes_per_pixel(format: wgpu::TextureFormat) -> u64 {
-    u64::from(format.block_copy_size(None).unwrap_or(4)) * (u64::from(MSAA_SAMPLE_COUNT) + 1)
-        + 4 * u64::from(MSAA_SAMPLE_COUNT)
+pub fn bytes_per_pixel_for_samples(format: wgpu::TextureFormat, sample_count: u32) -> u64 {
+    let count = u64::from(sample_count);
+    u64::from(format.block_copy_size(None).unwrap_or(4)) * (count + u64::from(count > 1))
+        + 4 * count
 }

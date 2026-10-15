@@ -17,13 +17,20 @@ pub fn decode_vtf_rgba(bytes: &[u8]) -> Result<vformats::vtf::RgbaImage, vformat
     vformats::vtf::parse(bytes, &Limits::default())?.decode_rgba(0, 0, 0, &Limits::default())
 }
 
+pub(super) struct DecodedVtfImage {
+    pub image: vformats::vtf::RgbaImage,
+    pub original_dimensions: [u32; 2],
+    pub flags: u32,
+    pub reflectivity_bits: [u32; 3],
+}
+
 /// Decodes the stored mip nearest at or below `max_dimension`, falling back
 /// to mip 0 on failure. Returns original mip-0 dimensions as well: BSP texel
 /// UVs normalize against them, not the decoded mip size.
 pub(super) fn decode_vtf_rgba_max(
     bytes: &[u8],
     max_dimension: Option<u32>,
-) -> Result<(vformats::vtf::RgbaImage, u32, u32), vformats::vtf::VtfError> {
+) -> Result<DecodedVtfImage, vformats::vtf::VtfError> {
     let limits = Limits::default();
     let vtf = vformats::vtf::parse(bytes, &limits)?;
     let (source_width, source_height) = (vtf.width(), vtf.height());
@@ -41,7 +48,12 @@ pub(super) fn decode_vtf_rgba_max(
         vtf.decode_rgba(0, 0, mip, &limits)
             .or_else(|_| vtf.decode_rgba(0, 0, 0, &limits))?
     };
-    Ok((image, source_width, source_height))
+    Ok(DecodedVtfImage {
+        image,
+        original_dimensions: [source_width, source_height],
+        flags: vtf.flags(),
+        reflectivity_bits: vtf.reflectivity().map(f32::to_bits),
+    })
 }
 
 pub(super) fn push_matching_path(
@@ -84,6 +96,8 @@ pub(super) fn downscale_resolved_texture(
         original_width,
         original_height,
         water_fallback,
+        flags,
+        reflectivity_bits,
         ..
     } = texture;
     let ResolvedTexturePayload::Rgba { rgba, .. } = payload else {
@@ -94,6 +108,8 @@ pub(super) fn downscale_resolved_texture(
             original_width,
             original_height,
             water_fallback,
+            flags,
+            reflectivity_bits,
         };
     };
     if rgba.len() != expected_len {
@@ -107,6 +123,8 @@ pub(super) fn downscale_resolved_texture(
             original_width,
             original_height,
             water_fallback,
+            flags,
+            reflectivity_bits,
         };
     }
     let image = ::image::RgbaImage::from_raw(source_width, source_height, rgba)
@@ -117,14 +135,17 @@ pub(super) fn downscale_resolved_texture(
         height,
         ::image::imageops::FilterType::Triangle,
     );
-    ResolvedTexture::rgba(
+    let mut result = ResolvedTexture::rgba(
         resized.into_raw(),
         width,
         height,
         original_width,
         original_height,
         water_fallback,
-    )
+    );
+    result.flags = flags;
+    result.reflectivity_bits = reflectivity_bits;
+    result
 }
 
 pub(super) fn with_generated_mip_chain(mut tex: ResolvedTexture) -> ResolvedTexture {
@@ -154,7 +175,10 @@ pub(super) fn resolved_bc_texture(
         })
         .collect::<Vec<_>>();
     let mips = drop_bc_mips_to_max_dimension(mips, max_dimension);
-    ResolvedTexture::bc(raw.format, mips, raw.width.max(1), raw.height.max(1))
+    let mut texture = ResolvedTexture::bc(raw.format, mips, raw.width.max(1), raw.height.max(1))?;
+    texture.flags = Some(vtf.flags());
+    texture.reflectivity_bits = Some(vtf.reflectivity().map(f32::to_bits));
+    Some(texture)
 }
 
 pub(super) fn drop_bc_mips_to_max_dimension(

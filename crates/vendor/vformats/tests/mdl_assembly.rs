@@ -3,7 +3,8 @@
 
 use vformats::Limits;
 use vformats::mdl::{
-    AssemblySkip, MdlError, assemble, assemble_lossy, parse_mdl, parse_vtx, parse_vvd,
+    AssemblySkip, MdlError, ModelData, ModelLightingVertex, VhvError, assemble, assemble_lossy,
+    parse_mdl, parse_vhv, parse_vtx, parse_vvd,
 };
 
 fn put_i32(b: &mut [u8], at: usize, v: i32) {
@@ -97,7 +98,11 @@ fn build_vvd(positions: &[[f32; 3]]) -> Vec<u8> {
         b.extend_from_slice(&0.5f32.to_le_bytes()); // u
         b.extend_from_slice(&0.25f32.to_le_bytes()); // v
     }
-    b.extend_from_slice(&vec![0u8; positions.len() * 16]); // tangents
+    for _ in positions {
+        for value in [1.0_f32, 0.0, 0.0, 1.0] {
+            b.extend_from_slice(&value.to_le_bytes());
+        }
+    }
     b
 }
 
@@ -190,6 +195,59 @@ fn assembles_a_static_prop_triangle_end_to_end() {
     assert_eq!(mesh.vertices[1].position, positions[1]);
     assert_eq!(mesh.vertices[2].position, positions[0]);
     assert_eq!(mesh.indices, [0, 2, 1]);
+}
+
+#[test]
+fn compression_options_preserve_authored_frames_and_default_geometry() {
+    use vformats::mdl::{
+        ModelAssemblyOptions, VertexCompression, assemble_lossy_with_options, source_ubyte4_vector,
+    };
+    let limits = Limits::default();
+    let mdl = parse_mdl(&build_mdl(), &limits).unwrap();
+    let mut vvd = parse_vvd(
+        &build_vvd(&[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        &limits,
+    )
+    .unwrap();
+    for vertex in &mut vvd.vertices {
+        vertex.normal = [0.2, 0.3, 0.5];
+    }
+    for tangent in &mut vvd.tangents {
+        *tangent = [0.3, 0.2, 0.5, -1.0];
+    }
+    let vtx = parse_vtx(&build_vtx(3), &limits).unwrap();
+    let raw = assemble(&mdl, &vvd, &vtx).unwrap().model;
+    let packed = assemble_lossy_with_options(
+        &mdl,
+        &vvd,
+        &vtx,
+        ModelAssemblyOptions {
+            vertex_compression: VertexCompression::SourceUbyte4,
+        },
+    )
+    .unwrap()
+    .model;
+    assert_eq!(raw.vertex_compression, VertexCompression::None);
+    assert_eq!(packed.vertex_compression, VertexCompression::SourceUbyte4);
+    assert_eq!(raw.source_frames, packed.source_frames);
+    assert_eq!(raw.lighting_compatible, packed.lighting_compatible);
+    assert_eq!(raw.lighting_meshes, packed.lighting_meshes);
+    for (raw_mesh, packed_mesh) in raw.meshes.iter().zip(&packed.meshes) {
+        assert_eq!(raw_mesh.indices, packed_mesh.indices);
+        assert_eq!(raw_mesh.vertex_lighting, packed_mesh.vertex_lighting);
+        for (raw_vertex, packed_vertex) in raw_mesh.vertices.iter().zip(&packed_mesh.vertices) {
+            assert_eq!(raw_vertex.position, packed_vertex.position);
+            assert_eq!(raw_vertex.uv, packed_vertex.uv);
+        }
+    }
+    assert_eq!(packed.source_frames[0].normal, [0.2, 0.3, 0.5]);
+    assert_eq!(packed.source_frames[0].tangent, Some([0.3, 0.2, 0.5, -1.0]));
+    assert_eq!(raw.meshes[0].vertices[0].normal, [0.2, 0.3, 0.5]);
+    assert_eq!(
+        packed.meshes[0].vertices[0].normal,
+        source_ubyte4_vector([0.2, 0.3, 0.5]).unwrap()
+    );
+    assert_eq!(packed.meshes[0].vertices[0].tangent_sign, -1.0);
 }
 
 #[test]
@@ -292,4 +350,180 @@ fn mesh_count_mismatch_errors_strict_and_truncates_lossy() {
         read.model.meshes.is_empty(),
         "zip-truncated to the shorter (empty) mesh list"
     );
+}
+
+fn lighting_file(model: &ModelData) -> Vec<u8> {
+    let directory_end = 40 + model.lighting_meshes.len() * 28;
+    let stream_start = directory_end.div_ceil(512) * 512;
+    let total: usize = model
+        .lighting_meshes
+        .iter()
+        .map(|mesh| mesh.vertex_count)
+        .sum();
+    let mut bytes = vec![0; (stream_start + total * 4).div_ceil(512) * 512];
+    put_i32(&mut bytes, 0, 2);
+    bytes[4..8].copy_from_slice(&model.checksum.to_le_bytes());
+    put_i32(&mut bytes, 8, 4);
+    put_i32(&mut bytes, 12, 4);
+    put_i32(&mut bytes, 16, total as i32);
+    put_i32(&mut bytes, 20, model.lighting_meshes.len() as i32);
+    let mut stream = stream_start;
+    for (index, mesh) in model.lighting_meshes.iter().enumerate() {
+        put_i32(&mut bytes, 40 + index * 28, mesh.lod as i32);
+        put_i32(&mut bytes, 44 + index * 28, mesh.vertex_count as i32);
+        put_i32(&mut bytes, 48 + index * 28, stream as i32);
+        for vertex in 0..mesh.vertex_count {
+            bytes[stream..stream + 4].copy_from_slice(&[vertex as u8, index as u8, 100, 255]);
+            stream += 4;
+        }
+    }
+    bytes
+}
+
+#[test]
+fn compiled_lighting_matches_hardware_identity_across_lods_models_and_duplicate_vertices() {
+    let limits = Limits::default();
+    let mut mdl = parse_mdl(&build_mdl(), &limits).unwrap();
+    let vvd = parse_vvd(
+        &build_vvd(&[[0.0; 3], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]]),
+        &limits,
+    )
+    .unwrap();
+    let mut vtx = parse_vtx(&build_vtx(3), &limits).unwrap();
+    let second_model = mdl.body_parts[0].models[0].clone();
+    mdl.body_parts[0].models.push(second_model);
+    let second_hardware_model = vtx.body_parts[0].models[0].clone();
+    let lower_lod = vtx.body_parts[0].models[0].lods[0].clone();
+    vtx.body_parts[0].models[0].lods.push(lower_lod);
+    vtx.body_parts[0].models.push(second_hardware_model);
+    let mesh = &mut vtx.body_parts[0].models[0].lods[0].meshes[0];
+    let mut second_group = mesh.strip_groups[0].clone();
+    second_group.vertices.swap(1, 2);
+    let group = &mut mesh.strip_groups[0];
+    group.vertices.push(group.vertices[0]);
+    group.indices = vec![3, 1, 2, 0, 2, 1];
+    group.strips[0].index_count = 6;
+    mesh.strip_groups.push(second_group);
+
+    let model = assemble(&mdl, &vvd, &vtx).unwrap().model;
+    assert!(model.lighting_compatible);
+    assert_eq!(
+        model
+            .lighting_meshes
+            .iter()
+            .map(|mesh| (mesh.lod, mesh.vertex_count))
+            .collect::<Vec<_>>(),
+        [(0, 4), (0, 3), (1, 3), (0, 3)]
+    );
+    assert_eq!(model.meshes.len(), 2);
+    assert_eq!(model.meshes[0].vertices.len(), 7);
+    let expected = [(0, 1), (0, 2), (0, 0), (0, 3), (1, 2), (1, 1), (1, 0)];
+    assert_eq!(
+        model.meshes[0]
+            .vertex_lighting
+            .iter()
+            .map(|vertex| (vertex.mesh, vertex.vertex))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(model.meshes[0].vertices[2], model.meshes[0].vertices[3]);
+    assert!(
+        model.meshes[1]
+            .vertex_lighting
+            .iter()
+            .all(|vertex| vertex.mesh == 3)
+    );
+
+    let bytes = lighting_file(&model);
+    let vhv = parse_vhv(&bytes, &limits).unwrap();
+    vhv.validate_model(&model).unwrap();
+    let colors: Vec<_> = model.meshes[0]
+        .vertex_lighting
+        .iter()
+        .map(|vertex| vhv.color_rgba(*vertex).unwrap())
+        .collect();
+    assert_eq!(
+        colors,
+        expected.map(|(mesh, vertex)| [100, mesh as u8, vertex as u8, 255])
+    );
+    assert_ne!(
+        colors[2], colors[3],
+        "equal VVD vertices retain distinct hardware lighting"
+    );
+}
+
+#[test]
+fn compiled_lighting_rejects_stale_checksums_layouts_and_lossy_companions() {
+    let limits = Limits::default();
+    let mdl = parse_mdl(&build_mdl(), &limits).unwrap();
+    let mut vvd = parse_vvd(
+        &build_vvd(&[[0.0; 3], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]]),
+        &limits,
+    )
+    .unwrap();
+    let mut vtx = parse_vtx(&build_vtx(3), &limits).unwrap();
+    let model = assemble(&mdl, &vvd, &vtx).unwrap().model;
+    let bytes = lighting_file(&model);
+    let vhv = parse_vhv(&bytes, &limits).unwrap();
+    vhv.validate_model(&model).unwrap();
+    let mut altered = model.clone();
+    altered.checksum = 123;
+    assert_eq!(
+        vhv.validate_model(&altered),
+        Err(VhvError::ChecksumMismatch {
+            expected: 123,
+            actual: 0
+        })
+    );
+    altered = model.clone();
+    altered.lighting_meshes[0].lod = 1;
+    assert_eq!(
+        vhv.validate_model(&altered),
+        Err(VhvError::MeshLayoutMismatch { mesh: 0 })
+    );
+    altered = model.clone();
+    altered.lighting_meshes[0].vertex_count += 1;
+    assert_eq!(
+        vhv.validate_model(&altered),
+        Err(VhvError::MeshLayoutMismatch { mesh: 0 })
+    );
+    altered = model.clone();
+    altered.meshes[0].vertex_lighting[0] = ModelLightingVertex { mesh: 0, vertex: 3 };
+    assert!(matches!(
+        vhv.validate_model(&altered),
+        Err(VhvError::Corrupt { .. })
+    ));
+    altered = model;
+    altered.lighting_meshes.clear();
+    assert_eq!(
+        vhv.validate_model(&altered),
+        Err(VhvError::MeshCountMismatch {
+            expected: 0,
+            actual: 1
+        })
+    );
+
+    vvd.checksum = 123;
+    let lossy = assemble_lossy(&mdl, &vvd, &vtx).unwrap().model;
+    assert_eq!(vhv.validate_model(&lossy), Err(VhvError::ModelIncompatible));
+    vvd.checksum = 0;
+    vtx.body_parts[0].models[0].lods[0].meshes.clear();
+    let lossy = assemble_lossy(&mdl, &vvd, &vtx).unwrap().model;
+    assert_eq!(vhv.validate_model(&lossy), Err(VhvError::ModelIncompatible));
+}
+
+#[test]
+fn raw_studio_flags_survive_assembly_without_changing_vertex_identity() {
+    let limits = Limits::default();
+    let positions = [[0.0f32, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]];
+    let mut mdl = parse_mdl(&build_mdl(), &limits).unwrap();
+    let vvd = parse_vvd(&build_vvd(&positions), &limits).unwrap();
+    let vtx = parse_vtx(&build_vtx(3), &limits).unwrap();
+    let baseline = assemble(&mdl, &vvd, &vtx).unwrap().model;
+    mdl.flags |= 0x8001_0000;
+    let flagged = assemble(&mdl, &vvd, &vtx).unwrap().model;
+    assert_eq!(flagged.mdl_flags, mdl.flags);
+    assert_eq!(flagged.meshes, baseline.meshes);
+    assert_eq!(flagged.lighting_meshes, baseline.lighting_meshes);
+    assert_eq!(flagged.source_frames, baseline.source_frames);
 }

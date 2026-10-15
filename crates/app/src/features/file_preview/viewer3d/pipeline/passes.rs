@@ -18,7 +18,7 @@ fn pass<'a>(
         label: Some(label),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &targets.color,
-            resolve_target: resolve.then_some(&targets.resolve_view),
+            resolve_target: (resolve && targets.sample_count > 1).then_some(&targets.resolve_view),
             ops: wgpu::Operations {
                 load,
                 store: wgpu::StoreOp::Store,
@@ -93,6 +93,10 @@ fn render_opaque(
                 transparency: &view.skybox_transparency,
             },
         );
+        drop(pass);
+        if sky {
+            view.sun.query(encoder, &resources.sun, true);
+        }
     }
     let mut pass = pass(
         encoder,
@@ -123,6 +127,7 @@ fn render_opaque(
             transparency: &view.transparency,
         },
     );
+    drop(pass);
 }
 
 fn render_scene(
@@ -134,6 +139,7 @@ fn render_scene(
     clear: wgpu::Color,
     sky: bool,
 ) {
+    let resources = resources.for_view(kind);
     render_opaque(view, resources, upload, encoder, kind, clear, sky);
     let targets = view.targets.as_ref().expect("prepared optical targets");
     let mut pass = pass(
@@ -158,6 +164,11 @@ fn render_scene(
             transparency: &view.transparency,
         },
     );
+    drop(pass);
+    if matches!(kind, ViewKind::Reflection) && sky {
+        view.sun.query(encoder, &resources.sun, false);
+        view.sun.draw(encoder, &resources.sun, upload, targets);
+    }
 }
 
 pub fn render_frame(
@@ -304,6 +315,10 @@ pub fn render_frame(
                 transparency: &view.transparency,
             },
         );
+    }
+    if !primitive.submerged {
+        view.sun.query(encoder, &resources.sun, false);
+        view.sun.draw(encoder, &resources.sun, upload, targets);
     }
     if primitive.phy_debug_visible {
         let mut pass = pass(

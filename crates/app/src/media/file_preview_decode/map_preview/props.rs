@@ -1,5 +1,8 @@
 #[cfg(test)]
 use super::MapAmbientLighting;
+use super::compiled_lighting::{
+    CompiledPropLighting, PropLightingStats, load_compiled_lighting, prepare_compiler_layout,
+};
 use super::{
     Arc, BTreeMap, BTreeSet, ContentSourceTier, ConvexHull, ConvexLedge, DoorInstance, DoorSound,
     DoorSoundSourceTier, DoorSoundWave, DoorSounds, Duration, HashMap, HashSet, Instant,
@@ -9,8 +12,7 @@ use super::{
     PropMaterialResolveJob, PropPlacementLighting, ReadStats, RenderMode, ResolvedPrimaryMaterial,
     ResolvedSoundReference, SelectedPropPlacement, SkipReason, StaticPropLightingInputs,
     StaticPropPlacement, Vec3, bounds_from_model_meshes, catch_asset_decode, entry_stem,
-    load_model_catching_panic, load_model_companions, map_mesh_to_model_mesh, parallel_collect,
-    prop_placement_lighting,
+    load_model_companions, map_mesh_to_model_mesh, parallel_collect, prop_placement_lighting,
 };
 use rayon::prelude::*;
 
@@ -22,6 +24,8 @@ pub(in super::super) struct PropBakeResult {
     pub(in super::super) placed_count: u32,
     pub(in super::super) skip_stats: PropBakeSkipStats,
     pub(in super::super) timing: PropBakeTiming,
+    pub(in super::super) lighting_stats: PropLightingStats,
+    pub(in super::super) model_lighting: Vec<crate::media::preview_model::ModelLightingContext>,
 }
 
 impl PropBakeResult {
@@ -69,6 +73,7 @@ pub(in super::super) struct PropDoorMaterialResolution {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(in super::super) struct PropBakeSkipStats {
+    pub(in super::super) hidden_render_mode: usize,
     pub(in super::super) placement_cap: usize,
     pub(in super::super) triangle_cap: usize,
     pub(in super::super) invalid_model_path: usize,
@@ -79,6 +84,7 @@ pub(in super::super) struct PropBakeSkipStats {
 impl PropBakeSkipStats {
     pub(in super::super) const fn total(self) -> usize {
         self.placement_cap
+            + self.hidden_render_mode
             + self.triangle_cap
             + self.invalid_model_path
             + self.load_failure
@@ -95,6 +101,9 @@ impl std::ops::Add for PropBakeSkipStats {
 
     fn add(self, rhs: Self) -> Self::Output {
         Self {
+            hidden_render_mode: self
+                .hidden_render_mode
+                .saturating_add(rhs.hidden_render_mode),
             placement_cap: self.placement_cap.saturating_add(rhs.placement_cap),
             triangle_cap: self.triangle_cap.saturating_add(rhs.triangle_cap),
             invalid_model_path: self
@@ -313,7 +322,9 @@ pub(in super::super) fn bake_static_props(
         table,
         StaticPropLightingInputs {
             ambient,
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         &load_prop_model,
@@ -415,13 +426,40 @@ pub(in super::super) fn bake_map_doors_with_prop_model_loader(
                     &model,
                     context.table.slots(),
                 );
+                let model = if let Some(inputs) = lighting.environment_maps {
+                    Arc::new(PropModelAsset {
+                        material_indices: super::cubemaps::bind_prop_materials(
+                            &model,
+                            placement,
+                            inputs,
+                            resolver,
+                            context.table,
+                        ),
+                        model: Arc::clone(&model.model),
+                        default_triangle_count: model.default_triangle_count,
+                    })
+                } else {
+                    model
+                };
+                let model = Arc::new(PropModelAsset {
+                    material_indices: prop_draw_materials(
+                        &model.material_indices,
+                        prop_opacity(placement),
+                        context.table,
+                    ),
+                    model: Arc::clone(&model.model),
+                    default_triangle_count: model.default_triangle_count,
+                });
                 let lighting = prop_placement_lighting(placement, lighting);
-                let meshes = bake_prop_door_meshes(placement, &model, lighting);
+                let mut meshes = bake_prop_door_meshes(placement, &model, lighting);
                 let Some((local_bounds_min, local_bounds_max)) = bounds_from_model_meshes(&meshes)
                 else {
                     baked.skipped_prop_door_count = baked.skipped_prop_door_count.saturating_add(1);
                     continue;
                 };
+                if matches!(placement.render_mode, 6 | 10) {
+                    meshes.clear();
+                }
                 baked.doors.push(DoorInstance {
                     brush_collision: None,
                     class: door.class,
@@ -533,7 +571,7 @@ pub(in super::super) fn bake_static_props_from_loaded_model_cache(
         pre_resolved_prop_materials,
         table,
     };
-    let selected = select_static_prop_placements(
+    let mut selected = select_static_prop_placements(
         placements,
         MAP_PROP_PLACEMENT_CAP,
         MAP_PROP_TRIANGLE_CAP,
@@ -547,8 +585,104 @@ pub(in super::super) fn bake_static_props_from_loaded_model_cache(
         },
         lighting,
     );
+    for prop in &mut selected.placements {
+        if prop.placement.entity
+            || prop.placement.static_prop_index.is_none()
+            || prop.placement.flags & 0x40 != 0
+        {
+            selected.lighting_stats.disabled += 1;
+            continue;
+        }
+        match load_compiled_lighting(
+            prop.placement,
+            &prop.model.model,
+            resolver,
+            lighting.lightmap_source == Some(gmpublished_domain::scene::map::LightmapSource::Hdr),
+        ) {
+            Ok(Some(compiled)) => {
+                prop.compiled_lighting = Some(Arc::new(compiled));
+                selected.lighting_stats.compiled += 1;
+            }
+            Ok(None) => selected.lighting_stats.missing += 1,
+            Err(error) => {
+                selected.lighting_stats.incompatible += 1;
+                log::warn!(
+                    "compiled prop lighting {:?} for {} rejected: {error}",
+                    prop.placement.static_prop_index,
+                    prop.placement.model_path
+                );
+            }
+        }
+    }
+    log::debug!(
+        "compiled prop lighting: applied {}, missing {}, disabled {}, incompatible {}",
+        selected.lighting_stats.compiled,
+        selected.lighting_stats.missing,
+        selected.lighting_stats.disabled,
+        selected.lighting_stats.incompatible
+    );
+    for prop in &mut selected.placements {
+        if let Some(inputs) = lighting.environment_maps {
+            let indices = super::cubemaps::bind_prop_materials(
+                &prop.model,
+                prop.placement,
+                inputs,
+                resolver,
+                context.table,
+            );
+            if indices != prop.model.material_indices {
+                prop.model = Arc::new(PropModelAsset {
+                    model: Arc::clone(&prop.model.model),
+                    material_indices: indices,
+                    default_triangle_count: prop.model.default_triangle_count,
+                });
+            }
+        }
+        let material_indices = prop_draw_materials(
+            &prop.model.material_indices,
+            prop_opacity(prop.placement),
+            context.table,
+        );
+        if material_indices != prop.model.material_indices {
+            prop.model = Arc::new(PropModelAsset {
+                model: Arc::clone(&prop.model.model),
+                material_indices,
+                default_triangle_count: prop.model.default_triangle_count,
+            });
+        }
+    }
     let load_timing = load_started.elapsed();
     bake_selected_static_props(selected, load_timing)
+}
+
+fn prop_draw_materials(indices: &[usize], opacity: f32, table: &mut MaterialTable) -> Vec<usize> {
+    indices
+        .iter()
+        .map(|&index| {
+            let key = format!("prop_draw_alpha\0{index}\0{}", opacity < 1.0);
+            if let Some(existing) = table.index_of(&key) {
+                return existing;
+            }
+            let mut slot = table.slots()[index].clone();
+            if let Some(surface) = slot.shader.surface() {
+                // Model draw modulation replaces material alpha. Keep the
+                // authored surface intact and select the resulting depth queue.
+                slot.render_mode = surface.draw_render_mode(
+                    slot.texture.as_ref().and_then(|texture| texture.flags),
+                    opacity,
+                );
+                slot.force_opaque = slot.render_mode.force_opaque();
+            } else if opacity < 1.0
+                && matches!(slot.render_mode, RenderMode::Opaque | RenderMode::Cutout)
+            {
+                slot.render_mode = RenderMode::Translucent;
+            }
+            if slot == table.slots()[index] {
+                return index;
+            }
+            table.push(&key, slot)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -571,7 +705,9 @@ pub(in super::super) fn bake_static_props_with_loaded_model_cache(
         pre_resolved_prop_materials.as_ref(),
         StaticPropLightingInputs {
             ambient,
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         load_started,
@@ -625,11 +761,44 @@ fn bake_selected_with(
     let (meshes, mesh_visibility) = prop_meshes_to_mesh_data(prop_meshes);
 
     PropBakeResult {
+        model_lighting: selected
+            .placements
+            .iter()
+            .map(|selected| {
+                let sample_point = crate::media::preview_model::placement_sample_point(
+                    &selected.model.model,
+                    selected.placement,
+                );
+                crate::media::preview_model::ModelLightingContext {
+                    mdl_flags: selected.model.model.mdl_flags,
+                    compiled_lighting: selected.compiled_lighting.is_some(),
+                    model_path: selected.placement.model_path.clone(),
+                    origin: selected.placement.origin,
+                    lighting_origin: sample_point
+                        .as_ref()
+                        .copied()
+                        .unwrap_or(selected.placement.origin),
+                    entity: selected.placement.entity,
+                    sample_point,
+                    static_world_bounds: crate::media::preview_model::placement_static_bounds(
+                        &selected.model.model,
+                        selected.placement,
+                    ),
+                    lighting_origin_reference: selected.placement.lighting_origin_reference.clone(),
+                    cpu_seed: Ok(None),
+                    diffuse_modulation: selected.placement.diffuse_modulation,
+                    render_mode: selected.placement.render_mode,
+                    ambient_cube: selected.lighting.ambient_cube,
+                    lights: Vec::new(),
+                }
+            })
+            .collect(),
         entity_meshes,
         meshes,
         mesh_visibility,
         placed_count: u32::try_from(selected.placements.len()).unwrap_or(u32::MAX),
         skip_stats: selected.skip_stats,
+        lighting_stats: selected.lighting_stats,
         timing: PropBakeTiming {
             load: load_timing,
             bake: bake_timing,
@@ -664,6 +833,7 @@ pub(in super::super) fn bake_static_props_with_loader_serial(
 pub(in super::super) struct SelectedPropPlacements<'a> {
     pub(in super::super) placements: Vec<SelectedPropPlacement<'a>>,
     pub(in super::super) skip_stats: PropBakeSkipStats,
+    pub(in super::super) lighting_stats: PropLightingStats,
 }
 
 pub(in super::super) fn select_static_prop_placements<'a>(
@@ -689,6 +859,10 @@ pub(in super::super) fn select_static_prop_placements<'a>(
     let mut baked_triangles = 0_usize;
 
     for (index, placement) in placements.iter().take(capped_count).enumerate() {
+        if placement.entity && matches!(placement.render_mode, 6 | 10) {
+            skip_stats.hidden_render_mode += 1;
+            continue;
+        }
         if !std::path::Path::new(&placement.model_path)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("mdl"))
@@ -715,9 +889,12 @@ pub(in super::super) fn select_static_prop_placements<'a>(
         if prop_placement_has_bakeable_mesh(placement, &model) {
             baked_triangles = baked_triangles.saturating_add(model.default_triangle_count);
             selected.push(SelectedPropPlacement {
+                lighting_context: u32::try_from(selected.len() + 1)
+                    .expect("bounded placement context"),
                 placement,
                 model,
                 lighting: prop_placement_lighting(placement, lighting),
+                compiled_lighting: None,
             });
         } else {
             skip_stats.no_bakeable_mesh = skip_stats.no_bakeable_mesh.saturating_add(1);
@@ -738,6 +915,7 @@ pub(in super::super) fn select_static_prop_placements<'a>(
     SelectedPropPlacements {
         placements: selected,
         skip_stats,
+        lighting_stats: PropLightingStats::default(),
     }
 }
 
@@ -765,6 +943,7 @@ pub(in super::super) fn prop_meshes_to_mesh_data(
         .map(|mesh| {
             (
                 MeshData {
+                    geometry: crate::media::preview_model::MeshGeometry::Model,
                     vertices: mesh.vertices,
                     indices: mesh.indices,
                     material_index: mesh.material_index,
@@ -804,10 +983,12 @@ pub(in super::super) fn bake_selected_prop_placements_serial(
 ) -> BTreeMap<(usize, bool), PropBuildMesh> {
     let mut prop_meshes = BTreeMap::<(usize, bool), PropBuildMesh>::new();
     for selected in selected {
-        let baked = bake_prop_placement(
+        let baked = bake_prop_placement_with_compiled(
             selected.placement,
             &selected.model,
             selected.lighting,
+            selected.compiled_lighting.as_deref(),
+            selected.lighting_context,
             &mut prop_meshes,
         );
         debug_assert!(baked, "selected prop placement should bake");
@@ -956,19 +1137,35 @@ pub(in super::super) fn bake_prop_door_meshes(
                 .iter()
                 .map(|vertex| {
                     let closed_normal = transform_prop_normal(vertex.normal, placement);
+                    let authored_modulation = placement.diffuse_modulation != [255; 4];
                     ModelVertex {
                         position: vertex.position,
                         normal: vertex.normal,
+                        tangent_s: vertex.tangent_s,
+                        tangent_t: vertex.tangent_t,
+                        tangent_sign: vertex.tangent_sign,
+                        lighting_context: 0,
                         uv: vertex.uv,
                         lightmap_uv: [0.0; 2],
                         lightmap_bump_step: 0.0,
-                        color: lighting.evaluate(closed_normal),
+                        color: if authored_modulation {
+                            prop_diffuse_tint(placement)
+                        } else {
+                            lighting.evaluate(closed_normal)
+                        },
                         blend_alpha: 0.0,
-                        opacity: 1.0,
+                        opacity: prop_opacity(placement),
+                        illumination: if authored_modulation {
+                            lighting.evaluate(closed_normal) * 2.0
+                        } else {
+                            Vec3::splat(1.0)
+                        },
+                        lighting_mode: 8 | u32::from(authored_modulation),
                     }
                 })
                 .collect::<Vec<_>>();
             (!vertices.is_empty() && !mesh.indices.is_empty()).then(|| MeshData {
+                geometry: crate::media::preview_model::MeshGeometry::Model,
                 vertices,
                 indices: mesh.indices.clone(),
                 material_index,
@@ -1091,6 +1288,14 @@ pub(in super::super) fn load_prop_model(
     model_path: &str,
     resolver: &MaterialResolver,
 ) -> Option<LoadedPropModel> {
+    load_prop_model_with_options(model_path, resolver, super::super::SOURCE_MODEL_ASSEMBLY)
+}
+
+pub(in super::super) fn load_prop_model_with_options(
+    model_path: &str,
+    resolver: &MaterialResolver,
+    options: vformats::mdl::ModelAssemblyOptions,
+) -> Option<LoadedPropModel> {
     let stem = entry_stem(model_path)?;
     let phy_path = format!("{stem}.phy");
 
@@ -1102,12 +1307,18 @@ pub(in super::super) fn load_prop_model(
         resolver.entry_bytes(path)
     })?;
 
-    let model = load_model_catching_panic(
+    let mut model = super::super::load_model_catching_panic_with_options(
         &format!("static prop model {model_path}"),
         &mdl_bytes,
         &vvd_bytes,
         &vtx_bytes,
+        options,
     )?;
+    let compiler_bytes = resolver.entry_bytes(&format!("{stem}.dx80.vtx"));
+    if let Err(reason) = prepare_compiler_layout(&mut model, &vtx_bytes, compiler_bytes.as_deref())
+    {
+        log::debug!("compiled prop lighting layout unavailable for {model_path}: {reason}");
+    }
     let default_triangle_count = model
         .meshes
         .iter()
@@ -1258,20 +1469,33 @@ pub(in super::super) fn prop_material_cache_key(material_dirs: &[String], name: 
     key
 }
 
+#[cfg(test)]
 pub(in super::super) fn bake_prop_placement(
     placement: &StaticPropPlacement,
     model: &PropModelAsset,
     lighting: PropPlacementLighting,
     prop_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
 ) -> bool {
+    bake_prop_placement_with_compiled(placement, model, lighting, None, 0, prop_meshes)
+}
+
+fn bake_prop_placement_with_compiled(
+    placement: &StaticPropPlacement,
+    model: &PropModelAsset,
+    lighting: PropPlacementLighting,
+    compiled: Option<&CompiledPropLighting>,
+    lighting_context: u32,
+    prop_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
+) -> bool {
     let skin_table = prop_skin_table(&model.model, placement.skin);
     let mut baked_any = false;
 
-    for mesh in model
+    for (mesh_index, mesh) in model
         .model
         .meshes
         .iter()
-        .filter(|mesh| mesh.bodygroup_choice == 0)
+        .enumerate()
+        .filter(|(_, mesh)| mesh.bodygroup_choice == 0)
     {
         let material_index = skin_table
             .and_then(|table| table.get(mesh.material_index))
@@ -1297,19 +1521,42 @@ pub(in super::super) fn bake_prop_placement(
             });
         let base = base.saturating_sub(u32::try_from(mesh.vertices.len()).unwrap_or(u32::MAX));
 
-        target.vertices.extend(mesh.vertices.iter().map(|vertex| {
-            let normal = transform_prop_normal(vertex.normal, placement);
-            ModelVertex {
-                position: transform_prop_position(vertex.position, placement),
-                normal,
-                uv: vertex.uv,
-                lightmap_uv: [0.0; 2],
-                lightmap_bump_step: 0.0,
-                color: lighting.evaluate(normal),
-                blend_alpha: 0.0,
-                opacity: 1.0,
-            }
-        }));
+        target.vertices.extend(
+            mesh.vertices
+                .iter()
+                .enumerate()
+                .map(|(vertex_index, vertex)| {
+                    let normal = transform_prop_normal(vertex.normal, placement);
+                    let compiled_illumination = compiled
+                        .and_then(|compiled| compiled.illumination.get(mesh_index))
+                        .and_then(|mesh| mesh.get(vertex_index))
+                        .copied();
+                    let authored_modulation = placement.diffuse_modulation != [255; 4];
+                    let illumination = compiled_illumination
+                        .or_else(|| authored_modulation.then(|| lighting.evaluate(normal) * 2.0));
+                    ModelVertex {
+                        position: transform_prop_position(vertex.position, placement),
+                        normal,
+                        tangent_s: vertex.tangent_s.rotate_source(placement.angles),
+                        tangent_t: vertex.tangent_t.rotate_source(placement.angles),
+                        tangent_sign: vertex.tangent_sign,
+                        lighting_context,
+                        uv: vertex.uv,
+                        lightmap_uv: [0.0; 2],
+                        lightmap_bump_step: 0.0,
+                        color: illumination.map_or_else(
+                            || lighting.evaluate(normal),
+                            |_| prop_diffuse_tint(placement),
+                        ),
+                        blend_alpha: 0.0,
+                        opacity: prop_opacity(placement),
+                        illumination: illumination.unwrap_or_else(|| Vec3::splat(1.0)),
+                        lighting_mode: u32::from(illumination.is_some())
+                            | (u32::from(!placement.entity) << 1)
+                            | 8,
+                    }
+                }),
+        );
         let index_start = target.indices.len();
         target.indices.extend(
             mesh.indices
@@ -1324,6 +1571,23 @@ pub(in super::super) fn bake_prop_placement(
     }
 
     baked_any
+}
+
+fn prop_diffuse_tint(placement: &StaticPropPlacement) -> Vec3 {
+    Vec3::new(
+        f32::from(placement.diffuse_modulation[0]),
+        f32::from(placement.diffuse_modulation[1]),
+        f32::from(placement.diffuse_modulation[2]),
+    )
+    .map(|channel| channel / 255.0)
+}
+
+fn prop_opacity(placement: &StaticPropPlacement) -> f32 {
+    if placement.entity && placement.render_mode != 0 {
+        f32::from(placement.diffuse_modulation[3]) / 255.0
+    } else {
+        1.0
+    }
 }
 
 pub(in super::super) fn prop_skin_table(model: &ModelData, skin: i32) -> Option<&[u16]> {
@@ -1345,5 +1609,169 @@ pub(in super::super) fn transform_prop_normal(
     normal: Vec3,
     placement: &StaticPropPlacement,
 ) -> Vec3 {
-    normal.rotate_source(placement.angles).normalize_or_zero()
+    normal.rotate_source(placement.angles)
+}
+
+#[cfg(test)]
+mod compiled_bake_tests {
+    use super::*;
+    use crate::media::file_preview_decode::tests::{prop_placement, test_prop_asset};
+    use gmpublished_domain::scene::map::AmbientCube;
+
+    fn fallback() -> PropPlacementLighting {
+        PropPlacementLighting {
+            ambient_cube: AmbientCube {
+                colors: [Vec3::splat(0.25); 6],
+            },
+            sun: None,
+        }
+    }
+
+    #[test]
+    fn compiled_black_illumination_keeps_raw_instance_rgb_and_static_alpha_override() {
+        let mut placement = prop_placement(
+            "models/test/chair.mdl",
+            Vec3::new(10.0, 20.0, 30.0),
+            Vec3::ZERO,
+            0,
+        );
+        placement.scale = 2.5;
+        placement.diffuse_modulation = [128, 64, 255, 96];
+        let model = test_prop_asset(1, vec![0, 1]);
+        let compiled = CompiledPropLighting {
+            illumination: vec![vec![Vec3::ZERO; 3]],
+        };
+        let mut baked = BTreeMap::new();
+        assert!(bake_prop_placement_with_compiled(
+            &placement,
+            &model,
+            fallback(),
+            Some(&compiled),
+            0,
+            &mut baked
+        ));
+        let vertex = baked[&(0, false)].vertices[0];
+        assert_eq!(vertex.position, Vec3::new(12.5, 20.0, 30.0));
+        assert_eq!(vertex.illumination, Vec3::ZERO);
+        assert_eq!(vertex.lighting_mode, 11);
+        assert_eq!(vertex.color.x(), 128.0 / 255.0);
+        assert_eq!(vertex.color.y(), 64.0 / 255.0);
+        assert_eq!(vertex.color.z(), 1.0);
+        assert_eq!(vertex.opacity, 1.0);
+    }
+
+    #[test]
+    fn compiled_instances_keep_independent_lighting_in_parallel_bakes() {
+        let placements = [
+            prop_placement("models/test/chair.mdl", Vec3::ZERO, Vec3::ZERO, 0),
+            prop_placement(
+                "models/test/chair.mdl",
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::ZERO,
+                0,
+            ),
+        ];
+        let model = Arc::new(test_prop_asset(1, vec![0, 1]));
+        let selected = placements
+            .iter()
+            .enumerate()
+            .map(|(index, placement)| SelectedPropPlacement {
+                placement,
+                model: Arc::clone(&model),
+                lighting: fallback(),
+                lighting_context: index as u32 + 1,
+                compiled_lighting: Some(Arc::new(CompiledPropLighting {
+                    illumination: vec![vec![Vec3::splat(index as f32); 3]],
+                })),
+            })
+            .collect::<Vec<_>>();
+        let serial = bake_selected_prop_placements_serial(&selected);
+        let parallel = bake_selected_prop_placements_parallel(&selected);
+        assert_eq!(serial[&(0, false)].vertices, parallel[&(0, false)].vertices);
+        assert_eq!(serial[&(0, false)].indices, parallel[&(0, false)].indices);
+        assert_eq!(parallel[&(0, false)].vertices[0].illumination, Vec3::ZERO);
+        assert_eq!(
+            parallel[&(0, false)].vertices[3].illumination,
+            Vec3::splat(1.0)
+        );
+        assert_eq!(parallel[&(0, false)].vertices[0].color, Vec3::splat(1.0));
+        assert_eq!(parallel[&(0, false)].vertices[0].lighting_context, 1);
+        assert_eq!(parallel[&(0, false)].vertices[3].lighting_context, 2);
+    }
+
+    #[test]
+    fn ordinary_fallback_keeps_its_previous_vertex_contract() {
+        let placement = prop_placement("models/test/chair.mdl", Vec3::ZERO, Vec3::ZERO, 0);
+        let model = test_prop_asset(1, vec![0, 1]);
+        let mut baked = BTreeMap::new();
+        assert!(bake_prop_placement_with_compiled(
+            &placement,
+            &model,
+            fallback(),
+            None,
+            0,
+            &mut baked
+        ));
+        let vertex = baked[&(0, false)].vertices[0];
+        assert_eq!(vertex.color, Vec3::splat(0.25));
+        assert_eq!(vertex.illumination, Vec3::splat(1.0));
+        assert_eq!(vertex.lighting_mode, 10);
+    }
+
+    #[test]
+    fn translucent_prop_variants_preserve_original_materials_and_share_slots() {
+        let mut table = MaterialTable::default();
+        let original = table.push(
+            "fixture",
+            MaterialSlot {
+                shader: Default::default(),
+                name: "fixture".to_owned(),
+                texture: None,
+                texture2: None,
+                force_opaque: true,
+                render_mode: RenderMode::Opaque,
+            },
+        );
+        let translucent = prop_draw_materials(&[original], 0.5, &mut table)[0];
+        assert_ne!(original, translucent);
+        assert_eq!(table.slots()[original].render_mode, RenderMode::Opaque);
+        assert_eq!(
+            table.slots()[translucent].render_mode,
+            RenderMode::Translucent
+        );
+        assert!(table.slots()[translucent].force_opaque);
+        assert_eq!(
+            prop_draw_materials(&[original], 0.5, &mut table),
+            [translucent]
+        );
+    }
+
+    #[test]
+    fn model_draw_alpha_replaces_material_alpha_without_changing_shared_world_state() {
+        use crate::bridge::materials::{MaterialShader, SurfaceMaterial};
+        let mut table = MaterialTable::default();
+        let original = table.push(
+            "scalar_alpha",
+            MaterialSlot {
+                shader: MaterialShader::VertexLit(Arc::new(SurfaceMaterial {
+                    alpha: 0.5,
+                    ..SurfaceMaterial::default()
+                })),
+                name: "scalar_alpha".to_owned(),
+                texture: None,
+                texture2: None,
+                force_opaque: false,
+                render_mode: RenderMode::Translucent,
+            },
+        );
+        let opaque = prop_draw_materials(&[original], 1.0, &mut table)[0];
+        let blended = prop_draw_materials(&[original], 0.5, &mut table)[0];
+        assert_eq!(table.slots()[original].render_mode, RenderMode::Translucent);
+        assert_eq!(table.slots()[opaque].render_mode, RenderMode::Opaque);
+        assert_eq!(table.slots()[blended].render_mode, RenderMode::Translucent);
+        assert!(table.slots()[opaque].force_opaque);
+        assert!(!table.slots()[blended].force_opaque);
+        assert_eq!(table.slots()[opaque].shader.surface().unwrap().alpha, 0.5);
+        assert_eq!(prop_draw_materials(&[original], 1.0, &mut table), [opaque]);
+    }
 }

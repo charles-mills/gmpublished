@@ -37,7 +37,9 @@ pub(super) fn build_props(
     visibility: Option<&MapVisibility>,
     walk_collision: Option<MapWalkCollision>,
     ambient: &MapAmbientLighting,
+    environment_maps: super::cubemaps::PropEnvironmentMapInputs<'_>,
     environment_lighting: Option<&MapEnvironmentLighting>,
+    lightmap_source: Option<gmpublished_domain::scene::map::LightmapSource>,
     resolver: &MaterialResolver,
     table: &mut MaterialTable,
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
@@ -83,7 +85,9 @@ pub(super) fn build_props(
     );
     let lighting = StaticPropLightingInputs {
         ambient,
+        environment_maps: Some(environment_maps),
         environment_lighting,
+        lightmap_source,
         walk_collision: walk_collision.as_ref(),
     };
     let resolved = pre_resolve_prop_materials(static_props, &loaded_models, resolver);
@@ -110,6 +114,11 @@ pub(super) fn build_props(
     let doors =
         bake_map_doors_with_prop_model_loader(map_doors, resolver, table, lighting, load_model);
     log_prop_door_material_resolution(&doors.prop_material_resolutions);
+    log::debug!(
+        "map compiled lighting: world {:?}, skybox {:?}",
+        world.lighting_stats,
+        skybox.lighting_stats
+    );
 
     PropBuildPhase {
         loaded_models,

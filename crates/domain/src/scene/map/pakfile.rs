@@ -91,7 +91,20 @@ fn is_pakfile_model_entry(path: &str) -> bool {
 }
 
 pub(super) fn is_pakfile_retained_entry(path: &str) -> bool {
-    is_pakfile_material_entry(path) || is_pakfile_model_entry(path)
+    is_pakfile_material_entry(path) || is_pakfile_model_entry(path) || is_prop_lighting_entry(path)
+}
+
+fn is_prop_lighting_entry(path: &str) -> bool {
+    let Some(stem) = path.strip_suffix(".vhv") else {
+        return false;
+    };
+    let Some(index) = stem
+        .strip_prefix("sp_hdr_")
+        .or_else(|| stem.strip_prefix("sp_"))
+    else {
+        return false;
+    };
+    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(super) fn is_pakfile_entry_oversized(size_bytes: u64) -> bool {

@@ -44,7 +44,15 @@ use texture::{
     write_bc_texture_level, write_texture_level,
 };
 
-pub(super) const MODEL_SHADER_SOURCE: &str = include_str!("model_viewer.wgsl");
+pub(super) const MODEL_SHADER_SOURCE: &str = concat!(
+    include_str!("model_lighting.wgsl"),
+    include_str!("model_lighting_context.wgsl"),
+    include_str!("cubemap.wgsl"),
+    "\n",
+    include_str!("surface.wgsl"),
+    "\n",
+    include_str!("model_viewer.wgsl")
+);
 const SHADER_SOURCE: &str = MODEL_SHADER_SOURCE;
 pub(super) const WATER_SHADER_SOURCE: &str = include_str!("water.wgsl");
 pub(super) const DETAIL_SHADER_SOURCE: &str = include_str!("detail.wgsl");
@@ -90,11 +98,15 @@ const CHECKERBOARD_MIP_2X2_BYTES: usize = 2 * 2 * 4;
 const CHECKERBOARD_MIP_1X1_BYTES: usize = 4;
 const PHY_DEBUG_RGBA: [u8; 4] = [48, 210, 255, 96];
 const MSAA_SAMPLE_COUNT: u32 = 4;
+
+pub(super) fn scene_sample_count() -> u32 {
+    pipeline::sampling::scene_sample_count()
+}
 const MATERIAL_ANISOTROPY_CLAMP: u16 = 16;
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
 const DETAIL_VERTEX_FLOAT_COUNT: u64 = 14;
-const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 14] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x3,
     2 => Float32x2,
@@ -103,6 +115,12 @@ const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_ar
     4 => Float32x3,
     5 => Float32,
     7 => Float32,
+    8 => Float32x3,
+    9 => Uint32,
+    10 => Float32x3,
+    11 => Float32x3,
+    12 => Float32,
+    13 => Uint32,
 ];
 const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x3,
@@ -150,7 +168,13 @@ pub(super) const SOURCE_UP: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 /// Right-handed look-at, column-major.
 pub(super) fn look_at(eye: Vec3, center: Vec3, up: Vec3) -> [[f32; 4]; 4] {
-    let f = normalize_or_up(center - eye);
+    look_to(eye, center - eye, up)
+}
+
+/// Build a view from an authored direction without adding it to a world eye.
+/// A unit direction added to a large Source-map coordinate loses precision.
+pub(super) fn look_to(eye: Vec3, direction: Vec3, up: Vec3) -> [[f32; 4]; 4] {
+    let f = normalize_or_up(direction);
     let s = normalize_or_up(f.cross(up));
     let u = s.cross(f);
     [
@@ -186,6 +210,22 @@ pub(super) fn mat_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn look_to_keeps_rotation_independent_of_large_world_origin() {
+        let direction = Vec3::new(-0.624_695, 0.468_521_33, -0.624_695_06);
+        let origin = look_to(Vec3::ZERO, direction, SOURCE_UP);
+        for eye in [
+            Vec3::new(-3120.0, -3564.0, 650.0),
+            Vec3::new(32768.0, -32768.0, 16384.0),
+        ] {
+            let view = look_to(eye, direction, SOURCE_UP);
+            assert_eq!(view[..3], origin[..3]);
+            // This is the former fly-view construction: it quantizes the
+            // authored direction before the view matrix can normalize it.
+            assert_ne!(look_at(eye, eye + direction, SOURCE_UP)[..3], origin[..3]);
+        }
+    }
 
     #[test]
     fn perspective_maps_near_to_one_and_far_to_zero() {

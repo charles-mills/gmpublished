@@ -3,7 +3,6 @@ use super::camera::FlyCamera;
 use super::{
     DoorAudioEvent, DoorAudioEventKind, DoorInstance, DoorSound, MapDoorClass, MapDoorMotion,
     MapDoorOpenDirection, MapPreview, MapTrace, MapVisibilityBucket, ModelVertex, mid,
-    normalize_or_up,
 };
 use gmpublished_domain::math::Vec3;
 
@@ -262,6 +261,10 @@ pub(super) fn transform_door_vertices(
             let mut transformed = *vertex;
             transformed.position =
                 transform_door_point(door, vertex.position, pose.progress, pose.swing);
+            transformed.tangent_s =
+                transform_door_normal(door, vertex.tangent_s, pose.progress, pose.swing);
+            transformed.tangent_t =
+                transform_door_normal(door, vertex.tangent_t, pose.progress, pose.swing);
             transformed.normal =
                 transform_door_normal(door, vertex.normal, pose.progress, pose.swing);
             transformed
@@ -298,11 +301,11 @@ pub(super) fn transform_door_normal(
 ) -> Vec3 {
     let progress = progress.clamp(0.0, 1.0);
     match door.motion {
-        MapDoorMotion::Linear { .. } => normalize_or_up(normal.rotate_source(door.angles)),
+        MapDoorMotion::Linear { .. } => normal.rotate_source(door.angles),
         MapDoorMotion::Rotating { angle_delta, .. } => {
             let delta = angle_delta * (progress * swing.sign());
             let angles = door.angles + delta;
-            normalize_or_up(normal.rotate_source(angles))
+            normal.rotate_source(angles)
         }
     }
 }

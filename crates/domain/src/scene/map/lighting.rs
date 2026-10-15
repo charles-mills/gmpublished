@@ -76,6 +76,77 @@ impl MapAmbientLighting {
         self.source
     }
 
+    /// Compiled samples before nearest-sample evaluation or fallback policy.
+    pub fn samples(&self) -> &[MapAmbientSample] {
+        &self.samples
+    }
+
+    /// Original per-leaf sample grouping, preserving all directional colours.
+    pub fn samples_for_leaf(&self, leaf_index: usize) -> &[MapAmbientSample] {
+        self.leaf_sample_ranges
+            .get(leaf_index)
+            .and_then(|range| self.samples.get(range.start..range.end()))
+            .unwrap_or_default()
+    }
+
+    pub fn leaf_at(&self, position: Vec3) -> Option<usize> {
+        position
+            .is_finite()
+            .then(|| self.locator.leaf_at(position))
+            .flatten()
+    }
+
+    /// Original BSP integer bounds, before absolute sample positions are rounded.
+    pub fn leaf_bounds(&self, leaf_index: usize) -> Option<([i16; 3], [i16; 3])> {
+        self.locator
+            .leaves
+            .get(leaf_index)
+            .map(|leaf| (leaf.mins, leaf.maxs))
+    }
+
+    /// Source radiosity-4 leaf interpolation at an already validated sample point.
+    /// Cache-center correction, empty-leaf redirection and static-prop spherical
+    /// sampling belong to the caller's lighting policy.
+    pub fn interpolate_leaf_at(&self, leaf_index: usize, position: Vec3) -> Option<AmbientCube> {
+        if !position.is_finite() {
+            return None;
+        }
+        let (mins, maxs) = self.leaf_bounds(leaf_index)?;
+        let samples = self.samples_for_leaf(leaf_index);
+        if samples.is_empty() {
+            return None;
+        }
+        let minimum = Vec3::from(mins.map(f32::from));
+        let maximum = Vec3::from(maxs.map(f32::from));
+        let center = (minimum + maximum) * 0.5;
+        let half_extent = (maximum - minimum) * 0.5;
+        let mut total_weight = 0.0;
+        let mut colors = [Vec3::ZERO; 6];
+        for sample in samples {
+            // Native computes relative deltas directly. Subtracting the rounded
+            // absolute position loses precision at large world coordinates.
+            let delta: [f32; 3] = std::array::from_fn(|axis| {
+                center[axis] - (position[axis] + half_extent[axis])
+                    + (half_extent[axis] * (2.0 / 255.0)) * f32::from(sample.encoded_position[axis])
+            });
+            let weight =
+                1.0 / ((delta[0] * delta[0] + delta[1] * delta[1] + 1.0) + delta[2] * delta[2]);
+            total_weight += weight;
+            for (color, value) in colors.iter_mut().zip(sample.cube.colors) {
+                *color += value * weight;
+            }
+        }
+        if !total_weight.is_finite() || total_weight <= 0.0 {
+            return None;
+        }
+        let inverse_weight = total_weight.recip();
+        colors = colors.map(|color| color * inverse_weight);
+        colors
+            .into_iter()
+            .all(Vec3::is_finite)
+            .then_some(AmbientCube { colors })
+    }
+
     pub fn cube_at(&self, position: Vec3) -> AmbientCube {
         if self.source == AmbientLightSource::Neutral {
             log::debug!("map ambient fallback white: no LDR/HDR leaf ambient samples");
@@ -152,10 +223,11 @@ impl MapAmbientLighting {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct MapAmbientSample {
-    pub(super) position: Vec3,
-    pub(super) cube: AmbientCube,
-    pub(super) cluster: i16,
+pub struct MapAmbientSample {
+    pub position: Vec3,
+    pub encoded_position: [u8; 3],
+    pub cube: AmbientCube,
+    pub cluster: i16,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -230,6 +302,7 @@ pub(super) fn map_ambient_lighting(bsp: &MapBsp) -> MapAmbientLighting {
         for sample in leaf_samples {
             samples.push(MapAmbientSample {
                 position: ambient_sample_position(sample.position, leaf),
+                encoded_position: sample.position,
                 cube: ambient_cube(sample.cube),
                 cluster: leaf.cluster,
             });
@@ -1080,6 +1153,8 @@ mod lightmap_tests {
             vertices: vec![BuildVertex {
                 vertex: MapVertex {
                     position: Vec3::ZERO,
+                    tangent_s: Vec3::ZERO,
+                    tangent_t: Vec3::ZERO,
                     normal: Vec3::new(0.0, 0.0, 1.0),
                     tex_s: 0.0,
                     tex_t: 0.0,

@@ -56,8 +56,20 @@ pub struct Mdl {
     pub version: i32,
     /// Header flags word (see [`FLAG_STATIC_PROP`]).
     pub flags: u32,
+    /// Authored model-space illumination position from the studio header.
+    pub illumination_position: [f32; 3],
+    /// Authored model-space hull minimum, independent of render geometry.
+    pub hull_min: [f32; 3],
+    /// Authored model-space hull maximum.
+    pub hull_max: [f32; 3],
+    /// Local authored attachment records, in file order.
+    pub attachments: Vec<super::MdlAttachment>,
+    /// Optional zero-based illumination attachment selector; may require virtual models.
+    pub illumination_attachment_index: Option<usize>,
     /// Skeleton bones, file order.
     pub bones: Vec<MdlBone>,
+    /// Optional v48/v49 optimized arrays; full authored records remain in `bones`.
+    pub linear_bones: Option<super::MdlLinearBones>,
     /// Material names (backslashes normalized to slashes).
     pub textures: Vec<String>,
     /// Material search directories (`$cdmaterials`), normalized.
@@ -72,6 +84,17 @@ pub struct Mdl {
     pub local_animations: Vec<MdlAnimationDescription>,
     /// Declared sequence count (sequences themselves are not parsed).
     pub sequence_count: u32,
+}
+
+impl Mdl {
+    /// Bone values selected by native runtime setup, preserving full records.
+    /// https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/public/bone_setup.cpp
+    pub fn runtime_bones(&self) -> Result<std::borrow::Cow<'_, [MdlBone]>, MdlError> {
+        self.linear_bones.as_ref().map_or_else(
+            || Ok(std::borrow::Cow::Borrowed(self.bones.as_slice())),
+            |linear| linear.apply_to(&self.bones).map(std::borrow::Cow::Owned),
+        )
+    }
 }
 
 /// One skeleton bone, fields as stored.
@@ -259,7 +282,11 @@ pub fn parse_mdl(bytes: &[u8], limits: &Limits) -> Result<Mdl, MdlError> {
     let checksum = r.u32()?;
     let name = fixed_string(r.take(64)?);
     r.take(4)?; // data length
-    r.take(72)?; // eye/illumination positions, bounding boxes
+    r.take(12)?; // eye position
+    let illumination_position = [r.f32()?, r.f32()?, r.f32()?];
+    let hull_min = r.vec3()?;
+    let hull_max = r.vec3()?;
+    r.take(24)?; // view bounding box
     debug_assert_eq!(r.pos, 152);
     let flags = r.u32()?;
     let bone_count = r.count("mdl bone count")?;
@@ -300,11 +327,23 @@ pub fn parse_mdl(bytes: &[u8], limits: &Limits) -> Result<Mdl, MdlError> {
         }
     }
 
+    let (attachments, illumination_attachment_index) =
+        super::attachments::read(bytes, bone_count, limits)?;
     let mut bones = Vec::with_capacity(bone_count);
     for index in 0..bone_count {
         let base = offset_at(bone_offset, index, BONE_BYTES)?;
         bones.push(read_bone(bytes, base)?);
     }
+    let linear_bones = if version >= 48 {
+        super::linear_bones::read(bytes, bone_count, limits)?
+    } else {
+        None
+    };
+    let runtime_bones = if let Some(linear) = &linear_bones {
+        std::borrow::Cow::Owned(linear.apply_to(&bones)?)
+    } else {
+        std::borrow::Cow::Borrowed(bones.as_slice())
+    };
 
     let mut textures = Vec::with_capacity(texture_count);
     for index in 0..texture_count {
@@ -342,15 +381,27 @@ pub fn parse_mdl(bytes: &[u8], limits: &Limits) -> Result<Mdl, MdlError> {
     let mut local_animations = Vec::with_capacity(anim_count);
     for index in 0..anim_count {
         let base = offset_at(anim_offset, index, ANIM_DESC_BYTES)?;
-        local_animations.push(read_animation_description(bytes, base, &bones, limits)?);
+        local_animations.push(read_animation_description(
+            bytes,
+            base,
+            &runtime_bones,
+            limits,
+        )?);
     }
+    drop(runtime_bones);
 
     Ok(Mdl {
         name,
         checksum,
         version,
         flags,
+        illumination_position,
+        hull_min,
+        hull_max,
+        attachments,
+        illumination_attachment_index,
         bones,
+        linear_bones,
         textures,
         texture_paths,
         skin_reference_count,

@@ -8,6 +8,22 @@ use super::{
 };
 use gmpublished_domain::math::QAngle;
 use gmpublished_domain::math::Vec3;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ViewId(u64);
+
+impl Default for ViewId {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(
+            NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .expect("viewer identity exhausted"),
+        )
+    }
+}
 
 pub struct Viewer3d {
     pub model: Arc<ModelPreview>,
@@ -20,6 +36,7 @@ pub struct Viewer3d {
 
 #[derive(Debug)]
 pub struct Camera {
+    pub(super) view_id: ViewId,
     pub(super) content_id: Option<u64>,
     /// `distance` is a multiplier over the model's auto-framed distance.
     pub(super) orbit: Orbit,
@@ -29,6 +46,7 @@ pub struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
+            view_id: ViewId::default(),
             content_id: None,
             orbit: Orbit::new(ZoomFloor::SolidMesh),
             drag_from: None,
@@ -94,6 +112,8 @@ impl shader::Program<Message> for Viewer3d {
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
+            model_lighting_time: 0.0,
+            view_id: camera.view_id,
             air_fog: None,
             clear_color: None,
             #[cfg(feature = "map-capture")]
@@ -102,6 +122,10 @@ impl shader::Program<Message> for Viewer3d {
             refraction_target: false,
             #[cfg(feature = "map-capture")]
             capture_diagnostics: None,
+            #[cfg(feature = "map-capture")]
+            capture_lighting_timeline: None,
+            #[cfg(feature = "map-capture")]
+            raster_offset: None,
             prepared_frame: std::sync::atomic::AtomicUsize::new(usize::MAX),
             skybox_transform: None,
             preview: PreviewScene::Model(Arc::clone(&self.model)),
@@ -203,6 +227,7 @@ impl WaterLevel {
     reason = "ground, jump, duck-reconcile, and exit-assist states change independently"
 )]
 pub struct FlyCamera {
+    pub(super) view_id: ViewId,
     pub(super) content_id: Option<u64>,
     pub(super) position: Option<Vec3>,
     pub(super) yaw: f32,
@@ -217,6 +242,7 @@ pub struct FlyCamera {
     pub(super) animation_started_at: Option<std::time::Instant>,
     pub(super) animated_scene: bool,
     pub(super) water_time: f32,
+    pub(super) model_lighting_time: f64,
     pub(super) mode: MovementMode,
     pub(super) walk_velocity: Vec3,
     pub(super) grounded: bool,
@@ -372,10 +398,17 @@ impl FlyCamera {
         self.last_frame = None;
         self.animation_started_at = None;
         self.water_time = 0.0;
+        self.model_lighting_time = 0.0;
         self.animated_scene = scene
             .lightmap
             .as_ref()
             .is_some_and(gmpublished_domain::scene::map::LightmapAtlas::is_animated)
+            || scene.model_lighting_inputs.as_ref().is_some_and(|inputs| inputs.is_animated())
+            || scene.skybox.as_ref().is_some_and(|sky| sky.materials.iter().flatten()
+                .filter_map(|material| material.painted.as_ref())
+                .any(crate::bridge::materials::PaintedSkyMaterial::is_animated))
+            // Sun visibility fades on the GPU after an occluder or camera moves.
+            || scene.suns.iter().any(|sun| sun.enabled)
             || scene.scene.materials.iter().any(|slot| {
                 slot.shader
                     .water()
@@ -759,6 +792,7 @@ impl shader::Program<Message> for FlyViewer {
             Event::Window(iced::window::Event::RedrawRequested(now)) => {
                 let started = camera.animation_started_at.get_or_insert(*now);
                 camera.water_time = now.saturating_duration_since(*started).as_secs_f32();
+                camera.model_lighting_time = now.saturating_duration_since(*started).as_secs_f64();
                 if !camera.needs_movement_tick() {
                     camera.last_frame = None;
                     camera.move_factor = 0.0;
@@ -807,6 +841,8 @@ impl shader::Program<Message> for FlyViewer {
             camera.water_time,
         );
         ModelPrimitive {
+            model_lighting_time: camera.model_lighting_time,
+            view_id: camera.view_id,
             air_fog: self.fog.filter(|_| self.fog_enabled),
             clear_color: self
                 .scene
@@ -815,13 +851,17 @@ impl shader::Program<Message> for FlyViewer {
                     uniforms.camera_position[1],
                     uniforms.camera_position[2],
                 ]))
-                .map(|water| water.fog_clear_linear),
+                .map(|water| water.scene_fog_color_linear),
             #[cfg(feature = "map-capture")]
             reflection_target: false,
             #[cfg(feature = "map-capture")]
             refraction_target: false,
             #[cfg(feature = "map-capture")]
             capture_diagnostics: None,
+            #[cfg(feature = "map-capture")]
+            capture_lighting_timeline: None,
+            #[cfg(feature = "map-capture")]
+            raster_offset: None,
             prepared_frame: std::sync::atomic::AtomicUsize::new(usize::MAX),
             skybox_transform: self.sky_camera.map(|camera| (camera.origin, camera.scale)),
             preview: PreviewScene::Map(Arc::clone(&self.scene)),
@@ -896,6 +936,36 @@ mod tests {
             requested_movement_mode: None,
             mouse_captured: captured,
         }
+    }
+
+    #[test]
+    fn widget_view_identity_is_unique_and_survives_camera_respawns() {
+        let mut orbit = Camera::default();
+        let mut fly = FlyCamera::default();
+        let other_orbit = Camera::default();
+        let other_fly = FlyCamera::default();
+        let ids = [
+            orbit.view_id,
+            fly.view_id,
+            other_orbit.view_id,
+            other_fly.view_id,
+        ];
+        for (index, id) in ids.iter().enumerate() {
+            assert!(!ids[index + 1..].contains(id));
+        }
+        let viewer = input_viewer(false);
+        for content in [1, 2, 1] {
+            orbit.ensure_spawn(content, None);
+            fly.ensure_spawn(&viewer.scene, None, content, None, None);
+            assert_eq!(orbit.view_id, ids[0]);
+            assert_eq!(fly.view_id, ids[1]);
+        }
+        let primitive = viewer.draw(
+            &fly,
+            mouse::Cursor::Unavailable,
+            Rectangle::with_size(iced::Size::new(640.0, 480.0)),
+        );
+        assert_eq!(primitive.view_id, fly.view_id);
     }
 
     fn key_press(key: iced::keyboard::Key, code: iced::keyboard::key::Code) -> Event {
@@ -1151,6 +1221,62 @@ mod tests {
     }
 
     #[test]
+    fn painted_sky_alone_advances_shared_sky_clock_without_camera_input() {
+        use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
+        use crate::media::preview_model::Skybox;
+        use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
+        let mut viewer = input_viewer(false);
+        let pixels = [128, 128, 128, 255].repeat(4);
+        let archive = PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("Animated Sky")
+                .entry(
+                    "materials/sky.vmt",
+                    br"g_sky { Proxies { SkyPaint {} } }".to_vec(),
+                )
+                .entry(
+                    "materials/skybox/starfield.vtf",
+                    fixture_vtf_bytes(2, 2, vformats::vtf::VtfFormat::Rgba8888, &[&pixels]),
+                )
+                .build(),
+        )
+        .unwrap();
+        let controller = gmpublished_domain::scene::map::MapSkyPaint::default();
+        let material = MaterialResolver::new(Arc::new(archive), None)
+            .resolve_sky_material_at_path("materials/sky.vmt", Some(&controller))
+            .unwrap();
+        Arc::get_mut(&mut viewer.scene).unwrap().skybox = Some(Skybox {
+            faces: std::array::from_fn(|_| None),
+            materials: std::array::from_fn(|_| Some(material.clone())),
+            paint: Some(controller),
+        });
+        let mut camera = FlyCamera::default();
+        let bounds = Rectangle::with_size(iced::Size::new(1280.0, 720.0));
+        let now = std::time::Instant::now();
+        for elapsed in [0, 1, 2] {
+            let (_, request, _) = viewer
+                .update(
+                    &mut camera,
+                    &Event::Window(iced::window::Event::RedrawRequested(
+                        now + std::time::Duration::from_secs(elapsed),
+                    )),
+                    bounds,
+                    mouse::Cursor::Unavailable,
+                )
+                .expect("animated sky schedules the next frame")
+                .into_inner();
+            if elapsed > 0 {
+                assert_eq!(request, iced::window::RedrawRequest::NextFrame);
+            }
+            let primitive = viewer.draw(&camera, mouse::Cursor::Unavailable, bounds);
+            assert_eq!(
+                primitive.sky_uniforms.unwrap().water_time_sky_tint[0],
+                elapsed as f32
+            );
+            assert!(!camera.needs_movement_tick());
+        }
+    }
+
+    #[test]
     fn water_clock_survives_movement_stopping_and_resets_for_a_new_map() {
         let mut viewer = animated_scene_viewer();
         let mut camera = FlyCamera::default();
@@ -1277,6 +1403,7 @@ mod tests {
     #[test]
     fn orbit_camera_without_pose_uses_default_framing() {
         let mut camera = Camera {
+            view_id: ViewId::default(),
             content_id: None,
             orbit: super::super::super::orbit::Orbit::from_pose(
                 OrbitPose {

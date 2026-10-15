@@ -337,6 +337,16 @@ fn parses_and_matches_vmdl_where_vmdl_is_correct() {
 }
 
 #[test]
+fn preserves_authored_illumination_position_independently_of_bounds() {
+    let mut fixture = build_mdl();
+    for (at, value) in [(92, -123.25), (96, 456.5), (100, -7.75)] {
+        put_f32(&mut fixture.bytes, at, value);
+    }
+    let model = parse_mdl(&fixture.bytes, &Limits::default()).unwrap();
+    assert_eq!(model.illumination_position, [-123.25, 456.5, -7.75]);
+}
+
+#[test]
 fn rle_animation_decodes_signed_values_with_scale_and_axis_fixup() {
     let fixture = build_mdl();
     let ours = parse_mdl(&fixture.bytes, &Limits::default()).expect("our parse");
@@ -417,4 +427,189 @@ fn rejects_malformed_mdl() {
         parse_mdl(&fixture.bytes, &cap),
         Err(MdlError::TooMany { .. })
     ));
+}
+
+fn with_linear_bones(mut bytes: Vec<u8>) -> (Vec<u8>, usize) {
+    let full = parse_mdl(&bytes, &Limits::default()).unwrap();
+    bytes.resize(bytes.len().next_multiple_of(4), 0);
+    let secondary = bytes.len();
+    bytes.resize(secondary + 256, 0);
+    put_i32(&mut bytes, 400, secondary as i32);
+    let linear = bytes.len();
+    bytes.resize(linear + 64, 0);
+    put_i32(&mut bytes, secondary + 16, (linear - secondary) as i32);
+    put_i32(&mut bytes, linear, full.bones.len() as i32);
+    let floats = |values: Vec<f32>| {
+        values
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    let arrays = [
+        vec![0x8000_0001u32, 0x400]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>(),
+        full.bones
+            .iter()
+            .flat_map(|b| b.parent.to_le_bytes())
+            .collect(),
+        floats(
+            full.bones
+                .iter()
+                .enumerate()
+                .flat_map(|(i, b)| {
+                    if i == 0 {
+                        [11.0, -12.0, 13.0]
+                    } else {
+                        b.position
+                    }
+                })
+                .collect(),
+        ),
+        floats(full.bones.iter().flat_map(|b| b.quaternion).collect()),
+        floats(full.bones.iter().flat_map(|b| b.rotation).collect()),
+        floats(
+            full.bones
+                .iter()
+                .enumerate()
+                .flat_map(|(i, b)| {
+                    let mut matrix = b.pose_to_bone;
+                    if i == 0 {
+                        matrix[0][3] = -11.0;
+                    }
+                    matrix.into_iter().flatten()
+                })
+                .collect(),
+        ),
+        floats(full.bones.iter().flat_map(|b| b.position_scale).collect()),
+        floats(full.bones.iter().flat_map(|b| b.rotation_scale).collect()),
+        floats(
+            full.bones
+                .iter()
+                .flat_map(|_| [0.0, 0.0, 0.0, 1.0])
+                .collect(),
+        ),
+    ];
+    for (i, array) in arrays.into_iter().enumerate() {
+        let offset = bytes.len() - linear;
+        put_i32(&mut bytes, linear + 4 + i * 4, offset as i32);
+        bytes.extend(array);
+    }
+    let length = bytes.len();
+    put_i32(&mut bytes, 76, length as i32);
+    (bytes, linear)
+}
+
+#[test]
+fn linear_bones_preserve_full_records_and_select_runtime_arrays() {
+    let original = build_mdl();
+    let full = parse_mdl(&original.bytes, &Limits::default()).unwrap();
+    let (bytes, _) = with_linear_bones(original.bytes);
+    let model = parse_mdl(&bytes, &Limits::default()).unwrap();
+    assert_eq!(
+        model.bones, full.bones,
+        "raw full records remain diagnostic data"
+    );
+    let linear = model.linear_bones.as_ref().unwrap();
+    assert_eq!(linear.flags, [0x8000_0001, 0x400]);
+    assert_eq!(linear.parents, [-1, 0]);
+    assert_eq!(linear.positions[0], [11.0, -12.0, 13.0]);
+    assert_eq!(linear.quaternion_alignment[0], [0.0, 0.0, 0.0, 1.0]);
+    let effective = model.runtime_bones().unwrap();
+    assert_eq!(effective[0].position, [11.0, -12.0, 13.0]);
+    assert_eq!(effective[0].pose_to_bone[0][3], -11.0);
+    assert_eq!(effective[0].name, full.bones[0].name);
+}
+
+#[test]
+fn malformed_optional_linear_bones_are_rejected_without_full_table_fallback() {
+    let (bytes, linear) = with_linear_bones(build_mdl().bytes);
+    let mut negative = bytes.clone();
+    put_i32(&mut negative, linear + 12, -1);
+    assert!(matches!(
+        parse_mdl(&negative, &Limits::default()),
+        Err(MdlError::Corrupt { .. })
+    ));
+    let mut outside = bytes.clone();
+    let beyond = outside.len() + 100;
+    put_i32(&mut outside, linear + 24, beyond as i32);
+    assert!(matches!(
+        parse_mdl(&outside, &Limits::default()),
+        Err(MdlError::Truncated { .. })
+    ));
+    let mut overlaps = bytes.clone();
+    put_i32(&mut overlaps, linear + 4, 4);
+    assert!(matches!(
+        parse_mdl(&overlaps, &Limits::default()),
+        Err(MdlError::Corrupt { .. })
+    ));
+    let mut mismatch = bytes.clone();
+    put_i32(&mut mismatch, linear, 3);
+    assert!(matches!(
+        parse_mdl(&mismatch, &Limits::default()),
+        Err(MdlError::Corrupt { .. })
+    ));
+    let limits = Limits {
+        max_entries: 4,
+        ..Limits::default()
+    };
+    put_i32(&mut mismatch, linear, 5);
+    assert!(matches!(
+        parse_mdl(&mismatch, &limits),
+        Err(MdlError::TooMany {
+            part: "mdl linear bones",
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_mdl(&bytes[..linear + 30], &Limits::default()),
+        Err(MdlError::Truncated { .. })
+    ));
+}
+
+#[test]
+fn manually_constructed_incomplete_linear_arrays_return_a_typed_error() {
+    let (bytes, _) = with_linear_bones(build_mdl().bytes);
+    let mut model = parse_mdl(&bytes, &Limits::default()).unwrap();
+    model.linear_bones.as_mut().unwrap().positions.pop();
+    assert!(matches!(
+        model.runtime_bones(),
+        Err(MdlError::Corrupt { .. })
+    ));
+}
+
+#[test]
+fn v44_secondary_illumination_attachment_and_authored_hull_are_retained() {
+    let mut bytes = build_mdl().bytes;
+    put_i32(&mut bytes, 4, 44);
+    for (at, value) in [
+        (104, -16.0),
+        (108, -24.0),
+        (112, -32.0),
+        (116, 40.0),
+        (120, 48.0),
+        (124, 56.0),
+    ] {
+        put_f32(&mut bytes, at, value);
+    }
+    let secondary = bytes.len();
+    bytes.resize(secondary + 256 + 92 + 5, 0);
+    let attachment = secondary + 256;
+    put_i32(&mut bytes, 400, secondary as i32);
+    put_i32(&mut bytes, secondary + 8, 1);
+    put_i32(&mut bytes, 240, 1);
+    put_i32(&mut bytes, 244, attachment as i32);
+    put_i32(&mut bytes, attachment, 92);
+    put_i32(&mut bytes, attachment + 8, 1);
+    for (offset, value) in [(12, 1.0), (28, 1.0), (44, 1.0), (40, 128.0)] {
+        put_f32(&mut bytes, attachment + offset, value);
+    }
+    bytes[attachment + 92..].copy_from_slice(b"lamp\0");
+    let model = parse_mdl(&bytes, &Limits::default()).unwrap();
+    assert_eq!(model.illumination_attachment_index, Some(0));
+    assert_eq!(model.attachments[0].local_bone, 1);
+    assert_eq!(model.attachments[0].local[1][3], 128.0);
+    assert_eq!(model.hull_min, [-16.0, -24.0, -32.0]);
+    assert_eq!(model.hull_max, [40.0, 48.0, 56.0]);
 }

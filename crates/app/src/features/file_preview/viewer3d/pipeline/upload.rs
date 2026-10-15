@@ -1,7 +1,8 @@
 use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 
-use super::materials::{MaterialTextureViews, MaterialUploadMode, WHITE_RGBA};
+use super::TextureUploadLevel;
+use super::materials::{MaterialTextureViews, MaterialUploadMode};
 use super::resources::RenderResources;
 use super::uniforms::scene_sky_tint;
 
@@ -71,7 +72,7 @@ impl UploadCache {
                         Some(texture),
                     )
                 });
-                let surface = slot.shader.lightmapped();
+                let surface = slot.shader.surface();
                 let water = slot.shader.water();
                 let mirror = slot.shader.mirror();
                 let normal = water
@@ -94,6 +95,12 @@ impl UploadCache {
                     MaterialUploadMode {
                         unlit: slot.shader.unlit(),
                         surface,
+                        base_flags: slot.texture.as_ref().and_then(|texture| texture.flags),
+                        base2_flags: slot
+                            .texture2
+                            .as_ref()
+                            .or(slot.texture.as_ref())
+                            .and_then(|texture| texture.flags),
                         force_opaque: slot.force_opaque,
                         render_mode: slot.render_mode,
                         water,
@@ -140,6 +147,8 @@ impl UploadCache {
                     MaterialUploadMode {
                         unlit: None,
                         surface: None,
+                        base_flags: None,
+                        base2_flags: None,
                         force_opaque: true,
                         render_mode: RenderMode::Opaque,
                         water: None,
@@ -185,16 +194,61 @@ impl UploadCache {
         let sky_tint = scene_sky_tint(map.and_then(|map| map.skybox.as_ref()));
         let skybox = map.and_then(|map| map.skybox.as_ref()).map(|skybox| {
             let face_bind_groups = std::array::from_fn(|index| {
-                skybox.faces[index].as_ref().map(|texture| {
-                    let view = resources.create_texture_view(
+                skybox.materials[index].as_ref().map(|material| {
+                    let fallback = TextureUploadLevel {
+                        rgba: &[0, 0, 0, 255],
+                        width: 1,
+                        height: 1,
+                    };
+                    let levels = if material.is_painted() {
+                        material
+                            .painted
+                            .as_ref()
+                            .and_then(|paint| paint.texture.as_ref())
+                            .and_then(|texture| texture.frames.first())
+                            .map(|mips| {
+                                mips.iter()
+                                    .map(|mip| TextureUploadLevel {
+                                        rgba: &mip.rgba,
+                                        width: mip.width,
+                                        height: mip.height,
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                    } else {
+                        skybox.faces[index].as_ref().map(|texture| {
+                            texture
+                                .mip_chain()
+                                .map(|mip| TextureUploadLevel {
+                                    rgba: mip.rgba,
+                                    width: mip.width,
+                                    height: mip.height,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    }
+                    .unwrap_or_else(|| vec![fallback]);
+                    let view = resources.create_texture_view_from_levels_format(
                         device,
                         queue,
-                        "file_preview.model_viewer.sky_texture",
-                        texture.rgba_bytes().unwrap_or(WHITE_RGBA.as_slice()),
-                        texture.width.max(1),
-                        texture.height.max(1),
+                        "file_preview.sky.texture",
+                        &levels,
+                        if material.is_painted() {
+                            wgpu::TextureFormat::Rgba8Unorm
+                        } else {
+                            wgpu::TextureFormat::Rgba8UnormSrgb
+                        },
                     );
-                    resources.create_sky_material(device, &view)
+                    resources.create_sky_material(
+                        device,
+                        &view,
+                        super::sky::SkyUniform::new(material),
+                        material
+                            .painted
+                            .as_ref()
+                            .and_then(|paint| paint.texture.as_ref())
+                            .map_or(0, |texture| texture.flags),
+                    )
                 })
             });
             UploadedSkybox { face_bind_groups }
@@ -216,6 +270,11 @@ impl UploadCache {
         self.uploads.insert(
             content_id,
             UploadedModel {
+                surface_pipelines: super::surface_pipelines::SurfacePipelineVariants::new(
+                    device,
+                    resources,
+                    &scene.materials,
+                ),
                 screen_refraction_normals,
                 meshes,
                 detail_sprites,
@@ -240,6 +299,7 @@ impl UploadCache {
 
 #[derive(Debug)]
 pub struct UploadedModel {
+    pub(super) surface_pipelines: super::surface_pipelines::SurfacePipelineVariants,
     pub screen_refraction_normals: HashMap<String, wgpu::TextureView>,
     pub meshes: Vec<UploadedMesh>,
     pub detail_sprites: Option<UploadedDetailSprites>,
@@ -321,6 +381,7 @@ pub struct UploadedSkybox {
 
 #[derive(Debug)]
 pub struct UploadedMesh {
+    pub geometry: crate::media::preview_model::MeshGeometry,
     pub entity: bool,
     pub transparent_parts: Vec<super::transparency::Part>,
     pub vertices: wgpu::Buffer,
@@ -424,6 +485,7 @@ pub fn upload_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             UploadedMesh {
+                geometry: mesh.geometry,
                 transparent_parts: Vec::new(),
                 entity: entity_flags
                     .and_then(|flags| flags.get(scene_mesh_index))
@@ -482,6 +544,7 @@ pub fn upload_door_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             uploaded.push(UploadedMesh {
+                geometry: mesh.geometry,
                 transparent_parts: Vec::new(),
                 entity: true,
                 vertices,
@@ -573,6 +636,10 @@ pub fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
         let vertex = overlay.vertices[index];
         ModelVertex {
             position: vertex.position,
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
             normal: vertex.normal,
             uv: vertex.uv,
             lightmap_uv: [0.0, 0.0],
@@ -580,6 +647,8 @@ pub fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
             color: Vec3::new(1.0, 1.0, 1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
         }
     })
 }

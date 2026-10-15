@@ -661,6 +661,8 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
         entity: false,
         vertices: vec![MapVertex {
             position: Vec3::ZERO,
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
             normal: Vec3::new(0.0, 0.0, 1.0),
             tex_s: 256.0,
             tex_t: 128.0,
@@ -734,7 +736,7 @@ fn skybox_resolution_degrades_to_available_faces() {
     .expect("fixture archive should load");
     let resolver = MaterialResolver::new(Arc::new(archive), None);
 
-    let skybox = resolve_skybox("sky_test", &resolver).expect("one face should resolve");
+    let skybox = resolve_skybox("sky_test", &resolver, None).expect("one face should resolve");
 
     let face = skybox.faces[SkyboxFace::Ft.index()]
         .as_ref()
@@ -749,7 +751,135 @@ fn skybox_resolution_degrades_to_available_faces() {
     ] {
         assert!(skybox.faces[face.index()].is_none(), "{face:?}");
     }
-    assert!(resolve_skybox("sky_missing", &resolver).is_none());
+    assert!(resolve_skybox("sky_missing", &resolver, None).is_none());
+}
+
+#[test]
+fn painted_sky_retains_authored_state_and_loads_cloud_vtf_without_a_material() {
+    let pixels = [32, 96, 160, 255].repeat(4);
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Painted Sky Fixture")
+            .entry(
+                "materials/skybox/paintedup.vmt",
+                br"g_sky { Proxies { SkyPaint {} } }".to_vec(),
+            )
+            .entry("materials/skybox/clouds.vtf", create_vtf_bytes(&pixels))
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let paint = gmpublished_domain::scene::map::MapSkyPaint {
+        top_color: Vec3::new(0.12, 0.34, 0.56),
+        fade_bias: 0.1,
+        star_texture: "skybox/clouds".into(),
+        star_scale: 2.0,
+        star_speed: 0.03,
+        ..Default::default()
+    };
+    let skybox = resolve_skybox("painted", &resolver, Some(&paint)).unwrap();
+    assert_eq!(skybox.paint.as_ref(), Some(&paint));
+    assert!(skybox.faces.iter().all(Option::is_none));
+    assert!(
+        skybox.materials[SkyboxFace::Up.index()]
+            .as_ref()
+            .unwrap()
+            .is_painted()
+    );
+    let clouds = skybox.materials[SkyboxFace::Up.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap()
+        .texture
+        .as_ref()
+        .unwrap();
+    assert_eq!(clouds.frames[0][0].rgba, pixels);
+}
+
+#[test]
+fn static_sky_preserves_patched_material_transform_and_linear_tint() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Static Sky Fixture")
+            .entry("materials/skybox/parent.vmt", br#"Sky { "$basetexture" "skybox/face" "$color" "[0.25 0.5 0.75]" }"#.to_vec())
+            .entry("materials/skybox/patchedup.vmt", br#"Patch { "include" "materials/skybox/parent.vmt" "insert" { "$basetexturetransform" "center 0 0 scale 1 2 rotate 0 translate 0 0" } }"#.to_vec())
+            .entry("materials/skybox/face.vtf", create_vtf_bytes(&[128; 16]))
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let skybox = resolve_skybox("patched", &resolver, None).unwrap();
+    let material = skybox.materials[SkyboxFace::Up.index()].as_ref().unwrap();
+    assert_eq!(material.shader, "Sky");
+    assert_eq!(material.color, Vec3::new(0.25, 0.5, 0.75));
+    assert_eq!(
+        material.transform,
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]]
+    );
+    assert!(skybox.paint.is_none());
+    assert!(material.painted.is_none());
+}
+
+#[test]
+fn painted_material_defaults_and_parameters_are_independent_of_lua_controller_defaults() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Painted Material State")
+            .entry(
+                "materials/skybox/independentup.vmt",
+                br#"g_sky {
+                "$topcolor" "[0.25 0.5 0.75]" "$bottomcolor" "[0.1 0.2 0.3]"
+                "$fadebias" "0.5" "$startexture" "skybox/stars"
+                "$starlayers" "2" "$starscale" "-2" "$starfade" "0.5" "$starpos" "0.75"
+            }"#
+                .to_vec(),
+            )
+            .entry(
+                "materials/skybox/controlledft.vmt",
+                br"g_sky { Proxies { SkyPaint {} } }".to_vec(),
+            )
+            .entry("materials/skybox/stars.vtf", create_vtf_bytes(&[128; 16]))
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let controller = gmpublished_domain::scene::map::MapSkyPaint::default();
+    let independent = resolve_skybox("independent", &resolver, Some(&controller)).unwrap();
+    let paint = independent.materials[SkyboxFace::Up.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap();
+    assert_eq!(paint.top_color, Vec3::new(0.25, 0.5, 0.75));
+    assert_eq!(paint.star_scale, -2.0);
+    assert_eq!(paint.star_fade, 0.5);
+    assert_eq!(paint.star_position, 0.75);
+    assert_eq!(paint.star_speed, 0.0);
+    assert!(paint.texture.is_some());
+
+    let no_controller = resolve_skybox("controlled", &resolver, None).unwrap();
+    assert!(no_controller.paint.is_none());
+    let paint = no_controller.materials[SkyboxFace::Ft.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap();
+    assert_eq!(paint.top_color, Vec3::ZERO);
+    assert_eq!(paint.bottom_color, Vec3::ZERO);
+    assert_eq!(paint.star_layers, 0);
+    assert!(paint.texture.is_none());
+
+    let controlled = resolve_skybox("controlled", &resolver, Some(&controller)).unwrap();
+    let paint = controlled.materials[SkyboxFace::Ft.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap();
+    assert_eq!(paint.top_color, controller.top_color);
+    assert_eq!(paint.star_scale, controller.client_star_scale());
+    assert_eq!(paint.star_speed, controller.client_star_speed());
 }
 
 #[test]
@@ -1156,7 +1286,9 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
         &mut materials,
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         &|_, _| {
@@ -1214,7 +1346,9 @@ fn prop_bake_counts_placement_cap_overflow_as_skipped() {
         100,
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1262,7 +1396,9 @@ fn prop_bake_counts_triangle_cap_remaining_as_skipped() {
         3,
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1329,7 +1465,9 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
         100,
         StaticPropLightingInputs {
             ambient: &ambient,
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1340,7 +1478,9 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
         100,
         StaticPropLightingInputs {
             ambient: &ambient,
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1391,7 +1531,9 @@ fn sprp_only_prop_bake_is_unchanged_when_entity_prop_list_is_empty() {
     let asset = Arc::new(test_prop_asset(1, vec![0, 1]));
     let lighting = StaticPropLightingInputs {
         ambient: &MapAmbientLighting::neutral(),
+        environment_maps: None,
         environment_lighting: None,
+        lightmap_source: None,
         walk_collision: None,
     };
 
@@ -1527,9 +1669,7 @@ fn pre_resolved_prop_materials_match_direct_prop_resolution() {
             .find(|material| material.name == "shared")
             .and_then(|material| material.texture.as_ref())
             .and_then(|texture| texture.rgba_bytes().map(Vec::from)),
-        Some(vec![
-            10, 10, 10, 255, 10, 10, 10, 255, 10, 10, 10, 255, 10, 10, 10, 255
-        ])
+        Some(vec![10; 16])
     );
 }
 
@@ -1712,7 +1852,12 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
     assert_eq!(names[19], "missing_19");
 }
 
-fn prop_placement(model_path: &str, origin: Vec3, angles: Vec3, skin: i32) -> StaticPropPlacement {
+pub(super) fn prop_placement(
+    model_path: &str,
+    origin: Vec3,
+    angles: Vec3,
+    skin: i32,
+) -> StaticPropPlacement {
     prop_placement_with_visibility(
         model_path,
         origin,
@@ -1731,6 +1876,14 @@ fn prop_placement_with_visibility(
 ) -> StaticPropPlacement {
     StaticPropPlacement {
         entity: false,
+        static_prop_index: None,
+        lighting_origin: None,
+        lighting_origin_reference: None,
+        diffuse_modulation: [255; 4],
+        render_mode: 0,
+        flags: 0,
+        flags_ex: None,
+        extra_flags: None,
         model_path: model_path.to_owned(),
         origin,
         angles,
@@ -1741,10 +1894,23 @@ fn prop_placement_with_visibility(
     }
 }
 
-fn test_prop_asset(default_triangle_count: usize, material_indices: Vec<usize>) -> PropModelAsset {
+pub(super) fn test_prop_asset(
+    default_triangle_count: usize,
+    material_indices: Vec<usize>,
+) -> PropModelAsset {
     PropModelAsset {
         model: Arc::new(ModelData {
+            mdl_flags: 0,
+            vertex_compression: vformats::mdl::VertexCompression::None,
+            source_frames: Vec::new(),
+            illumination_position: Vec3::ZERO,
+            hull_min: Vec3::ZERO,
+            hull_max: Vec3::splat(1.0),
+            illumination_attachment_index: None,
+            illumination_attachment_position: None,
+            lighting: None,
             meshes: vec![MeshData {
+                geometry: crate::media::preview_model::MeshGeometry::Model,
                 vertices: vec![
                     model_vertex(Vec3::new(1.0, 0.0, 0.0)),
                     model_vertex(Vec3::new(0.0, 1.0, 0.0)),
@@ -1779,7 +1945,17 @@ fn test_loaded_prop_model(
     let material_count = material_names.len();
     LoadedPropModel {
         model: Arc::new(ModelData {
+            mdl_flags: 0,
+            vertex_compression: vformats::mdl::VertexCompression::None,
+            source_frames: Vec::new(),
+            illumination_position: Vec3::ZERO,
+            hull_min: Vec3::ZERO,
+            hull_max: Vec3::splat(1.0),
+            illumination_attachment_index: None,
+            illumination_attachment_position: None,
+            lighting: None,
             meshes: vec![MeshData {
+                geometry: crate::media::preview_model::MeshGeometry::Model,
                 vertices: vec![
                     model_vertex(Vec3::new(1.0, 0.0, 0.0)),
                     model_vertex(Vec3::new(0.0, 1.0, 0.0)),
@@ -1820,6 +1996,10 @@ fn test_loaded_prop_model(
 fn model_vertex(position: Vec3) -> ModelVertex {
     ModelVertex {
         position,
+        tangent_s: Vec3::ZERO,
+        tangent_t: Vec3::ZERO,
+        tangent_sign: 0.0,
+        lighting_context: 0,
         normal: Vec3::new(1.0, 0.0, 0.0),
         uv: [0.25, 0.75],
         lightmap_uv: [0.5, 0.5],
@@ -1827,6 +2007,8 @@ fn model_vertex(position: Vec3) -> ModelVertex {
         color: Vec3::splat(1.0),
         blend_alpha: 1.0,
         opacity: 1.0,
+        illumination: Vec3::splat(1.0),
+        lighting_mode: 0,
     }
 }
 

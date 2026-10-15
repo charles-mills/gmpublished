@@ -1,7 +1,7 @@
 use super::{
     AMBIENT, Camera, FOV_Y, FlyCamera, MapFog, MapPreview, MapSkyCamera, Rectangle, RenderMode,
     RenderScene, ResolvedTexture, SOURCE_UP, Skybox, decode_bc_texture, half_extent, look_at,
-    mat_mul, mid, perspective, skybox_eye,
+    look_to, mat_mul, mid, perspective, skybox_eye,
 };
 use crate::media::preview_model::ModelPreview;
 use gmpublished_domain::math::Vec3;
@@ -22,6 +22,8 @@ pub struct Uniforms {
     pub medium_plane: [f32; 4],
     /// xy: widget dimensions; z: the diagnosed HDR lightmap display fallback.
     pub viewport: [f32; 4],
+    /// Physical clip-space bias, retained separately from projected texture UVs.
+    pub raster_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -190,6 +192,24 @@ impl MaterialUniform {
 }
 
 impl Uniforms {
+    /// Source/ToGL shifts clip-space vertices by half a physical pixel. Apply
+    /// after selecting each render target, independently of logical widget DPI.
+    /// https://github.com/ValveSoftware/ToGL/blob/master/public/togl/linuxwin/cglmprogram.h
+    pub fn with_raster_offset(mut self, size: (u32, u32), offset: [f32; 2]) -> Self {
+        let clip_offset = [
+            2.0 * offset[0] / size.0.max(1) as f32,
+            -2.0 * offset[1] / size.1.max(1) as f32,
+        ];
+        for column in &mut self.view_proj {
+            column[0] += clip_offset[0] * column[3];
+            column[1] += clip_offset[1] * column[3];
+        }
+        self.viewport[0] = size.0 as f32;
+        self.viewport[1] = size.1 as f32;
+        self.raster_params = [offset[0], offset[1], 0.0, 0.0];
+        self
+    }
+
     pub fn for_fly(
         scene: &MapPreview,
         camera: &FlyCamera,
@@ -198,8 +218,7 @@ impl Uniforms {
         water_time: f32,
     ) -> Self {
         let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
-        let target = frame.eye + frame.forward;
-        let view = look_at(frame.eye, target, SOURCE_UP);
+        let view = look_to(frame.eye, frame.forward, SOURCE_UP);
         let liquid = scene
             .water_volumes
             .as_ref()
@@ -229,9 +248,9 @@ impl Uniforms {
             |water| {
                 (
                     [
-                        water.fog_color_linear[0],
-                        water.fog_color_linear[1],
-                        water.fog_color_linear[2],
+                        water.scene_fog_color_linear[0],
+                        water.scene_fog_color_linear[1],
+                        water.scene_fog_color_linear[2],
                         1.0,
                     ],
                     [
@@ -267,13 +286,13 @@ impl Uniforms {
                 })),
                 0.0,
             ],
+            raster_params: [0.0; 4],
         }
     }
 
     pub fn for_fly_sky(scene: &MapPreview, camera: &FlyCamera, bounds: Rectangle) -> Self {
         let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
-        let target = frame.eye + frame.forward;
-        let mut view = look_at(frame.eye, target, SOURCE_UP);
+        let mut view = look_to(frame.eye, frame.forward, SOURCE_UP);
         view[3][0] = 0.0;
         view[3][1] = 0.0;
         view[3][2] = 0.0;
@@ -284,11 +303,12 @@ impl Uniforms {
             camera_position: [frame.eye[0], frame.eye[1], frame.eye[2], 0.0],
             fog_color: [0.0; 4],
             fog_params: [0.0, 1.0, 0.0, 0.0],
-            water_time_sky_tint: [0.0; 4],
+            water_time_sky_tint: [camera.water_time, 0.0, 0.0, 0.0],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
             viewport: [0.0; 4],
+            raster_params: [0.0; 4],
         }
     }
 
@@ -301,7 +321,7 @@ impl Uniforms {
     ) -> Self {
         let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
         let eye = skybox_eye(frame.eye, sky_camera.origin, sky_camera.scale);
-        let view = look_at(eye, eye + frame.forward, SOURCE_UP);
+        let view = look_to(eye, frame.forward, SOURCE_UP);
 
         let fog_scale = if sky_camera.scale > 0.0 {
             1.0 / sky_camera.scale
@@ -340,6 +360,7 @@ impl Uniforms {
                 })),
                 0.0,
             ],
+            raster_params: [0.0; 4],
         }
     }
 
@@ -369,6 +390,7 @@ impl Uniforms {
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
             viewport: [0.0; 4],
+            raster_params: [0.0; 4],
         }
     }
 }
@@ -479,6 +501,69 @@ mod uniform_layout_tests {
 
     use super::{MaterialUniform, Uniforms};
 
+    fn pixel_position(matrix: [[f32; 4]; 4], point: [f32; 4], size: (u32, u32)) -> [f32; 3] {
+        let clip = std::array::from_fn::<_, 4, _>(|row| {
+            (0..4)
+                .map(|column| matrix[column][row] * point[column])
+                .sum::<f32>()
+        });
+        [
+            (clip[0] / clip[3] * 0.5 + 0.5) * size.0 as f32,
+            (0.5 - clip[1] / clip[3] * 0.5) * size.1 as f32,
+            clip[2] / clip[3],
+        ]
+    }
+
+    #[test]
+    fn source_pixel_center_shift_is_half_a_physical_pixel_at_each_target_size() {
+        let mut original = <Uniforms as bytemuck::Zeroable>::zeroed();
+        original.view_proj = super::perspective(1.3, 16.0 / 9.0, 4.0, 30_000.0);
+        original.viewport[2] = 0.5;
+        original.viewport[3] = 2.0;
+        for size in [(320, 180), (640, 360), (1280, 720), (2560, 1440)] {
+            let shifted = original.with_raster_offset(size, [0.5; 2]);
+            assert_eq!(shifted.viewport, [size.0 as f32, size.1 as f32, 0.5, 2.0]);
+            for point in [
+                [0.0, 0.0, -16.0, 1.0],
+                [1.0, 2.0, -8.0, 1.0],
+                [-100.0, -20.0, -512.0, 1.0],
+            ] {
+                let before = pixel_position(original.view_proj, point, size);
+                let after = pixel_position(shifted.view_proj, point, size);
+                assert!((after[0] - before[0] - 0.5).abs() < 0.0005);
+                assert!((after[1] - before[1] - 0.5).abs() < 0.0005);
+                assert_eq!(before[2], after[2]);
+            }
+        }
+        assert_eq!(
+            original.with_raster_offset((1280, 720), [0.0; 2]).view_proj,
+            original.view_proj
+        );
+    }
+
+    #[test]
+    fn source_pixel_center_shift_applies_after_reflection_without_changing_its_clip_plane() {
+        use super::super::reflections::Plane;
+        use gmpublished_domain::math::Vec3;
+        let mut original = <Uniforms as bytemuck::Zeroable>::zeroed();
+        original.view_proj = super::perspective(1.3, 16.0 / 9.0, 4.0, 30_000.0);
+        original.camera_position = [0.0, 0.0, 16.0, 0.0];
+        let plane = Plane {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            distance: 3.0,
+        };
+        let reflected = plane.reflect_uniforms(original, true);
+        let shifted = reflected.with_raster_offset((512, 288), [0.5; 2]);
+        let point = [2.0, 3.0, -32.0, 1.0];
+        let before = pixel_position(reflected.view_proj, point, (512, 288));
+        let after = pixel_position(shifted.view_proj, point, (512, 288));
+        assert!((after[0] - before[0] - 0.5).abs() < 0.0005);
+        assert!((after[1] - before[1] - 0.5).abs() < 0.0005);
+        assert_eq!(shifted.clip_plane, reflected.clip_plane);
+        assert_eq!(shifted.camera_position, reflected.camera_position);
+        assert_eq!(after[2], before[2]);
+    }
+
     #[test]
     fn unlit_flags_are_separate_from_water_and_bumped_lighting_flags() {
         use crate::bridge::materials::{RenderMode, UnlitMaterial};
@@ -486,6 +571,7 @@ mod uniform_layout_tests {
             shader: "UnlitGeneric".into(),
             vertex_color: true,
             vertex_alpha: true,
+            surface: std::sync::Arc::new(crate::bridge::materials::SurfaceMaterial::default()),
         };
         let mut original = MaterialUniform::new(false, RenderMode::Translucent);
         original.flags[2] = 2;
@@ -513,9 +599,61 @@ mod uniform_layout_tests {
             offset_of!(ModelVertex, blend_alpha)
         );
         assert_eq!(
-            size_of::<ModelVertex>(),
+            offset_of!(ModelVertex, illumination),
             attribute.offset as usize + size_of::<f32>()
         );
+    }
+
+    #[test]
+    fn explicit_vertex_illumination_has_independent_gpu_attributes() {
+        use crate::media::preview_model::ModelVertex;
+        let attributes = &super::super::super::MODEL_VERTEX_ATTRIBUTES;
+        let illumination = attributes
+            .iter()
+            .find(|attribute| attribute.shader_location == 8)
+            .unwrap();
+        let mode = attributes
+            .iter()
+            .find(|attribute| attribute.shader_location == 9)
+            .unwrap();
+        assert_eq!(
+            illumination.offset as usize,
+            offset_of!(ModelVertex, illumination)
+        );
+        assert_eq!(illumination.format, iced::wgpu::VertexFormat::Float32x3);
+        assert_eq!(mode.offset as usize, offset_of!(ModelVertex, lighting_mode));
+        assert_eq!(mode.format, iced::wgpu::VertexFormat::Uint32);
+        assert_eq!(mode.offset, illumination.offset + 12);
+        assert_eq!(offset_of!(ModelVertex, tangent_s), mode.offset as usize + 4);
+        for (location, offset) in [
+            (10, offset_of!(ModelVertex, tangent_s)),
+            (11, offset_of!(ModelVertex, tangent_t)),
+        ] {
+            let attribute = attributes
+                .iter()
+                .find(|a| a.shader_location == location)
+                .unwrap();
+            assert_eq!(attribute.offset as usize, offset);
+            assert_eq!(attribute.format, iced::wgpu::VertexFormat::Float32x3);
+        }
+        assert_eq!(
+            size_of::<ModelVertex>(),
+            offset_of!(ModelVertex, lighting_context) + 4
+        );
+        let sign = attributes.iter().find(|a| a.shader_location == 12).unwrap();
+        assert_eq!(sign.offset as usize, offset_of!(ModelVertex, tangent_sign));
+        assert_eq!(sign.offset, offset_of!(ModelVertex, tangent_t) as u64 + 12);
+        let context = attributes
+            .iter()
+            .find(|attribute| attribute.shader_location == 13)
+            .unwrap();
+        assert_eq!(
+            context.offset as usize,
+            offset_of!(ModelVertex, lighting_context)
+        );
+        assert_eq!(context.format, iced::wgpu::VertexFormat::Uint32);
+        assert_eq!(context.offset, sign.offset + 4);
+        assert_eq!(sign.format, iced::wgpu::VertexFormat::Float32);
     }
 
     #[test]
@@ -537,6 +675,7 @@ mod uniform_layout_tests {
             ("clip_plane", offset_of!(Uniforms, clip_plane)),
             ("medium_plane", offset_of!(Uniforms, medium_plane)),
             ("viewport", offset_of!(Uniforms, viewport)),
+            ("raster_params", offset_of!(Uniforms, raster_params)),
         ];
         for (name, source) in [
             ("model_viewer", super::super::super::MODEL_SHADER_SOURCE),
@@ -552,6 +691,35 @@ mod uniform_layout_tests {
             )
             .validate(&module)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
+            if name == "model_viewer" {
+                let output = module
+                    .types
+                    .iter()
+                    .find_map(|(_, ty)| {
+                        (ty.name.as_deref() == Some("VertexOutput")).then_some(&ty.inner)
+                    })
+                    .unwrap();
+                let TypeInner::Struct { members, .. } = output else {
+                    panic!("vertex output struct");
+                };
+                let mut variables = 0usize;
+                let mut components = 0usize;
+                for member in members {
+                    if let Some(naga::Binding::Location { location, .. }) = member.binding {
+                        assert!(location < 16, "portable inter-stage location budget");
+                        variables += 1;
+                        components += match module.types[member.ty].inner {
+                            TypeInner::Scalar(_) => 1,
+                            TypeInner::Vector { size, .. } => size as usize,
+                            _ => panic!("unexpected vertex varying type"),
+                        };
+                    }
+                }
+                assert!(
+                    variables <= 16 && components <= 60,
+                    "portable inter-stage budget"
+                );
+            }
             let uniform = module
                 .types
                 .iter()
@@ -685,7 +853,7 @@ mod tests {
         assert_eq!(above.fog_params, [512.0, 8192.0, 0.5, 1.0]);
         assert_eq!(
             submerged.fog_color,
-            [0.2_f32.powf(2.2), 0.3_f32.powf(2.2), 0.4_f32.powf(2.2), 1.0]
+            [0.033104762, 0.07227186, 0.13286833, 1.0]
         );
         assert_eq!(submerged.fog_params, [-64.0, 640.0, 1.0, 3.0]);
         assert_eq!(submerged.medium_plane, [0.0, 0.0, 1.0, -128.0]);

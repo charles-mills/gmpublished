@@ -3,7 +3,7 @@ mod isolation;
 use super::{FlyCamera, FlyPose, FlyViewer, Message, ModelPrimitive, MovementMode, Vec3, shader};
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::generation::Generation;
-use crate::media::file_preview_decode::load_map_for_capture;
+use crate::media::file_preview_decode::load_map_for_capture_with_model_options;
 use crate::media::preview_model::{MaterialSlot, PreviewContent, PreviewRequest};
 use iced::advanced::renderer::Headless as _;
 use iced::{Color, Length, Rectangle, Size, mouse};
@@ -70,7 +70,30 @@ struct CaptureSuite {
     benchmark_frames: usize,
     #[serde(default)]
     verify_view_isolation: bool,
+    #[serde(default)]
+    model_vertex_compression: CaptureModelVertexCompression,
     maps: Vec<CaptureMap>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptureModelVertexCompression {
+    None,
+    #[default]
+    SourceUbyte4,
+    SourceHardware,
+}
+
+impl CaptureModelVertexCompression {
+    fn options(self) -> vformats::mdl::ModelAssemblyOptions {
+        vformats::mdl::ModelAssemblyOptions {
+            vertex_compression: match self {
+                Self::None => vformats::mdl::VertexCompression::None,
+                Self::SourceUbyte4 => vformats::mdl::VertexCompression::SourceUbyte4,
+                Self::SourceHardware => vformats::mdl::VertexCompression::SourceHardware,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,7 +102,130 @@ struct CaptureMap {
     name: String,
     cameras: Vec<CaptureCamera>,
     #[serde(default)]
+    verify_temporal_view_isolation: bool,
+    #[serde(default)]
     traces: Vec<CaptureTrace>,
+    #[serde(default)]
+    shader_lighting: Option<CaptureModelLighting>,
+    #[serde(default)]
+    bone_pose_control: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureModelLighting {
+    targetname: String,
+    model: String,
+    model_path: String,
+    origin: [f32; 3],
+    #[serde(default)]
+    lighting_origin: Option<[f32; 3]>,
+    ambient_cube: [[f32; 3]; 6],
+    ambient_cube_order: [String; 6],
+    lights: Vec<CaptureModelLight>,
+    suppress_engine_lighting: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CaptureModelLight {
+    #[serde(rename = "type")]
+    kind: String,
+    color: [f32; 3],
+    pos: [f32; 3],
+    dir: [f32; 3],
+    constant_falloff: f32,
+    linear_falloff: f32,
+    quadratic_falloff: f32,
+    range: f32,
+    #[serde(default)]
+    angular_falloff: f32,
+    #[serde(default)]
+    inner_angle: f32,
+    #[serde(default)]
+    outer_angle: f32,
+}
+
+fn override_model_lighting(
+    scene: &mut Arc<crate::media::preview_model::MapPreview>,
+    control: &CaptureModelLighting,
+) -> Value {
+    use crate::media::preview_model::{ModelLightKind, ModelLocalLight};
+    assert!(control.suppress_engine_lighting && control.model == control.model_path);
+    assert_eq!(
+        control.ambient_cube_order,
+        ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
+    );
+    let scene = Arc::make_mut(scene);
+    let indices = scene
+        .model_lighting
+        .iter()
+        .enumerate()
+        .filter(|(_, context)| {
+            context.model_path == control.model_path && context.origin == Vec3::from(control.origin)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        indices.len(),
+        1,
+        "lighting override must identify exactly one placement"
+    );
+    let index = indices[0];
+    let context = &mut scene.model_lighting[index];
+    context.lighting_origin = control.lighting_origin.map_or(context.origin, Vec3::from);
+    context.cpu_seed = Ok(None);
+    context.ambient_cube.colors = control.ambient_cube.map(Vec3::from);
+    context.lights = control
+        .lights
+        .iter()
+        .map(|light| ModelLocalLight {
+            kind: match light.kind.as_str() {
+                "point" => ModelLightKind::Point,
+                "spot" => ModelLightKind::Spot,
+                "directional" => ModelLightKind::Directional,
+                other => panic!("unsupported controlled light type {other}"),
+            },
+            position: Vec3::from(light.pos),
+            direction: Vec3::from(light.dir),
+            radiance: Vec3::from(light.color),
+            attenuation: [
+                light.constant_falloff,
+                light.linear_falloff,
+                light.quadratic_falloff,
+            ],
+            range: light.range,
+            spot_exponent: light.angular_falloff,
+            inner_cosine: (light.inner_angle.to_radians() * 0.5).cos(),
+            outer_cosine: (light.outer_angle.to_radians() * 0.5).cos(),
+        })
+        .collect();
+    assert!(context.lights.len() <= 4);
+    let id = u32::try_from(index + 1).expect("bounded context index");
+    let mut changed = 0;
+    for mesh in Arc::make_mut(&mut scene.scene)
+        .meshes
+        .iter_mut()
+        .chain(&mut scene.map_skybox_meshes)
+    {
+        for vertex in &mut mesh.vertices {
+            if vertex.lighting_context == id {
+                vertex.lighting_mode |= 5;
+                vertex.color = Vec3::new(
+                    f32::from(context.diffuse_modulation[0]) / 255.0,
+                    f32::from(context.diffuse_modulation[1]) / 255.0,
+                    f32::from(context.diffuse_modulation[2]) / 255.0,
+                );
+                changed += 1;
+            }
+        }
+    }
+    assert!(changed > 0, "controlled model has no rendered vertices");
+    json!({"targetname":control.targetname,"model_path":control.model_path,"origin":control.origin,
+        "lighting_origin":context.lighting_origin.to_array(),"native_lighting_origin_controlled":control.lighting_origin.is_some(),
+        "diffuse_modulation_rgba":context.diffuse_modulation,"entity_render_mode":context.render_mode,
+        "context_index":id,"vertices":changed,"ambient_cube_linear":control.ambient_cube,
+        "lights":format!("{:?}",context.lights),"scope":"capture-only explicit shader inputs; does not certify BSP lighting selection"})
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +250,18 @@ struct CaptureCamera {
     angles: [f32; 2],
     #[serde(default)]
     animation_time: Option<f32>,
+    #[serde(default)]
+    model_lighting_timeline: Option<ModelLightingTimeline>,
+    #[serde(default)]
+    sky_animation_time: Option<f32>,
+    #[serde(default)]
+    raster_offset: Option<[f32; 2]>,
+    #[serde(default)]
+    frame_visualization: Option<FrameVisualization>,
+    #[serde(default)]
+    frame_visualization_linear_output: bool,
+    #[serde(default)]
+    frame_probe: Option<FrameProbe>,
     /// Replay the production widget update path for two seconds without input.
     #[serde(default)]
     live_animation: bool,
@@ -121,6 +279,34 @@ struct CaptureCamera {
     visibility: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ModelLightingTimeline {
+    pub model: String,
+    pub origin: [f32; 3],
+    pub draw_times_before_capture: Vec<f64>,
+    pub capture_time: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FrameVisualization {
+    Normal = 1,
+    TangentS = 2,
+    TangentT = 3,
+    Position = 4,
+    UnitNormal = 5,
+    UnitTangentS = 6,
+    UnitEye = 7,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct FrameProbe {
+    gain: f32,
+    bias: [f32; 3],
+}
+
 const fn enabled() -> bool {
     true
 }
@@ -132,6 +318,23 @@ enum CaptureTarget {
     Refraction,
 }
 impl CaptureCamera {
+    fn lighting_timeline(&self) -> Option<Arc<ModelLightingTimeline>> {
+        self.model_lighting_timeline.as_ref().map(|timeline| {
+            assert!(
+                !self.live_animation,
+                "native timeline and live event replay are separate controls"
+            );
+            assert!(timeline.capture_time.is_finite() && timeline.capture_time >= 0.0);
+            assert!(timeline.origin.iter().all(|value| value.is_finite()));
+            let mut previous = 0.0;
+            for &time in &timeline.draw_times_before_capture {
+                assert!(time.is_finite() && time >= previous && time <= timeline.capture_time);
+                previous = time;
+            }
+            Arc::new(timeline.clone())
+        })
+    }
+
     fn target(&self) -> CaptureTarget {
         assert!(
             !(self.reflection_target && self.refraction_target),
@@ -148,11 +351,17 @@ impl CaptureCamera {
 }
 
 struct FixedView {
+    model_lighting_timeline: Option<Arc<ModelLightingTimeline>>,
     diagnostics: Arc<Mutex<Value>>,
     viewer: FlyViewer,
     camera: FlyCamera,
     live_animation: bool,
     fullbright: bool,
+    sky_animation_time: Option<f32>,
+    raster_offset: Option<[f32; 2]>,
+    frame_visualization: Option<FrameVisualization>,
+    frame_visualization_linear_output: bool,
+    frame_probe: Option<FrameProbe>,
     target: CaptureTarget,
 }
 
@@ -185,6 +394,56 @@ impl shader::Program<Message> for FixedView {
         primitive.reflection_target = self.target == CaptureTarget::Reflection;
         primitive.refraction_target = self.target == CaptureTarget::Refraction;
         primitive.capture_diagnostics = Some(Arc::clone(&self.diagnostics));
+        primitive
+            .capture_lighting_timeline
+            .clone_from(&self.model_lighting_timeline);
+        if let Some(timeline) = &self.model_lighting_timeline {
+            primitive.model_lighting_time = timeline.capture_time;
+        }
+        primitive.raster_offset = self.raster_offset;
+        if let Some(mode) = self.frame_visualization {
+            assert!(
+                matches!(
+                    mode,
+                    FrameVisualization::Normal
+                        | FrameVisualization::TangentS
+                        | FrameVisualization::TangentT
+                ) || self.frame_probe.is_some()
+            );
+            let value = (mode as u32
+                + if self.frame_probe.is_some() {
+                    6
+                } else if self.frame_visualization_linear_output {
+                    3
+                } else {
+                    0
+                }) as f32;
+            primitive.uniforms.viewport[3] = value;
+            if let Some(skybox) = primitive.map_skybox_uniforms.as_mut() {
+                skybox.viewport[3] = value;
+            }
+        }
+        if let Some(probe) = self.frame_probe {
+            assert!(
+                self.frame_visualization.is_some()
+                    && !self.fullbright
+                    && !self.frame_visualization_linear_output
+            );
+            assert!(
+                probe.gain.is_finite()
+                    && probe.gain >= 0.0
+                    && probe.bias.into_iter().all(f32::is_finite)
+            );
+            let light = [probe.bias[0], probe.bias[1], probe.bias[2], probe.gain];
+            primitive.uniforms.light = light;
+            if let Some(skybox) = primitive.map_skybox_uniforms.as_mut() {
+                skybox.light = light;
+            }
+        }
+        if let (Some(time), Some(sky)) = (self.sky_animation_time, primitive.sky_uniforms.as_mut())
+        {
+            sky.water_time_sky_tint[0] = time;
+        }
         if self.fullbright {
             primitive.uniforms.light[3] = -1.0;
             if let Some(skybox) = primitive.map_skybox_uniforms.as_mut() {
@@ -200,6 +459,48 @@ fn valid_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn executable_identity(output: &std::path::Path) -> Value {
+    let executable = std::env::current_exe().expect("capture executable path");
+    let sha256 = Command::new("sha256sum")
+        .arg(&executable)
+        .output()
+        .ok()
+        .filter(|result| result.status.success())
+        .and_then(|result| String::from_utf8(result.stdout).ok())
+        .and_then(|text| text.split_whitespace().next().map(str::to_owned));
+    let provenance_path = executable.with_file_name("provenance.json");
+    let provenance = fs::read(&provenance_path).ok().map(|bytes| {
+        serde_json::from_slice::<Value>(&bytes).expect("frozen build provenance JSON")
+    });
+    if let Some(provenance) = &provenance {
+        assert!(
+            sha256.as_ref().is_some_and(
+                |hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            ),
+            "frozen executable requires a SHA-256 fingerprint"
+        );
+        assert_eq!(
+            sha256.as_deref(),
+            provenance["sha256"].as_str(),
+            "frozen executable fingerprint mismatch"
+        );
+        fs::write(
+            output.join("executable-provenance.json"),
+            serde_json::to_vec_pretty(provenance).unwrap(),
+        )
+        .expect("copy executable provenance");
+        if provenance["stable_inputs_during_build"] == true {
+            fs::copy(
+                executable.with_file_name("source.tar.gz"),
+                output.join("executable-source.tar.gz"),
+            )
+            .expect("copy frozen build source archive");
+        }
+    }
+    json!({"path":executable,"sha256":sha256,"provenance":provenance,
+        "workspace_snapshot_scope":"capture-time workspace; source.patch and untracked-source do not identify a frozen executable's build inputs"})
 }
 
 fn texture_info(texture: &crate::bridge::materials::ResolvedTexture) -> Value {
@@ -222,6 +523,7 @@ fn texture_info(texture: &crate::bridge::materials::ResolvedTexture) -> Value {
         "format": format,
         "payload_crc32": format!("{:08x}", hash.finalize()),
         "water_fallback": texture.is_water_fallback(),
+        "vtf_flags": texture.flags,
     })
 }
 
@@ -261,7 +563,7 @@ fn material_info(slot: &MaterialSlot) -> Value {
             "reflect_amount": water.reflect_amount, "refract_amount": water.refract_amount,
             "reflect_tint_linear": water.reflect_tint_linear,
             "refract_tint_linear": water.refract_tint_linear,
-            "fog_color_linear": water.fog_color_linear, "fog_clear_linear":water.fog_clear_linear, "underwater_overlay":water.underwater_overlay.as_ref().map(|effect|serde_json::json!({"name":effect.name,"refract_amount":effect.refract_amount,"blur":effect.blur,"bump_transform":effect.bump_transform,"proxy_scroll":effect.proxy_scroll})),
+            "fog_color_linear": water.fog_color_linear, "scene_fog_color_linear":water.scene_fog_color_linear, "underwater_overlay":water.underwater_overlay.as_ref().map(|effect|serde_json::json!({"name":effect.name,"refract_amount":effect.refract_amount,"blur":effect.blur,"bump_transform":effect.bump_transform,"proxy_scroll":effect.proxy_scroll})),
             "fog_start": water.fog_start, "fog_end": water.fog_end,
             "fog_enabled": water.fog_enabled,
             "below_material": water.below_material,
@@ -276,16 +578,96 @@ fn material_info(slot: &MaterialSlot) -> Value {
             crate::bridge::materials::MaterialShader::Surface(name) => name,
             crate::bridge::materials::MaterialShader::Unlit(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Lightmapped(material) => &material.shader,
+            crate::bridge::materials::MaterialShader::VertexLit(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Mirror(material) => &material.shader,
             crate::bridge::materials::MaterialShader::Water(material) => &material.shader,
         },
         "water": water,
+        "surface": slot.shader.surface().map(|surface|json!({
+            "family":format!("{:?}",surface.family),
+            "parameters":surface.parameters,
+            "color":surface.color,"color2":surface.color2,"alpha":surface.alpha,
+            "base_transform":surface.base_transform,"base2_transform":surface.base2_transform,
+            "detail":surface.detail.as_ref().map(|detail|json!({"path":detail.path,"frame":detail.frame,"scale":detail.scale,"mode":detail.mode,"effective_mode":surface.effective_detail_mode(),"factor":detail.factor,"tint":detail.tint,"transform":detail.transform,"texture_available":detail.texture.is_some()})),
+            "emission":surface.emission.as_ref().map(|emission|json!({"self_illumination":emission.self_illumination,"envmap_mask_alpha":emission.envmap_mask_alpha,"tint":emission.tint,"mask":emission.mask_path,"fresnel":emission.fresnel})),
+            "envmap":surface.envmap.as_ref().map(|envmap|json!({"path":envmap.path,"frame":envmap.frame,"mask":format!("{:?}",envmap.mask),"tint":envmap.tint})),
+            "phong":surface.phong.as_ref().map(|phong|json!({
+                "enabled":phong.enabled,"exponent":phong.exponent,"exponent_factor":phong.exponent_factor,
+                "boost":phong.boost,"fresnel_ranges":phong.fresnel_ranges,"tint":phong.tint,
+                "albedo_tint":phong.albedo_tint,"base_alpha_mask":phong.base_alpha_mask,
+                "invert_mask":phong.invert_mask,"half_lambert":phong.half_lambert,
+                "exponent_texture":phong.exponent_texture.as_ref().map(|texture|json!({"path":texture.path,"texture_available":texture.texture.is_some()})),
+                "specular_warp":phong.specular_warp.as_ref().map(|texture|json!({"path":texture.path,"texture_available":texture.texture.is_some()})),
+                "diffuse_warp":phong.diffuse_warp.as_ref().map(|texture|json!({"path":texture.path,"texture_available":texture.texture.is_some()})),
+                "rim":{"enabled":phong.rim.enabled,"exponent":phong.rim.exponent,"boost":phong.rim.boost,"exponent_alpha_mask":phong.rim.exponent_alpha_mask}
+            })),
+            "unsupported_proxies":surface.unsupported_proxies,
+            "unsupported_features":surface.unsupported_features(),
+        })),
         "unlit": slot.shader.unlit().map(|material|json!({"vertex_color":material.vertex_color,"vertex_alpha":material.vertex_alpha})),
         "mirror": slot.shader.mirror().map(|mirror| json!({"shader":mirror.shader,"parameters":mirror.parameters,"fresnel_power":mirror.fresnel_power,"min_reflectivity":mirror.min_reflectivity,"max_reflectivity":mirror.max_reflectivity,"normal_map_path":mirror.normal_map_path,"unsupported_features":mirror.unsupported_features})),
         "render_mode": format!("{:?}", slot.render_mode),
         "force_opaque": slot.force_opaque,
         "texture": slot.texture.as_deref().map(texture_info),
         "texture2": slot.texture2.as_deref().map(texture_info),
+    })
+}
+
+fn sky_info(sky: &crate::media::preview_model::Skybox) -> Value {
+    json!({
+        "faces": sky.materials.iter().map(|material| material.as_ref().map(|material|json!({
+            "shader": material.shader,
+            "color_linear": material.color.to_array(),
+            "texture_transform": material.transform,
+            "texture": material.texture.as_deref().map(texture_info),
+            "paint_proxy": material.paint_proxy,
+            "painted": material.painted.as_ref().map(|paint|json!({
+                "top_color_linear": paint.top_color.to_array(),
+                "bottom_color_linear": paint.bottom_color.to_array(),
+                "fade_bias": paint.fade_bias,
+                "sun_normal": paint.sun_normal.to_array(),
+                "sun_color_linear": paint.sun_color.to_array(),
+                "sun_size": paint.sun_size,
+                "dusk_color_linear": paint.dusk_color.to_array(),
+                "dusk_scale": paint.dusk_scale,
+                "dusk_intensity": paint.dusk_intensity,
+                "hdr_scale": paint.hdr_scale,
+                "star_texture": paint.star_texture,
+                "star_layers": paint.star_layers,
+                "star_scale": paint.star_scale,
+                "star_fade": paint.star_fade,
+                "star_position": paint.star_position,
+                "star_speed": paint.star_speed,
+                "frames": paint.texture.as_ref().map(|texture| texture.frames.iter().map(|mips|mips.iter().map(|mip|json!({
+                    "dimensions": [mip.width,mip.height],
+                    "rgba_crc32": format!("{:08x}",crc32fast::hash(&mip.rgba)),
+                })).collect::<Vec<_>>()).collect::<Vec<_>>()),
+            })),
+        }))).collect::<Vec<_>>(),
+        "paint": sky.paint.as_ref().map(|paint|json!({
+            "top_color_linear": paint.top_color.to_array(),
+            "bottom_color_linear": paint.bottom_color.to_array(),
+            "fade_bias": paint.fade_bias,
+            "sun_normal": paint.sun_normal.to_array(),
+            "authored_sun_normal": paint.authored_sun_normal.to_array(),
+            "sun_position_method": paint.sun_position_method,
+            "sun_color_linear": paint.sun_color.to_array(),
+            "sun_size": paint.sun_size,
+            "dusk_color_linear": paint.dusk_color.to_array(),
+            "dusk_scale": paint.dusk_scale,
+            "dusk_intensity": paint.dusk_intensity,
+            "draw_stars": paint.draw_stars,
+            "star_texture": paint.star_texture,
+            "star_layers": paint.star_layers,
+            "star_scale": paint.star_scale,
+            "star_fade": paint.star_fade,
+            "star_speed": paint.star_speed,
+            "client_star_scale": paint.client_star_scale(),
+            "client_star_fade": paint.client_star_fade(),
+            "client_star_speed": paint.client_star_speed(),
+            "hdr_scale": paint.hdr_scale,
+            "effective_ldr_hdr_scale": 1.0,
+        })),
     })
 }
 
@@ -416,13 +798,17 @@ pub fn capture_map_reference_frames() {
         "game_installation_directory": game,
         "maps_directory": maps_directory,
         "viewport": [suite.width, suite.height],
+        "scene_msaa_samples": super::scene_sample_count(),
+        "optical_msaa_samples": 1,
         "scale_factor": 1.0,
         "vertical_fov_degrees": super::FOV_Y.to_degrees(),
         "animation_time_seconds": suite.animation_time,
         "benchmark_frames_per_view": suite.benchmark_frames,
+        "model_vertex_compression": suite.model_vertex_compression,
         "backend": "wgpu headless using the production map pipeline",
         "adapter_and_shader_diagnostics": "renderer.log",
         "test_build": cfg!(test),
+        "executable": executable_identity(&output),
         "wgpu_backend_override": std::env::var("WGPU_BACKEND").ok(),
         "game_reference_captures": false,
         "maps": [],
@@ -468,12 +854,17 @@ pub fn capture_map_reference_frames() {
             bypass_size_limits: true,
         };
         let load_started = Instant::now();
-        let preview =
-            load_map_for_capture(&request, game.clone(), &pool).expect("load map preview");
+        let preview = load_map_for_capture_with_model_options(
+            &request,
+            game.clone(),
+            &pool,
+            suite.model_vertex_compression.options(),
+        )
+        .expect("load map preview");
         let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
         let content_id = preview.content_id();
         let PreviewContent::Map {
-            scene,
+            mut scene,
             stats,
             fog,
             sky_camera,
@@ -482,6 +873,10 @@ pub fn capture_map_reference_frames() {
         else {
             panic!("{} did not decode as a map", map.name);
         };
+        let shader_lighting = map
+            .shader_lighting
+            .as_ref()
+            .map(|control| override_model_lighting(&mut scene, control));
         let directory = output.join(&map.name);
         fs::create_dir(&directory).expect("map capture directory");
         fs::write(
@@ -499,6 +894,8 @@ pub fn capture_map_reference_frames() {
         .expect("write material diagnostics");
         let mut map_record = json!({
             "name": map.name,
+            "shader_lighting":shader_lighting,
+            "native_bone_pose_control":map.bone_pose_control,
             "bsp_path": map_path,
             "bsp_bytes": bytes.len(),
             "bsp_crc32": format!("{:08x}", request.crc32),
@@ -508,6 +905,33 @@ pub fn capture_map_reference_frames() {
             "fog": format!("{fog:?}"),
             "world_meshes": scene.scene.meshes.len(),
             "skybox_meshes": scene.map_skybox_meshes.len(),
+            "model_lighting_contexts": scene.model_lighting.iter().enumerate().map(|(index, context)| json!({
+                "id":index+1,"model":context.model_path,"entity":context.entity,
+                "origin":context.origin.to_array(),"lighting_origin":context.lighting_origin.to_array(),
+                "mdl_flags":context.mdl_flags,"compiled_vhv":context.compiled_lighting,
+                "seed":match &context.cpu_seed {
+                    Ok(Some(seed))=>json!({"sample_point":seed.sample_point.to_array(),"leaf":seed.leaf,
+                        "ambient":seed.ambient_cube.colors.map(Vec3::to_array),"diagnostics":format!("{:?}",seed.diagnostics)}),
+                    Ok(None)=>Value::Null,
+                    Err(error)=>json!({"error":format!("{error:?}")}),
+                },
+                "runtime_vertices":scene.scene.meshes.iter().chain(&scene.map_skybox_meshes)
+                    .flat_map(|mesh|&mesh.vertices).filter(|vertex|vertex.lighting_context as usize==index+1 && vertex.lighting_mode&4!=0).count(),
+            })).collect::<Vec<_>>(),
+            "sky": scene.skybox.as_ref().map(sky_info),
+            "suns": scene.suns.iter().map(|sun|json!({
+                "direction_to_sun": sun.direction_to_sun.to_array(),
+                "color": sun.color_srgb,
+                "overlay_color": sun.overlay_color_srgb,
+                "size": sun.size,
+                "overlay_size": sun.overlay_size,
+                "material": sun.material,
+                "overlay_material": sun.overlay_material,
+                "hdr_color_scale": sun.hdr_color_scale,
+                "enabled": sun.enabled,
+                "start_disabled": sun.start_disabled,
+                "spawn_flags": sun.spawn_flags,
+            })).collect::<Vec<_>>(),
             "baked_lighting": scene.lightmap.as_ref().map(|atlas| serde_json::json!({"source":format!("{:?}",atlas.source),"dimensions":[atlas.width,atlas.height],"animated":atlas.is_animated(),"active_styles":atlas.active_styles(),"initial_weights":atlas.active_styles().into_iter().map(|index|(index.to_string(),atlas.style_values(0.0)[usize::from(index)])).collect::<std::collections::BTreeMap<_,_>>()})),
             "lightmap_crc32": scene.lightmap.as_ref().map(|atlas| format!("{:08x}", crc32fast::hash(&atlas.rgba))),
             "captures": [],
@@ -541,6 +965,7 @@ pub fn capture_map_reference_frames() {
             let animation_time = shot.animation_time.unwrap_or(suite.animation_time);
             assert!(animation_time.is_finite() && animation_time >= 0.0);
             camera.water_time = animation_time;
+            camera.model_lighting_time = f64::from(animation_time);
             let submerged = scene
                 .walk_collision
                 .as_ref()
@@ -563,9 +988,15 @@ pub fn capture_map_reference_frames() {
             };
             let diagnostics = Arc::new(Mutex::new(Value::Null));
             let view = FixedView {
+                model_lighting_timeline: shot.lighting_timeline(),
                 diagnostics: Arc::clone(&diagnostics),
                 live_animation: shot.live_animation,
                 fullbright: shot.fullbright,
+                sky_animation_time: shot.sky_animation_time,
+                raster_offset: shot.raster_offset,
+                frame_visualization: shot.frame_visualization,
+                frame_visualization_linear_output: shot.frame_visualization_linear_output,
+                frame_probe: shot.frame_probe,
                 target: shot.target(),
                 viewer: FlyViewer {
                     scene: Arc::clone(&scene),
@@ -635,16 +1066,18 @@ pub fn capture_map_reference_frames() {
                             "live animated water must schedule the next frame"
                         );
                     }
+                    ui.draw(
+                        &mut renderer,
+                        &theme,
+                        &iced::advanced::renderer::Style {
+                            text_color: Color::WHITE,
+                        },
+                        mouse::Cursor::Unavailable,
+                    );
+                    // Commit every redraw so temporal GPU state follows the
+                    // production cadence, including frames not saved to disk.
+                    let rgba = renderer.screenshot(physical_size, 1.0, Color::BLACK);
                     if frame % 60 == 0 {
-                        ui.draw(
-                            &mut renderer,
-                            &theme,
-                            &iced::advanced::renderer::Style {
-                                text_color: Color::WHITE,
-                            },
-                            mouse::Cursor::Unavailable,
-                        );
-                        let rgba = renderer.screenshot(physical_size, 1.0, Color::BLACK);
                         let hash = format!("{:08x}", crc32fast::hash(&rgba));
                         if let Some(previous) = live_animation_samples.last() {
                             assert_ne!(
@@ -717,13 +1150,29 @@ pub fn capture_map_reference_frames() {
                 shot.eye[1],
                 shot.eye[2] - super::camera::PLAYER_START_EYE_NUDGE,
             ];
+            let capture_lighting_time = shot.model_lighting_timeline.as_ref().map_or_else(
+                || {
+                    if shot.live_animation {
+                        2.0
+                    } else {
+                        f64::from(animation_time)
+                    }
+                },
+                |timeline| timeline.capture_time,
+            );
             map_record["captures"].as_array_mut().unwrap().push(json!({
                 "file": filename,
                 "render_diagnostics": diagnostics.lock().unwrap().clone(),
-                "fullbright": shot.fullbright, "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
+                "raster_offset": shot.raster_offset.unwrap_or([0.5; 2]), "fullbright": shot.fullbright, "sky_animation_time": shot.sky_animation_time.unwrap_or(if shot.live_animation { 2.0 } else { animation_time }), "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
+                "frame_visualization":shot.frame_visualization,"frame_visualization_linear_output":shot.frame_visualization_linear_output,
+                "frame_probe":shot.frame_probe,
+                "model_lighting_timeline":shot.model_lighting_timeline,
+                "model_lighting_time":capture_lighting_time,
+                "model_light_styles":scene.model_lighting_inputs.as_ref().map(|inputs|inputs.style_values(capture_lighting_time).to_vec()),
                 "animation_time": if shot.live_animation { 2.0 } else { animation_time },
                 "live_animation": shot.live_animation.then(|| json!({
                     "redraw_events_without_input": 121,
+                    "rendered_frames":121,
                     "all_followup_frames_requested": true,
                     "unchanged_camera_messages_published": 0,
                     "samples": live_animation_samples,
@@ -745,57 +1194,69 @@ pub fn capture_map_reference_frames() {
             }));
             println!("map capture: {}", directory.join(filename).display());
         }
-        if suite.verify_view_isolation {
-            map_record["view_isolation"] = isolation::verify(
-                &mut renderer,
-                |shot| {
-                    let pose = FlyPose {
-                        position: Vec3::from(shot.eye),
-                        yaw: shot.angles[1].to_radians(),
-                        pitch: -shot.angles[0].to_radians(),
-                        speed: 1.0,
-                    };
-                    let mut camera = FlyCamera::default();
-                    camera.ensure_spawn(
-                        &scene,
-                        spawn,
-                        content_id,
-                        Some(pose),
-                        Some(MovementMode::Fly),
-                    );
-                    camera.water_time = shot.animation_time.unwrap_or(suite.animation_time);
-                    camera.water = if scene
-                        .walk_collision
-                        .as_ref()
-                        .is_some_and(|collision| collision.water_at(pose.position).is_some())
-                    {
-                        super::camera::WaterLevel::Eyes
-                    } else {
-                        super::camera::WaterLevel::Dry
-                    };
-                    FixedView {
-                        diagnostics: Arc::new(Mutex::new(Value::Null)),
-                        camera,
-                        live_animation: false,
-                        fullbright: shot.fullbright,
-                        target: CaptureTarget::Main,
-                        viewer: FlyViewer {
-                            scene: Arc::clone(&scene),
-                            content_id,
-                            fog,
-                            fog_enabled: shot.fog,
-                            sky_camera,
-                            map_skybox_visible: shot.skybox,
-                            visibility_culling: shot.visibility,
-                            phy_debug_visible: false,
-                            spawn,
-                            pose: Some(pose),
-                            movement_mode: Some(MovementMode::Fly),
-                            requested_movement_mode: None,
-                            mouse_captured: false,
-                        },
-                    }
+        let make_isolation_view = |shot: &CaptureCamera| {
+            let pose = FlyPose {
+                position: Vec3::from(shot.eye),
+                yaw: shot.angles[1].to_radians(),
+                pitch: -shot.angles[0].to_radians(),
+                speed: 1.0,
+            };
+            let mut camera = FlyCamera::default();
+            camera.ensure_spawn(
+                &scene,
+                spawn,
+                content_id,
+                Some(pose),
+                Some(MovementMode::Fly),
+            );
+            camera.water_time = shot.animation_time.unwrap_or(suite.animation_time);
+            camera.model_lighting_time = f64::from(camera.water_time);
+            camera.water = if scene
+                .walk_collision
+                .as_ref()
+                .is_some_and(|collision| collision.water_at(pose.position).is_some())
+            {
+                super::camera::WaterLevel::Eyes
+            } else {
+                super::camera::WaterLevel::Dry
+            };
+            FixedView {
+                model_lighting_timeline: shot.lighting_timeline(),
+                diagnostics: Arc::new(Mutex::new(Value::Null)),
+                camera,
+                live_animation: false,
+                fullbright: shot.fullbright,
+                sky_animation_time: shot.sky_animation_time,
+                raster_offset: shot.raster_offset,
+                frame_visualization: shot.frame_visualization,
+                frame_visualization_linear_output: shot.frame_visualization_linear_output,
+                frame_probe: shot.frame_probe,
+                target: CaptureTarget::Main,
+                viewer: FlyViewer {
+                    scene: Arc::clone(&scene),
+                    content_id,
+                    fog,
+                    fog_enabled: shot.fog,
+                    sky_camera,
+                    map_skybox_visible: shot.skybox,
+                    visibility_culling: shot.visibility,
+                    phy_debug_visible: false,
+                    spawn,
+                    pose: Some(pose),
+                    movement_mode: Some(MovementMode::Fly),
+                    requested_movement_mode: None,
+                    mouse_captured: false,
                 },
+            }
+        };
+        if suite.verify_view_isolation {
+            map_record["view_isolation"] =
+                isolation::verify(&mut renderer, make_isolation_view, &map.cameras, &directory);
+        }
+        if map.verify_temporal_view_isolation {
+            map_record["temporal_view_isolation"] = isolation::verify_temporal(
+                &mut renderer,
+                make_isolation_view,
                 &map.cameras,
                 &directory,
             );

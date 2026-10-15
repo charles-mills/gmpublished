@@ -402,7 +402,7 @@ fn decoded_texture_cache_reuses_shared_vtf_path() {
 }
 
 #[test]
-fn alphatest_preserves_alpha_and_separates_decoded_cache_key() {
+fn alphatest_and_opaque_materials_share_authored_texture_data() {
     let rgba = vec![
         25, 50, 75, 0, 25, 50, 75, 64, 25, 50, 75, 128, 25, 50, 75, 255,
     ];
@@ -432,32 +432,13 @@ fn alphatest_preserves_alpha_and_separates_decoded_cache_key() {
         .resolve(&["models/test".to_owned()], "opaque")
         .expect("opaque material should resolve");
 
-    assert!(!Arc::ptr_eq(&cutout, &opaque));
+    assert!(Arc::ptr_eq(&cutout, &opaque));
     assert_eq!(texture_rgba(&cutout), rgba);
-    assert!(
-        opaque
-            .rgba_bytes()
-            .expect("opaque rgba")
-            .iter()
-            .skip(3)
-            .step_by(4)
-            .all(|alpha| *alpha == 255)
-    );
-    assert_eq!(
-        opaque
-            .rgba_bytes()
-            .expect("opaque rgba")
-            .chunks_exact(4)
-            .map(|pixel| &pixel[..3])
-            .collect::<Vec<_>>(),
-        rgba.chunks_exact(4)
-            .map(|pixel| &pixel[..3])
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(texture_rgba(&opaque), rgba);
 }
 
 #[test]
-fn render_mode_precedence_follows_vmt_flags() {
+fn alpha_test_excludes_texture_blending_while_additive_keeps_its_blend_identity() {
     let rgba = vec![
         25, 50, 75, 128, 25, 50, 75, 255, 25, 50, 75, 64, 25, 50, 75, 0,
     ];
@@ -500,28 +481,19 @@ fn render_mode_precedence_follows_vmt_flags() {
 
     assert_eq!(opaque.render_mode, RenderMode::Opaque);
     assert_eq!(cutout.render_mode, RenderMode::Cutout);
-    assert_eq!(translucent.render_mode, RenderMode::Translucent);
+    assert_eq!(translucent.render_mode, RenderMode::Cutout);
     assert_eq!(additive.render_mode, RenderMode::Additive);
     assert!(opaque.force_opaque);
     assert!(!cutout.force_opaque);
     assert!(!translucent.force_opaque);
     assert!(!additive.force_opaque);
-    assert!(
-        opaque
-            .texture
-            .rgba_bytes()
-            .expect("opaque rgba")
-            .iter()
-            .skip(3)
-            .step_by(4)
-            .all(|alpha| *alpha == 255)
-    );
+    assert_eq!(texture_rgba(&opaque.texture), rgba);
     assert_eq!(texture_rgba(&translucent.texture), rgba);
     assert_eq!(texture_rgba(&additive.texture), rgba);
 }
 
 #[test]
-fn non_alphatest_material_forces_decoded_alpha_opaque() {
+fn opaque_material_preserves_authored_alpha_independently_of_blend_state() {
     let rgba = vec![
         240, 10, 20, 0, 30, 220, 40, 16, 50, 60, 210, 128, 70, 80, 90, 254,
     ];
@@ -537,15 +509,7 @@ fn non_alphatest_material_forces_decoded_alpha_opaque() {
         .resolve(&["models/test".to_owned()], "thing")
         .expect("material should resolve");
 
-    assert!(
-        texture
-            .rgba_bytes()
-            .expect("rgba texture")
-            .iter()
-            .skip(3)
-            .step_by(4)
-            .all(|alpha| *alpha == 255)
-    );
+    assert_eq!(texture_rgba(&texture), rgba);
 }
 
 #[test]
@@ -1598,14 +1562,14 @@ fn compress_lzma(input: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Debug)]
-struct ZipFixtureEntry {
+pub(super) struct ZipFixtureEntry {
     path: String,
     method: u16,
     uncompressed: Vec<u8>,
     compressed: Vec<u8>,
 }
 
-fn zip_stored_entry(path: &str, bytes: Vec<u8>) -> ZipFixtureEntry {
+pub(super) fn zip_stored_entry(path: &str, bytes: Vec<u8>) -> ZipFixtureEntry {
     ZipFixtureEntry {
         path: path.to_owned(),
         method: 0,
@@ -1632,7 +1596,7 @@ fn zip_lzma_entry(path: &str, bytes: Vec<u8>) -> ZipFixtureEntry {
     }
 }
 
-fn zip_fixture(entries: impl IntoIterator<Item = ZipFixtureEntry>) -> Vec<u8> {
+pub(super) fn zip_fixture(entries: impl IntoIterator<Item = ZipFixtureEntry>) -> Vec<u8> {
     let mut file = Vec::new();
     let mut central_entries = Vec::new();
     for entry in entries {
@@ -1885,8 +1849,8 @@ fn water_patch_preserves_normal_animation_and_shader_with_a_base_texture() {
             }
         }"#.to_vec())
         .entry("materials/water/patch.vmt", br#"patch {
-            include "materials/water/base.vmt" replace { "$fogstart" "20" "$envmap" "maps/example/cubemap" Proxies {} }
-            insert { "$fogend" "999" "$waterdepth" "800" }
+            include "materials/water/base.vmt" replace { "$fogstart" "20" Proxies {} }
+            insert { "$fogend" "999" "$waterdepth" "800" "$envmap" "maps/example/cubemap" }
         }"#.to_vec())
         .entry("materials/water/normal.vtf", normal)
         .entry("materials/water/base.vtf", fixture_vtf_bytes(2,2,VtfFormat::Rgba8888,&[&base]))
@@ -2129,7 +2093,10 @@ fn underwater_effect_keeps_its_own_normal_proxy_and_blur_without_a_base_texture(
     assert!((overlay.proxy_scroll[1] - 0.1).abs() < 1e-6);
     assert_eq!(overlay.normal_map.frames[0][0].rgba, normal);
     for (channel, byte) in [24, 64, 72].into_iter().enumerate() {
-        assert_eq!(water.fog_clear_linear[channel], srgb_byte_to_linear(byte));
+        assert_eq!(
+            water.scene_fog_color_linear[channel],
+            srgb_byte_to_linear(byte)
+        );
     }
 }
 
@@ -2139,18 +2106,18 @@ fn lightmapped_patch_preserves_linear_bumps_and_diffuse_controls() {
     let white = [255, 255, 255, 255].repeat(4);
     let archive=PreviewArchive::from_gma(GmaFixtureBuilder::new("Baked directional lighting")
         .entry("materials/lit/base.vmt",br#"LightmappedGeneric { "$basetexture" "lit/white" "$bumpmap" "lit/normal" "$ssbump" "1" "$bumptransform" "center 0 0 scale 2 3 rotate 0 translate .25 .5" }"#.to_vec())
-        .entry("materials/lit/flat.vmt",br#"patch { include "materials/lit/base.vmt" replace { "$nodiffusebumplighting" "1" } }"#.to_vec())
+        .entry("materials/lit/flat.vmt",br#"patch { include "materials/lit/base.vmt" insert { "$nodiffusebumplighting" "1" } }"#.to_vec())
         .entry("materials/lit/normal.vtf",fixture_vtf_bytes(2,2,VtfFormat::Rgba8888,&[&normal]))
         .entry("materials/lit/white.vtf",fixture_vtf_bytes(2,2,VtfFormat::Rgba8888,&[&white]))
         .build()).unwrap();
     let resolver = MaterialResolver::new(Arc::new(archive), None);
     let lit = resolver.resolve_primary(&[], "lit/base").unwrap();
-    let lit = lit.shader.lightmapped().unwrap();
+    let lit = lit.shader.surface().unwrap();
     assert_eq!(lit.normal.as_ref().unwrap().frames[0][0].rgba, normal);
     assert!(lit.ssbump && lit.diffuse_bump);
     assert_eq!(lit.transform, [[2.0, 0.0, 0.0, 0.25], [0.0, 3.0, 0.0, 0.5]]);
     let flat = resolver.resolve_primary(&[], "lit/flat").unwrap();
-    let flat = flat.shader.lightmapped().unwrap();
+    let flat = flat.shader.surface().unwrap();
     assert!(!flat.diffuse_bump);
     assert!(Arc::ptr_eq(
         flat.normal.as_ref().unwrap(),
@@ -2179,12 +2146,51 @@ fn unlit_vertex_alpha_blends_partial_texture_alpha_without_changing_opaque_mater
     assert!(unlit.vertex_alpha && unlit.vertex_color);
     assert_eq!(opaque.render_mode, RenderMode::Opaque);
     assert!(opaque.force_opaque);
-    assert!(
-        texture_rgba(&opaque.texture)
-            .chunks_exact(4)
-            .all(|p| p[3] == 255)
+    assert_eq!(texture_rgba(&opaque.texture), rgba);
+    assert!(Arc::ptr_eq(&opaque.texture, &blended.texture));
+}
+
+#[test]
+fn vtf_alpha_capability_controls_texture_blending_without_destroying_stored_channels() {
+    let rgba = [96, 128, 160, 127].repeat(4);
+    let mut unflagged = create_vtf_bytes(&rgba);
+    unflagged[20..24].copy_from_slice(&0_u32.to_le_bytes());
+    let mut flagged = unflagged.clone();
+    flagged[20..24].copy_from_slice(&vformats::vtf::texture_flags::EIGHTBITALPHA.to_le_bytes());
+    let mut archive = GmaFixtureBuilder::new("Alpha capability");
+    for (name, shader) in [
+        ("world", "LightmappedGeneric"),
+        ("model", "VertexLitGeneric"),
+        ("unlit", "UnlitGeneric"),
+    ] {
+        for capability in ["flagged", "unflagged"] {
+            archive = archive.entry(
+                format!("materials/{name}_{capability}.vmt"),
+                format!(r#"{shader} {{ "$basetexture" "{capability}" "$translucent" "1" }}"#)
+                    .into_bytes(),
+            );
+        }
+    }
+    archive = archive
+        .entry("materials/flagged.vtf", flagged)
+        .entry("materials/unflagged.vtf", unflagged);
+    let resolver = MaterialResolver::new(
+        Arc::new(PreviewArchive::from_gma(archive.build()).unwrap()),
+        None,
     );
-    assert!(!Arc::ptr_eq(&opaque.texture, &blended.texture));
+    for name in ["world", "model", "unlit"] {
+        let opaque = resolver
+            .resolve_primary(&[], &format!("{name}_unflagged"))
+            .unwrap();
+        let blended = resolver
+            .resolve_primary(&[], &format!("{name}_flagged"))
+            .unwrap();
+        assert_eq!(opaque.render_mode, RenderMode::Opaque);
+        assert_eq!(blended.render_mode, RenderMode::Translucent);
+        assert!(opaque.shader.surface().unwrap().translucent);
+        assert_eq!(texture_rgba(&opaque.texture), rgba);
+        assert_eq!(texture_rgba(&blended.texture), rgba);
+    }
 }
 
 #[test]
@@ -2207,6 +2213,177 @@ fn unlit_patch_inherits_identity_and_overrides_vertex_flags() {
 }
 
 #[test]
+fn patched_surface_retains_raw_shader_terms_and_independent_texture_roles() {
+    let rgba = [64, 128, 192, 32].repeat(4);
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Surface roles")
+            .entry(
+                "materials/surface/base.vmt",
+                br#"WorldVertexTransition {
+                "$basetexture" "surface/pixels" "$basetexture2" "surface/pixels"
+                "$color" "[0.5 1 2]" "$color2" "[2 0.5 1]"
+                "$detail" "surface/pixels" "$detailscale" "0.12"
+                "$detailblendfactor" "0.5" "$detailblendmode" "0"
+                "$blendmodulatetexture" "surface/pixels"
+                "$basetexturetransform" "center .5 .5 scale 1.25 2 rotate 30 translate .1 .2"
+                "$basetexturetransform2" "center .5 .5 scale 3 4 rotate 0 translate 0 0"
+                "$selfillum" "1" "$selfillumtint" "[0.25 0.5 2]"
+                "$envmap" "env_cubemap" "$basealphaenvmapmask" "1"
+            }"#
+                .to_vec(),
+            )
+            .entry(
+                "materials/surface/patched.vmt",
+                br#"Patch {
+                include "materials/surface/base.vmt"
+                insert { "$detailscale" "9" "$alpha" "0.4" "$detailtint" "[2 1 0.5]" }
+                replace { "$detailblendfactor" "0.75" }
+            }"#
+                .to_vec(),
+            )
+            .entry("materials/surface/pixels.vtf", create_vtf_bytes(&rgba))
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let resolved = resolver.resolve_with_base2(&[], "surface/patched").unwrap();
+    let surface = resolved.shader.surface().unwrap();
+    assert_eq!(surface.family, SurfaceFamily::Transition);
+    assert_eq!(surface.color, [0.5, 1.0, 2.0]);
+    assert_eq!(surface.color2, [2.0, 0.5, 1.0]);
+    assert_eq!(surface.alpha, 0.4);
+    assert_ne!(surface.base_transform, surface.base2_transform.unwrap());
+    let detail = surface.detail.as_ref().unwrap();
+    assert_eq!(detail.scale, [0.12; 2]);
+    assert_eq!(detail.factor, 0.75);
+    assert_eq!(detail.tint, [2.0, 1.0, 0.5]);
+    assert_eq!(detail.texture.as_ref().unwrap().frames[0][0].rgba, rgba);
+    assert!(surface.blend_modulation.is_some());
+    assert_eq!(surface.emission.as_ref().unwrap().tint, [0.25, 0.5, 2.0]);
+    assert_eq!(
+        surface.envmap.as_ref().unwrap().mask,
+        EnvironmentMapMask::BaseAlpha
+    );
+    assert!(matches!(
+        surface.envmap.as_ref().unwrap().source,
+        EnvironmentMapSource::LocalProbe
+    ));
+    assert_eq!(texture_rgba(resolved.texture.as_ref().unwrap()), rgba);
+    assert_eq!(resolved.render_mode, RenderMode::Translucent);
+}
+
+#[test]
+fn emission_inputs_follow_native_shader_family_initialization() {
+    let mut builder = GmaFixtureBuilder::new("Emission families");
+    for (name, shader, options) in [
+        ("world", "LightmappedGeneric", ""),
+        ("transition", "WorldVertexTransition", ""),
+        ("model", "VertexLitGeneric", ""),
+        (
+            "bumped",
+            "VertexLitGeneric",
+            "\"$bumpmap\" \"emission/pixels\"",
+        ),
+        (
+            "skin",
+            "VertexLitGeneric",
+            "\"$phong\" \"1\" \"$bumpmap\" \"emission/pixels\"",
+        ),
+        ("unlit", "UnlitGeneric", ""),
+    ] {
+        builder = builder.entry(format!("materials/emission/{name}.vmt"), format!(
+            "{shader} {{ \"$basetexture\" \"emission/pixels\" \"$selfillum\" \"1\" \"$selfillummask\" \"emission/pixels\" \"$selfillumfresnel\" \"1\" {options} }}"
+        ).into_bytes());
+    }
+    builder = builder.entry(
+        "materials/emission/pixels.vtf",
+        create_vtf_bytes(&[64, 128, 192, 32].repeat(4)),
+    );
+    let archive = PreviewArchive::from_gma(builder.build()).unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    for (name, with_alpha, without_alpha) in [
+        ("world", 1, 0),
+        ("transition", 1, 0),
+        ("model", 2, 2),
+        ("bumped", 3, 3),
+        ("skin", 3, 3),
+        ("unlit", 0, 0),
+    ] {
+        let material = resolver
+            .resolve_with_base2(&[], &format!("emission/{name}"))
+            .unwrap();
+        let surface = material.shader.surface().unwrap();
+        assert_eq!(surface.effective_emission_mode(true), with_alpha, "{name}");
+        assert_eq!(
+            surface.effective_emission_mode(false),
+            without_alpha,
+            "{name}"
+        );
+        assert!(surface.emission.as_ref().unwrap().mask.is_some());
+        assert_eq!(
+            surface.emission.as_ref().unwrap().fresnel,
+            Some([0.0, 1.0, 1.0])
+        );
+    }
+}
+
+#[test]
+fn independent_environment_mask_glow_keeps_base_alpha_available_for_cutout() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Independent glow")
+            .entry(
+                "materials/emission/glow.vmt",
+                br#"VertexLitGeneric {
+            "$basetexture" "emission/pixels" "$envmap" "env_cubemap"
+            "$envmapmask" "emission/pixels" "$selfillum" "0"
+            "$selfillum_envmapmask_alpha" "1" "$alphatest" "1"
+        }"#
+                .to_vec(),
+            )
+            .entry(
+                "materials/emission/pixels.vtf",
+                create_vtf_bytes(&[64, 128, 192, 32].repeat(4)),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let material = resolver.resolve_with_base2(&[], "emission/glow").unwrap();
+    let surface = material.shader.surface().unwrap();
+    assert_eq!(surface.effective_emission_mode(true), 4);
+    assert!(!surface.base_alpha_is_mask(true));
+    assert_eq!(material.render_mode, RenderMode::Cutout);
+    assert!(surface.unsupported_features().is_empty());
+}
+
+#[test]
+fn missing_surface_bitmap_retains_typed_family_and_authored_parameters() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Missing surface")
+            .entry(
+                "materials/surface/missing.vmt",
+                br#"VertexLitGeneric {
+                "$basetexture" "surface/absent" "$color2" "[2 3 4]"
+                "$phong" "1" "$phongexponent" "12"
+            }"#
+                .to_vec(),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let resolved = resolver.resolve_with_base2(&[], "surface/missing").unwrap();
+    assert!(resolved.texture.is_none());
+    assert!(matches!(resolved.shader, MaterialShader::VertexLit(_)));
+    let surface = resolved.shader.surface().unwrap();
+    assert_eq!(surface.color2, [2.0, 3.0, 4.0]);
+    assert_eq!(
+        surface.parameters.get("$phongexponent").map(String::as_str),
+        Some("12")
+    );
+}
+
+#[test]
 fn missing_unlit_texture_retains_authored_shading_and_blending_identity() {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Missing Unlit")
@@ -2222,4 +2399,135 @@ fn missing_unlit_texture_retains_authored_shading_and_blending_identity() {
     assert!(material.shader.unlit().unwrap().vertex_alpha);
     assert_eq!(material.render_mode, RenderMode::Translucent);
     assert!(material.texture.is_none());
+}
+
+#[test]
+fn original_vtf_header_metadata_survives_decode_downscale_and_mip_views() {
+    use vformats::vtf::texture_flags;
+    let flags = texture_flags::EIGHTBITALPHA | texture_flags::CLAMPS | texture_flags::POINTSAMPLE;
+    let mut bytes = create_vtf_bytes_with_dimensions(4, 2, &[128; 32]);
+    bytes[20..24].copy_from_slice(&flags.to_le_bytes());
+    let reflectivity_bits = [0.125_f32.to_bits(), 0.5_f32.to_bits(), (-0.0_f32).to_bits()];
+    for (channel, bits) in reflectivity_bits.iter().enumerate() {
+        bytes[32 + channel * 4..36 + channel * 4].copy_from_slice(&bits.to_le_bytes());
+    }
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Flags")
+            .entry(
+                "materials/test/flags.vmt",
+                br#"VertexLitGeneric { "$basetexture" "test/flags" }"#.to_vec(),
+            )
+            .entry("materials/test/flags.vtf", bytes)
+            .build(),
+    )
+    .unwrap();
+    let resolver =
+        MaterialResolver::new(Arc::new(archive), None).with_decoded_texture_max_dimension(2);
+    let texture = resolver.resolve(&[], "test/flags").unwrap();
+    assert_eq!(texture.flags, Some(flags));
+    assert_eq!(texture.reflectivity_bits, Some(reflectivity_bits));
+    assert_eq!((texture.width, texture.height), (2, 1));
+    assert_eq!(texture.without_mip_chain().flags, Some(flags));
+    assert_eq!(
+        texture.without_mip_chain().reflectivity_bits,
+        Some(reflectivity_bits)
+    );
+    assert_eq!(texture.original_dimensions(), (4, 2));
+
+    let mut bc = create_bc_vtf_bytes(8, 4, VtfFormat::Dxt1, &[&[0; 8], &[0; 16]]);
+    for (channel, bits) in reflectivity_bits.iter().enumerate() {
+        bc[32 + channel * 4..36 + channel * 4].copy_from_slice(&bits.to_le_bytes());
+    }
+    let bc = resolved_bc_texture(&bc, Some(4)).unwrap();
+    assert_eq!(bc.reflectivity_bits, Some(reflectivity_bits));
+    assert_eq!((bc.width, bc.height), (4, 2));
+}
+
+#[test]
+#[ignore = "requires the isolated native material-profile fixture and getter capture"]
+fn installed_native_material_profile_getters_match_cpu_resolution() {
+    let fixture = PathBuf::from(std::env::var("GMPUBLISHED_MATERIAL_PROFILE_FIXTURE").unwrap());
+    let native_path = PathBuf::from(std::env::var("GMPUBLISHED_MATERIAL_PROFILE_NATIVE").unwrap());
+    let native: serde_json::Value =
+        serde_json::from_slice(&fs::read(&native_path).unwrap()).unwrap();
+    let source = fs::read(fixture.join("maps/gm_material_profile_controls.bsp")).unwrap();
+    let map = gmpublished_domain::scene::map::load_map(&source).unwrap();
+    let mut builder = GmaFixtureBuilder::new("Native material profile replay");
+    let mut texts = BTreeMap::new();
+    for entry in map.pakfile.indexed_entries().unwrap() {
+        if !PathBuf::from(&entry.path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("vmt"))
+        {
+            continue;
+        }
+        let bytes = map
+            .pakfile
+            .entry_bytes_by_index(entry.index)
+            .unwrap()
+            .unwrap();
+        texts.insert(
+            entry.path.clone(),
+            String::from_utf8(bytes.clone()).unwrap(),
+        );
+        builder = builder.entry(entry.path, bytes);
+    }
+    let archive = PreviewArchive::from_gma(builder.build()).unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let mut rows = Vec::new();
+    for (role, actual) in native["material_controls"].as_object().unwrap() {
+        let name = actual["name"].as_str().unwrap();
+        let text = &texts[&format!("materials/{name}.vmt")];
+        let material = resolver
+            .effective_material(text, 0, &mut Vec::new())
+            .unwrap();
+        let native_shader = actual["shader"].as_str().unwrap();
+        assert!(
+            material.shader.eq_ignore_ascii_case(native_shader)
+                || (material
+                    .shader
+                    .eq_ignore_ascii_case("WorldVertexTransition")
+                    && native_shader.eq_ignore_ascii_case("WorldVertexTransition_DX9")),
+            "{role}"
+        );
+        let color = material.parameter("$color").map_or([1.0; 3], |value| {
+            let values = value
+                .trim()
+                .trim_matches(['[', ']'])
+                .split_whitespace()
+                .map(|value| value.parse::<f32>().unwrap())
+                .collect::<Vec<_>>();
+            values.try_into().unwrap()
+        });
+        let mut values = vec![
+            (
+                "$alpha",
+                water::scalar(material.parameter("$alpha"), 1.0),
+                actual["floats"]["$alpha"].as_f64().unwrap() as f32,
+            ),
+            (
+                "$detailblendfactor",
+                water::scalar(material.parameter("$detailblendfactor"), 1.0),
+                actual["floats"]["$detailblendfactor"].as_f64().unwrap() as f32,
+            ),
+        ];
+        for (index, value) in color.into_iter().enumerate() {
+            values.push((
+                "$color",
+                value,
+                actual["vectors"]["$color"][index].as_f64().unwrap() as f32,
+            ));
+        }
+        for (parameter, computed, expected) in &values {
+            assert_eq!(computed, expected, "{role} {parameter}");
+        }
+        rows.push(serde_json::json!({"role":role,"shader":material.shader,"values":values}));
+    }
+    assert_eq!(rows.len(), 52);
+    if let Ok(path) = std::env::var("GMPUBLISHED_MATERIAL_PROFILE_REPORT") {
+        fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({
+            "scope":"Native effective shader/color/alpha/detailfactor getters versus actual shared CPU material resolver; all52 controls exact f32, including includes/Patch/profile blocks. Appearance acceptance is separate.",
+            "native":native_path, "fixture":fixture, "controls":rows,
+        })).unwrap()).unwrap();
+    }
 }

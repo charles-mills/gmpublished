@@ -8,6 +8,9 @@ pub(in super::super) struct SelectedPropPlacement<'a> {
     pub(in super::super) placement: &'a StaticPropPlacement,
     pub(in super::super) model: Arc<PropModelAsset>,
     pub(in super::super) lighting: PropPlacementLighting,
+    pub(in super::super) lighting_context: u32,
+    pub(in super::super) compiled_lighting:
+        Option<Arc<super::compiled_lighting::CompiledPropLighting>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,7 +29,9 @@ pub(in super::super) struct PropSunLighting {
 #[derive(Clone, Copy)]
 pub(in super::super) struct StaticPropLightingInputs<'a> {
     pub(in super::super) ambient: &'a MapAmbientLighting,
+    pub(in super::super) environment_maps: Option<super::cubemaps::PropEnvironmentMapInputs<'a>>,
     pub(in super::super) environment_lighting: Option<&'a MapEnvironmentLighting>,
+    pub(in super::super) lightmap_source: Option<gmpublished_domain::scene::map::LightmapSource>,
     pub(in super::super) walk_collision: Option<&'a MapWalkCollision>,
 }
 
@@ -52,14 +57,15 @@ pub(in super::super) fn prop_placement_lighting(
     placement: &StaticPropPlacement,
     lighting: StaticPropLightingInputs<'_>,
 ) -> PropPlacementLighting {
-    let ambient_cube = lighting.ambient.cube_at(placement.origin);
+    let sample_origin = placement.lighting_origin.unwrap_or(placement.origin);
+    let ambient_cube = lighting.ambient.cube_at(sample_origin);
     let Some(environment_lighting) = lighting.environment_lighting else {
         return PropPlacementLighting {
             ambient_cube,
             sun: None,
         };
     };
-    let ray_start = placement.origin + PROP_LIGHT_SAMPLE_OFFSET;
+    let ray_start = sample_origin + PROP_LIGHT_SAMPLE_OFFSET;
     let sun = environment_lighting.sun.map(|sun| PropSunLighting {
         direction_to_sun: sun.direction_to_sun,
         color_linear: sun.color_linear,

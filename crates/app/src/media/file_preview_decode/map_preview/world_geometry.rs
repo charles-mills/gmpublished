@@ -38,12 +38,21 @@ pub(in super::super) fn map_mesh_to_model_mesh(
 ) -> MeshData {
     let (width, height) = material_dimensions(materials, mesh.material_index);
     MeshData {
+        geometry: crate::media::preview_model::MeshGeometry::Brush,
         vertices: mesh
             .vertices
             .iter()
             .map(|vertex| ModelVertex {
+                lighting_context: 0,
                 position: vertex.position,
                 normal: vertex.normal,
+                tangent_s: vertex.tangent_s,
+                tangent_t: vertex.tangent_t,
+                tangent_sign: vertex
+                    .normal
+                    .cross(vertex.tangent_s)
+                    .dot(vertex.tangent_t)
+                    .signum(),
                 uv: normalize_map_uv(
                     vertex.tex_s,
                     vertex.tex_t,
@@ -63,6 +72,8 @@ pub(in super::super) fn map_mesh_to_model_mesh(
                 color: Vec3::splat(1.0),
                 blend_alpha: vertex.blend_alpha,
                 opacity: vertex.opacity,
+                illumination: Vec3::splat(1.0),
+                lighting_mode: 0,
             })
             .collect(),
         indices: mesh.indices.clone(),

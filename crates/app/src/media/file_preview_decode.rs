@@ -137,22 +137,24 @@ fn load_preview_data(
 }
 
 #[cfg(feature = "map-capture")]
-pub fn load_map_for_capture(
+pub fn load_map_for_capture_with_model_options(
     request: &PreviewRequest,
     gmod_dir: std::path::PathBuf,
     pool: &rayon::ThreadPool,
+    options: vformats::mdl::ModelAssemblyOptions,
 ) -> Result<PreviewData, PreviewLoadError> {
     pool.install(|| {
-        load_preview_data(
-            request.clone(),
-            &Tokens::with_accent_inputs(
-                crate::theme::ThemeVariant::Dark,
-                crate::theme::AccentInputs::for_preset(crate::bridge::ThemePreset::Dark),
-            ),
+        let bytes = request.archive.entry_bytes(&request.entry_path)?;
+        let mut stage = |stage| println!("map capture: {stage:?}");
+        stage(PreviewLoadStage::ReadingBsp);
+        Ok(map_preview::map_preview_data_with_prop_model_loader(
+            request,
+            &bytes,
             Some(gmod_dir),
             Some(pool),
-            &mut |stage| println!("map capture: {stage:?}"),
-        )
+            &mut stage,
+            &|path, resolver| map_preview::load_prop_model_with_options(path, resolver, options),
+        ))
     })
 }
 
@@ -700,14 +702,37 @@ fn model_phy_debug_mesh(
     builder.finish(material_index)
 }
 
+const SOURCE_MODEL_ASSEMBLY: vformats::mdl::ModelAssemblyOptions =
+    vformats::mdl::ModelAssemblyOptions {
+        vertex_compression: vformats::mdl::VertexCompression::SourceUbyte4,
+    };
+
 fn load_model_catching_panic(
     context: &str,
     mdl_bytes: &[u8],
     vvd_bytes: &[u8],
     vtx_bytes: &[u8],
 ) -> Option<ModelData> {
+    load_model_catching_panic_with_options(
+        context,
+        mdl_bytes,
+        vvd_bytes,
+        vtx_bytes,
+        SOURCE_MODEL_ASSEMBLY,
+    )
+}
+
+fn load_model_catching_panic_with_options(
+    context: &str,
+    mdl_bytes: &[u8],
+    vvd_bytes: &[u8],
+    vtx_bytes: &[u8],
+    options: vformats::mdl::ModelAssemblyOptions,
+) -> Option<ModelData> {
     match catch_asset_decode(context, || {
-        gmpublished_domain::scene::model::load_model(mdl_bytes, vvd_bytes, vtx_bytes)
+        gmpublished_domain::scene::model::load_model_with_options(
+            mdl_bytes, vvd_bytes, vtx_bytes, options,
+        )
     }) {
         Some(Ok(model)) => Some(ModelData::from(model)),
         Some(Err(error)) => {

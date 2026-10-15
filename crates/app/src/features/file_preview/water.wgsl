@@ -11,12 +11,13 @@ struct Uniforms {
     clip_plane: vec4<f32>,
     medium_plane: vec4<f32>,
     viewport: vec4<f32>,
+    raster_params: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var refraction_texture: texture_2d<f32>;
 @group(0) @binding(2) var refraction_sampler: sampler;
-@group(0) @binding(3) var scene_depth: texture_depth_multisampled_2d;
+@group(0) @binding(3) var scene_depth: texture_depth_2d;
 @group(0) @binding(4) var reflection_texture: texture_2d<f32>;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
@@ -45,6 +46,9 @@ struct VertexInput {
     @location(2) uv: vec2<f32>,
     @location(3) lightmap_uv:vec2<f32>,
     @location(6) lightmap_bump_step:f32,
+    @location(10) tangent_s:vec3<f32>,
+    @location(11) tangent_t:vec3<f32>,
+    @location(12) tangent_sign:f32,
 }
 
 struct VertexOutput {
@@ -54,6 +58,8 @@ struct VertexOutput {
     @location(2) uv: vec2<f32>,
     @location(3) lightmap_uv:vec2<f32>,
     @location(4) lightmap_bump_step:f32,
+    @location(10) tangent_s:vec3<f32>,
+    @location(11) tangent_t:vec3<f32>,
 }
 
 fn transform_water_vertex(input: VertexInput) -> VertexOutput {
@@ -61,6 +67,8 @@ fn transform_water_vertex(input: VertexInput) -> VertexOutput {
     out.clip_position = uniforms.view_proj * vec4<f32>(input.position, 1.0);
     out.world_position = input.position;
     out.normal = input.normal;
+    out.tangent_s = input.tangent_s;
+    out.tangent_t = input.tangent_t;
     out.uv = input.uv;
     out.lightmap_uv=input.lightmap_uv;
     out.lightmap_bump_step=input.lightmap_bump_step;
@@ -134,12 +142,18 @@ fn view_fog_factor(position:vec3<f32>, projected_depth:f32) -> f32 {
 }
 
 @fragment
-fn fs_main(input: VertexOutput, @builtin(sample_index) sample_index:u32) -> @location(0) vec4<f32> {
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let lighting = surface_lighting(input);
     let dimensions_u = textureDimensions(refraction_texture, 0);
     let dimensions = vec2<f32>(dimensions_u);
     let half_texel = vec2<f32>(0.5) / dimensions;
-    let unperturbed_uv = clamp(input.clip_position.xy / uniforms.viewport.xy, half_texel, vec2<f32>(1.0) - half_texel);
+    // Source computes projected texture coordinates before ToGL applies its
+    // raster bias. Reproject the interpolated position at the varying's
+    // interpolation location, independently of the MSAA sample position.
+    let projected=uniforms.view_proj*vec4<f32>(input.world_position,1.0);
+    let projected_uv=projected.xy/projected.w*vec2<f32>(0.5,-0.5)+vec2<f32>(0.5)
+        -uniforms.raster_params.xy/uniforms.viewport.xy;
+    let unperturbed_uv = clamp(projected_uv, half_texel, vec2<f32>(1.0) - half_texel);
     if material.flags.w == 1u {
         let reflected_uv = clamp(unperturbed_uv + vec2<f32>(-lighting.tangent_normal.x, lighting.tangent_normal.y) * lighting.tangent_normal.a * material.water_optics.x, half_texel, vec2<f32>(1.0) - half_texel);
         let refracted_uv = clamp(unperturbed_uv + lighting.tangent_normal.xy * lighting.tangent_normal.a * material.water_optics.y, half_texel, vec2<f32>(1.0) - half_texel);
@@ -158,7 +172,7 @@ fn fs_main(input: VertexOutput, @builtin(sample_index) sample_index:u32) -> @loc
     let distortion=lighting.tangent_normal.xy*lighting.tangent_normal.a*material.water_optics.y*original_fog;
     var sample_uv=clamp(unperturbed_uv+distortion,half_texel,vec2<f32>(1.0)-half_texel);
     let sample_pixel=clamp(vec2<i32>(sample_uv*dimensions),vec2<i32>(0),vec2<i32>(dimensions_u)-vec2<i32>(1));
-    let sampled_depth=textureLoad(scene_depth,sample_pixel,i32(sample_index));
+    let sampled_depth=textureLoad(scene_depth,sample_pixel,0);
     // A distorted fetch must not pull geometry in front of this surface into
     // its refraction. The refraction scene has independent, read-only depth.
     if sampled_depth>water_depth {sample_uv=unperturbed_uv;}
