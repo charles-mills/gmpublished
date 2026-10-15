@@ -1,25 +1,3 @@
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    // Directional light in world space (xyz) + ambient strength (w).
-    light: vec4<f32>,
-    camera_position: vec4<f32>,
-    fog_color: vec4<f32>,
-    // start, end, max density, enabled flag.
-    fog_params: vec4<f32>,
-    // x: animation time, yzw: sky tint.
-    water_time_sky_tint: vec4<f32>,
-    // xy: near and far clip distances.
-    water_depth_params: vec4<f32>,
-    clip_plane: vec4<f32>,
-    medium_plane: vec4<f32>,
-    viewport: vec4<f32>,
-    raster_params: vec4<f32>,
-}
-
-struct Material {
-    // x: force opaque, y: alpha test cutout.
-    flags: vec4<u32>,
-}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
@@ -56,8 +34,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     if input.orientation<0.5 {
         right=input.axis_right;up=input.axis_up;
     } else if input.orientation<1.5 {
-        // Source computes angles from each sprite to the current eye, rather
-        // than using one camera-wide basis for every screen-aligned sprite.
         let to_camera = uniforms.camera_position.xyz - input.center;
         if dot(to_camera, to_camera) > 0.0001 {
             up = normalize(cross(normalize(to_camera), right));
@@ -82,9 +58,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var albedo = textureSample(base_texture, base_sampler, input.uv);
-    if material.flags.x != 0u {
+    if material.texture_alpha_opaque != 0u {
         albedo.a = 1.0;
-    } else if material.flags.y != 0u && albedo.a < 0.5 {
+    } else if material.alpha_test != 0u && albedo.a < 0.5 {
         discard;
     }
 
@@ -102,35 +78,4 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     lit = mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position,1.0/input.clip_position.w));
     if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
     return vec4<f32>(lit, albedo.a);
-}
-
-// Source height fog stores axial distance through the medium, rather than
-// radial distance from the camera. The clipping bias is deliberately separate.
-fn view_fog_factor(position:vec3<f32>, projected_depth:f32) -> f32 {
-    if uniforms.fog_params.y <= uniforms.fog_params.x { return 0.0; }
-    if uniforms.fog_params.w > 3.5 {
-        return clamp((distance(position,uniforms.camera_position.xyz)-uniforms.fog_params.x)
-            /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
-    }
-    if uniforms.fog_params.w > 2.5 {
-        return clamp((projected_depth-uniforms.fog_params.x)
-            /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
-    }
-    if uniforms.fog_params.w > 1.5 {
-        let point_distance=dot(vec4<f32>(position,1.0),uniforms.medium_plane);
-        let eye_distance=dot(vec4<f32>(uniforms.camera_position.xyz,1.0),uniforms.medium_plane);
-        let fraction=clamp(-point_distance/max(eye_distance-point_distance,0.00001),0.0,1.0);
-        return clamp(fraction*projected_depth/(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
-    }
-    if uniforms.fog_params.w < 0.5 { return 0.0; }
-    return clamp((projected_depth-uniforms.fog_params.x)
-        /(uniforms.fog_params.y-uniforms.fog_params.x),0.0,uniforms.fog_params.z);
-}
-
-fn view_fog_color_factor(position:vec3<f32>,projected_depth:f32) -> f32 {
-    let factor = view_fog_factor(position,projected_depth);
-    // Source's ps2b+ range-fog blend squares opacity to match hardware fog.
-    // Height-fog depth metadata and the water shader's own absorption stay linear.
-    let opacity = select(factor*factor, factor, uniforms.fog_params.w>1.5 && uniforms.fog_params.w<2.5);
-    return opacity*select(1.0,uniforms.fog_color.a,uniforms.fog_params.w>1.5 && uniforms.fog_params.w<3.5);
 }

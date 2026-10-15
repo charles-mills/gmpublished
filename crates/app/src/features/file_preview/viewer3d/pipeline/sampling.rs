@@ -1,5 +1,4 @@
-//! Main raster samples are immutable per process; optical views use one.
-//! The optional override belongs to the fixed-camera capture harness only.
+//! Main sampling is fixed at resource creation; optical attachments use one sample.
 
 pub(in crate::features::file_preview::viewer3d) fn scene_sample_count() -> u32 {
     #[cfg(feature = "map-capture")]
@@ -32,8 +31,7 @@ pub(super) fn visibility_shader(source: &str, count: u32) -> std::borrow::Cow<'_
     if count > 1 {
         return source.into();
     }
-    // For a single-sample depth texture the third textureLoad argument is
-    // mip zero. The existing sample loop/index becomes precisely zero.
+    // Single-sample textureLoad interprets its third argument as mip zero.
     source
         .replace("texture_depth_multisampled_2d", "texture_depth_2d")
         .replace("textureNumSamples(depth)", "1u")

@@ -1,21 +1,3 @@
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    // Directional light in world space (xyz) + ambient strength (w).
-    light: vec4<f32>,
-    camera_position: vec4<f32>,
-    fog_color: vec4<f32>,
-    // start, end, max density, enabled flag.
-    fog_params: vec4<f32>,
-    // x: animation time, yzw: sky tint.
-    water_time_sky_tint: vec4<f32>,
-    water_depth_params: vec4<f32>,
-    clip_plane: vec4<f32>,
-    medium_plane: vec4<f32>,
-    viewport: vec4<f32>,
-    raster_params: vec4<f32>,
-    // xy: near and far clip distances.
-}
-
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(1) @binding(0) var sky_texture: texture_2d<f32>;
 @group(1) @binding(1) var sky_sampler: sampler;

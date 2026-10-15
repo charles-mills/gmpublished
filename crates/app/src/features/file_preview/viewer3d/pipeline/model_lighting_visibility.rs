@@ -1,11 +1,11 @@
 //! Advance temporal lighting only for placements included in prepared views.
-use super::{MapPreview, ModelVertex, RenderScene, SceneView, UploadedModel};
+use super::{MapPreview, ModelVertex, RenderScene, SceneView, ViewerScene};
 
 pub(super) fn gather(
     active: &mut [bool],
     scene: &RenderScene,
     map: Option<&MapPreview>,
-    upload: &UploadedModel,
+    upload: &ViewerScene,
     view: &SceneView,
 ) {
     let Some(plans) = &view.plans else { return };
@@ -54,13 +54,13 @@ fn mark(active: &mut [bool], vertices: &[ModelVertex], indices: &[u32]) {
         let Some(vertex) = vertices.get(index as usize) else {
             continue;
         };
-        if vertex.lighting_mode & 4 == 0 {
+        if vertex.lighting_mode & crate::media::preview_model::vertex_lighting::RUNTIME_CONTEXT == 0
+        {
             continue;
         }
-        if let Some(context) = vertex
-            .lighting_context
-            .checked_sub(1)
-            .and_then(|id| active.get_mut(id as usize))
+        if let Some(context) =
+            crate::media::preview_model::ModelLightingContextId::from_gpu(vertex.lighting_context)
+                .and_then(|id| active.get_mut(id.index()))
         {
             *context = true;
         }
@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn merged_mesh_visibility_advances_only_referenced_runtime_placements() {
         let mut vertex: ModelVertex = bytemuck::Zeroable::zeroed();
-        vertex.lighting_mode = 4;
+        vertex.lighting_mode = crate::media::preview_model::vertex_lighting::RUNTIME_CONTEXT;
         vertex.lighting_context = 1;
         let first = vertex;
         vertex.lighting_context = 2;

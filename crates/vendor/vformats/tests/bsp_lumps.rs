@@ -419,6 +419,30 @@ fn overlays_decode_and_trim_their_face_table() {
 }
 
 #[test]
+fn overlay_fades_preserve_squared_distances_and_disabled_sentinel() {
+    let limits = Limits::default();
+    let absent = build_bsp(&[]);
+    assert!(
+        parse(&absent, &limits)
+            .unwrap()
+            .overlay_fades(&limits)
+            .unwrap()
+            .is_empty()
+    );
+    let records = Record::new().f32(-1.0).f32(0.0).f32(4096.0).f32(16384.0).0;
+    let bytes = build_bsp(&[(lump_ids::OVERLAY_FADES, records, 0)]);
+    let fades = parse(&bytes, &limits)
+        .unwrap()
+        .overlay_fades(&limits)
+        .unwrap();
+    assert_eq!(fades.len(), 2);
+    assert_eq!(fades[0].min_distance_squared, -1.0);
+    assert_eq!(fades[0].max_distance_squared, 0.0);
+    assert_eq!(fades[1].min_distance_squared, 4096.0);
+    assert_eq!(fades[1].max_distance_squared, 16384.0);
+}
+
+#[test]
 fn nodes_brush_sides_and_leaf_tables_decode() {
     let node = Record::new()
         .i32(3) // plane

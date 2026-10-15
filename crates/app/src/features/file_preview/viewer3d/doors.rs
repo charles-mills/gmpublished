@@ -22,12 +22,8 @@ pub(super) enum DoorMotion {
     #[default]
     Idle,
     Moving,
-    /// Stopped part-way while closing because the player is in the way; resumes
-    /// on its own once they step clear.
+    /// Resumes closing when the obstruction clears.
     BlockedClosing,
-    /// Fully open and counting down to an automatic close. Source's `wait`
-    /// (`returndelay` on `prop_door_rotating`); a negative value means the door
-    /// stays open and never enters this state.
     HoldingOpen {
         remaining: f32,
     },
@@ -168,9 +164,7 @@ pub(super) fn source_sound_gain(distance: f32, sound_level: f32) -> f32 {
     if !distance.is_finite() || !sound_level.is_finite() {
         return 0.0;
     }
-    // Source's sound engine applies soundlevel attenuation. The preview has
-    // no PAS/DSP/panning model, so approximate SNDLVL_NORM (75 dB) as
-    // inaudible beyond ~1500 Source units and scale that radius by soundlevel.
+    // Radius approximation; PAS, DSP and panning are unsupported.
     let audible_radius = SOURCE_NORM_AUDIBLE_RADIUS * 10.0_f32.powf((sound_level - 75.0) / 40.0);
     if audible_radius <= SOURCE_NEAR_FULL_GAIN_RADIUS || distance >= audible_radius {
         return 0.0;
@@ -255,21 +249,29 @@ pub(super) fn transform_door_vertices(
     vertices: &[ModelVertex],
     pose: DoorRenderPose,
 ) -> Vec<ModelVertex> {
-    vertices
-        .iter()
-        .map(|vertex| {
-            let mut transformed = *vertex;
-            transformed.position =
-                transform_door_point(door, vertex.position, pose.progress, pose.swing);
-            transformed.tangent_s =
-                transform_door_normal(door, vertex.tangent_s, pose.progress, pose.swing);
-            transformed.tangent_t =
-                transform_door_normal(door, vertex.tangent_t, pose.progress, pose.swing);
-            transformed.normal =
-                transform_door_normal(door, vertex.normal, pose.progress, pose.swing);
-            transformed
-        })
-        .collect()
+    let mut output = Vec::with_capacity(vertices.len());
+    transform_door_vertices_into(door, vertices, pose, &mut output);
+    output
+}
+
+pub(super) fn transform_door_vertices_into(
+    door: &DoorInstance,
+    vertices: &[ModelVertex],
+    pose: DoorRenderPose,
+    output: &mut Vec<ModelVertex>,
+) {
+    output.clear();
+    output.extend(vertices.iter().map(|vertex| {
+        let mut transformed = *vertex;
+        transformed.position =
+            transform_door_point(door, vertex.position, pose.progress, pose.swing);
+        transformed.tangent_s =
+            transform_door_normal(door, vertex.tangent_s, pose.progress, pose.swing);
+        transformed.tangent_t =
+            transform_door_normal(door, vertex.tangent_t, pose.progress, pose.swing);
+        transformed.normal = transform_door_normal(door, vertex.normal, pose.progress, pose.swing);
+        transformed
+    }));
 }
 
 pub(super) fn transform_door_point(
@@ -666,6 +668,7 @@ mod tests {
 
     fn test_linear_door(origin: Vec3, distance: f32) -> DoorInstance {
         DoorInstance {
+            source_index: 0,
             brush_collision: None,
             class: MapDoorClass::FuncDoor,
             origin,

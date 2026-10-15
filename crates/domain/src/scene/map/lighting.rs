@@ -961,6 +961,7 @@ pub(super) fn bake_lightmap_atlas<'a>(
 pub(super) fn clear_lightmap_uvs(meshes: &mut [&mut BuildMesh]) {
     for vertex in meshes.iter_mut().flat_map(|mesh| &mut mesh.vertices) {
         vertex.vertex.lightmap_uv = [0.0; 2];
+        vertex.vertex.has_lightmap = false;
         vertex.vertex.lightmap_bump_step = 0.0;
         vertex.lightmap_block = None;
     }
@@ -976,19 +977,23 @@ pub(super) fn rewrite_lightmap_uvs(
     for vertex in meshes.iter_mut().flat_map(|mesh| &mut mesh.vertices) {
         let Some(block_index) = vertex.lightmap_block else {
             vertex.vertex.lightmap_uv = [0.0; 2];
+            vertex.vertex.has_lightmap = false;
             vertex.vertex.lightmap_bump_step = 0.0;
             continue;
         };
         let Some(block) = blocks.get(block_index) else {
             vertex.vertex.lightmap_uv = [0.0; 2];
+            vertex.vertex.has_lightmap = false;
             vertex.vertex.lightmap_bump_step = 0.0;
             continue;
         };
         let Some(Some(rect)) = placements.get(block_index) else {
             vertex.vertex.lightmap_uv = [0.0; 2];
+            vertex.vertex.has_lightmap = false;
             vertex.vertex.lightmap_bump_step = 0.0;
             continue;
         };
+        vertex.vertex.has_lightmap = true;
         vertex.vertex.lightmap_bump_step = if block.basis_count == 4 {
             (block.face_width + 2) as f32 / atlas_width.max(1) as f32
         } else {
@@ -1160,6 +1165,7 @@ mod lightmap_tests {
                     tex_t: 0.0,
                     texture_size: [1, 1],
                     lightmap_uv: [0.25, 0.75],
+                    has_lightmap: true,
                     lightmap_bump_step: 0.0,
                     blend_alpha: 0.0,
                     opacity: 1.0,
@@ -1171,6 +1177,7 @@ mod lightmap_tests {
             partition: GeometryPartition::Visible,
             entity: false,
             visibility: BuildMeshVisibility::default(),
+            surface_owners: Vec::new(),
         };
         rewrite_lightmap_uvs(
             &mut [&mut mesh],
@@ -1184,9 +1191,11 @@ mod lightmap_tests {
             [3.5 / 32.0, 5.5 / 16.0]
         );
         assert_eq!(mesh.vertices[0].vertex.lightmap_bump_step, 4.0 / 32.0);
+        assert!(mesh.vertices[0].vertex.has_lightmap);
         rewrite_lightmap_uvs(&mut [&mut mesh], &[], &[None], 32, 16);
         assert_eq!(mesh.vertices[0].vertex.lightmap_uv, [0.0; 2]);
         assert_eq!(mesh.vertices[0].vertex.lightmap_bump_step, 0.0);
+        assert!(!mesh.vertices[0].vertex.has_lightmap);
     }
 
     #[test]

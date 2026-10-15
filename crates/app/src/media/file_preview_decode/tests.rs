@@ -668,6 +668,7 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
             tex_t: 128.0,
             texture_size: [128, 64],
             lightmap_uv: [0.0; 2],
+            has_lightmap: false,
             lightmap_bump_step: 0.0,
             blend_alpha: 0.0,
             opacity: 1.0,
@@ -675,6 +676,7 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
         indices: vec![0],
         material_index: 0,
         visibility: MapMeshVisibility::default(),
+        surface_owners: Vec::new(),
     };
     // No resolved material: the face's compiled coordinates still have scale.
     let converted = map_preview::map_mesh_to_model_mesh(&mesh, &[]);
@@ -695,8 +697,8 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
         shader: resolved.shader,
         texture: Some(resolved.texture),
         texture2: None,
-        force_opaque: true,
         render_mode: RenderMode::Opaque,
+        alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
     };
     assert_eq!(
         map_preview::map_mesh_to_model_mesh(&mesh, &[material]).vertices[0].uv,
@@ -1111,7 +1113,7 @@ fn prop_transform_composes_roll_before_yaw() {
 
 #[test]
 fn prop_lighting_adds_visible_sun_in_linear_space() {
-    let lighting = PropPlacementLighting {
+    let lighting = LegacyPropLightingFallback {
         ambient_cube: test_ambient_cube(Vec3::new(0.1, 0.1, 0.1)),
         sun: Some(PropSunLighting {
             direction_to_sun: Vec3::new(0.0, 0.0, 1.0),
@@ -1134,7 +1136,7 @@ fn prop_lighting_adds_visible_sun_in_linear_space() {
 
 #[test]
 fn prop_lighting_keeps_shadowed_vertices_ambient_only() {
-    let lighting = PropPlacementLighting {
+    let lighting = LegacyPropLightingFallback {
         ambient_cube: test_ambient_cube(Vec3::new(0.25, 0.2, 0.15)),
         sun: Some(PropSunLighting {
             direction_to_sun: Vec3::new(0.0, 0.0, 1.0),
@@ -1167,7 +1169,7 @@ fn prop_bake_applies_skin_table_to_material_slot() {
     assert!(bake_prop_placement(
         &placement,
         &asset,
-        PropPlacementLighting {
+        LegacyPropLightingFallback {
             ambient_cube: AmbientCube::WHITE,
             sun: None,
         },
@@ -1197,7 +1199,7 @@ fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
     assert!(bake_prop_placement(
         &placement,
         &asset,
-        PropPlacementLighting {
+        LegacyPropLightingFallback {
             ambient_cube: AmbientCube::WHITE,
             sun: None,
         },
@@ -1249,8 +1251,8 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
             name: "door_skin".to_owned(),
             texture: None,
             texture2: None,
-            force_opaque: true,
             render_mode: RenderMode::Opaque,
+            alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
         },
     );
     let door = gmpublished_domain::scene::map::MapDoor {
@@ -1831,8 +1833,8 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
             name: format!("missing_{index:02}"),
             texture: None,
             texture2: None,
-            force_opaque: true,
             render_mode: RenderMode::Opaque,
+            alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
         })
         .collect::<Vec<_>>();
     materials.push(MaterialSlot {
@@ -1840,8 +1842,8 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
         name: "missing_03".to_owned(),
         texture: None,
         texture2: None,
-        force_opaque: true,
         render_mode: RenderMode::Opaque,
+        alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
     });
 
     let (names, total) = unresolved_material_names_for_debug(&materials);
@@ -1902,7 +1904,6 @@ pub(super) fn test_prop_asset(
         model: Arc::new(ModelData {
             mdl_flags: 0,
             vertex_compression: vformats::mdl::VertexCompression::None,
-            source_frames: Vec::new(),
             illumination_position: Vec3::ZERO,
             hull_min: Vec3::ZERO,
             hull_max: Vec3::splat(1.0),
@@ -1947,7 +1948,6 @@ fn test_loaded_prop_model(
         model: Arc::new(ModelData {
             mdl_flags: 0,
             vertex_compression: vformats::mdl::VertexCompression::None,
-            source_frames: Vec::new(),
             illumination_position: Vec3::ZERO,
             hull_min: Vec3::ZERO,
             hull_max: Vec3::splat(1.0),
@@ -2000,6 +2000,7 @@ fn model_vertex(position: Vec3) -> ModelVertex {
         tangent_t: Vec3::ZERO,
         tangent_sign: 0.0,
         lighting_context: 0,
+        surface_mark: 0,
         normal: Vec3::new(1.0, 0.0, 0.0),
         uv: [0.25, 0.75],
         lightmap_uv: [0.5, 0.5],
@@ -2202,7 +2203,7 @@ fn material_slot_signatures(materials: &[MaterialSlot]) -> Vec<MaterialSlotSigna
                     .texture2
                     .as_ref()
                     .and_then(|texture| texture.rgba_bytes().map(Vec::from)),
-                material.force_opaque,
+                material.alpha_policy.force_opaque(),
                 material.render_mode,
                 material
                     .texture
@@ -2241,4 +2242,260 @@ fn tiny_wav_bytes() -> Vec<u8> {
 
 fn create_vtf_bytes(rgba: &[u8]) -> Vec<u8> {
     fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[rgba])
+}
+
+#[test]
+fn explicit_lightmap_source_survives_zero_uv_coordinates() {
+    use gmpublished_domain::scene::map::{MapMesh, MapMeshVisibility, MapVertex};
+    let mesh = MapMesh {
+        entity: false,
+        vertices: vec![MapVertex {
+            position: Vec3::ZERO,
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tex_s: 0.0,
+            tex_t: 0.0,
+            texture_size: [1, 1],
+            lightmap_uv: [0.0; 2],
+            has_lightmap: true,
+            lightmap_bump_step: 0.0,
+            blend_alpha: 0.0,
+            opacity: 1.0,
+        }],
+        indices: vec![0],
+        material_index: 0,
+        visibility: MapMeshVisibility::default(),
+        surface_owners: Vec::new(),
+    };
+    let vertex = map_preview::map_mesh_to_model_mesh(&mesh, &[]).vertices[0];
+    assert_eq!(vertex.lightmap_uv, [0.0; 2]);
+    assert_ne!(
+        vertex.lighting_mode & crate::media::preview_model::vertex_lighting::LIGHTMAP,
+        0
+    );
+    assert_eq!(
+        vertex.lighting_mode & crate::media::preview_model::vertex_lighting::PREVIEW,
+        0
+    );
+}
+
+fn surface_mark_receiver() -> gmpublished_domain::scene::map::MapMesh {
+    use gmpublished_domain::scene::map::{
+        MapMesh, MapMeshIndexRange, MapMeshSurfaceOwner, MapMeshVisibility, MapSurfaceOwner,
+        MapVertex,
+    };
+    MapMesh {
+        entity: false,
+        vertices: [[-64.0, -64.0], [-64.0, 64.0], [64.0, 64.0], [64.0, -64.0]]
+            .map(|[x, y]| MapVertex {
+                position: Vec3::new(x, y, 0.0),
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                tangent_s: Vec3::new(1.0, 0.0, 0.0),
+                tangent_t: Vec3::new(0.0, 1.0, 0.0),
+                tex_s: x,
+                tex_t: y,
+                texture_size: [128; 2],
+                lightmap_uv: [0.25 + x / 512.0, 0.25 + y / 512.0],
+                has_lightmap: true,
+                lightmap_bump_step: 0.125,
+                blend_alpha: 0.0,
+                opacity: 1.0,
+            })
+            .to_vec(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+        material_index: 0,
+        visibility: MapMeshVisibility {
+            always_visible: vec![MapMeshIndexRange {
+                face: 7,
+                start: 0,
+                count: 6,
+            }],
+            clusters: Vec::new(),
+        },
+        surface_owners: vec![MapMeshSurfaceOwner {
+            index_start: 0,
+            owner: MapSurfaceOwner::World,
+            solid: true,
+            allows_decals: true,
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
+            plane_distance: 0.0,
+            displacement: false,
+        }],
+    }
+}
+
+fn surface_mark() -> gmpublished_domain::scene::map::MapOverlay {
+    use gmpublished_domain::scene::map::{MapDecal, MapSurfaceOwner, MapSurfaceProjector};
+    let world = [surface_mark_receiver()];
+    MapSurfaceProjector::new(&world, &[], &[])
+        .project_decal(
+            &MapDecal {
+                id: 3,
+                material_name: "test/decal".to_owned(),
+                origin: Vec3::ZERO,
+                owner: MapSurfaceOwner::World,
+            },
+            [32.0, 16.0],
+            &[true],
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
+#[test]
+fn surface_marks_retain_receiver_geometry_lighting_and_draw_attachment() {
+    let mark = surface_mark();
+    let primitive = materials::overlay_primitive(&mark, 5);
+    assert_eq!(primitive.indices, mark.indices);
+    assert_eq!(primitive.source, mark.source);
+    assert_eq!(primitive.receiver_mesh, mark.receiver_mesh);
+    assert_eq!(primitive.receiver_range, mark.receiver_range);
+    assert_eq!(
+        primitive.receiver_material_index,
+        mark.receiver_material_index
+    );
+    assert_eq!(primitive.material_index, 5);
+    for (actual, expected) in primitive.vertices.iter().zip(&mark.vertices) {
+        assert_eq!(actual.position, expected.surface.position);
+        assert_eq!(actual.lightmap_uv, expected.surface.lightmap_uv);
+        assert_eq!(
+            actual.lightmap_bump_step,
+            expected.surface.lightmap_bump_step
+        );
+        assert_eq!(actual.tangent_s, expected.surface.tangent_s);
+        assert_eq!(actual.tangent_t, expected.surface.tangent_t);
+        assert_eq!(actual.uv, expected.uv);
+        assert_eq!(
+            actual.lighting_mode,
+            crate::media::preview_model::vertex_lighting::LIGHTMAP
+        );
+    }
+}
+
+#[test]
+fn static_decal_mapping_uses_original_dimensions_after_texture_downsampling() {
+    use gmpublished_domain::scene::map::{MapDecal, MapSurfaceOwner, MapSurfaceProjector};
+    let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("DecalDimensions")
+        .entry("materials/test/decal.vmt",br#"LightmappedGeneric { "$basetexture" "test/decal" "$decal" "1" "$decalscale" "0.5" }"#.to_vec())
+        .entry("materials/test/decal.vtf",fixture_vtf_bytes(64,32,VtfFormat::Rgba8888,&[&vec![255;64*32*4]]))
+        .build()).unwrap();
+    let resolver =
+        MaterialResolver::new(Arc::new(archive), None).with_decoded_texture_max_dimension(1);
+    let world = [surface_mark_receiver()];
+    let projector = MapSurfaceProjector::new(&world, &[], &[]);
+    let mut table = MaterialTable::default();
+    let decal = MapDecal {
+        id: 3,
+        material_name: "test/decal".to_owned(),
+        origin: Vec3::ZERO,
+        owner: MapSurfaceOwner::World,
+    };
+    let (world, sky) =
+        materials::resolve_map_decals(&[decal], &projector, &[true], &resolver, &mut table);
+    assert!(sky.overlays.is_empty());
+    assert_eq!(world.skipped_count, 0);
+    assert_eq!(world.overlays.len(), 1);
+    let texture = table.slots()[0].texture.as_ref().unwrap();
+    assert_eq!([texture.width, texture.height], [1, 1]);
+    assert_eq!(texture.original_dimensions(), (64, 32));
+    let vertices = &world.overlays[0].vertices;
+    let max = vertices
+        .iter()
+        .map(|vertex| vertex.position[0])
+        .max_by(f32::total_cmp)
+        .unwrap();
+    let min = vertices
+        .iter()
+        .map(|vertex| vertex.position[0])
+        .min_by(f32::total_cmp)
+        .unwrap();
+    assert!((max - min - 32.0).abs() < 1e-6);
+}
+
+#[test]
+fn surface_mark_statistics_count_authored_sources_instead_of_receiver_fragments() {
+    use gmpublished_domain::scene::map::MapSurfaceMarkSource;
+    let mut first = materials::overlay_primitive(&surface_mark(), 0);
+    first.source = MapSurfaceMarkSource::Overlay { index: 0, id: 11 };
+    let mut second = first.clone();
+    second.receiver_face = 8;
+    let mut third = first.clone();
+    third.source = MapSurfaceMarkSource::Decal { entity_index: 11 };
+    let mut fourth = first.clone();
+    fourth.source = MapSurfaceMarkSource::Overlay { index: 1, id: 11 };
+    assert_eq!(
+        materials::authored_surface_mark_count(&[first, second, third, fourth]),
+        3
+    );
+}
+
+#[test]
+fn unavailable_surface_mark_material_is_counted_once_across_fragments() {
+    let resolver = MaterialResolver::new(
+        Arc::new(PreviewArchive::from_gma(GmaFixtureBuilder::new("MissingDecal").build()).unwrap()),
+        None,
+    );
+    let first = surface_mark();
+    let mut second = first.clone();
+    second.receiver_face = 8;
+    let baked =
+        materials::resolve_map_overlays(&[first, second], &resolver, &mut MaterialTable::default());
+    assert_eq!(baked.skipped_count, 1);
+    assert!(baked.overlays.is_empty());
+}
+
+#[test]
+fn compacted_door_indices_remap_surface_mark_geometry_and_omit_unavailable_owners() {
+    use crate::media::preview_model::{DoorInstance, DoorSounds};
+    use gmpublished_domain::scene::map::{
+        MapDoorClass, MapDoorMotion, MapReceiverMesh, MapSurfaceMarkSource, MapSurfaceOwner,
+    };
+    let door = DoorInstance {
+        source_index: 5,
+        brush_collision: None,
+        class: MapDoorClass::FuncDoor,
+        origin: Vec3::ZERO,
+        angles: Vec3::ZERO,
+        local_bounds_min: Vec3::ZERO,
+        local_bounds_max: Vec3::ZERO,
+        visibility: MapVisibilityBucket::Always,
+        initial_progress: 0.0,
+        auto_close_after: None,
+        motion: MapDoorMotion::Linear {
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            distance: 64.0,
+            speed: 64.0,
+        },
+        sounds: DoorSounds::default(),
+        meshes: Vec::new(),
+    };
+    let mut available = materials::overlay_primitive(&surface_mark(), 0);
+    available.owner = MapSurfaceOwner::Door { door_index: 5 };
+    available.receiver_mesh = MapReceiverMesh::Door {
+        door_index: 5,
+        mesh_index: 2,
+    };
+    let mut missing = available.clone();
+    missing.owner = MapSurfaceOwner::Door { door_index: 1 };
+    missing.receiver_mesh = MapReceiverMesh::Door {
+        door_index: 1,
+        mesh_index: 0,
+    };
+    missing.source = MapSurfaceMarkSource::Decal { entity_index: 20 };
+    let mut world = vec![available, missing.clone(), missing];
+    assert_eq!(
+        map_preview::remap_surface_mark_doors(&mut world, &mut Vec::new(), &[door]),
+        1
+    );
+    assert_eq!(world.len(), 1);
+    assert_eq!(world[0].owner, MapSurfaceOwner::Door { door_index: 0 });
+    assert_eq!(
+        world[0].receiver_mesh,
+        MapReceiverMesh::Door {
+            door_index: 0,
+            mesh_index: 2
+        }
+    );
 }

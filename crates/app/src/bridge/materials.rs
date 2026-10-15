@@ -11,11 +11,15 @@ use std::{
 
 mod cubemap;
 mod discovery;
+mod frames;
 mod mirror;
+mod parameters;
+use parameters::parse_material_color;
 mod phong;
 mod profile;
 mod prop_lighting;
 mod radiosity;
+mod shader;
 mod sibling_gma;
 mod sky;
 mod surface;
@@ -27,13 +31,14 @@ pub use cubemap::{
 pub use mirror::MirrorMaterial;
 pub use phong::{PhongMaterial, PhongTexture};
 pub use radiosity::ResolvedSurfaceLighting;
+pub use shader::MaterialShader;
 pub use sky::{PaintedSkyMaterial, SkyMaterial};
-pub use surface::{SurfaceFamily, SurfaceMaterial};
-pub use water::{
-    LightmappedMaterial, LinearTextureFrames, MaterialShader, UnlitMaterial, WaterMaterial,
-    WaterNormalMap,
-};
+#[cfg(test)]
+use surface::DecalParameters;
+pub use surface::{ModelShadingProfile, SurfaceFamily, SurfaceMaterial};
+pub use water::WaterMaterial;
 
+pub use frames::{DecodedTextureFrames, TextureReadTransfer, TextureRole};
 pub use texture::decode_vtf_rgba;
 use texture::{
     bc_supported, decode_vtf_rgba_max, downscale_resolved_texture, force_opaque_alpha,
@@ -263,7 +268,6 @@ pub struct ResolvedMaterialTextures {
     pub(crate) shader: MaterialShader,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) texture2: Option<Arc<ResolvedTexture>>,
-    pub(crate) force_opaque: bool,
     pub(crate) render_mode: RenderMode,
 }
 
@@ -271,7 +275,6 @@ pub struct ResolvedMaterialTextures {
 pub struct ResolvedPrimaryMaterial {
     pub(crate) shader: MaterialShader,
     pub(crate) texture: Arc<ResolvedTexture>,
-    pub(crate) force_opaque: bool,
     pub(crate) render_mode: RenderMode,
 }
 
@@ -281,16 +284,36 @@ pub enum RenderMode {
     Cutout,
     Translucent,
     Additive,
+    Modulate,
 }
 
-impl RenderMode {
+/// Texture opacity interpretation, independent of per-instance blend-queue selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureAlphaPolicy {
+    Opaque,
+    Sampled,
+}
+
+impl TextureAlphaPolicy {
     pub(crate) const fn force_opaque(self) -> bool {
         matches!(self, Self::Opaque)
     }
 }
 
+impl RenderMode {
+    /// Initialize texture-alpha handling before instance draw-queue overrides.
+    pub(crate) const fn texture_alpha_policy(self) -> TextureAlphaPolicy {
+        if matches!(self, Self::Opaque) {
+            TextureAlphaPolicy::Opaque
+        } else {
+            TextureAlphaPolicy::Sampled
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ResolverConfig {
+    hardware_profile: profile::HardwareProfile,
     pakfile: Option<Arc<PakSource>>,
     decoded_texture_max_dimension: Option<u32>,
     decoded_texture_budget: Option<Arc<DecodedTextureBudget>>,
@@ -306,7 +329,7 @@ struct ResolverShared {
     sibling_gmas: OnceLock<SiblingGmaIndex>,
     game_vpks: OnceLock<Vec<VpkArchive>>,
     decoded_texture_cache: Mutex<HashMap<DecodedTextureCacheKey, Arc<ResolvedTexture>>>,
-    normal_map_cache: Mutex<HashMap<water::WaterNormalKey, Arc<WaterNormalMap>>>,
+    frame_texture_cache: Mutex<HashMap<frames::DecodedFramesKey, Arc<DecodedTextureFrames>>>,
     cubemap_cache: Mutex<HashMap<cubemap::CubemapCacheKey, Arc<ResolvedCubemap>>>,
     sound_scripts: OnceLock<SoundScriptLibrary>,
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
@@ -450,6 +473,7 @@ enum DecodedTextureCacheKey {
     Rgba {
         path: ContentPath,
         preserve_alpha: bool,
+        transfer: TextureReadTransfer,
         max_dimension: Option<u32>,
     },
     Bc {
@@ -502,6 +526,7 @@ impl MaterialResolver {
             .unwrap_or_default();
         Self {
             config: ResolverConfig {
+                hardware_profile: profile::HardwareProfile::LDR,
                 pakfile: None,
                 decoded_texture_max_dimension: None,
                 decoded_texture_budget: None,
@@ -515,7 +540,7 @@ impl MaterialResolver {
                 sibling_gmas: OnceLock::new(),
                 game_vpks: OnceLock::new(),
                 decoded_texture_cache: Mutex::new(HashMap::new()),
-                normal_map_cache: Mutex::new(HashMap::new()),
+                frame_texture_cache: Mutex::new(HashMap::new()),
                 cubemap_cache: Mutex::new(HashMap::new()),
                 sound_scripts: OnceLock::new(),
                 resolved_sound_cache: Mutex::new(HashMap::new()),
@@ -645,13 +670,25 @@ impl MaterialResolver {
         let render_mode = material.render_mode();
         let texture = material
             .effective_base_texture()
-            .and_then(|base_texture| self.resolve_texture(base_texture, true))
+            .and_then(|base_texture| {
+                self.resolve_texture_transfer(
+                    base_texture,
+                    true,
+                    shader::base_read_transfer(&material.shader),
+                )
+            })
             .or_else(|| self.mirror_fallback_texture(&material))
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material));
         let texture2 = material
             .parameter("$basetexture2")
-            .and_then(|base_texture| self.resolve_texture(base_texture, true));
+            .and_then(|base_texture| {
+                self.resolve_texture_transfer(
+                    base_texture,
+                    true,
+                    shader::base_read_transfer(&material.shader),
+                )
+            });
 
         let shader = self.resolve_shader(
             &material,
@@ -672,7 +709,6 @@ impl MaterialResolver {
                 shader,
                 texture,
                 texture2,
-                force_opaque: render_mode.force_opaque(),
                 render_mode,
             },
         )
@@ -689,7 +725,13 @@ impl MaterialResolver {
         let render_mode = material.render_mode();
         let texture = material
             .effective_base_texture()
-            .and_then(|base_texture| self.resolve_texture(base_texture, true))
+            .and_then(|base_texture| {
+                self.resolve_texture_transfer(
+                    base_texture,
+                    true,
+                    shader::base_read_transfer(&material.shader),
+                )
+            })
             .or_else(|| self.mirror_fallback_texture(&material))
             .or_else(|| self.water_fallback_texture(&material))
             .or_else(|| self.envmap_fallback_texture(&material))?;
@@ -700,7 +742,6 @@ impl MaterialResolver {
         Some(ResolvedPrimaryMaterial {
             shader,
             texture,
-            force_opaque: render_mode.force_opaque(),
             render_mode,
         })
     }
@@ -715,12 +756,17 @@ impl MaterialResolver {
         if let Some(patch) = document.patch() {
             let mut material = self
                 .effective_patch_include(&patch.include, depth, visited_includes)
-                .unwrap_or_else(|| EffectiveMaterial::from_document(&document));
+                .unwrap_or_else(|| {
+                    EffectiveMaterial::with_profile(&document, self.config.hardware_profile)
+                });
             material.apply_patch_values(&document, &patch);
             return Some(material);
         }
 
-        Some(EffectiveMaterial::from_document(&document))
+        Some(EffectiveMaterial::with_profile(
+            &document,
+            self.config.hardware_profile,
+        ))
     }
 
     fn effective_patch_include(
@@ -757,6 +803,19 @@ impl MaterialResolver {
         base_texture: &str,
         preserve_alpha: bool,
     ) -> Option<Arc<ResolvedTexture>> {
+        self.resolve_texture_transfer(
+            base_texture,
+            preserve_alpha,
+            TextureReadTransfer::SrgbToLinear,
+        )
+    }
+
+    fn resolve_texture_transfer(
+        &self,
+        base_texture: &str,
+        preserve_alpha: bool,
+        transfer: TextureReadTransfer,
+    ) -> Option<Arc<ResolvedTexture>> {
         let texture_path = texture_path(base_texture)?;
         // Include the size cap in the shared cache key or a bounded resolver can receive
         // an uncapped decode.
@@ -774,6 +833,7 @@ impl MaterialResolver {
         let rgba_cache_key = DecodedTextureCacheKey::Rgba {
             path: texture_path.clone(),
             preserve_alpha,
+            transfer,
             max_dimension,
         };
         if let Some(texture) = self.cached_decoded_texture(&rgba_cache_key) {
@@ -804,10 +864,13 @@ impl MaterialResolver {
                     );
                     texture.flags = Some(decoded.flags);
                     texture.reflectivity_bits = Some(decoded.reflectivity_bits);
-                    let texture = with_generated_mip_chain(downscale_resolved_texture(
-                        texture,
-                        self.config.decoded_texture_max_dimension,
-                    ));
+                    let texture = with_generated_mip_chain(
+                        downscale_resolved_texture(
+                            texture,
+                            self.config.decoded_texture_max_dimension,
+                        ),
+                        transfer,
+                    );
                     self.cache_decoded_texture(rgba_cache_key.clone(), texture)
                 }
                 Err(error) => {
@@ -1188,17 +1251,27 @@ impl SourceRef<'_> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EffectiveMaterial {
+    profile: profile::HardwareProfile,
     source: vformats::keyvalues::KvDocument<'static>,
     shader: String,
     parameters: BTreeMap<String, String>,
-    proxies: Vec<water::MaterialProxy>,
+    proxies: Vec<parameters::MaterialProxy>,
 }
 
 impl EffectiveMaterial {
+    #[cfg(test)]
     fn from_document(document: &vformats::vmt::VmtDocument<'_>) -> Self {
+        Self::with_profile(document, profile::HardwareProfile::LDR)
+    }
+
+    fn with_profile(
+        document: &vformats::vmt::VmtDocument<'_>,
+        profile: profile::HardwareProfile,
+    ) -> Self {
         let source = profile::owned(&document.kv);
-        let (parameters, proxies) = profile::resolve(&source, &document.shader);
+        let (parameters, proxies) = profile::resolve(&source, &document.shader, profile);
         Self {
+            profile,
             source,
             shader: document.shader.to_string(),
             parameters,
@@ -1242,7 +1315,7 @@ impl EffectiveMaterial {
             RenderMode::Additive
         } else if vmt_bool(self.parameter("$translucent"))
             || vmt_bool(self.parameter("$vertexalpha"))
-            || water::scalar(self.parameter("$alpha"), 1.0) < 1.0
+            || parameters::scalar(self.parameter("$alpha"), 1.0) < 1.0
         {
             RenderMode::Translucent
         } else if vmt_bool(self.parameter("$alphatest")) {
@@ -1263,7 +1336,8 @@ impl EffectiveMaterial {
                 profile::merge(&mut self.source, block, insert);
             }
         }
-        (self.parameters, self.proxies) = profile::resolve(&self.source, &self.shader);
+        (self.parameters, self.proxies) =
+            profile::resolve(&self.source, &self.shader, self.profile);
     }
 }
 
@@ -1283,7 +1357,7 @@ fn is_water_shader(shader: &str) -> bool {
 
 fn water_fog_rgba(value: Option<&str>) -> [u8; 4] {
     let linear = value
-        .and_then(parse_water_fog_color)
+        .and_then(parse_material_color)
         .unwrap_or(DEFAULT_WATER_FOG_LINEAR);
     [
         linear_to_srgb_byte(linear[0]),
@@ -1291,36 +1365,6 @@ fn water_fog_rgba(value: Option<&str>) -> [u8; 4] {
         linear_to_srgb_byte(linear[2]),
         255,
     ]
-}
-
-fn parse_water_fog_color(value: &str) -> Option<Vec3> {
-    let trimmed = value.trim();
-    let (inner, scale) = if let Some(inner) = bracketed_value(trimmed, '[', ']') {
-        (inner, 1.0)
-    } else if let Some(inner) = bracketed_value(trimmed, '{', '}') {
-        (inner, 1.0 / 255.0)
-    } else {
-        return None;
-    };
-
-    let mut components = inner
-        .split(|char: char| char.is_ascii_whitespace() || char == ',')
-        .filter(|component| !component.is_empty())
-        .map(str::parse::<f32>);
-    let red = components.next()?.ok()? * scale;
-    let green = components.next()?.ok()? * scale;
-    let blue = components.next()?.ok()? * scale;
-    [red, green, blue]
-        .into_iter()
-        .all(f32::is_finite)
-        .then_some(Vec3::new(red, green, blue))
-}
-
-fn bracketed_value(value: &str, open: char, close: char) -> Option<&str> {
-    value
-        .strip_prefix(open)
-        .and_then(|value| value.strip_suffix(close))
-        .map(str::trim)
 }
 
 fn linear_to_srgb_byte(linear: f32) -> u8 {

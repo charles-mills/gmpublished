@@ -20,9 +20,9 @@ use rodio::Source as _;
 use crate::bridge::materials::{MaterialResolver, RenderMode, ResolvedMaterialTextures};
 use crate::media::preview_model::{
     DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot, ModelPreview, ModelStats,
-    OverlayPrimitive, OverlayVertex, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot,
-    ParticlePreview, ParticleSystemInfo, PreviewContent, PreviewData, PreviewLoadError,
-    PreviewLoadStage, PreviewRequest, RenderScene, Skybox, SkyboxFace, normalize_particle_material,
+    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot, ParticlePreview,
+    ParticleSystemInfo, PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage,
+    PreviewRequest, RenderScene, Skybox, SkyboxFace, normalize_particle_material,
 };
 use crate::theme::Tokens;
 
@@ -35,8 +35,8 @@ mod syntax;
 use crate::media::preview_model::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
 #[cfg(test)]
 use map_preview::{
-    LoadedPropModel, LoadedPropPhysics, MaterialTable, PropBakeSkipStats, PropModelAsset,
-    PropPlacementLighting, PropSunLighting, StaticPropLightingInputs,
+    LegacyPropLightingFallback, LoadedPropModel, LoadedPropPhysics, MaterialTable,
+    PropBakeSkipStats, PropModelAsset, PropSunLighting, StaticPropLightingInputs,
     bake_map_doors_with_prop_model_loader, bake_prop_placement, bake_static_props,
     bake_static_props_with_loaded_model_cache, bake_static_props_with_loader,
     bake_static_props_with_loader_serial, map_preview_data_with_prop_model_loader,
@@ -617,12 +617,13 @@ fn model_preview_data(
                 name: name.clone(),
                 texture,
                 texture2: None,
-                force_opaque: resolved
-                    .as_ref()
-                    .is_none_or(|material| material.force_opaque),
                 render_mode: resolved
                     .as_ref()
                     .map_or(RenderMode::Opaque, |material| material.render_mode),
+                alpha_policy: resolved
+                    .as_ref()
+                    .map_or(RenderMode::Opaque, |material| material.render_mode)
+                    .texture_alpha_policy(),
             }
         })
         .collect::<Vec<_>>();
@@ -633,8 +634,8 @@ fn model_preview_data(
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,
-            force_opaque: false,
             render_mode: RenderMode::Translucent,
+            alpha_policy: RenderMode::Translucent.texture_alpha_policy(),
         });
     }
 

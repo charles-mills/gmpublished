@@ -1,9 +1,10 @@
 use super::{SunView, sun_quads};
 use crate::features::file_preview::viewer3d::pipeline::targets::RenderTargets;
 use crate::features::file_preview::viewer3d::pipeline::{
-    MapPreview, RenderMode, Uniforms, UploadedModel, wgpu,
+    MapPreview, RenderMode, Uniforms, ViewerScene, wgpu,
 };
 use gmpublished_domain::math::Vec3;
+use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -17,10 +18,12 @@ struct Params {
     flags: [u32; 4],
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Resources {
     query_layout: wgpu::BindGroupLayout,
-    draw_layout: wgpu::BindGroupLayout,
+    draw: Arc<DrawResources>,
+    sample_count: u32,
+    target_format: wgpu::TextureFormat,
     query_world: wgpu::ComputePipeline,
     query_sky: wgpu::ComputePipeline,
     opaque: wgpu::RenderPipeline,
@@ -35,31 +38,33 @@ impl Resources {
         material: &wgpu::BindGroupLayout,
         sample_count: u32,
     ) -> Self {
-        let uniform = |visibility| wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
-            },
-            count: None,
-        };
-        let state = |visibility, read_only| wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only },
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(16),
-            },
-            count: None,
-        };
+        let draw = Arc::new(DrawResources::new(device, material));
+        Self::new_for_samples(device, format, sample_count, draw)
+    }
+
+    pub fn with_sample_count(&self, device: &wgpu::Device, sample_count: u32) -> Self {
+        if self.sample_count == sample_count {
+            return self.clone();
+        }
+        Self::new_for_samples(
+            device,
+            self.target_format,
+            sample_count,
+            Arc::clone(&self.draw),
+        )
+    }
+
+    fn new_for_samples(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        draw: Arc<DrawResources>,
+    ) -> Self {
         let query_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sun.depth_query.layout"),
             entries: &[
-                uniform(wgpu::ShaderStages::COMPUTE),
-                state(wgpu::ShaderStages::COMPUTE, false),
+                uniform_layout_entry(wgpu::ShaderStages::COMPUTE),
+                state_layout_entry(wgpu::ShaderStages::COMPUTE, false),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -70,13 +75,6 @@ impl Resources {
                     },
                     count: None,
                 },
-            ],
-        });
-        let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("sun.draw.layout"),
-            entries: &[
-                uniform(wgpu::ShaderStages::VERTEX),
-                state(wgpu::ShaderStages::VERTEX, true),
             ],
         });
         let query_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -104,27 +102,18 @@ impl Resources {
         };
         let query_world = compute("query_world");
         let query_sky = compute("query_sky");
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("sun.draw.shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
-        });
-        let draw_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("sun.draw.pipeline_layout"),
-            bind_group_layouts: &[&draw_layout, material],
-            push_constant_ranges: &[],
-        });
         let render = |blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("sun.draw.pipeline"),
-                layout: Some(&draw_pipeline_layout),
+                layout: Some(&draw.pipeline_layout),
                 vertex: wgpu::VertexState {
-                    module: &shader,
+                    module: &draw.shader,
                     entry_point: Some("vs_main"),
                     compilation_options: Default::default(),
                     buffers: &[],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shader,
+                    module: &draw.shader,
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
@@ -162,7 +151,9 @@ impl Resources {
         }));
         Self {
             query_layout,
-            draw_layout,
+            draw,
+            sample_count,
+            target_format: format,
             query_world,
             query_sky,
             opaque,
@@ -173,10 +164,79 @@ impl Resources {
 }
 
 #[derive(Debug)]
+struct DrawResources {
+    layout: wgpu::BindGroupLayout,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+}
+
+impl DrawResources {
+    fn new(device: &wgpu::Device, material: &wgpu::BindGroupLayout) -> Self {
+        let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sun.draw.layout"),
+            entries: &[
+                uniform_layout_entry(wgpu::ShaderStages::VERTEX),
+                state_layout_entry(wgpu::ShaderStages::VERTEX, true),
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sun.draw.shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
+        });
+        let draw_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sun.draw.pipeline_layout"),
+            bind_group_layouts: &[&draw_layout, material],
+            push_constant_ranges: &[],
+        });
+        Self {
+            layout: draw_layout,
+            shader,
+            pipeline_layout: draw_pipeline_layout,
+        }
+    }
+}
+
+fn uniform_layout_entry(visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
+        },
+        count: None,
+    }
+}
+
+fn state_layout_entry(
+    visibility: wgpu::ShaderStages,
+    read_only: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding: 1,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(16),
+        },
+        count: None,
+    }
+}
+
+#[derive(Debug)]
+struct DepthQuery {
+    depth: wgpu::TextureView,
+    layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+}
+
+#[derive(Debug)]
 struct Entry {
     uniforms: wgpu::Buffer,
     state: wgpu::Buffer,
-    query_group: Option<wgpu::BindGroup>,
+    query: Option<DepthQuery>,
     draw_group: wgpu::BindGroup,
     materials: [usize; 2],
     modes: [RenderMode; 2],
@@ -236,7 +296,7 @@ impl Frame {
             });
             let draw_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("sun.draw.inputs"),
-                layout: &resources.draw_layout,
+                layout: &resources.draw.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -253,7 +313,7 @@ impl Frame {
                 uniforms,
                 state,
                 draw_group,
-                query_group: None,
+                query: None,
                 materials: [0; 2],
                 modes: [RenderMode::Opaque; 2],
                 layers: [false; 2],
@@ -315,27 +375,41 @@ impl Frame {
                 flags: [0, 0, u32::from(skybox.is_some()), 0],
             };
             queue.write_buffer(&entry.uniforms, 0, bytemuck::bytes_of(&params));
-            entry.query_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("sun.depth_query.inputs"),
-                layout: &resources.query_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: entry.uniforms.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: entry.state.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&targets.depth),
-                    },
-                ],
-            }));
-            entry.materials = *slots;
-            entry.modes = slots.map(|slot| map.scene.materials[slot].render_mode);
-            entry.layers = quads.map(|quad| quad.is_some());
+            if entry.query.as_ref().is_none_or(|query| {
+                query.depth != targets.depth || query.layout != resources.query_layout
+            }) {
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sun.depth_query.inputs"),
+                    layout: &resources.query_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: entry.uniforms.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: entry.state.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&targets.depth),
+                        },
+                    ],
+                });
+                entry.query = Some(DepthQuery {
+                    depth: targets.depth.clone(),
+                    layout: resources.query_layout.clone(),
+                    bind_group,
+                });
+            }
+            entry.materials = slots.map(|slot| slot.unwrap_or(0));
+            entry.modes = slots.map(|slot| {
+                slot.map_or(RenderMode::Opaque, |slot| {
+                    map.scene.materials[slot].render_mode
+                })
+            });
+            entry.layers =
+                std::array::from_fn(|index| slots[index].is_some() && quads[index].is_some());
         }
     }
 
@@ -354,7 +428,15 @@ impl Frame {
         });
         for entry in &self.entries {
             if entry.layers.iter().any(|layer| *layer) {
-                pass.set_bind_group(0, entry.query_group.as_ref().unwrap(), &[]);
+                pass.set_bind_group(
+                    0,
+                    &entry
+                        .query
+                        .as_ref()
+                        .expect("prepared Sun depth query")
+                        .bind_group,
+                    &[],
+                );
                 pass.dispatch_workgroups(1, 1, 1);
             }
         }
@@ -364,7 +446,7 @@ impl Frame {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         resources: &Resources,
-        upload: &UploadedModel,
+        upload: &ViewerScene,
         targets: &RenderTargets,
     ) {
         if self.entries.is_empty() {
@@ -394,9 +476,14 @@ impl Frame {
                     RenderMode::Opaque | RenderMode::Cutout => &resources.opaque,
                     RenderMode::Translucent => &resources.transparent,
                     RenderMode::Additive => &resources.additive,
+                    RenderMode::Modulate => continue,
                 });
                 pass.set_bind_group(0, &entry.draw_group, &[]);
-                pass.set_bind_group(1, &upload.material_bind_groups[entry.materials[layer]], &[]);
+                pass.set_bind_group(
+                    1,
+                    &upload.assets.material_bind_groups[entry.materials[layer]],
+                    &[],
+                );
                 pass.draw(0..6, layer as u32..layer as u32 + 1);
             }
         }

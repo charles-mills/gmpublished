@@ -1,13 +1,30 @@
 use super::wgpu;
+const DIRECTIONAL_PIXEL_DISTANCE: f32 = 10_000.0;
+const MODEL_MATERIAL_RIM: u32 = 1;
+const MODEL_MATERIAL_PIXEL_LIGHTING: u32 = 2;
+const MODEL_DIFFUSE_WARP: u32 = 1;
+const MODEL_SPECULAR_WARP: u32 = 2;
+const MODEL_EXPONENT_MAP: u32 = 4;
+const MODEL_HALF_LAMBERT: u32 = 8;
+const MODEL_BASE_ALPHA_MASK: u32 = 16;
+const MODEL_INVERT_MASK: u32 = 32;
+mod state;
 use crate::media::preview_model::{
     ModelLightKind, ModelLightingContext, ModelLightingHistory, ModelLocalLight,
 };
+pub(super) use state::State;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct ModelMaterialUniform {
-    flags: [u32; 4],
-    params: [f32; 4],
+    skin: u32,
+    normal: u32,
+    features: u32,
+    lighting: u32,
+    exponent: f32,
+    reserved0: f32,
+    boost: f32,
+    reserved1: f32,
     fresnel: [f32; 4],
     tint: [f32; 4],
     rim: [f32; 4],
@@ -16,21 +33,12 @@ pub(super) struct ModelMaterialUniform {
 impl ModelMaterialUniform {
     pub(super) fn new(surface: Option<&crate::bridge::materials::SurfaceMaterial>) -> Self {
         let phong = surface.and_then(|surface| surface.phong.as_deref());
-        let enabled =
-            surface.is_some_and(crate::bridge::materials::SurfaceMaterial::uses_skin_shader);
-        let texture_available = |texture: Option<&crate::bridge::materials::PhongTexture>| {
-            texture.is_some_and(|texture| texture.texture.is_some())
-        };
-        let diffuse_warp = phong
-            .is_some_and(|phong| texture_available(phong.diffuse_warp.as_ref()))
-            && (enabled
-                || surface.is_none_or(|surface| surface.effective_emission_mode(true) != 3));
-        let specular_warp =
-            phong.is_some_and(|phong| texture_available(phong.specular_warp.as_ref()));
-        let exponent_map =
-            phong.is_some_and(|phong| texture_available(phong.exponent_texture.as_ref()));
-        let half_lambert = enabled || phong.is_some_and(|phong| phong.half_lambert == Some(true));
-        let base_mask = phong.is_some_and(|phong| phong.base_alpha_mask == Some(true));
+        let profile: crate::bridge::materials::ModelShadingProfile = surface.map_or_else(
+            Default::default,
+            crate::bridge::materials::SurfaceMaterial::model_shading_profile,
+        );
+        let enabled = profile.skin;
+        let exponent_map = profile.exponent_map;
         let fresnel = phong
             .and_then(|phong| phong.fresnel_ranges)
             .unwrap_or([0.0; 3]);
@@ -45,26 +53,23 @@ impl ModelMaterialUniform {
                 }
             });
         Self {
-            flags: [
-                u32::from(enabled),
-                u32::from(surface.is_some_and(|surface| surface.normal.is_some())),
-                u32::from(diffuse_warp)
-                    | (u32::from(specular_warp) << 1)
-                    | (u32::from(exponent_map) << 2)
-                    | (u32::from(half_lambert) << 3)
-                    | (u32::from(base_mask) << 4)
-                    | (u32::from(phong.is_some_and(|phong| phong.invert_mask == Some(true))) << 5),
-                u32::from(enabled && phong.is_some_and(|phong| phong.rim.enabled == Some(true))),
-            ],
-            params: [
-                phong
-                    .and_then(|phong| phong.exponent)
-                    .filter(|v| *v > 0.0)
-                    .unwrap_or(-1.0),
-                0.0,
-                phong.and_then(|phong| phong.boost).unwrap_or(1.0),
-                0.0,
-            ],
+            skin: u32::from(enabled),
+            normal: u32::from(profile.normal),
+            features: (u32::from(profile.diffuse_warp) * MODEL_DIFFUSE_WARP)
+                | (u32::from(profile.specular_warp) * MODEL_SPECULAR_WARP)
+                | (u32::from(exponent_map) * MODEL_EXPONENT_MAP)
+                | (u32::from(profile.half_lambert) * MODEL_HALF_LAMBERT)
+                | (u32::from(profile.base_alpha_mask) * MODEL_BASE_ALPHA_MASK)
+                | (u32::from(profile.invert_mask) * MODEL_INVERT_MASK),
+            lighting: (u32::from(profile.rim) * MODEL_MATERIAL_RIM)
+                | (u32::from(profile.uses_pixel_lighting()) * MODEL_MATERIAL_PIXEL_LIGHTING),
+            exponent: phong
+                .and_then(|phong| phong.exponent)
+                .filter(|value| *value > 0.0)
+                .unwrap_or(-1.0),
+            reserved0: 0.0,
+            boost: phong.and_then(|phong| phong.boost).unwrap_or(1.0),
+            reserved1: 0.0,
             fresnel: [fresnel[0], fresnel[1], fresnel[2], 0.0],
             tint: [tint[0], tint[1], tint[2], 0.0],
             rim: [
@@ -130,7 +135,7 @@ impl From<&ModelLocalLight> for GpuModelLight {
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct GpuModelContext {
     ambient: [[f32; 4]; 6],
-    lights: [GpuModelLight; 4],
+    lights: [GpuModelLight; crate::media::preview_model::MODEL_LOCAL_LIGHT_LIMIT],
     counts: [u32; 4],
 }
 
@@ -138,9 +143,29 @@ pub(super) fn encode(
     contexts: &[ModelLightingContext],
     styles: &[f32; 128],
     time: f64,
-    mut histories: Option<&mut [ModelLightingHistory]>,
+    histories: Option<&mut [ModelLightingHistory]>,
     active_contexts: Option<&[bool]>,
 ) -> Vec<GpuModelContext> {
+    let mut data = Vec::with_capacity(contexts.len() + 1);
+    encode_into(
+        contexts,
+        styles,
+        time,
+        histories,
+        active_contexts,
+        &mut data,
+    );
+    data
+}
+
+pub(super) fn encode_into(
+    contexts: &[ModelLightingContext],
+    styles: &[f32; 128],
+    time: f64,
+    mut histories: Option<&mut [ModelLightingHistory]>,
+    active_contexts: Option<&[bool]>,
+    data: &mut Vec<GpuModelContext>,
+) {
     if let Some(histories) = &histories {
         assert_eq!(
             contexts.len(),
@@ -155,22 +180,34 @@ pub(super) fn encode(
             "lighting visibility context identity changed"
         );
     }
-    let mut data = Vec::with_capacity(contexts.len() + 1);
+    data.clear();
+    data.reserve(contexts.len() + 1);
     data.push(GpuModelContext::default());
     for (index, context) in contexts.iter().enumerate() {
         let history = histories
             .as_deref_mut()
             .filter(|_| active_contexts.is_none_or(|active| active[index]));
-        let evaluated = history.map_or_else(
-            || context.evaluate(styles),
-            |histories| context.evaluate_with_history(styles, time, &mut histories[index]),
-        );
-        let (ambient, lights) = match &evaluated {
-            Ok(Some((ambient, lights))) => (ambient, lights.as_slice()),
-            _ => (&context.ambient_cube, context.lights.as_slice()),
+        let evaluated = context.source.runtime_seed().map(|_| {
+            history.map_or_else(
+                || context.evaluate(styles),
+                |histories| context.evaluate_with_history(styles, time, &mut histories[index]),
+            )
+        });
+        let snapshot = match &evaluated {
+            Some(Ok(snapshot)) => snapshot,
+            Some(Err(error)) => {
+                log::error!(
+                    "model lighting evaluation {:?}: {error:?}; using diagnosed fallback",
+                    context.model_path
+                );
+                context.source.fallback_snapshot()
+            }
+            None => context.source.fallback_snapshot(),
         };
+        let ambient = &snapshot.ambient_cube;
+        let lights = snapshot.lights.as_slice();
         assert!(
-            lights.len() <= 4,
+            lights.len() <= crate::media::preview_model::MODEL_LOCAL_LIGHT_LIMIT,
             "model context exceeds native local-light slots"
         );
         let mut item = GpuModelContext {
@@ -183,13 +220,13 @@ pub(super) fn encode(
             if light.kind == ModelLightKind::Directional {
                 // ShaderAPI uploads a finite light position to pixel shaders;
                 // its vertex-light constants use the direction independently.
-                let position = context.lighting_origin - light.direction * 10_000.0;
+                let position =
+                    context.lighting_origin - light.direction * DIRECTIONAL_PIXEL_DISTANCE;
                 target.position_kind[..3].copy_from_slice(&position.to_array());
             }
         }
         data.push(item);
     }
-    data
 }
 
 pub(super) fn upload(device: &wgpu::Device, data: &[GpuModelContext]) -> wgpu::Buffer {
@@ -247,12 +284,52 @@ mod tests {
             Some(&mut histories),
             Some(&[true, false]),
         );
-        // The first context last drew at0.0, so its filter covers the full0.4
-        // seconds. The second context still returns current instantaneous data
-        // without advancing its hidden renderable history.
         assert_eq!(data[1].ambient[0][0], (-2.0_f32).exp());
         assert_eq!(data[2].ambient[0][0], 1.0);
         assert_eq!(histories[1], hidden_history);
+    }
+
+    #[test]
+    fn packed_vertex_lighting_flags_match_shader_constants() {
+        use crate::media::preview_model::vertex_lighting;
+        let module =
+            naga::front::wgsl::parse_str(super::super::super::MODEL_SHADER_SOURCE).unwrap();
+        for (name, expected) in [
+            ("MODEL_DIFFUSE_WARP", MODEL_DIFFUSE_WARP),
+            ("MODEL_SPECULAR_WARP", MODEL_SPECULAR_WARP),
+            ("MODEL_EXPONENT_MAP", MODEL_EXPONENT_MAP),
+            ("MODEL_HALF_LAMBERT", MODEL_HALF_LAMBERT),
+            ("MODEL_BASE_ALPHA_MASK", MODEL_BASE_ALPHA_MASK),
+            ("MODEL_INVERT_MASK", MODEL_INVERT_MASK),
+            ("MODEL_MATERIAL_RIM", MODEL_MATERIAL_RIM),
+            (
+                "MODEL_MATERIAL_PIXEL_LIGHTING",
+                MODEL_MATERIAL_PIXEL_LIGHTING,
+            ),
+            (
+                "LIGHTING_LINEAR_ILLUMINATION",
+                vertex_lighting::LINEAR_ILLUMINATION,
+            ),
+            ("LIGHTING_STATIC_PROP", vertex_lighting::STATIC_PROP),
+            ("LIGHTING_RUNTIME_CONTEXT", vertex_lighting::RUNTIME_CONTEXT),
+            ("LIGHTING_MODEL_DRAW", vertex_lighting::MODEL_DRAW),
+            ("LIGHTING_LIGHTMAP", vertex_lighting::LIGHTMAP),
+            ("LIGHTING_PREVIEW", vertex_lighting::PREVIEW),
+            (
+                "LIGHTING_LEGACY_VERTEX_COLOR",
+                vertex_lighting::LEGACY_VERTEX_COLOR,
+            ),
+        ] {
+            let (_, constant) = module
+                .constants
+                .iter()
+                .find(|(_, constant)| constant.name.as_deref() == Some(name))
+                .unwrap();
+            assert!(
+                matches!(module.global_expressions[constant.init], naga::Expression::Literal(naga::Literal::U32(value)) if value == expected),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -285,8 +362,14 @@ mod tests {
                 "ModelMaterial",
                 size_of::<ModelMaterialUniform>(),
                 vec![
-                    offset_of!(ModelMaterialUniform, flags),
-                    offset_of!(ModelMaterialUniform, params),
+                    offset_of!(ModelMaterialUniform, skin),
+                    offset_of!(ModelMaterialUniform, normal),
+                    offset_of!(ModelMaterialUniform, features),
+                    offset_of!(ModelMaterialUniform, lighting),
+                    offset_of!(ModelMaterialUniform, exponent),
+                    offset_of!(ModelMaterialUniform, reserved0),
+                    offset_of!(ModelMaterialUniform, boost),
+                    offset_of!(ModelMaterialUniform, reserved1),
                     offset_of!(ModelMaterialUniform, fresnel),
                     offset_of!(ModelMaterialUniform, tint),
                     offset_of!(ModelMaterialUniform, rim),

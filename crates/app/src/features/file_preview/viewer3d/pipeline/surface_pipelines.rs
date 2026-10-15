@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub(super) struct SurfaceRaster {
     pub no_cull: bool,
     pub ignore_z: bool,
+    pub decal_bias: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -13,6 +14,16 @@ pub(super) enum SurfaceBlend {
     Opaque,
     Alpha,
     Additive,
+    Modulate,
+}
+
+impl SurfaceBlend {
+    pub(super) const fn color_transfer(self) -> super::targets::ColorTransfer {
+        match self {
+            Self::Modulate => super::targets::ColorTransfer::Encoded,
+            Self::Opaque | Self::Alpha | Self::Additive => super::targets::ColorTransfer::Linear,
+        }
+    }
 }
 
 impl From<RenderMode> for SurfaceBlend {
@@ -21,6 +32,7 @@ impl From<RenderMode> for SurfaceBlend {
             RenderMode::Opaque | RenderMode::Cutout => Self::Opaque,
             RenderMode::Translucent => Self::Alpha,
             RenderMode::Additive => Self::Additive,
+            RenderMode::Modulate => Self::Modulate,
         }
     }
 }
@@ -54,6 +66,7 @@ impl SurfacePipelineVariants {
                     .map_or_else(SurfaceRaster::default, |surface| SurfaceRaster {
                         no_cull: surface.no_cull,
                         ignore_z: surface.ignore_z,
+                        decal_bias: surface.decal,
                     })
             })
             .collect::<Vec<_>>();
@@ -68,7 +81,7 @@ impl SurfacePipelineVariants {
             ] {
                 for view in [ViewKind::Main, ViewKind::Reflection, ViewKind::Refraction] {
                     for overlay in [false, true] {
-                        if !state.ignore_z && (overlay || !state.no_cull) {
+                        if !state.ignore_z && (overlay || (!state.no_cull && !state.decal_bias)) {
                             continue;
                         }
                         let key = SurfacePipelineKey {
@@ -77,9 +90,9 @@ impl SurfacePipelineVariants {
                             overlay,
                             blend: material.render_mode.into(),
                         };
-                        pipelines.entry(key).or_insert_with(|| {
-                            resources.for_view(view).create_surface_variant(device, key)
-                        });
+                        pipelines
+                            .entry(key)
+                            .or_insert_with(|| resources.create_surface_variant(device, key));
                     }
                 }
             }

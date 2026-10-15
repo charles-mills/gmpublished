@@ -1,6 +1,4 @@
-//! View-local underwater postprocessing reads the completed main image. It
-//! neither samples an attachment being written nor distorts surrounding UI.
-use super::{RenderResources, UploadedModel, wgpu};
+use super::{RenderResources, ViewerScene, wgpu};
 
 #[derive(Debug)]
 pub struct Resources {
@@ -143,7 +141,7 @@ pub fn prepare(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     resources: &RenderResources,
-    upload: &UploadedModel,
+    upload: &ViewerScene,
     primitive: &super::ModelPrimitive,
 ) {
     let eye = super::Vec3::from([
@@ -160,7 +158,7 @@ pub fn prepare(
         *slot = None;
         return;
     };
-    let Some(normal) = upload.screen_refraction_normals.get(&effect.name) else {
+    let Some(normal) = upload.assets.screen_refraction_normals.get(&effect.name) else {
         *slot = None;
         return;
     };

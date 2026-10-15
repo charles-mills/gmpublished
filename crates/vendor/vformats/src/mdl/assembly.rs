@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use super::MdlError;
 use super::studio::{FLAG_STATIC_PROP, Mdl, MdlAnimation};
 use super::vertex_compression::{
-    VertexCompression, source_short2_weights, source_ubyte4_tangent, source_ubyte4_vector,
+    VertexCompression, source_ubyte4_tangent, source_ubyte4_vector,
 };
 use super::vtx::Vtx;
 use super::vvd::{Vvd, VvdVertex};
@@ -32,14 +32,6 @@ pub struct ModelAssemblyOptions {
 /// Authored VVD frame, in original materialized LOD-0 vertex-pool order.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModelSourceVertexFrame {
-    /// Raw model-space authored position and unmodified skinning channels.
-    pub position: [f32; 3],
-    /// Raw VVD weights, before physical-stream quantization.
-    pub weights: [f32; 3],
-    /// Raw authored bone indices for the three weight slots.
-    pub bones: [u8; 3],
-    /// Authored number of populated skinning slots.
-    pub bone_count: u8,
     /// Raw model-space authored normal.
     pub normal: [f32; 3],
     /// Raw authored tangent XYZ and independent handedness W.
@@ -446,10 +438,6 @@ fn assemble_impl(
                 .iter()
                 .enumerate()
                 .map(|(index, vertex)| ModelSourceVertexFrame {
-                    position: vertex.position,
-                    weights: vertex.weights,
-                    bones: vertex.bones,
-                    bone_count: vertex.bone_count,
                     normal: vertex.normal,
                     tangent: vvd.tangents.get(index).copied(),
                 })
@@ -591,17 +579,11 @@ fn prepare_model_geometry_with_options(
         .map(|(index, vertex)| {
             let mut physical = *vertex;
             let mut tangent = vvd.tangents.get(index).copied();
-            if matches!(
-                options.vertex_compression,
-                VertexCompression::SourceUbyte4 | VertexCompression::SourceHardware
-            ) {
+            if options.vertex_compression == VertexCompression::SourceUbyte4 {
                 physical.normal = source_ubyte4_vector(vertex.normal).unwrap_or(vertex.normal);
                 tangent = tangent.map(|frame| source_ubyte4_tangent(frame).unwrap_or(frame));
             }
-            let blend = (options.vertex_compression == VertexCompression::SourceHardware)
-                .then(|| source_hardware_blend(&bone_transforms, &physical))
-                .flatten();
-            model_vertex(&bone_transforms, &physical, tangent, blend, stats)
+            model_vertex(&bone_transforms, &physical, tangent, stats)
         })
         .collect();
     let bounds = bounds_from_vertices(&vertices);
@@ -825,18 +807,9 @@ fn model_vertex(
     bone_transforms: &[Mat4],
     vertex: &VvdVertex,
     tangent: Option<[f32; 4]>,
-    blend: Option<Mat4>,
     stats: &mut MdlStats,
 ) -> ModelVertex {
-    let (position, normal) = blend.map_or_else(
-        || skin_model_vertex(bone_transforms, vertex, stats),
-        |blend| {
-            (
-                mat4_transform_point(blend, vertex.position),
-                mat4_transform_direction(blend, vertex.normal),
-            )
-        },
-    );
+    let (position, normal) = skin_model_vertex(bone_transforms, vertex, stats);
     let tangent_s = tangent
         .filter(|t| {
             t.iter().all(|x| x.is_finite()) && t[3] != 0.0 && t[..3].iter().any(|x| *x != 0.0)
@@ -846,12 +819,7 @@ fn model_vertex(
                 stats.note(AssemblySkip::VertexMissingTangent);
                 [0.0; 3]
             },
-            |t| {
-                blend.map_or_else(
-                    || skin_direction(bone_transforms, vertex, [t[0], t[1], t[2]]),
-                    |blend| mat4_transform_direction(blend, [t[0], t[1], t[2]]),
-                )
-            },
+            |t| skin_direction(bone_transforms, vertex, [t[0], t[1], t[2]]),
         );
     let handedness = tangent.map_or(0.0, |t| if t[3].is_finite() { t[3] } else { 0.0 });
     let tangent_t = [
@@ -867,39 +835,6 @@ fn model_vertex(
         tangent_sign: handedness,
         uv: vertex.uv,
     }
-}
-
-/// Mirror the compiled Source VS: decode two physical weights, reconstruct
-/// the third, blend the three matrices, then transform all vertex channels.
-fn source_hardware_blend(bones: &[Mat4], vertex: &VvdVertex) -> Option<Mat4> {
-    if !(1..=3).contains(&vertex.bone_count)
-        || !array_is_finite(vertex.position)
-        || !array_is_finite(vertex.normal)
-        || vertex.weights.iter().sum::<f32>() <= f32::EPSILON
-    {
-        return None;
-    }
-    let weights = source_short2_weights(vertex.weights)?;
-    let mut matrices = [MAT4_IDENTITY; 3];
-    for slot in 0..3 {
-        if weights[slot] != 0.0 {
-            matrices[slot] = *bones.get(usize::from(vertex.bones[slot]))?;
-            if matrices[slot]
-                .iter()
-                .flatten()
-                .any(|value| !value.is_finite())
-            {
-                return None;
-            }
-        }
-    }
-    Some(std::array::from_fn(|column| {
-        std::array::from_fn(|row| {
-            matrices[0][column][row] * weights[0]
-                + matrices[1][column][row] * weights[1]
-                + matrices[2][column][row] * weights[2]
-        })
-    }))
 }
 
 fn skin_direction(bone_transforms: &[Mat4], vertex: &VvdVertex, direction: [f32; 3]) -> [f32; 3] {
@@ -1171,104 +1106,6 @@ mod tangent_frame_tests {
     }
 
     #[test]
-    fn source_hardware_stream_quantizes_weights_before_sharing_one_blended_frame() {
-        let mut scale = MAT4_IDENTITY;
-        for (axis, column) in scale.iter_mut().take(3).enumerate() {
-            column[axis] = 2.0;
-        }
-        scale[3] = [10.0, 20.0, 30.0, 1.0];
-        let mut rotated = MAT4_IDENTITY;
-        rotated[0] = [0.0, 1.0, 0.0, 0.0];
-        rotated[1] = [-1.0, 0.0, 0.0, 0.0];
-        rotated[3] = [-10.0, -20.0, -30.0, 1.0];
-        let vertex = VvdVertex {
-            weights: [0.3, 0.4, 0.3],
-            bones: [0, 1, 2],
-            bone_count: 3,
-            position: [3.0, -2.0, 4.0],
-            normal: [1.0, 0.0, 0.0],
-            uv: [0.25, 0.75],
-        };
-        let matrices = [MAT4_IDENTITY, scale, rotated];
-        let blend = source_hardware_blend(&matrices, &vertex).unwrap();
-        let first = 9830.0 / 32768.0;
-        let second = 13108.0 / 32768.0;
-        let third = first;
-        let diagonal = first + 2.0 * second;
-        let mut stats = MdlStats::default();
-        let result = model_vertex(
-            &matrices,
-            &vertex,
-            Some([0.0, 1.0, 0.0, -1.0]),
-            Some(blend),
-            &mut stats,
-        );
-        assert_eq!(result.normal, [diagonal, third, 0.0]);
-        assert_eq!(result.tangent_s, [-third, diagonal, 0.0]);
-        assert_eq!(result.tangent_sign, -1.0);
-        assert_eq!(
-            result.position,
-            [
-                3.0 * diagonal + 2.0 * third + 10.0 * (second - third),
-                3.0 * third - 2.0 * diagonal + 20.0 * (second - third),
-                4.0 * (1.0 + second) + 30.0 * (second - third)
-            ]
-        );
-        assert_eq!(vertex.weights, [0.3, 0.4, 0.3]);
-        assert_ne!(
-            result.normal,
-            skin_direction(&matrices, &vertex, vertex.normal)
-        );
-        assert_eq!(result.uv, vertex.uv);
-    }
-
-    #[test]
-    fn source_hardware_blends_matrices_before_large_origin_position_arithmetic() {
-        let matrix = |rotation, position| {
-            local_pose_matrix(LocalBonePose {
-                position,
-                rotation: stored_quat_to_wxyz(rotation),
-            })
-        };
-        let a = matrix(
-            [0.0, 0.0, 0.14943813, 0.9887711],
-            [-2000.17, 3000.8, -100.3],
-        );
-        let b = matrix(
-            [0.0, 0.0, 0.7512804, 0.65998316],
-            [-1500.95, 3300.45, -700.33],
-        );
-        let c = matrix(
-            [0.0, 0.43496552, 0.0, 0.90044713],
-            [-3200.1, 2000.33, 500.88],
-        );
-        let vertex = VvdVertex {
-            weights: [0.25, 0.5, 0.25],
-            bones: [0, 1, 2],
-            bone_count: 3,
-            position: [105.7, 33.9, -150.33],
-            normal: [0.0, 0.0, 1.0],
-            uv: [0.0; 2],
-        };
-        let matrices = [a, b, c];
-        let actual = mat4_transform_point(
-            source_hardware_blend(&matrices, &vertex).unwrap(),
-            vertex.position,
-        );
-        let previous = skin_model_vertex(&matrices, &vertex, &mut MdlStats::default()).0;
-        assert_ne!(
-            actual, previous,
-            "post-transform blending loses the Source arithmetic order"
-        );
-        assert!(
-            actual
-                .into_iter()
-                .zip(previous)
-                .all(|(a, b)| (a - b).abs() < 0.001)
-        );
-    }
-
-    #[test]
     fn physical_stream_compression_precedes_nonidentity_bone_blending() {
         let mut mdl = super::tests::mdl_with_for_compression_test();
         mdl.illumination_position = [1.0, 2.0, 3.0];
@@ -1331,7 +1168,6 @@ mod tangent_frame_tests {
             &[a, b],
             &vertex,
             Some([0.0, 1.0, 0.0, -1.0]),
-            None,
             &mut stats,
         );
         assert_eq!(result.normal, [0.25, 0.75, 0.0]);
@@ -1352,7 +1188,7 @@ mod tangent_frame_tests {
             uv: [0.0; 2],
         };
         let mut stats = MdlStats::default();
-        let result = model_vertex(&[MAT4_IDENTITY], &vertex, None, None, &mut stats);
+        let result = model_vertex(&[MAT4_IDENTITY], &vertex, None, &mut stats);
         assert_eq!(result.tangent_s, [0.0; 3]);
         assert_eq!(result.tangent_t, [0.0; 3]);
         assert_eq!(result.tangent_sign, 0.0);
@@ -1377,7 +1213,6 @@ mod tangent_frame_tests {
             &[MAT4_IDENTITY],
             &vertex,
             Some([1.0, 0.0, 0.0, -1.0]),
-            None,
             &mut MdlStats::default(),
         );
         assert_eq!(result.tangent_t, [0.0; 3]);

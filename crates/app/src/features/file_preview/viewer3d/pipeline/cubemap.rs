@@ -69,8 +69,6 @@ pub(super) fn create_view(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    // Preserve native face order here. Any coordinate-basis conversion belongs
-    // to cube lookup, independently verified with asymmetric direction controls.
     for (face, mips) in cube.faces.iter().enumerate() {
         for (level, image) in mips.iter().enumerate() {
             queue.write_texture(

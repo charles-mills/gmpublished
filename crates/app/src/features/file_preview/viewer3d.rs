@@ -45,6 +45,10 @@ use texture::{
 };
 
 pub(super) const MODEL_SHADER_SOURCE: &str = concat!(
+    include_str!("view_uniforms.wgsl"),
+    include_str!("material_uniforms.wgsl"),
+    include_str!("view_fog.wgsl"),
+    include_str!("lightmap_decode.wgsl"),
     include_str!("model_lighting.wgsl"),
     include_str!("model_lighting_context.wgsl"),
     include_str!("cubemap.wgsl"),
@@ -54,9 +58,21 @@ pub(super) const MODEL_SHADER_SOURCE: &str = concat!(
     include_str!("model_viewer.wgsl")
 );
 const SHADER_SOURCE: &str = MODEL_SHADER_SOURCE;
-pub(super) const WATER_SHADER_SOURCE: &str = include_str!("water.wgsl");
-pub(super) const DETAIL_SHADER_SOURCE: &str = include_str!("detail.wgsl");
-pub(super) const SKY_SHADER_SOURCE: &str = include_str!("sky.wgsl");
+pub(super) const WATER_SHADER_SOURCE: &str = concat!(
+    include_str!("view_uniforms.wgsl"),
+    include_str!("material_uniforms.wgsl"),
+    include_str!("view_fog.wgsl"),
+    include_str!("lightmap_decode.wgsl"),
+    include_str!("water.wgsl")
+);
+pub(super) const DETAIL_SHADER_SOURCE: &str = concat!(
+    include_str!("view_uniforms.wgsl"),
+    include_str!("material_uniforms.wgsl"),
+    include_str!("view_fog.wgsl"),
+    include_str!("detail.wgsl")
+);
+pub(super) const SKY_SHADER_SOURCE: &str =
+    concat!(include_str!("view_uniforms.wgsl"), include_str!("sky.wgsl"));
 const BLIT_SHADER_SOURCE: &str = r"
 var<private> uvs: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2<f32>(0.0, 0.0),
@@ -106,7 +122,7 @@ const MATERIAL_ANISOTROPY_CLAMP: u16 = 16;
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
 const DETAIL_VERTEX_FLOAT_COUNT: u64 = 14;
-const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 14] = wgpu::vertex_attr_array![
+const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 15] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x3,
     2 => Float32x2,
@@ -121,6 +137,7 @@ const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 14] = wgpu::vertex_attr_a
     11 => Float32x3,
     12 => Float32,
     13 => Uint32,
+    14 => Uint32,
 ];
 const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x3,
@@ -163,7 +180,6 @@ fn normalize_or_up(v: Vec3) -> Vec3 {
     v.normalize().unwrap_or(SOURCE_UP)
 }
 
-/// Source is Z-up.
 pub(super) const SOURCE_UP: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 /// Right-handed look-at, column-major.
@@ -171,8 +187,6 @@ pub(super) fn look_at(eye: Vec3, center: Vec3, up: Vec3) -> [[f32; 4]; 4] {
     look_to(eye, center - eye, up)
 }
 
-/// Build a view from an authored direction without adding it to a world eye.
-/// A unit direction added to a large Source-map coordinate loses precision.
 pub(super) fn look_to(eye: Vec3, direction: Vec3, up: Vec3) -> [[f32; 4]; 4] {
     let f = normalize_or_up(direction);
     let s = normalize_or_up(f.cross(up));
@@ -221,8 +235,6 @@ mod tests {
         ] {
             let view = look_to(eye, direction, SOURCE_UP);
             assert_eq!(view[..3], origin[..3]);
-            // This is the former fly-view construction: it quantizes the
-            // authored direction before the view matrix can normalize it.
             assert_ne!(look_at(eye, eye + direction, SOURCE_UP)[..3], origin[..3]);
         }
     }

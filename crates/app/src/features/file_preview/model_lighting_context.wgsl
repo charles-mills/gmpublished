@@ -12,7 +12,9 @@ struct ModelLightingContext {
 };
 @group(0) @binding(7) var<storage,read> model_lighting_contexts:array<ModelLightingContext>;
 struct ModelMaterial {
-    flags:vec4<u32>,params:vec4<f32>,fresnel:vec4<f32>,tint:vec4<f32>,rim:vec4<f32>,
+    skin:u32,normal:u32,features:u32,lighting:u32,
+    exponent:f32,reserved0:f32,boost:f32,reserved1:f32,
+    fresnel:vec4<f32>,tint:vec4<f32>,rim:vec4<f32>,
 };
 @group(1) @binding(16) var<uniform> model_material:ModelMaterial;
 @group(1) @binding(17) var model_exponent:texture_2d_array<f32>;

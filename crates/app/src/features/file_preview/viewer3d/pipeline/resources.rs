@@ -6,45 +6,35 @@ use super::{
     wgpu,
 };
 use gmpublished_domain::math::Vec3;
+use std::{ops::Deref, sync::Arc};
 
 #[derive(Debug)]
 pub struct RenderResources {
-    pub sample_count: u32,
-    optical: Option<Box<Self>>,
-    model_shader: wgpu::ShaderModule,
-    model_layout: wgpu::PipelineLayout,
-    pub surface_white: wgpu::TextureView,
-    pub surface_black_cube: wgpu::TextureView,
+    shared: Arc<SharedResources>,
+    main: ViewPipelines,
+    reflection: ViewPipelines,
+    refraction: ViewPipelines,
     pub sun: super::sun::gpu::Resources,
-    pub screen_refraction: super::screen_refraction::Resources,
-    pub water_near_intersection_pipeline: wgpu::RenderPipeline,
-    pub refracted_opaque_pipeline: wgpu::RenderPipeline,
-    pub refracted_translucent_pipeline: wgpu::RenderPipeline,
-    pub refracted_additive_pipeline: wgpu::RenderPipeline,
-    pub refracted_detail_pipeline: wgpu::RenderPipeline,
-    pub refracted_overlay_opaque_pipeline: wgpu::RenderPipeline,
-    pub refracted_overlay_translucent_pipeline: wgpu::RenderPipeline,
-    pub refracted_overlay_additive_pipeline: wgpu::RenderPipeline,
-    pub refracted_planar_pipeline: wgpu::RenderPipeline,
-
-    pub reflected_opaque_pipeline: wgpu::RenderPipeline,
-    pub reflected_translucent_pipeline: wgpu::RenderPipeline,
-    pub reflected_additive_pipeline: wgpu::RenderPipeline,
-    pub uniform_layout: wgpu::BindGroupLayout,
-    pub opaque_pipeline: wgpu::RenderPipeline,
-    pub water_pipeline: wgpu::RenderPipeline,
-    pub reflected_water_pipeline: wgpu::RenderPipeline,
-    /// None when shader translation fails; use the single-pass water pipeline instead.
+    pub reflection_sun: super::sun::gpu::Resources,
     pub refractive_water_pipeline: Option<wgpu::RenderPipeline>,
-    pub translucent_pipeline: wgpu::RenderPipeline,
-    pub additive_pipeline: wgpu::RenderPipeline,
-    pub detail_pipeline: wgpu::RenderPipeline,
-    pub overlay_opaque_pipeline: wgpu::RenderPipeline,
-    pub overlay_translucent_pipeline: wgpu::RenderPipeline,
-    pub overlay_additive_pipeline: wgpu::RenderPipeline,
+    pub water_near_intersection_pipeline: wgpu::RenderPipeline,
     pub phy_debug_pipeline: wgpu::RenderPipeline,
-    pub sky_pipeline: wgpu::RenderPipeline,
-    pub blit_pipeline: wgpu::RenderPipeline,
+}
+
+#[derive(Debug)]
+pub struct SharedResources {
+    model_shader: wgpu::ShaderModule,
+    detail_shader: wgpu::ShaderModule,
+    water_shader: wgpu::ShaderModule,
+    sky_shader: wgpu::ShaderModule,
+    model_layout: wgpu::PipelineLayout,
+    refractive_water_layout: wgpu::PipelineLayout,
+    sky_pipeline_layout: wgpu::PipelineLayout,
+    pub surface_white: wgpu::TextureView,
+    pub flat_normal: wgpu::TextureView,
+    pub surface_black_cube: wgpu::TextureView,
+    pub screen_refraction: super::screen_refraction::Resources,
+    pub uniform_layout: wgpu::BindGroupLayout,
     pub material_layout: wgpu::BindGroupLayout,
     pub water_frame_layout: wgpu::BindGroupLayout,
     pub sky_layout: wgpu::BindGroupLayout,
@@ -54,50 +44,43 @@ pub struct RenderResources {
     pub blit_sampler: wgpu::Sampler,
     pub water_refraction_sampler: wgpu::Sampler,
     pub sky_vertices: wgpu::Buffer,
+    pub blit_pipeline: wgpu::RenderPipeline,
     pub target_format: wgpu::TextureFormat,
 }
 
-impl RenderResources {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let mut main = Self::new_for_samples(device, queue, format, scene_sample_count(), None);
-        if main.sample_count > 1 {
-            main.optical = Some(Box::new(Self::new_for_samples(
-                device,
-                queue,
-                format,
-                1,
-                Some(&main),
-            )));
-        }
-        main
-    }
+#[derive(Debug)]
+pub struct ViewPipelines {
+    kind: super::draw::ViewKind,
+    shared: Arc<SharedResources>,
+    pub sample_count: u32,
+    pub opaque_pipeline: wgpu::RenderPipeline,
+    pub translucent_pipeline: wgpu::RenderPipeline,
+    pub additive_pipeline: wgpu::RenderPipeline,
+    pub modulate_pipeline: wgpu::RenderPipeline,
+    pub overlay_opaque_pipeline: wgpu::RenderPipeline,
+    pub overlay_translucent_pipeline: wgpu::RenderPipeline,
+    pub overlay_additive_pipeline: wgpu::RenderPipeline,
+    pub overlay_modulate_pipeline: wgpu::RenderPipeline,
+    pub detail_pipeline: wgpu::RenderPipeline,
+    pub planar_pipeline: wgpu::RenderPipeline,
+    pub sky_pipeline: wgpu::RenderPipeline,
+}
 
-    /// Planar scene attachments are single-sample independently of main AA.
-    pub fn optical(&self) -> &Self {
-        self.optical.as_deref().unwrap_or(self)
+impl Deref for RenderResources {
+    type Target = SharedResources;
+    fn deref(&self) -> &Self::Target {
+        &self.shared
     }
-
-    pub(super) fn for_view(&self, view: super::draw::ViewKind) -> &Self {
-        match view {
-            super::draw::ViewKind::Main => self,
-            super::draw::ViewKind::Reflection | super::draw::ViewKind::Refraction => self.optical(),
-        }
+}
+impl Deref for ViewPipelines {
+    type Target = SharedResources;
+    fn deref(&self) -> &Self::Target {
+        &self.shared
     }
+}
 
-    fn new_for_samples(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-        sample_count: u32,
-        shared: Option<&Self>,
-    ) -> Self {
-        let target = PipelineTarget {
-            format,
-            sample_count,
-        };
-        // These shaders run on iced_wgpu's own device, so they must fit the
-        // limits it requests (max_bind_groups: 2, max_non_sampler_bindings:
-        // 2048). Exceeding them panics here at preview time, not at build time.
+impl SharedResources {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("file_preview.model_viewer.shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
@@ -119,178 +102,172 @@ impl RenderResources {
             source: wgpu::ShaderSource::Wgsl(BLIT_SHADER_SOURCE.into()),
         });
 
-        let uniform_layout = shared.map_or_else(
-            || {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("file_preview.model_viewer.uniforms"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(
-                                    std::mem::size_of::<Uniforms>() as u64,
-                                ),
-                            },
-                            count: None,
-                        },
-                        lightmap_layout_entry(5),
-                        lightmap_layout_entry(6),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 7,
-                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                                    super::model_lighting::GpuModelContext,
-                                >(
-                                )
-                                    as u64),
-                            },
-                            count: None,
-                        },
-                    ],
-                })
-            },
-            |resources| resources.uniform_layout.clone(),
-        );
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("file_preview.model_viewer.uniforms"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<Uniforms>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                lightmap_layout_entry(5),
+                lightmap_layout_entry(6),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                            super::model_lighting::GpuModelContext,
+                        >() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                            super::marks::GpuSurfaceMark,
+                        >() as u64),
+                    },
+                    count: None,
+                },
+            ],
+        });
 
-        let material_layout = shared.map_or_else(
-            || {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("file_preview.model_viewer.material"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 4,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 5,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                                    MaterialUniform,
-                                >(
-                                )
-                                    as u64),
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 6,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2Array,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 7,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2Array,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 8,
-                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                                    super::surface::SurfaceUniform,
-                                >(
-                                )
-                                    as u64),
-                            },
-                            count: None,
-                        },
-                        surface_texture_layout(9),
-                        surface_texture_layout(10),
-                        surface_texture_layout(11),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 12,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::Cube,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        surface_texture_layout(13),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 14,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 16,
-                            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                                    super::model_lighting::ModelMaterialUniform,
-                                >(
-                                )
-                                    as u64),
-                            },
-                            count: None,
-                        },
-                        surface_texture_layout(17),
-                        surface_texture_layout(18),
-                        surface_texture_layout(19),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 20,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                })
-            },
-            |resources| resources.material_layout.clone(),
-        );
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("file_preview.model_viewer.material"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<MaterialUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                            super::surface::SurfaceUniform,
+                        >() as u64),
+                    },
+                    count: None,
+                },
+                surface_texture_layout(9),
+                surface_texture_layout(10),
+                surface_texture_layout(11),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                surface_texture_layout(13),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 16,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                            super::model_lighting::ModelMaterialUniform,
+                        >() as u64),
+                    },
+                    count: None,
+                },
+                surface_texture_layout(17),
+                surface_texture_layout(18),
+                surface_texture_layout(19),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 20,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
         // Uniforms and refraction inputs share one group so the refractive
         // water pipeline fits iced_wgpu's max_bind_groups = 2 alongside the
         // per-material group.
@@ -350,78 +327,66 @@ impl RenderResources {
                     lightmap_layout_entry(6),
                 ],
             });
-        let sky_layout = shared.map_or_else(
-            || {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("file_preview.model_viewer.sky_material"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                                    super::sky::SkyUniform,
-                                >(
-                                )
-                                    as u64),
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                })
-            },
-            |resources| resources.sky_layout.clone(),
-        );
-        let blit_layout = shared.map_or_else(
-            || {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("file_preview.model_viewer.blit_texture"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                            count: None,
-                        },
-                    ],
-                })
-            },
-            |resources| resources.blit_layout.clone(),
-        );
+        let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("file_preview.model_viewer.sky_material"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                            super::sky::SkyUniform,
+                        >() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("file_preview.model_viewer.blit_texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("file_preview.model_viewer.layout"),
@@ -445,239 +410,6 @@ impl RenderResources {
             push_constant_ranges: &[],
         });
 
-        let opaque_pipeline = create_model_pipeline(
-            device,
-            &layout,
-            &shader,
-            target,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            true,
-            "file_preview.model_viewer.opaque_pipeline",
-        );
-        let translucent_pipeline = create_model_pipeline(
-            device,
-            &layout,
-            &shader,
-            target,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-            "file_preview.model_viewer.translucent_pipeline",
-        );
-        let water_pipeline = create_model_pipeline_with_fragment_entry(
-            device,
-            &layout,
-            &water_shader,
-            target,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: false,
-                bias: wgpu::DepthBiasState::default(),
-                cull_mode: Some(wgpu::Face::Back),
-                front_face: wgpu::FrontFace::Cw,
-            },
-            PipelineShaderEntry {
-                vertex: "vs_main",
-                write_mask: wgpu::ColorWrites::ALL,
-                fragment: "fs_skybox",
-                label: "file_preview.model_viewer.water_pipeline",
-            },
-        );
-        let reflected_water_pipeline = create_model_pipeline_with_fragment_entry(
-            device,
-            &layout,
-            &water_shader,
-            target,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: false,
-                bias: wgpu::DepthBiasState::default(),
-                cull_mode: Some(wgpu::Face::Back),
-                front_face: wgpu::FrontFace::Ccw,
-            },
-            PipelineShaderEntry {
-                vertex: "vs_main",
-                write_mask: wgpu::ColorWrites::ALL,
-                fragment: "fs_skybox",
-                label: "file_preview.reflected.planar_fallback",
-            },
-        );
-        // Some backends fail shader translation for this pipeline (naga's
-        // GLSL backend rejects `textureLoad` on a depth texture); capture
-        // the error instead of hitting wgpu's panicking uncaptured-error
-        // handler, and fall back to non-refractive water.
-        device.push_error_scope(wgpu::ErrorFilter::Internal);
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let refractive_water_pipeline = create_model_pipeline_with_fragment_entry(
-            device,
-            &refractive_water_layout,
-            &water_shader,
-            target,
-            None,
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: true,
-                bias: wgpu::DepthBiasState::default(),
-                cull_mode: Some(wgpu::Face::Back),
-                front_face: wgpu::FrontFace::Cw,
-            },
-            PipelineShaderEntry {
-                vertex: "vs_main",
-                write_mask: wgpu::ColorWrites::ALL,
-                fragment: "fs_main",
-                label: "file_preview.model_viewer.refractive_water_pipeline",
-            },
-        );
-        let validation_error = take_scoped_error(device);
-        let internal_error = take_scoped_error(device);
-        let translation_error = validation_error.or(internal_error);
-        if let Some(error) = &translation_error {
-            log::warn!(
-                "refractive water pipeline unavailable, using non-refractive water: {error}"
-            );
-        }
-        let water_near_intersection_pipeline = create_model_pipeline_with_fragment_entry(
-            device,
-            &refractive_water_layout,
-            &water_shader,
-            target,
-            None,
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: true,
-                bias: wgpu::DepthBiasState::default(),
-                cull_mode: Some(wgpu::Face::Back),
-                front_face: wgpu::FrontFace::Cw,
-            },
-            PipelineShaderEntry {
-                vertex: "vs_near_main",
-                fragment: "fs_near_intersection",
-                label: "file_preview.water.near_intersection",
-                write_mask: wgpu::ColorWrites::ALL,
-            },
-        );
-        let refractive_water_pipeline = translation_error
-            .is_none()
-            .then_some(refractive_water_pipeline);
-        let additive_pipeline = create_model_pipeline(
-            device,
-            &layout,
-            &shader,
-            target,
-            Some(additive_blend_state()),
-            false,
-            "file_preview.model_viewer.additive_pipeline",
-        );
-        let detail_pipeline = create_detail_pipeline(
-            device,
-            &layout,
-            &detail_shader,
-            target,
-            "file_preview.model_viewer.detail_pipeline",
-            wgpu::ColorWrites::ALL,
-        );
-        let overlay_opaque_pipeline = create_model_pipeline_with_depth_bias(
-            device,
-            &layout,
-            &shader,
-            target,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: false,
-                bias: overlay_depth_bias_state(),
-                // Overlays stay two-sided: their quad winding comes from
-                // the packed overlay basis, not face winding.
-                cull_mode: None,
-                front_face: wgpu::FrontFace::Cw,
-            },
-            "file_preview.model_viewer.overlay_opaque_pipeline",
-        );
-        let overlay_translucent_pipeline = create_model_pipeline_with_depth_bias(
-            device,
-            &layout,
-            &shader,
-            target,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: false,
-                bias: overlay_depth_bias_state(),
-                cull_mode: None,
-                front_face: wgpu::FrontFace::Cw,
-            },
-            "file_preview.model_viewer.overlay_translucent_pipeline",
-        );
-        let overlay_additive_pipeline = create_model_pipeline_with_depth_bias(
-            device,
-            &layout,
-            &shader,
-            target,
-            Some(additive_blend_state()),
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: false,
-                bias: overlay_depth_bias_state(),
-                cull_mode: None,
-                front_face: wgpu::FrontFace::Cw,
-            },
-            "file_preview.model_viewer.overlay_additive_pipeline",
-        );
-        let phy_debug_pipeline = create_model_pipeline_with_depth_bias(
-            device,
-            &layout,
-            &shader,
-            target,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            PipelineRasterMode {
-                ignore_z: false,
-                write_enabled: false,
-                bias: overlay_depth_bias_state(),
-                cull_mode: None,
-                front_face: wgpu::FrontFace::Cw,
-            },
-            "file_preview.model_viewer.phy_debug_pipeline",
-        );
-        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("file_preview.model_viewer.sky_pipeline"),
-            layout: Some(&sky_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &sky_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: (3 * std::mem::size_of::<f32>()) as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &sky_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::GreaterEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: multisample_state(sample_count),
-            multiview: None,
-            cache: None,
-        });
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("file_preview.model_viewer.blit_pipeline"),
             layout: Some(&blit_pipeline_layout),
@@ -707,274 +439,93 @@ impl RenderResources {
             multiview: None,
             cache: None,
         });
-
-        let reflected = |write_enabled, blend, label| {
-            create_model_pipeline_with_depth_bias(
-                device,
-                &layout,
-                &shader,
-                target,
-                blend,
-                PipelineRasterMode {
-                    ignore_z: false,
-                    write_enabled,
-                    bias: wgpu::DepthBiasState::default(),
-                    cull_mode: Some(wgpu::Face::Back),
-                    front_face: wgpu::FrontFace::Ccw,
-                },
-                label,
-            )
-        };
-        let reflected_opaque_pipeline = reflected(
-            true,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            "file_preview.reflected.opaque",
-        );
-        let reflected_translucent_pipeline = reflected(
-            false,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            "file_preview.reflected.translucent",
-        );
-        let reflected_additive_pipeline = reflected(
-            false,
-            Some(additive_blend_state()),
-            "file_preview.reflected.additive",
-        );
-
-        let refraction_pipeline =
-            |fragment, write_enabled, blend, overlay, write_mask, label, water| {
-                create_model_pipeline_with_fragment_entry(
-                    device,
-                    &layout,
-                    if water { &water_shader } else { &shader },
-                    target,
-                    blend,
-                    PipelineRasterMode {
-                        ignore_z: false,
-                        write_enabled,
-                        bias: if overlay {
-                            overlay_depth_bias_state()
-                        } else {
-                            wgpu::DepthBiasState::default()
-                        },
-                        cull_mode: if overlay {
-                            None
-                        } else {
-                            Some(wgpu::Face::Back)
-                        },
-                        front_face: wgpu::FrontFace::Cw,
-                    },
-                    PipelineShaderEntry {
-                        vertex: "vs_main",
-                        fragment,
-                        label,
-                        write_mask,
-                    },
-                )
-            };
-        let refracted_opaque_pipeline = refraction_pipeline(
-            "fs_refraction",
-            true,
-            None,
-            false,
-            wgpu::ColorWrites::ALL,
-            "file_preview.refracted.opaque",
-            false,
-        );
-        let refracted_translucent_pipeline = refraction_pipeline(
-            "fs_main",
-            false,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-            wgpu::ColorWrites::COLOR,
-            "file_preview.refracted.translucent",
-            false,
-        );
-        let refracted_additive_pipeline = refraction_pipeline(
-            "fs_additive",
-            false,
-            Some(additive_blend_state()),
-            false,
-            wgpu::ColorWrites::COLOR,
-            "file_preview.refracted.additive",
-            false,
-        );
-        let refracted_overlay_opaque_pipeline = refraction_pipeline(
-            "fs_main",
-            false,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            true,
-            wgpu::ColorWrites::COLOR,
-            "file_preview.refracted.overlay_opaque",
-            false,
-        );
-        let refracted_overlay_translucent_pipeline = refraction_pipeline(
-            "fs_main",
-            false,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            true,
-            wgpu::ColorWrites::COLOR,
-            "file_preview.refracted.overlay_translucent",
-            false,
-        );
-        let refracted_overlay_additive_pipeline = refraction_pipeline(
-            "fs_additive",
-            false,
-            Some(additive_blend_state()),
-            true,
-            wgpu::ColorWrites::COLOR,
-            "file_preview.refracted.overlay_additive",
-            false,
-        );
-        let refracted_planar_pipeline = refraction_pipeline(
-            "fs_skybox",
-            true,
-            None,
-            false,
-            wgpu::ColorWrites::ALL,
-            "file_preview.refracted.planar_fallback",
-            true,
-        );
-        let refracted_detail_pipeline = create_detail_pipeline(
+        let material_sampler = sampler(
             device,
-            &layout,
-            &detail_shader,
-            target,
-            "file_preview.refracted.detail",
-            wgpu::ColorWrites::COLOR,
-        );
-
-        let material_sampler = shared.map_or_else(
-            || {
-                sampler(
-                    device,
-                    "file_preview.model_viewer.material_sampler",
-                    &SamplerSpec {
-                        address: wgpu::AddressMode::Repeat,
-                        filter: wgpu::FilterMode::Linear,
-                        mipmap: wgpu::FilterMode::Linear,
-                        anisotropy: MATERIAL_ANISOTROPY_CLAMP,
-                    },
-                )
+            "file_preview.model_viewer.material_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::Repeat,
+                filter: wgpu::FilterMode::Linear,
+                mipmap: wgpu::FilterMode::Linear,
+                anisotropy: MATERIAL_ANISOTROPY_CLAMP,
             },
-            |resources| resources.material_sampler.clone(),
         );
-        let simple_sampler = shared.map_or_else(
-            || {
-                sampler(
-                    device,
-                    "file_preview.model_viewer.simple_sampler",
-                    &SamplerSpec {
-                        address: wgpu::AddressMode::Repeat,
-                        filter: wgpu::FilterMode::Linear,
-                        mipmap: wgpu::FilterMode::Nearest,
-                        ..SamplerSpec::default()
-                    },
-                )
+        let simple_sampler = sampler(
+            device,
+            "file_preview.model_viewer.simple_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::Repeat,
+                filter: wgpu::FilterMode::Linear,
+                mipmap: wgpu::FilterMode::Nearest,
+                ..SamplerSpec::default()
             },
-            |resources| resources.simple_sampler.clone(),
         );
-        let blit_sampler = shared.map_or_else(
-            || {
-                sampler(
-                    device,
-                    "file_preview.model_viewer.blit_sampler",
-                    &SamplerSpec {
-                        address: wgpu::AddressMode::ClampToEdge,
-                        filter: wgpu::FilterMode::Nearest,
-                        mipmap: wgpu::FilterMode::Nearest,
-                        ..SamplerSpec::default()
-                    },
-                )
+        let blit_sampler = sampler(
+            device,
+            "file_preview.model_viewer.blit_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::ClampToEdge,
+                filter: wgpu::FilterMode::Nearest,
+                mipmap: wgpu::FilterMode::Nearest,
+                ..SamplerSpec::default()
             },
-            |resources| resources.blit_sampler.clone(),
         );
-        let water_refraction_sampler = shared.map_or_else(
-            || {
-                sampler(
-                    device,
-                    "file_preview.model_viewer.water_refraction_sampler",
-                    &SamplerSpec {
-                        address: wgpu::AddressMode::ClampToEdge,
-                        filter: wgpu::FilterMode::Linear,
-                        mipmap: wgpu::FilterMode::Nearest,
-                        ..SamplerSpec::default()
-                    },
-                )
+        let water_refraction_sampler = sampler(
+            device,
+            "file_preview.model_viewer.water_refraction_sampler",
+            &SamplerSpec {
+                address: wgpu::AddressMode::ClampToEdge,
+                filter: wgpu::FilterMode::Linear,
+                mipmap: wgpu::FilterMode::Nearest,
+                ..SamplerSpec::default()
             },
-            |resources| resources.water_refraction_sampler.clone(),
         );
         let screen_refraction =
             super::screen_refraction::Resources::new(device, format, &blit_layout);
         let sky_vertex_bytes = skybox_vertex_bytes();
-        let sky_vertices = shared.map_or_else(
-            || {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("file_preview.model_viewer.sky_vertices"),
-                    size: sky_vertex_bytes.len() as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                })
-            },
-            |resources| resources.sky_vertices.clone(),
-        );
+        let sky_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("file_preview.model_viewer.sky_vertices"),
+            size: sky_vertex_bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         queue.write_buffer(&sky_vertices, 0, &sky_vertex_bytes);
 
-        let sun = super::sun::gpu::Resources::new(device, format, &material_layout, sample_count);
-        let surface_white = shared.map_or_else(
-            || {
-                Self::create_texture_frames_view(
-                    device,
-                    queue,
-                    &[vec![crate::bridge::materials::ResolvedTextureMip {
-                        rgba: vec![255; 4],
-                        width: 1,
-                        height: 1,
-                    }]],
-                    wgpu::TextureFormat::Rgba8Unorm,
-                )
+        let surface_white = RenderResources::create_texture_frames_view(
+            device,
+            queue,
+            &[vec![crate::bridge::materials::ResolvedTextureMip {
+                rgba: vec![255; 4],
+                width: 1,
+                height: 1,
+            }]],
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let flat_normal = RenderResources::create_normal_view(
+            device,
+            queue,
+            &crate::bridge::materials::DecodedTextureFrames {
+                flags: 0,
+                frames: vec![vec![crate::bridge::materials::ResolvedTextureMip {
+                    rgba: vec![128, 128, 255, 255],
+                    width: 1,
+                    height: 1,
+                }]],
             },
-            |resources| resources.surface_white.clone(),
         );
-        let surface_black_cube = shared.map_or_else(
-            || super::cubemap::create_view(device, queue, None),
-            |resources| resources.surface_black_cube.clone(),
-        );
+        let surface_black_cube = super::cubemap::create_view(device, queue, None);
         Self {
-            sample_count,
-            optical: None,
             model_shader: shader,
+            detail_shader,
+            water_shader,
+            sky_shader,
             model_layout: layout,
+            refractive_water_layout,
+            sky_pipeline_layout,
             surface_white,
+            flat_normal,
             surface_black_cube,
-            sun,
             screen_refraction,
-            water_near_intersection_pipeline,
-            refracted_opaque_pipeline,
-            refracted_translucent_pipeline,
-            refracted_additive_pipeline,
-            refracted_detail_pipeline,
-            refracted_overlay_opaque_pipeline,
-            refracted_overlay_translucent_pipeline,
-            refracted_overlay_additive_pipeline,
-            refracted_planar_pipeline,
-            reflected_opaque_pipeline,
-            reflected_translucent_pipeline,
-            reflected_additive_pipeline,
             uniform_layout,
-            opaque_pipeline,
-            water_pipeline,
-            reflected_water_pipeline,
-            refractive_water_pipeline,
-            translucent_pipeline,
-            additive_pipeline,
-            detail_pipeline,
-            overlay_opaque_pipeline,
-            overlay_translucent_pipeline,
-            overlay_additive_pipeline,
-            phy_debug_pipeline,
-            sky_pipeline,
-            blit_pipeline,
             material_layout,
             water_frame_layout,
             sky_layout,
@@ -984,7 +535,346 @@ impl RenderResources {
             blit_sampler,
             water_refraction_sampler,
             sky_vertices,
+            blit_pipeline,
             target_format: format,
+        }
+    }
+}
+
+impl RenderResources {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        use super::draw::ViewKind;
+        let shared = Arc::new(SharedResources::new(device, queue, format));
+        let sample_count = scene_sample_count();
+        let main = ViewPipelines::new(
+            device,
+            Arc::clone(&shared),
+            ViewKind::Main,
+            sample_count,
+            None,
+        );
+        let reflection = ViewPipelines::new(
+            device,
+            Arc::clone(&shared),
+            ViewKind::Reflection,
+            1,
+            (sample_count == 1).then_some(&main.sky_pipeline),
+        );
+        let refraction = ViewPipelines::new(
+            device,
+            Arc::clone(&shared),
+            ViewKind::Refraction,
+            1,
+            Some(&reflection.sky_pipeline),
+        );
+        let target = PipelineTarget {
+            format,
+            sample_count,
+        };
+        let refractive_water_layout = &shared.refractive_water_layout;
+        let water_shader = &shared.water_shader;
+        // Depth texture loads are unsupported by some shader translators.
+        // Preserve the single-pass fallback when pipeline creation fails.
+        device.push_error_scope(wgpu::ErrorFilter::Internal);
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let refractive_water_pipeline = create_model_pipeline_with_fragment_entry(
+            device,
+            refractive_water_layout,
+            water_shader,
+            target,
+            None,
+            PipelineRasterMode {
+                ignore_z: false,
+                write_enabled: true,
+                bias: wgpu::DepthBiasState::default(),
+                cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Cw,
+            },
+            PipelineShaderEntry {
+                vertex: "vs_main",
+                write_mask: wgpu::ColorWrites::ALL,
+                fragment: "fs_main",
+                label: "file_preview.model_viewer.refractive_water_pipeline",
+            },
+        );
+        let validation_error = take_scoped_error(device);
+        let internal_error = take_scoped_error(device);
+        let translation_error = validation_error.or(internal_error);
+        if let Some(error) = &translation_error {
+            log::warn!(
+                "refractive water pipeline unavailable, using non-refractive water: {error}"
+            );
+        }
+        let water_near_intersection_pipeline = create_model_pipeline_with_fragment_entry(
+            device,
+            refractive_water_layout,
+            water_shader,
+            target,
+            None,
+            PipelineRasterMode {
+                ignore_z: false,
+                write_enabled: true,
+                bias: wgpu::DepthBiasState::default(),
+                cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Cw,
+            },
+            PipelineShaderEntry {
+                vertex: "vs_near_main",
+                fragment: "fs_near_intersection",
+                label: "file_preview.water.near_intersection",
+                write_mask: wgpu::ColorWrites::ALL,
+            },
+        );
+        let refractive_water_pipeline = translation_error
+            .is_none()
+            .then_some(refractive_water_pipeline);
+        let sun =
+            super::sun::gpu::Resources::new(device, format, &shared.material_layout, sample_count);
+        let reflection_sun = sun.with_sample_count(device, 1);
+        let phy_debug_pipeline = main.overlay_opaque_pipeline.clone();
+        Self {
+            shared,
+            main,
+            reflection,
+            refraction,
+            sun,
+            reflection_sun,
+            refractive_water_pipeline,
+            water_near_intersection_pipeline,
+            phy_debug_pipeline,
+        }
+    }
+
+    pub(super) fn for_view(&self, view: super::draw::ViewKind) -> &ViewPipelines {
+        match view {
+            super::draw::ViewKind::Main => &self.main,
+            super::draw::ViewKind::Reflection => &self.reflection,
+            super::draw::ViewKind::Refraction => &self.refraction,
+        }
+    }
+}
+
+impl ViewPipelines {
+    pub(super) fn kind(&self) -> super::draw::ViewKind {
+        self.kind
+    }
+
+    fn new(
+        device: &wgpu::Device,
+        shared: Arc<SharedResources>,
+        view: super::draw::ViewKind,
+        sample_count: u32,
+        shared_sky: Option<&wgpu::RenderPipeline>,
+    ) -> Self {
+        use super::draw::ViewKind;
+        let format = shared.target_format;
+        let target = PipelineTarget {
+            format,
+            sample_count,
+        };
+        let layout = &shared.model_layout;
+        let shader = &shared.model_shader;
+        let sky_shader = &shared.sky_shader;
+        let sky_pipeline_layout = &shared.sky_pipeline_layout;
+        let refracted = view == ViewKind::Refraction;
+        let front_face = if view == ViewKind::Reflection {
+            wgpu::FrontFace::Ccw
+        } else {
+            wgpu::FrontFace::Cw
+        };
+        let write_mask = if refracted {
+            wgpu::ColorWrites::COLOR
+        } else {
+            wgpu::ColorWrites::ALL
+        };
+        let pipeline = |fragment, blend, write_enabled, overlay, mask, water, label| {
+            create_model_pipeline_with_fragment_entry(
+                device,
+                layout,
+                if water { &shared.water_shader } else { shader },
+                target,
+                blend,
+                PipelineRasterMode {
+                    ignore_z: false,
+                    write_enabled,
+                    bias: if overlay {
+                        overlay_depth_bias_state()
+                    } else {
+                        wgpu::DepthBiasState::default()
+                    },
+                    cull_mode: if overlay {
+                        None
+                    } else {
+                        Some(wgpu::Face::Back)
+                    },
+                    front_face: if overlay {
+                        wgpu::FrontFace::Cw
+                    } else {
+                        front_face
+                    },
+                },
+                PipelineShaderEntry {
+                    vertex: "vs_main",
+                    fragment,
+                    write_mask: mask,
+                    label,
+                },
+            )
+        };
+        let opaque_pipeline = pipeline(
+            if refracted {
+                "fs_refraction"
+            } else {
+                "fs_main"
+            },
+            (!refracted).then_some(wgpu::BlendState::ALPHA_BLENDING),
+            true,
+            false,
+            wgpu::ColorWrites::ALL,
+            false,
+            "file_preview.scene.opaque",
+        );
+        let translucent_pipeline = pipeline(
+            "fs_main",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+            false,
+            write_mask,
+            false,
+            "file_preview.scene.translucent",
+        );
+        let additive_pipeline = pipeline(
+            "fs_additive",
+            Some(additive_blend_state()),
+            false,
+            false,
+            write_mask,
+            false,
+            "file_preview.scene.additive",
+        );
+        let overlay_opaque_pipeline = pipeline(
+            "fs_main",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+            true,
+            write_mask,
+            false,
+            "file_preview.scene.overlay",
+        );
+        let overlay_translucent_pipeline = overlay_opaque_pipeline.clone();
+        let overlay_additive_pipeline = pipeline(
+            "fs_additive",
+            Some(additive_blend_state()),
+            false,
+            true,
+            write_mask,
+            false,
+            "file_preview.scene.overlay_additive",
+        );
+        let modulate = |overlay, label| {
+            create_model_pipeline_with_fragment_entry(
+                device,
+                layout,
+                shader,
+                PipelineTarget {
+                    format: super::targets::ColorTransfer::Encoded.format(format),
+                    sample_count,
+                },
+                Some(modulate_blend_state()),
+                PipelineRasterMode {
+                    ignore_z: false,
+                    write_enabled: false,
+                    bias: overlay_depth_bias_state(),
+                    cull_mode: if overlay {
+                        None
+                    } else {
+                        Some(wgpu::Face::Back)
+                    },
+                    front_face,
+                },
+                PipelineShaderEntry {
+                    vertex: "vs_main",
+                    fragment: "fs_main",
+                    write_mask: wgpu::ColorWrites::COLOR,
+                    label,
+                },
+            )
+        };
+        let modulate_pipeline = modulate(false, "file_preview.scene.modulate");
+        let overlay_modulate_pipeline = modulate(true, "file_preview.scene.overlay_modulate");
+        let planar_pipeline = pipeline(
+            "fs_skybox",
+            (!refracted).then_some(wgpu::BlendState::ALPHA_BLENDING),
+            refracted,
+            false,
+            wgpu::ColorWrites::ALL,
+            true,
+            "file_preview.scene.planar",
+        );
+        let detail_pipeline = create_detail_pipeline(
+            device,
+            layout,
+            &shared.detail_shader,
+            target,
+            "file_preview.scene.detail",
+            write_mask,
+        );
+        let sky_pipeline = shared_sky.cloned().unwrap_or_else(|| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("file_preview.model_viewer.sky_pipeline"),
+                layout: Some(sky_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: sky_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: (3 * std::mem::size_of::<f32>()) as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: sky_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::GreaterEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: multisample_state(sample_count),
+                multiview: None,
+                cache: None,
+            })
+        });
+        Self {
+            kind: view,
+            shared,
+            sample_count,
+            opaque_pipeline,
+            translucent_pipeline,
+            additive_pipeline,
+            modulate_pipeline,
+            overlay_opaque_pipeline,
+            overlay_translucent_pipeline,
+            overlay_additive_pipeline,
+            overlay_modulate_pipeline,
+            detail_pipeline,
+            planar_pipeline,
+            sky_pipeline,
         }
     }
 }
@@ -1043,6 +933,7 @@ impl RenderResources {
         } else {
             Some(match key.blend {
                 SurfaceBlend::Additive => additive_blend_state(),
+                SurfaceBlend::Modulate => modulate_blend_state(),
                 SurfaceBlend::Opaque | SurfaceBlend::Alpha => wgpu::BlendState::ALPHA_BLENDING,
             })
         };
@@ -1051,14 +942,15 @@ impl RenderResources {
             &self.model_layout,
             &self.model_shader,
             PipelineTarget {
-                format: self.target_format,
-                sample_count: self.sample_count,
+                format: key.blend.color_transfer().format(self.target_format),
+                sample_count: self.for_view(key.view).sample_count,
             },
             blend,
             PipelineRasterMode {
                 ignore_z: key.raster.ignore_z,
                 write_enabled: key.blend == SurfaceBlend::Opaque && !key.overlay,
-                bias: if key.overlay {
+                bias: if key.overlay || key.raster.decal_bias || key.blend == SurfaceBlend::Modulate
+                {
                     overlay_depth_bias_state()
                 } else {
                     wgpu::DepthBiasState::default()
@@ -1083,7 +975,9 @@ impl RenderResources {
                 } else {
                     "fs_main"
                 },
-                write_mask: if key.view == ViewKind::Refraction && !refracted_opaque {
+                write_mask: if key.blend == SurfaceBlend::Modulate
+                    || (key.view == ViewKind::Refraction && !refracted_opaque)
+                {
                     wgpu::ColorWrites::COLOR
                 } else {
                     wgpu::ColorWrites::ALL
@@ -1107,6 +1001,7 @@ pub fn uniforms(
     layout: &wgpu::BindGroupLayout,
     label: &str,
     lighting: &super::lighting::Frame,
+    surface_marks: &wgpu::Buffer,
 ) -> (wgpu::Buffer, wgpu::BindGroup) {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(&format!("{label}_buffer")),
@@ -1133,6 +1028,10 @@ pub fn uniforms(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: lighting.model_lights.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: surface_marks.as_entire_binding(),
             },
         ],
     });
@@ -1180,61 +1079,6 @@ fn multisample_state(sample_count: u32) -> wgpu::MultisampleState {
     }
 }
 
-fn create_model_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    target: PipelineTarget,
-    blend: Option<wgpu::BlendState>,
-    depth_write_enabled: bool,
-    label: &'static str,
-) -> wgpu::RenderPipeline {
-    create_model_pipeline_with_depth_bias(
-        device,
-        layout,
-        shader,
-        target,
-        blend,
-        PipelineRasterMode {
-            ignore_z: false,
-            write_enabled: depth_write_enabled,
-            bias: wgpu::DepthBiasState::default(),
-            cull_mode: Some(wgpu::Face::Back),
-            front_face: wgpu::FrontFace::Cw,
-        },
-        label,
-    )
-}
-
-fn create_model_pipeline_with_depth_bias(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    target: PipelineTarget,
-    blend: Option<wgpu::BlendState>,
-    raster: PipelineRasterMode,
-    label: &'static str,
-) -> wgpu::RenderPipeline {
-    create_model_pipeline_with_fragment_entry(
-        device,
-        layout,
-        shader,
-        target,
-        blend,
-        raster,
-        PipelineShaderEntry {
-            vertex: "vs_main",
-            write_mask: wgpu::ColorWrites::ALL,
-            fragment: if blend == Some(additive_blend_state()) {
-                "fs_additive"
-            } else {
-                "fs_main"
-            },
-            label,
-        },
-    )
-}
-
 fn create_model_pipeline_with_fragment_entry(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -1265,9 +1109,6 @@ fn create_model_pipeline_with_fragment_entry(
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
-            // Source renders brush/model geometry one-sided with clockwise
-            // front faces; without this, up-facing water planes above the
-            // camera paint their undersides across the sky.
             front_face: raster.front_face,
             cull_mode: raster.cull_mode,
             ..wgpu::PrimitiveState::default()
@@ -1335,8 +1176,7 @@ fn create_detail_pipeline(
 }
 
 fn overlay_depth_bias_state() -> wgpu::DepthBiasState {
-    // Reverse-Z needs positive depth bias to pull decals toward the viewer.
-    // Slope bias covers interpolation differences at oblique angles.
+    // Reverse-Z decal bias is positive.
     wgpu::DepthBiasState {
         constant: 2,
         slope_scale: 2.0,
@@ -1357,6 +1197,21 @@ fn detail_vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: DETAIL_VERTEX_FLOAT_COUNT * std::mem::size_of::<f32>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &DETAIL_VERTEX_ATTRIBUTES,
+    }
+}
+
+fn modulate_blend_state() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::Src,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
     }
 }
 
@@ -1387,10 +1242,7 @@ fn skybox_vertex_bytes() -> Vec<u8> {
     bytes
 }
 
-// Valve's 2D skybox suffixes are documented on the Valve Developer Community
-// "Skybox (2D)" page; the Source-space corner data below follows
-// noclip.website's SourceEngine SkyboxRenderer vertex table:
-// https://github.com/magcius/noclip.website/blob/main/src/SourceEngine/Main.ts
+// Face orientation: https://github.com/magcius/noclip.website/blob/main/src/SourceEngine/Main.ts
 pub fn skybox_face_corners(face: SkyboxFace) -> [Vec3; 4] {
     match face {
         SkyboxFace::Rt => [
@@ -1451,8 +1303,6 @@ mod tests {
 
     #[test]
     fn skybox_face_corners_match_source_2d_skybox_convention() {
-        // Data source: Valve Developer Community "Skybox (2D)" suffixes,
-        // with face orientation from noclip.website's SourceEngine SkyboxRenderer.
         assert_eq!(
             SkyboxFace::ALL.map(skybox_face_corners),
             [

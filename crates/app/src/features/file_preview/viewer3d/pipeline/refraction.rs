@@ -1,14 +1,14 @@
-//! Refraction uses the real camera and its own clipped scene/depth, never a
-//! copy of the main opaque image. Visibility and optical state are view-local.
 use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection, prepare_draw_plans};
 use super::reflections::{PlanarView, Plane, SceneView};
 use super::targets::RenderTargets;
+use super::uniforms::FogUniform;
 use super::visibility::upload_visible_indices;
-use super::{ModelPrimitive, RenderResources, UploadedModel, Vec3, wgpu};
+use super::{ModelPrimitive, RenderResources, Vec3, ViewerScene, wgpu};
 
 #[derive(Clone, Copy)]
 pub struct OpticalInputs<'a> {
     pub size: (u32, u32),
+    pub surface_marks: &'a wgpu::Buffer,
     pub lighting: &'a super::lighting::Frame,
 }
 impl PlanarView {
@@ -18,20 +18,23 @@ impl PlanarView {
         queue: &wgpu::Queue,
         resources: &RenderResources,
         primitive: &ModelPrimitive,
-        upload: &UploadedModel,
+        upload: &ViewerScene,
         inputs: OpticalInputs<'_>,
     ) {
-        let resources = resources.optical();
-        let OpticalInputs { size, lighting } = inputs;
-        let source = &upload.reflectors[self.surface_index];
+        let OpticalInputs {
+            size,
+            lighting,
+            surface_marks,
+        } = inputs;
+        let source = &upload.assets.reflectors[self.surface_index];
         let shader = &primitive.preview.render_scene().materials[source.material_slot].shader;
         let (reflect, refract) = super::reflections::optical_passes(shader);
-        self.reflect_enabled = reflect;
-        if self.reflect_enabled {
-            self.prepare(device, queue, resources, primitive, upload, size);
+        if reflect {
+            self.reflection
+                .get_or_insert_with(|| SceneView::new(device, resources, lighting, surface_marks));
+            self.prepare_reflection(device, queue, resources, primitive, upload, size);
         } else {
-            self.view.targets = None;
-            self.view.plans = None;
+            self.reflection = None;
         }
         if !refract {
             self.refraction = None;
@@ -39,15 +42,14 @@ impl PlanarView {
         }
         let view = self
             .refraction
-            .get_or_insert_with(|| SceneView::new(device, resources, lighting));
+            .get_or_insert_with(|| SceneView::new(device, resources, lighting, surface_marks));
         let mut uniforms = primitive
             .uniforms
             .with_raster_offset(size, primitive.raster_offset());
-        uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
+        uniforms.water_time_sky_tint[1..].copy_from_slice(upload.assets.sky_tint.as_array());
         let plane = source.plane;
         let below_water = shader.water().is_some_and(|water| !water.above_water);
-        // Source's above-water refraction view clips two units above the
-        // exact water plane to avoid shoreline cracks (DF_FUDGE_UP).
+        // The two-unit refraction clip bias avoids shoreline cracks.
         let clip_bias = if below_water {
             0.0
         } else if shader.water().is_some() {
@@ -69,8 +71,7 @@ impl PlanarView {
         ];
         self.refraction_clear = wgpu::Color::BLACK;
         if below_water {
-            // Looking out of water captures the air scene with its own world
-            // fog. The underside material applies the in-water segment later.
+            // The air scene and underwater segment apply their own fog separately.
             uniforms.medium_plane = [0.0; 4];
             uniforms.fog_color = primitive.air_fog.map_or([0.0; 4], |fog| {
                 [
@@ -80,14 +81,7 @@ impl PlanarView {
                     0.0,
                 ]
             });
-            uniforms.fog_params = primitive.air_fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
-                [
-                    fog.start,
-                    fog.end,
-                    fog.max_density,
-                    if fog.radial { 4.0 } else { 1.0 },
-                ]
-            });
+            uniforms.fog = FogUniform::for_map(primitive.air_fog, 1.0);
         } else if let Some(water) = shader.water() {
             uniforms.fog_color = [
                 water.scene_fog_color_linear[0],
@@ -95,7 +89,7 @@ impl PlanarView {
                 water.scene_fog_color_linear[2],
                 f32::from(water.fog_enabled),
             ];
-            uniforms.fog_params = [water.fog_start, water.fog_end, 1.0, 2.0];
+            uniforms.fog = FogUniform::height(water);
             self.refraction_clear = wgpu::Color {
                 r: f64::from(water.scene_fog_color_linear[0]),
                 g: f64::from(water.scene_fog_color_linear[1]),
@@ -149,14 +143,13 @@ impl PlanarView {
                 camera_position: uniforms.camera_position,
                 map_skybox_visible: primitive.map_skybox_visible
                     && (shader.water().is_none() || below_water),
-                map_skybox_content_present: upload.has_map_skybox_content(),
+                map_skybox_content_present: upload.assets.has_map_skybox_content(),
                 map_skybox_camera_position: skybox.map(|uniforms| uniforms.camera_position),
                 visibility_plan: view.visibility.plan.as_ref(),
             },
         );
-        // Exclude the source plane without dropping other heights/orientations
-        // batched into the same material mesh. The original PVS plan remains
-        // intact so a later visibility rebuild can safely repeat this filter.
+        // Exclude only this plane from a batched mesh; preserve the PVS source
+        // so its other heights and orientations survive subsequent rebuilds.
         let generation = view.visibility.tracker.rebuild_count;
         if view.planar_exclusion_generation != Some(generation) {
             let scene = primitive.preview.render_scene();
@@ -190,10 +183,15 @@ impl PlanarView {
             view,
             upload,
             uniforms,
-            skybox,
+            skybox.as_ref(),
             shader.water().map(|water| water.above_water),
         );
-        RenderTargets::ensure(&mut view.targets, device, resources, size);
+        RenderTargets::ensure(
+            &mut view.targets,
+            device,
+            resources.for_view(super::draw::ViewKind::Refraction),
+            size,
+        );
     }
 }
 
@@ -225,6 +223,7 @@ mod tests {
             tangent_t: Vec3::ZERO,
             tangent_sign: 0.0,
             lighting_context: 0,
+            surface_mark: 0,
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],

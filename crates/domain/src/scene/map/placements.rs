@@ -1,10 +1,8 @@
 use super::{
     BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropSolid, MapPropVisibility,
-    MapVisibilityBucket, Overlay, SkyboxPartition, StaticProp, StaticPropPlacement,
-    cluster_in_range, is_preview_material_visible, normalize_entity_prop_model_path,
-    normalize_material_name, normalize_static_prop_model_path, parse_entity_bool,
+    MapVisibilityBucket, SkyboxPartition, StaticProp, StaticPropPlacement, cluster_in_range,
+    normalize_entity_prop_model_path, normalize_static_prop_model_path, parse_entity_bool,
     parse_entity_float, parse_entity_i32, parse_entity_vec3, point_visibility_bucket,
-    vector_is_finite_nonzero,
 };
 use crate::math::Vec3;
 
@@ -34,18 +32,6 @@ pub struct MapDetailSprite {
     pub lower_right: [f32; 2],
     pub tex_upper_left: [f32; 2],
     pub tex_lower_right: [f32; 2],
-    pub visibility: MapVisibilityBucket,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MapOverlay {
-    pub id: i32,
-    pub material_name: String,
-    pub positions: [Vec3; 4],
-    pub normal: Vec3,
-    pub u: [f32; 2],
-    pub v: [f32; 2],
-    pub face_count: u16,
     pub visibility: MapVisibilityBucket,
 }
 
@@ -389,88 +375,4 @@ pub(super) fn partitioned_detail_sprite_placements(
         }
     }
     (visible, skybox)
-}
-
-pub(super) fn partitioned_map_overlays(
-    bsp: &MapBsp,
-    partition: &SkyboxPartition,
-) -> (Vec<MapOverlay>, Vec<MapOverlay>) {
-    let mut visible = Vec::new();
-    let mut skybox = Vec::new();
-    let cluster_count = bsp.cluster_count();
-    for (overlay, mapped) in bsp.overlays.iter().filter_map(|overlay| {
-        let texinfo = usize::try_from(overlay.texinfo)
-            .ok()
-            .and_then(|index| bsp.texinfos.get(index))?;
-        let material_name = normalize_material_name(bsp.texinfo_name(texinfo))?;
-        if !is_preview_material_visible(&material_name) {
-            return None;
-        }
-        Some((
-            overlay,
-            MapOverlay {
-                id: overlay.id,
-                material_name,
-                positions: overlay_quad_positions(OverlayBasis::from_overlay(overlay))?,
-                normal: Vec3::from(overlay.basis_normal).normalize_or_zero(),
-                u: overlay.u,
-                v: overlay.v,
-                face_count: overlay.face_count().try_into().unwrap_or(u16::MAX),
-                visibility: point_visibility_bucket(bsp, Vec3::from(overlay.origin), cluster_count),
-            },
-        ))
-    }) {
-        match partition.point_partition(bsp, Vec3::from(overlay.origin)) {
-            GeometryPartition::Visible => visible.push(mapped),
-            GeometryPartition::Skybox => skybox.push(mapped),
-        }
-    }
-    (visible, skybox)
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct OverlayBasis {
-    pub(super) id: i32,
-    pub(super) basis_normal: Vec3,
-    pub(super) uv_points: [Vec3; 4],
-    pub(super) origin: Vec3,
-}
-
-impl OverlayBasis {
-    pub(super) fn from_overlay(overlay: &Overlay) -> Self {
-        Self {
-            id: overlay.id,
-            basis_normal: Vec3::from(overlay.basis_normal),
-            uv_points: overlay.uv_points.map(Vec3::from),
-            origin: Vec3::from(overlay.origin),
-        }
-    }
-}
-
-pub(super) fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[Vec3; 4]> {
-    let normal = overlay.basis_normal.normalize_or_zero();
-    if !vector_is_finite_nonzero(normal) {
-        log::debug!("bsp overlay {} skipped: invalid basis normal", overlay.id);
-        return None;
-    }
-    // vbsp packs BasisU in uv_points[0..3].z and the V-flip flag in [3].z.
-    // The xy pairs are corners in that basis; z is not a normal offset.
-    // See source-sdk-2013 utils/vbsp/overlay.cpp.
-    let uv_points = overlay.uv_points;
-    let u_axis = Vec3::new(uv_points[0][2], uv_points[1][2], uv_points[2][2]).normalize_or_zero();
-    if !vector_is_finite_nonzero(u_axis) {
-        log::debug!(
-            "bsp overlay {} skipped: degenerate packed U basis",
-            overlay.id
-        );
-        return None;
-    }
-    let mut v_axis = normal.cross(u_axis).normalize_or_zero();
-    if uv_points[3][2] == 1.0 {
-        v_axis *= -1.0;
-    }
-    let origin = overlay.origin;
-    // Preview simplification: render one quad from the overlay plane points
-    // and do not clip it back to the referenced faces.
-    Some(uv_points.map(|point| origin + ((u_axis * point[0]) + (v_axis * point[1]))))
 }

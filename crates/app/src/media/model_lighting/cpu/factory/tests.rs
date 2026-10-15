@@ -351,8 +351,6 @@ fn static_seed_keeps_exact_point_and_separates_spherical_from_dynamic_leaf_polic
     assert_ne!(dynamic_seed.sample_point, point);
     assert_eq!(static_seed.ambient_cube, cube);
     assert_ne!(dynamic_seed.ambient_cube, cube);
-    // Installed static caller excludes styled lights and retains emitters that
-    // are already represented in dynamic leaf cubes. Native contrast is separate.
     assert_eq!(
         static_seed
             .evaluate(&[1.0; 128], 4, 0.0002)

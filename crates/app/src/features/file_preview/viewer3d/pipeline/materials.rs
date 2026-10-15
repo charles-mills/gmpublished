@@ -8,6 +8,30 @@ use super::{
     wgpu, write_bc_texture_level, write_texture_level,
 };
 
+use crate::bridge::materials::{TextureReadTransfer, TextureRole};
+
+fn transfer_format(transfer: TextureReadTransfer) -> wgpu::TextureFormat {
+    match transfer {
+        TextureReadTransfer::Unmodified => wgpu::TextureFormat::Rgba8Unorm,
+        TextureReadTransfer::SrgbToLinear => wgpu::TextureFormat::Rgba8UnormSrgb,
+    }
+}
+
+fn texture_format(role: TextureRole) -> wgpu::TextureFormat {
+    transfer_format(role.read_transfer())
+}
+
+fn bc_transfer_format(format: BcFormat, transfer: TextureReadTransfer) -> wgpu::TextureFormat {
+    match transfer {
+        TextureReadTransfer::SrgbToLinear => bc_texture_format(format),
+        TextureReadTransfer::Unmodified => match format {
+            BcFormat::Bc1 => wgpu::TextureFormat::Bc1RgbaUnorm,
+            BcFormat::Bc2 => wgpu::TextureFormat::Bc2RgbaUnorm,
+            BcFormat::Bc3 => wgpu::TextureFormat::Bc3RgbaUnorm,
+        },
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct MaterialTextureViews<'a> {
     pub base: &'a wgpu::TextureView,
@@ -17,31 +41,56 @@ pub struct MaterialTextureViews<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub enum PreparedMaterial<'a> {
+    Fallback,
+    Surface(&'a crate::bridge::materials::SurfaceMaterial),
+    Water(&'a crate::bridge::materials::WaterMaterial),
+    Mirror(&'a crate::bridge::materials::MirrorMaterial),
+}
+
+impl<'a> From<&'a crate::bridge::materials::MaterialShader> for PreparedMaterial<'a> {
+    fn from(shader: &'a crate::bridge::materials::MaterialShader) -> Self {
+        use crate::bridge::materials::MaterialShader;
+        match shader {
+            MaterialShader::Surface(surface) => Self::Surface(surface),
+            MaterialShader::Water(water) => Self::Water(water),
+            MaterialShader::Mirror(mirror) => Self::Mirror(mirror),
+            MaterialShader::Unknown | MaterialShader::Unsupported(_) => Self::Fallback,
+        }
+    }
+}
+
+impl<'a> PreparedMaterial<'a> {
+    fn surface(self) -> Option<&'a crate::bridge::materials::SurfaceMaterial> {
+        if let Self::Surface(surface) = self {
+            Some(surface)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct MaterialUploadMode<'a> {
-    pub unlit: Option<&'a crate::bridge::materials::UnlitMaterial>,
-    pub surface: Option<&'a crate::bridge::materials::LightmappedMaterial>,
+    pub material: PreparedMaterial<'a>,
     pub base_flags: Option<u32>,
     pub base2_flags: Option<u32>,
-    pub force_opaque: bool,
     pub render_mode: RenderMode,
-    pub water: Option<&'a crate::bridge::materials::WaterMaterial>,
-    pub mirror: Option<&'a crate::bridge::materials::MirrorMaterial>,
+    pub alpha_policy: crate::bridge::materials::TextureAlphaPolicy,
 }
 
 impl RenderResources {
-    pub fn create_water_normal_view(
-        &self,
+    pub fn create_normal_view(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        normal: Option<&crate::bridge::materials::WaterNormalMap>,
+        normal: &crate::bridge::materials::DecodedTextureFrames,
     ) -> wgpu::TextureView {
-        let fallback = vec![vec![crate::bridge::materials::ResolvedTextureMip {
-            rgba: vec![128, 128, 255, 255],
-            width: 1,
-            height: 1,
-        }]];
-        let frames = normal.map_or(fallback.as_slice(), |normal| normal.frames.as_slice());
-        Self::create_texture_frames_view(device, queue, frames, wgpu::TextureFormat::Rgba8Unorm)
+        Self::create_texture_frames_view(
+            device,
+            queue,
+            &normal.frames,
+            texture_format(TextureRole::Normal),
+        )
     }
 
     pub(super) fn create_texture_frames_view(
@@ -121,22 +170,45 @@ impl RenderResources {
         label: &'static str,
         texture: Option<&ResolvedTexture>,
     ) -> wgpu::TextureView {
+        self.create_material_texture_view_transfer(
+            device,
+            queue,
+            label,
+            texture,
+            TextureReadTransfer::SrgbToLinear,
+        )
+    }
+
+    fn create_material_texture_view_transfer(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &'static str,
+        texture: Option<&ResolvedTexture>,
+        transfer: TextureReadTransfer,
+    ) -> wgpu::TextureView {
+        let format = transfer_format(transfer);
         let Some(texture) = texture else {
             let levels = checkerboard_mip_levels();
-            return self.create_texture_view_from_levels(device, queue, label, &levels);
+            return self
+                .create_texture_view_from_levels_format(device, queue, label, &levels, format);
         };
         if texture.is_water_fallback() {
-            return self.create_texture_view(
+            let level = TextureUploadLevel {
+                rgba: texture.rgba_bytes().unwrap_or(WHITE_RGBA.as_slice()),
+                width: texture.width.max(1),
+                height: texture.height.max(1),
+            };
+            return self.create_texture_view_from_levels_format(
                 device,
                 queue,
                 label,
-                texture.rgba_bytes().unwrap_or(WHITE_RGBA.as_slice()),
-                texture.width.max(1),
-                texture.height.max(1),
+                &[level],
+                format,
             );
         }
         if let Some((format, mips)) = texture.bc_payload() {
-            return self.create_bc_texture_view(device, queue, label, format, mips);
+            return self.create_bc_texture_view(device, queue, label, (format, mips), transfer);
         }
 
         let levels = texture
@@ -147,7 +219,7 @@ impl RenderResources {
                 height: mip.height,
             })
             .collect::<Vec<_>>();
-        self.create_texture_view_from_levels(device, queue, label, &levels)
+        self.create_texture_view_from_levels_format(device, queue, label, &levels, format)
     }
 
     pub fn create_slot_texture_view(
@@ -161,7 +233,13 @@ impl RenderResources {
         if slot.name == PHY_DEBUG_MATERIAL_NAME && texture.is_none() {
             return self.create_texture_view(device, queue, label, PHY_DEBUG_RGBA.as_slice(), 1, 1);
         }
-        self.create_material_texture_view(device, queue, label, texture)
+        let transfer = slot
+            .shader
+            .surface()
+            .map_or(TextureReadTransfer::SrgbToLinear, |surface| {
+                surface.base_read_transfer()
+            });
+        self.create_material_texture_view_transfer(device, queue, label, texture, transfer)
     }
 
     pub fn create_texture_view_from_levels(
@@ -241,45 +319,46 @@ impl RenderResources {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    pub fn create_bc_texture_view(
+    fn create_bc_texture_view(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         label: &'static str,
-        format: BcFormat,
-        mips: &[ResolvedBcMip],
+        payload: (BcFormat, &[ResolvedBcMip]),
+        transfer: TextureReadTransfer,
     ) -> wgpu::TextureView {
+        let (format, mips) = payload;
+        let format_rgba = transfer_format(transfer);
+        let rgba_view = |rgba: &[u8], width: u32, height: u32| {
+            self.create_texture_view_from_levels_format(
+                device,
+                queue,
+                label,
+                &[TextureUploadLevel {
+                    rgba,
+                    width,
+                    height,
+                }],
+                format_rgba,
+            )
+        };
         let Some(base) = mips.first() else {
-            return self.create_texture_view(device, queue, label, WHITE_RGBA.as_slice(), 1, 1);
+            return rgba_view(WHITE_RGBA.as_slice(), 1, 1);
         };
         if !device
             .features()
             .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
         {
             if let Some(rgba) = decode_bc_texture(format, base.width, base.height, &base.data) {
-                return self.create_texture_view(
-                    device,
-                    queue,
-                    label,
-                    &rgba,
-                    base.width,
-                    base.height,
-                );
+                return rgba_view(&rgba, base.width, base.height);
             }
-            return self.create_texture_view(device, queue, label, WHITE_RGBA.as_slice(), 1, 1);
+            return rgba_view(WHITE_RGBA.as_slice(), 1, 1);
         }
         if !mips.iter().all(|mip| bc_mip_is_valid(format, mip)) {
             if let Some(rgba) = decode_bc_texture(format, base.width, base.height, &base.data) {
-                return self.create_texture_view(
-                    device,
-                    queue,
-                    label,
-                    &rgba,
-                    base.width,
-                    base.height,
-                );
+                return rgba_view(&rgba, base.width, base.height);
             }
-            return self.create_texture_view(device, queue, label, WHITE_RGBA.as_slice(), 1, 1);
+            return rgba_view(WHITE_RGBA.as_slice(), 1, 1);
         }
 
         let mip_level_count = u32::try_from(mips.len())
@@ -295,7 +374,7 @@ impl RenderResources {
             mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: bc_texture_format(format),
+            format: bc_transfer_format(format, transfer),
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -326,74 +405,72 @@ impl RenderResources {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let material_uniform = MaterialUniform::new(mode.force_opaque, mode.render_mode)
-            .with_surface(mode.surface)
-            .with_unlit(mode.unlit)
-            .with_water(mode.water)
-            .with_mirror(mode.mirror);
+        let surface = mode.material.surface();
+        let material_uniform = match mode.material {
+            PreparedMaterial::Fallback => MaterialUniform::new(mode.render_mode, mode.alpha_policy),
+            PreparedMaterial::Surface(surface) => {
+                MaterialUniform::new(mode.render_mode, mode.alpha_policy).with_surface(surface)
+            }
+            PreparedMaterial::Water(water) => {
+                MaterialUniform::new(mode.render_mode, mode.alpha_policy).with_water(water)
+            }
+            PreparedMaterial::Mirror(mirror) => {
+                MaterialUniform::new(mode.render_mode, mode.alpha_policy).with_mirror(mirror)
+            }
+        };
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
         use wgpu::util::DeviceExt;
         let model_material = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("file_preview.model_material"),
             contents: bytemuck::bytes_of(&super::model_lighting::ModelMaterialUniform::new(
-                mode.surface,
+                surface,
             )),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let surface_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("file_preview.material.surface_uniform"),
             contents: bytemuck::bytes_of(&super::surface::SurfaceUniform::new(
-                mode.surface,
+                surface,
                 mode.base_flags,
                 mode.base2_flags,
             )),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let role_view = |source: Option<&crate::bridge::materials::LinearTextureFrames>,
-                         srgb: bool| {
+        let role_view = |source: Option<&crate::bridge::materials::DecodedTextureFrames>,
+                         role: TextureRole| {
             source.map(|source| {
                 Self::create_texture_frames_view(
                     device,
                     queue,
                     source.frames.as_slice(),
-                    if srgb {
-                        wgpu::TextureFormat::Rgba8UnormSrgb
-                    } else {
-                        wgpu::TextureFormat::Rgba8Unorm
-                    },
+                    texture_format(role),
                 )
             })
         };
-        let detail = mode.surface.and_then(|surface| surface.detail.as_ref());
-        let detail_srgb = mode.surface.zip(detail).is_some_and(|(surface, _)| {
-            use crate::bridge::materials::SurfaceFamily;
-            if matches!(
-                surface.family,
-                SurfaceFamily::VertexLit | SurfaceFamily::Unlit
-            ) {
-                surface
-                    .effective_detail_mode()
-                    .is_some_and(|mode| mode != 0)
-            } else {
-                surface.effective_detail_mode() == Some(1)
-            }
-        });
+        let detail = surface.and_then(|surface| surface.detail.as_ref());
+        let detail_role = TextureRole::Detail {
+            family: surface.map_or(
+                crate::bridge::materials::SurfaceFamily::Lightmapped,
+                |surface| surface.family,
+            ),
+            mode: surface
+                .and_then(crate::bridge::materials::SurfaceMaterial::effective_detail_mode),
+        };
         let detail_view = role_view(
             detail.and_then(|detail| detail.texture.as_deref()),
-            detail_srgb,
+            detail_role,
         );
         let blend_view = role_view(
-            mode.surface
-                .and_then(|surface| surface.blend_modulation.as_deref()),
-            false,
+            surface.and_then(|surface| surface.blend_modulation.as_deref()),
+            TextureRole::BlendModulation,
         );
         let emission_view = role_view(
-            mode.surface
+            surface
                 .and_then(|surface| surface.emission.as_ref())
                 .and_then(|emission| emission.mask.as_deref()),
-            false,
+            TextureRole::EmissionMask,
         );
-        let envmap = mode.surface.and_then(|surface| surface.envmap.as_deref());
+        let envmap = surface.and_then(|surface| surface.envmap.as_deref());
         let cube_view = envmap.and_then(|envmap| match &envmap.source {
             crate::bridge::materials::EnvironmentMapSource::Named(cube) => {
                 Some(super::cubemap::create_view(device, queue, Some(cube)))
@@ -411,26 +488,26 @@ impl RenderResources {
         );
         let envmap_mask_view = role_view(
             envmap.and_then(|envmap| envmap.mask_texture.as_deref()),
-            false,
+            TextureRole::EnvironmentMask,
         );
-        let phong = mode.surface.and_then(|surface| surface.phong.as_deref());
+        let phong = surface.and_then(|surface| surface.phong.as_deref());
         let exponent_view = role_view(
             phong
                 .and_then(|phong| phong.exponent_texture.as_ref())
                 .and_then(|texture| texture.texture.as_deref()),
-            false,
+            TextureRole::PhongExponent,
         );
         let diffuse_warp_view = role_view(
             phong
                 .and_then(|phong| phong.diffuse_warp.as_ref())
                 .and_then(|texture| texture.texture.as_deref()),
-            false,
+            TextureRole::PhongWarp,
         );
         let specular_warp_view = role_view(
             phong
                 .and_then(|phong| phong.specular_warp.as_ref())
                 .and_then(|texture| texture.texture.as_deref()),
-            false,
+            TextureRole::PhongWarp,
         );
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.material_bind_group"),
@@ -565,8 +642,7 @@ impl RenderResources {
             address_mode_v: address(flags::CLAMPT),
             mag_filter: filter,
             min_filter: filter,
-            // Native VTF controls select linear mip blending for either flag,
-            // including ANISOTROPIC with the captured mat_forceaniso=1 profile.
+            // ANISOTROPIC requests linear mip blending even at one anisotropic sample.
             mipmap_filter: if texture_flags & (flags::TRILINEAR | flags::ANISOTROPIC) != 0 {
                 wgpu::FilterMode::Linear
             } else {
@@ -675,6 +751,20 @@ pub const fn solid_rgba<const N: usize>(color: [u8; 4]) -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::{CHECKERBOARD_MIP_RGBA, checkerboard_mip_levels};
+
+    #[test]
+    fn decal_modulate_keeps_encoded_channels_for_rgba_and_bc_textures() {
+        use super::*;
+        let role = TextureRole::Base {
+            family: crate::bridge::materials::SurfaceFamily::DecalModulate,
+        };
+        let transfer = role.read_transfer();
+        assert_eq!(texture_format(role), wgpu::TextureFormat::Rgba8Unorm);
+        for format in [BcFormat::Bc1, BcFormat::Bc2, BcFormat::Bc3] {
+            assert!(!bc_transfer_format(format, transfer).is_srgb());
+            assert!(bc_transfer_format(format, TextureReadTransfer::SrgbToLinear).is_srgb());
+        }
+    }
 
     #[test]
     fn checkerboard_fallback_has_prepared_gamma_correct_mips() {

@@ -182,6 +182,7 @@ fn build_mesh_to_map_mesh_local(mesh: BuildMesh) -> MapMesh {
         indices: mesh.indices,
         material_index: mesh.material_index,
         visibility: mesh.visibility.into_map_visibility(),
+        surface_owners: mesh.surface_owners,
     }
 }
 
@@ -457,6 +458,11 @@ pub(super) fn extract_pending_door_meshes(
         let visibility = MapFaceVisibility::from_bucket(pending.visibility);
         let mut door_context = FaceAppendContext {
             entity: false,
+            receiver_owner: super::MapSurfaceOwner::World,
+            receiver_solid: super::brushes::brush_instances(bsp)
+                .iter()
+                .find(|instance| instance.model_index == model_index)
+                .is_none_or(|instance| instance.solid),
             transform: super::brushes::BrushTransform::default(),
             meshes: &mut meshes,
             material_names: context.material_names,

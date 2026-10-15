@@ -1,9 +1,7 @@
-//! Sort logical faces/prop placements across materials, overlays and sprites.
-//! Material batching must not turn distant props into one indivisible layer.
+use super::geometry::ViewerScene;
 use super::reflections::SceneView;
 use super::uniforms::Uniforms;
-use super::upload::UploadedModel;
-use super::{DrawItem, DrawPlan, OverlayDrawItem, Vec3};
+use super::{DrawItem, DrawPlan, OverlayDrawItem, RenderMode, Vec3};
 use gmpublished_domain::scene::map::MapMeshVisibility;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -27,7 +25,7 @@ pub enum Primitive {
 pub struct Draw {
     pub primitive: Primitive,
     pub depth: f32,
-    pub additive: bool,
+    pub blend: RenderMode,
 }
 
 pub fn parts(
@@ -61,8 +59,6 @@ pub fn parts(
             continue;
         };
         let clusters = clusters.map(Arc::<[u32]>::from);
-        // Sorting a whole prop cannot put its front face in front of a pane
-        // which crosses its bounds. Retain PVS membership but order triangles.
         for (offset, triangle) in selected.chunks_exact(3).enumerate() {
             let Some(a) = vertices.get(triangle[0] as usize) else {
                 continue;
@@ -100,20 +96,21 @@ fn skybox_parts(vertices: &[super::ModelVertex], indices: &[u32]) -> Vec<Part> {
 }
 
 pub fn build_parts(
-    upload: &mut UploadedModel,
+    meshes: &mut [super::upload::UploadedMesh],
+    material_render_modes: &[super::RenderMode],
     scene: &super::RenderScene,
     map: Option<&super::MapPreview>,
 ) {
     let Some(map) = map else {
         return;
     };
-    for mesh in &mut upload.meshes {
+    for mesh in meshes {
         if mesh.door_index.is_some() {
             continue;
         }
         if !matches!(
-            upload.material_render_modes.get(mesh.material_index),
-            Some(super::RenderMode::Translucent | super::RenderMode::Additive)
+            material_render_modes.get(mesh.material_index),
+            Some(RenderMode::Translucent | RenderMode::Additive)
         ) {
             continue;
         }
@@ -126,8 +123,6 @@ pub fn build_parts(
             continue;
         };
         if mesh.map_skybox {
-            // Skybox meshes are material batches outside world PVS. Sort their
-            // individual triangles in the sky camera just like world cards.
             mesh.transparent_parts = skybox_parts(&source.vertices, &source.indices);
         } else if let Some(visibility) = map.mesh_visibility.get(mesh.scene_mesh_index) {
             mesh.transparent_parts = parts(&source.vertices, &source.indices, visibility);
@@ -144,9 +139,9 @@ fn depth(uniforms: Uniforms, position: Vec3) -> f32 {
 
 pub fn prepare(
     view: &mut SceneView,
-    upload: &UploadedModel,
+    upload: &ViewerScene,
     world: Uniforms,
-    skybox: Option<Uniforms>,
+    skybox: Option<&Uniforms>,
     detail_water_side: Option<bool>,
 ) {
     let Some(plans) = view.plans.as_ref() else {
@@ -165,12 +160,12 @@ pub fn prepare(
         .as_ref()
         .zip(skybox)
         .map_or_else(Vec::new, |(plan, uniforms)| {
-            queue(upload, plan, uniforms, &view.skybox_visibility, true, None)
+            queue(upload, plan, *uniforms, &view.skybox_visibility, true, None)
         });
 }
 
 fn queue(
-    upload: &UploadedModel,
+    upload: &ViewerScene,
     plan: &DrawPlan,
     uniforms: Uniforms,
     visibility: &super::visibility::UploadedVisibility,
@@ -178,14 +173,14 @@ fn queue(
     detail_water_side: Option<bool>,
 ) -> Vec<Draw> {
     let mut draws = Vec::new();
-    for (items, additive) in [(&plan.translucent, false), (&plan.additive, true)] {
+    for items in [&plan.translucent, &plan.additive] {
         for item in items {
             let mesh = &upload.meshes[item.mesh_index];
             if mesh.transparent_parts.is_empty() {
                 draws.push(Draw {
                     primitive: Primitive::Mesh(*item, None),
-                    depth: depth(uniforms, mesh.centroid),
-                    additive,
+                    depth: depth(uniforms, mesh.centroid()),
+                    blend: upload.assets.material_render_modes[item.material_slot],
                 });
             } else {
                 for part in &mesh.transparent_parts {
@@ -204,34 +199,21 @@ fn queue(
                     draws.push(Draw {
                         primitive: Primitive::Mesh(*item, Some(part.indices.clone())),
                         depth: depth(uniforms, part.centre),
-                        additive,
+                        blend: upload.assets.material_render_modes[item.material_slot],
                     });
                 }
             }
         }
     }
-    for (items, additive) in [
-        (&plan.overlay_translucent, false),
-        (&plan.overlay_additive, true),
-    ] {
-        for item in items {
-            draws.push(Draw {
-                primitive: Primitive::Overlay(*item),
-                depth: depth(uniforms, upload.overlays[item.overlay_index].centroid),
-                additive,
-            });
-        }
-    }
     let sprites = if skybox {
-        upload.map_skybox_detail_sprites.as_ref()
+        upload.assets.map_skybox_detail_sprites.as_ref()
     } else {
-        upload.detail_sprites.as_ref()
+        upload.assets.detail_sprites.as_ref()
     };
     if let Some(sprites) = sprites {
         let stride = super::DETAIL_VERTEX_FLOAT_COUNT as usize * 4;
         for (index, bytes) in sprites.all_vertices.chunks_exact(6 * stride).enumerate() {
-            // Source's PruneWorldListInfo selects detail props by their leaf's
-            // fog volume, not by the corners of their camera-facing quad.
+            // Water-side selection uses the sprite leaf.
             if detail_water_side
                 .is_some_and(|underwater| sprites.underwater_leaves[index] != underwater)
             {
@@ -268,16 +250,40 @@ fn queue(
             draws.push(Draw {
                 primitive: Primitive::Sprite(index as u32 * 6..(index as u32 + 1) * 6),
                 depth: depth(uniforms, position),
-                additive: false,
+                blend: RenderMode::Translucent,
             });
         }
     }
     sort_draws(&mut draws);
+    for mark in &plan.receiver_marks {
+        let last = draws.iter().rposition(|draw| match &draw.primitive {
+            Primitive::Mesh(item, range) if Some(item.mesh_index) == mark.receiver_mesh_index => {
+                range.as_ref().is_none_or(|range| {
+                    range.start < mark.receiver_range.start + mark.receiver_range.count
+                        && range.end > mark.receiver_range.start
+                })
+            }
+            Primitive::Overlay(item) => {
+                item.receiver_mesh_index == mark.receiver_mesh_index
+                    && item.receiver_range == mark.receiver_range
+            }
+            _ => false,
+        });
+        if let Some(index) = last {
+            draws.insert(
+                index + 1,
+                Draw {
+                    primitive: Primitive::Overlay(*mark),
+                    depth: draws[index].depth,
+                    blend: mark.blend,
+                },
+            );
+        }
+    }
     draws
 }
 
 fn sort_draws(draws: &mut [Draw]) {
-    // Stable ordering preserves authored order for coplanar/tied primitives.
     draws.sort_by(|a, b| b.depth.total_cmp(&a.depth));
 }
 
@@ -293,6 +299,7 @@ mod tests {
             tangent_t: Vec3::ZERO,
             tangent_sign: 0.0,
             lighting_context: 0,
+            surface_mark: 0,
             normal: Vec3::new(0.0, 1.0, 0.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -340,6 +347,7 @@ mod tests {
             tangent_t: Vec3::ZERO,
             tangent_sign: 0.0,
             lighting_context: 0,
+            surface_mark: 0,
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -397,6 +405,7 @@ mod tests {
             tangent_t: Vec3::ZERO,
             tangent_sign: 0.0,
             lighting_context: 0,
+            surface_mark: 0,
             normal: Vec3::new(0.0, 1.0, 0.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -419,19 +428,7 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert!(selected.iter().all(|part| part.clusters.is_none()));
         for direction in [1.0, -1.0] {
-            let mut uniforms = Uniforms {
-                view_proj: [[0.0; 4]; 4],
-                light: [0.0; 4],
-                camera_position: [0.0; 4],
-                fog_color: [0.0; 4],
-                fog_params: [0.0; 4],
-                water_time_sky_tint: [0.0; 4],
-                water_depth_params: [0.0; 4],
-                clip_plane: [0.0; 4],
-                medium_plane: [0.0; 4],
-                viewport: [0.0; 4],
-                raster_params: [0.0; 4],
-            };
+            let mut uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
             uniforms.view_proj[1][3] = direction;
             let item = DrawItem {
                 mesh_index: 0,
@@ -443,7 +440,7 @@ mod tests {
                 .map(|part| Draw {
                     primitive: Primitive::Mesh(item, Some(part.indices.clone())),
                     depth: depth(uniforms, part.centre),
-                    additive: false,
+                    blend: RenderMode::Translucent,
                 })
                 .collect::<Vec<_>>();
             sort_draws(&mut draws);

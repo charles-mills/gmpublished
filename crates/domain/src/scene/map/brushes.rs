@@ -30,6 +30,7 @@ impl BrushTransform {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BrushInstance {
+    pub(super) entity_index: Option<usize>,
     pub(super) model_index: ModelIndex,
     pub(super) transform: BrushTransform,
     pub(super) visible: bool,
@@ -85,6 +86,7 @@ pub(super) fn brush_instances(bsp: &MapBsp) -> Vec<BrushInstance> {
     let mut instances = Vec::new();
     if !bsp.models.is_empty() {
         instances.push(BrushInstance {
+            entity_index: None,
             model_index: ModelIndex::new(0),
             transform: BrushTransform::default(),
             visible: true,
@@ -92,7 +94,7 @@ pub(super) fn brush_instances(bsp: &MapBsp) -> Vec<BrushInstance> {
             use_vphysics: false,
         });
     }
-    for entity in &bsp.entities {
+    for (entity_index, entity) in bsp.entities.iter().enumerate() {
         let Some(index) = entity.prop("model").and_then(parse_bmodel_index) else {
             continue;
         };
@@ -155,6 +157,7 @@ pub(super) fn brush_instances(bsp: &MapBsp) -> Vec<BrushInstance> {
         // SetParent computes a parent-relative pose from the child's world
         // pose. A map's parentname does NOT make its origin parent-relative.
         instances.push(BrushInstance {
+            entity_index: Some(entity_index),
             model_index: index,
             transform: BrushTransform { origin, angles },
             visible,

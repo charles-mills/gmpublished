@@ -10,7 +10,7 @@ use vformats::Limits;
 
 use super::{
     ResolvedBcMip, ResolvedTexture, ResolvedTextureMip, ResolvedTexturePayload,
-    linear_to_srgb_byte, normalize_archive_path, srgb_byte_to_linear,
+    TextureReadTransfer, linear_to_srgb_byte, normalize_archive_path, srgb_byte_to_linear,
 };
 
 pub fn decode_vtf_rgba(bytes: &[u8]) -> Result<vformats::vtf::RgbaImage, vformats::vtf::VtfError> {
@@ -148,12 +148,15 @@ pub(super) fn downscale_resolved_texture(
     result
 }
 
-pub(super) fn with_generated_mip_chain(mut tex: ResolvedTexture) -> ResolvedTexture {
+pub(super) fn with_generated_mip_chain(
+    mut tex: ResolvedTexture,
+    transfer: TextureReadTransfer,
+) -> ResolvedTexture {
     if tex.water_fallback {
         return tex;
     }
     if let ResolvedTexturePayload::Rgba { rgba, mip_chain } = &mut tex.payload {
-        *mip_chain = generate_srgb_mip_chain(rgba, tex.width, tex.height).unwrap_or_default();
+        *mip_chain = generate_mip_chain(rgba, tex.width, tex.height, transfer).unwrap_or_default();
     }
     tex
 }
@@ -198,10 +201,20 @@ pub(super) fn drop_bc_mips_to_max_dimension(
     mips
 }
 
+#[cfg(test)]
 pub fn generate_srgb_mip_chain(
     base_rgba: &[u8],
     width: u32,
     height: u32,
+) -> Option<Vec<ResolvedTextureMip>> {
+    generate_mip_chain(base_rgba, width, height, TextureReadTransfer::SrgbToLinear)
+}
+
+fn generate_mip_chain(
+    base_rgba: &[u8],
+    width: u32,
+    height: u32,
+    transfer: TextureReadTransfer,
 ) -> Option<Vec<ResolvedTextureMip>> {
     if width == 0
         || height == 0
@@ -218,7 +231,8 @@ pub fn generate_srgb_mip_chain(
     while previous_width > 1 || previous_height > 1 {
         let next_width = previous_width.div_ceil(2);
         let next_height = previous_height.div_ceil(2);
-        let next_rgba = downsample_srgb_mip_level(&previous_rgba, previous_width, previous_height)?;
+        let next_rgba =
+            downsample_mip_level(&previous_rgba, previous_width, previous_height, transfer)?;
 
         levels.push(ResolvedTextureMip {
             rgba: next_rgba.clone(),
@@ -233,7 +247,12 @@ pub fn generate_srgb_mip_chain(
     Some(levels)
 }
 
-pub(super) fn downsample_srgb_mip_level(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+fn downsample_mip_level(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    transfer: TextureReadTransfer,
+) -> Option<Vec<u8>> {
     if width == 0
         || height == 0
         || rgba.len() != crate::media::pixel::checked_rgba_len(width, height)?
@@ -255,16 +274,28 @@ pub(super) fn downsample_srgb_mip_level(rgba: &[u8], width: u32, height: u32) ->
             for source_y in (y * 2)..((y * 2 + 2).min(height)) {
                 for source_x in (x * 2)..((x * 2 + 2).min(width)) {
                     let offset = rgba_offset(source_x, source_y, width)?;
-                    rgb_linear[0] += srgb_byte_to_linear(rgba[offset]);
-                    rgb_linear[1] += srgb_byte_to_linear(rgba[offset + 1]);
-                    rgb_linear[2] += srgb_byte_to_linear(rgba[offset + 2]);
+                    for channel in 0..3 {
+                        rgb_linear[channel] += match transfer {
+                            TextureReadTransfer::SrgbToLinear => {
+                                srgb_byte_to_linear(rgba[offset + channel])
+                            }
+                            TextureReadTransfer::Unmodified => {
+                                f32::from(rgba[offset + channel]) / 255.0
+                            }
+                        };
+                    }
                     alpha += f32::from(rgba[offset + 3]);
                     count += 1.0;
                 }
             }
-            next.push(linear_to_srgb_byte(rgb_linear[0] / count));
-            next.push(linear_to_srgb_byte(rgb_linear[1] / count));
-            next.push(linear_to_srgb_byte(rgb_linear[2] / count));
+            for value in rgb_linear {
+                next.push(match transfer {
+                    TextureReadTransfer::SrgbToLinear => linear_to_srgb_byte(value / count),
+                    TextureReadTransfer::Unmodified => {
+                        (value / count * 255.0).round().clamp(0.0, 255.0) as u8
+                    }
+                });
+            }
             next.push((alpha / count).round().clamp(0.0, 255.0) as u8);
         }
     }

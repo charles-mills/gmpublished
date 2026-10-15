@@ -1,5 +1,28 @@
 use crate::bridge::materials::{SurfaceFamily, SurfaceMaterial};
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceShaderKind {
+    Fallback = 0,
+    Lightmapped = 1,
+    Transition = 2,
+    VertexLit = 3,
+    Unlit = 4,
+    DecalModulate = 5,
+}
+
+impl From<SurfaceFamily> for SurfaceShaderKind {
+    fn from(family: SurfaceFamily) -> Self {
+        match family {
+            SurfaceFamily::Lightmapped => Self::Lightmapped,
+            SurfaceFamily::Transition => Self::Transition,
+            SurfaceFamily::VertexLit => Self::VertexLit,
+            SurfaceFamily::Unlit => Self::Unlit,
+            SurfaceFamily::DecalModulate => Self::DecalModulate,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SurfaceUniform {
@@ -34,8 +57,7 @@ fn model_gamma(value: f32) -> f32 {
     }
 }
 
-// IMaterialVar's linear-vector path uses the bounded mathlib lookup,
-// unlike general modulation constants which bypass conversion above one.
+// IMaterialVar bounds environment tint before gamma conversion.
 fn environment_gamma(value: f32) -> f32 {
     if value >= 0.95 {
         1.0
@@ -45,8 +67,7 @@ fn environment_gamma(value: f32) -> f32 {
 }
 
 fn alpha_test_reference(authored: Option<f32>) -> f32 {
-    // Generic helpers only override the inherited GEQUAL state for positive
-    // references. ShaderAPI truncates the selected reference to an ALPHAREF byte.
+    // Non-positive references inherit GEQUAL at byte178.
     let reference = authored.filter(|value| *value > 0.0).unwrap_or(0.7);
     (reference * 255.0).trunc() / 255.0
 }
@@ -59,7 +80,7 @@ impl SurfaceUniform {
     ) -> Self {
         let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
         let mut result = Self {
-            flags: [0; 4],
+            flags: [SurfaceShaderKind::Fallback as u32, 0, 0, 0],
             modulation: [1.0; 4],
             model_modulation: [1.0; 4],
             base_s: identity[0],
@@ -92,12 +113,10 @@ impl SurfaceUniform {
         result.alpha_state[1] = u32::from(base2_flags.is_none_or(|flags| {
             flags & (texture_flags::ONEBITALPHA | texture_flags::EIGHTBITALPHA) != 0
         }));
-        result.flags[0] = match surface.family {
-            SurfaceFamily::Lightmapped => 1,
-            SurfaceFamily::Transition => 2,
-            SurfaceFamily::VertexLit => 3,
-            SurfaceFamily::Unlit => 4,
-        };
+        result.flags[0] = SurfaceShaderKind::from(surface.family) as u32;
+        if surface.blends_in_gamma_space() {
+            return result;
+        }
         for channel in 0..3 {
             result.modulation[channel] = surface.color[channel] * surface.color2[channel];
         }
@@ -121,8 +140,7 @@ impl SurfaceUniform {
             } else {
                 surface.base_transform
             };
-            // Source scales each affine column and its corresponding
-            // translation, including translations authored before detail scale.
+            // Detail scale also scales authored translation.
             for row in &mut transform {
                 row[0] *= detail.scale[0];
                 row[1] *= detail.scale[1];
@@ -190,7 +208,7 @@ impl SurfaceUniform {
                 result.env_tint[channel] = if matches!(
                     surface.family,
                     SurfaceFamily::VertexLit | SurfaceFamily::Unlit
-                ) && !surface.uses_skin_shader()
+                ) && !surface.model_shading_profile().skin
                 {
                     environment_gamma(envmap.tint[channel])
                 } else {
@@ -198,7 +216,7 @@ impl SurfaceUniform {
                 };
             }
             result.env_params = [envmap.contrast, envmap.saturation, 1.0, envmap.fresnel];
-            if surface.uses_skin_shader() {
+            if surface.model_shading_profile().skin {
                 result.env_params[3] = surface
                     .parameters
                     .get("$envmapfresnel")
@@ -226,7 +244,7 @@ impl SurfaceUniform {
                 }
             }
             if surface.family == SurfaceFamily::VertexLit
-                && !surface.uses_skin_shader()
+                && !surface.model_shading_profile().skin
                 && surface.normal.is_some()
                 && envmap.mask != EnvironmentMapMask::NormalAlpha
                 && (surface.authored_flag("$basealphaenvmapmask")
@@ -258,6 +276,58 @@ mod tests {
     use super::*;
     use iced::wgpu::naga;
     use std::mem::{offset_of, size_of};
+
+    #[test]
+    fn surface_shader_selectors_match_wgsl_constants() {
+        let module = naga::front::wgsl::parse_str(
+            crate::features::file_preview::viewer3d::MODEL_SHADER_SOURCE,
+        )
+        .unwrap();
+        for (name, kind) in [
+            ("SURFACE_NONE", SurfaceShaderKind::Fallback),
+            ("SURFACE_LIGHTMAPPED", SurfaceShaderKind::Lightmapped),
+            ("SURFACE_TRANSITION", SurfaceShaderKind::Transition),
+            ("SURFACE_VERTEX_LIT", SurfaceShaderKind::VertexLit),
+            ("SURFACE_UNLIT", SurfaceShaderKind::Unlit),
+            ("SURFACE_DECAL_MODULATE", SurfaceShaderKind::DecalModulate),
+        ] {
+            let constant = module
+                .constants
+                .iter()
+                .find_map(|(_, constant)| {
+                    (constant.name.as_deref() == Some(name)).then_some(constant)
+                })
+                .unwrap();
+            assert!(
+                matches!(module.global_expressions[constant.init], naga::Expression::Literal(naga::Literal::U32(actual)) if actual == kind as u32),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn modulate_shader_ignores_generic_tint_alpha_and_texture_transform() {
+        let material = SurfaceMaterial {
+            family: SurfaceFamily::DecalModulate,
+            color: [0.1, 0.2, 0.3],
+            color2: [0.4, 0.5, 0.6],
+            alpha: 0.25,
+            base_transform: [[2.0, 0.0, 0.0, 0.5], [0.0, 3.0, 0.0, -0.5]],
+            vertex_color: true,
+            vertex_alpha: true,
+            alpha_test: true,
+            ..SurfaceMaterial::default()
+        };
+        let uniform = SurfaceUniform::new(Some(&material), None, None);
+        assert_eq!(
+            uniform.flags,
+            [SurfaceShaderKind::DecalModulate as u32, 0, 0, 0]
+        );
+        assert_eq!(uniform.modulation, [1.0; 4]);
+        assert_eq!(uniform.base_s, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(uniform.base_t, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(uniform.state, [0; 4]);
+    }
 
     #[test]
     fn native_alpha_cutoff_inherits_gequal_and_preserves_byte_boundaries() {

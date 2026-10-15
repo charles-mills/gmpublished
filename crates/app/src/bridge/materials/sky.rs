@@ -1,4 +1,4 @@
-use super::{Arc, ContentPath, MaterialResolver, ResolvedTexture, Vec3, parse_water_fog_color};
+use super::{Arc, ContentPath, MaterialResolver, ResolvedTexture, Vec3, parse_material_color};
 use gmpublished_domain::scene::map::MapSkyPaint;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19,7 +19,7 @@ pub struct PaintedSkyMaterial {
     pub star_fade: f32,
     pub star_position: f32,
     pub star_speed: f32,
-    pub texture: Option<Arc<super::LinearTextureFrames>>,
+    pub texture: Option<Arc<super::DecodedTextureFrames>>,
 }
 
 impl PaintedSkyMaterial {
@@ -31,10 +31,10 @@ impl PaintedSkyMaterial {
         let vector = |key| {
             material
                 .parameter(key)
-                .and_then(parse_water_fog_color)
+                .and_then(parse_material_color)
                 .unwrap_or(Vec3::ZERO)
         };
-        let scalar = |key| super::water::scalar(material.parameter(key), 0.0);
+        let scalar = |key| super::parameters::scalar(material.parameter(key), 0.0);
         // Native g_sky leaves undefined material parameters at zero. The Lua
         // entity's defaults apply only when its SkyPaint proxy actually binds.
         let mut paint = Self {
@@ -143,9 +143,9 @@ impl MaterialResolver {
                     .and_then(|name| self.resolve_texture(name, false)),
                 color: material
                     .parameter("$color")
-                    .and_then(parse_water_fog_color)
+                    .and_then(parse_material_color)
                     .unwrap_or(Vec3::splat(1.0)),
-                transform: super::water::texture_transform(
+                transform: super::parameters::texture_transform(
                     material.parameter("$basetexturetransform"),
                 ),
                 paint_proxy,

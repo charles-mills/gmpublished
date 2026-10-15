@@ -1,15 +1,13 @@
-//! Planar views share geometry, but own all camera, visibility and target state.
 use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection, prepare_draw_plans};
 use super::DrawPlans;
+use super::geometry::ViewerScene;
 use super::targets::RenderTargets;
 use super::uniforms::Uniforms;
 use super::upload::UploadedModel;
 use super::visibility::UploadedVisibility;
 use super::{ModelPrimitive, RenderResources, Vec3, mat_mul, wgpu};
 
-/// Bound aggregate reflection attachments while preserving aspect ratio. The
-/// normalized projection/sample coordinates are independent of RT resolution.
-/// Main-view attachments and driver allocation overhead are separate.
+/// Aggregate optical attachment budget, excluding main targets and driver overhead.
 const TARGET_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 pub fn target_size(size: (u32, u32), count: usize, format: wgpu::TextureFormat) -> (u32, u32) {
     if count == 0 {
@@ -118,14 +116,16 @@ pub struct ViewUniforms {
 impl ViewUniforms {
     pub fn new(
         device: &wgpu::Device,
-        resources: &RenderResources,
+        resources: &super::resources::SharedResources,
         lighting: &super::lighting::Frame,
+        surface_marks: &wgpu::Buffer,
     ) -> Self {
         let (buffer, bind_group) = super::resources::uniforms(
             device,
             &resources.uniform_layout,
             "file_preview.scene_view",
             lighting,
+            surface_marks,
         );
         Self { buffer, bind_group }
     }
@@ -150,14 +150,15 @@ pub struct SceneView {
 impl SceneView {
     pub fn new(
         device: &wgpu::Device,
-        resources: &RenderResources,
+        resources: &super::resources::SharedResources,
         lighting: &super::lighting::Frame,
+        surface_marks: &wgpu::Buffer,
     ) -> Self {
         Self {
             sun: super::sun::gpu::Frame::default(),
-            world: ViewUniforms::new(device, resources, lighting),
-            sky: ViewUniforms::new(device, resources, lighting),
-            skybox: ViewUniforms::new(device, resources, lighting),
+            world: ViewUniforms::new(device, resources, lighting, surface_marks),
+            sky: ViewUniforms::new(device, resources, lighting, surface_marks),
+            skybox: ViewUniforms::new(device, resources, lighting, surface_marks),
             visibility: UploadedVisibility::default(),
             skybox_visibility: UploadedVisibility::default(),
             plans: None,
@@ -320,30 +321,31 @@ pub struct PlanarView {
     pub surface_index: usize,
     pub surface_indices: Vec<u32>,
     pub surface_buffer: super::visibility::UploadedVisibleIndices,
-    pub view: SceneView,
-    pub reflect_enabled: bool,
+    pub reflection: Option<SceneView>,
     pub refraction: Option<SceneView>,
     pub refraction_clear: wgpu::Color,
-    pub water_bind_group: Option<wgpu::BindGroup>,
+    pub water_bind_group: Option<super::targets::WaterBindings>,
     pub surface_uniforms: ViewUniforms,
 }
 
 impl PlanarView {
-    pub fn prepare(
+    pub(super) fn prepare_reflection(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         resources: &RenderResources,
         primitive: &ModelPrimitive,
-        upload: &UploadedModel,
+        upload: &ViewerScene,
         size: (u32, u32),
     ) {
-        let surface = &upload.reflectors[self.surface_index];
+        let surface = &upload.assets.reflectors[self.surface_index];
         let shader = &primitive.preview.render_scene().materials[surface.material_slot].shader;
+        let Some(view) = self.reflection.as_mut() else {
+            return;
+        };
         let offset = primitive.raster_offset();
-        // Stored optical targets use the main-camera reflection matrix. Source
-        // uses a proper reflected camera, with a different axis reversal for
-        // water and reflective glass; transform its raster bias accordingly.
+        // Reflection reverses different raster axes for water and glass.
+        // Transform the half-pixel bias into the stored target orientation.
         let reflected_offset = if shader.mirror().is_some() {
             [-offset[0], offset[1]]
         } else {
@@ -356,14 +358,14 @@ impl PlanarView {
         let water = primitive.preview.render_scene().materials[surface.material_slot]
             .shader
             .water();
-        main.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
-        self.view.world.write(queue, &main);
+        main.water_time_sky_tint[1..].copy_from_slice(upload.assets.sky_tint.as_array());
+        view.world.write(queue, &main);
         if let Some(sky) = primitive.sky_uniforms {
             let direction_plane = Plane {
                 distance: 0.0,
                 ..surface.plane
             };
-            self.view.sky.write(
+            view.sky.write(
                 queue,
                 &direction_plane
                     .reflect_uniforms(sky, false)
@@ -371,8 +373,7 @@ impl PlanarView {
             );
         }
         let skybox = primitive.map_skybox_uniforms.map(|mut uniforms| {
-            uniforms.water_time_sky_tint[1..].copy_from_slice(upload.sky_tint.as_array());
-            // sky_camera translates and uniformly scales world coordinates.
+            uniforms.water_time_sky_tint[1..].copy_from_slice(upload.assets.sky_tint.as_array());
             let scale = primitive.skybox_transform.map_or(16.0, |(_, scale)| scale);
             let origin = primitive
                 .skybox_transform
@@ -385,18 +386,16 @@ impl PlanarView {
             .with_raster_offset(size, reflected_offset)
         });
         if let Some(skybox) = skybox {
-            self.view.skybox.write(queue, &skybox);
+            view.skybox.write(queue, &skybox);
         }
         if let Some(map) = primitive.preview.map() {
-            // Main SetupVis remains active while Source builds optical world
-            // lists. Keep the reflected frustum and clipping view-local;
-            // projecting the eye onto water admits unrelated world clusters.
+            // Optical passes retain main-camera PVS while using their own frustum.
             let eye = Vec3::from([
                 primitive.uniforms.camera_position[0],
                 primitive.uniforms.camera_position[1],
                 primitive.uniforms.camera_position[2],
             ]);
-            self.view.visibility.ensure_world_visibility(
+            view.visibility.ensure_world_visibility(
                 device,
                 queue,
                 map,
@@ -415,14 +414,11 @@ impl PlanarView {
                 },
                 camera_position: main.camera_position,
                 map_skybox_visible: primitive.map_skybox_visible,
-                map_skybox_content_present: upload.has_map_skybox_content(),
+                map_skybox_content_present: upload.assets.has_map_skybox_content(),
                 map_skybox_camera_position: skybox.map(|uniforms| uniforms.camera_position),
-                visibility_plan: self.view.visibility.plan.as_ref(),
+                visibility_plan: view.visibility.plan.as_ref(),
             },
         );
-        // Secondary planar surfaces use the non-recursive material fallback.
-        // They still cover geometry and obey this view's clip plane; skipping
-        // them would leave holes. No reflected pass samples its own target.
         if let Some(water) = primitive
             .preview
             .render_scene()
@@ -445,21 +441,23 @@ impl PlanarView {
             }
         }
         let sun_skybox = skybox.filter(|_| plans.map_skybox.is_some());
-        self.view.plans = Some(plans);
-        super::transparency::prepare(&mut self.view, upload, main, skybox, water.map(|_| false));
-        RenderTargets::ensure(&mut self.view.targets, device, resources, size);
-        // Legacy env_sun overlays are part of GMod's reflected sky scene. Keep
-        // their visibility history and depth queries local to this view, using
-        // its reflected camera and the skybox plan actually rendered here.
-        self.view.sun.prepare(
+        view.plans = Some(plans);
+        super::transparency::prepare(view, upload, main, skybox.as_ref(), water.map(|_| false));
+        RenderTargets::ensure(
+            &mut view.targets,
+            device,
+            resources.for_view(super::draw::ViewKind::Reflection),
+            size,
+        );
+        view.sun.prepare(
             device,
             queue,
-            &resources.sun,
+            &resources.reflection_sun,
             &super::sun::gpu::Inputs {
                 map: primitive.preview.map(),
                 world: main,
                 skybox: sun_skybox,
-                targets: self.view.targets.as_ref().unwrap(),
+                targets: view.targets.as_ref().unwrap(),
             },
         );
     }
@@ -638,6 +636,7 @@ mod tests {
             tangent_t: Vec3::ZERO,
             tangent_sign: 0.0,
             lighting_context: 0,
+            surface_mark: 0,
             normal,
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],

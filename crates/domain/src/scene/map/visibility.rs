@@ -11,7 +11,12 @@ pub struct MapVisibility {
     pub(super) cluster_count: u32,
     pub(super) locator: MapLeafLocator,
     pub(super) vis: Visibility<'static>,
+    ordering: FaceOrdering,
 }
+
+#[path = "visibility_order.rs"]
+mod order;
+use order::FaceOrdering;
 
 pub(super) const PROP_AABB_MAX_EXTENT: f32 = 8192.0;
 pub(super) const PROP_AABB_MAX_LEAVES: usize = 4096;
@@ -24,6 +29,7 @@ impl MapVisibility {
             cluster_count: vis.cluster_count() as u32,
             locator: MapLeafLocator::from_bsp(bsp),
             vis,
+            ordering: FaceOrdering::from_bsp(bsp),
         })
     }
 
@@ -47,6 +53,10 @@ impl MapVisibility {
     pub fn clusters_for_aabb(&self, bounds_min: Vec3, bounds_max: Vec3) -> MapPropVisibility {
         self.locator
             .clusters_for_aabb(bounds_min, bounds_max, self.cluster_count)
+    }
+
+    pub fn ordered_faces(&self, eye: Vec3, visible: impl Fn(u32) -> bool) -> Vec<u32> {
+        self.ordering.ordered_faces(&self.locator, eye, visible)
     }
 }
 

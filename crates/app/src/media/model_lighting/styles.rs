@@ -17,14 +17,58 @@ const DEFAULT_PATTERNS: [&str; 13] = [
 ];
 const LEVEL_SCALE: f32 = f32::from_bits(0x3b78_3e10);
 
-pub(super) fn model_light_style_values(entities: &[MapLightStyleEntity], time: f64) -> [f32; 128] {
-    let tick = if time.is_finite() {
-        (time.max(0.0) * 10.0) as usize
-    } else {
-        0
-    };
-    patterns(entities)
-        .map(|pattern| pattern.map_or(256.0 * LEVEL_SCALE, |pattern| pattern_value(pattern, tick)))
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ModelLightStyles {
+    patterns: [Option<Box<str>>; 128],
+    animated: [bool; 128],
+}
+
+impl ModelLightStyles {
+    pub fn new(entities: &[MapLightStyleEntity]) -> Self {
+        let patterns: [Option<Box<str>>; 128] =
+            patterns(entities).map(|pattern| pattern.map(Box::from));
+        let animated = std::array::from_fn(|index| {
+            patterns[index].as_deref().is_some_and(|pattern| {
+                pattern
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|first| pattern.bytes().any(|byte| byte != *first))
+            })
+        });
+        Self { patterns, animated }
+    }
+
+    pub fn values(&self, time: f64) -> [f32; 128] {
+        let tick = if time.is_finite() {
+            (time.max(0.0) * 10.0) as usize
+        } else {
+            0
+        };
+        std::array::from_fn(|index| {
+            self.patterns[index]
+                .as_deref()
+                .map_or(256.0 * LEVEL_SCALE, |pattern| pattern_value(pattern, tick))
+        })
+    }
+
+    pub fn is_animated(&self, lights: &[gmpublished_domain::scene::map::MapWorldLight]) -> bool {
+        lights
+            .iter()
+            .filter(|light| light.intensity.into_iter().any(|value| value > 0.0))
+            .filter(|light| light.kind != vformats::bsp::WorldLightKind::SkyAmbient)
+            .any(|light| {
+                usize::try_from(light.style)
+                    .ok()
+                    .and_then(|index| self.animated.get(index))
+                    .copied()
+                    .unwrap_or(false)
+            })
+    }
+}
+
+#[cfg(test)]
+fn model_light_style_values(entities: &[MapLightStyleEntity], time: f64) -> [f32; 128] {
+    ModelLightStyles::new(entities).values(time)
 }
 
 fn patterns(entities: &[MapLightStyleEntity]) -> [Option<&str>; 128] {
@@ -67,36 +111,11 @@ fn patterns(entities: &[MapLightStyleEntity]) -> [Option<&str>; 128] {
     values
 }
 
-pub(super) fn model_light_styles_animated(
-    entities: &[MapLightStyleEntity],
-    lights: &[gmpublished_domain::scene::map::MapWorldLight],
-) -> bool {
-    let patterns = patterns(entities);
-    lights
-        .iter()
-        .filter(|light| light.intensity.into_iter().any(|value| value > 0.0))
-        .filter(|light| light.kind != vformats::bsp::WorldLightKind::SkyAmbient)
-        .filter_map(|light| {
-            usize::try_from(light.style)
-                .ok()
-                .and_then(|style| patterns.get(style))
-                .copied()
-                .flatten()
-        })
-        .any(|pattern| {
-            pattern
-                .as_bytes()
-                .first()
-                .is_some_and(|first| pattern.bytes().any(|value| value != *first))
-        })
-}
-
 fn pattern_value(pattern: &str, tick: usize) -> f32 {
     let Some(&byte) = pattern.as_bytes().get(tick % pattern.len().max(1)) else {
         return 256.0 * LEVEL_SCALE;
     };
-    // The engine stores integer letter levels before applying1/264. This
-    // differs by an ULP from directly dividing the letter index by12.
+    // Integer letter levels preserve rounding before the 1/264 scale.
     f32::from((i16::from(byte) - i16::from(b'a')) * 22) * LEVEL_SCALE
 }
 

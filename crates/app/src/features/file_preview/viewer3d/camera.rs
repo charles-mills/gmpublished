@@ -191,17 +191,12 @@ pub(super) const WALK_DUCK_EYE_HEIGHT: f32 = 28.0;
 pub(super) const WALK_DUCK_EYE_TO_HULL_CENTER: Vec3 = Vec3::new(0.0, 0.0, -10.0);
 pub(super) const WALK_DUCK_HULL_CENTER_TO_EYE: Vec3 = Vec3::new(0.0, 0.0, 10.0);
 pub(super) const WALK_SPEED: f32 = 190.0;
-// HL2 sprint speed; keeps the Source-defaults convention of the rest.
 pub(super) const WALK_SWIM_STOP_SPEED: f32 = 0.1;
 pub(super) const WALK_STEP_HEIGHT: f32 = 18.0;
 pub(super) const WALK_GROUND_SNAP: f32 = 4.0;
 pub(super) const LAND_BOB_DURATION: f32 = 0.22;
 pub(super) const LAND_BOB_AMPLITUDE: f32 = 3.0;
 
-/// How deep the walk hull is in water, sampled at feet, waist and eye.
-///
-/// Ordered: swimming starts at [`Self::Waist`], and [`Self::Eyes`] is also
-/// submerged.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum WaterLevel {
     #[default]
@@ -232,13 +227,11 @@ pub struct FlyCamera {
     pub(super) position: Option<Vec3>,
     pub(super) yaw: f32,
     pub(super) pitch: f32,
-    /// Multiplier over the map-scaled base speed, adjusted by wheel.
     pub(super) speed: f32,
     pub(super) move_factor: f32,
     pub(super) held: HeldKeys,
     pub(super) input_captured: bool,
     pub(super) last_frame: Option<std::time::Instant>,
-    /// Visual time is independent of movement and its bounded physics steps.
     pub(super) animation_started_at: Option<std::time::Instant>,
     pub(super) animated_scene: bool,
     pub(super) water_time: f32,
@@ -403,11 +396,17 @@ impl FlyCamera {
             .lightmap
             .as_ref()
             .is_some_and(gmpublished_domain::scene::map::LightmapAtlas::is_animated)
-            || scene.model_lighting_inputs.as_ref().is_some_and(|inputs| inputs.is_animated())
-            || scene.skybox.as_ref().is_some_and(|sky| sky.materials.iter().flatten()
-                .filter_map(|material| material.painted.as_ref())
-                .any(crate::bridge::materials::PaintedSkyMaterial::is_animated))
-            // Sun visibility fades on the GPU after an occluder or camera moves.
+            || scene
+                .model_lighting_inputs
+                .as_ref()
+                .is_some_and(|inputs| inputs.is_animated())
+            || scene.skybox.as_ref().is_some_and(|sky| {
+                sky.materials
+                    .iter()
+                    .flatten()
+                    .filter_map(|material| material.painted.as_ref())
+                    .any(crate::bridge::materials::PaintedSkyMaterial::is_animated)
+            })
             || scene.suns.iter().any(|sun| sun.enabled)
             || scene.scene.materials.iter().any(|slot| {
                 slot.shader
@@ -685,8 +684,6 @@ impl shader::Program<Message> for FlyViewer {
                 if !delta.0.is_finite() || !delta.1.is_finite() {
                     return None;
                 }
-                // Source is Z-up: increasing yaw turns left, so mouse-right
-                // must decrease yaw. Positive pitch looks upward.
                 camera.yaw -= delta.0 as f32 * FLY_LOOK_SENSITIVITY;
                 camera.pitch = (camera.pitch - delta.1 as f32 * FLY_LOOK_SENSITIVITY)
                     .clamp(MIN_PITCH, MAX_PITCH);
@@ -799,8 +796,6 @@ impl shader::Program<Message> for FlyViewer {
                     if initialized || mode_request_seen || mode_request_changed {
                         return camera.camera_update_message().map(Action::publish);
                     }
-                    // Surface animation drives its own redraw chain without
-                    // publishing unchanged camera poses to application state.
                     return camera.animated_scene.then(Action::request_redraw);
                 }
                 if let Some(last) = camera.last_frame {
@@ -1075,7 +1070,6 @@ mod tests {
             bounds,
             mouse::Cursor::Unavailable,
         );
-        // Looking along +X, screen-right is -Y and screen-up is +Z.
         assert!(camera.forward()[1] < 0.0, "mouse-right must look right");
         assert!(camera.forward()[2] > 0.0, "mouse-up must look up");
         let left_and_down = Event::Mouse(mouse::Event::Motion {
@@ -1165,8 +1159,8 @@ mod tests {
                 shader: resolved.shader,
                 texture: Some(resolved.texture),
                 texture2: None,
-                force_opaque: resolved.force_opaque,
                 render_mode: resolved.render_mode,
+                alpha_policy: resolved.render_mode.texture_alpha_policy(),
             });
         FlyViewer {
             scene: Arc::new(scene),

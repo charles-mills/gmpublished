@@ -6,13 +6,13 @@ use super::compiled_lighting::{
 use super::{
     Arc, BTreeMap, BTreeSet, ContentSourceTier, ConvexHull, ConvexLedge, DoorInstance, DoorSound,
     DoorSoundSourceTier, DoorSoundWave, DoorSounds, Duration, HashMap, HashSet, Instant,
-    MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP, MapDoor, MapDoorGeometry, MapMeshClusterRanges,
-    MapMeshIndexRange, MapMeshVisibility, MapPropVisibility, MapVisibility, MapWalkPropModel,
-    MaterialResolver, MaterialSlot, MaterialTable, MeshData, ModelData, ModelVertex,
-    PropMaterialResolveJob, PropPlacementLighting, ReadStats, RenderMode, ResolvedPrimaryMaterial,
+    LegacyPropLightingFallback, MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP, MapDoor,
+    MapDoorGeometry, MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapPropVisibility,
+    MapVisibility, MapWalkPropModel, MaterialResolver, MaterialSlot, MaterialTable, MeshData,
+    ModelData, ModelVertex, PropMaterialResolveJob, ReadStats, RenderMode, ResolvedPrimaryMaterial,
     ResolvedSoundReference, SelectedPropPlacement, SkipReason, StaticPropLightingInputs,
     StaticPropPlacement, Vec3, bounds_from_model_meshes, catch_asset_decode, entry_stem,
-    load_model_companions, map_mesh_to_model_mesh, parallel_collect, prop_placement_lighting,
+    legacy_prop_lighting_fallback, load_model_companions, map_mesh_to_model_mesh, parallel_collect,
 };
 use rayon::prelude::*;
 
@@ -191,10 +191,7 @@ impl PropBuildMeshVisibility {
     }
 
     fn append_shifted(&mut self, source: Self, index_base: u32) {
-        // Face ids are the rebuild-time dedup key and must stay unique within
-        // a merged mesh; each parallel chunk numbers its own faces from zero,
-        // so rebase them past the ids already used here or colliding props
-        // would be silently dropped from the visible plan.
+        // Parallel chunks restart face IDs; rebase them or visibility dedup drops props.
         let face_base = self.next_face;
         for range in source.always_visible {
             if let Some(range) = shifted_range(range, index_base, face_base) {
@@ -395,6 +392,7 @@ pub(in super::super) fn bake_map_doors_with_prop_model_loader(
                     .map(|mesh| map_mesh_to_model_mesh(mesh, context.table.slots()))
                     .collect::<Vec<_>>();
                 baked.doors.push(DoorInstance {
+                    source_index: door_index,
                     brush_collision: door.brush_collision.clone(),
                     class: door.class,
                     origin: door.origin,
@@ -450,7 +448,7 @@ pub(in super::super) fn bake_map_doors_with_prop_model_loader(
                     model: Arc::clone(&model.model),
                     default_triangle_count: model.default_triangle_count,
                 });
-                let lighting = prop_placement_lighting(placement, lighting);
+                let lighting = legacy_prop_lighting_fallback(placement, lighting);
                 let mut meshes = bake_prop_door_meshes(placement, &model, lighting);
                 let Some((local_bounds_min, local_bounds_max)) = bounds_from_model_meshes(&meshes)
                 else {
@@ -461,6 +459,7 @@ pub(in super::super) fn bake_map_doors_with_prop_model_loader(
                     meshes.clear();
                 }
                 baked.doors.push(DoorInstance {
+                    source_index: door_index,
                     brush_collision: None,
                     class: door.class,
                     origin: door.origin,
@@ -665,13 +664,12 @@ fn prop_draw_materials(indices: &[usize], opacity: f32, table: &mut MaterialTabl
             }
             let mut slot = table.slots()[index].clone();
             if let Some(surface) = slot.shader.surface() {
-                // Model draw modulation replaces material alpha. Keep the
-                // authored surface intact and select the resulting depth queue.
+                // Instance opacity replaces material alpha without changing authored inputs.
                 slot.render_mode = surface.draw_render_mode(
                     slot.texture.as_ref().and_then(|texture| texture.flags),
                     opacity,
                 );
-                slot.force_opaque = slot.render_mode.force_opaque();
+                slot.alpha_policy = slot.render_mode.texture_alpha_policy();
             } else if opacity < 1.0
                 && matches!(slot.render_mode, RenderMode::Opaque | RenderMode::Cutout)
             {
@@ -785,11 +783,14 @@ fn bake_selected_with(
                         selected.placement,
                     ),
                     lighting_origin_reference: selected.placement.lighting_origin_reference.clone(),
-                    cpu_seed: Ok(None),
+                    source: crate::media::preview_model::ModelLightingSource::DiagnosedFallback {
+                        reason: crate::media::preview_model::ModelLightingFallbackReason::LegacyVertexLighting,
+                        snapshot: crate::media::preview_model::ModelLightingSnapshot {
+                            ambient_cube: selected.lighting.ambient_cube, lights: Vec::new(),
+                        },
+                    },
                     diffuse_modulation: selected.placement.diffuse_modulation,
                     render_mode: selected.placement.render_mode,
-                    ambient_cube: selected.lighting.ambient_cube,
-                    lights: Vec::new(),
                 }
             })
             .collect(),
@@ -889,11 +890,14 @@ pub(in super::super) fn select_static_prop_placements<'a>(
         if prop_placement_has_bakeable_mesh(placement, &model) {
             baked_triangles = baked_triangles.saturating_add(model.default_triangle_count);
             selected.push(SelectedPropPlacement {
-                lighting_context: u32::try_from(selected.len() + 1)
-                    .expect("bounded placement context"),
+                lighting_context: crate::media::preview_model::ModelLightingContextId::from_index(
+                    selected.len(),
+                )
+                .expect("bounded placement context")
+                .gpu(),
                 placement,
                 model,
-                lighting: prop_placement_lighting(placement, lighting),
+                lighting: legacy_prop_lighting_fallback(placement, lighting),
                 compiled_lighting: None,
             });
         } else {
@@ -1033,6 +1037,10 @@ pub(in super::super) fn prop_placement_has_bakeable_mesh(
     placement: &StaticPropPlacement,
     model: &PropModelAsset,
 ) -> bool {
+    log::debug!(
+        "prop door {:?}: using closed-pose legacy lighting fallback",
+        placement.model_path
+    );
     let skin_table = prop_skin_table(&model.model, placement.skin);
     model
         .model
@@ -1119,7 +1127,7 @@ pub(in super::super) fn log_prop_door_material_resolution(
 pub(in super::super) fn bake_prop_door_meshes(
     placement: &StaticPropPlacement,
     model: &PropModelAsset,
-    lighting: PropPlacementLighting,
+    lighting: LegacyPropLightingFallback,
 ) -> Vec<MeshData> {
     let skin_table = prop_skin_table(&model.model, placement.skin);
     model
@@ -1137,7 +1145,11 @@ pub(in super::super) fn bake_prop_door_meshes(
                 .iter()
                 .map(|vertex| {
                     let closed_normal = transform_prop_normal(vertex.normal, placement);
-                    let authored_modulation = placement.diffuse_modulation != [255; 4];
+                    let fallback = lighting.vertex_lighting(
+                        closed_normal,
+                        prop_diffuse_tint(placement),
+                        placement.diffuse_modulation != [255; 4],
+                    );
                     ModelVertex {
                         position: vertex.position,
                         normal: vertex.normal,
@@ -1145,22 +1157,16 @@ pub(in super::super) fn bake_prop_door_meshes(
                         tangent_t: vertex.tangent_t,
                         tangent_sign: vertex.tangent_sign,
                         lighting_context: 0,
+                        surface_mark: 0,
                         uv: vertex.uv,
                         lightmap_uv: [0.0; 2],
                         lightmap_bump_step: 0.0,
-                        color: if authored_modulation {
-                            prop_diffuse_tint(placement)
-                        } else {
-                            lighting.evaluate(closed_normal)
-                        },
+                        color: fallback.color,
                         blend_alpha: 0.0,
                         opacity: prop_opacity(placement),
-                        illumination: if authored_modulation {
-                            lighting.evaluate(closed_normal) * 2.0
-                        } else {
-                            Vec3::splat(1.0)
-                        },
-                        lighting_mode: 8 | u32::from(authored_modulation),
+                        illumination: fallback.illumination,
+                        lighting_mode: crate::media::preview_model::vertex_lighting::MODEL_DRAW
+                            | fallback.flags,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1448,12 +1454,13 @@ pub(in super::super) fn prop_material_index(
             name: name.to_owned(),
             texture,
             texture2: None,
-            force_opaque: resolved
-                .as_ref()
-                .is_none_or(|material| material.force_opaque),
             render_mode: resolved
                 .as_ref()
                 .map_or(RenderMode::Opaque, |material| material.render_mode),
+            alpha_policy: resolved
+                .as_ref()
+                .map_or(RenderMode::Opaque, |material| material.render_mode)
+                .texture_alpha_policy(),
         },
     )
 }
@@ -1473,7 +1480,7 @@ pub(in super::super) fn prop_material_cache_key(material_dirs: &[String], name: 
 pub(in super::super) fn bake_prop_placement(
     placement: &StaticPropPlacement,
     model: &PropModelAsset,
-    lighting: PropPlacementLighting,
+    lighting: LegacyPropLightingFallback,
     prop_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
 ) -> bool {
     bake_prop_placement_with_compiled(placement, model, lighting, None, 0, prop_meshes)
@@ -1482,7 +1489,7 @@ pub(in super::super) fn bake_prop_placement(
 fn bake_prop_placement_with_compiled(
     placement: &StaticPropPlacement,
     model: &PropModelAsset,
-    lighting: PropPlacementLighting,
+    lighting: LegacyPropLightingFallback,
     compiled: Option<&CompiledPropLighting>,
     lighting_context: u32,
     prop_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
@@ -1531,9 +1538,11 @@ fn bake_prop_placement_with_compiled(
                         .and_then(|compiled| compiled.illumination.get(mesh_index))
                         .and_then(|mesh| mesh.get(vertex_index))
                         .copied();
-                    let authored_modulation = placement.diffuse_modulation != [255; 4];
-                    let illumination = compiled_illumination
-                        .or_else(|| authored_modulation.then(|| lighting.evaluate(normal) * 2.0));
+                    let fallback = lighting.vertex_lighting(
+                        normal,
+                        prop_diffuse_tint(placement),
+                        placement.diffuse_modulation != [255; 4],
+                    );
                     ModelVertex {
                         position: transform_prop_position(vertex.position, placement),
                         normal,
@@ -1541,19 +1550,22 @@ fn bake_prop_placement_with_compiled(
                         tangent_t: vertex.tangent_t.rotate_source(placement.angles),
                         tangent_sign: vertex.tangent_sign,
                         lighting_context,
+                        surface_mark: 0,
                         uv: vertex.uv,
                         lightmap_uv: [0.0; 2],
                         lightmap_bump_step: 0.0,
-                        color: illumination.map_or_else(
-                            || lighting.evaluate(normal),
-                            |_| prop_diffuse_tint(placement),
-                        ),
+                        color: compiled_illumination
+                            .map_or(fallback.color, |_| prop_diffuse_tint(placement)),
                         blend_alpha: 0.0,
                         opacity: prop_opacity(placement),
-                        illumination: illumination.unwrap_or_else(|| Vec3::splat(1.0)),
-                        lighting_mode: u32::from(illumination.is_some())
-                            | (u32::from(!placement.entity) << 1)
-                            | 8,
+                        illumination: compiled_illumination.unwrap_or(fallback.illumination),
+                        lighting_mode: compiled_illumination.map_or(fallback.flags, |_| {
+                            crate::media::preview_model::vertex_lighting::LINEAR_ILLUMINATION
+                        }) | if placement.entity {
+                            0
+                        } else {
+                            crate::media::preview_model::vertex_lighting::STATIC_PROP
+                        } | crate::media::preview_model::vertex_lighting::MODEL_DRAW,
                     }
                 }),
         );
@@ -1618,8 +1630,8 @@ mod compiled_bake_tests {
     use crate::media::file_preview_decode::tests::{prop_placement, test_prop_asset};
     use gmpublished_domain::scene::map::AmbientCube;
 
-    fn fallback() -> PropPlacementLighting {
-        PropPlacementLighting {
+    fn fallback() -> LegacyPropLightingFallback {
+        LegacyPropLightingFallback {
             ambient_cube: AmbientCube {
                 colors: [Vec3::splat(0.25); 6],
             },
@@ -1715,7 +1727,12 @@ mod compiled_bake_tests {
         let vertex = baked[&(0, false)].vertices[0];
         assert_eq!(vertex.color, Vec3::splat(0.25));
         assert_eq!(vertex.illumination, Vec3::splat(1.0));
-        assert_eq!(vertex.lighting_mode, 10);
+        assert_eq!(vertex.lighting_mode & 15, 10);
+        assert_ne!(
+            vertex.lighting_mode
+                & crate::media::preview_model::vertex_lighting::LEGACY_VERTEX_COLOR,
+            0
+        );
     }
 
     #[test]
@@ -1728,8 +1745,8 @@ mod compiled_bake_tests {
                 name: "fixture".to_owned(),
                 texture: None,
                 texture2: None,
-                force_opaque: true,
                 render_mode: RenderMode::Opaque,
+                alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
             },
         );
         let translucent = prop_draw_materials(&[original], 0.5, &mut table)[0];
@@ -1739,7 +1756,7 @@ mod compiled_bake_tests {
             table.slots()[translucent].render_mode,
             RenderMode::Translucent
         );
-        assert!(table.slots()[translucent].force_opaque);
+        assert!(table.slots()[translucent].alpha_policy.force_opaque());
         assert_eq!(
             prop_draw_materials(&[original], 0.5, &mut table),
             [translucent]
@@ -1753,15 +1770,15 @@ mod compiled_bake_tests {
         let original = table.push(
             "scalar_alpha",
             MaterialSlot {
-                shader: MaterialShader::VertexLit(Arc::new(SurfaceMaterial {
+                shader: MaterialShader::Surface(Arc::new(SurfaceMaterial {
                     alpha: 0.5,
                     ..SurfaceMaterial::default()
                 })),
                 name: "scalar_alpha".to_owned(),
                 texture: None,
                 texture2: None,
-                force_opaque: false,
                 render_mode: RenderMode::Translucent,
+                alpha_policy: RenderMode::Translucent.texture_alpha_policy(),
             },
         );
         let opaque = prop_draw_materials(&[original], 1.0, &mut table)[0];
@@ -1769,8 +1786,8 @@ mod compiled_bake_tests {
         assert_eq!(table.slots()[original].render_mode, RenderMode::Translucent);
         assert_eq!(table.slots()[opaque].render_mode, RenderMode::Opaque);
         assert_eq!(table.slots()[blended].render_mode, RenderMode::Translucent);
-        assert!(table.slots()[opaque].force_opaque);
-        assert!(!table.slots()[blended].force_opaque);
+        assert!(table.slots()[opaque].alpha_policy.force_opaque());
+        assert!(!table.slots()[blended].alpha_policy.force_opaque());
         assert_eq!(table.slots()[opaque].shader.surface().unwrap().alpha, 0.5);
         assert_eq!(prop_draw_materials(&[original], 1.0, &mut table), [opaque]);
     }

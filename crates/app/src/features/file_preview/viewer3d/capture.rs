@@ -81,7 +81,6 @@ enum CaptureModelVertexCompression {
     None,
     #[default]
     SourceUbyte4,
-    SourceHardware,
 }
 
 impl CaptureModelVertexCompression {
@@ -90,7 +89,6 @@ impl CaptureModelVertexCompression {
             vertex_compression: match self {
                 Self::None => vformats::mdl::VertexCompression::None,
                 Self::SourceUbyte4 => vformats::mdl::VertexCompression::SourceUbyte4,
-                Self::SourceHardware => vformats::mdl::VertexCompression::SourceHardware,
             },
         }
     }
@@ -103,6 +101,8 @@ struct CaptureMap {
     cameras: Vec<CaptureCamera>,
     #[serde(default)]
     verify_temporal_view_isolation: bool,
+    #[serde(default)]
+    verify_door_view_isolation: bool,
     #[serde(default)]
     traces: Vec<CaptureTrace>,
     #[serde(default)]
@@ -174,9 +174,7 @@ fn override_model_lighting(
     let index = indices[0];
     let context = &mut scene.model_lighting[index];
     context.lighting_origin = control.lighting_origin.map_or(context.origin, Vec3::from);
-    context.cpu_seed = Ok(None);
-    context.ambient_cube.colors = control.ambient_cube.map(Vec3::from);
-    context.lights = control
+    let lights: Vec<ModelLocalLight> = control
         .lights
         .iter()
         .map(|light| ModelLocalLight {
@@ -200,8 +198,18 @@ fn override_model_lighting(
             outer_cosine: (light.outer_angle.to_radians() * 0.5).cos(),
         })
         .collect();
-    assert!(context.lights.len() <= 4);
-    let id = u32::try_from(index + 1).expect("bounded context index");
+    assert!(lights.len() <= crate::media::preview_model::MODEL_LOCAL_LIGHT_LIMIT);
+    context.source = crate::media::preview_model::ModelLightingSource::Explicit(
+        crate::media::preview_model::ModelLightingSnapshot {
+            ambient_cube: gmpublished_domain::scene::map::AmbientCube {
+                colors: control.ambient_cube.map(Vec3::from),
+            },
+            lights,
+        },
+    );
+    let id = crate::media::preview_model::ModelLightingContextId::from_index(index)
+        .expect("bounded context index")
+        .gpu();
     let mut changed = 0;
     for mesh in Arc::make_mut(&mut scene.scene)
         .meshes
@@ -210,7 +218,11 @@ fn override_model_lighting(
     {
         for vertex in &mut mesh.vertices {
             if vertex.lighting_context == id {
-                vertex.lighting_mode |= 5;
+                vertex.lighting_mode &= !(crate::media::preview_model::vertex_lighting::PREVIEW
+                    | crate::media::preview_model::vertex_lighting::LEGACY_VERTEX_COLOR);
+                vertex.lighting_mode |=
+                    crate::media::preview_model::vertex_lighting::RUNTIME_CONTEXT
+                        | crate::media::preview_model::vertex_lighting::LINEAR_ILLUMINATION;
                 vertex.color = Vec3::new(
                     f32::from(context.diffuse_modulation[0]) / 255.0,
                     f32::from(context.diffuse_modulation[1]) / 255.0,
@@ -225,7 +237,7 @@ fn override_model_lighting(
         "lighting_origin":context.lighting_origin.to_array(),"native_lighting_origin_controlled":control.lighting_origin.is_some(),
         "diffuse_modulation_rgba":context.diffuse_modulation,"entity_render_mode":context.render_mode,
         "context_index":id,"vertices":changed,"ambient_cube_linear":control.ambient_cube,
-        "lights":format!("{:?}",context.lights),"scope":"capture-only explicit shader inputs; does not certify BSP lighting selection"})
+        "lights":format!("{:?}",context.source.fallback_snapshot().lights),"scope":"capture-only explicit shader inputs; does not certify BSP lighting selection"})
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,6 +268,7 @@ struct CaptureCamera {
     sky_animation_time: Option<f32>,
     #[serde(default)]
     raster_offset: Option<[f32; 2]>,
+    door_progress_override: Option<f32>,
     #[serde(default)]
     frame_visualization: Option<FrameVisualization>,
     #[serde(default)]
@@ -267,6 +280,8 @@ struct CaptureCamera {
     live_animation: bool,
     #[serde(default)]
     fullbright: bool,
+    #[serde(default)]
+    phy_debug: bool,
     #[serde(default)]
     reflection_target: bool,
     #[serde(default)]
@@ -291,13 +306,35 @@ pub(super) struct ModelLightingTimeline {
 #[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum FrameVisualization {
-    Normal = 1,
-    TangentS = 2,
-    TangentT = 3,
-    Position = 4,
-    UnitNormal = 5,
-    UnitTangentS = 6,
-    UnitEye = 7,
+    Normal,
+    TangentS,
+    TangentT,
+    Position,
+    UnitNormal,
+    UnitTangentS,
+    UnitEye,
+}
+
+impl FrameVisualization {
+    fn diagnostic_mode(self, probe: bool, linear_output: bool) -> super::pipeline::DiagnosticMode {
+        use super::pipeline::DiagnosticMode;
+        match (self, probe, linear_output) {
+            (Self::Normal, true, false) => DiagnosticMode::RawNormal,
+            (Self::TangentS, true, false) => DiagnosticMode::RawTangentS,
+            (Self::TangentT, true, false) => DiagnosticMode::RawTangentT,
+            (Self::Position, true, false) => DiagnosticMode::Position,
+            (Self::UnitNormal, true, false) => DiagnosticMode::UnitNormal,
+            (Self::UnitTangentS, true, false) => DiagnosticMode::UnitTangentS,
+            (Self::UnitEye, true, false) => DiagnosticMode::UnitEye,
+            (Self::Normal, false, false) => DiagnosticMode::VertexNormalColor,
+            (Self::TangentS, false, false) => DiagnosticMode::VertexTangentSColor,
+            (Self::TangentT, false, false) => DiagnosticMode::VertexTangentTColor,
+            (Self::Normal, false, true) => DiagnosticMode::VertexNormalLinear,
+            (Self::TangentS, false, true) => DiagnosticMode::VertexTangentSLinear,
+            (Self::TangentT, false, true) => DiagnosticMode::VertexTangentTLinear,
+            _ => panic!("raw frame diagnostics require a probe and disable linear-output mode"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
@@ -359,6 +396,7 @@ struct FixedView {
     fullbright: bool,
     sky_animation_time: Option<f32>,
     raster_offset: Option<[f32; 2]>,
+    door_progress_override: Option<f32>,
     frame_visualization: Option<FrameVisualization>,
     frame_visualization_linear_output: bool,
     frame_probe: Option<FrameProbe>,
@@ -401,26 +439,10 @@ impl shader::Program<Message> for FixedView {
             primitive.model_lighting_time = timeline.capture_time;
         }
         primitive.raster_offset = self.raster_offset;
-        if let Some(mode) = self.frame_visualization {
-            assert!(
-                matches!(
-                    mode,
-                    FrameVisualization::Normal
-                        | FrameVisualization::TangentS
-                        | FrameVisualization::TangentT
-                ) || self.frame_probe.is_some()
-            );
-            let value = (mode as u32
-                + if self.frame_probe.is_some() {
-                    6
-                } else if self.frame_visualization_linear_output {
-                    3
-                } else {
-                    0
-                }) as f32;
-            primitive.uniforms.viewport[3] = value;
-            if let Some(skybox) = primitive.map_skybox_uniforms.as_mut() {
-                skybox.viewport[3] = value;
+        if let Some(progress) = self.door_progress_override {
+            assert!(progress.is_finite() && (0.0..=1.0).contains(&progress));
+            for pose in &mut primitive.door_poses {
+                pose.progress = progress;
             }
         }
         if let Some(probe) = self.frame_probe {
@@ -434,10 +456,19 @@ impl shader::Program<Message> for FixedView {
                     && probe.gain >= 0.0
                     && probe.bias.into_iter().all(f32::is_finite)
             );
-            let light = [probe.bias[0], probe.bias[1], probe.bias[2], probe.gain];
-            primitive.uniforms.light = light;
+        }
+        if let Some(mode) = self.frame_visualization {
+            let mode = mode.diagnostic_mode(
+                self.frame_probe.is_some(),
+                self.frame_visualization_linear_output,
+            );
+            let transform = self.frame_probe.map_or([0.0, 0.0, 0.0, 1.0], |probe| {
+                [probe.bias[0], probe.bias[1], probe.bias[2], probe.gain]
+            });
+            let diagnostic = super::pipeline::Diagnostic::new(mode, transform);
+            primitive.uniforms.diagnostic = diagnostic;
             if let Some(skybox) = primitive.map_skybox_uniforms.as_mut() {
-                skybox.light = light;
+                skybox.diagnostic = diagnostic;
             }
         }
         if let (Some(time), Some(sky)) = (self.sky_animation_time, primitive.sky_uniforms.as_mut())
@@ -445,9 +476,9 @@ impl shader::Program<Message> for FixedView {
             sky.water_time_sky_tint[0] = time;
         }
         if self.fullbright {
-            primitive.uniforms.light[3] = -1.0;
+            primitive.uniforms.shading_mode = super::pipeline::ShadingMode::Fullbright as u32;
             if let Some(skybox) = primitive.map_skybox_uniforms.as_mut() {
-                skybox.light[3] = -1.0;
+                skybox.shading_mode = super::pipeline::ShadingMode::Fullbright as u32;
             }
         }
         primitive
@@ -573,15 +604,7 @@ fn material_info(slot: &MaterialSlot) -> Value {
     });
     json!({
         "name": slot.name,
-        "shader": match &slot.shader {
-            crate::bridge::materials::MaterialShader::Unknown => "unknown",
-            crate::bridge::materials::MaterialShader::Surface(name) => name,
-            crate::bridge::materials::MaterialShader::Unlit(material) => &material.shader,
-            crate::bridge::materials::MaterialShader::Lightmapped(material) => &material.shader,
-            crate::bridge::materials::MaterialShader::VertexLit(material) => &material.shader,
-            crate::bridge::materials::MaterialShader::Mirror(material) => &material.shader,
-            crate::bridge::materials::MaterialShader::Water(material) => &material.shader,
-        },
+        "shader": slot.shader.shader_name(),
         "water": water,
         "surface": slot.shader.surface().map(|surface|json!({
             "family":format!("{:?}",surface.family),
@@ -603,11 +626,12 @@ fn material_info(slot: &MaterialSlot) -> Value {
             })),
             "unsupported_proxies":surface.unsupported_proxies,
             "unsupported_features":surface.unsupported_features(),
+            "unavailable_textures":surface.unavailable_textures().iter().map(|texture|json!({"parameter":texture.parameter,"path":texture.path})).collect::<Vec<_>>(),
         })),
         "unlit": slot.shader.unlit().map(|material|json!({"vertex_color":material.vertex_color,"vertex_alpha":material.vertex_alpha})),
         "mirror": slot.shader.mirror().map(|mirror| json!({"shader":mirror.shader,"parameters":mirror.parameters,"fresnel_power":mirror.fresnel_power,"min_reflectivity":mirror.min_reflectivity,"max_reflectivity":mirror.max_reflectivity,"normal_map_path":mirror.normal_map_path,"unsupported_features":mirror.unsupported_features})),
         "render_mode": format!("{:?}", slot.render_mode),
-        "force_opaque": slot.force_opaque,
+        "force_opaque": slot.alpha_policy.force_opaque(),
         "texture": slot.texture.as_deref().map(texture_info),
         "texture2": slot.texture2.as_deref().map(texture_info),
     })
@@ -909,14 +933,19 @@ pub fn capture_map_reference_frames() {
                 "id":index+1,"model":context.model_path,"entity":context.entity,
                 "origin":context.origin.to_array(),"lighting_origin":context.lighting_origin.to_array(),
                 "mdl_flags":context.mdl_flags,"compiled_vhv":context.compiled_lighting,
-                "seed":match &context.cpu_seed {
-                    Ok(Some(seed))=>json!({"sample_point":seed.sample_point.to_array(),"leaf":seed.leaf,
+                "lighting_source":match &context.source {
+                    crate::media::preview_model::ModelLightingSource::Runtime {..}=>"runtime",
+                    crate::media::preview_model::ModelLightingSource::Explicit(_)=>"explicit",
+                    crate::media::preview_model::ModelLightingSource::DiagnosedFallback {..}=>"diagnosed_fallback",
+                },
+                "seed":match &context.source {
+                    crate::media::preview_model::ModelLightingSource::Runtime {seed,..}=>json!({"sample_point":seed.sample_point.to_array(),"leaf":seed.leaf,
                         "ambient":seed.ambient_cube.colors.map(Vec3::to_array),"diagnostics":format!("{:?}",seed.diagnostics)}),
-                    Ok(None)=>Value::Null,
-                    Err(error)=>json!({"error":format!("{error:?}")}),
+                    crate::media::preview_model::ModelLightingSource::Explicit(_)=>Value::Null,
+                    crate::media::preview_model::ModelLightingSource::DiagnosedFallback {reason,..}=>json!({"error":format!("{reason:?}")}),
                 },
                 "runtime_vertices":scene.scene.meshes.iter().chain(&scene.map_skybox_meshes)
-                    .flat_map(|mesh|&mesh.vertices).filter(|vertex|vertex.lighting_context as usize==index+1 && vertex.lighting_mode&4!=0).count(),
+                    .flat_map(|mesh|&mesh.vertices).filter(|vertex|vertex.lighting_context as usize==index+1 && vertex.lighting_mode & crate::media::preview_model::vertex_lighting::RUNTIME_CONTEXT != 0).count(),
             })).collect::<Vec<_>>(),
             "sky": scene.skybox.as_ref().map(sky_info),
             "suns": scene.suns.iter().map(|sun|json!({
@@ -979,8 +1008,7 @@ pub fn capture_map_reference_frames() {
                 "{} / {} eye is inside solid collision",
                 map.name, shot.name
             );
-            // Fly movement does not sample immersion until it moves. Fixed poses
-            // need the same eye-in-volume state without advancing simulation.
+            // Fixed fly poses need immersion before their first movement.
             camera.water = if submerged {
                 super::camera::WaterLevel::Eyes
             } else {
@@ -994,6 +1022,7 @@ pub fn capture_map_reference_frames() {
                 fullbright: shot.fullbright,
                 sky_animation_time: shot.sky_animation_time,
                 raster_offset: shot.raster_offset,
+                door_progress_override: shot.door_progress_override,
                 frame_visualization: shot.frame_visualization,
                 frame_visualization_linear_output: shot.frame_visualization_linear_output,
                 frame_probe: shot.frame_probe,
@@ -1006,7 +1035,7 @@ pub fn capture_map_reference_frames() {
                     sky_camera,
                     map_skybox_visible: shot.skybox,
                     visibility_culling: shot.visibility,
-                    phy_debug_visible: false,
+                    phy_debug_visible: shot.phy_debug,
                     spawn,
                     pose: Some(pose),
                     movement_mode: Some(MovementMode::Fly),
@@ -1074,8 +1103,6 @@ pub fn capture_map_reference_frames() {
                         },
                         mouse::Cursor::Unavailable,
                     );
-                    // Commit every redraw so temporal GPU state follows the
-                    // production cadence, including frames not saved to disk.
                     let rgba = renderer.screenshot(physical_size, 1.0, Color::BLACK);
                     if frame % 60 == 0 {
                         let hash = format!("{:08x}", crc32fast::hash(&rgba));
@@ -1106,8 +1133,6 @@ pub fn capture_map_reference_frames() {
                 },
                 mouse::Cursor::Unavailable,
             );
-            // Warm upload and render once, then verify byte-for-byte stability
-            // at the frozen pose and animation time before accepting the PNG.
             let _ = renderer.screenshot(physical_size, 1.0, Color::BLACK);
             let started = Instant::now();
             let rgba = renderer.screenshot(physical_size, 1.0, Color::BLACK);
@@ -1163,7 +1188,7 @@ pub fn capture_map_reference_frames() {
             map_record["captures"].as_array_mut().unwrap().push(json!({
                 "file": filename,
                 "render_diagnostics": diagnostics.lock().unwrap().clone(),
-                "raster_offset": shot.raster_offset.unwrap_or([0.5; 2]), "fullbright": shot.fullbright, "sky_animation_time": shot.sky_animation_time.unwrap_or(if shot.live_animation { 2.0 } else { animation_time }), "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
+                "door_progress_override":shot.door_progress_override,"raster_offset": shot.raster_offset.unwrap_or([0.5; 2]), "fullbright": shot.fullbright, "phy_debug": shot.phy_debug, "sky_animation_time": shot.sky_animation_time.unwrap_or(if shot.live_animation { 2.0 } else { animation_time }), "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
                 "frame_visualization":shot.frame_visualization,"frame_visualization_linear_output":shot.frame_visualization_linear_output,
                 "frame_probe":shot.frame_probe,
                 "model_lighting_timeline":shot.model_lighting_timeline,
@@ -1228,6 +1253,7 @@ pub fn capture_map_reference_frames() {
                 fullbright: shot.fullbright,
                 sky_animation_time: shot.sky_animation_time,
                 raster_offset: shot.raster_offset,
+                door_progress_override: shot.door_progress_override,
                 frame_visualization: shot.frame_visualization,
                 frame_visualization_linear_output: shot.frame_visualization_linear_output,
                 frame_probe: shot.frame_probe,
@@ -1240,7 +1266,7 @@ pub fn capture_map_reference_frames() {
                     sky_camera,
                     map_skybox_visible: shot.skybox,
                     visibility_culling: shot.visibility,
-                    phy_debug_visible: false,
+                    phy_debug_visible: shot.phy_debug,
                     spawn,
                     pose: Some(pose),
                     movement_mode: Some(MovementMode::Fly),
@@ -1255,6 +1281,14 @@ pub fn capture_map_reference_frames() {
         }
         if map.verify_temporal_view_isolation {
             map_record["temporal_view_isolation"] = isolation::verify_temporal(
+                &mut renderer,
+                make_isolation_view,
+                &map.cameras,
+                &directory,
+            );
+        }
+        if map.verify_door_view_isolation {
+            map_record["door_view_isolation"] = isolation::verify_doors(
                 &mut renderer,
                 make_isolation_view,
                 &map.cameras,

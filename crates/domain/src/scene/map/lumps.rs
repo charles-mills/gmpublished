@@ -83,6 +83,7 @@ pub(super) struct MapBsp {
     pub(super) leaf_ambient_indices: Vec<LeafAmbientIndex>,
     pub(super) leaf_ambient_indices_hdr: Vec<LeafAmbientIndex>,
     pub(super) overlays: Vec<Overlay>,
+    pub(super) overlay_fades: Vec<bsp::OverlayFade>,
     pub(super) entities: Vec<MapEntity>,
     pub(super) visibility: Option<Visibility<'static>>,
     pub(super) static_props: Option<StaticProps>,
@@ -168,6 +169,7 @@ impl MapBsp {
             leaf_ambient_lighting_hdr = if want_ambient_hdr { bsp.leaf_ambient_lighting_hdr(limits) } else { Ok(Vec::new()) };
             leaf_ambient_indices_hdr = if want_ambient_hdr { bsp.leaf_ambient_indices_hdr(limits) } else { Ok(Vec::new()) };
             overlays = bsp.overlays(limits);
+            overlay_fades = bsp.overlay_fades(limits);
             static_props = bsp.static_props(limits);
             detail_props = bsp.detail_props(limits);
             cubemap_samples = bsp.cubemap_samples(limits);
@@ -227,6 +229,7 @@ impl MapBsp {
             leaf_ambient_indices: leaf_ambient_indices.map_err(decode_error)?,
             leaf_ambient_indices_hdr: leaf_ambient_indices_hdr.map_err(decode_error)?,
             overlays: overlays.map_err(decode_error)?,
+            overlay_fades: overlay_fades.map_err(decode_error)?,
             static_props: static_props.map_err(decode_error)?,
             detail_props: detail_props.map_err(decode_error)?,
             cubemap_samples: cubemap_samples.map_err(decode_error)?,

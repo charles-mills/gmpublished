@@ -1,7 +1,7 @@
-use super::water::{scalar, texture_transform};
+use super::parameters::{scalar, texture_transform};
 use super::{
-    Arc, ContentPath, EffectiveMaterial, Limits, LinearTextureFrames, MaterialResolver,
-    ResolvedTextureMip, normalize_texture_name, parse_water_fog_color, texture_path, vmt_bool,
+    Arc, ContentPath, DecodedTextureFrames, EffectiveMaterial, Limits, MaterialResolver,
+    ResolvedTextureMip, normalize_texture_name, parse_material_color, texture_path, vmt_bool,
 };
 use vformats::vtf::{Vtf, VtfError, VtfFormat, texture_flags};
 
@@ -39,7 +39,7 @@ pub struct EnvironmentMapMaterial {
     pub contrast: f32,
     pub saturation: f32,
     pub mask: EnvironmentMapMask,
-    pub mask_texture: Option<Arc<LinearTextureFrames>>,
+    pub mask_texture: Option<Arc<DecodedTextureFrames>>,
     pub mask_frame: u32,
     pub mask_transform: [[f32; 4]; 2],
     pub fresnel: f32,
@@ -142,7 +142,7 @@ fn cubemap_plan(
 fn authored_tint(value: Option<&str>) -> [f32; 3] {
     value
         .and_then(|value| {
-            parse_water_fog_color(value)
+            parse_material_color(value)
                 .map(gmpublished_domain::math::Vec3::to_array)
                 .or_else(|| {
                     value
@@ -171,8 +171,6 @@ impl MaterialResolver {
             .parameter("$envmapmask")
             .and_then(normalize_texture_name)
             .and_then(|name| self.resolve_raw_texture_frames(&name));
-        // Preserve the authored choice; the family resolver applies Source's
-        // incompatible-parameter and texture-alpha initialization rules.
         let mask = if vmt_bool(material.parameter("$normalmapalphaenvmapmask")) {
             EnvironmentMapMask::NormalAlpha
         } else if vmt_bool(material.parameter("$basealphaenvmapmask")) {

@@ -483,10 +483,15 @@ fn alpha_test_excludes_texture_blending_while_additive_keeps_its_blend_identity(
     assert_eq!(cutout.render_mode, RenderMode::Cutout);
     assert_eq!(translucent.render_mode, RenderMode::Cutout);
     assert_eq!(additive.render_mode, RenderMode::Additive);
-    assert!(opaque.force_opaque);
-    assert!(!cutout.force_opaque);
-    assert!(!translucent.force_opaque);
-    assert!(!additive.force_opaque);
+    assert!(opaque.render_mode.texture_alpha_policy().force_opaque());
+    assert!(!cutout.render_mode.texture_alpha_policy().force_opaque());
+    assert!(
+        !translucent
+            .render_mode
+            .texture_alpha_policy()
+            .force_opaque()
+    );
+    assert!(!additive.render_mode.texture_alpha_policy().force_opaque());
     assert_eq!(texture_rgba(&opaque.texture), rgba);
     assert_eq!(texture_rgba(&translucent.texture), rgba);
     assert_eq!(texture_rgba(&additive.texture), rgba);
@@ -545,7 +550,6 @@ fn decoded_texture_cap_downscales_resolved_vtf() {
 
     assert_eq!((texture.width, texture.height), (2, 1));
     assert_eq!(texture.rgba_bytes().expect("rgba texture").len(), 2 * 4);
-    // Downscaling must not change the source dimensions used to normalize BSP texel UVs.
     assert_eq!(texture.original_dimensions(), (4, 2));
 }
 
@@ -655,8 +659,8 @@ fn bc_texture_cache_reuses_path_across_alpha_modes() {
         .resolve_primary(&["models/test".to_owned()], "opaque")
         .expect("opaque material");
 
-    assert!(!cutout.force_opaque);
-    assert!(opaque.force_opaque);
+    assert!(!cutout.render_mode.texture_alpha_policy().force_opaque());
+    assert!(opaque.render_mode.texture_alpha_policy().force_opaque());
     assert!(Arc::ptr_eq(&cutout.texture, &opaque.texture));
     assert!(cutout.texture.is_bc());
 }
@@ -1787,11 +1791,13 @@ fn the_decoded_texture_cache_key_separates_resolutions() {
     let uncapped = DecodedTextureCacheKey::Rgba {
         path: ContentPath::new("materials/x.vtf").expect("valid content path"),
         preserve_alpha: false,
+        transfer: TextureReadTransfer::SrgbToLinear,
         max_dimension: None,
     };
     let capped = DecodedTextureCacheKey::Rgba {
         path: ContentPath::new("materials/x.vtf").expect("valid content path"),
         preserve_alpha: false,
+        transfer: TextureReadTransfer::SrgbToLinear,
         max_dimension: Some(512),
     };
 
@@ -1970,8 +1976,6 @@ fn water_normals_use_stored_linear_mips_and_share_the_texture_budget() {
         4,
         "cache hits must not reserve memory twice"
     );
-    // The dimension participates in the cache key: an uncapped load cannot
-    // accidentally receive the already cached 1x1 normal or bypass its budget.
     let full = resolver
         .with_decoded_texture_budget(Arc::clone(&budget))
         .resolve_primary(&[], "water")
@@ -2139,13 +2143,13 @@ fn unlit_vertex_alpha_blends_partial_texture_alpha_without_changing_opaque_mater
     let opaque = resolver.resolve_primary(&[], "unlit/opaque").unwrap();
     let with_base2 = resolver.resolve_with_base2(&[], "unlit/base").unwrap();
     assert_eq!(blended.render_mode, RenderMode::Translucent);
-    assert!(!blended.force_opaque);
+    assert!(!blended.render_mode.texture_alpha_policy().force_opaque());
     assert_eq!(texture_rgba(&blended.texture), rgba);
     assert_eq!(texture_rgba(with_base2.texture.as_ref().unwrap()), rgba);
     let unlit = blended.shader.unlit().unwrap();
     assert!(unlit.vertex_alpha && unlit.vertex_color);
     assert_eq!(opaque.render_mode, RenderMode::Opaque);
-    assert!(opaque.force_opaque);
+    assert!(opaque.render_mode.texture_alpha_policy().force_opaque());
     assert_eq!(texture_rgba(&opaque.texture), rgba);
     assert!(Arc::ptr_eq(&opaque.texture, &blended.texture));
 }
@@ -2374,7 +2378,7 @@ fn missing_surface_bitmap_retains_typed_family_and_authored_parameters() {
     let resolver = MaterialResolver::new(Arc::new(archive), None);
     let resolved = resolver.resolve_with_base2(&[], "surface/missing").unwrap();
     assert!(resolved.texture.is_none());
-    assert!(matches!(resolved.shader, MaterialShader::VertexLit(_)));
+    assert!(matches!(resolved.shader, MaterialShader::Surface(_)));
     let surface = resolved.shader.surface().unwrap();
     assert_eq!(surface.color2, [2.0, 3.0, 4.0]);
     assert_eq!(
@@ -2502,12 +2506,12 @@ fn installed_native_material_profile_getters_match_cpu_resolution() {
         let mut values = vec![
             (
                 "$alpha",
-                water::scalar(material.parameter("$alpha"), 1.0),
+                parameters::scalar(material.parameter("$alpha"), 1.0),
                 actual["floats"]["$alpha"].as_f64().unwrap() as f32,
             ),
             (
                 "$detailblendfactor",
-                water::scalar(material.parameter("$detailblendfactor"), 1.0),
+                parameters::scalar(material.parameter("$detailblendfactor"), 1.0),
                 actual["floats"]["$detailblendfactor"].as_f64().unwrap() as f32,
             ),
         ];
@@ -2529,5 +2533,244 @@ fn installed_native_material_profile_getters_match_cpu_resolution() {
             "scope":"Native effective shader/color/alpha/detailfactor getters versus actual shared CPU material resolver; all52 controls exact f32, including includes/Patch/profile blocks. Appearance acceptance is separate.",
             "native":native_path, "fixture":fixture, "controls":rows,
         })).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn decal_material_families_preserve_distinct_transfer_and_blend_contracts() {
+    let mut builder = GmaFixtureBuilder::new("Decal contracts");
+    for (name, shader, flags) in [
+        (
+            "alpha",
+            "LightmappedGeneric",
+            r#""$vertexcolor" "1" "$vertexalpha" "1" "$translucent" "1" "$decal" "1""#,
+        ),
+        ("bumped", "LightmappedGeneric_Decal", ""),
+        (
+            "modulate",
+            "DecalModulate_DX9",
+            r#""$bumpmap" "ignored/normal" "$detail" "ignored/detail" "$envmap" "ignored/environment" "$selfillum" "1""#,
+        ),
+        ("plain", "LightmappedGeneric", ""),
+    ] {
+        builder = builder.entry(
+            format!("materials/decals/{name}.vmt"),
+            format!(r#"{shader} {{ "$basetexture" "decals/pixels" {flags} }}"#).into_bytes(),
+        );
+    }
+    builder = builder.entry(
+        "materials/decals/pixels.vtf",
+        create_vtf_bytes(&[64, 128, 192, 128].repeat(4)),
+    );
+    let resolver = MaterialResolver::new(
+        Arc::new(PreviewArchive::from_gma(builder.build()).unwrap()),
+        None,
+    );
+    let unsupported = resolver.resolve_with_base2(&[], "decals/bumped").unwrap();
+    assert!(
+        matches!(unsupported.shader, MaterialShader::Unsupported(ref name) if name == "LightmappedGeneric_Decal")
+    );
+    for (name, family, mode, transfer, gamma, vertex_color, vertex_alpha) in [
+        (
+            "alpha",
+            SurfaceFamily::Lightmapped,
+            RenderMode::Translucent,
+            TextureReadTransfer::SrgbToLinear,
+            false,
+            true,
+            true,
+        ),
+        (
+            "modulate",
+            SurfaceFamily::DecalModulate,
+            RenderMode::Modulate,
+            TextureReadTransfer::Unmodified,
+            true,
+            false,
+            false,
+        ),
+        (
+            "plain",
+            SurfaceFamily::Lightmapped,
+            RenderMode::Opaque,
+            TextureReadTransfer::SrgbToLinear,
+            false,
+            false,
+            false,
+        ),
+    ] {
+        let material = resolver
+            .resolve_with_base2(&[], &format!("decals/{name}"))
+            .unwrap();
+        let surface = material.shader.surface().unwrap();
+        assert_eq!(surface.family, family, "{name}");
+        assert_eq!(material.render_mode, mode, "{name}");
+        assert_eq!(surface.base_read_transfer(), transfer, "{name}");
+        assert_eq!(surface.blends_in_gamma_space(), gamma, "{name}");
+        assert_eq!(surface.effective_vertex_color(), vertex_color, "{name}");
+        assert_eq!(surface.effective_vertex_alpha(), vertex_alpha, "{name}");
+        assert_eq!(surface.no_debug_override, name != "plain", "{name}");
+        if family == SurfaceFamily::DecalModulate {
+            assert!(
+                surface.normal.is_none()
+                    && surface.detail.is_none()
+                    && surface.envmap.is_none()
+                    && surface.emission.is_none()
+            );
+            assert!(!surface.model_shading_profile().requires_runtime_lighting());
+            assert!(surface.unavailable_textures().is_empty());
+            assert_eq!(
+                surface.parameters.get("$bumpmap").map(String::as_str),
+                Some("ignored/normal")
+            );
+        }
+    }
+}
+
+#[test]
+fn decal_patch_retains_mapping_scale_fade_and_receiver_flags() {
+    let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Decal metadata")
+        .entry("materials/decals/base.vmt", br#"LightmappedGeneric { "$basetexture" "decals/pixels" "$decal" "1" "$decalscale" ".1" "$nodecal" "1" "$decalFadeDuration" "2.5" "decalFadeTime" "4.5" }"#.to_vec())
+        .entry("materials/decals/patched.vmt", br#"Patch { include "materials/decals/base.vmt" replace { "$decalscale" ".25" "$nodecal" "0" } }"#.to_vec())
+        .entry("materials/decals/pixels.vtf", create_vtf_bytes(&[64, 128, 192, 255].repeat(4)))
+        .build()).unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let base = resolver.resolve_with_base2(&[], "decals/base").unwrap();
+    let base = base.shader.surface().unwrap();
+    assert!(base.decal && base.suppress_decals && base.no_debug_override);
+    assert_eq!(base.decal_parameters.scale, 0.1);
+    assert_eq!(
+        base.decal_parameters.mapping_extent((1024, 512)),
+        Some([102.0, 51.0])
+    );
+    assert_eq!(base.decal_parameters.fade_time, Some(4.5));
+    assert_eq!(base.decal_parameters.fade_duration, Some(2.5));
+    let patched = resolver.resolve_with_base2(&[], "decals/patched").unwrap();
+    let patched = patched.shader.surface().unwrap();
+    assert!(patched.decal && !patched.suppress_decals);
+    assert_eq!(
+        patched.decal_parameters.mapping_extent((1024, 512)),
+        Some([256.0, 128.0])
+    );
+    assert_eq!(
+        patched.decal_parameters.fade_time,
+        base.decal_parameters.fade_time
+    );
+}
+
+#[test]
+fn decal_mapping_extent_rejects_invalid_or_empty_stamps() {
+    for scale in [0.0, -1.0, f32::INFINITY, f32::NAN, 0.001] {
+        assert_eq!(
+            DecalParameters {
+                scale,
+                ..DecalParameters::default()
+            }
+            .mapping_extent((64, 64)),
+            None
+        );
+    }
+    assert_eq!(
+        DecalParameters::default().mapping_extent((64, 32)),
+        Some([64.0, 32.0])
+    );
+}
+
+#[test]
+fn world_vertex_alpha_follows_color_permutation_and_transition_blend_semantics() {
+    let mut surface = SurfaceMaterial {
+        family: SurfaceFamily::Lightmapped,
+        vertex_alpha: true,
+        ..SurfaceMaterial::default()
+    };
+    assert!(!surface.effective_vertex_alpha());
+    surface.vertex_color = true;
+    assert!(surface.effective_vertex_alpha());
+    surface.vertex_alpha = false;
+    assert!(surface.effective_vertex_alpha());
+    surface.family = SurfaceFamily::Transition;
+    assert!(!surface.effective_vertex_alpha());
+    surface.family = SurfaceFamily::Unlit;
+    assert!(!surface.effective_vertex_alpha());
+    surface.vertex_alpha = true;
+    assert!(surface.effective_vertex_alpha());
+}
+
+#[test]
+fn shared_base_texture_cache_separates_raw_and_srgb_mip_filters() {
+    let rgba = [
+        [0, 0, 0, 0],
+        [255, 255, 255, 255],
+        [0, 0, 0, 0],
+        [255, 255, 255, 255],
+    ]
+    .concat();
+    for order in [["linear", "encoded"], ["encoded", "linear"]] {
+        let archive = PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("Shared transfer")
+                .entry(
+                    "materials/decals/linear.vmt",
+                    br#"LightmappedGeneric { "$basetexture" "decals/shared" }"#.to_vec(),
+                )
+                .entry(
+                    "materials/decals/encoded.vmt",
+                    br#"DecalModulate { "$basetexture" "decals/shared" }"#.to_vec(),
+                )
+                .entry("materials/decals/shared.vtf", create_vtf_bytes(&rgba))
+                .build(),
+        )
+        .unwrap();
+        let resolver = MaterialResolver::new(Arc::new(archive), None);
+        for name in order {
+            resolver
+                .resolve_primary(&[], &format!("decals/{name}"))
+                .unwrap();
+        }
+        let linear = resolver
+            .resolve_primary(&[], "decals/linear")
+            .unwrap()
+            .texture;
+        let encoded = resolver
+            .resolve_primary(&[], "decals/encoded")
+            .unwrap()
+            .texture;
+        assert!(!Arc::ptr_eq(&linear, &encoded));
+        assert_eq!(linear.rgba_bytes(), encoded.rgba_bytes());
+        let linear_mip = linear.mip_chain().nth(1).unwrap();
+        let encoded_mip = encoded.mip_chain().nth(1).unwrap();
+        assert_eq!(linear_mip.rgba, [188, 188, 188, 128]);
+        assert_eq!(encoded_mip.rgba, [128, 128, 128, 128]);
+    }
+}
+
+#[test]
+fn receiver_suppression_is_a_common_flag_across_shader_families() {
+    let mut builder = GmaFixtureBuilder::new("Receiver suppression");
+    for (name, shader) in [
+        ("world", "LightmappedGeneric"),
+        ("model", "VertexLitGeneric"),
+        ("unlit", "UnlitGeneric"),
+        ("water", "Water"),
+        ("mirror", "LightmappedReflective"),
+        ("modulate", "DecalModulate"),
+    ] {
+        for suppress in [false, true] {
+            builder = builder.entry(
+                format!("materials/{name}_{suppress}.vmt"),
+                format!(r#"{shader} {{ "$nodecal" "{}" }}"#, u8::from(suppress)).into_bytes(),
+            );
+        }
+    }
+    let resolver = MaterialResolver::new(
+        Arc::new(PreviewArchive::from_gma(builder.build()).unwrap()),
+        None,
+    );
+    for name in ["world", "model", "unlit", "water", "mirror", "modulate"] {
+        for suppress in [false, true] {
+            let material = resolver
+                .resolve_with_base2(&[], &format!("{name}_{suppress}"))
+                .unwrap();
+            assert_eq!(material.shader.suppresses_decals(), suppress, "{name}");
+        }
     }
 }

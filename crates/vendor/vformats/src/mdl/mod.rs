@@ -23,7 +23,7 @@ pub use assembly::{
 
 mod vertex_compression;
 pub use vertex_compression::{
-    VertexCompression, source_short2_weights, source_ubyte4_tangent, source_ubyte4_vector,
+    VertexCompression, source_ubyte4_tangent, source_ubyte4_vector,
 };
 
 mod vhv;

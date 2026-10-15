@@ -1,8 +1,9 @@
 use super::{
     BTreeMap, BspError, ColorRgbExp, DispInfo, Face, HashMap, MapBsp, MapFaceVisibility,
-    MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility, MapVertex, PendingLightmapBlock,
-    TexInfo, brush_lightmap_uv, displacement_lightmap_uv, extract_face_lightmap,
-    is_preview_material_visible, normalize_material_name,
+    MapMeshClusterRanges, MapMeshIndexRange, MapMeshSurfaceOwner, MapMeshVisibility,
+    MapSurfaceOwner, MapVertex, PendingLightmapBlock, TexInfo, brush_lightmap_uv,
+    displacement_lightmap_uv, extract_face_lightmap, is_preview_material_visible,
+    normalize_material_name,
 };
 use crate::math::Vec3;
 
@@ -14,6 +15,7 @@ pub(super) struct BuildMesh {
     pub(super) partition: GeometryPartition,
     pub(super) entity: bool,
     pub(super) visibility: BuildMeshVisibility,
+    pub(super) surface_owners: Vec<MapMeshSurfaceOwner>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -57,6 +59,7 @@ impl BuildMeshes {
                 partition,
                 entity,
                 visibility: BuildMeshVisibility::default(),
+                surface_owners: Vec::new(),
             });
             index
         });
@@ -125,6 +128,8 @@ pub(super) struct DisplacementGridVertex {
 
 pub(super) struct FaceAppendContext<'a> {
     pub(super) entity: bool,
+    pub(super) receiver_owner: MapSurfaceOwner,
+    pub(super) receiver_solid: bool,
     pub(super) transform: super::brushes::BrushTransform,
     pub(super) meshes: &'a mut BuildMeshes,
     pub(super) material_names: &'a mut Vec<String>,
@@ -149,9 +154,7 @@ pub(super) fn append_face(
         return Ok(());
     };
 
-    // Source writes the already-oriented plane number and repeats its low
-    // bit in face.side (vbsp/writebsp.cpp). Applying side a second time flips
-    // every back-plane normal, including water undersides, back to the top.
+    // BSP plane numbers already include face.side orientation.
     let normal = bsp.face_plane_normal(face);
 
     let texture_name = bsp.texinfo_name(texinfo);
@@ -200,8 +203,7 @@ pub(super) fn append_face(
     } else {
         append_brush_face(bsp, face, face_index, texinfo, normal, mesh, lightmap_block)?;
     }
-    // Evaluate texinfo and lightmap transforms in compiled model space first.
-    // Moving the position before UV evaluation makes textures slide with origin.
+    // UV transforms use compiled model space, before entity placement.
     for vertex in &mut mesh.vertices[vertex_start..] {
         vertex.vertex.texture_size = bsp.texinfo_texdata(texinfo).map_or([0; 2], |data| {
             [
@@ -216,14 +218,37 @@ pub(super) fn append_face(
     }
     let index_count = mesh.indices.len().saturating_sub(index_start);
     if index_count > 0
-        && let (Ok(face), Ok(start), Ok(count)) = (
+        && let (Ok(face_id), Ok(start), Ok(count)) = (
             u32::try_from(face_index),
             u32::try_from(index_start),
             u32::try_from(index_count),
         )
     {
-        mesh.visibility
-            .push(face_visibility, MapMeshIndexRange { face, start, count });
+        mesh.visibility.push(
+            face_visibility,
+            MapMeshIndexRange {
+                face: face_id,
+                start,
+                count,
+            },
+        );
+        mesh.surface_owners.push(MapMeshSurfaceOwner {
+            index_start: start,
+            owner: context.receiver_owner,
+            solid: context.receiver_solid,
+            allows_decals: texinfo.flags & super::texture_flags::NODECALS == 0,
+            plane_normal: context.transform.vector(normal),
+            plane_distance: bsp
+                .face_vertex_positions(face)
+                .first()
+                .map_or(0.0, |position| {
+                    context
+                        .transform
+                        .point(*position)
+                        .dot(context.transform.vector(normal))
+                }),
+            displacement: bsp.face_displacement(face).is_some(),
+        });
     }
 
     Ok(())
@@ -348,6 +373,7 @@ pub(super) fn map_vertex(
         tex_t: texture_coord(position, texinfo.texture_vecs[1]),
         texture_size: [0; 2],
         lightmap_uv,
+        has_lightmap: false,
         lightmap_bump_step: 0.0,
         blend_alpha,
         opacity: 1.0,
@@ -436,11 +462,7 @@ fn displacement_allowed_triangles(steps: usize, allowed: &[u32; 10]) -> Vec<[usi
                 }
             }
         }
-        // Source's shared engine/compiler tessellator visits a clockwise ring
-        // around each node. Active children cover their quadrants; inactive
-        // boundary points are omitted and the remaining segment forms one fan
-        // triangle. This prevents higher-power edges from retaining vertices
-        // the compiler removed to meet their coarser neighbors.
+        // Omit inactive boundary points to match coarser neighboring edges.
         let winding = [
             ([1, -1], Some(3)),
             ([0, -1], None),
@@ -484,14 +506,11 @@ pub(super) fn tessellate_displacement_grid(
     steps: usize,
     side: usize,
 ) -> Vec<DisplacementBuildVertex> {
-    // Read the grid column-major, as `displacement_grid` writes it.
-    // Transposing preserves the shape but reverses winding and backface culling.
     let index = |column: usize, row: usize| column * side + row;
 
     let mut vertices = Vec::with_capacity(steps.saturating_mul(steps).saturating_mul(6));
     for column in 0..steps {
         for row in 0..steps {
-            // Source's full-resolution mesh fans around each 2x2-cell centre.
             let triangles = if (column + row) % 2 == 0 {
                 [
                     [(column, row), (column + 1, row), (column + 1, row + 1)],

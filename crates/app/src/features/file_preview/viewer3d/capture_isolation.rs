@@ -53,6 +53,19 @@ fn crop(bytes: &[u8], width: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
         .collect()
 }
 
+fn assert_pixels_equal(actual: &[u8], expected: &[u8], context: &str) {
+    assert!(
+        actual == expected,
+        "{context}: {} channels differ, lengths {}/{}, CRC32 {:08x}/{:08x}",
+        actual.iter().zip(expected).filter(|(a, b)| a != b).count()
+            + actual.len().abs_diff(expected.len()),
+        actual.len(),
+        expected.len(),
+        crc32fast::hash(actual),
+        crc32fast::hash(expected),
+    );
+}
+
 pub(super) fn verify(
     renderer: &mut iced::Renderer,
     make: impl Fn(&CaptureCamera) -> FixedView,
@@ -110,10 +123,13 @@ pub(super) fn verify(
                 height,
             );
             let expected = crop(&solo, solo_width, 12, 12, widths[side], height);
-            assert_eq!(
-                actual, expected,
-                "camera/visibility/targets must be independent for {} in composite {iteration}",
-                order[side].name
+            assert_pixels_equal(
+                &actual,
+                &expected,
+                &format!(
+                    "camera/visibility/targets leaked for {} in composite {iteration}",
+                    order[side].name
+                ),
             );
             results.push(json!({"iteration":iteration,"camera":order[side].name,"dimensions":[widths[side],height],"pair_matches_solo_pixels":true,"pixel_crc32":format!("{:08x}",crc32fast::hash(&actual)),"file":file}));
         }
@@ -224,9 +240,12 @@ pub(super) fn verify_temporal(
                 width,
                 height,
             );
-            assert_eq!(
-                actual, reference,
-                "temporal view state leaked after reorder at step {step}, view {actual_index}"
+            assert_pixels_equal(
+                &actual,
+                &reference,
+                &format!(
+                    "temporal view state leaked after reorder at step {step}, view {actual_index}"
+                ),
             );
             if actual_index == 0 && step < 8 {
                 clear_pixels.push(crc32fast::hash(&actual));
@@ -336,4 +355,123 @@ pub(super) fn verify_temporal(
     )
     .expect("save temporal negative control");
     json!({"status":"passed","checks":checks,"single_gpu_render_per_time":true,"draw_order_negative_control_mismatched_channels":mismatched_channels,"covers":["stable widget identity","advancing visibility history","reorder","camera changes","resize","independent reference views"]})
+}
+
+pub(super) fn verify_doors(
+    renderer: &mut iced::Renderer,
+    make: impl Fn(&CaptureCamera) -> FixedView,
+    cameras: &[CaptureCamera],
+    directory: &std::path::Path,
+) -> Value {
+    let camera = cameras
+        .iter()
+        .find(|shot| !shot.reflection_target && !shot.refraction_target && !shot.live_animation)
+        .expect("door isolation needs a fixed main camera facing a door");
+    let mut views = [make(camera), make(camera)];
+    assert!(
+        !views[0].viewer.scene.doors.is_empty(),
+        "door isolation needs a map with decoded doors"
+    );
+    let mut references = [make(camera), make(camera)];
+    let mut solo_renderers: [iced::Renderer; 2] = std::array::from_fn(|_| {
+        futures::executor::block_on(iced::Renderer::new(
+            iced::Font::default(),
+            iced::Pixels(16.0),
+            Some("wgpu"),
+        ))
+        .expect("door isolation needs independent wgpu reference renderers")
+    });
+    let view_ids = views
+        .each_ref()
+        .map(|view| format!("{:?}", view.camera.view_id));
+    let mut checks = Vec::new();
+    let mut pose_images = Vec::new();
+    for (step, (progress, order, widths, height)) in [
+        ([0.0, 1.0], &[0, 1][..], [320, 480], 240),
+        ([1.0, 0.0], &[0, 1][..], [320, 480], 240),
+        ([0.5, 1.0], &[1, 0][..], [320, 480], 240),
+        ([0.0, 0.5], &[1, 0][..], [320, 480], 240),
+        ([1.0, 0.0], &[0, 1][..], [256, 384], 192),
+        ([0.5, 1.0], &[0][..], [256, 384], 192),
+        ([0.0, 0.5], &[0][..], [256, 384], 192),
+        ([1.0, 0.0], &[1, 0][..], [256, 384], 192),
+        ([0.0, 1.0], &[0, 1][..], [320, 480], 240),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for index in 0..2 {
+            views[index].door_progress_override = Some(progress[index]);
+            references[index].door_progress_override = Some(progress[index]);
+        }
+        let expected: [Vec<u8>; 2] = std::array::from_fn(|index| {
+            let (rgba, width) = pixels(
+                &mut solo_renderers[index],
+                vec![(BorrowedView(&references[index], None), widths[index])],
+                height,
+                false,
+            );
+            crop(&rgba, width, 12, 12, widths[index], height)
+        });
+        let (rgba, full_width) = pixels(
+            renderer,
+            order
+                .iter()
+                .map(|&index| (BorrowedView(&views[index], None), widths[index]))
+                .collect(),
+            height,
+            false,
+        );
+        let file = format!("door-isolation-{step:02}.png");
+        image::save_buffer(
+            directory.join(&file),
+            &rgba,
+            full_width,
+            height + 24,
+            image::ColorType::Rgba8,
+        )
+        .expect("save door isolation image");
+        let mut x = 12;
+        for &index in order {
+            let actual = crop(&rgba, full_width, x, 12, widths[index], height);
+            assert_pixels_equal(
+                &actual,
+                &expected[index],
+                &format!(
+                    "door geometry leaked at step {step}, viewer {index}, progress {}",
+                    progress[index]
+                ),
+            );
+            checks.push(json!({
+                "step": step,
+                "viewer": index,
+                "view_id": view_ids[index],
+                "progress": progress[index],
+                "dimensions": [widths[index], height],
+                "pair_matches_independent_persistent_solo": true,
+                "pixel_crc32": format!("{:08x}", crc32fast::hash(&actual)),
+                "file": file,
+            }));
+            if index == 0 && step < 3 {
+                pose_images.push(actual);
+            }
+            x += widths[index] + 16;
+        }
+    }
+    for (left, right) in [(0, 1), (0, 2), (1, 2)] {
+        assert!(
+            pose_images[left] != pose_images[right],
+            "closed, open and mid-door poses must each change the rendered image"
+        );
+    }
+    json!({
+        "status": "passed",
+        "camera": camera.name,
+        "view_ids": view_ids,
+        "checks": checks,
+        "reference_policy": "two independent renderers with persistent solo viewer identities",
+        "gpu_renders_per_step": {"pair": 1, "each_solo": 1},
+        "distinct_closed_open_mid_pixels": true,
+        "covers": ["viewer-local door vertices", "persistent pose swaps", "widget reorder", "resize", "drop and readd", "independent solo renderers"],
+    })
 }

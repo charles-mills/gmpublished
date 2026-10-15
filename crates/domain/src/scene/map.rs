@@ -25,6 +25,8 @@ use crate::scene::QAngle;
 mod brushes;
 mod cubemaps;
 mod data;
+mod decals;
+pub use decals::{MapDecal, MapSurfaceProjector};
 mod doors;
 mod entities;
 mod frames;
@@ -32,10 +34,12 @@ mod lighting;
 mod lighting_trace;
 mod lumps;
 mod mesh;
+mod overlays;
 mod pakfile;
 mod paths;
 mod physics;
 mod placements;
+mod projection;
 mod radiosity;
 mod sky;
 mod spatial;
@@ -49,9 +53,9 @@ pub use world_lights::{MapLightStyleEntity, MapWorldLight, MapWorldLightSet, Map
 
 pub use cubemaps::MapCubemapProbe;
 pub use data::{
-    MapBounds, MapData, MapMesh, MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility,
-    MapPropSolid, MapPropVisibility, MapSkyboxPartitionStats, MapStatsRaw, MapVertex,
-    MapVisibilityBucket, StaticPropPlacement,
+    MapBounds, MapData, MapMesh, MapMeshClusterRanges, MapMeshIndexRange, MapMeshSurfaceOwner,
+    MapMeshVisibility, MapPropSolid, MapPropVisibility, MapReceiverMesh, MapSkyboxPartitionStats,
+    MapStatsRaw, MapSurfaceOwner, MapVertex, MapVisibilityBucket, StaticPropPlacement,
 };
 #[cfg(test)]
 use doors::linear_door_distance;
@@ -92,6 +96,10 @@ use mesh::{
 use mesh::{
     DisplacementGridVertex, displacement_blend_alpha, fan_indices, tessellate_displacement_grid,
 };
+use overlays::partitioned_map_overlays;
+pub use overlays::{MapOverlay, MapSurfaceMarkSource};
+#[cfg(test)]
+use overlays::{OverlayBasis, overlay_quad_positions};
 use pakfile::pakfile_error;
 pub use pakfile::{MAX_PAKFILE_ENTRY_BYTES, MapPakFile, MapPakFileEntry};
 #[cfg(test)]
@@ -100,19 +108,21 @@ use paths::{
     is_preview_material_visible, normalize_entity_prop_model_path, normalize_material_name,
     normalize_skyname, normalize_source_path, normalize_static_prop_model_path,
 };
-pub use placements::{MapDetailSprite, MapLightingOriginReference, MapOverlay};
 #[cfg(test)]
-use placements::{OverlayBasis, overlay_quad_positions, parse_entity_prop_model_scale};
+use placements::parse_entity_prop_model_scale;
+pub use placements::{MapDetailSprite, MapLightingOriginReference};
 use placements::{
     partitioned_detail_sprite_placements, partitioned_entity_prop_placements,
-    partitioned_map_overlays, partitioned_static_prop_placements,
+    partitioned_static_prop_placements,
 };
+pub use projection::{MapSurfaceReceiver, MapSurfaceVertex};
 pub use radiosity::{
     MapRadiosityDisplacement, MapRadiosityHit, MapRadiosityMaterialFlags, MapRadiosityStyles,
     MapRadiositySurfaces, MapRadiosityTraceError,
 };
 pub use sky::{MapSkyPaint, MapSun};
 use sky::{map_sky_paint, map_suns};
+pub use vformats::bsp::OverlayFade as MapOverlayFade;
 pub use visibility::MapVisibility;
 use visibility::{
     FaceAttributions, MapFaceVisibility, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT,
@@ -235,6 +245,8 @@ fn load_map_impl(
     {
         let mut face_context = FaceAppendContext {
             entity: false,
+            receiver_owner: MapSurfaceOwner::World,
+            receiver_solid: true,
             transform: brushes::BrushTransform::default(),
             meshes: &mut meshes,
             material_names: &mut material_names,
@@ -250,6 +262,18 @@ fn load_map_impl(
             let model = &bsp.models[instance.model_index.get()];
             face_context.transform = instance.transform;
             face_context.entity = instance.model_index.get() != 0;
+            face_context.receiver_owner =
+                instance
+                    .entity_index
+                    .map_or(MapSurfaceOwner::World, |entity_index| {
+                        MapSurfaceOwner::Brush {
+                            entity_index,
+                            model_index: instance.model_index,
+                            origin: instance.transform.origin,
+                            angles: instance.transform.angles,
+                        }
+                    });
+            face_context.receiver_solid = instance.solid;
             let attribution = (instance.model_index.get() != 0)
                 .then(|| instance.attribution(&bsp, &brush_locator, &skybox_partition));
             let Some(face_range) = model_face_range(model, bsp.faces.len()) else {
@@ -304,7 +328,6 @@ fn load_map_impl(
     let detail_material_name = worldspawn_detail_material_name(&bsp.entities);
     let (detail_sprites, skybox_detail_sprites) =
         partitioned_detail_sprite_placements(&bsp, &skybox_partition);
-    let (overlays, skybox_overlays) = partitioned_map_overlays(&bsp, &skybox_partition);
     let ambient = map_ambient_lighting(&bsp);
     let world_lighting = map_world_lighting(&bsp, lightmap_source, ambient.source());
     let environment_lighting = map_environment_lighting(&bsp.entities);
@@ -337,6 +360,7 @@ fn load_map_impl(
             indices: mesh.indices,
             material_index: mesh.material_index,
             visibility: mesh.visibility.into_map_visibility(),
+            surface_owners: mesh.surface_owners,
         })
         .collect::<Vec<_>>();
     let skybox_meshes = skybox_meshes
@@ -351,8 +375,12 @@ fn load_map_impl(
             indices: mesh.indices,
             material_index: mesh.material_index,
             visibility: mesh.visibility.into_map_visibility(),
+            surface_owners: mesh.surface_owners,
         })
         .collect::<Vec<_>>();
+    let (overlays, skybox_overlays) =
+        partitioned_map_overlays(&bsp, &meshes, &skybox_meshes, &doors)?;
+    let decals = decals::map_decals(&bsp, &meshes, &skybox_meshes, &doors);
     let MapBounds {
         min: bounds_min,
         max: bounds_max,
@@ -380,7 +408,13 @@ fn load_map_impl(
         ),
         static_prop_count: count_to_u32(skybox_static_props.len()),
         detail_sprite_count: count_to_u32(skybox_detail_sprites.len()),
-        overlay_count: count_to_u32(skybox_overlays.len()),
+        overlay_count: count_to_u32(
+            skybox_overlays
+                .iter()
+                .map(|overlay| overlay.source)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+        ),
     };
 
     Ok(MapData {
@@ -394,6 +428,7 @@ fn load_map_impl(
         detail_sprites,
         skybox_detail_sprites,
         overlays,
+        decals,
         skybox_overlays,
         ambient,
         world_lighting,

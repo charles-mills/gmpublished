@@ -1,4 +1,3 @@
-//! Audited model-light input math, independent of visibility, interpolation and ranking.
 use gmpublished_domain::{math::Vec3, scene::map::MapWorldLight};
 use vformats::bsp::WorldLightKind;
 
@@ -18,8 +17,7 @@ pub(super) struct LightCacheCell {
     pub key: LightCacheKey,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
-    /// Candidate before Source validates the cell center against BSP contents
-    /// and traces from the requested position. It is not a validated sample.
+    /// Candidate awaiting BSP contents and trace validation.
     pub center: Vec3,
 }
 
@@ -36,10 +34,8 @@ impl LightCacheCell {
         }
         let shifts = [3, 3, 4];
         let grid = std::array::from_fn(|axis| (coordinates[axis] as i32 + 32_768) >> shifts[axis]);
-        // The native cache hash truncates signed coordinates before shifting,
-        // while its sample bounds truncate absolute coordinates and complement
-        // the grid index for negatives. Exact negative boundaries can therefore
-        // share a key with a different cell center, depending on the first query.
+        // Hashing truncates signed coordinates; bounds truncate their magnitude.
+        // Negative edges can share a key across different centers: the first query wins.
         let minimum = std::array::from_fn(|axis| {
             let cell = (coordinates[axis].abs() as i32) >> shifts[axis];
             let signed = if coordinates[axis] < 0.0 { !cell } else { cell };
@@ -58,7 +54,6 @@ impl LightCacheCell {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct CompiledPointLight {
-    /// Preserve source ID, style, flags, cluster and attenuation without inventing policy.
     pub light: MapWorldLight,
 }
 
@@ -89,8 +84,7 @@ impl CompiledPointLight {
         Some(Self { light })
     }
 
-    /// The caller supplies the shared lightstyle weight and independently decides
-    /// whether the emitter is visible or already included in ambient lighting.
+    /// Visibility and ambient membership are decided by the caller.
     pub fn response(self, position: Vec3, style_weight: f32) -> Option<PointLightResponse> {
         if !position.is_finite() || !style_weight.is_finite() || style_weight < 0.0 {
             return None;
@@ -107,8 +101,7 @@ impl CompiledPointLight {
         if !denominator.is_finite() || denominator <= 0.0 {
             return None;
         }
-        // Source LightDesc uses zero for infinite range. Radius edge/near-source
-        // behavior and generalized coefficients remain separate native gates.
+        // A zero descriptor range is infinite.
         let in_range = self.light.radius == 0.0 || distance <= self.light.radius;
         let attenuation = if in_range { denominator.recip() } else { 0.0 };
         let radiance = Vec3::from(self.light.intensity) * attenuation * style_weight;
@@ -223,7 +216,6 @@ mod tests {
     #[test]
     fn isolated_compiled_point_matches_independent_native_linear_readouts() {
         let light = CompiledPointLight::from_compiled(point()).unwrap();
-        // Native model-lighting-game-reference02, actual float32 BSP/query inputs.
         for (position, normal, expected) in [
             (
                 Vec3::new(-3001.7256, -1231.3098, -55.843136),

@@ -1,7 +1,5 @@
-//! Authored ordinary-surface state. Colour conversion and shader permutations
-//! depend on the material family; raw VMT values stay independent of GPU state.
-use super::water::{scalar, texture_transform};
-use super::{Arc, BTreeMap, EffectiveMaterial, LinearTextureFrames, MaterialResolver};
+use super::parameters::{scalar, texture_transform};
+use super::{Arc, BTreeMap, DecodedTextureFrames, EffectiveMaterial, MaterialResolver};
 
 pub type TextureTransform = [[f32; 4]; 2];
 
@@ -12,12 +10,42 @@ pub enum SurfaceFamily {
     Transition,
     VertexLit,
     Unlit,
+    DecalModulate,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "resolved independent Source shader permutations"
+)]
+pub struct ModelShadingProfile {
+    /// Warp availability selects runtime lighting independently of Fresnel.
+    pub runtime_lighting: bool,
+    pub skin: bool,
+    pub normal: bool,
+    pub diffuse_warp: bool,
+    pub specular_warp: bool,
+    pub exponent_map: bool,
+    pub half_lambert: bool,
+    pub base_alpha_mask: bool,
+    pub invert_mask: bool,
+    pub rim: bool,
+}
+
+impl ModelShadingProfile {
+    pub const fn requires_runtime_lighting(self) -> bool {
+        self.runtime_lighting
+    }
+
+    pub const fn uses_pixel_lighting(self) -> bool {
+        self.skin || self.normal || self.diffuse_warp
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceDetail {
     pub path: String,
-    pub texture: Option<Arc<LinearTextureFrames>>,
+    pub texture: Option<Arc<DecodedTextureFrames>>,
     pub frame: f32,
     pub scale: [f32; 2],
     pub transform: Option<TextureTransform>,
@@ -30,10 +58,42 @@ pub struct SurfaceDetail {
 pub struct SurfaceEmission {
     pub self_illumination: bool,
     pub tint: [f32; 3],
-    pub mask: Option<Arc<LinearTextureFrames>>,
+    pub mask: Option<Arc<DecodedTextureFrames>>,
     pub mask_path: Option<String>,
     pub envmap_mask_alpha: bool,
     pub fresnel: Option<[f32; 3]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecalParameters {
+    pub scale: f32,
+    pub fade_time: Option<f32>,
+    pub fade_duration: Option<f32>,
+}
+
+impl Default for DecalParameters {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            fade_time: None,
+            fade_duration: None,
+        }
+    }
+}
+
+impl DecalParameters {
+    pub(crate) fn mapping_extent(self, dimensions: (u32, u32)) -> Option<[f32; 2]> {
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return None;
+        }
+        let reciprocal = self.scale.recip();
+        let extent =
+            [dimensions.0, dimensions.1].map(|dimension| (dimension as f32 / reciprocal).trunc());
+        extent
+            .iter()
+            .all(|value| value.is_finite() && *value >= 1.0 && *value < i32::MAX as f32)
+            .then_some(extent)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,8 +112,8 @@ pub struct SurfaceMaterial {
     pub base2_transform: Option<TextureTransform>,
     pub base_frame: f32,
     pub base2_frame: f32,
-    pub normal: Option<Arc<LinearTextureFrames>>,
-    pub normal2: Option<Arc<LinearTextureFrames>>,
+    pub normal: Option<Arc<DecodedTextureFrames>>,
+    pub normal2: Option<Arc<DecodedTextureFrames>>,
     pub normal_frame: f32,
     pub ssbump: bool,
     pub diffuse_bump: bool,
@@ -63,11 +123,15 @@ pub struct SurfaceMaterial {
     pub emission: Option<SurfaceEmission>,
     pub envmap: Option<Arc<super::EnvironmentMapMaterial>>,
     pub phong: Option<Arc<super::PhongMaterial>>,
-    pub blend_modulation: Option<Arc<LinearTextureFrames>>,
+    pub blend_modulation: Option<Arc<DecodedTextureFrames>>,
     pub blend_mask_transform: TextureTransform,
     pub masked_blending: bool,
     pub vertex_color: bool,
     pub vertex_alpha: bool,
+    pub decal: bool,
+    pub decal_parameters: DecalParameters,
+    pub suppress_decals: bool,
+    pub no_debug_override: bool,
     pub blend_tint_by_base_alpha: bool,
     pub tint_replace_factor: f32,
     pub alpha_test: bool,
@@ -79,7 +143,91 @@ pub struct SurfaceMaterial {
     pub unsupported_proxies: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnavailableTexture<'a> {
+    pub parameter: &'static str,
+    pub path: &'a str,
+}
+
 impl SurfaceMaterial {
+    pub(crate) const fn base_read_transfer(&self) -> super::TextureReadTransfer {
+        super::TextureRole::Base {
+            family: self.family,
+        }
+        .read_transfer()
+    }
+
+    pub(crate) const fn blends_in_gamma_space(&self) -> bool {
+        matches!(self.family, SurfaceFamily::DecalModulate)
+    }
+
+    pub(crate) const fn effective_vertex_color(&self) -> bool {
+        match self.family {
+            SurfaceFamily::DecalModulate => false,
+            _ => self.vertex_color,
+        }
+    }
+
+    pub(crate) const fn effective_vertex_alpha(&self) -> bool {
+        match self.family {
+            SurfaceFamily::Lightmapped => self.vertex_color,
+            SurfaceFamily::Transition => false,
+            SurfaceFamily::DecalModulate => false,
+            SurfaceFamily::VertexLit | SurfaceFamily::Unlit => self.vertex_alpha,
+        }
+    }
+    pub(crate) fn unavailable_textures(&self) -> Vec<UnavailableTexture<'_>> {
+        if self.family == SurfaceFamily::DecalModulate {
+            return Vec::new();
+        }
+        let phong = self.phong.as_deref();
+        let phong_available = |texture: Option<&super::PhongTexture>| {
+            texture.is_some_and(|texture| texture.texture.is_some())
+        };
+        [
+            ("$bumpmap", self.normal.is_some()),
+            ("$bumpmap2", self.normal2.is_some()),
+            (
+                "$detail",
+                self.detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.texture.is_some()),
+            ),
+            ("$blendmodulatetexture", self.blend_modulation.is_some()),
+            (
+                "$selfillummask",
+                self.emission
+                    .as_ref()
+                    .is_some_and(|emission| emission.mask.is_some()),
+            ),
+            ("$envmap", self.envmap.is_some()),
+            (
+                "$envmapmask",
+                self.envmap
+                    .as_ref()
+                    .is_some_and(|environment| environment.mask_texture.is_some()),
+            ),
+            (
+                "$phongexponenttexture",
+                phong_available(phong.and_then(|phong| phong.exponent_texture.as_ref())),
+            ),
+            (
+                "$phongwarptexture",
+                phong_available(phong.and_then(|phong| phong.specular_warp.as_ref())),
+            ),
+            (
+                "$lightwarptexture",
+                phong_available(phong.and_then(|phong| phong.diffuse_warp.as_ref())),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(parameter, available)| {
+            let path = self.parameters.get(parameter)?.as_str();
+            (!available && !path.trim().is_empty())
+                .then_some(UnavailableTexture { parameter, path })
+        })
+        .collect()
+    }
     pub(crate) fn unsupported_features(&self) -> Vec<&'static str> {
         let mut features = Vec::new();
         if self.detail.as_ref().is_some_and(|detail| {
@@ -111,7 +259,33 @@ impl SurfaceMaterial {
         features
     }
 
-    pub(crate) fn uses_skin_shader(&self) -> bool {
+    pub(crate) fn model_shading_profile(&self) -> ModelShadingProfile {
+        if self.family == SurfaceFamily::DecalModulate {
+            return ModelShadingProfile::default();
+        }
+        let phong = self.phong.as_deref();
+        let available = |texture: Option<&super::PhongTexture>| {
+            texture.is_some_and(|texture| texture.texture.is_some())
+        };
+        let skin = self.uses_skin_shader();
+        let authored_diffuse_warp =
+            phong.is_some_and(|phong| available(phong.diffuse_warp.as_ref()));
+        ModelShadingProfile {
+            runtime_lighting: self.normal.is_some() || skin || authored_diffuse_warp,
+            skin,
+            normal: self.normal.is_some(),
+            diffuse_warp: authored_diffuse_warp
+                && (skin || self.effective_emission_mode(true) != 3),
+            specular_warp: phong.is_some_and(|phong| available(phong.specular_warp.as_ref())),
+            exponent_map: phong.is_some_and(|phong| available(phong.exponent_texture.as_ref())),
+            half_lambert: skin || phong.is_some_and(|phong| phong.half_lambert == Some(true)),
+            base_alpha_mask: phong.is_some_and(|phong| phong.base_alpha_mask == Some(true)),
+            invert_mask: phong.is_some_and(|phong| phong.invert_mask == Some(true)),
+            rim: skin && phong.is_some_and(|phong| phong.rim.enabled == Some(true)),
+        }
+    }
+
+    fn uses_skin_shader(&self) -> bool {
         self.family == SurfaceFamily::VertexLit
             && self.phong.as_ref().is_some_and(|phong| {
                 phong.enabled == Some(true)
@@ -137,6 +311,9 @@ impl SurfaceMaterial {
     }
 
     pub(crate) fn effective_detail_mode(&self) -> Option<u32> {
+        if self.family == SurfaceFamily::DecalModulate {
+            return None;
+        }
         let detail = self.detail.as_ref()?;
         detail.texture.as_ref()?;
         if matches!(
@@ -152,8 +329,7 @@ impl SurfaceMaterial {
             }
             return Some(if detail.mode == 1 { 1 } else { 0 });
         }
-        // Generic model/Unlit programs only define modes0..9. Higher values
-        // alias unrelated static combos without matching vertex outputs.
+        // Model/Unlit detail permutations define only modes0..9.
         (detail.mode <= 9).then_some(detail.mode)
     }
 
@@ -166,6 +342,9 @@ impl SurfaceMaterial {
         base_has_alpha: bool,
     ) -> super::EnvironmentMapMask {
         use super::EnvironmentMapMask;
+        if self.family == SurfaceFamily::DecalModulate {
+            return EnvironmentMapMask::None;
+        }
         let Some(environment) = &self.envmap else {
             return EnvironmentMapMask::None;
         };
@@ -205,8 +384,10 @@ impl SurfaceMaterial {
                 == super::EnvironmentMapMask::BaseAlpha
     }
 
-    /// Native shader families consume different self-illumination inputs.
     pub(crate) fn effective_emission_mode(&self, base_has_alpha: bool) -> u32 {
+        if self.family == SurfaceFamily::DecalModulate {
+            return 0;
+        }
         let Some(emission) = &self.emission else {
             return 0;
         };
@@ -260,6 +441,9 @@ impl SurfaceMaterial {
         alpha: f32,
     ) -> super::RenderMode {
         use super::RenderMode;
+        if self.family == SurfaceFamily::DecalModulate {
+            return RenderMode::Modulate;
+        }
         let has_alpha = |flags: u32| {
             flags
                 & (vformats::vtf::texture_flags::ONEBITALPHA
@@ -321,6 +505,10 @@ impl Default for SurfaceMaterial {
             masked_blending: false,
             vertex_color: false,
             vertex_alpha: false,
+            decal: false,
+            decal_parameters: DecalParameters::default(),
+            suppress_decals: false,
+            no_debug_override: false,
             blend_tint_by_base_alpha: false,
             tint_replace_factor: 0.0,
             alpha_test: false,
@@ -336,7 +524,7 @@ impl Default for SurfaceMaterial {
 
 fn vector3(value: Option<&str>, fallback: [f32; 3]) -> [f32; 3] {
     value
-        .and_then(super::parse_water_fog_color)
+        .and_then(super::parse_material_color)
         .map(super::Vec3::to_array)
         .or_else(|| {
             value
@@ -361,19 +549,23 @@ impl MaterialResolver {
         family: SurfaceFamily,
     ) -> Arc<SurfaceMaterial> {
         let get = |key| material.parameter(key);
+        let generic = family != SurfaceFamily::DecalModulate;
         let raw_texture = |key| get(key).and_then(|name| self.resolve_raw_texture_frames(name));
-        let detail = get("$detail").map(|path| SurfaceDetail {
-            path: path.to_owned(),
-            texture: self.resolve_raw_texture_frames(path),
-            frame: scalar(get("$detailframe"), 0.0),
-            scale: scale(get("$detailscale")),
-            transform: get("$detailtexturetransform").map(|v| texture_transform(Some(v))),
-            mode: scalar(get("$detailblendmode"), 0.0).max(0.0) as u32,
-            factor: scalar(get("$detailblendfactor"), 1.0),
-            tint: vector3(get("$detailtint"), [1.0; 3]),
-        });
-        let self_illumination = super::vmt_bool(get("$selfillum"));
-        let envmap_mask_alpha = super::vmt_bool(get("$selfillum_envmapmask_alpha"));
+        let detail = generic
+            .then(|| get("$detail"))
+            .flatten()
+            .map(|path| SurfaceDetail {
+                path: path.to_owned(),
+                texture: self.resolve_raw_texture_frames(path),
+                frame: scalar(get("$detailframe"), 0.0),
+                scale: scale(get("$detailscale")),
+                transform: get("$detailtexturetransform").map(|v| texture_transform(Some(v))),
+                mode: scalar(get("$detailblendmode"), 0.0).max(0.0) as u32,
+                factor: scalar(get("$detailblendfactor"), 1.0),
+                tint: vector3(get("$detailtint"), [1.0; 3]),
+            });
+        let self_illumination = generic && super::vmt_bool(get("$selfillum"));
+        let envmap_mask_alpha = generic && super::vmt_bool(get("$selfillum_envmapmask_alpha"));
         let emission = (self_illumination || envmap_mask_alpha).then(|| SurfaceEmission {
             self_illumination,
             tint: vector3(get("$selfillumtint"), [1.0; 3]),
@@ -398,8 +590,8 @@ impl MaterialResolver {
             base2_transform: get("$basetexturetransform2").map(|v| texture_transform(Some(v))),
             base_frame: scalar(get("$frame"), 0.0),
             base2_frame: scalar(get("$frame2"), 0.0),
-            normal: raw_texture("$bumpmap"),
-            normal2: raw_texture("$bumpmap2"),
+            normal: generic.then(|| raw_texture("$bumpmap")).flatten(),
+            normal2: generic.then(|| raw_texture("$bumpmap2")).flatten(),
             normal_frame: scalar(get("$bumpframe"), 0.0),
             ssbump: super::vmt_bool(get("$ssbump")),
             diffuse_bump: !super::vmt_bool(get("$nodiffusebumplighting")),
@@ -407,12 +599,28 @@ impl MaterialResolver {
             transform2: get("$bumptransform2").map(|v| texture_transform(Some(v))),
             detail,
             emission,
-            envmap: self.resolve_environment_map(material),
-            blend_modulation: raw_texture("$blendmodulatetexture"),
+            envmap: generic
+                .then(|| self.resolve_environment_map(material))
+                .flatten(),
+            blend_modulation: generic
+                .then(|| raw_texture("$blendmodulatetexture"))
+                .flatten(),
             blend_mask_transform: texture_transform(get("$blendmasktransform")),
             masked_blending: super::vmt_bool(get("$maskedblending")),
             vertex_color: super::vmt_bool(get("$vertexcolor")),
             vertex_alpha: super::vmt_bool(get("$vertexalpha")),
+            decal: super::vmt_bool(get("$decal")),
+            decal_parameters: DecalParameters {
+                scale: scalar(get("$decalscale"), 1.0),
+                fade_time: get("decalfadetime")
+                    .or_else(|| get("$decalfadetime"))
+                    .map(|value| scalar(Some(value), 0.0)),
+                fade_duration: get("$decalfadeduration").map(|value| scalar(Some(value), 0.0)),
+            },
+            suppress_decals: super::vmt_bool(get("$nodecal")),
+            no_debug_override: matches!(family, SurfaceFamily::DecalModulate)
+                || super::vmt_bool(get("$decal"))
+                || super::vmt_bool(get("$no_debug_override")),
             blend_tint_by_base_alpha: super::vmt_bool(get("$blendtintbybasealpha")),
             tint_replace_factor: scalar(get("$blendtintcoloroverbase"), 0.0),
             alpha_test: super::vmt_bool(get("$alphatest")),
@@ -423,6 +631,14 @@ impl MaterialResolver {
             ignore_z: super::vmt_bool(get("$ignorez")),
             unsupported_proxies,
         };
+        for texture in surface.unavailable_textures() {
+            log::debug!(
+                "material {}: unavailable {} texture {}",
+                surface.shader,
+                texture.parameter,
+                texture.path
+            );
+        }
         for feature in surface.unsupported_features() {
             log::debug!("material {}: {feature}", surface.shader);
         }
@@ -437,7 +653,7 @@ mod detail_mode_tests {
     #[test]
     fn native_detail_permutations_keep_texture_capability_separate_from_authored_mode() {
         let frames = |flags| {
-            Arc::new(LinearTextureFrames {
+            Arc::new(DecodedTextureFrames {
                 flags,
                 frames: Vec::new(),
             })
@@ -500,5 +716,79 @@ mod detail_mode_tests {
                 material.detail.as_mut().unwrap().texture = Some(frames(0));
             }
         }
+    }
+    fn available_frames() -> Arc<DecodedTextureFrames> {
+        Arc::new(DecodedTextureFrames {
+            flags: 0,
+            frames: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn model_profile_keeps_skin_and_generic_fresnel_warp_rules_distinct() {
+        let warp = super::super::PhongTexture {
+            path: "warp".into(),
+            texture: Some(available_frames()),
+        };
+        let mut material = SurfaceMaterial {
+            family: SurfaceFamily::VertexLit,
+            phong: Some(Arc::new(super::super::PhongMaterial {
+                diffuse_warp: Some(warp),
+                ..Default::default()
+            })),
+            emission: Some(SurfaceEmission {
+                self_illumination: true,
+                tint: [1.0; 3],
+                mask: None,
+                mask_path: None,
+                envmap_mask_alpha: false,
+                fresnel: Some([0.0, 1.0, 1.0]),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(material.effective_emission_mode(true), 3);
+        assert!(!material.model_shading_profile().diffuse_warp);
+        assert!(!material.model_shading_profile().uses_pixel_lighting());
+        assert!(material.model_shading_profile().requires_runtime_lighting());
+        Arc::make_mut(material.phong.as_mut().unwrap()).enabled = Some(true);
+        let profile = material.model_shading_profile();
+        assert!(
+            profile.skin
+                && profile.diffuse_warp
+                && profile.half_lambert
+                && profile.uses_pixel_lighting()
+        );
+    }
+
+    #[test]
+    fn unavailable_assets_remain_diagnosed_without_enabling_permutations() {
+        let mut material = SurfaceMaterial {
+            family: SurfaceFamily::VertexLit,
+            parameters: BTreeMap::from([
+                ("$bumpmap".into(), "missing/normal".into()),
+                ("$lightwarptexture".into(), "missing/warp".into()),
+            ]),
+            phong: Some(Arc::new(super::super::PhongMaterial {
+                enabled: Some(true),
+                diffuse_warp: Some(super::super::PhongTexture {
+                    path: "missing/warp".into(),
+                    texture: None,
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(material.unavailable_textures().len(), 2);
+        assert!(!material.model_shading_profile().uses_pixel_lighting());
+        material.normal = Some(available_frames());
+        assert_eq!(
+            material.unavailable_textures(),
+            vec![UnavailableTexture {
+                parameter: "$lightwarptexture",
+                path: "missing/warp"
+            }]
+        );
+        assert!(material.model_shading_profile().skin);
+        assert!(!material.model_shading_profile().diffuse_warp);
     }
 }

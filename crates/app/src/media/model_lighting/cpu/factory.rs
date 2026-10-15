@@ -1,5 +1,3 @@
-//! Immutable spatial seeds with per-frame style selection and ambient folding.
-
 use super::initialization::initialized_light;
 use super::{CompiledPointLight, LightCacheCell, LightCacheKey, PointLightResponse};
 use gmpublished_domain::{
@@ -12,6 +10,7 @@ use gmpublished_domain::{
 };
 use std::{collections::HashMap, sync::Arc};
 use vformats::bsp::WorldLightKind;
+const WORLD_LIGHT_IN_AMBIENT_CUBE: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelLightingFailure {
@@ -108,8 +107,7 @@ impl<'a> ModelLightingFactory<'a> {
         })
     }
 
-    /// The caller supplies a verified engine sampling point. Static spherical
-    /// radiosity and model/attachment/anchor selection are separate policies.
+    /// Model/attachment/anchor selection precedes dynamic cache sampling.
     pub fn seed_dynamic(
         &mut self,
         point: Vec3,
@@ -140,8 +138,7 @@ impl<'a> ModelLightingFactory<'a> {
         Ok(seed)
     }
 
-    /// Static cache creation retains the resolved continuous point. Its
-    /// spherical surface radiosity is supplied independently of leaf samples.
+    /// Static seeds use the continuous point and spherical ambient, not leaf samples.
     pub fn seed_static(
         &self,
         point: Vec3,
@@ -162,8 +159,7 @@ impl<'a> ModelLightingFactory<'a> {
             .ok_or(ModelLightingFailure::MissingLeaf)?;
         let cell = LightCacheCell::from_position(point, leaf)
             .ok_or(ModelLightingFailure::InvalidPosition)?;
-        // Selection derives its culling cell from the point even for a
-        // continuous static cache seed; model hull bounds are separate metadata.
+        // Culling uses the point's cache cell, independently of model hull bounds.
         self.build_seed(point, point, leaf, ambient_cube, cell.bounds_max, true)
     }
 
@@ -190,7 +186,7 @@ impl<'a> ModelLightingFactory<'a> {
             .ok_or(ModelLightingFailure::InvalidPosition)?;
         let mut sky_seen = false;
         for light in &self.lights.lights {
-            if (!is_static && light.flags & 1 != 0)
+            if (!is_static && light.flags & WORLD_LIGHT_IN_AMBIENT_CUBE != 0)
                 || (is_static && light.style != 0)
                 || light.kind == WorldLightKind::SkyAmbient
                 || (light.kind != WorldLightKind::Skylight
@@ -285,8 +281,7 @@ impl<'a> ModelLightingFactory<'a> {
                     .trace_opaque(origin, sample_point)
                     .ok_or(ModelLightingFailure::InvalidTrace)?;
                 let distance = sample_point.distance(origin);
-                // Engine world-light visibility permits an obstruction within
-                // eight units of the receiving point, after tracing from source.
+                // Source-to-receiver traces tolerate obstruction in the final eight units.
                 if !source_visible(distance, trace.fraction, trace.start_solid) {
                     continue;
                 }
@@ -378,9 +373,7 @@ impl ModelLightingSeed {
                 colors: [Vec3::ZERO; 6],
             },
         )?;
-        // Source caches ordinary and switchable-light lists separately. At
-        // composition, retained switchable lights replace the weakest ordinary
-        // slot using a fixed comparison limit, even at equal/lower brightness.
+        // Switchable lights replace ordinary slots even at equal/lower brightness.
         for slot in styled_selected {
             select_slot(
                 slot,
@@ -436,9 +429,8 @@ impl ModelLightingSeed {
                 continue;
             }
             let intensity = candidate.light.intensity;
-            // Spatial response first drops sub-threshold maximum-channel
-            // energy. Local-slot selection has a separate luminance threshold;
-            // lights below that second threshold still contribute ambient.
+            // Spatial cutoff uses maximum-channel energy; the luminance cutoff
+            // only removes local slots and retains their ambient contribution.
             if !matches!(
                 candidate.light.kind,
                 WorldLightKind::Surface | WorldLightKind::Skylight

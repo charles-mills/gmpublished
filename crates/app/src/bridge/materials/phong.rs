@@ -1,11 +1,10 @@
-//! Authored model-lighting parameters, before shader initialization supplies defaults.
-use super::{Arc, EffectiveMaterial, LinearTextureFrames, MaterialResolver};
+use super::{Arc, DecodedTextureFrames, EffectiveMaterial, MaterialResolver};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhongTexture {
     pub path: String,
     /// Exponent and warp channels are raw UNORM data, including their alpha.
-    pub texture: Option<Arc<LinearTextureFrames>>,
+    pub texture: Option<Arc<DecodedTextureFrames>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -69,7 +68,7 @@ fn finite_scalar(material: &EffectiveMaterial, name: &str) -> Option<f32> {
 
 fn finite_vector(material: &EffectiveMaterial, name: &str) -> Option<[f32; 3]> {
     let authored = material.parameter(name)?;
-    let parsed = super::parse_water_fog_color(authored)
+    let parsed = super::parse_material_color(authored)
         .map(super::Vec3::to_array)
         .or_else(|| finite_scalar(material, name).map(|v| [v; 3]));
     if parsed.is_none() {

@@ -1,5 +1,5 @@
 use super::MapPreview;
-use super::upload::UploadedModel;
+use super::geometry::ViewerScene;
 use super::{WorldVisibilityPlan, wgpu};
 use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
@@ -97,7 +97,7 @@ impl UploadedVisibility {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         scene: &MapPreview,
-        upload: &UploadedModel,
+        upload: &ViewerScene,
         enabled: bool,
         camera_position: Vec3,
     ) {
@@ -140,7 +140,7 @@ impl UploadedVisibility {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        upload: &UploadedModel,
+        upload: &ViewerScene,
         plan: Option<WorldVisibilityPlan>,
     ) {
         self.mesh_indices.clear();

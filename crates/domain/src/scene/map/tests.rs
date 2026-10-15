@@ -3,7 +3,6 @@ fn overlay_quad_uses_packed_u_basis_and_v_flip_flag() {
     // Wall overlay: normal +X. vbsp packs BasisU into the UV points'
     // z components; corners live in the (U, V) plane as xy pairs.
     let mut overlay = OverlayBasis {
-        id: 7,
         uv_points: [
             // xy = corner (-8, -4); z components 0..2 pack BasisU = +Y.
             Vec3::new(-8.0, -4.0, 0.0),
@@ -1928,7 +1927,7 @@ fn door_meshes_retain_compiled_model_space_instead_of_subtracting_origin_twice()
     assert_eq!(map.doors[0].angles, Vec3::new(0.0, 35.0, 0.0));
 }
 
-fn brush_collision_bsp(extra_entities: &str) -> MapBsp {
+pub(super) fn brush_collision_bsp(extra_entities: &str) -> MapBsp {
     let mut bsp = read_fixture_bsp(&door_bmodel_bsp_fixture(extra_entities));
     let mut leaf = bsp.leaves[0];
     leaf.first_leaf_brush = 0;
@@ -2064,6 +2063,7 @@ fn brush_visibility_uses_placed_bounds_and_preserves_multiple_clusters() {
     .unwrap();
     let locator = MapLeafLocator::from_bsp(&bsp);
     let mut instance = brushes::BrushInstance {
+        entity_index: Some(1),
         use_vphysics: false,
         model_index: ModelIndex::new(1),
         transform: brushes::BrushTransform {
@@ -3550,6 +3550,7 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
         tex_s: 0.0,
         tex_t: 0.0,
         lightmap_uv: [0.0; 2],
+        has_lightmap: false,
         lightmap_bump_step: 0.0,
         blend_alpha: 0.0,
         opacity: 1.0,
@@ -3563,6 +3564,7 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
         indices: Vec::new(),
         material_index: 0,
         visibility: MapMeshVisibility::default(),
+        surface_owners: Vec::new(),
     };
 
     let bounds = bounds_from_meshes(std::slice::from_ref(&mesh));

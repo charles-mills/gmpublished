@@ -23,6 +23,7 @@ pub mod texture_flags {
     pub const TRANS: i32 = 0x0010;
     pub const NODRAW: i32 = 0x0080;
     pub const NOLIGHT: i32 = 0x0400;
+    pub const NODECALS: i32 = 0x2000;
 }
 
 /// Brush contents bits this crate names.
@@ -322,6 +323,14 @@ pub struct Overlay {
     pub origin: [f32; 3],
     /// Basis normal (the projection direction).
     pub basis_normal: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+/// Squared-distance fade limits, indexed by compiled overlay position.
+#[allow(missing_docs)]
+pub struct OverlayFade {
+    pub min_distance_squared: f32,
+    pub max_distance_squared: f32,
 }
 
 impl Overlay {
@@ -746,6 +755,16 @@ impl<'a> Bsp<'a> {
             uv_points: std::array::from_fn(|point| vec3_at(r, 280 + point * 12)),
             origin: vec3_at(r, 328),
             basis_normal: vec3_at(r, 340),
+        })
+    }
+
+    /// `LUMP_OVERLAY_FADES`, one eight-byte record per overlay.
+    pub fn overlay_fades(&self, limits: &Limits) -> Result<Vec<OverlayFade>, BspError> {
+        self.records(lump_ids::OVERLAY_FADES, 8, "overlay fades", limits, |r| {
+            OverlayFade {
+                min_distance_squared: f32_at(r, 0),
+                max_distance_squared: f32_at(r, 4),
+            }
         })
     }
 

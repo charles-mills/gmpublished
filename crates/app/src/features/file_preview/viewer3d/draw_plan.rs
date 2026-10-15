@@ -1,6 +1,8 @@
-use super::pipeline::UploadedModel;
+use super::pipeline::ViewerScene;
 use super::{MapVisibilityBucket, RenderMode, WorldVisibilityPlan};
 use gmpublished_domain::math::Vec3;
+use gmpublished_domain::scene::map::MapSurfaceMarkSource;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawPlans {
@@ -13,9 +15,8 @@ pub(super) struct DrawPlans {
 pub(super) struct DrawPlan {
     pub(super) opaque: Vec<DrawItem>,
     pub(super) planar: Vec<DrawItem>,
-    pub(super) overlay_opaque: Vec<OverlayDrawItem>,
-    pub(super) overlay_translucent: Vec<OverlayDrawItem>,
-    pub(super) overlay_additive: Vec<OverlayDrawItem>,
+    pub(super) surface_marks: Vec<OverlayDrawItem>,
+    pub(super) receiver_marks: Vec<OverlayDrawItem>,
     pub(super) translucent: Vec<DrawItem>,
     pub(super) additive: Vec<DrawItem>,
 }
@@ -29,9 +30,11 @@ pub(super) struct DrawItem {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct OverlayDrawItem {
+    pub(super) blend: RenderMode,
+    pub(super) receiver_mesh_index: Option<usize>,
+    pub(super) receiver_range: gmpublished_domain::scene::map::MapMeshIndexRange,
     pub(super) overlay_index: usize,
     pub(super) material_slot: usize,
-    pub(super) distance_squared: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -49,10 +52,23 @@ pub(super) struct MeshPlanSource {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct OverlayPlanSource {
+    pub(super) receiver_mesh_index: Option<usize>,
+    pub(super) receiver_range: gmpublished_domain::scene::map::MapMeshIndexRange,
+    pub(super) receiver_material_index: usize,
+    pub(super) receiver_lightmap_page: u32,
+    pub(super) source: gmpublished_domain::scene::map::MapSurfaceMarkSource,
+    pub(super) render_order: u16,
     pub(super) overlay_index: usize,
     pub(super) material_index: usize,
-    pub(super) centroid: Vec3,
     pub(super) map_skybox: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReceiverPlanSource {
+    pub(super) receiver_mesh_index: Option<usize>,
+    pub(super) face: u32,
+    pub(super) material_index: usize,
+    pub(super) lightmap_page: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +91,7 @@ pub(super) struct PartitionPlanContext<'a> {
     pub(super) camera_position: [f32; 4],
     pub(super) partition: PartitionFilter,
     pub(super) visibility_plan: Option<&'a WorldVisibilityPlan>,
+    pub(super) receiver_encounters: &'a [ReceiverPlanSource],
 }
 
 #[cfg(test)]
@@ -111,10 +128,7 @@ impl PartitionFilter {
     }
 }
 
-pub(super) fn prepare_draw_plans(
-    upload: &UploadedModel,
-    request: DrawPlanRequest<'_>,
-) -> DrawPlans {
+pub(super) fn prepare_draw_plans(upload: &ViewerScene, request: DrawPlanRequest<'_>) -> DrawPlans {
     let world = prepare_partition_draw_plan(
         upload,
         request.selection.skin_remap,
@@ -145,7 +159,7 @@ pub(super) fn prepare_draw_plans(
 }
 
 pub(super) fn prepare_partition_draw_plan(
-    upload: &UploadedModel,
+    upload: &ViewerScene,
     skin_remap: &[u16],
     bodygroup_choices: &[usize],
     camera_position: [f32; 4],
@@ -163,7 +177,7 @@ pub(super) fn prepare_partition_draw_plan(
                 material_index: mesh.material_index,
                 bodygroup: mesh.bodygroup,
                 bodygroup_choice: mesh.bodygroup_choice,
-                centroid: mesh.centroid,
+                centroid: mesh.centroid(),
                 map_skybox: mesh.map_skybox,
                 door_index: mesh.door_index,
                 door_visibility: mesh.door_visibility,
@@ -175,14 +189,19 @@ pub(super) fn prepare_partition_draw_plan(
             .map(|(overlay_index, overlay)| OverlayPlanSource {
                 overlay_index,
                 material_index: overlay.material_index,
-                centroid: overlay.centroid,
+                receiver_mesh_index: overlay.receiver_mesh_index,
+                receiver_range: overlay.receiver_range,
+                receiver_material_index: overlay.receiver_material_index,
+                receiver_lightmap_page: 0,
+                source: overlay.source,
+                render_order: overlay.render_order,
                 map_skybox: overlay.map_skybox,
             }),
         PartitionPlanContext {
             materials: DrawPlanMaterials {
-                render_modes: upload.material_render_modes.as_slice(),
-                planar_materials: upload.material_planar_materials.as_slice(),
-                material_count: upload.material_bind_groups.len(),
+                render_modes: upload.assets.material_render_modes.as_slice(),
+                planar_materials: upload.assets.material_planar_materials.as_slice(),
+                material_count: upload.assets.material_bind_groups.len(),
             },
             selection: DrawPlanSelection {
                 skin_remap,
@@ -191,6 +210,7 @@ pub(super) fn prepare_partition_draw_plan(
             camera_position,
             partition,
             visibility_plan,
+            receiver_encounters: &[],
         },
     )
 }
@@ -209,6 +229,7 @@ pub(super) fn prepare_draw_plans_from_sources(
             camera_position: request.camera_position,
             partition: PartitionFilter::World,
             visibility_plan: request.visibility_plan,
+            receiver_encounters: &[],
         },
     );
     let map_skybox = if request.map_skybox_visible && request.map_skybox_content_present {
@@ -222,6 +243,7 @@ pub(super) fn prepare_draw_plans_from_sources(
                     camera_position,
                     partition: PartitionFilter::MapSkybox,
                     visibility_plan: None,
+                    receiver_encounters: &[],
                 },
             )
         })
@@ -299,22 +321,22 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         } else {
             match render_mode {
                 RenderMode::Opaque | RenderMode::Cutout => plan.opaque.push(item),
-                RenderMode::Translucent => plan.translucent.push(item),
+                RenderMode::Translucent | RenderMode::Modulate => plan.translucent.push(item),
                 RenderMode::Additive => plan.additive.push(item),
             }
         }
     }
-    for overlay in overlays {
-        if !context.partition.accepts(overlay.map_skybox) {
-            continue;
-        }
-        if context.partition == PartitionFilter::World
-            && context
-                .visibility_plan
-                .is_some_and(|plan| !plan.overlay_visible(overlay.overlay_index))
-        {
-            continue;
-        }
+    let overlays = overlays
+        .into_iter()
+        .filter(|overlay| {
+            context.partition.accepts(overlay.map_skybox)
+                && (context.partition != PartitionFilter::World
+                    || context.visibility_plan.is_none_or(|plan| {
+                        plan.overlay_visible(overlay.overlay_index)
+                    }))
+        })
+        .collect::<Vec<_>>();
+    for overlay in ordered_surface_marks(&overlays, context.receiver_encounters) {
         let material_slot = overlay
             .material_index
             .min(context.materials.material_count.saturating_sub(1));
@@ -325,16 +347,25 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
             .copied()
             .unwrap_or(RenderMode::Opaque);
         let item = OverlayDrawItem {
+            blend: render_mode,
+            receiver_mesh_index: overlay.receiver_mesh_index,
+            receiver_range: overlay.receiver_range,
             overlay_index: overlay.overlay_index,
             material_slot,
-            distance_squared: overlay.centroid.distance_squared(Vec3::from(camera)),
         };
-        match render_mode {
-            RenderMode::Opaque | RenderMode::Cutout => plan.overlay_opaque.push(item),
-            RenderMode::Translucent => plan.overlay_translucent.push(item),
-            RenderMode::Additive => plan.overlay_additive.push(item),
+        let receiver_mode = context
+            .materials
+            .render_modes
+            .get(overlay.receiver_material_index)
+            .copied()
+            .unwrap_or(RenderMode::Opaque);
+        if matches!(receiver_mode, RenderMode::Opaque | RenderMode::Cutout) {
+            plan.surface_marks.push(item);
+        } else {
+            plan.receiver_marks.push(item);
         }
     }
+
     plan.translucent.sort_by(|left, right| {
         right
             .distance_squared
@@ -347,13 +378,88 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
             .total_cmp(&left.distance_squared)
             .then_with(|| left.mesh_index.cmp(&right.mesh_index))
     });
-    plan.overlay_translucent.sort_by(|left, right| {
-        right
-            .distance_squared
-            .total_cmp(&left.distance_squared)
-            .then_with(|| left.overlay_index.cmp(&right.overlay_index))
-    });
     plan
+}
+
+fn ordered_surface_marks<'a>(
+    marks: &'a [OverlayPlanSource],
+    receiver_encounters: &[ReceiverPlanSource],
+) -> Vec<&'a OverlayPlanSource> {
+    let mut receiver_chains = Vec::new();
+    let mut receiver_chain_indices = HashMap::new();
+    let mut encountered_faces = HashSet::new();
+    for receiver in receiver_encounters.iter().copied().chain(marks.iter().map(|mark| {
+        ReceiverPlanSource {
+            receiver_mesh_index: mark.receiver_mesh_index,
+            face: mark.receiver_range.face,
+            material_index: mark.receiver_material_index,
+            lightmap_page: mark.receiver_lightmap_page,
+        }
+    })) {
+        let face = (receiver.receiver_mesh_index, receiver.face);
+        if !encountered_faces.insert(face) {
+            continue;
+        }
+        let next_index = receiver_chains.len();
+        let index = *receiver_chain_indices
+            .entry((receiver.material_index, receiver.lightmap_page))
+            .or_insert_with(|| {
+                receiver_chains.push(Vec::new());
+                next_index
+            });
+        receiver_chains[index].push(face);
+    }
+
+    let mut face_fragments = HashMap::<_, Vec<&OverlayPlanSource>>::new();
+    let mut decals = Vec::new();
+    for mark in marks {
+        match mark.source {
+            MapSurfaceMarkSource::Overlay { .. } => {
+                face_fragments
+                    .entry((mark.receiver_mesh_index, mark.receiver_range.face))
+                    .or_default()
+                    .push(mark);
+            }
+            MapSurfaceMarkSource::Decal { .. } => decals.push(mark),
+        }
+    }
+    for fragments in face_fragments.values_mut() {
+        fragments.sort_by_key(|mark| {
+            let MapSurfaceMarkSource::Overlay { index, .. } = mark.source else {
+                unreachable!();
+            };
+            std::cmp::Reverse((index, mark.overlay_index))
+        });
+    }
+
+    let mut material_buckets = Vec::<Vec<&OverlayPlanSource>>::new();
+    let mut material_bucket_indices = HashMap::new();
+    for face in receiver_chains.iter().flatten() {
+        for mark in face_fragments.get(face).into_iter().flatten() {
+            let next_index = material_buckets.len();
+            let index = *material_bucket_indices
+                .entry((mark.material_index, mark.receiver_lightmap_page))
+                .or_insert_with(|| {
+                    material_buckets.push(Vec::new());
+                    next_index
+                });
+            material_buckets[index].push(mark);
+        }
+    }
+
+    // Source prepends both material buckets and their encountered fragments.
+    let mut ordered = Vec::with_capacity(marks.len());
+    for render_order in 0..=3 {
+        for bucket in material_buckets.iter().rev() {
+            ordered.extend(bucket.iter().rev().copied().filter(|mark| mark.render_order == render_order));
+        }
+    }
+    decals.sort_by_key(|mark| match mark.source {
+        MapSurfaceMarkSource::Decal { entity_index } => entity_index,
+        MapSurfaceMarkSource::Overlay { .. } => unreachable!(),
+    });
+    ordered.extend(decals);
+    ordered
 }
 
 pub(super) fn remapped_material_slot(
@@ -388,14 +494,164 @@ mod tests {
     fn overlay_plan_source(
         overlay_index: usize,
         map_skybox: bool,
-        centroid: Vec3,
+        _centroid: Vec3,
     ) -> OverlayPlanSource {
         OverlayPlanSource {
+            receiver_mesh_index: None,
+            receiver_range: gmpublished_domain::scene::map::MapMeshIndexRange {
+                face: 0,
+                start: 0,
+                count: 3,
+            },
+            receiver_material_index: 0,
+            receiver_lightmap_page: 0,
+            source: gmpublished_domain::scene::map::MapSurfaceMarkSource::Overlay {
+                index: overlay_index,
+                id: overlay_index as i32,
+            },
+            render_order: 0,
             overlay_index,
             material_index: 0,
-            centroid,
             map_skybox,
         }
+    }
+
+    #[test]
+    fn marks_follow_receiver_phase_and_authored_layer_order() {
+        use gmpublished_domain::scene::map::MapSurfaceMarkSource;
+        let base = overlay_plan_source(0, false, Vec3::ZERO);
+        let overlays = [
+            OverlayPlanSource {
+                material_index: 1,
+                render_order: 2,
+                ..base
+            },
+            OverlayPlanSource {
+                overlay_index: 1,
+                material_index: 2,
+                source: MapSurfaceMarkSource::Decal { entity_index: 7 },
+                ..base
+            },
+            OverlayPlanSource {
+                overlay_index: 2,
+                material_index: 1,
+                receiver_material_index: 1,
+                receiver_mesh_index: Some(3),
+                ..base
+            },
+            OverlayPlanSource {
+                overlay_index: 3,
+                material_index: 1,
+                render_order: 0,
+                ..base
+            },
+        ];
+        let plan = prepare_partition_draw_plan_from_sources(
+            [],
+            overlays,
+            PartitionPlanContext {
+                materials: DrawPlanMaterials {
+                    render_modes: &[
+                        RenderMode::Opaque,
+                        RenderMode::Translucent,
+                        RenderMode::Modulate,
+                    ],
+                    planar_materials: &[],
+                    material_count: 3,
+                },
+                selection: DrawPlanSelection {
+                    skin_remap: &[],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0; 4],
+                partition: PartitionFilter::World,
+                visibility_plan: None,
+                receiver_encounters: &[],
+            },
+        );
+        assert_eq!(
+            plan.surface_marks
+                .iter()
+                .map(|item| item.overlay_index)
+                .collect::<Vec<_>>(),
+            [3, 0, 1]
+        );
+        assert_eq!(plan.surface_marks[2].blend, RenderMode::Modulate);
+        assert_eq!(plan.receiver_marks.len(), 1);
+        assert_eq!(plan.receiver_marks[0].receiver_mesh_index, Some(3));
+    }
+
+    fn mark(index: usize, material: usize, face: u32) -> OverlayPlanSource {
+        let mut mark = overlay_plan_source(index, false, Vec3::ZERO);
+        mark.material_index = material;
+        mark.receiver_range.face = face;
+        mark
+    }
+
+    fn ordered_indices(marks: &[OverlayPlanSource], receivers: &[ReceiverPlanSource]) -> Vec<usize> {
+        ordered_surface_marks(marks, receivers)
+            .iter()
+            .map(|mark| mark.overlay_index)
+            .collect()
+    }
+
+    #[test]
+    fn shared_material_fragments_keep_lump_order_inside_reverse_material_buckets() {
+        let mut marks = [mark(0, 4, 7), mark(1, 2, 7), mark(2, 4, 7)];
+        for (mark, id) in marks.iter_mut().zip([91, -10, 0]) {
+            let MapSurfaceMarkSource::Overlay { index, .. } = mark.source else {
+                unreachable!();
+            };
+            mark.source = MapSurfaceMarkSource::Overlay { index, id };
+        }
+        assert_eq!(ordered_indices(&marks, &[]), [1, 0, 2]);
+        marks.reverse();
+        assert_eq!(ordered_indices(&marks, &[]), [1, 0, 2]);
+    }
+
+    #[test]
+    fn unmarked_receivers_prime_material_chains_before_marked_faces() {
+        let mut marks = [mark(0, 7, 30), mark(1, 8, 20)];
+        marks[0].receiver_material_index = 4;
+        marks[1].receiver_material_index = 2;
+        let receiver = |face, material_index| ReceiverPlanSource {
+            receiver_mesh_index: None,
+            face,
+            material_index,
+            lightmap_page: 0,
+        };
+        assert_eq!(
+            ordered_indices(&marks, &[receiver(20, 2), receiver(30, 4)]),
+            [0, 1]
+        );
+        assert_eq!(
+            ordered_indices(&marks, &[receiver(10, 4), receiver(20, 2), receiver(30, 4)]),
+            [1, 0]
+        );
+    }
+
+    #[test]
+    fn lightmap_pages_separate_receiver_and_mark_material_buckets() {
+        let mut marks = [mark(0, 4, 0), mark(1, 2, 1), mark(2, 4, 2)];
+        assert_eq!(ordered_indices(&marks, &[]), [1, 2, 0]);
+        marks[2].receiver_lightmap_page = 1;
+        assert_eq!(ordered_indices(&marks, &[]), [2, 1, 0]);
+    }
+
+    #[test]
+    fn placed_brush_receivers_with_one_bsp_face_keep_separate_encounters() {
+        let mut marks = [mark(0, 4, 7), mark(1, 4, 7)];
+        marks[0].receiver_mesh_index = Some(0);
+        marks[1].receiver_mesh_index = Some(1);
+        assert_eq!(ordered_indices(&marks, &[]), [1, 0]);
+    }
+
+    #[test]
+    fn render_order_precedes_material_buckets_and_static_decals_follow_overlays() {
+        let mut marks = [mark(0, 4, 7), mark(1, 2, 7), mark(2, 4, 7), mark(3, 8, 7)];
+        marks[0].render_order = 2;
+        marks[3].source = MapSurfaceMarkSource::Decal { entity_index: 3 };
+        assert_eq!(ordered_indices(&marks, &[]), [1, 2, 0, 3]);
     }
 
     #[test]
@@ -523,7 +779,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0]
         );
-        assert!(plans.world.overlay_opaque.is_empty());
+        assert!(plans.world.surface_marks.is_empty());
         assert!(plans.map_skybox.is_none());
     }
 
@@ -673,10 +929,6 @@ mod tests {
 
     #[test]
     fn visibility_plan_lookup_uses_scene_index_not_upload_index() {
-        // Empty-index meshes are dropped at upload, so upload position and
-        // scene position diverge; the plan is keyed by scene position.
-        // Scene mesh 1 was dropped: the surviving upload slot 1 holds scene
-        // mesh 2, whose plan entry is visible while scene mesh 1's is not.
         let meshes = [
             mesh_plan_source(0, false, Vec3::new(0.0, 0.0, 0.0)),
             MeshPlanSource {

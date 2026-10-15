@@ -6,6 +6,124 @@ use super::{
 use crate::media::preview_model::ModelPreview;
 use gmpublished_domain::math::Vec3;
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FogMode {
+    #[default]
+    Disabled = 0,
+    Axial = 1,
+    Height = 2,
+    Immersion = 3,
+    Radial = 4,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct FogUniform {
+    pub start: f32,
+    pub end: f32,
+    pub max_density: f32,
+    pub mode: u32,
+}
+
+impl FogUniform {
+    pub const DISABLED: Self = Self::new(0.0, 1.0, 0.0, FogMode::Disabled);
+
+    pub const fn new(start: f32, end: f32, max_density: f32, mode: FogMode) -> Self {
+        Self {
+            start,
+            end,
+            max_density,
+            mode: mode as u32,
+        }
+    }
+
+    pub fn for_map(fog: Option<MapFog>, scale: f32) -> Self {
+        fog.map_or(Self::DISABLED, |fog| {
+            Self::new(
+                fog.start * scale,
+                fog.end * scale,
+                fog.max_density,
+                if fog.radial {
+                    FogMode::Radial
+                } else {
+                    FogMode::Axial
+                },
+            )
+        })
+    }
+
+    pub fn immersion(water: &crate::bridge::materials::WaterMaterial) -> Self {
+        Self::new(
+            water.fog_start,
+            water.fog_end,
+            f32::from(water.fog_enabled),
+            FogMode::Immersion,
+        )
+    }
+
+    pub fn height(water: &crate::bridge::materials::WaterMaterial) -> Self {
+        Self::new(water.fog_start, water.fog_end, 1.0, FogMode::Height)
+    }
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LightmapMode {
+    #[default]
+    Ldr = 0,
+    HdrFallback = 1,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ShadingMode {
+    #[default]
+    Scene = 0,
+    #[cfg(any(test, feature = "map-capture"))]
+    Fullbright = 1,
+}
+
+#[cfg(any(test, feature = "map-capture"))]
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiagnosticMode {
+    #[default]
+    Disabled = 0,
+    VertexNormalColor = 1,
+    VertexTangentSColor = 2,
+    VertexTangentTColor = 3,
+    VertexNormalLinear = 4,
+    VertexTangentSLinear = 5,
+    VertexTangentTLinear = 6,
+    RawNormal = 7,
+    RawTangentS = 8,
+    RawTangentT = 9,
+    Position = 10,
+    UnitNormal = 11,
+    UnitTangentS = 12,
+    UnitEye = 13,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Diagnostic {
+    pub mode: u32,
+    padding: [u32; 3],
+    pub transform: [f32; 4],
+}
+
+#[cfg(any(test, feature = "map-capture"))]
+impl Diagnostic {
+    pub const fn new(mode: DiagnosticMode, transform: [f32; 4]) -> Self {
+        Self {
+            mode: mode as u32,
+            padding: [0; 3],
+            transform,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
@@ -13,180 +131,196 @@ pub struct Uniforms {
     pub light: [f32; 4],
     pub camera_position: [f32; 4],
     pub fog_color: [f32; 4],
-    pub fog_params: [f32; 4],
+    pub fog: FogUniform,
     pub water_time_sky_tint: [f32; 4],
     pub water_depth_params: [f32; 4],
     /// World-space half-space retained by this view; zero disables clipping.
     pub clip_plane: [f32; 4],
     /// Exact optical plane for height fog; independent of clip bias.
     pub medium_plane: [f32; 4],
-    /// xy: widget dimensions; z: the diagnosed HDR lightmap display fallback.
-    pub viewport: [f32; 4],
+    pub viewport_size: [f32; 2],
+    pub lightmap_mode: u32,
+    pub shading_mode: u32,
     /// Physical clip-space bias, retained separately from projected texture UVs.
     pub raster_params: [f32; 4],
+    pub diagnostic: Diagnostic,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum BumpMode {
+    #[default]
+    None = 0,
+    Tangent = 1,
+    SsBump = 2,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PlanarKind {
+    #[default]
+    None = 0,
+    Mirror = 1,
+    TexturedWater = 2,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialUniform {
-    pub flags: [u32; 4],
-    /// x: unlit, y: authored vertex color, z: authored vertex alpha.
-    pub surface_flags: [u32; 4],
+    pub texture_alpha_opaque: u32,
+    pub alpha_test: u32,
+    pub bump_mode: u32,
+    pub planar_kind: u32,
+    pub unlit: u32,
+    pub vertex_color: u32,
+    pub vertex_alpha: u32,
+    pub normal_animation_clamp: u32,
     pub water_fog: [f32; 4],
     pub water_optics: [f32; 4],
     pub water_reflect: [f32; 4],
     pub water_refract: [f32; 4],
-    pub water_bump_s: [f32; 4],
-    pub water_bump_t: [f32; 4],
+    pub normal_s: [f32; 4],
+    pub normal_t: [f32; 4],
     pub water_scroll: [f32; 4],
     pub water_animation: [f32; 4],
     pub water_state: [f32; 4],
 }
 
 impl MaterialUniform {
-    pub fn with_unlit(
-        mut self,
-        material: Option<&crate::bridge::materials::UnlitMaterial>,
-    ) -> Self {
-        if let Some(material) = material {
-            self.surface_flags = [
-                1,
-                u32::from(material.vertex_color),
-                u32::from(material.vertex_alpha),
-                0,
-            ];
-        }
-        self
-    }
-
-    pub fn with_surface(
-        mut self,
-        surface: Option<&crate::bridge::materials::LightmappedMaterial>,
-    ) -> Self {
-        if let Some(surface) = surface {
-            self.flags[2] = if surface.normal.is_some() && surface.diffuse_bump {
-                if surface.ssbump { 2 } else { 1 }
+    pub fn with_surface(mut self, surface: &crate::bridge::materials::SurfaceMaterial) -> Self {
+        self.unlit = u32::from(surface.family == crate::bridge::materials::SurfaceFamily::Unlit);
+        self.vertex_color = u32::from(surface.effective_vertex_color());
+        self.vertex_alpha = u32::from(surface.effective_vertex_alpha());
+        self.bump_mode = if surface.normal.is_some() && surface.diffuse_bump {
+            if surface.ssbump {
+                BumpMode::SsBump
             } else {
-                0
-            };
-            self.water_bump_s = surface.transform[0];
-            self.water_bump_t = surface.transform[1];
-        }
+                BumpMode::Tangent
+            }
+        } else {
+            BumpMode::None
+        } as u32;
+        self.normal_s = surface.transform[0];
+        self.normal_t = surface.transform[1];
+
         self
     }
 
-    pub fn with_mirror(
-        mut self,
-        mirror: Option<&crate::bridge::materials::MirrorMaterial>,
-    ) -> Self {
-        if let Some(mirror) = mirror {
-            self.flags[3] = 1;
-            self.water_reflect = [
-                mirror.reflect_tint_linear[0],
-                mirror.reflect_tint_linear[1],
-                mirror.reflect_tint_linear[2],
-                f32::from(mirror.reflect_enabled),
-            ];
-            self.water_refract = [
-                mirror.refract_tint_linear[0],
-                mirror.refract_tint_linear[1],
-                mirror.refract_tint_linear[2],
-                f32::from(mirror.refract_enabled),
-            ];
-            self.water_optics = [mirror.reflect_amount, mirror.refract_amount, 0.0, 0.0];
-            self.water_bump_s = mirror.bump_transform[0];
-            self.water_bump_t = mirror.bump_transform[1];
-            self.water_scroll = [
-                mirror.min_reflectivity,
-                mirror.max_reflectivity,
-                mirror.fresnel_power,
-                0.0,
-            ];
-            self.water_state = [
-                mirror
-                    .normal_map
-                    .as_ref()
-                    .map_or(1.0, |normal| normal.frames.len() as f32),
-                0.0,
-                0.0,
-                0.0,
-            ];
-        }
+    pub fn with_mirror(mut self, mirror: &crate::bridge::materials::MirrorMaterial) -> Self {
+        self.planar_kind = PlanarKind::Mirror as u32;
+        self.water_reflect = [
+            mirror.reflect_tint_linear[0],
+            mirror.reflect_tint_linear[1],
+            mirror.reflect_tint_linear[2],
+            f32::from(mirror.reflect_enabled),
+        ];
+        self.water_refract = [
+            mirror.refract_tint_linear[0],
+            mirror.refract_tint_linear[1],
+            mirror.refract_tint_linear[2],
+            f32::from(mirror.refract_enabled),
+        ];
+        self.water_optics = [mirror.reflect_amount, mirror.refract_amount, 0.0, 0.0];
+        self.normal_s = mirror.bump_transform[0];
+        self.normal_t = mirror.bump_transform[1];
+        self.water_scroll = [
+            mirror.min_reflectivity,
+            mirror.max_reflectivity,
+            mirror.fresnel_power,
+            0.0,
+        ];
+        self.water_state = [
+            mirror
+                .normal_map
+                .as_ref()
+                .map_or(1.0, |normal| normal.frames.len() as f32),
+            0.0,
+            0.0,
+            0.0,
+        ];
+
         self
     }
-    pub const fn new(force_opaque: bool, render_mode: RenderMode) -> Self {
+    pub const fn new(
+        render_mode: RenderMode,
+        alpha_policy: crate::bridge::materials::TextureAlphaPolicy,
+    ) -> Self {
         Self {
-            surface_flags: [0; 4],
+            texture_alpha_opaque: alpha_policy.force_opaque() as u32,
+            alpha_test: matches!(render_mode, RenderMode::Cutout) as u32,
+            bump_mode: BumpMode::None as u32,
+            planar_kind: PlanarKind::None as u32,
+            unlit: 0,
+            vertex_color: 0,
+            vertex_alpha: 0,
+            normal_animation_clamp: 0,
             water_fog: [0.0; 4],
             water_optics: [0.0; 4],
             water_reflect: [0.0; 4],
             water_refract: [0.0; 4],
-            water_bump_s: [0.0; 4],
-            water_bump_t: [0.0; 4],
+            normal_s: [0.0; 4],
+            normal_t: [0.0; 4],
             water_scroll: [0.0; 4],
             water_animation: [0.0; 4],
             water_state: [0.0; 4],
-            flags: [
-                (force_opaque && matches!(render_mode, RenderMode::Opaque)) as u32,
-                matches!(render_mode, RenderMode::Cutout) as u32,
-                0,
-                0,
-            ],
         }
     }
 
-    pub fn with_water(mut self, water: Option<&crate::bridge::materials::WaterMaterial>) -> Self {
-        if let Some(water) = water {
-            self.flags[3] = if water.has_base_texture { 2 } else { 0 };
-            self.flags[2] = u32::from(!water.animation_wrap);
-            self.water_fog = [
-                water.fog_color_linear[0],
-                water.fog_color_linear[1],
-                water.fog_color_linear[2],
-                f32::from(water.fog_enabled),
-            ];
-            self.water_optics = [
-                water.reflect_amount,
-                water.refract_amount,
-                water.fog_start,
-                water.fog_end,
-            ];
-            self.water_reflect = [
-                water.reflect_tint_linear[0],
-                water.reflect_tint_linear[1],
-                water.reflect_tint_linear[2],
-                f32::from(water.reflect_enabled),
-            ];
-            self.water_refract = [
-                water.refract_tint_linear[0],
-                water.refract_tint_linear[1],
-                water.refract_tint_linear[2],
-                f32::from(water.refract_enabled),
-            ];
-            self.water_bump_s = water.bump_transform[0];
-            self.water_bump_t = water.bump_transform[1];
-            self.water_scroll = [
-                water.scroll1[0],
-                water.scroll1[1],
-                water.scroll2[0],
-                water.scroll2[1],
-            ];
-            self.water_animation = [
-                water.proxy_scroll[0],
-                water.proxy_scroll[1],
-                water.bump_frame,
-                water.frame_rate,
-            ];
-            self.water_state = [
-                water
-                    .normal_map
-                    .as_ref()
-                    .map_or(1.0, |map| map.frames.len() as f32),
-                f32::from(water.scroll1[0].abs() > 0.0 && !water.has_base_texture),
-                f32::from(water.above_water),
-                f32::from(water.no_fresnel),
-            ];
-        }
+    pub fn with_water(mut self, water: &crate::bridge::materials::WaterMaterial) -> Self {
+        self.planar_kind = if water.has_base_texture {
+            PlanarKind::TexturedWater
+        } else {
+            PlanarKind::None
+        } as u32;
+        self.normal_animation_clamp = u32::from(!water.animation_wrap);
+        self.water_fog = [
+            water.fog_color_linear[0],
+            water.fog_color_linear[1],
+            water.fog_color_linear[2],
+            f32::from(water.fog_enabled),
+        ];
+        self.water_optics = [
+            water.reflect_amount,
+            water.refract_amount,
+            water.fog_start,
+            water.fog_end,
+        ];
+        self.water_reflect = [
+            water.reflect_tint_linear[0],
+            water.reflect_tint_linear[1],
+            water.reflect_tint_linear[2],
+            f32::from(water.reflect_enabled),
+        ];
+        self.water_refract = [
+            water.refract_tint_linear[0],
+            water.refract_tint_linear[1],
+            water.refract_tint_linear[2],
+            f32::from(water.refract_enabled),
+        ];
+        self.normal_s = water.bump_transform[0];
+        self.normal_t = water.bump_transform[1];
+        self.water_scroll = [
+            water.scroll1[0],
+            water.scroll1[1],
+            water.scroll2[0],
+            water.scroll2[1],
+        ];
+        self.water_animation = [
+            water.proxy_scroll[0],
+            water.proxy_scroll[1],
+            water.bump_frame,
+            water.frame_rate,
+        ];
+        self.water_state = [
+            water
+                .normal_map
+                .as_ref()
+                .map_or(1.0, |map| map.frames.len() as f32),
+            f32::from(water.scroll1[0].abs() > 0.0 && !water.has_base_texture),
+            f32::from(water.above_water),
+            f32::from(water.no_fresnel),
+        ];
+
         self
     }
 }
@@ -204,8 +338,7 @@ impl Uniforms {
             column[0] += clip_offset[0] * column[3];
             column[1] += clip_offset[1] * column[3];
         }
-        self.viewport[0] = size.0 as f32;
-        self.viewport[1] = size.1 as f32;
+        self.viewport_size = [size.0 as f32, size.1 as f32];
         self.raster_params = [offset[0], offset[1], 0.0, 0.0];
         self
     }
@@ -224,7 +357,7 @@ impl Uniforms {
             .as_ref()
             .and_then(|volumes| volumes.at(frame.eye));
         let water = scene.immersion_material(frame.eye);
-        let (fog_color, fog_params) = water.map_or_else(
+        let (fog_color, fog_uniform) = water.map_or_else(
             || {
                 (
                     fog.map_or([0.0; 4], |fog| {
@@ -235,14 +368,7 @@ impl Uniforms {
                             0.0,
                         ]
                     }),
-                    fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
-                        [
-                            fog.start,
-                            fog.end,
-                            fog.max_density,
-                            if fog.radial { 4.0 } else { 1.0 },
-                        ]
-                    }),
+                    FogUniform::for_map(fog, 1.0),
                 )
             },
             |water| {
@@ -253,12 +379,7 @@ impl Uniforms {
                         water.scene_fog_color_linear[2],
                         1.0,
                     ],
-                    [
-                        water.fog_start,
-                        water.fog_end,
-                        f32::from(water.fog_enabled),
-                        3.0,
-                    ],
+                    FogUniform::immersion(water),
                 )
             },
         );
@@ -268,7 +389,7 @@ impl Uniforms {
             light: [0.4, 0.6, 0.8, AMBIENT],
             camera_position: [frame.eye[0], frame.eye[1], frame.eye[2], 0.0],
             fog_color,
-            fog_params,
+            fog: fog_uniform,
             water_time_sky_tint: [water_time, 0.0, 0.0, 0.0],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: liquid
@@ -278,14 +399,16 @@ impl Uniforms {
                     [0.0, 0.0, -1.0, sample.body.surface_z + 2.0]
                 }),
             medium_plane: liquid.map_or([0.0; 4], |sample| [0.0, 0.0, 1.0, -sample.body.surface_z]),
-            viewport: [
-                0.0,
-                0.0,
-                f32::from(scene.lightmap.as_ref().is_some_and(|atlas| {
-                    atlas.source == gmpublished_domain::scene::map::LightmapSource::Hdr
-                })),
-                0.0,
-            ],
+            viewport_size: [0.0; 2],
+            lightmap_mode: if scene.lightmap.as_ref().is_some_and(|atlas| {
+                atlas.source == gmpublished_domain::scene::map::LightmapSource::Hdr
+            }) {
+                LightmapMode::HdrFallback as u32
+            } else {
+                LightmapMode::Ldr as u32
+            },
+            shading_mode: ShadingMode::Scene as u32,
+            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
         }
     }
@@ -302,12 +425,15 @@ impl Uniforms {
             light: [0.0; 4],
             camera_position: [frame.eye[0], frame.eye[1], frame.eye[2], 0.0],
             fog_color: [0.0; 4],
-            fog_params: [0.0, 1.0, 0.0, 0.0],
+            fog: FogUniform::DISABLED,
             water_time_sky_tint: [camera.water_time, 0.0, 0.0, 0.0],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
-            viewport: [0.0; 4],
+            viewport_size: [0.0; 2],
+            lightmap_mode: LightmapMode::Ldr as u32,
+            shading_mode: ShadingMode::Scene as u32,
+            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
         }
     }
@@ -340,26 +466,21 @@ impl Uniforms {
                     0.0,
                 ]
             }),
-            fog_params: fog.map_or([0.0, 1.0, 0.0, 0.0], |fog| {
-                [
-                    fog.start * fog_scale,
-                    fog.end * fog_scale,
-                    fog.max_density,
-                    if fog.radial { 4.0 } else { 1.0 },
-                ]
-            }),
+            fog: FogUniform::for_map(fog, fog_scale),
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [frame.near, frame.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
-            viewport: [
-                0.0,
-                0.0,
-                f32::from(scene.lightmap.as_ref().is_some_and(|atlas| {
-                    atlas.source == gmpublished_domain::scene::map::LightmapSource::Hdr
-                })),
-                0.0,
-            ],
+            viewport_size: [0.0; 2],
+            lightmap_mode: if scene.lightmap.as_ref().is_some_and(|atlas| {
+                atlas.source == gmpublished_domain::scene::map::LightmapSource::Hdr
+            }) {
+                LightmapMode::HdrFallback as u32
+            } else {
+                LightmapMode::Ldr as u32
+            },
+            shading_mode: ShadingMode::Scene as u32,
+            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
         }
     }
@@ -384,12 +505,15 @@ impl Uniforms {
             light: [0.4, 0.6, 0.8, AMBIENT],
             camera_position: [eye[0], eye[1], eye[2], 0.0],
             fog_color: [0.0; 4],
-            fog_params: [0.0, 1.0, 0.0, 0.0],
+            fog: FogUniform::DISABLED,
             water_time_sky_tint: [0.0; 4],
             water_depth_params: [0.0; 4],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
-            viewport: [0.0; 4],
+            viewport_size: [0.0; 2],
+            lightmap_mode: LightmapMode::Ldr as u32,
+            shading_mode: ShadingMode::Scene as u32,
+            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
         }
     }
@@ -499,7 +623,7 @@ mod uniform_layout_tests {
     use iced::wgpu::naga::{self, TypeInner};
     use std::mem::{offset_of, size_of};
 
-    use super::{MaterialUniform, Uniforms};
+    use super::{BumpMode, FogMode, FogUniform, MaterialUniform, PlanarKind, Uniforms};
 
     fn pixel_position(matrix: [[f32; 4]; 4], point: [f32; 4], size: (u32, u32)) -> [f32; 3] {
         let clip = std::array::from_fn::<_, 4, _>(|row| {
@@ -515,14 +639,115 @@ mod uniform_layout_tests {
     }
 
     #[test]
+    fn diagnostic_payload_and_named_view_modes_match_shader_contracts() {
+        use super::{Diagnostic, DiagnosticMode, LightmapMode, ShadingMode};
+        let module =
+            naga::front::wgsl::parse_str(super::super::super::MODEL_SHADER_SOURCE).unwrap();
+        let (_, ty) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("Diagnostic"))
+            .unwrap();
+        let TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("diagnostic struct");
+        };
+        assert_eq!(*span as usize, size_of::<Diagnostic>());
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.offset as usize)
+                .collect::<Vec<_>>(),
+            [
+                offset_of!(Diagnostic, mode),
+                offset_of!(Diagnostic, padding),
+                offset_of!(Diagnostic, padding) + 4,
+                offset_of!(Diagnostic, padding) + 8,
+                offset_of!(Diagnostic, transform),
+            ]
+        );
+        assert_eq!(offset_of!(Uniforms, fog), 112);
+        assert_eq!(offset_of!(Uniforms, viewport_size), 192);
+        assert_eq!(offset_of!(Uniforms, raster_params), 208);
+        assert_eq!(offset_of!(Uniforms, diagnostic), 224);
+        assert_eq!(size_of::<Uniforms>(), 256);
+        for (name, expected) in [
+            ("FOG_DISABLED", FogMode::Disabled as u32),
+            ("FOG_AXIAL", FogMode::Axial as u32),
+            ("FOG_HEIGHT", FogMode::Height as u32),
+            ("FOG_IMMERSION", FogMode::Immersion as u32),
+            ("FOG_RADIAL", FogMode::Radial as u32),
+            ("LIGHTMAP_LDR", LightmapMode::Ldr as u32),
+            ("LIGHTMAP_HDR_FALLBACK", LightmapMode::HdrFallback as u32),
+            ("SHADING_SCENE", ShadingMode::Scene as u32),
+            ("SHADING_FULLBRIGHT", ShadingMode::Fullbright as u32),
+            ("DIAGNOSTIC_DISABLED", DiagnosticMode::Disabled as u32),
+            (
+                "DIAGNOSTIC_VERTEX_NORMAL_COLOR",
+                DiagnosticMode::VertexNormalColor as u32,
+            ),
+            (
+                "DIAGNOSTIC_VERTEX_TANGENT_S_COLOR",
+                DiagnosticMode::VertexTangentSColor as u32,
+            ),
+            (
+                "DIAGNOSTIC_VERTEX_TANGENT_T_COLOR",
+                DiagnosticMode::VertexTangentTColor as u32,
+            ),
+            (
+                "DIAGNOSTIC_VERTEX_NORMAL_LINEAR",
+                DiagnosticMode::VertexNormalLinear as u32,
+            ),
+            (
+                "DIAGNOSTIC_VERTEX_TANGENT_S_LINEAR",
+                DiagnosticMode::VertexTangentSLinear as u32,
+            ),
+            (
+                "DIAGNOSTIC_VERTEX_TANGENT_T_LINEAR",
+                DiagnosticMode::VertexTangentTLinear as u32,
+            ),
+            ("DIAGNOSTIC_RAW_NORMAL", DiagnosticMode::RawNormal as u32),
+            (
+                "DIAGNOSTIC_RAW_TANGENT_S",
+                DiagnosticMode::RawTangentS as u32,
+            ),
+            (
+                "DIAGNOSTIC_RAW_TANGENT_T",
+                DiagnosticMode::RawTangentT as u32,
+            ),
+            ("DIAGNOSTIC_POSITION", DiagnosticMode::Position as u32),
+            ("DIAGNOSTIC_UNIT_NORMAL", DiagnosticMode::UnitNormal as u32),
+            (
+                "DIAGNOSTIC_UNIT_TANGENT_S",
+                DiagnosticMode::UnitTangentS as u32,
+            ),
+            ("DIAGNOSTIC_UNIT_EYE", DiagnosticMode::UnitEye as u32),
+        ] {
+            let (_, constant) = module
+                .constants
+                .iter()
+                .find(|(_, constant)| constant.name.as_deref() == Some(name))
+                .unwrap();
+            assert!(
+                matches!(module.global_expressions[constant.init], naga::Expression::Literal(naga::Literal::U32(value)) if value == expected),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn source_pixel_center_shift_is_half_a_physical_pixel_at_each_target_size() {
         let mut original = <Uniforms as bytemuck::Zeroable>::zeroed();
         original.view_proj = super::perspective(1.3, 16.0 / 9.0, 4.0, 30_000.0);
-        original.viewport[2] = 0.5;
-        original.viewport[3] = 2.0;
+        original.lightmap_mode = super::LightmapMode::HdrFallback as u32;
+        original.diagnostic = super::Diagnostic::new(
+            super::DiagnosticMode::VertexTangentSColor,
+            [0.0, 0.0, 0.0, 1.0],
+        );
         for size in [(320, 180), (640, 360), (1280, 720), (2560, 1440)] {
             let shifted = original.with_raster_offset(size, [0.5; 2]);
-            assert_eq!(shifted.viewport, [size.0 as f32, size.1 as f32, 0.5, 2.0]);
+            assert_eq!(shifted.viewport_size, [size.0 as f32, size.1 as f32]);
+            assert_eq!(shifted.lightmap_mode, original.lightmap_mode);
+            assert_eq!(shifted.diagnostic, original.diagnostic);
             for point in [
                 [0.0, 0.0, -16.0, 1.0],
                 [1.0, 2.0, -8.0, 1.0],
@@ -565,24 +790,113 @@ mod uniform_layout_tests {
     }
 
     #[test]
+    fn instance_blend_queue_does_not_reinterpret_opaque_texture_alpha() {
+        use crate::bridge::materials::{RenderMode, TextureAlphaPolicy};
+        let uniform = MaterialUniform::new(RenderMode::Translucent, TextureAlphaPolicy::Opaque);
+        assert_eq!([uniform.texture_alpha_opaque, uniform.alpha_test], [1, 0]);
+        let cutout = MaterialUniform::new(RenderMode::Cutout, TextureAlphaPolicy::Sampled);
+        assert_eq!([cutout.texture_alpha_opaque, cutout.alpha_test], [0, 1]);
+    }
+
+    #[test]
+    fn water_animation_clamp_has_no_surface_bump_mode() {
+        use crate::bridge::materials::{MaterialResolver, RenderMode};
+        let resolver = MaterialResolver::prop_lighting_fixture(
+            Vec::new(),
+            vec![("materials/pool.vmt", b"Water {}".to_vec())],
+        );
+        let resolved = resolver.resolve_primary(&[], "pool").unwrap();
+        let mut water = resolved.shader.water().unwrap().clone();
+        water.animation_wrap = false;
+        let material = MaterialUniform::new(
+            RenderMode::Opaque,
+            RenderMode::Opaque.texture_alpha_policy(),
+        )
+        .with_water(&water);
+        assert_eq!(material.bump_mode, BumpMode::None as u32);
+        assert_eq!(material.normal_animation_clamp, 1);
+        water.animation_wrap = true;
+        assert_eq!(
+            MaterialUniform::new(
+                RenderMode::Opaque,
+                RenderMode::Opaque.texture_alpha_policy()
+            )
+            .with_water(&water)
+            .normal_animation_clamp,
+            0
+        );
+    }
+
+    #[test]
     fn unlit_flags_are_separate_from_water_and_bumped_lighting_flags() {
-        use crate::bridge::materials::{RenderMode, UnlitMaterial};
-        let unlit = UnlitMaterial {
+        use crate::bridge::materials::{RenderMode, SurfaceFamily, SurfaceMaterial};
+        let unlit = SurfaceMaterial {
             shader: "UnlitGeneric".into(),
+            family: SurfaceFamily::Unlit,
             vertex_color: true,
             vertex_alpha: true,
-            surface: std::sync::Arc::new(crate::bridge::materials::SurfaceMaterial::default()),
+            ..SurfaceMaterial::default()
         };
-        let mut original = MaterialUniform::new(false, RenderMode::Translucent);
-        original.flags[2] = 2;
-        original.flags[3] = 1;
-        let result = original.with_unlit(Some(&unlit));
-        assert_eq!(result.flags, original.flags);
-        assert_eq!(result.surface_flags, [1, 1, 1, 0]);
+        let original = MaterialUniform::new(
+            RenderMode::Translucent,
+            RenderMode::Translucent.texture_alpha_policy(),
+        );
+        let result = original.with_surface(&unlit);
         assert_eq!(
-            MaterialUniform::new(true, RenderMode::Opaque).surface_flags,
+            [
+                result.texture_alpha_opaque,
+                result.alpha_test,
+                result.bump_mode,
+                result.planar_kind
+            ],
+            [
+                original.texture_alpha_opaque,
+                original.alpha_test,
+                original.bump_mode,
+                original.planar_kind
+            ]
+        );
+        assert_eq!(
+            [
+                result.unlit,
+                result.vertex_color,
+                result.vertex_alpha,
+                result.normal_animation_clamp
+            ],
+            [1, 1, 1, 0]
+        );
+        let opaque = MaterialUniform::new(
+            RenderMode::Opaque,
+            RenderMode::Opaque.texture_alpha_policy(),
+        );
+        assert_eq!(
+            [
+                opaque.unlit,
+                opaque.vertex_color,
+                opaque.vertex_alpha,
+                opaque.normal_animation_clamp
+            ],
             [0; 4]
         );
+    }
+
+    #[test]
+    fn surface_mark_fades_have_an_independent_gpu_contract() {
+        use crate::media::preview_model::ModelVertex;
+        let attribute = super::super::super::MODEL_VERTEX_ATTRIBUTES
+            .iter()
+            .find(|v| v.shader_location == 14)
+            .unwrap();
+        assert_eq!(
+            attribute.offset as usize,
+            offset_of!(ModelVertex, surface_mark)
+        );
+        assert_eq!(attribute.format, iced::wgpu::VertexFormat::Uint32);
+        assert_ne!(
+            offset_of!(ModelVertex, surface_mark),
+            offset_of!(ModelVertex, lighting_context)
+        );
+        assert_eq!(size_of::<super::super::marks::GpuSurfaceMark>(), 32);
     }
 
     #[test]
@@ -638,7 +952,7 @@ mod uniform_layout_tests {
         }
         assert_eq!(
             size_of::<ModelVertex>(),
-            offset_of!(ModelVertex, lighting_context) + 4
+            offset_of!(ModelVertex, surface_mark) + 4
         );
         let sign = attributes.iter().find(|a| a.shader_location == 12).unwrap();
         assert_eq!(sign.offset as usize, offset_of!(ModelVertex, tangent_sign));
@@ -663,7 +977,7 @@ mod uniform_layout_tests {
             ("light", offset_of!(Uniforms, light)),
             ("camera_position", offset_of!(Uniforms, camera_position)),
             ("fog_color", offset_of!(Uniforms, fog_color)),
-            ("fog_params", offset_of!(Uniforms, fog_params)),
+            ("fog", offset_of!(Uniforms, fog)),
             (
                 "water_time_sky_tint",
                 offset_of!(Uniforms, water_time_sky_tint),
@@ -674,8 +988,11 @@ mod uniform_layout_tests {
             ),
             ("clip_plane", offset_of!(Uniforms, clip_plane)),
             ("medium_plane", offset_of!(Uniforms, medium_plane)),
-            ("viewport", offset_of!(Uniforms, viewport)),
+            ("viewport_size", offset_of!(Uniforms, viewport_size)),
+            ("lightmap_mode", offset_of!(Uniforms, lightmap_mode)),
+            ("shading_mode", offset_of!(Uniforms, shading_mode)),
             ("raster_params", offset_of!(Uniforms, raster_params)),
+            ("diagnostic", offset_of!(Uniforms, diagnostic)),
         ];
         for (name, source) in [
             ("model_viewer", super::super::super::MODEL_SHADER_SOURCE),
@@ -734,7 +1051,27 @@ mod uniform_layout_tests {
                 assert_eq!(member.name.as_deref(), Some(field), "{name}: field name");
                 assert_eq!(member.offset as usize, offset, "{name}: {field} offset");
             }
-            if name == "water" || name == "model_viewer" {
+            let fog = module
+                .types
+                .iter()
+                .find_map(|(_, ty)| (ty.name.as_deref() == Some("FogUniform")).then_some(&ty.inner))
+                .unwrap();
+            let TypeInner::Struct { members, span } = fog else {
+                panic!("FogUniform must be a struct")
+            };
+            assert_eq!(*span as usize, size_of::<FogUniform>());
+            assert_eq!(*span, 16);
+            assert_eq!(members.len(), 4);
+            for (member, (field, offset)) in members.iter().zip([
+                ("start", offset_of!(FogUniform, start)),
+                ("end", offset_of!(FogUniform, end)),
+                ("max_density", offset_of!(FogUniform, max_density)),
+                ("mode", offset_of!(FogUniform, mode)),
+            ]) {
+                assert_eq!(member.name.as_deref(), Some(field));
+                assert_eq!(member.offset as usize, offset);
+            }
+            if matches!(name, "water" | "model_viewer" | "detail") {
                 let material = module
                     .types
                     .iter()
@@ -746,16 +1083,49 @@ mod uniform_layout_tests {
                     panic!("Material must be a struct")
                 };
                 assert_eq!(*span as usize, size_of::<MaterialUniform>());
-                assert_eq!(members.len(), 11, "{name}: material field count");
+                for (name, value) in [
+                    ("BUMP_NONE", BumpMode::None as u32),
+                    ("BUMP_TANGENT", BumpMode::Tangent as u32),
+                    ("BUMP_SSBUMP", BumpMode::SsBump as u32),
+                    ("PLANAR_NONE", PlanarKind::None as u32),
+                    ("PLANAR_MIRROR", PlanarKind::Mirror as u32),
+                    ("PLANAR_TEXTURED_WATER", PlanarKind::TexturedWater as u32),
+                ] {
+                    let constant = module
+                        .constants
+                        .iter()
+                        .find_map(|(_, constant)| {
+                            (constant.name.as_deref() == Some(name)).then_some(constant)
+                        })
+                        .unwrap();
+                    assert!(
+                        matches!(module.global_expressions[constant.init], naga::Expression::Literal(naga::Literal::U32(actual)) if actual==value),
+                        "{name}"
+                    );
+                }
+
+                assert_eq!(members.len(), 17, "{name}: material field count");
                 for (member, (field, offset)) in members.iter().zip([
-                    ("flags", offset_of!(MaterialUniform, flags)),
-                    ("surface_flags", offset_of!(MaterialUniform, surface_flags)),
+                    (
+                        "texture_alpha_opaque",
+                        offset_of!(MaterialUniform, texture_alpha_opaque),
+                    ),
+                    ("alpha_test", offset_of!(MaterialUniform, alpha_test)),
+                    ("bump_mode", offset_of!(MaterialUniform, bump_mode)),
+                    ("planar_kind", offset_of!(MaterialUniform, planar_kind)),
+                    ("unlit", offset_of!(MaterialUniform, unlit)),
+                    ("vertex_color", offset_of!(MaterialUniform, vertex_color)),
+                    ("vertex_alpha", offset_of!(MaterialUniform, vertex_alpha)),
+                    (
+                        "normal_animation_clamp",
+                        offset_of!(MaterialUniform, normal_animation_clamp),
+                    ),
                     ("water_fog", offset_of!(MaterialUniform, water_fog)),
                     ("water_optics", offset_of!(MaterialUniform, water_optics)),
                     ("water_reflect", offset_of!(MaterialUniform, water_reflect)),
                     ("water_refract", offset_of!(MaterialUniform, water_refract)),
-                    ("water_bump_s", offset_of!(MaterialUniform, water_bump_s)),
-                    ("water_bump_t", offset_of!(MaterialUniform, water_bump_t)),
+                    ("normal_s", offset_of!(MaterialUniform, normal_s)),
+                    ("normal_t", offset_of!(MaterialUniform, normal_t)),
                     ("water_scroll", offset_of!(MaterialUniform, water_scroll)),
                     (
                         "water_animation",
@@ -776,7 +1146,9 @@ mod tests {
     use iced::Point;
 
     use super::super::super::test_support::empty_preview;
-    use super::{FlyCamera, MapFog, Rectangle, Uniforms, Vec3, average_srgb_rgba};
+    use super::{
+        FlyCamera, FogMode, FogUniform, MapFog, Rectangle, Uniforms, Vec3, average_srgb_rgba,
+    };
 
     #[test]
     fn sky_tint_averages_known_2x2_texture() {
@@ -819,8 +1191,8 @@ mod tests {
                     shader: r.shader,
                     texture: Some(r.texture),
                     texture2: None,
-                    force_opaque: r.force_opaque,
                     render_mode: r.render_mode,
+                    alpha_policy: r.render_mode.texture_alpha_policy(),
                 });
         }
         let map_fog = MapFog {
@@ -846,22 +1218,31 @@ mod tests {
             }),
             12.0,
         );
-        assert_eq!(radial.fog_params, [512.0, 8192.0, 0.5, 4.0]);
+        assert_eq!(
+            radial.fog,
+            FogUniform::new(512.0, 8192.0, 0.5, FogMode::Radial)
+        );
         camera.position = Some(Vec3::ZERO);
         let submerged = Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0);
         assert_eq!(above.fog_color, [0.8, 0.7, 0.6, 0.0]);
-        assert_eq!(above.fog_params, [512.0, 8192.0, 0.5, 1.0]);
+        assert_eq!(
+            above.fog,
+            FogUniform::new(512.0, 8192.0, 0.5, FogMode::Axial)
+        );
         assert_eq!(
             submerged.fog_color,
             [0.033104762, 0.07227186, 0.13286833, 1.0]
         );
-        assert_eq!(submerged.fog_params, [-64.0, 640.0, 1.0, 3.0]);
+        assert_eq!(
+            submerged.fog,
+            FogUniform::new(-64.0, 640.0, 1.0, FogMode::Immersion)
+        );
         assert_eq!(submerged.medium_plane, [0.0, 0.0, 1.0, -128.0]);
         assert_eq!(submerged.clip_plane, [0.0, 0.0, -1.0, 130.0]);
         camera.position = Some(Vec3::new(256.0, 0.0, 0.0));
         assert_eq!(
-            Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0).fog_params,
-            above.fog_params
+            Uniforms::for_fly(&scene, &camera, bounds, Some(map_fog), 12.0).fog,
+            above.fog
         );
     }
     #[test]
@@ -886,10 +1267,13 @@ mod tests {
         };
         let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let uniforms = Uniforms::for_fly_skybox_composite(&scene, &camera, bounds, sky, Some(fog));
-        assert_eq!(uniforms.fog_params, [-250.0, 20000.0, 0.5, 4.0]);
         assert_eq!(
-            Uniforms::for_fly(&scene, &camera, bounds, Some(fog), 0.0).fog_params,
-            [-4000.0, 320000.0, 0.5, 4.0]
+            uniforms.fog,
+            FogUniform::new(-250.0, 20000.0, 0.5, FogMode::Radial)
+        );
+        assert_eq!(
+            Uniforms::for_fly(&scene, &camera, bounds, Some(fog), 0.0).fog,
+            FogUniform::new(-4000.0, 320000.0, 0.5, FogMode::Radial)
         );
     }
 }

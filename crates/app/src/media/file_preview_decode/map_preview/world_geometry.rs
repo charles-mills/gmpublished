@@ -44,6 +44,7 @@ pub(in super::super) fn map_mesh_to_model_mesh(
             .iter()
             .map(|vertex| ModelVertex {
                 lighting_context: 0,
+                surface_mark: 0,
                 position: vertex.position,
                 normal: vertex.normal,
                 tangent_s: vertex.tangent_s,
@@ -73,7 +74,11 @@ pub(in super::super) fn map_mesh_to_model_mesh(
                 blend_alpha: vertex.blend_alpha,
                 opacity: vertex.opacity,
                 illumination: Vec3::splat(1.0),
-                lighting_mode: 0,
+                lighting_mode: if vertex.has_lightmap {
+                    crate::media::preview_model::vertex_lighting::LIGHTMAP
+                } else {
+                    crate::media::preview_model::vertex_lighting::PREVIEW
+                },
             })
             .collect(),
         indices: mesh.indices.clone(),

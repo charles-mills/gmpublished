@@ -2,6 +2,9 @@ use super::ModelLightingFailure;
 use super::cpu::factory::{ModelLightingEvaluation, SelectedModelLight};
 use gmpublished_domain::{math::Vec3, scene::map::AmbientCube};
 
+const AVERAGING_RATE: f32 = 5.0;
+const AMBIENT_MAXIMUM: f32 = 8.0;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelLightingHistory {
     state: Option<HistoryState>,
@@ -42,13 +45,12 @@ impl ModelLightingHistory {
             self.pending = false;
             return Ok(target);
         };
-        // Source subtracts a float timestamp from its double client clock.
-        // Repeated draws can still have a positive delta if that timestamp
-        // rounded down; only a nonpositive delta preserves the old value.
+        // The f32 prior timestamp can round below an equal f64 client clock,
+        // allowing repeated draws to advance the filter.
         let elapsed = (time - f64::from(previous.time)) as f32;
         let decay = if elapsed > 0.0 {
             previous.time = time as f32;
-            (-5.0 * elapsed).exp()
+            (-AVERAGING_RATE * elapsed).exp()
         } else {
             1.0
         };
@@ -63,9 +65,10 @@ impl ModelLightingHistory {
             *color = Vec3::from(
                 (*color - (*color - old) * decay)
                     .to_array()
-                    .map(|v| v.clamp(0.0, 8.0)),
+                    .map(|v| v.clamp(0.0, AMBIENT_MAXIMUM)),
             );
-            self.pending |= *color != Vec3::from(desired.to_array().map(|v| v.clamp(0.0, 8.0)))
+            self.pending |= *color
+                != Vec3::from(desired.to_array().map(|v| v.clamp(0.0, AMBIENT_MAXIMUM)))
                 && (elapsed <= 0.0 || *color != old);
         }
         let current_ids = target
@@ -84,9 +87,8 @@ impl ModelLightingHistory {
             selected.light.intensity = filtered.to_array();
             self.pending |= filtered != current && (elapsed <= 0.0 || filtered != old);
         }
-        // Averaging precedes descriptor conversion and lightstyle modulation.
-        // Removed raw lights below unit squared intensity disappear immediately;
-        // brighter lights occupy remaining slots in their previous order.
+        // Raw IDs fade before style modulation. Removed lights below squared
+        // intensity 1 disappear immediately; remaining slots retain prior order.
         for old in &previous.selected {
             if target.selected.len() == 4 {
                 break;

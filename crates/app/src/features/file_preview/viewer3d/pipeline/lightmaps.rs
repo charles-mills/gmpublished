@@ -1,5 +1,4 @@
-//! Lighting is shared by a frame's scene views, independently of other widgets.
-use super::{RenderResources, wgpu};
+use super::wgpu;
 use gmpublished_domain::scene::map::LightmapAtlas;
 
 #[derive(Debug)]
@@ -11,12 +10,7 @@ pub struct Frame {
     values: [f32; 256],
 }
 impl Frame {
-    pub fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _resources: &RenderResources,
-        atlas: Option<&LightmapAtlas>,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, atlas: Option<&LightmapAtlas>) -> Self {
         let (width, height, bytes) = atlas.map_or((1, 1, &[255_u8; 4][..]), |a| {
             (a.width, a.height, a.rgba.as_slice())
         });

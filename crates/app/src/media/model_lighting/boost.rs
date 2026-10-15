@@ -23,9 +23,7 @@ pub(super) fn model_draw_ambient(
     if mean >= 0.3 {
         return ambient;
     }
-    // Draw setup uses raw selected world lights and the shader origin here;
-    // style weighting, spotlight cones and the cache's sample center belong to
-    // other stages and are not reapplied to this local-light brightness sum.
+    // Boost uses unstyled radiance at the raw shader origin, without cone falloff.
     let mut local_brightness = 0.0;
     for selected in lights {
         let light = selected.light;
@@ -52,8 +50,7 @@ pub(super) fn model_draw_ambient(
 }
 
 fn luminance(color: Vec3) -> f32 {
-    // Model draw setup uses these coefficients, separately from the compiled
-    // emitter selector's .299/.587/.114 ranking coefficients.
+    // Draw boost and light selection use different luminance coefficients.
     (color[0] * 0.30 + color[1] * 0.59) + color[2] * 0.11
 }
 

@@ -17,6 +17,7 @@ pub struct MapData {
     pub detail_sprites: Vec<MapDetailSprite>,
     pub skybox_detail_sprites: Vec<MapDetailSprite>,
     pub overlays: Vec<MapOverlay>,
+    pub decals: Vec<super::MapDecal>,
     pub skybox_overlays: Vec<MapOverlay>,
     pub ambient: MapAmbientLighting,
     pub world_lighting: MapWorldLighting,
@@ -50,6 +51,43 @@ pub struct MapMesh {
     pub indices: Vec<u32>,
     pub material_index: usize,
     pub visibility: MapMeshVisibility,
+    pub surface_owners: Vec<MapMeshSurfaceOwner>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum MapSurfaceOwner {
+    #[default]
+    World,
+    Brush {
+        entity_index: usize,
+        model_index: super::ModelIndex,
+        origin: Vec3,
+        angles: Vec3,
+    },
+    Door {
+        door_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapMeshSurfaceOwner {
+    pub index_start: u32,
+    pub owner: MapSurfaceOwner,
+    pub solid: bool,
+    pub allows_decals: bool,
+    pub plane_normal: Vec3,
+    pub plane_distance: f32,
+    pub displacement: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MapReceiverMesh {
+    World(usize),
+    Skybox(usize),
+    Door {
+        door_index: usize,
+        mesh_index: usize,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -118,6 +156,7 @@ pub struct MapVertex {
     /// Compiled texdata dimensions, independent of replacement/fallback textures.
     pub texture_size: [u32; 2],
     pub lightmap_uv: [f32; 2],
+    pub has_lightmap: bool,
     /// Horizontal atlas stride to each of the three directional lighting planes.
     pub lightmap_bump_step: f32,
     pub blend_alpha: f32,

@@ -1,41 +1,40 @@
+use super::{PreviewScene, SceneKey};
 use gmpublished_domain::math::Vec3;
-use std::collections::HashMap;
+use gmpublished_domain::scene::map::{
+    MapMeshIndexRange, MapOverlayFade, MapReceiverMesh, MapSurfaceMarkSource, MapSurfaceOwner,
+};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use super::TextureUploadLevel;
-use super::materials::{MaterialTextureViews, MaterialUploadMode};
+use super::materials::{MaterialTextureViews, MaterialUploadMode, PreparedMaterial};
 use super::resources::RenderResources;
 use super::uniforms::scene_sky_tint;
 
 use super::{
-    DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance, DoorRenderPose, MapPreview,
-    MapVisibilityBucket, MeshData, ModelVertex, OverlayPrimitive, RenderMode, RenderScene,
-    SKYBOX_FACE_COUNT, initial_door_swing, transform_door_vertices, wgpu,
+    DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance, DoorRenderPose, MapVisibilityBucket,
+    MeshData, ModelVertex, OverlayPrimitive, RenderMode, RenderScene, SKYBOX_FACE_COUNT,
+    initial_door_swing, transform_door_vertices, wgpu,
 };
 
 #[derive(Debug, Default)]
 pub struct UploadCache {
-    uploads: HashMap<u64, UploadedModel>,
-    live: Vec<u64>,
+    uploads: HashMap<SceneKey, Arc<UploadedModel>>,
+    live: HashSet<SceneKey>,
 }
 
 impl UploadCache {
-    pub fn get(&self, content_id: u64) -> Option<&UploadedModel> {
-        self.uploads.get(&content_id)
+    pub fn get(&self, key: SceneKey) -> Option<&Arc<UploadedModel>> {
+        self.uploads.get(&key)
     }
 
-    pub fn get_mut(&mut self, content_id: u64) -> Option<&mut UploadedModel> {
-        self.uploads.get_mut(&content_id)
-    }
-
-    pub fn touch(&mut self, content_id: u64) {
-        if !self.live.contains(&content_id) {
-            self.live.push(content_id);
-        }
+    pub fn touch(&mut self, key: SceneKey) {
+        self.live.insert(key);
     }
 
     pub fn trim(&mut self) {
-        let live = std::mem::take(&mut self.live);
-        self.uploads.retain(|id, _| live.contains(id));
+        self.uploads.retain(|id, _| self.live.contains(id));
+        self.live.clear();
     }
 
     pub fn ensure_upload(
@@ -43,15 +42,16 @@ impl UploadCache {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         resources: &RenderResources,
-        content_id: u64,
-        scene: &RenderScene,
-        map: Option<&MapPreview>,
+        key: SceneKey,
+        source: &PreviewScene,
     ) {
-        if self.uploads.contains_key(&content_id) {
+        let scene = source.render_scene();
+        let map = source.map();
+        if self.uploads.contains_key(&key) {
             return;
         }
 
-        let flat_normal = resources.create_water_normal_view(device, queue, None);
+        let flat_normal = &resources.flat_normal;
         let material_uploads = scene
             .materials
             .iter()
@@ -79,32 +79,29 @@ impl UploadCache {
                     .and_then(|water| water.normal_map.as_deref())
                     .or_else(|| mirror.and_then(|mirror| mirror.normal_map.as_deref()))
                     .or_else(|| surface.and_then(|surface| surface.normal.as_deref()))
-                    .map(|normal| resources.create_water_normal_view(device, queue, Some(normal)));
+                    .map(|normal| RenderResources::create_normal_view(device, queue, normal));
                 let normal2 = surface
                     .and_then(|surface| surface.normal2.as_deref())
-                    .map(|normal| resources.create_water_normal_view(device, queue, Some(normal)));
+                    .map(|normal| RenderResources::create_normal_view(device, queue, normal));
                 resources.create_material(
                     device,
                     queue,
                     MaterialTextureViews {
                         base: &base_view,
                         base2: base2_view.as_ref().unwrap_or(&base_view),
-                        normal: normal.as_ref().unwrap_or(&flat_normal),
-                        normal2: normal2.as_ref().or(normal.as_ref()).unwrap_or(&flat_normal),
+                        normal: normal.as_ref().unwrap_or(flat_normal),
+                        normal2: normal2.as_ref().or(normal.as_ref()).unwrap_or(flat_normal),
                     },
                     MaterialUploadMode {
-                        unlit: slot.shader.unlit(),
-                        surface,
+                        material: PreparedMaterial::from(&slot.shader),
                         base_flags: slot.texture.as_ref().and_then(|texture| texture.flags),
                         base2_flags: slot
                             .texture2
                             .as_ref()
                             .or(slot.texture.as_ref())
                             .and_then(|texture| texture.flags),
-                        force_opaque: slot.force_opaque,
                         render_mode: slot.render_mode,
-                        water,
-                        mirror,
+                        alpha_policy: slot.alpha_policy,
                     },
                 )
             })
@@ -141,18 +138,15 @@ impl UploadCache {
                     MaterialTextureViews {
                         base: &base_view,
                         base2: &base_view,
-                        normal: &flat_normal,
-                        normal2: &flat_normal,
+                        normal: flat_normal,
+                        normal2: flat_normal,
                     },
                     MaterialUploadMode {
-                        unlit: None,
-                        surface: None,
+                        material: PreparedMaterial::Fallback,
                         base_flags: None,
                         base2_flags: None,
-                        force_opaque: true,
                         render_mode: RenderMode::Opaque,
-                        water: None,
-                        mirror: None,
+                        alpha_policy: crate::bridge::materials::TextureAlphaPolicy::Opaque,
                     },
                 );
                 (vec![bind_group], vec![uniform])
@@ -181,13 +175,29 @@ impl UploadCache {
         let map_skybox_detail_sprites = map.and_then(|map| {
             upload_detail_sprites(device, queue, map.map_skybox_detail_sprites.as_slice())
         });
+        let receivers = meshes
+            .iter()
+            .enumerate()
+            .map(|(index, mesh)| (mesh.receiver_source(), (index, mesh.material_index)))
+            .collect::<HashMap<_, _>>();
         let overlays = map.map_or_else(Vec::new, |map| {
-            let mut overlays = upload_overlays(device, queue, map.overlays.as_slice(), false);
+            let mut overlays = upload_overlays(
+                device,
+                queue,
+                map.overlays.as_slice(),
+                false,
+                &map.doors,
+                0,
+                &receivers,
+            );
             overlays.extend(upload_overlays(
                 device,
                 queue,
                 map.map_skybox_overlays.as_slice(),
                 true,
+                &map.doors,
+                overlays.len(),
+                &receivers,
             ));
             overlays
         });
@@ -264,48 +274,46 @@ impl UploadCache {
             screen_refraction_normals
                 .entry(effect.name.clone())
                 .or_insert_with(|| {
-                    resources.create_water_normal_view(device, queue, Some(&effect.normal_map))
+                    RenderResources::create_normal_view(device, queue, &effect.normal_map)
                 });
         }
-        self.uploads.insert(
-            content_id,
-            UploadedModel {
-                surface_pipelines: super::surface_pipelines::SurfacePipelineVariants::new(
-                    device,
-                    resources,
-                    &scene.materials,
-                ),
-                screen_refraction_normals,
-                meshes,
-                detail_sprites,
-                map_skybox_detail_sprites,
-                overlays,
-                phy_debug_meshes: None,
-                material_bind_groups,
-                material_render_modes,
-                material_planar_materials,
-                _material_uniforms: material_uniforms,
-                skybox,
-                sky_tint,
-                reflectors: Vec::new(),
-            },
-        );
-        if let Some(upload) = self.uploads.get_mut(&content_id) {
-            upload.reflectors = super::reflections::collect_reflectors(upload, scene);
-            super::transparency::build_parts(upload, scene, map);
-        }
+        super::transparency::build_parts(&mut meshes, &material_render_modes, scene, map);
+        let mut upload = UploadedModel {
+            source: source.clone(),
+            surface_pipelines: super::surface_pipelines::SurfacePipelineVariants::new(
+                device,
+                resources,
+                &scene.materials,
+            ),
+            screen_refraction_normals,
+            meshes: meshes.into_iter().map(Arc::new).collect(),
+            detail_sprites,
+            map_skybox_detail_sprites,
+            overlays,
+            phy_debug_meshes: OnceLock::new(),
+            material_bind_groups,
+            material_render_modes,
+            material_planar_materials,
+            _material_uniforms: material_uniforms,
+            skybox,
+            sky_tint,
+            reflectors: Vec::new(),
+        };
+        upload.reflectors = super::reflections::collect_reflectors(&upload, scene);
+        self.uploads.insert(key, Arc::new(upload));
     }
 }
 
 #[derive(Debug)]
 pub struct UploadedModel {
+    pub(super) source: PreviewScene,
     pub(super) surface_pipelines: super::surface_pipelines::SurfacePipelineVariants,
     pub screen_refraction_normals: HashMap<String, wgpu::TextureView>,
-    pub meshes: Vec<UploadedMesh>,
+    pub meshes: Vec<Arc<UploadedMesh>>,
     pub detail_sprites: Option<UploadedDetailSprites>,
     pub map_skybox_detail_sprites: Option<UploadedDetailSprites>,
-    pub overlays: Vec<UploadedOverlay>,
-    pub phy_debug_meshes: Option<Vec<UploadedMesh>>,
+    pub overlays: Vec<Arc<UploadedOverlay>>,
+    pub phy_debug_meshes: OnceLock<Vec<UploadedMesh>>,
     pub material_bind_groups: Vec<wgpu::BindGroup>,
     pub material_render_modes: Vec<RenderMode>,
     pub material_planar_materials: Vec<bool>,
@@ -323,54 +331,13 @@ impl UploadedModel {
     }
 
     pub fn ensure_phy_debug_meshes(
-        &mut self,
+        &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         scene: &RenderScene,
     ) {
-        if self.phy_debug_meshes.is_some() {
-            return;
-        }
-        self.phy_debug_meshes = Some(upload_meshes(
-            device,
-            queue,
-            scene.phy_debug_meshes.as_slice(),
-            false,
-            None,
-        ));
-    }
-
-    pub fn update_door_vertices(
-        &mut self,
-        queue: &wgpu::Queue,
-        scene: &MapPreview,
-        poses: &[DoorRenderPose],
-    ) {
-        for mesh in self.meshes.iter_mut() {
-            let Some(door_index) = mesh.door_index else {
-                continue;
-            };
-            let Some(door) = scene.doors.get(door_index) else {
-                continue;
-            };
-            let pose = poses
-                .get(door_index)
-                .copied()
-                .unwrap_or_else(|| DoorRenderPose {
-                    progress: door.initial_progress.clamp(0.0, 1.0),
-                    swing: initial_door_swing(door.motion),
-                });
-            if mesh.last_door_pose == Some(pose) {
-                continue;
-            }
-            let Some(local_vertices) = mesh.local_vertices.as_ref() else {
-                continue;
-            };
-            let transformed = transform_door_vertices(door, local_vertices.as_slice(), pose);
-            queue.write_buffer(&mesh.vertices, 0, bytemuck::cast_slice(&transformed));
-            mesh.centroid = mesh_centroid(transformed.as_slice());
-            mesh.last_door_pose = Some(pose);
-        }
+        self.phy_debug_meshes
+            .get_or_init(|| upload_meshes(device, queue, &scene.phy_debug_meshes, false, None));
     }
 }
 
@@ -384,22 +351,41 @@ pub struct UploadedMesh {
     pub geometry: crate::media::preview_model::MeshGeometry,
     pub entity: bool,
     pub transparent_parts: Vec<super::transparency::Part>,
-    pub vertices: wgpu::Buffer,
+    vertices: wgpu::Buffer,
     pub indices: wgpu::Buffer,
     pub index_count: u32,
-    // Position in the source scene's mesh list, NOT this upload list:
-    // empty-index meshes are dropped at upload, and WorldVisibilityPlan is
-    // keyed by the unfiltered scene order.
     pub scene_mesh_index: usize,
-    pub centroid: Vec3,
+    centroid: Vec3,
     pub material_index: usize,
     pub bodygroup: usize,
     pub bodygroup_choice: usize,
     pub map_skybox: bool,
     pub door_index: Option<usize>,
+    pub door_mesh_index: Option<usize>,
     pub door_visibility: Option<MapVisibilityBucket>,
     pub local_vertices: Option<Vec<ModelVertex>>,
-    pub last_door_pose: Option<DoorRenderPose>,
+}
+
+impl UploadedMesh {
+    pub fn receiver_source(&self) -> MapReceiverMesh {
+        if let (Some(door_index), Some(mesh_index)) = (self.door_index, self.door_mesh_index) {
+            MapReceiverMesh::Door {
+                door_index,
+                mesh_index,
+            }
+        } else if self.map_skybox {
+            MapReceiverMesh::Skybox(self.scene_mesh_index)
+        } else {
+            MapReceiverMesh::World(self.scene_mesh_index)
+        }
+    }
+
+    pub fn vertices(&self) -> &wgpu::Buffer {
+        &self.vertices
+    }
+    pub fn centroid(&self) -> Vec3 {
+        self.centroid
+    }
 }
 
 #[derive(Debug)]
@@ -412,11 +398,29 @@ pub struct UploadedDetailSprites {
 
 #[derive(Debug)]
 pub struct UploadedOverlay {
-    pub vertices: wgpu::Buffer,
+    vertices: wgpu::Buffer,
     pub vertex_count: u32,
-    pub centroid: Vec3,
+    centroid: Vec3,
     pub material_index: usize,
     pub map_skybox: bool,
+    pub owner: MapSurfaceOwner,
+    pub source: MapSurfaceMarkSource,
+    pub receiver_mesh_index: Option<usize>,
+    pub receiver_range: MapMeshIndexRange,
+    pub receiver_material_index: usize,
+    pub render_order: u16,
+    pub fade: Option<MapOverlayFade>,
+    pub fade_origin: Vec3,
+    pub local_vertices: Option<Vec<ModelVertex>>,
+}
+
+impl UploadedOverlay {
+    pub fn vertices(&self) -> &wgpu::Buffer {
+        &self.vertices
+    }
+    pub fn centroid(&self) -> Vec3 {
+        self.centroid
+    }
 }
 
 pub fn upload_detail_sprites(
@@ -501,9 +505,9 @@ pub fn upload_meshes(
                 bodygroup_choice: mesh.bodygroup_choice,
                 map_skybox,
                 door_index: None,
+                door_mesh_index: None,
                 door_visibility: None,
                 local_vertices: None,
-                last_door_pose: None,
             }
         })
         .collect()
@@ -520,7 +524,7 @@ pub fn upload_door_meshes(
             progress: door.initial_progress.clamp(0.0, 1.0),
             swing: initial_door_swing(door.motion),
         };
-        for mesh in &door.meshes {
+        for (door_mesh_index, mesh) in door.meshes.iter().enumerate() {
             if mesh.vertices.is_empty() || mesh.indices.is_empty() {
                 continue;
             }
@@ -557,9 +561,9 @@ pub fn upload_door_meshes(
                 bodygroup_choice: 0,
                 map_skybox: false,
                 door_index: Some(door_index),
+                door_mesh_index: Some(door_mesh_index),
                 door_visibility: Some(door.visibility),
                 local_vertices: Some(mesh.vertices.clone()),
-                last_door_pose: Some(pose),
             });
         }
     }
@@ -607,60 +611,64 @@ pub fn upload_overlays(
     queue: &wgpu::Queue,
     overlays: &[OverlayPrimitive],
     map_skybox: bool,
-) -> Vec<UploadedOverlay> {
+    doors: &[DoorInstance],
+    offset: usize,
+    receivers: &HashMap<MapReceiverMesh, (usize, usize)>,
+) -> Vec<Arc<UploadedOverlay>> {
     overlays
         .iter()
-        .map(|overlay| {
-            let vertices = overlay_vertices(overlay);
-            let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
+        .enumerate()
+        .map(|(index, overlay)| {
+            let mark_id = u32::try_from(offset + index + 1).expect("surface mark index fits u32");
+            let expanded = overlay
+                .indices
+                .iter()
+                .map(|&index| {
+                    let mut vertex = overlay.vertices[index as usize];
+                    vertex.surface_mark = mark_id;
+                    vertex
+                })
+                .collect::<Vec<_>>();
+            let (posed, local_vertices) = if let MapSurfaceOwner::Door { door_index } =
+                overlay.owner
+            {
+                let door = &doors[door_index];
+                (
+                    transform_door_vertices(door, &expanded, super::geometry::initial_pose(door)),
+                    Some(expanded),
+                )
+            } else {
+                (expanded, None)
+            };
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("file_preview.model_viewer.overlay_vertices"),
-                size: vertex_bytes.len() as u64,
+                label: Some("file_preview.surface_mark.vertices"),
+                size: std::mem::size_of_val(posed.as_slice()) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&vertices, 0, vertex_bytes);
-            UploadedOverlay {
+            queue.write_buffer(&vertices, 0, bytemuck::cast_slice(&posed));
+            Arc::new(UploadedOverlay {
                 vertices,
-                vertex_count: 6,
-                centroid: overlay_centroid(overlay),
+                vertex_count: posed.len() as u32,
+                centroid: mesh_centroid(&posed),
                 material_index: overlay.material_index,
                 map_skybox,
-            }
+                owner: overlay.owner,
+                source: overlay.source,
+                receiver_mesh_index: receivers
+                    .get(&overlay.receiver_mesh)
+                    .map(|&(index, _)| index),
+                receiver_range: overlay.receiver_range,
+                receiver_material_index: receivers
+                    .get(&overlay.receiver_mesh)
+                    .map_or(overlay.receiver_material_index, |&(_, material)| material),
+                render_order: overlay.render_order,
+                fade: overlay.fade,
+                fade_origin: overlay.fade_origin,
+                local_vertices,
+            })
         })
         .collect()
-}
-
-pub fn overlay_vertices(overlay: &OverlayPrimitive) -> [ModelVertex; 6] {
-    [0_usize, 1, 2, 0, 2, 3].map(|index| {
-        let vertex = overlay.vertices[index];
-        ModelVertex {
-            position: vertex.position,
-            tangent_s: Vec3::ZERO,
-            tangent_t: Vec3::ZERO,
-            tangent_sign: 0.0,
-            lighting_context: 0,
-            normal: vertex.normal,
-            uv: vertex.uv,
-            lightmap_uv: [0.0, 0.0],
-            lightmap_bump_step: 0.0,
-            color: Vec3::new(1.0, 1.0, 1.0),
-            blend_alpha: 0.0,
-            opacity: 1.0,
-            illumination: Vec3::splat(1.0),
-            lighting_mode: 0,
-        }
-    })
-}
-
-pub fn overlay_centroid(overlay: &OverlayPrimitive) -> Vec3 {
-    let mut centroid = Vec3::ZERO;
-    for vertex in overlay.vertices {
-        for (axis, component) in vertex.position.into_iter().enumerate() {
-            centroid[axis] += component;
-        }
-    }
-    centroid.map(|component| component / overlay.vertices.len() as f32)
 }
 
 pub fn push_f32s(bytes: &mut Vec<u8>, values: &[f32]) {

@@ -1,13 +1,13 @@
-//! LightmappedReflective uses planar views, with glass-specific Fresnel optics.
-use super::water::{scalar, texture_transform, tint};
+use super::parameters::{scalar, texture_transform, tint};
 use super::{
-    Arc, BTreeMap, EffectiveMaterial, MaterialResolver, WaterNormalMap, normalize_texture_name,
+    Arc, BTreeMap, DecodedTextureFrames, EffectiveMaterial, MaterialResolver,
+    normalize_texture_name,
 };
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirrorMaterial {
     pub shader: String,
     pub parameters: BTreeMap<String, String>,
-    pub normal_map: Option<Arc<WaterNormalMap>>,
+    pub normal_map: Option<Arc<DecodedTextureFrames>>,
     pub normal_map_path: String,
     pub bump_transform: [[f32; 4]; 2],
     pub reflect_amount: f32,

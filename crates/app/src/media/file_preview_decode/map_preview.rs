@@ -1,6 +1,7 @@
 use super::materials::{
-    resolve_detail_sprites, resolve_map_material_slots_parallel, resolve_map_overlays,
-    resolve_skybox, resolve_sun_materials, sky_log_status,
+    authored_surface_mark_count, resolve_detail_sprites, resolve_map_decals,
+    resolve_map_material_slots_parallel, resolve_map_overlays, resolve_skybox,
+    resolve_sun_materials, sky_log_status,
 };
 use super::{
     MAP_FALLBACK_TEXTURE_DIMENSION, MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP,
@@ -52,7 +53,8 @@ use diagnostics::{
 #[cfg(test)]
 pub(super) use lighting::PropSunLighting;
 pub(super) use lighting::{
-    PropPlacementLighting, SelectedPropPlacement, StaticPropLightingInputs, prop_placement_lighting,
+    LegacyPropLightingFallback, SelectedPropPlacement, StaticPropLightingInputs,
+    legacy_prop_lighting_fallback,
 };
 #[cfg(test)]
 pub(super) use materials::unresolved_material_names_for_debug;
@@ -97,6 +99,41 @@ pub(super) fn map_preview_data(
     )
 }
 
+pub(super) fn remap_surface_mark_doors(
+    world: &mut Vec<crate::media::preview_model::OverlayPrimitive>,
+    sky: &mut Vec<crate::media::preview_model::OverlayPrimitive>,
+    doors: &[DoorInstance],
+) -> u32 {
+    use gmpublished_domain::scene::map::{MapReceiverMesh, MapSurfaceOwner};
+    let indices = doors
+        .iter()
+        .enumerate()
+        .map(|(index, door)| (door.source_index, index))
+        .collect::<HashMap<_, _>>();
+    let mut skipped = HashSet::new();
+    for marks in [world, sky] {
+        marks.retain_mut(|mark| {
+            let MapSurfaceOwner::Door { door_index } = &mut mark.owner else {
+                return true;
+            };
+            let Some(index) = indices.get(door_index).copied() else {
+                log::debug!(
+                    "map preview surface mark {:?} skipped: door {door_index} unavailable",
+                    mark.source
+                );
+                skipped.insert(mark.source);
+                return false;
+            };
+            *door_index = index;
+            if let MapReceiverMesh::Door { door_index, .. } = &mut mark.receiver_mesh {
+                *door_index = index;
+            }
+            true
+        });
+    }
+    u32::try_from(skipped.len()).unwrap_or(u32::MAX)
+}
+
 pub(super) fn map_preview_data_with_prop_model_loader(
     request: &PreviewRequest,
     bsp_bytes: &[u8],
@@ -133,6 +170,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         detail_sprites: map_detail_sprites,
         skybox_detail_sprites: map_skybox_detail_sprites,
         overlays: map_overlays,
+        decals: map_decals,
         skybox_overlays: map_skybox_overlays,
         ambient,
         world_lighting,
@@ -176,14 +214,15 @@ pub(super) fn map_preview_data_with_prop_model_loader(
                 |&index| material_resolver.resolve_surface_lighting(surfaces.material_name(index)?),
             )
         });
-    let model_lighting_inputs = Arc::new(crate::media::preview_model::ModelLightingSceneInputs {
-        ambient,
-        world_lighting,
-        visibility: visibility.clone(),
-        collision: lighting_collision,
-        radiosity_surfaces,
-        surface_materials,
-    });
+    let model_lighting_inputs =
+        Arc::new(crate::media::preview_model::ModelLightingSceneInputs::new(
+            ambient,
+            world_lighting,
+            visibility.clone(),
+            lighting_collision,
+            radiosity_surfaces,
+            surface_materials,
+        ));
     // A compiled fog volume can name an underside material even when no
     // visible face references it. Resolve that dependency independently.
     let below_names = table
@@ -210,9 +249,38 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         &material_resolver,
         &mut table,
     );
-    let overlay_bake = resolve_map_overlays(&map_overlays, &material_resolver, &mut table);
-    let skybox_overlay_bake =
+    let receiver_allowed = table
+        .slots()
+        .iter()
+        .take(material_names.len())
+        .map(|slot| !slot.shader.suppresses_decals())
+        .collect::<Vec<_>>();
+    let mut overlay_bake = resolve_map_overlays(&map_overlays, &material_resolver, &mut table);
+    let mut skybox_overlay_bake =
         resolve_map_overlays(&map_skybox_overlays, &material_resolver, &mut table);
+    let projector = gmpublished_domain::scene::map::MapSurfaceProjector::new(
+        &map_meshes,
+        &map_skybox_meshes,
+        &map_doors,
+    );
+    let surface_receivers = projector.receiver_metadata();
+    let (decal_bake, skybox_decal_bake) = resolve_map_decals(
+        &map_decals,
+        &projector,
+        &receiver_allowed,
+        &material_resolver,
+        &mut table,
+    );
+    overlay_bake.overlays.extend(decal_bake.overlays);
+    overlay_bake.skipped_count = overlay_bake
+        .skipped_count
+        .saturating_add(decal_bake.skipped_count);
+    skybox_overlay_bake
+        .overlays
+        .extend(skybox_decal_bake.overlays);
+    skybox_overlay_bake.skipped_count = skybox_overlay_bake
+        .skipped_count
+        .saturating_add(skybox_decal_bake.skipped_count);
     let materials_timing = materials_started.elapsed();
     let mut entity_meshes = map_meshes
         .iter()
@@ -249,7 +317,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         &raw_stats,
         visibility.as_ref(),
         walk_collision,
-        &model_lighting_inputs.ambient,
+        model_lighting_inputs.ambient(),
         cubemaps::PropEnvironmentMapInputs {
             map_name: request
                 .entry_path
@@ -265,6 +333,14 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         &mut table,
         load_model,
     );
+    let skipped_door_marks = remap_surface_mark_doors(
+        &mut overlay_bake.overlays,
+        &mut skybox_overlay_bake.overlays,
+        &door_bake.doors,
+    );
+    overlay_bake.skipped_count = overlay_bake
+        .skipped_count
+        .saturating_add(skipped_door_marks);
     let placed_prop_count = prop_bake
         .placed_count
         .saturating_add(skybox_prop_bake.placed_count);
@@ -281,8 +357,15 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let mut skybox_prop_bake = skybox_prop_bake;
     for mesh in &mut skybox_prop_bake.meshes {
         for vertex in &mut mesh.vertices {
-            if vertex.lighting_context != 0 {
-                vertex.lighting_context += sky_context_offset;
+            if let Some(id) = crate::media::preview_model::ModelLightingContextId::from_gpu(
+                vertex.lighting_context,
+            ) {
+                vertex.lighting_context =
+                    crate::media::preview_model::ModelLightingContextId::from_index(
+                        id.index() + sky_context_offset as usize,
+                    )
+                    .expect("bounded skybox lighting context index")
+                    .gpu();
             }
         }
     }
@@ -333,9 +416,8 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let detail_sprite_count = u32::try_from(detail_sprites.len()).unwrap_or(u32::MAX);
     let map_skybox_detail_sprite_count =
         u32::try_from(map_skybox_detail_sprites.len()).unwrap_or(u32::MAX);
-    let overlay_count = u32::try_from(overlay_bake.overlays.len()).unwrap_or(u32::MAX);
-    let map_skybox_overlay_count =
-        u32::try_from(skybox_overlay_bake.overlays.len()).unwrap_or(u32::MAX);
+    let overlay_count = authored_surface_mark_count(&overlay_bake.overlays);
+    let map_skybox_overlay_count = authored_surface_mark_count(&skybox_overlay_bake.overlays);
     let skipped_overlay_count = overlay_bake
         .skipped_count
         .saturating_add(skybox_overlay_bake.skipped_count);
@@ -357,11 +439,12 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,
-            force_opaque: false,
             render_mode: RenderMode::Translucent,
+            alpha_policy: RenderMode::Translucent.texture_alpha_policy(),
         });
     }
     let scene = Arc::new(MapPreview {
+        surface_receivers,
         model_lighting,
         model_lighting_inputs: Some(model_lighting_inputs),
         water_volumes,

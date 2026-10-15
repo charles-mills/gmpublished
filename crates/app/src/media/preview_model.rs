@@ -10,11 +10,12 @@ use crate::generation::Generation;
 #[path = "model_lighting.rs"]
 mod model_lighting;
 pub use gmpublished_domain::scene::map::{
-    MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapTrace, MapVisibility,
-    MapVisibilityBucket, MapWalkCollision,
+    MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapPropVisibility, MapTrace,
+    MapVisibility, MapVisibilityBucket, MapWalkCollision,
 };
 pub use model_lighting::{
-    ModelLightKind, ModelLightingContext, ModelLightingHistory, ModelLightingSceneInputs,
+    MODEL_LOCAL_LIGHT_LIMIT, ModelLightKind, ModelLightingContext, ModelLightingFallbackReason,
+    ModelLightingHistory, ModelLightingSceneInputs, ModelLightingSnapshot, ModelLightingSource,
     ModelLocalLight, placement_sample_point, placement_static_bounds,
 };
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -23,6 +24,39 @@ pub enum PreviewLoadError {
     Schedule(#[from] ScheduleError),
     #[error(transparent)]
     Archive(#[from] PreviewArchiveSourceError),
+}
+
+pub mod vertex_lighting {
+    pub const LINEAR_ILLUMINATION: u32 = 1;
+    pub const STATIC_PROP: u32 = 2;
+    pub const RUNTIME_CONTEXT: u32 = 4;
+    pub const MODEL_DRAW: u32 = 8;
+    pub const LIGHTMAP: u32 = 16;
+    pub const PREVIEW: u32 = 32;
+    pub const LEGACY_VERTEX_COLOR: u32 = 64;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelLightingContextId(std::num::NonZeroU32);
+
+impl ModelLightingContextId {
+    pub fn from_index(index: usize) -> Option<Self> {
+        u32::try_from(index)
+            .ok()?
+            .checked_add(1)
+            .and_then(Self::from_gpu)
+    }
+
+    pub fn from_gpu(value: u32) -> Option<Self> {
+        std::num::NonZeroU32::new(value).map(Self)
+    }
+
+    pub fn index(self) -> usize {
+        self.0.get() as usize - 1
+    }
+    pub fn gpu(self) -> u32 {
+        self.0.get()
+    }
 }
 
 #[repr(C)]
@@ -39,15 +73,12 @@ pub struct ModelVertex {
     pub opacity: f32,
     /// Explicit linear illumination, independent of authored vertex colour.
     pub illumination: Vec3,
-    /// Bit 0 selects separate linear illumination and raw instance RGB;
-    /// bit 1 identifies the static-prop draw context's modulation overrides.
-    /// Bit 2 enables a directional lighting context; bit 3 marks a model draw
-    /// whose per-instance opacity replaces the material alpha constant.
     pub lighting_mode: u32,
     pub tangent_s: Vec3,
     pub tangent_t: Vec3,
     pub tangent_sign: f32,
     pub lighting_context: u32,
+    pub surface_mark: u32,
 }
 
 impl From<&vformats::mdl::ModelVertex> for ModelVertex {
@@ -59,6 +90,7 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
             tangent_t: Vec3::from(vertex.tangent_t),
             tangent_sign: vertex.tangent_sign,
             lighting_context: 0,
+            surface_mark: 0,
             uv: vertex.uv,
             lightmap_uv: [0.0; 2],
             lightmap_bump_step: 0.0,
@@ -66,7 +98,7 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
             blend_alpha: 0.0,
             opacity: 1.0,
             illumination: Vec3::splat(1.0),
-            lighting_mode: 8,
+            lighting_mode: vertex_lighting::MODEL_DRAW | vertex_lighting::PREVIEW,
         }
     }
 }
@@ -105,7 +137,6 @@ impl From<&vformats::mdl::MeshData> for MeshData {
 pub struct ModelData {
     pub mdl_flags: u32,
     pub vertex_compression: vformats::mdl::VertexCompression,
-    pub source_frames: Vec<vformats::mdl::ModelSourceVertexFrame>,
     pub illumination_position: Vec3,
     pub hull_min: Vec3,
     pub hull_max: Vec3,
@@ -150,7 +181,6 @@ impl From<vformats::mdl::ModelData> for ModelData {
                 .illumination_attachment_position
                 .map(Vec3::from),
             vertex_compression: model.vertex_compression,
-            source_frames: model.source_frames,
             lighting: Some(Arc::new(ModelLightingData {
                 checksum: model.checksum,
                 compatible: model.lighting_compatible,
@@ -316,6 +346,7 @@ pub struct ModelPreview {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapPreview {
+    pub(crate) surface_receivers: Vec<gmpublished_domain::scene::map::MapSurfaceReceiver>,
     pub(crate) water_volumes: Option<gmpublished_domain::scene::map::MapWaterVolumes>,
     pub(crate) entity_meshes: Vec<bool>,
     pub(crate) skybox_entity_meshes: Vec<bool>,
@@ -328,7 +359,7 @@ pub struct MapPreview {
     pub(crate) skybox: Option<Skybox>,
     pub(crate) suns: Vec<gmpublished_domain::scene::map::MapSun>,
     pub(crate) cubemap_probes: Vec<gmpublished_domain::scene::map::MapCubemapProbe>,
-    pub(crate) sun_material_slots: Vec<[usize; 2]>,
+    pub(crate) sun_material_slots: Vec<[Option<usize>; 2]>,
     pub(crate) detail_sprites: Vec<DetailSprite>,
     pub(crate) map_skybox_detail_sprites: Vec<DetailSprite>,
     pub(crate) overlays: Vec<OverlayPrimitive>,
@@ -368,6 +399,7 @@ impl MapPreview {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DoorInstance {
+    pub(crate) source_index: usize,
     pub(crate) brush_collision: Option<gmpublished_domain::scene::map::MapBrushCollision>,
     pub(crate) class: MapDoorClass,
     pub(crate) origin: Vec3,
@@ -467,7 +499,7 @@ impl WorldVisibilityPlan {
             overlay_visible: scene
                 .overlays
                 .iter()
-                .map(|overlay| bucket_visible(overlay.visibility, visible_clusters))
+                .map(|overlay| prop_visible(&overlay.visibility, visible_clusters))
                 .collect(),
             detail_sprite_visible: scene
                 .detail_sprites
@@ -563,6 +595,15 @@ fn push_visible_range(
     indices.extend_from_slice(slice);
 }
 
+fn prop_visible(visibility: &MapPropVisibility, clusters: &[bool]) -> bool {
+    match visibility {
+        MapPropVisibility::Always => true,
+        MapPropVisibility::Clusters(indices) => indices
+            .iter()
+            .any(|&index| clusters.get(index as usize).copied().unwrap_or(false)),
+    }
+}
+
 fn bucket_visible(bucket: MapVisibilityBucket, visible_clusters: &[bool]) -> bool {
     match bucket {
         MapVisibilityBucket::Always => true,
@@ -579,8 +620,8 @@ pub struct MaterialSlot {
     pub(crate) name: String,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) texture2: Option<Arc<ResolvedTexture>>,
-    pub(crate) force_opaque: bool,
     pub(crate) render_mode: RenderMode,
+    pub(crate) alpha_policy: crate::bridge::materials::TextureAlphaPolicy,
 }
 
 pub type LightmapSlot = gmpublished_domain::scene::map::LightmapAtlas;
@@ -601,16 +642,19 @@ pub struct DetailSprite {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverlayPrimitive {
-    pub(crate) vertices: [OverlayVertex; 4],
+    pub(crate) source: gmpublished_domain::scene::map::MapSurfaceMarkSource,
+    pub(crate) vertices: Vec<ModelVertex>,
+    pub(crate) indices: Vec<u32>,
     pub(crate) material_index: usize,
-    pub(crate) visibility: MapVisibilityBucket,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OverlayVertex {
-    pub(crate) position: Vec3,
-    pub(crate) normal: Vec3,
-    pub(crate) uv: [f32; 2],
+    pub(crate) visibility: MapPropVisibility,
+    pub(crate) owner: gmpublished_domain::scene::map::MapSurfaceOwner,
+    pub(crate) receiver_face: u32,
+    pub(crate) receiver_mesh: gmpublished_domain::scene::map::MapReceiverMesh,
+    pub(crate) receiver_range: MapMeshIndexRange,
+    pub(crate) receiver_material_index: usize,
+    pub(crate) render_order: u16,
+    pub(crate) fade: Option<gmpublished_domain::scene::map::MapOverlayFade>,
+    pub(crate) fade_origin: Vec3,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -762,6 +806,19 @@ mod tests {
     use super::*;
     use crate::bridge::materials::RenderMode;
 
+    #[test]
+    fn lighting_context_ids_reserve_zero_and_reject_overflow() {
+        assert!(ModelLightingContextId::from_gpu(0).is_none());
+        let first = ModelLightingContextId::from_index(0).unwrap();
+        assert_eq!(first.gpu(), 1);
+        assert_eq!(first.index(), 0);
+        assert_eq!(
+            ModelLightingContextId::from_gpu(u32::MAX).unwrap().index(),
+            u32::MAX as usize - 1
+        );
+        assert!(ModelLightingContextId::from_index(u32::MAX as usize).is_none());
+    }
+
     fn vertex(x: f32) -> ModelVertex {
         ModelVertex {
             position: Vec3::new(x, 0.0, 0.0),
@@ -769,6 +826,7 @@ mod tests {
             tangent_t: Vec3::ZERO,
             tangent_sign: 0.0,
             lighting_context: 0,
+            surface_mark: 0,
             normal: Vec3::new(0.0, 0.0, 1.0),
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
@@ -808,6 +866,7 @@ mod tests {
 
     fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> MapPreview {
         MapPreview {
+        surface_receivers: Vec::new(),
             suns: Vec::new(),
             cubemap_probes: Vec::new(),
             sun_material_slots: Vec::new(),
@@ -822,16 +881,16 @@ mod tests {
                         name: "a".to_owned(),
                         texture: None,
                         texture2: None,
-                        force_opaque: true,
                         render_mode: RenderMode::Opaque,
+                        alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
                     },
                     MaterialSlot {
                         shader: Default::default(),
                         name: "b".to_owned(),
                         texture: None,
                         texture2: None,
-                        force_opaque: true,
                         render_mode: RenderMode::Opaque,
+                        alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
                     },
                 ],
                 phy_debug_meshes: Vec::new(),
@@ -867,13 +926,26 @@ mod tests {
             }],
             map_skybox_detail_sprites: Vec::new(),
             overlays: vec![OverlayPrimitive {
-                vertices: [OverlayVertex {
-                    position: Vec3::splat(0.0),
-                    normal: Vec3::new(0.0, 0.0, 1.0),
-                    uv: [0.0; 2],
-                }; 4],
+                source: gmpublished_domain::scene::map::MapSurfaceMarkSource::Overlay {
+                    index: 0,
+                    id: 0,
+                },
+                vertices: mesh(0).vertices,
+                indices: vec![0, 1, 2],
                 material_index: 0,
-                visibility: MapVisibilityBucket::Cluster(1),
+                visibility: MapPropVisibility::Clusters(vec![1]),
+                owner: gmpublished_domain::scene::map::MapSurfaceOwner::World,
+                receiver_face: 0,
+                receiver_mesh: gmpublished_domain::scene::map::MapReceiverMesh::World(0),
+                receiver_range: MapMeshIndexRange {
+                    face: 0,
+                    start: 0,
+                    count: 3,
+                },
+                receiver_material_index: 0,
+                render_order: 0,
+                fade: None,
+                fade_origin: Vec3::ZERO,
             }],
             map_skybox_overlays: Vec::new(),
             doors: Vec::new(),

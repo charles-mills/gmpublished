@@ -38,7 +38,7 @@ mod lumps;
 pub use lumps::{
     Brush, BrushSide, BspModel, ColorRgbExp, CubemapSample, DispCornerNeighbors, DispInfo,
     DispSubNeighbor, DispVert, Face, Leaf, LeafAmbientIndex, LeafAmbientSample, LeafWaterData,
-    Node, Overlay, Plane, TexData, TexInfo, contents_flags, texture_flags,
+    Node, Overlay, OverlayFade, Plane, TexData, TexInfo, contents_flags, texture_flags,
 };
 
 mod vis;
@@ -93,6 +93,7 @@ pub mod lump_ids {
     pub const TEXDATA_STRING_DATA: usize = 43;
     pub const TEXDATA_STRING_TABLE: usize = 44;
     pub const OVERLAYS: usize = 45;
+    pub const OVERLAY_FADES: usize = 60;
     pub const LIGHTING_HDR: usize = 53;
 }
 

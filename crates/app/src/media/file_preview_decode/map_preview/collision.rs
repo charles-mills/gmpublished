@@ -158,6 +158,7 @@ impl PhyDebugMeshBuilder {
                 tangent_t: Vec3::ZERO,
                 tangent_sign: 0.0,
                 lighting_context: 0,
+                surface_mark: 0,
                 normal,
                 uv: [0.0; 2],
                 lightmap_uv: [0.0; 2],
@@ -166,7 +167,7 @@ impl PhyDebugMeshBuilder {
                 blend_alpha: 0.0,
                 opacity: 1.0,
                 illumination: Vec3::splat(1.0),
-                lighting_mode: 0,
+                lighting_mode: crate::media::preview_model::vertex_lighting::LEGACY_VERTEX_COLOR,
             }));
         self.indices
             .extend_from_slice(&[base, base.saturating_add(1), base.saturating_add(2)]);

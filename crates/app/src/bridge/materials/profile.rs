@@ -1,14 +1,8 @@
-//! Resolve one Source hardware-profile block after assembling VMT patches.
-//!
-//! Installed engine: materialsystem_client.so helper 0x37830 searches the
-//! global condition key first, then `<shader>_<condition>`. PrecacheVars at
-//! 0x3b9a4 selects the first supported block and chains it over the original
-//! KeyValues, so unspecified parameters inherit and unrelated blocks do not.
-use super::water::{self, MaterialProxy};
+use super::parameters::{self, MaterialProxy};
 use std::{borrow::Cow, collections::BTreeMap};
 use vformats::keyvalues::{KvDocument, KvPair, KvValue};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct HardwareProfile {
     dx_level: u32,
     ps20b: bool,
@@ -18,9 +12,6 @@ pub(super) struct HardwareProfile {
 }
 
 impl HardwareProfile {
-    // Native render.GetDXLevel() reports90 although mat_dxlevel requests92.
-    // Observed inline GPU>=1/2/3 conditions all pass; threshold3 represents
-    // that supported quality class, not an invented private ConVar value.
     pub(super) const LDR: Self = Self {
         dx_level: 90,
         ps20b: true,
@@ -127,18 +118,19 @@ fn selected<'a, 'b>(
 pub(super) fn resolve(
     document: &KvDocument<'_>,
     shader: &str,
+    profile: HardwareProfile,
 ) -> (BTreeMap<String, String>, Vec<MaterialProxy>) {
-    let mut parameters = water::string_values(document);
-    let block = selected(document, shader, HardwareProfile::LDR);
+    let mut parameters = parameters::string_values(document, profile);
+    let block = selected(document, shader, profile);
     if let Some(block) = block {
-        parameters.extend(water::string_values(block));
+        parameters.extend(parameters::string_values(block, profile));
     }
     // FindKey("Proxies") follows the selected block's parent chain; an own
     // proxy block shadows the inherited group as a whole.
     let proxy_source = block
         .filter(|block| block.get("Proxies").is_some())
         .unwrap_or(document);
-    (parameters, water::proxies(proxy_source))
+    (parameters, parameters::proxies(proxy_source, profile))
 }
 
 /// Merge raw KeyValues before profile selection. Preserve blocks and duplicate
@@ -156,8 +148,6 @@ pub(super) fn merge(base: &mut KvDocument<'static>, patch: &KvDocument<'_>, inse
                 _ => {}
             }
         } else if insert {
-            // Native Patch replace only updates existing raw keys, including
-            // scalar shader parameters (native getter gates36 and52).
             base.pairs.push(KvPair {
                 key: Cow::Owned(pair.key.to_string()),
                 value: owned_value(&pair.value),
@@ -193,7 +183,7 @@ mod tests {
                 r#"{shader} {{ "$alpha" ".8" "$color" "outer" "{shader}_DX9" {{ "$color" "selected" }} WrongShader_DX9 {{ "$alpha" ".1" }} }}"#
             );
             let source = material(&text);
-            let (effective, _) = resolve(&source.kv, &source.shader);
+            let (effective, _) = resolve(&source.kv, &source.shader, HardwareProfile::LDR);
             assert_eq!(effective["$color"], "selected");
             assert_eq!(effective["$alpha"], ".8");
         }
@@ -204,11 +194,14 @@ mod tests {
         let source = material(
             r#"LightmappedGeneric { "$color" "outer" LightmappedGeneric_DX9 { "$color" "family" } dx9 { "$color" "dx9" } srgb { "$color" "srgb" } ">=DX90" { "$color" "dx90" } }"#,
         );
-        assert_eq!(resolve(&source.kv, &source.shader).0["$color"], "dx90");
+        assert_eq!(
+            resolve(&source.kv, &source.shader, HardwareProfile::LDR).0["$color"],
+            "dx90"
+        );
         let source = material(
             r#"LightmappedGeneric { "$alpha" ".8" dx9 { "$color" "first" } dx9 { "$color" "second" } LightmappedGeneric_DX9 { "$alpha" ".1" } }"#,
         );
-        let values = resolve(&source.kv, &source.shader).0;
+        let values = resolve(&source.kv, &source.shader, HardwareProfile::LDR).0;
         assert_eq!(values["$color"], "first");
         assert_eq!(values["$alpha"], ".8");
     }
@@ -227,7 +220,7 @@ mod tests {
             patch.kv.blocks("replace").next().unwrap(),
             false,
         );
-        let (values, proxies) = resolve(&source, "LightmappedGeneric");
+        let (values, proxies) = resolve(&source, "LightmappedGeneric", HardwareProfile::LDR);
         assert_eq!(values["$color"], "patched-selected");
         assert_eq!(values["$alpha"], ".8");
         assert_eq!(proxies.len(), 1);
@@ -246,7 +239,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            resolve(&source, "LightmappedGeneric").0["$color"],
+            resolve(&source, "LightmappedGeneric", HardwareProfile::LDR).0["$color"],
             "selected"
         );
         assert!(source.get(">=DX90").is_none());
@@ -269,7 +262,7 @@ mod tests {
             false,
         );
         assert!(
-            !resolve(&source, "LightmappedGeneric")
+            !resolve(&source, "LightmappedGeneric", HardwareProfile::LDR)
                 .0
                 .contains_key("$alpha")
         );
@@ -281,8 +274,36 @@ mod tests {
         let mut source = owned(&source.kv);
         let patch = material(r#"Patch { insert { dx9 { "$color" "ignored" "$alpha" ".7" } } }"#);
         merge(&mut source, patch.kv.blocks("insert").next().unwrap(), true);
-        let values = resolve(&source, "LightmappedGeneric").0;
+        let values = resolve(&source, "LightmappedGeneric", HardwareProfile::LDR).0;
         assert_eq!(values["$color"], "selected");
         assert_eq!(values["$alpha"], ".7");
+    }
+    #[test]
+    fn one_profile_controls_blocks_inline_values_and_proxies() {
+        let source = material(
+            r#"VertexLitGeneric {
+            "$alpha" "outer" "hdr?$alpha" "hdr-outer" "ldr?$alpha" "ldr-outer"
+            hdr { "$color" "hdr" "hdr?$detailblendfactor" ".7" Proxies { Control { "hdr?value" "yes" "ldr?value" "no" } } }
+            ldr { "$color" "ldr" "ldr?$detailblendfactor" ".3" Proxies { Control { "hdr?value" "no" "ldr?value" "yes" } } }
+        }"#,
+        );
+        for (profile, color, alpha, factor) in [
+            (HardwareProfile::LDR, "ldr", "ldr-outer", ".3"),
+            (
+                HardwareProfile {
+                    hdr: true,
+                    ..HardwareProfile::LDR
+                },
+                "hdr",
+                "hdr-outer",
+                ".7",
+            ),
+        ] {
+            let (values, proxies) = resolve(&source.kv, &source.shader, profile);
+            assert_eq!(values["$color"], color);
+            assert_eq!(values["$alpha"], alpha);
+            assert_eq!(values["$detailblendfactor"], factor);
+            assert_eq!(proxies[0].values["value"], "yes");
+        }
     }
 }

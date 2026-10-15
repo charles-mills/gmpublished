@@ -6,6 +6,8 @@ use gmpublished_domain::{
     },
 };
 
+const TRACE_DISTANCE: f32 = f32::from_bits(0x475e_b852);
+
 pub(super) struct Sampler<'a> {
     inputs: &'a ModelLightingSceneInputs,
     surfaces: &'a MapRadiositySurfaces,
@@ -55,7 +57,7 @@ impl<'a> Sampler<'a> {
         let styles = self.inputs.style_values(0.0);
         for bits in DIRECTION_BITS {
             let direction = Vec3::from(bits.map(f32::from_bits));
-            let end = point + direction * f32::from_bits(0x475e_b852);
+            let end = point + direction * TRACE_DISTANCE;
             let hit = self
                 .surfaces
                 .trace_surface(point, end, &self.flags)
@@ -106,8 +108,7 @@ impl<'a> Sampler<'a> {
     }
 }
 
-// Installed Source sphere order and original float bits are retained: both
-// direction rounding and accumulation order affect the six-axis result.
+// Float bits and accumulation order affect the six-axis result.
 const DIRECTION_BITS: [[u32; 3]; 162] = [
     [0xbf06964f, 0x00000000, 0x3f59c444],
     [0xbee2bef0, 0x3e7496ab, 0x3f5d3b6d],
